@@ -304,6 +304,7 @@ export class LocalEngine {
     this.registerSession(connectionId)
     const session = this.sessions.get(connectionId)!
     const enqueued = this.generation
+    const acknowledged = session.generation
     if (op === "disconnect") this.sessions.delete(connectionId)
     return this.enqueue(async () => {
       // A retired helper has already discarded its sessions. Cleanup must not
@@ -312,10 +313,9 @@ export class LocalEngine {
       if (this.closed || !this.openRequest) throw new Error(`${this.opts.label} connection not open`)
       if (op !== "disconnect") {
         if (this.sessions.get(connectionId) !== session) throw new Error(`${this.opts.label} connection not open`)
-        // Acknowledging a timeout or rejection must not allow pre-restart
-        // calls through: they were queued against session state now lost.
-        const stale = enqueued !== this.generation
-        if (stale || session.generation !== this.generation) {
+        // Reject calls queued before a restart or before this session acknowledged
+        // it, even if an earlier rejection has since acknowledged it.
+        if (enqueued !== this.generation || acknowledged !== this.generation) {
           session.generation = this.generation
           throw this.sessionStateLostError()
         }

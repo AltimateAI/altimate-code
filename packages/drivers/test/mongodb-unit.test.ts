@@ -1,10 +1,12 @@
 import { describe, expect, mock, test } from "bun:test"
 import { createRequire } from "node:module"
+import { normalizeMqlCommand } from "../src/mongodb"
 
 // Use the driver's BSON package directly so the MongoDB client mock cannot replace Binary.
 const { Binary } = createRequire(import.meta.resolve("mongodb"))("bson")
 
 async function fakeMongo(docs: Record<string, unknown>[] = []) {
+  const finds: unknown[] = []
   const pipelines: Record<string, unknown>[][] = []
   const counts: { filter: unknown; options: unknown }[] = []
   const distincts: { field: string; filter: unknown; options: unknown }[] = []
@@ -16,7 +18,10 @@ async function fakeMongo(docs: Record<string, unknown>[] = []) {
         db() {
           return {
             collection: () => ({
-              find: () => ({ limit: () => ({ toArray: async () => docs }) }),
+              find: (filter: unknown) => {
+                finds.push(filter)
+                return { limit: () => ({ toArray: async () => docs }) }
+              },
               aggregate: (pipeline: Record<string, unknown>[]) => {
                 pipelines.push(pipeline)
                 return { toArray: async () => docs }
@@ -39,8 +44,77 @@ async function fakeMongo(docs: Record<string, unknown>[] = []) {
   const connector = await connect({ type: "mongodb", database: "test" })
   await connector.connect()
   const query = (command: string, extra: object = {}) => JSON.stringify({ collection: "articles", command, ...extra })
-  return { connector, query, pipelines, counts, distincts }
+  return { connector, query, finds, pipelines, counts, distincts }
 }
+
+describe("normalizeMqlCommand bounds", () => {
+  const forms = [
+    { name: "string-form", input: (bounds: object) => JSON.parse(JSON.stringify({ find: "events", ...bounds })) },
+    { name: "object-form", input: (bounds: object) => ({ find: "events", ...bounds }) },
+    { name: "explicit command-form", input: (bounds: object) => ({ command: "find", collection: "events", ...bounds }) },
+  ]
+
+  for (const { name, input } of forms) {
+    test.each([
+      { name: "limit: -1", bounds: { limit: -1 }, error: "MongoDB find limit must be a positive integer" },
+      { name: "limit: 1.5", bounds: { limit: 1.5 }, error: "MongoDB find limit must be a positive integer" },
+      { name: "unsafe limit", bounds: { limit: Number.MAX_SAFE_INTEGER + 1 }, error: "MongoDB find limit must be a positive integer" },
+      { name: "string limit", bounds: { limit: "5" }, error: "MongoDB find limit must be a positive integer" },
+      { name: "null limit", bounds: { limit: null }, error: "MongoDB find limit must be a positive integer" },
+      { name: "skip: -3", bounds: { skip: -3 }, error: "MongoDB find skip must be a non-negative integer" },
+      { name: "skip: 1.5", bounds: { skip: 1.5 }, error: "MongoDB find skip must be a non-negative integer" },
+      { name: "unsafe skip", bounds: { skip: Number.MAX_SAFE_INTEGER + 1 }, error: "MongoDB find skip must be a non-negative integer" },
+    ])(`rejects $name in ${name}`, ({ bounds, error }) => {
+      expect(() => normalizeMqlCommand(input(bounds))).toThrow(error)
+    })
+
+    test.each([0, 5])(`preserves limit: %i and skip: 0 in ${name}`, (limit) => {
+      expect(normalizeMqlCommand(input({ limit, skip: 0 }))).toEqual({
+        command: "find", collection: "events", limit, skip: 0,
+      })
+    })
+  }
+
+  test.each(["aggregate", "countDocuments"])("validates top-level limit and skip for %s", (command) => {
+    for (const bounds of [{ limit: -1 }, { limit: 1.5 }, { skip: -3 }]) {
+      const field = "limit" in bounds ? "limit" : "skip"
+      const rule = field === "limit" ? "a positive" : "a non-negative"
+      expect(() => normalizeMqlCommand({ command, collection: "events", pipeline: [], ...bounds })).toThrow(
+        `MongoDB ${command} ${field} must be ${rule} integer`,
+      )
+    }
+  })
+
+  test.each([
+    { name: "$limit: -1", stage: { $limit: -1 }, error: "MongoDB aggregate $limit must be a positive integer" },
+    { name: "$limit: 0", stage: { $limit: 0 }, error: "MongoDB aggregate $limit must be a positive integer" },
+    { name: "$limit: 1.5", stage: { $limit: 1.5 }, error: "MongoDB aggregate $limit must be a positive integer" },
+    { name: "unsafe $limit", stage: { $limit: Number.MAX_SAFE_INTEGER + 1 }, error: "MongoDB aggregate $limit must be a positive integer" },
+    { name: "$skip: -3", stage: { $skip: -3 }, error: "MongoDB aggregate $skip must be a non-negative integer" },
+    { name: "$skip: 1.5", stage: { $skip: 1.5 }, error: "MongoDB aggregate $skip must be a non-negative integer" },
+  ])("rejects aggregate pipeline $name", ({ stage, error }) => {
+    expect(() => normalizeMqlCommand({ aggregate: "events", pipeline: [stage] })).toThrow(error)
+  })
+
+  test("preserves valid aggregate pipeline bounds", () => {
+    const pipeline = [{ $skip: 0 }, { $limit: 5 }]
+    expect(normalizeMqlCommand({ aggregate: "events", pipeline })).toEqual({
+      command: "aggregate", collection: "events", pipeline,
+    })
+  })
+
+  test("rejects invalid bounds before opening find or aggregate cursors", async () => {
+    const { connector, finds, pipelines } = await fakeMongo()
+    await expect(connector.execute(JSON.stringify({ find: "events", limit: -1 }))).rejects.toThrow(
+      "MongoDB find limit must be a positive integer",
+    )
+    await expect(connector.execute(JSON.stringify({ aggregate: "events", pipeline: [{ $skip: -3 }] }))).rejects.toThrow(
+      "MongoDB aggregate $skip must be a non-negative integer",
+    )
+    expect(finds).toEqual([])
+    expect(pipelines).toEqual([])
+  })
+})
 
 describe("MongoDB BSON normalization", () => {
   test.each([

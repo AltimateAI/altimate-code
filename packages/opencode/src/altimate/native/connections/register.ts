@@ -583,7 +583,7 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
           : "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
       )
     }
-    if (!params.warehouse && params.read_only && fallbackType !== "postgres") {
+    if (params.read_only && fallbackType !== "postgres") {
       throw new Error("Read-only SQL execution requires a native PostgreSQL connection. Configure one with warehouse.add or set ALTIMATE_CODE_CONN_* env vars.")
     }
     // altimate_change end

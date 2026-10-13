@@ -387,9 +387,24 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
       )
     }
 
+    const run = (sql: string) => scratch.execute(sql, undefined, undefined, { noLimit: true })
+    const scratchRows = async (sql: string) => (await run(sql)).rows
+    const q = quoteIdent(table)
+    const existing = await scratchRows(
+      `SELECT column_name, data_type FROM information_schema.columns WHERE table_catalog = '${SCRATCH_NAME}' AND table_schema = 'main' AND table_name = ${quoteString(table)} ORDER BY ordinal_position`,
+    )
+    const exists = existing.length > 0
+
     const names = uniqueColumnNames(result.columns)
     if (names.length === 0) {
-      return { table, mode, rows: 0, total_rows: 0, columns: [], materialized: false, warnings }
+      let total = 0
+      if (mode === "replace") {
+        await run(`DROP TABLE IF EXISTS ${q}`)
+        warnings.push(`replaced with an empty result: ${SCRATCH_NAME}.${table} was dropped`)
+      } else if (mode === "append" && exists) {
+        total = Number((await scratchRows(`SELECT count(*) FROM ${q}`))[0]?.[0] ?? 0)
+      }
+      return { table, mode, rows: 0, total_rows: total, columns: [], materialized: false, warnings }
     }
 
     let bytes = 0
@@ -418,14 +433,6 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
       }
       types.push(t ?? "VARCHAR")
     }
-
-    const run = (sql: string) => scratch.execute(sql, undefined, undefined, { noLimit: true })
-    const scratchRows = async (sql: string) => (await run(sql)).rows
-    const q = quoteIdent(table)
-    const existing = await scratchRows(
-      `SELECT column_name, data_type FROM information_schema.columns WHERE table_catalog = '${SCRATCH_NAME}' AND table_schema = 'main' AND table_name = ${quoteString(table)} ORDER BY ordinal_position`,
-    )
-    const exists = existing.length > 0
 
     if (mode === "create" && exists) {
       throw new MaterializeError(
@@ -581,10 +588,12 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       if (!r.materialized) {
         return Precedence.annotate(verdict, {
           title: `Materialize ${label}: 0 rows`,
-          metadata: { rowCount: 0, table: r.table, materialized: false, ...lintMetadata },
+          metadata: { rowCount: 0, totalRows: r.total_rows, table: r.table, materialized: false, ...lintMetadata },
           output:
             warning +
-            `The source query returned 0 rows and no column information, so ${label} was not created or changed.\n` +
+            (r.mode === "replace"
+              ? "The source query returned 0 rows and no column information; no replacement table was created.\n"
+              : `The source query returned 0 rows and no column information, so ${label} was not created or changed.\n`) +
             "Check the filter, or run the query with sql_execute to see why it is empty." +
             checks,
         })

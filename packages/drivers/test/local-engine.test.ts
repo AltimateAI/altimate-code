@@ -284,9 +284,57 @@ describe("sqlite session restart disclosure", () => {
       await engine.close()
     }
   })
+
+  test("rejects all three peer writes enqueued after restart before state-loss acknowledgement", async () => {
+    const file = path.join(tmp, `sqlite-peer-disclosure-${crypto.randomUUID()}.db`)
+    const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: file })
+    try {
+      await engine.open({ path: file, readwrite: true, create: true })
+      await engine.call("run", { sql: "CREATE TABLE sentinel(value INTEGER)", connectionId: 2 })
+      await expect(engine.call("all", { sql: FOREVER.sqlite, connectionId: 1 }, 100))
+        .rejects.toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+
+      // Enqueue the entire burst before the first rejection acknowledges the restart.
+      const writes = [1, 2, 3].map((value) =>
+        engine.call("run", { sql: `INSERT INTO sentinel VALUES (${value})`, connectionId: 2 }),
+      )
+      const settled = Promise.allSettled(writes)
+      await expect(writes[0]).rejects.toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      const fresh = engine.call("all", { sql: "SELECT value FROM sentinel", connectionId: 2 })
+      const results = await settled
+      expect(await fresh).toEqual([])
+      for (const result of results) {
+        expect(result.status).toBe("rejected")
+        expect((result as PromiseRejectedResult).reason).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+      }
+    } finally {
+      await engine.close()
+    }
+  })
 })
 
 describe("duckdb concurrent stores", () => {
+  test("rejects all three peer writes enqueued after restart before state-loss acknowledgement", async () => {
+    const file = path.join(tmp, `duckdb-peer-disclosure-${crypto.randomUUID()}.db`)
+    const caller = await make("duckdb", { path: file, create: true })
+    const peer = await make("duckdb", { path: file })
+    await peer.execute("CREATE TABLE sentinel(value INTEGER)")
+    await expect(caller.execute(FOREVER.duckdb, 10, undefined, { queryTimeoutMs: 100 }))
+      .rejects.toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
+
+    // No await between these calls: all three precede the peer's acknowledgement.
+    const writes = [1, 2, 3].map((value) => peer.execute(`INSERT INTO sentinel VALUES (${value})`))
+    const settled = Promise.allSettled(writes)
+    await expect(writes[0]).rejects.toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    const fresh = peer.execute("SELECT value FROM sentinel")
+    const results = await settled
+    expect((await fresh).rows).toEqual([])
+    for (const result of results) {
+      expect(result.status).toBe("rejected")
+      expect((result as PromiseRejectedResult).reason).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    }
+  })
+
   test.each([
     { name: "separate statement", batch: false },
     { name: "within batch", batch: true },

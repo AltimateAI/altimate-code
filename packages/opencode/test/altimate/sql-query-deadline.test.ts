@@ -24,7 +24,18 @@ const FOREVER_SQLITE =
 let scriptedAdapter: unknown
 mock.module("../../../dbt-tools/src/adapter", () => ({ create: async () => scriptedAdapter }))
 
-beforeAll(() => registerAll())
+// The real `pg` module, captured before any test replaces it, so the replacement can be undone.
+// `pg` is an optional dependency of the drivers package, not of this one, so resolve it from there.
+let realPg: Record<string, unknown> | undefined
+beforeAll(async () => {
+  try {
+    const driversDir = path.resolve(import.meta.dir, "../../../drivers")
+    realPg = await import(require.resolve("pg", { paths: [driversDir] }))
+  } catch {
+    realPg = undefined
+  }
+  registerAll()
+})
 afterAll(() => {
   // mock.module leaks across files: leave the adapter unavailable, which callers treat as "no dbt".
   mock.module("../../../dbt-tools/src/adapter", () => ({
@@ -32,6 +43,23 @@ afterAll(() => {
       throw new Error("dbt adapter unavailable")
     },
   }))
+  // Likewise put the real `pg` back (or an unreachable pool when it is not installed) so a later
+  // file's connection probe against an unresolvable host fails instead of talking to the queued fake.
+  const restored = realPg ? { ...realPg } : undefined
+  mock.module(
+    "pg",
+    () =>
+      restored ?? {
+        default: {
+          Pool: class {
+            async connect() {
+              throw new Error("pg unavailable")
+            }
+            async end() {}
+          },
+        },
+      },
+  )
 })
 beforeEach(() => {
   resetDbtAdapter()
@@ -126,12 +154,26 @@ describe("sql.execute deadline — native engines", () => {
     }
   })
 
-  test("sql.execute keeps non-PostgreSQL connector options unchanged for read-only requests", async () => {
+  test("sql.execute refuses a named non-PostgreSQL warehouse for read-only requests before executing SQL", async () => {
     Registry.setConfigs({ source: { type: "snowflake" } })
     const execute = mock<Connector["execute"]>(async () => ({ columns: [], rows: [], row_count: 0, truncated: false }))
     const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
     try {
-      expect((await run({ sql: "SELECT 1", warehouse: "source", read_only: true })).error).toBeUndefined()
+      const result = await run({ sql: "SELECT writing_view()", warehouse: "source", read_only: true })
+      expect(result.error).toContain("Read-only SQL execution requires a native PostgreSQL connection. Configure one with warehouse.add or set ALTIMATE_CODE_CONN_* env vars.")
+      expect(get).not.toHaveBeenCalled()
+      expect(execute).not.toHaveBeenCalled()
+    } finally {
+      get.mockRestore()
+    }
+  })
+
+  test("sql.execute keeps non-PostgreSQL connector options unchanged for unprotected requests", async () => {
+    Registry.setConfigs({ source: { type: "snowflake" } })
+    const execute = mock<Connector["execute"]>(async () => ({ columns: [], rows: [], row_count: 0, truncated: false }))
+    const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
+    try {
+      expect((await run({ sql: "SELECT 1", warehouse: "source", read_only: false })).error).toBeUndefined()
       expect(execute.mock.calls[0]?.[3]).toEqual({ queryTimeoutMs: undefined })
     } finally {
       get.mockRestore()
