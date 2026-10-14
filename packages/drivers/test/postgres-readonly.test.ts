@@ -175,11 +175,103 @@ test("Postgres never starts user SQL when cancellation arrives during session se
     controller.abort(timeout)
     finishSetup.resolve()
     expect(await execution).toBe(timeout)
-    expect(queries).toEqual(["SHOW statement_timeout", "SET statement_timeout TO 10", "RESET statement_timeout"])
-    expect(releases).toEqual([undefined])
+    expect(queries).toEqual(["SHOW statement_timeout"])
+    expect(releases).toEqual([true])
   } finally {
     finishSetup.resolve()
     await connector.close()
+  }
+})
+
+async function probeDatabase() {
+  const queries: string[] = []
+  const releases: unknown[] = []
+  const started = Promise.withResolvers<void>()
+  const shown = Promise.withResolvers<{ fields: never[]; rows: { statement_timeout: string }[] }>()
+  mock.module("pg", () => ({
+    default: {
+      Pool: class {
+        async connect() {
+          return {
+            async query(sql: string) {
+              queries.push(sql)
+              if (sql === "SHOW statement_timeout") {
+                started.resolve()
+                return shown.promise
+              }
+              return { fields: [{ name: "value" }], rows: [{ value: 1 }] }
+            },
+            release(discard?: boolean) { releases.push(discard) },
+          }
+        }
+        async end() {}
+      },
+    },
+  }))
+  const connector = await connect({ type: "postgres", query_timeout_ms: 1000 })
+  await connector.connect()
+  return { connector, queries, releases, started: started.promise, shown }
+}
+
+for (const pgTimeoutReason of [false, true]) {
+  test(`Postgres abandons a stalled initial timeout probe with the exact ${pgTimeoutReason ? "PostgreSQL-shaped" : "caller"} abort reason`, async () => {
+    const db = await probeDatabase()
+    const controller = new AbortController()
+    const reason = pgTimeoutReason
+      ? Object.assign(new Error("canceling statement due to statement timeout"), { code: "57014" })
+      : new Error("caller deadline expired")
+    const execution = db.connector.execute("INSERT INTO sentinel VALUES (1)", undefined, undefined, {
+      signal: controller.signal,
+    }).catch((error) => error)
+    try {
+      await db.started
+      controller.abort(reason)
+      expect(await Promise.race([execution, Bun.sleep(100).then(() => "still probing")])).toBe(reason)
+      expect(db.queries).toEqual(["SHOW statement_timeout"])
+      expect(db.releases).toEqual([true])
+    } finally {
+      await db.connector.close()
+    }
+  })
+}
+
+test("Postgres abandons a stalled initial timeout probe at the resolved deadline without a signal", async () => {
+  const db = await probeDatabase()
+  try {
+    const execution = db.connector.execute("INSERT INTO sentinel VALUES (1)", undefined, undefined, {
+      queryTimeoutMs: 10,
+    }).catch((error) => error)
+    await db.started
+    const error = await Promise.race([execution, Bun.sleep(100).then(() => "still probing")])
+    expect(error).toBeInstanceOf(QueryTimeoutError)
+    expect(error.timeoutMs).toBe(10)
+    expect(db.queries).toEqual(["SHOW statement_timeout"])
+    expect(db.releases).toEqual([true])
+  } finally {
+    await db.connector.close()
+  }
+})
+
+test("Postgres executes user SQL after a fast initial timeout probe", async () => {
+  const db = await probeDatabase()
+  const controller = new AbortController()
+  try {
+    db.shown.resolve({ fields: [], rows: [{ statement_timeout: "0" }] })
+    const result = await db.connector.execute("INSERT INTO sentinel VALUES (1)", undefined, undefined, {
+      signal: controller.signal,
+      queryTimeoutMs: 10,
+    })
+    expect(result.rows).toEqual([[1]])
+    controller.abort(new Error("after completion"))
+    expect(db.queries).toEqual([
+      "SHOW statement_timeout",
+      "SET statement_timeout TO 10",
+      "INSERT INTO sentinel VALUES (1)",
+      "RESET statement_timeout",
+    ])
+    expect(db.releases).toEqual([undefined])
+  } finally {
+    await db.connector.close()
   }
 })
 

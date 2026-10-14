@@ -130,6 +130,55 @@ describe("run budget control at prompt boundaries", () => {
   })
 
   for (const control of ["soft", "soft-no-downgrade"]) {
+    test(`${control} does not interrupt a newer generation when its reminder resolves late`, async () => {
+      const sessionID = SessionID.make(`ses_budget_control_late_reminder_${control}`)
+      const storeNudge = Promise.withResolvers<string>()
+      const nudgeStarted = Promise.withResolvers<void>()
+      const interruptions: string[] = []
+      const unregisterWork = RunBudget.registerGeneration(sessionID, () => interruptions.push("work"))
+      let unregisterFinalization: (() => void) | undefined
+      const nudge = withBudgetControl({ sessionID, control, noReply: true }, () => {
+        nudgeStarted.resolve()
+        return storeNudge.promise
+      })
+      try {
+        await nudgeStarted.promise
+        unregisterWork()
+        unregisterFinalization = RunBudget.registerGeneration(sessionID, () => interruptions.push("finalization"))
+        storeNudge.resolve("saved nudge")
+        expect(await nudge).toBe("saved nudge")
+        expect(interruptions).toEqual([])
+      } finally {
+        storeNudge.resolve("saved nudge")
+        await nudge
+        unregisterWork()
+        unregisterFinalization?.()
+      }
+    })
+
+    test(`${control} interrupts its original generation when its reminder resolves while still current`, async () => {
+      const sessionID = SessionID.make(`ses_budget_control_current_reminder_${control}`)
+      const storeNudge = Promise.withResolvers<string>()
+      const nudgeStarted = Promise.withResolvers<void>()
+      let interruptions = 0
+      const unregister = RunBudget.registerGeneration(sessionID, () => interruptions++)
+      const nudge = withBudgetControl({ sessionID, control, noReply: true }, () => {
+        nudgeStarted.resolve()
+        return storeNudge.promise
+      })
+      try {
+        await nudgeStarted.promise
+        expect(interruptions).toBe(0)
+        storeNudge.resolve("saved nudge")
+        expect(await nudge).toBe("saved nudge")
+        expect(interruptions).toBe(1)
+      } finally {
+        storeNudge.resolve("saved nudge")
+        await nudge
+        unregister()
+      }
+    })
+
     test(`${control} respects the effort opt-out while still interrupting the saved reminder`, async () => {
       const sessionID = SessionID.make(`ses_budget_control_opt_out_${control}`)
       if (control === "soft") process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE = "0"

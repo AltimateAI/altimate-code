@@ -12,6 +12,7 @@ export async function withBudgetControl<T>(
   const finalizing = input.control === "finalization" || input.control === "finalization-no-downgrade"
   if (!soft && !finalizing && input.control !== "work") return prompt()
 
+  const interrupt = input.noReply && soft ? RunBudget.captureGenerationInterrupt(input.sessionID) : undefined
   // A synchronous prompt spans its entire session loop. A noReply reminder
   // borrows that scope; subsequent finalization prompts explicitly re-arm it.
   const release = input.noReply ? undefined : RunBudgetEffort.begin(input.sessionID, finalizing)
@@ -26,8 +27,8 @@ export async function withBudgetControl<T>(
       }
     }
     const result = await prompt()
-    // Do not release the current generation until the next user turn is saved.
-    if (input.noReply && soft) RunBudget.interruptGeneration(input.sessionID)
+    // Interrupt the captured generation only after the next user turn is saved.
+    interrupt?.()
     return result
   } finally {
     release?.()

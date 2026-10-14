@@ -101,7 +101,8 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       // deadline: a configured limit stricter than the default is preserved.
       const configured = Number(config.statement_timeout)
       const configuredMs = Number.isFinite(configured) && configured > 0 ? Math.round(configured) : undefined
-      const ourMs = tighter(configuredMs, resolveQueryTimeout(config, options).ms)
+      const queryTimeout = resolveQueryTimeout(config, options)
+      const ourMs = tighter(configuredMs, queryTimeout.ms)
       let effectiveMs = ourMs
       let timeoutApplied = false
       let discardClient = false
@@ -115,11 +116,35 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           // Never loosen a stricter limit the server or role already imposes.
           let existing = existingTimeout.get(client)
           if (existing === undefined) {
+            const signal = options?.signal
+            let timer: ReturnType<typeof setTimeout> | undefined
+            let abort: (() => void) | undefined
             try {
-              const shown = await client.query("SHOW statement_timeout")
+              const shown = await new Promise<any>((resolve, reject) => {
+                abort = () => {
+                  // pg's promise query API has no cancellation handle. Discard
+                  // the connection in finally so a stalled probe is never reused.
+                  discardClient = true
+                  reject(signal ? signal.reason : new QueryTimeoutError({
+                    engine: "PostgreSQL", timeoutMs: queryTimeout.ms!,
+                  }))
+                }
+                signal?.addEventListener("abort", abort, { once: true })
+                if (!signal && queryTimeout.ms !== undefined) timer = setTimeout(abort, queryTimeout.ms)
+                if (signal?.aborted) {
+                  abort()
+                  return
+                }
+                // Handle late settlement too, just as acquireClient does.
+                Promise.resolve(client.query("SHOW statement_timeout")).then(resolve, reject)
+              })
               existing = parsePgDuration(shown?.rows?.[0]?.statement_timeout) ?? null
-            } catch {
+            } catch (error) {
+              if (discardClient) throw error
               existing = null
+            } finally {
+              if (timer !== undefined) clearTimeout(timer)
+              if (abort) signal?.removeEventListener("abort", abort)
             }
             existingTimeout.set(client, existing)
           }
@@ -211,6 +236,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           truncated,
         }
       } catch (err: any) {
+        if (options?.signal?.aborted && err === options.signal.reason) throw err
         // 57014 is also a manual cancel; only the message names a timeout.
         if (effectiveMs !== undefined && err?.code === PG_QUERY_CANCELED && /statement timeout/i.test(String(err?.message))) {
           throw new QueryTimeoutError({ engine: "PostgreSQL", timeoutMs: effectiveMs })
