@@ -4,6 +4,7 @@ import type { Agent } from "../../src/agent/agent"
 import { NamedError } from "@opencode-ai/core/util/error"
 import { Permission } from "../../src/permission"
 import { SystemPrompt } from "../../src/session/system"
+import { SKILL_PRECEDENCE_RULE } from "../../src/altimate/skill-source"
 import { testEffect } from "../lib/effect"
 import { withLegacyInstanceRunner } from "./legacy-instance"
 import fs from "node:fs/promises"
@@ -86,6 +87,21 @@ describe("session.system", () => {
       }),
     { init: writeSkillFixtures },
   )
+
+  // altimate_change start — the labels are only half of it; the rule that ranks them goes with the listing
+  it.instance(
+    "skills output states the precedence rule and labels each skill's source",
+    () =>
+      Effect.gen(function* () {
+        const prompt = yield* SystemPrompt.Service
+        const output = (yield* prompt.skills(build)) ?? ""
+        expect(output).toContain(SKILL_PRECEDENCE_RULE)
+        expect(output).toContain('<skill source="project">\n    <name>alpha-skill</name>')
+        expect(output.indexOf(SKILL_PRECEDENCE_RULE)).toBeLessThan(output.indexOf("<available_skills>"))
+      }),
+    { init: writeSkillFixtures },
+  )
+  // altimate_change end
 
   for (const disabledBy of ["config", "env"] as const) {
     it.instance(

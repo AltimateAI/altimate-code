@@ -139,6 +139,9 @@ export namespace Server {
   }
   const TRACE_PAGE_SIZE = 50
   const TRACE_PAGE_MAX = 200
+  /** No requests or form posts from the trace viewer page: its content is tool output, not ours. */
+  const TRACE_VIEW_CSP =
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'"
   const TRACE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
   /** The traces directory, honoring `tracing.dir` like the CLI and TUI; a config that fails to load
    * falls back to the default rather than hiding every trace. */
@@ -1165,6 +1168,78 @@ export namespace Server {
         }
       })
       // altimate_change end
+      // altimate_change start — GET /altimate/workspace/starter
+      // The fixed "what this workspace has, what next?" message for the IDE extension's chat and the
+      // TUI after a link: no model call, same data as the prompt's workspace section. A link that
+      // could not be confirmed (`stale`) is answered like an unreachable service, as the prompt does.
+      .get("/altimate/workspace/starter", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { resolveBindingOutcome } = await import("../altimate/workspace/state")
+          const outcome = await resolveBindingOutcome(Instance.directory)
+          if (outcome.status === "unbound") return c.json({ ok: true as const, linked: false as const })
+          if (outcome.status !== "bound" || outcome.stale) {
+            return c.json({ ok: false, error: "Could not confirm this project's workspace link right now." }, 503)
+          }
+          const { starterFor } = await import("../altimate/workspace/starter")
+          const starter = await starterFor(Instance.directory, outcome.binding)
+          return c.json({ ok: true as const, linked: true as const, starter })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace starter: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
+      // altimate_change start — GET /altimate/workspace/status
+      // The recorded sync state for the request's directory: per entity kind, when it was last
+      // checked and changed, and what changed. Reads local files past the binding resolution, which
+      // asks the server only when its cached answer is older than the revalidation window. Changes
+      // after this read arrive as `altimate.workspace.sync.changed` on `/event`.
+      //
+      // `binding` says why there may be no state: `unbound` is a project with no workspace,
+      // `unknown` one whose link could not be confirmed (no credentials, an invalid pin, the
+      // service unreachable) — which a client must not show as "not linked". `stale` marks a
+      // last-known answer (`bound` or `unbound`) the server could not confirm just now, for a
+      // client to show as last known.
+      .get("/altimate/workspace/status", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { resolveBindingOutcome } = await import("../altimate/workspace/state")
+          const SyncState = await import("../altimate/workspace/sync-state")
+          const outcome = await resolveBindingOutcome(Instance.directory)
+          const stale = "stale" in outcome && outcome.stale === true
+          if (outcome.status !== "bound") {
+            return c.json({ ok: true as const, binding: outcome.status, stale, datamateId: null, entities: {} })
+          }
+          const datamateId = outcome.binding.datamateId
+          const state = await SyncState.read(Instance.directory, datamateId)
+          return c.json({
+            ok: true as const,
+            binding: "bound" as const,
+            stale,
+            datamateId,
+            entities: state?.entities ?? {},
+          })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace status: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
       // altimate_change start — GET /altimate/skill/publishable, POST /altimate/skill/publish
       // The CLI's `skill publish <name>` for the IDE extension. Only `serve` holds the extension's
       // pin, so publishing here targets the workspace selected in the panel — through the same
@@ -1343,6 +1418,7 @@ export namespace Server {
           ])
           const trace = await Trace.loadTrace(sessionID, await tracesDir())
           if (!trace) return c.json({ ok: false, error: `Trace not found: ${sessionID}` }, 404)
+          c.header("Content-Security-Policy", TRACE_VIEW_CSP)
           return c.html(renderTraceViewer(trace, { embedded: true }))
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)

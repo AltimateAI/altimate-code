@@ -44,7 +44,8 @@ function modeName(name: string): string {
 /** The commands workspace mode registers in the palette. Kept here rather
  * than read from the palette so the line is stable and testable; the plugin
  * that registers them is the same one that renders this. */
-export const WORKSPACE_COMMANDS = "/workspace — status, refresh, sync, unlink · /skills — the workspace's skills"
+// altimate_change - leads with the starter: what the workspace has, and prompts to try
+export const WORKSPACE_COMMANDS = "/workspace → Get started: what it has, prompts to try · /skills — its skills"
 
 /** `snapshot` is the bound workspace's, as `currentAttachSnapshot` returns it:
  * undefined when no session has attached to this workspace yet. It is always
@@ -74,7 +75,7 @@ export function welcomeLines(input: {
   return {
     mode: `Workspace mode · linked to ${modeName(binding.datamateName)}`,
     commands: WORKSPACE_COMMANDS,
-    integrations: `Integrations (last session, ${describeAge(snapshot.at, input.now)}): ${statusHeadline(counts)}${counts.gaps > 0 ? " — /workspace for the reasons" : ""}`,
+    integrations: `Integrations (last session, ${describeAge(snapshot.at, input.now)}): ${statusHeadline(counts)}${counts.gaps > 0 ? " — /integrations for the reasons" : ""}`,
   }
 }
 

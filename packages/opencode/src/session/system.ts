@@ -27,6 +27,7 @@ import { Skill } from "@/skill"
 import { Fingerprint } from "../altimate/fingerprint"
 import { Config } from "../config/config"
 import { selectSkillsWithLLM } from "../altimate/skill-selector"
+import { SKILL_PRECEDENCE_RULE } from "../altimate/skill-source"
 // altimate_change start — Effect Service facade for SystemPrompt.skills (see bottom of namespace)
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -173,6 +174,8 @@ export namespace SystemPrompt {
     parts.push(
       "Skills provide specialized instructions and workflows for specific tasks.",
       "Use the skill tool to load a skill when a task matches its description.",
+      // altimate_change - which skill wins when several fit
+      SKILL_PRECEDENCE_RULE,
       // the agents seem to ingest the information about skills a bit better if we present a more verbose
       // version of them here and a less verbose version in tool description, rather than vice versa.
       Skill.fmt(filtered, { verbose: true }),

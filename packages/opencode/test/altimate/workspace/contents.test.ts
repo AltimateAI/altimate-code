@@ -76,8 +76,8 @@ describe("workspace contents section", () => {
     expect(names).toContain("- skill-00\n")
     expect(names).not.toContain("xxxx")
 
-    const counted = Contents.render(contents, 900)
-    expect(counted.length).toBeLessThanOrEqual(900)
+    const counted = Contents.render(contents, 1100)
+    expect(counted.length).toBeLessThanOrEqual(1100)
     expect(counted).toContain("Workspace skills: 55 (too many to list here")
     expect(counted).toContain("Integrations: github.")
     expect(counted).toContain("Knowledge: not limited to selected documents")
@@ -127,6 +127,14 @@ describe("workspace contents section", () => {
 })
 
 describe("workspace summary", () => {
+  // The starter prints these to the terminal, not only to the model.
+  test("integration ids have control characters stripped", async () => {
+    spyOn(AltimateApi, "getDatamate").mockResolvedValueOnce(summary({ integrations: [{ id: "snow\u001b[2Jflake" }] }))
+    const ids = (await Contents.workspaceSummary(50)).integrations
+    expect(ids).toHaveLength(1)
+    expect(ids![0]).not.toContain("\u001b")
+  })
+
   test("integrations come back sorted and are cached; a failure is 'not known', never 'none'", async () => {
     const spy = spyOn(AltimateApi, "getDatamate").mockResolvedValueOnce(
       summary({ integrations: [{ id: "snowflake" }, { id: "github" }], memory_enabled: true }),
@@ -371,6 +379,43 @@ describe("workspace skills", () => {
     const text = await Contents.section("/project", 35)
     expect(Date.now() - started).toBeLessThan(600)
     expect(text).toContain("Workspace skills: could not be read just now")
+  })
+})
+describe("workspace knowledge is used without being asked", () => {
+  const base = { skills: [], integrations: [], memoryEnabled: true }
+  const RULE = "check this workspace's knowledge"
+
+  for (const knowledge of [
+    { kind: "all" as const },
+    { kind: "selected" as const, selected: 2, names: ["Handbook", "Glossary"] },
+    // The names could not be read, but the documents are there.
+    { kind: "selected" as const, selected: 2, names: null },
+  ]) {
+    test(`a workspace with knowledge (${knowledge.kind}${"names" in knowledge && knowledge.names === null ? ", names unread" : ""}) gets the rule`, () => {
+      const text = Contents.render({ ...base, knowledge })
+      expect(text).toContain(RULE)
+      expect(text).toContain("`ask_knowledge_base`")
+    })
+  }
+
+  const cases: Array<[string, Contents.WorkspaceKnowledge | null]> = [
+    ["the engine off", { kind: "off" }],
+    ["knowledge not known", null],
+    ["every selected document gone", { kind: "selected", selected: 2, names: [] }],
+  ]
+  for (const [label, knowledge] of cases) {
+    test(`no rule with ${label}: there is nothing to search`, () => {
+      expect(Contents.render({ ...base, knowledge })).not.toContain(RULE)
+    })
+  }
+
+  test("the rule survives the tightest tier, with the counts", () => {
+    const many = Array.from({ length: 300 }, (_, i) => `document ${i}`)
+    const integrations = Array.from({ length: 200 }, (_, i) => `integration-number-${i}`)
+    const text = Contents.render({ ...base, integrations, knowledge: { kind: "selected", selected: 300, names: many } })
+    expect(text).toContain("Integrations: 200 attached.")
+    expect(text).toContain("Knowledge documents: 300.")
+    expect(text).toContain(RULE)
   })
 })
 // altimate_change end

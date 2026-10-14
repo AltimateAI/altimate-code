@@ -317,6 +317,9 @@ function View(props: { api: TuiPluginApi }) {
             <Show when={detail()?.skillsSyncedAt}>
               {(at) => <text fg={theme().textMuted}>{`skills synced ${describeAge(at())}`}</text>}
             </Show>
+            <Show when={detail()?.memoryLoadedAt}>
+              {(at) => <text fg={theme().textMuted}>{`memory loaded ${describeAge(at())}`}</text>}
+            </Show>
             <Show when={detail()?.lessons}>
               {(l) => <text fg={theme().textMuted}>{lessonsLine(l())}</text>}
             </Show>
