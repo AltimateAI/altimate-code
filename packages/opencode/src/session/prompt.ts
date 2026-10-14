@@ -6,7 +6,9 @@ import fs from "fs/promises"
 import z from "zod"
 import { Filesystem } from "../util/filesystem"
 import { SessionID, MessageID, PartID } from "./schema"
-import { MessageV2 } from "./message-v2"
+// altimate_change start — module-scope echo transport predicate
+import { MessageV2, isEchoTransportError } from "./message-v2"
+// altimate_change end
 import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "."
@@ -932,7 +934,7 @@ export namespace SessionPrompt {
             cause?.name === "ContentFilterError" ||
             (cause &&
               ["APIError", "UnknownError", "ProviderAuthError"].includes(cause.name) &&
-              !MessageV2.isEchoTransportError(cause)),
+              !isEchoTransportError(cause)),
         )
       )
         return false

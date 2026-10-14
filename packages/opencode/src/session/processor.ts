@@ -1,4 +1,6 @@
-import { MessageV2 } from "./message-v2"
+// altimate_change start — module-scope echo transport predicate
+import { MessageV2, isEchoTransportError } from "./message-v2"
+// altimate_change end
 import { Log } from "@/util/log"
 // altimate_change start — client trace propagation
 import { TraceContext } from "@/altimate/observability/trace-context"
@@ -1274,7 +1276,7 @@ export namespace SessionProcessor {
                 (deferText || (input.recoverCommittedAnswer && input.assistantMessage.summary)) &&
                 !input.abort.aborted &&
                 input.assistantMessage.finish !== "content-filter" &&
-                (MessageV2.isEchoTransportError(error) || MessageV2.ContextOverflowError.isInstance(error))
+                (isEchoTransportError(error) || MessageV2.ContextOverflowError.isInstance(error))
               ) {
                 input.assistantMessage.metadata = {
                   ...input.assistantMessage.metadata,

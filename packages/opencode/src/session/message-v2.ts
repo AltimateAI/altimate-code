@@ -592,24 +592,6 @@ export namespace MessageV2 {
   })
   export type Assistant = z.infer<typeof Assistant>
 
-  // altimate_change start — recover committed echoes only from transient transport failures
-  export function isEchoTransportError(error: Assistant["error"]): boolean {
-    if (error?.name !== "APIError") return false
-    const { statusCode, responseBody, metadata, isRetryable } = error.data
-    // Provider decisions can be wrapped by a gateway with a transient HTTP status.
-    // Inspect structured codes, never prose in a message or response body.
-    if (echoPolicyCode(responseBody) || isEchoPolicyCode(metadata?.code)) return false
-    if (statusCode !== undefined)
-      return (statusCode >= 500 && statusCode < 600) || statusCode === 429 || statusCode === 408
-    const code = metadata?.code
-    return (
-      (code !== undefined &&
-        (echoNetworkCodes.has(code) ||
-          ["ZlibError", "ProviderHeaderTimeoutError", "ProviderStreamIdleTimeoutError"].includes(code))) ||
-      (isRetryable && metadata?.url !== undefined && !responseBody)
-    )
-  }
-  // altimate_change end
   export const Info = z.discriminatedUnion("role", [User, Assistant]).meta({
     ref: "Message",
   })
@@ -1383,3 +1365,22 @@ export namespace MessageV2 {
     }
   }
 }
+
+// altimate_change start — recover committed echoes only from transient transport failures
+export function isEchoTransportError(error: MessageV2.Assistant["error"]): boolean {
+  if (error?.name !== "APIError") return false
+  const { statusCode, responseBody, metadata, isRetryable } = error.data
+  // Provider decisions can be wrapped by a gateway with a transient HTTP status.
+  // Inspect structured codes, never prose in a message or response body.
+  if (echoPolicyCode(responseBody) || isEchoPolicyCode(metadata?.code)) return false
+  if (statusCode !== undefined)
+    return (statusCode >= 500 && statusCode < 600) || statusCode === 429 || statusCode === 408
+  const code = metadata?.code
+  return (
+    (code !== undefined &&
+      (echoNetworkCodes.has(code) ||
+        ["ZlibError", "ProviderHeaderTimeoutError", "ProviderStreamIdleTimeoutError"].includes(code))) ||
+    (isRetryable && metadata?.url !== undefined && !responseBody)
+  )
+}
+// altimate_change end

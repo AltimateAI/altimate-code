@@ -21,7 +21,7 @@ import { SessionPrompt } from "../../src/session/prompt"
 import { SessionRoutes } from "../../src/server/routes/session"
 import { SessionTermination } from "../../src/session/termination"
 import { SessionCompaction } from "../../src/session/compaction"
-import { MessageV2 } from "../../src/session/message-v2"
+import { MessageV2, isEchoTransportError } from "../../src/session/message-v2"
 import { SessionSummary } from "../../src/session/summary"
 // altimate_change start — error provenance fixtures for committed-answer echoes
 import { APICallError } from "ai"
@@ -1558,13 +1558,13 @@ describe("committed-answer echo error classification", () => {
   for (const statusCode of [408, 429, 500, 503, 599]) {
     test(`HTTP ${statusCode} is a recoverable echo transport failure`, () => {
       const error = new MessageV2.APIError({ message: "Request failed", statusCode, isRetryable: false }).toObject()
-      expect(MessageV2.isEchoTransportError(error)).toBe(true)
+      expect(isEchoTransportError(error)).toBe(true)
     })
   }
   for (const statusCode of [400, 401, 403, 404]) {
     test(`HTTP ${statusCode} is never a recoverable echo transport failure`, () => {
       const error = new MessageV2.APIError({ message: "Request failed", statusCode, isRetryable: true }).toObject()
-      expect(MessageV2.isEchoTransportError(error)).toBe(false)
+      expect(isEchoTransportError(error)).toBe(false)
     })
   }
   for (const code of [
@@ -1578,7 +1578,7 @@ describe("committed-answer echo error classification", () => {
         isRetryable: true,
         responseBody: JSON.stringify({ error: { code } }),
       }).toObject()
-      expect(MessageV2.isEchoTransportError(error)).toBe(false)
+      expect(isEchoTransportError(error)).toBe(false)
     })
   }
   test("a policy code beyond the response-body limit survives API error normalization", () => {
@@ -1591,7 +1591,7 @@ describe("committed-answer echo error classification", () => {
       responseBody: JSON.stringify({ details: "x".repeat(5000), error: { code: "policy_violation" } }),
     }), { providerID: promptModel.providerID })
     expect(error.name).toBe("APIError")
-    expect(MessageV2.isEchoTransportError(error)).toBe(false)
+    expect(isEchoTransportError(error)).toBe(false)
   })
   test("a structured policy code never overrides an explicit context overflow code", () => {
     const error = MessageV2.fromError(new APICallError({
@@ -1606,7 +1606,7 @@ describe("committed-answer echo error classification", () => {
       }),
     }), { providerID: promptModel.providerID })
     expect(error.name).toBe("ContextOverflowError")
-    expect(MessageV2.isEchoTransportError(error)).toBe(false)
+    expect(isEchoTransportError(error)).toBe(false)
   })
   test("a 503 orchestration guardrail code survives normalization and vetoes echo recovery", () => {
     const error = MessageV2.fromError(new APICallError({
@@ -1618,7 +1618,7 @@ describe("committed-answer echo error classification", () => {
       responseBody: JSON.stringify({ orchestrationError: { code: "guardrail_intervened" } }),
     }), { providerID: promptModel.providerID })
     expect(error.name).toBe("APIError")
-    expect(MessageV2.isEchoTransportError(error)).toBe(false)
+    expect(isEchoTransportError(error)).toBe(false)
   })
   test("a 413 content_length_exceeded code remains a context overflow", () => {
     const error = MessageV2.fromError(new APICallError({
@@ -1630,7 +1630,7 @@ describe("committed-answer echo error classification", () => {
       responseBody: JSON.stringify({ error: { code: "content_length_exceeded" } }),
     }), { providerID: promptModel.providerID })
     expect(error.name).toBe("ContextOverflowError")
-    expect(MessageV2.isEchoTransportError(error)).toBe(false)
+    expect(isEchoTransportError(error)).toBe(false)
   })
   test("a wrapped socket reset without a status remains recoverable even when the SDK disables retries", () => {
     const error = MessageV2.fromError(new APICallError({
@@ -1641,7 +1641,7 @@ describe("committed-answer echo error classification", () => {
       cause: Object.assign(new Error("socket reset"), { code: "ECONNRESET" }),
     }), { providerID: promptModel.providerID })
     expect(error.name).toBe("APIError")
-    expect(MessageV2.isEchoTransportError(error)).toBe(true)
+    expect(isEchoTransportError(error)).toBe(true)
   })
   test("statusless socket and watchdog failures are recoverable but local failures and auth are not", () => {
     for (const code of ["ECONNRESET", "ETIMEDOUT", "ProviderStreamIdleTimeoutError"]) {
@@ -1650,15 +1650,15 @@ describe("committed-answer echo error classification", () => {
         isRetryable: false,
         metadata: { code },
       }).toObject()
-      expect(MessageV2.isEchoTransportError(error)).toBe(true)
+      expect(isEchoTransportError(error)).toBe(true)
     }
-    expect(MessageV2.isEchoTransportError(
+    expect(isEchoTransportError(
       new MessageV2.APIError({ message: "Unclassified failure", isRetryable: false }).toObject(),
     )).toBe(false)
-    expect(MessageV2.isEchoTransportError(
+    expect(isEchoTransportError(
       MessageV2.fromError(new Error("Snapshot tracking failed"), { providerID: promptModel.providerID }),
     )).toBe(false)
-    expect(MessageV2.isEchoTransportError(
+    expect(isEchoTransportError(
       new MessageV2.AuthError({ message: "Authentication failed", providerID: promptModel.providerID }).toObject(),
     )).toBe(false)
   })
