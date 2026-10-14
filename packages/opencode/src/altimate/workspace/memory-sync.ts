@@ -182,6 +182,13 @@ function blockUpdatedOf(record: CloudMemoryRecord | undefined): string {
   return typeof value === "string" ? value : ""
 }
 
+/** The record with the newest `block_updated`, the first on a tie. */
+function newestRecord(records: CloudMemoryRecord[]): CloudMemoryRecord | undefined {
+  let newest: CloudMemoryRecord | undefined
+  for (const record of records) if (!newest || blockUpdatedOf(record) > blockUpdatedOf(newest)) newest = record
+  return newest
+}
+
 /** ``directory`` is the tree that owned the operation. Fire-and-forget mirrors
  * and archives run after their writing context has gone, so resolving the
  * binding from the ambient instance can attribute one project's memory to
@@ -751,10 +758,7 @@ async function push(
   // that compared remotes as raw strings wrote a second record once its
   // binding's cached form of the repo changed.
   const copies = view.records.filter((r) => isSameBlock(r, block, binding))
-  const newest = copies.reduce<CloudMemoryRecord | undefined>(
-    (best, r) => (best && blockUpdatedOf(best) >= blockUpdatedOf(r) ? best : r),
-    undefined,
-  )
+  const newest = newestRecord(copies)
   const match = (indexUsable ? existing?.memoryId : undefined) ?? newest?.id
   if (match) {
     // Refuse to move a record backwards. Two machines editing the same block,
@@ -764,9 +768,7 @@ async function push(
     // needs a conditional update the service does not offer. Checked against
     // the newest copy too: the other copies are archived below, so a newer
     // one's content would be lost.
-    const remoteUpdated = [view.records.find((r) => r.id === match), newest]
-      .map(blockUpdatedOf)
-      .reduce((a, b) => (a > b ? a : b))
+    const remoteUpdated = blockUpdatedOf(newestRecord(view.records.filter((r) => r.id === match || r === newest)))
     if (remoteUpdated > block.updated) {
       log.warn("declining to overwrite a newer workspace record with older local content", {
         id: block.id,
@@ -777,15 +779,9 @@ async function push(
     }
     await MemoryApi.update(match, block.content, metadata)
     await recordIndexEntry(key, { memoryId: match, contentHash: hash, syncedAt: Date.now() })
-    // One live record per block. The other copies are archived as a split
-    // create's extras are below: emptied, under this push's metadata, so any
-    // client that reads one as this block's tombstone also reads `match` as
-    // its live record and keeps the block.
-    for (const copy of copies) {
-      if (copy.id === match) continue
-      log.warn("archiving a second live record of one block", { id: block.id, memoryId: copy.id })
-      await MemoryApi.update(copy.id, "", { ...metadata, archived: "true", archived_at: new Date().toISOString() })
-    }
+    // One live record per block.
+    const others = copies.filter((r) => r.id !== match).map((r) => r.id)
+    await archiveDuplicates(others, block, metadata, "archiving a second live record of one block")
     return "stored"
   }
 
@@ -816,11 +812,23 @@ async function push(
   // the metadata we sent. Only one can represent the block; the rest would
   // otherwise be injected as duplicates under the same block id, holding text
   // the user never wrote.
-  for (const extra of extras) {
-    log.warn("archiving an extra record produced by one create", { id: block.id, memoryId: extra })
-    await MemoryApi.update(extra, "", { ...metadata, archived: "true", archived_at: new Date().toISOString() })
-  }
+  await archiveDuplicates(extras, block, metadata, "archiving an extra record produced by one create")
   return "stored"
+}
+
+/** Archive records that duplicate a block's live record: emptied, under the
+ * metadata the live record was just given. Any client that reads one as the
+ * block's tombstone then also reads the live record, and keeps the block. */
+async function archiveDuplicates(
+  ids: string[],
+  block: MemoryBlock,
+  metadata: MirrorMetadata,
+  reason: string,
+): Promise<void> {
+  for (const id of ids) {
+    log.warn(reason, { id: block.id, memoryId: id })
+    await MemoryApi.update(id, "", { ...metadata, archived: "true", archived_at: new Date().toISOString() })
+  }
 }
 
 /** Cloud operations for one logical block, run one at a time.
