@@ -24,6 +24,14 @@ export function interruptGeneration(sessionID: string): void {
   generations.get(sessionID)?.()
 }
 
+/** A delayed reminder may interrupt only the provider request it originally targeted. */
+export function captureGenerationInterrupt(sessionID: string): () => void {
+  const interrupt = generations.get(sessionID)
+  return () => {
+    if (generations.get(sessionID) === interrupt) interrupt?.()
+  }
+}
+
 export const GenerationInterrupted = BusEvent.define(
   "session.generation.interrupted",
   z.object({ sessionID: SessionID.zod, timestamp: z.number() }),

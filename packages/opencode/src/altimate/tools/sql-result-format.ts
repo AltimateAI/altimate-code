@@ -109,7 +109,8 @@ function displayCell(value: unknown, ancestors = new Set<unknown>()): { text: st
     let text = ""
     let bytes = 0
     for (let i = 0; i < value.length; i++) {
-      const item = value[i] == null ? { text: "", clipped: false } : displayCell(value[i], ancestors)
+      // A null element keeps a marker so `[NULL]`, `['']` and `[[]]` stay distinguishable.
+      const item = value[i] == null ? { text: "NULL", clipped: false } : displayCell(value[i], ancestors)
       const delimiter = i ? "," : ""
       const size = Buffer.byteLength(item.text, "utf8") + delimiter.length
       if (item.clipped || bytes + size > SQL_MAX_PREVIEW_BYTES) {
@@ -134,6 +135,8 @@ function displayCell(value: unknown, ancestors = new Set<unknown>()): { text: st
     const prototype = Object.getPrototypeOf(value)
     if (prototype === Object.prototype || prototype === null) return displayObject(value, ancestors)
   }
+  // Date's default string form drops milliseconds and the zone; ISO 8601 is lossless and matches the spill's `$date`.
+  if (value instanceof Date) return { text: Number.isNaN(value.getTime()) ? "Invalid Date" : value.toISOString(), clipped: false }
   return { text: value === null ? "NULL" : String(value), clipped: false }
 }
 

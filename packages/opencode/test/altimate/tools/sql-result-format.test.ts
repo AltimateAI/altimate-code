@@ -89,11 +89,12 @@ describe("SQL result previews", () => {
     expect(saved.writes).toHaveLength(0)
   })
 
-  test("quotes the exact NULL string in array cells while leaving null items empty", async () => {
+  test("marks null array items and quotes the exact NULL string in array cells", async () => {
     const saved = spill()
-    const formatted = await formatSqlResult(result([[[null, "NULL"]]]), { limit: 100, write: saved.write })
+    const formatted = await formatSqlResult(result([[[null, "NULL"]], [[""]], [[[]]]]), { limit: 100, write: saved.write })
 
-    expect(body(formatted.output)).toBe(',"NULL"')
+    // `[NULL]`, `['']` and `[[]]` stay distinguishable: NULL marker, empty item, empty nested array.
+    expect(body(formatted.output)).toBe('NULL,"NULL"\n\n')
     expect(saved.writes).toHaveLength(0)
   })
 
@@ -350,11 +351,12 @@ describe("SQL result previews", () => {
   })
 
   test("preserves existing Date bigint bytes number and boolean preview paths", async () => {
-    const cells = [new Date("2026-01-02T03:04:05.000Z"), 9007199254740993n, new Uint8Array([1, 128]), 42, true]
+    const cells = [new Date("2026-01-02T03:04:05.678Z"), 9007199254740993n, new Uint8Array([1, 128]), 42, true]
     const saved = spill()
     const formatted = await formatSqlResult(result(cells.map((cell) => [cell])), { limit: 100, write: saved.write })
 
-    expect(body(formatted.output)).toBe([String(cells[0]), String(cells[1]), "base64:AYA=", "42", "true"].join("\n"))
+    // Timestamps render as lossless ISO 8601 (milliseconds and zone kept), matching the spill's `$date`.
+    expect(body(formatted.output)).toBe(["2026-01-02T03:04:05.678Z", String(cells[1]), "base64:AYA=", "42", "true"].join("\n"))
     expect(saved.writes).toHaveLength(0)
   })
 
