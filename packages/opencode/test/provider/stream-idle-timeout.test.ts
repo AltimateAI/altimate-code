@@ -200,6 +200,104 @@ it.live("SSE data every 10ms resets the 50ms model-output deadline", () =>
   }),
 )
 
+for (const eventType of ["ping", "keepalive", "heartbeat"]) {
+  it.live(`SSE event: ${eventType} with data every 10ms times out at the 50ms deadline`, () =>
+    Effect.gen(function* () {
+      const frame = new TextEncoder().encode(`event: ${eventType}\ndata: {"type":"ping"}\n\n`)
+      const result = yield* requestBody("text/event-stream", Array(15).fill(frame))
+
+      expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
+      expect(result.chunks.length).toBeLessThan(15)
+      expect(result.signal?.aborted).toBe(true)
+      expect(result.cancelled).toBe(true)
+    }),
+  )
+}
+
+it.live("SSE ping data without an event field every 10ms times out at the 50ms deadline", () =>
+  Effect.gen(function* () {
+    const frame = new TextEncoder().encode('data: {"type":"ping"}\n\n')
+    const result = yield* requestBody("text/event-stream", Array(15).fill(frame))
+
+    expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
+    expect(result.chunks.length).toBeLessThan(15)
+    expect(result.signal?.aborted).toBe(true)
+  }),
+)
+
+for (const padding of ["leading", "trailing"]) {
+  it.live(`SSE ping data with long ${padding} whitespace does not reset the deadline`, () =>
+    Effect.gen(function* () {
+      const spaces = " ".repeat(100)
+      const payload = padding === "leading" ? `${spaces}{"type":"ping"}` : `{"type":"ping"}${spaces}`
+      const frame = new TextEncoder().encode(`data: ${payload}\n\n`)
+      const result = yield* requestBody("text/event-stream", Array(15).fill(frame))
+
+      expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
+      expect(result.chunks.length).toBeLessThan(15)
+    }),
+  )
+}
+
+it.live("SSE data after a split UTF-8 BOM resets the deadline", () =>
+  Effect.gen(function* () {
+    const frame = new TextEncoder().encode('\uFEFFdata: {"text":"hello"}\n\n')
+    const chunks = [frame.slice(0, 1), frame.slice(1), new TextEncoder().encode(": keepalive\n\n")]
+    const result = yield* requestBody("text/event-stream", chunks, [0, 30, 65])
+
+    expect(result.error).toBeUndefined()
+    expect(result.chunks).toEqual(chunks)
+  }),
+)
+
+it.live("SSE content_block_delta events reset the deadline", () =>
+  Effect.gen(function* () {
+    const frame = new TextEncoder().encode('event: content_block_delta\ndata: {"text":"hello"}\n\n')
+    const chunks = Array(15).fill(frame)
+    const result = yield* requestBody("text/event-stream", chunks)
+
+    expect(result.error).toBeUndefined()
+    expect(result.chunks).toEqual(chunks)
+    expect(result.signal?.aborted).toBe(false)
+  }),
+)
+
+it.live("SSE real data lines longer than 64 bytes reset the deadline", () =>
+  Effect.gen(function* () {
+    const frame = new TextEncoder().encode(`data: {"text":"${"x".repeat(256)}"}\n\n`)
+    const chunks = Array(15).fill(frame)
+    const result = yield* requestBody("text/event-stream", chunks)
+
+    expect(result.error).toBeUndefined()
+    expect(result.chunks).toEqual(chunks)
+    expect(result.signal?.aborted).toBe(false)
+  }),
+)
+
+it.live("SSE event fields after split data lines apply until the CRLF block boundary", () =>
+  Effect.gen(function* () {
+    const chunks = Array.from({ length: 8 }, () => ['data: {"text":"hello"}\r', "\nevent: ping\r\n\r\n"])
+      .flat()
+      .map((value) => new TextEncoder().encode(value))
+    const result = yield* requestBody("text/event-stream", chunks)
+
+    expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
+    expect(result.chunks.length).toBeLessThan(chunks.length)
+  }),
+)
+
+it.live("SSE event fields reset at blank lines before subsequent data blocks", () =>
+  Effect.gen(function* () {
+    const chunks = ['event: ping\ndata: {"type":"ping"}\n\n', ...Array(14).fill('data: {"text":"hello"}\n\n')].map(
+      (value) => new TextEncoder().encode(value),
+    )
+    const result = yield* requestBody("text/event-stream", chunks)
+
+    expect(result.error).toBeUndefined()
+    expect(result.chunks).toEqual(chunks)
+  }),
+)
+
 for (const chunk of [": keepalive\n\n", "\n\r\n", "event: ping\nid: 1\nretry: 10\n\n"]) {
   it.live(`SSE protocol-only bytes ${JSON.stringify(chunk)} are forwarded without resetting the deadline`, () =>
     Effect.gen(function* () {
@@ -219,7 +317,7 @@ for (const chunk of [": keepalive\n\n", "\n\r\n", "event: ping\nid: 1\nretry: 10
 
 it.live("an SSE data line split across chunks resets the deadline once complete", () =>
   Effect.gen(function* () {
-    const chunks = ["da", 'ta: {"text":"hello"}\r', '\ndata: {"text":"world"}\n\n'].map((value) =>
+    const chunks = ["da", 'ta: {"text":"hello"}\r\n\r', '\ndata: {"text":"world"}\n\n'].map((value) =>
       new TextEncoder().encode(value),
     )
     const result = yield* requestBody("text/event-stream", chunks, [0, 30, 65])
@@ -260,6 +358,24 @@ it.live("Amazon event-stream chunk frames reset the deadline", () =>
   Effect.gen(function* () {
     const chunks = Array(15).fill(eventFrame("chunk"))
     const result = yield* requestBody("application/vnd.amazon.eventstream", chunks)
+
+    expect(result.error).toBeUndefined()
+    expect(result.chunks).toEqual(chunks)
+    expect(result.signal?.aborted).toBe(false)
+  }),
+)
+
+it.live("Amazon event-stream chunk headers and slow payload pieces keep resetting the deadline", () =>
+  Effect.gen(function* () {
+    const headers = eventFrame("chunk").slice(0, -4)
+    const pieces = Array.from({ length: 8 }, () => new Uint8Array(1024))
+    new DataView(headers.buffer).setUint32(0, headers.length + 8 * 1024 + 4)
+    const chunks = [headers.slice(0, 12), headers.slice(12), ...pieces, new Uint8Array(4)]
+    const result = yield* requestBody(
+      "application/vnd.amazon.eventstream",
+      chunks,
+      chunks.map((_, i) => i * 30),
+    )
 
     expect(result.error).toBeUndefined()
     expect(result.chunks).toEqual(chunks)

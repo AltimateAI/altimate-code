@@ -520,15 +520,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
               "Pipeline contains a blocked operator ($function, $accumulator). Executing arbitrary JavaScript is not allowed.",
             )
           }
-          // Cap or append $limit to prevent OOM (write stages already blocked above).
-          const limitIdx = pipeline.findIndex((stage) => "$limit" in stage)
-          if (limitIdx >= 0) {
-            // Cap user-specified $limit against effectiveLimit
-            const userLimit = (pipeline[limitIdx] as any).$limit
-            if (typeof userLimit === "number" && userLimit > effectiveLimit) {
-              pipeline[limitIdx] = { $limit: effectiveLimit + 1 }
-            }
-          } else {
+          // Earlier limits cannot bound rows produced by later expanding stages.
+          const terminalLimit = pipeline.at(-1)?.$limit
+          if (!(typeof terminalLimit === "number" && terminalLimit <= effectiveLimit + 1)) {
             pipeline.push({ $limit: effectiveLimit + 1 })
           }
 
@@ -579,12 +573,21 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           if (!parsed.field) {
             throw new Error("distinct requires a 'field' string")
           }
-          const values = await coll.distinct(parsed.field, parsed.filter ?? {}, withMaxTime(maxTimeMS))
-          const truncated = values.length > effectiveLimit
-          const limited = truncated ? values.slice(0, effectiveLimit) : values
+          const docs = await readCursor(
+            coll.aggregate(
+              [
+                { $match: parsed.filter ?? {} },
+                { $group: { _id: `$${parsed.field}` } },
+                { $limit: effectiveLimit + 1 },
+              ],
+              withMaxTime(maxTimeMS),
+            ),
+          )
+          const truncated = docs.length > effectiveLimit
+          const limited = truncated ? docs.slice(0, effectiveLimit) : docs
           return {
             columns: [parsed.field],
-            rows: limited.map((v: unknown) => [serializeValue(v)]),
+            rows: limited.map((doc) => [serializeValue(doc._id)]),
             row_count: limited.length,
             truncated,
           }

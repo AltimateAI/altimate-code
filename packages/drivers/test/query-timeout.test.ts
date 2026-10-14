@@ -212,7 +212,12 @@ describe("MongoDB deadline plumbing", () => {
     })
     const coll = {
       find: (_f: unknown, o: unknown) => ((seen.find = o), cursor("find")),
-      aggregate: (_p: unknown, o: unknown) => ((seen.aggregate = o), cursor("aggregate")),
+      // `distinct` is executed as a bounded `$group` aggregate; record it under its own key.
+      aggregate: (p: unknown, o: unknown) => {
+        const grouped = Array.isArray(p) && p.some((stage) => stage && typeof stage === "object" && "$group" in stage)
+        seen[grouped ? "distinct" : "aggregate"] = o
+        return cursor("aggregate")
+      },
       countDocuments: async (_f: unknown, o: unknown) => {
         seen.countDocuments = o
         if (opts.failWith) throw opts.failWith

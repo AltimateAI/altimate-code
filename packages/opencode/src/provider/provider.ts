@@ -142,6 +142,14 @@ export namespace Provider {
   function modelOutputDetector(contentType: string) {
     const decoder = new TextDecoder()
     let prefix = ""
+    let prefixBytes = 0
+    let truncated = false
+    let firstChar = true
+    let carriageReturn = false
+    let data = false
+    let ping = false
+    let otherData = false
+    let eventOutput: boolean | undefined
     let pending: Uint8Array = new Uint8Array()
     let headersLength: number | undefined
     let remaining = 0
@@ -149,13 +157,45 @@ export namespace Provider {
     return (chunk: Uint8Array) => {
       let output = false
       if (contentType.includes("text/event-stream")) {
-        // Retain only the field prefix across partial lines, never the model payload.
+        // SSE fields apply to the whole block, even when event follows data.
+        // Ignore leading value whitespace and retain at most 64 bytes per line.
+        // Beyond that prefix, only remember whether non-whitespace arrived.
         for (const char of decoder.decode(chunk, { stream: true })) {
+          if (firstChar) {
+            firstChar = false
+            if (char === "\uFEFF") continue
+          }
+          if (carriageReturn && char === "\n") {
+            carriageReturn = false
+            continue
+          }
+          carriageReturn = char === "\r"
           if (char === "\n" || char === "\r") {
-            if (prefix === "data:") output = true
+            if (!prefix) {
+              if (data && (eventOutput ?? (!ping || otherData))) output = true
+              data = ping = otherData = false
+              eventOutput = undefined
+            } else if (prefix === "data" || prefix.startsWith("data:")) {
+              const value = prefix.slice(5).trim()
+              data = true
+              // Multiple nonempty data lines cannot be exactly one ping object.
+              otherData ||= truncated || (value !== "" && (value !== '{"type":"ping"}' || ping))
+              ping ||= value === '{"type":"ping"}'
+            } else if (prefix === "event" || prefix.startsWith("event:")) {
+              eventOutput = truncated || !/^(ping|keepalive|heartbeat)$/i.test(prefix.slice(6).trim())
+            }
             prefix = ""
-          } else if (prefix.length < 5) {
-            prefix += char
+            prefixBytes = 0
+            truncated = false
+          } else if ((prefix === "data:" || prefix === "event:") && !char.trim()) {
+            continue
+          } else if (prefixBytes < 64) {
+            const code = char.codePointAt(0)!
+            prefixBytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4
+            if (prefixBytes <= 64) prefix += char
+            else truncated ||= !!char.trim()
+          } else {
+            truncated ||= !!char.trim()
           }
         }
         return output
@@ -168,7 +208,7 @@ export namespace Provider {
           const count = Math.min(remaining, chunk.length - offset)
           remaining -= count
           offset += count
-          if (remaining === 0 && frameOutput) output = true
+          if (frameOutput) output = true
           continue
         }
         const length = headersLength ?? 12
@@ -192,6 +232,7 @@ export namespace Provider {
           remaining = total - 12 - headers
         } else {
           frameOutput = eventStreamFrameHasOutput(pending)
+          if (frameOutput) output = true
           headersLength = undefined
         }
         pending = new Uint8Array()

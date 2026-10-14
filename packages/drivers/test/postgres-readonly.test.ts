@@ -182,3 +182,69 @@ test("Postgres never starts user SQL when cancellation arrives during session se
     await connector.close()
   }
 })
+
+async function timeoutDatabase() {
+  const queries: string[] = []
+  let statementTimeout = "1s"
+  const client = {
+    async query(sql: string) {
+      queries.push(sql)
+      if (sql === "SHOW statement_timeout") {
+        return { fields: [], rows: [{ statement_timeout: statementTimeout }] }
+      }
+      const set = /^SET statement_timeout (?:=|TO) (\d+)$/i.exec(sql)
+      if (set) statementTimeout = set[1]!
+      else if (/^RESET statement_timeout$/i.test(sql)) statementTimeout = "0"
+      return { fields: [], rows: [] }
+    },
+    release() {},
+  }
+  mock.module("pg", () => ({
+    default: {
+      Pool: class {
+        async connect() {
+          return client
+        }
+        async end() {}
+      },
+    },
+  }))
+  const connector = await connect({ type: "postgres" })
+  await connector.connect()
+  const execute = (sql: string) => connector.execute(sql, 1, undefined, { queryTimeoutMs: 5000 })
+  return { connector, execute, queries }
+}
+
+test("Postgres preserves a stricter cached statement timeout for ordinary queries", async () => {
+  const db = await timeoutDatabase()
+  try {
+    await db.execute("SELECT 1")
+    await db.execute("SELECT 2")
+    expect(db.queries).toEqual(["SHOW statement_timeout", "SELECT 1 LIMIT 2", "SELECT 2 LIMIT 2"])
+  } finally {
+    await db.connector.close()
+  }
+})
+
+for (const statement of ["SET STATEMENT_TIMEOUT = 0", "RESET statement_timeout"]) {
+  test(`Postgres rechecks a stricter cached timeout after ${statement}`, async () => {
+    const db = await timeoutDatabase()
+    try {
+      await db.execute("SELECT 1")
+      expect(db.queries).toEqual(["SHOW statement_timeout", "SELECT 1 LIMIT 2"])
+      await db.execute(statement)
+      await db.execute("SELECT 2")
+      expect(db.queries).toEqual([
+        "SHOW statement_timeout",
+        "SELECT 1 LIMIT 2",
+        statement,
+        "SHOW statement_timeout",
+        "SET statement_timeout TO 5000",
+        "SELECT 2 LIMIT 2",
+        "RESET statement_timeout",
+      ])
+    } finally {
+      await db.connector.close()
+    }
+  })
+}
