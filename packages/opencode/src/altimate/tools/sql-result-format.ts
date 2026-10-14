@@ -203,10 +203,11 @@ const CONTINUED_CELL = "…[continued in spill]"
 const OMITTED_CELLS = "…[remaining cells omitted; see spill]"
 
 function namedCell(value: unknown, maxBytes: number, maxLines: number): { text?: string; clipped: boolean } {
-  // Strings stay readable; structured/binary values use the spill's tagged JSON.
-  if (typeof value === "string") {
-    const text = clipText(value, maxBytes, maxLines, CONTINUED_CELL)
-    return { text, clipped: text !== value }
+  // Strings and NULL use table rendering; structured/binary values use the spill's tagged JSON.
+  if (typeof value === "string" || value === null) {
+    const rendered = displayCell(value).text
+    const text = clipText(rendered, maxBytes, maxLines, CONTINUED_CELL)
+    return { text, clipped: text !== rendered }
   }
   let text = ""
   let bytes = 0

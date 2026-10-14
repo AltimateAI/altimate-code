@@ -785,6 +785,34 @@ describe("empty-result hint", () => {
 })
 
 describe("SQL full text retrieval", () => {
+  test("quotes newline and column delimiters in named text on one row", async () => {
+    const saved = spill()
+    const text = "alpha\nbeta | gamma"
+    const formatted = await formatSqlResult(result([[text]], ["body"]), {
+      limit: 20,
+      fullTextColumns: ["body"],
+      write: saved.write,
+    })
+
+    expect(body(formatted.output, ["body"])).toBe('"alpha\\nbeta | gamma"')
+    expect(formatted.metadata).toMatchObject({ preview_rows: 1, output_truncated: false })
+    expect(saved.rows()).toEqual([{ columns: ["body"], values: [text] }])
+  })
+
+  test("distinguishes the exact NULL string from named null while leaving ordinary strings bare", async () => {
+    const saved = spill()
+    const rows = [["NULL"], [null], ["null"], ["true"], ["42"], ["plain"]]
+    const formatted = await formatSqlResult(result(rows, ["body"]), {
+      limit: 20,
+      fullTextColumns: ["body"],
+      write: saved.write,
+    })
+
+    expect(body(formatted.output, ["body"])).toBe('"NULL"\nNULL\nnull\ntrue\n42\nplain')
+    expect(formatted.metadata).toMatchObject({ preview_rows: rows.length, output_truncated: false })
+    expect(saved.rows().map((row) => row.values)).toEqual(rows)
+  })
+
   test("clips a 50 KiB named cell within 16 KiB and preserves its complete spill", async () => {
     const saved = spill()
     const text = "x".repeat(50 * 1024)
@@ -922,7 +950,7 @@ describe("SQL full text retrieval", () => {
       fullTextColumns: ["named"],
       write: saved.write,
     })
-    expect(formatted.output).toContain('1 | null\n2 | {"$sql_type":"undefined"}')
+    expect(formatted.output).toContain('1 | NULL\n2 | {"$sql_type":"undefined"}')
     expect(saved.rows().map((row) => row.values)).toEqual([
       [1, null],
       [2, { $sql_type: "undefined" }],
