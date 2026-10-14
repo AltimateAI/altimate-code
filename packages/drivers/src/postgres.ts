@@ -153,7 +153,8 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         options?.signal?.throwIfAborted()
         // User SQL can change a stricter session timeout that we did not SET or
         // RESET. Recheck it on the next call instead of trusting stale state.
-        if (/statement_timeout/i.test(sql)) existingTimeout.delete(client)
+        // `RESET ALL` / `DISCARD ALL` clear every session setting, including statement_timeout.
+        if (/statement_timeout|\breset\s+all\b|\bdiscard\s+all\b/i.test(sql)) existingTimeout.delete(client)
         // altimate_change start — pg Query row listeners disable pg's result-array accumulation
         if (options?.maxResultBytes !== undefined) {
           const consume = createResultByteBudget(options.maxResultBytes)

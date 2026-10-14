@@ -194,7 +194,7 @@ async function timeoutDatabase() {
       }
       const set = /^SET statement_timeout (?:=|TO) (\d+)$/i.exec(sql)
       if (set) statementTimeout = set[1]!
-      else if (/^RESET statement_timeout$/i.test(sql)) statementTimeout = "0"
+      else if (/^(RESET statement_timeout|RESET ALL|DISCARD ALL)$/i.test(sql)) statementTimeout = "0"
       return { fields: [], rows: [] }
     },
     release() {},
@@ -226,7 +226,7 @@ test("Postgres preserves a stricter cached statement timeout for ordinary querie
   }
 })
 
-for (const statement of ["SET STATEMENT_TIMEOUT = 0", "RESET statement_timeout"]) {
+for (const statement of ["SET STATEMENT_TIMEOUT = 0", "RESET statement_timeout", "RESET ALL", "discard all"]) {
   test(`Postgres rechecks a stricter cached timeout after ${statement}`, async () => {
     const db = await timeoutDatabase()
     try {
