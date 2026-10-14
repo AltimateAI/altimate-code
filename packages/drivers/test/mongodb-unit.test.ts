@@ -216,7 +216,9 @@ describe("MongoDB extraction limits", () => {
       undefined,
       { queryTimeoutMs: 250 },
     )
-    expect(pipelines).toEqual([[{ $match: { customer: 42 } }, { $group: { _id: "$status" } }, { $limit: 3 }]])
+    expect(pipelines).toEqual([
+      [{ $match: { customer: 42 } }, { $unwind: "$status" }, { $group: { _id: "$status" } }, { $limit: 3 }],
+    ])
     expect(aggregateOptions).toEqual([{ maxTimeMS: 250 }])
     expect(distincts).toEqual([])
     expect(result).toEqual({ columns: ["status"], rows: [["A"], ["B"]], row_count: 2, truncated: true })
@@ -283,7 +285,9 @@ describe("MongoDB native command filters", () => {
       undefined,
       { queryTimeoutMs: 0 },
     )
-    expect(pipelines).toEqual([[{ $match: { customer: 42 } }, { $group: { _id: "$status" } }, { $limit: 11 }]])
+    expect(pipelines).toEqual([
+      [{ $match: { customer: 42 } }, { $unwind: "$status" }, { $group: { _id: "$status" } }, { $limit: 11 }],
+    ])
     expect(aggregateOptions).toEqual([{}])
     expect(result.rows).toEqual([["A"]])
   })

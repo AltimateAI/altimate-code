@@ -577,6 +577,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
             coll.aggregate(
               [
                 { $match: parsed.filter ?? {} },
+                // `distinct` deconstructs arrays and skips missing fields; `$unwind` without
+                // preserveNullAndEmptyArrays does the same for array, scalar and absent values.
+                { $unwind: `$${parsed.field}` },
                 { $group: { _id: `$${parsed.field}` } },
                 { $limit: effectiveLimit + 1 },
               ],
