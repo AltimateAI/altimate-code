@@ -19,6 +19,11 @@ export namespace ProviderError {
     }
   }
 
+  // Message of the idle-stream watchdog, shared so classification can recognise it.
+  export const SSE_IDLE_MESSAGE = "SSE read timed out"
+  // Leading words of the user-facing message for a stalled request.
+  export const MODEL_STOPPED_RESPONDING = "The model stopped responding"
+
   export class ResponseStreamError extends Error {
     public override readonly name = "ProviderResponseStreamError"
 

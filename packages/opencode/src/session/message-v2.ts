@@ -1171,6 +1171,30 @@ export namespace MessageV2 {
           },
           { cause: e },
         ).toObject()
+      // altimate_change start — a request the provider stopped answering (no response headers, or a silent
+      // stream) is a transient stall: classify it as a retryable APIError that names the problem instead of
+      // surfacing it as an opaque UnknownError that ends the session. Mirrors upstream OpenCode
+      // (dev: message-v2.ts HeaderTimeoutError / ResponseStreamError cases), with clearer wording and
+      // limited to the idle watchdog: other ResponseStreamErrors (websocket transport) keep their old handling.
+      case e instanceof ProviderError.HeaderTimeoutError:
+        return new MessageV2.APIError(
+          {
+            message: `${ProviderError.MODEL_STOPPED_RESPONDING}: no response headers within ${Math.round(e.ms / 1000)}s`,
+            isRetryable: true,
+            metadata: { code: e.name, timeoutMs: String(e.ms) },
+          },
+          { cause: e },
+        ).toObject()
+      case e instanceof ProviderError.ResponseStreamError && e.message === ProviderError.SSE_IDLE_MESSAGE:
+        return new MessageV2.APIError(
+          {
+            message: `${ProviderError.MODEL_STOPPED_RESPONDING}: the response stream went silent (${e.message})`,
+            isRetryable: true,
+            metadata: { code: e.name },
+          },
+          { cause: e },
+        ).toObject()
+      // altimate_change end
       case APICallError.isInstance(e):
         const parsed = ProviderError.parseAPICallError({
           providerID: ctx.providerID,

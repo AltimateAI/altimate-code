@@ -88,6 +88,14 @@ describe("session.retry.delay", () => {
     process.emitWarning = originalWarn
     expect(warnings.some((w) => w.includes("TimeoutOverflowWarning"))).toBe(false)
   })
+
+  test("sleep rejects at once when the signal is already aborted (a Stop that landed before the backoff)", async () => {
+    const controller = new AbortController()
+    controller.abort()
+    const started = Date.now()
+    await expect(SessionRetry.sleep(60_000, controller.signal)).rejects.toThrow("Aborted")
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
 })
 
 describe("session.retry.max_attempts", () => {
@@ -192,9 +200,7 @@ describe("session.message-v2.fromError", () => {
       // Use a raw TCP server that sends a partial HTTP response then
       // destroys the socket, triggering an immediate ECONNRESET on the client.
       const server = createServer((socket) => {
-        socket.write(
-          "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nHello,\r\n",
-        )
+        socket.write("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nHello,\r\n")
         setTimeout(() => socket.destroy(), 20)
       })
 
