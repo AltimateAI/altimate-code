@@ -939,7 +939,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
 /** The one line a settled attach is announced with: the headline every
  * surface shares, then where the detail is. */
 export function attachSummary(counts: Pick<AttachCounts, "served" | "declared" | "gaps" | "extServed">): string {
-  return `${statusHeadline(counts)}. Details: /workspace`
+  return `${statusHeadline(counts)}. Details: /integrations`
 }
 
 /** Tell the session about a refusal, once per unchanged verdict.
