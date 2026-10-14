@@ -102,6 +102,17 @@ export namespace SessionProcessor {
   }
   // altimate_change end
 
+  // altimate_change start — a MessageAbortedError raised after the session's
+  // own abort signal fired is a requested cancellation (Stop/Esc, dispose,
+  // harness challenge abort), already recorded as the session's "aborted"
+  // outcome; it is not a CLI failure. An abort the session did not request
+  // (signal not aborted) is unexpected and is still reported.
+  /** @internal Exported for focused telemetry tests. */
+  export function shouldTrackStreamingError(error: unknown, sessionAborted: boolean): boolean {
+    return !(sessionAborted && MessageV2.AbortedError.isInstance(error))
+  }
+  // altimate_change end
+
   // A provider may repeat one malformed raw tool-call id for concurrent calls.
   // FIFO is correct only when those calls settle in start order; use the
   // tool-name/input identity carried by execution and result events to select
@@ -1232,16 +1243,18 @@ export namespace SessionProcessor {
               })
               // altimate_change end
               // altimate_change start — telemetry for unhandled streaming errors (non-retry, non-overflow)
-              // Covers: MessageAbortedError (Stop/dispose), UnknownError (SSE chunk timeout),
-              // APIError (provider failures after retry exhaustion), AuthError, and any other streaming error.
-              Telemetry.track({
-                type: "error",
-                timestamp: Date.now(),
-                session_id: input.assistantMessage.sessionID,
-                error_name: error.name,
-                error_message: (error.data as any)?.message ?? String((e as any)?.message ?? ""),
-                context: "streaming",
-              })
+              // Covers: UnknownError (SSE chunk timeout), APIError (provider failures after
+              // retry exhaustion), AuthError, unrequested aborts, and any other streaming
+              // error. Requested aborts are excluded — see shouldTrackStreamingError.
+              if (shouldTrackStreamingError(error, input.abort.aborted))
+                Telemetry.track({
+                  type: "error",
+                  timestamp: Date.now(),
+                  session_id: input.assistantMessage.sessionID,
+                  error_name: error.name,
+                  error_message: (error.data as any)?.message ?? String((e as any)?.message ?? ""),
+                  context: "streaming",
+                })
               // altimate_change end
               // altimate_change start — SessionStatus.set became async; await so idle state flushes before exit
               await SessionStatus.set(input.sessionID, { type: "idle" })
