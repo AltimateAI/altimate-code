@@ -57,6 +57,9 @@ import { MessageID } from "../../session/schema"
 // altimate_change start — run implies run mode (fork-only module)
 import { applyRunModeDefault } from "./run/run-mode"
 // altimate_change end
+// altimate_change start — a failed provider list is reported as itself, not "Model not found" (fork-only module)
+import { providerListOrThrow } from "./run/provider-list"
+// altimate_change end
 // altimate_change start — run-mode-only idle-done fallback (fork-only modules).
 // Detection lives in idle-done.ts; the confirm-DONE challenge text and the DONE
 // token contract live in session/termination.ts; delivery goes through the nudge
@@ -657,15 +660,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
         const parsed = Provider.parseModel(args.model)
         // A failed list call (server busy at startup) is not "no providers": retry, then surface the real error
         // instead of masquerading as an unknown model.
-        const listed = await (async () => {
+        const providers = await (async () => {
           for (let attempt = 1; ; attempt++) {
             const res = await sdk.provider.list()
-            if (!res.error && res.data) return res.data
-            if (attempt >= 3) throw new Error(`Failed to list providers: ${JSON.stringify(res.error ?? "no data")}`)
+            if (!res.error && Array.isArray(res.data?.all)) return res.data.all
+            if (attempt >= 3) return providerListOrThrow(res, args.model!)
             await Bun.sleep(250 * attempt)
           }
         })()
-        const providers = listed.all ?? []
         const provider = providers.find((item) => item.id === parsed.providerID)
         if (!provider?.models?.[parsed.modelID]) {
           throw new Provider.ModelNotFoundError({

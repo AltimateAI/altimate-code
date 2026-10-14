@@ -272,6 +272,40 @@ for (const config of [
   })
 }
 
+test("Postgres bounds a stalled initial timeout probe even when the caller's signal never fires", async () => {
+  const db = await probeDatabase()
+  const controller = new AbortController()
+  try {
+    const execution = db.connector.execute("INSERT INTO sentinel VALUES (1)", undefined, undefined, {
+      signal: controller.signal,
+      queryTimeoutMs: 20,
+    }).catch((error) => error)
+    await db.started
+    const error = await Promise.race([execution, Bun.sleep(1000).then(() => "still probing")])
+    expect(error).toBeInstanceOf(QueryTimeoutError)
+    expect(error.timeoutMs).toBe(20)
+    expect(db.queries).toEqual(["SHOW statement_timeout"])
+    expect(db.releases).toEqual([true])
+  } finally {
+    await db.connector.close()
+  }
+})
+
+test("Postgres caps a statement_timeout above the timer limit instead of timing out the probe at once", async () => {
+  const db = await probeDatabase({ query_timeout_ms: 0, statement_timeout: 3_000_000_000 })
+  try {
+    const execution = db.connector.execute("INSERT INTO sentinel VALUES (1)").catch((error) => error)
+    await db.started
+    await Bun.sleep(50)
+    db.shown.resolve({ fields: [], rows: [{ statement_timeout: "0" }] })
+    const result = await execution
+    expect(result).not.toBeInstanceOf(Error)
+    expect(db.releases).toEqual([undefined])
+  } finally {
+    await db.connector.close()
+  }
+})
+
 test("Postgres executes user SQL after a fast initial timeout probe", async () => {
   const db = await probeDatabase()
   const controller = new AbortController()

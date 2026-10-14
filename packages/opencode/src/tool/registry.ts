@@ -134,6 +134,7 @@ import { AltimateCoreRewriteTool } from "../altimate/tools/altimate-core-rewrite
 import { ToolLookupTool } from "../altimate/tools/tool-lookup"
 import { ProjectScanTool } from "../altimate/tools/project-scan"
 import { DatamateManagerTool } from "../altimate/tools/datamate"
+import { hiddenToolIds } from "../altimate/workspace/datamate-manager-gate"
 import { FeedbackSubmitTool } from "../altimate/tools/feedback-submit"
 import { SampleSetupTool } from "../altimate/tools/sample-setup"
 // altimate_change end
@@ -546,6 +547,9 @@ export namespace ToolRegistry {
     configInput?: RegistryConfigInput,
   ) {
     const tools = await all(plugins, configInput)
+    // A project linked to a workspace gets its integrations from the workspace's
+    // engine only; the older datamate route is not offered there.
+    const hidden = await hiddenToolIds()
     // altimate_change end
     // altimate_change start — analyst-only finalization is a gated candidate, never a tool_lookup catalogue entry.
     // A configured agent named analyst intentionally retains access. External tools cannot
@@ -557,6 +561,9 @@ export namespace ToolRegistry {
     const result = await Promise.all(
       tools
         .filter((t) => {
+          // altimate_change start — tools turned off for this project (see `hidden` above)
+          if (hidden.has(t.id)) return false
+          // altimate_change end
           // Enable websearch/codesearch for zen users OR via enable flag
           if (t.id === "codesearch" || t.id === "websearch") {
             // altimate_change start — upstream_fix: gate on Exa OR Parallel runtime flags.

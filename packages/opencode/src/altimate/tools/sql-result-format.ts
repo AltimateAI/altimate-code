@@ -105,11 +105,13 @@ function displayCell(value: unknown, ancestors = new Set<unknown>()): { text: st
   if (Array.isArray(value)) {
     if (ancestors.has(value)) return { text: "", clipped: false } // Array.toString omits cycles.
     if (ancestors.size >= 100) return { text: "…[nested cell clipped]", clipped: true }
+    // An empty array is rendered explicitly so it differs from an empty string.
+    if (value.length === 0) return { text: "[]", clipped: false }
     ancestors.add(value)
     let text = ""
     let bytes = 0
     for (let i = 0; i < value.length; i++) {
-      // A null element keeps a marker so `[NULL]`, `['']` and `[[]]` stay distinguishable.
+      // A null element keeps a marker; with quoted empty strings and `[]`, `[NULL]`, `['']` and `[[]]` stay distinct.
       const item = value[i] == null ? { text: "NULL", clipped: false } : displayCell(value[i], ancestors)
       const delimiter = i ? "," : ""
       const size = Buffer.byteLength(item.text, "utf8") + delimiter.length
@@ -128,7 +130,11 @@ function displayCell(value: unknown, ancestors = new Set<unknown>()): { text: st
     return { text, clipped: false }
   }
   if (typeof value === "string") {
-    const quote = value === "NULL" || /[\n\r]| \| /.test(value) || (ancestors.size > 0 && value.includes(","))
+    const quote =
+      value === "NULL" ||
+      value === "[]" ||
+      /[\n\r]| \| /.test(value) ||
+      (ancestors.size > 0 && (value === "" || value.includes(",")))
     return { text: quote ? JSON.stringify(value) : value, clipped: false }
   }
   if (value && typeof value === "object") {

@@ -135,6 +135,17 @@ describe("GET /altimate/trace/:sessionID/view", () => {
     expect(html).toContain('id="btn-share"')
   })
 
+  // Trace content is tool output, so script injected through it must not be able to call this server's API.
+  test("the viewer page may not make requests or post forms", async () => {
+    await writeTrace("ses_view", "2026-10-01T10:00:00.000Z")
+
+    const response = await get("/altimate/trace/ses_view/view")
+    const csp = response.headers.get("content-security-policy") ?? ""
+    expect(csp).toContain("connect-src 'none'")
+    expect(csp).toContain("form-action 'none'")
+    expect(csp).toContain("default-src 'none'")
+  })
+
   test("returns 404 for an unknown trace", async () => {
     const response = await get("/altimate/trace/ses_missing/view")
     expect(response.status).toBe(404)

@@ -476,6 +476,27 @@ describe("SqlExplainTool.execute", () => {
     spy.mockRestore()
   })
 
+  for (const sql of ["INSERT INTO t VALUES (1)", "DELETE FROM t", "SELECT 1; DELETE FROM t", "CREATE TABLE t2 AS SELECT 1"]) {
+    test(`refuses EXPLAIN ANALYZE of a non-read statement before calling dispatcher: ${sql}`, async () => {
+      const spy = spyOn(Dispatcher, "call")
+      const tool = await initTool(SqlExplainTool)
+      const result = await tool.execute({ sql, analyze: true }, ctx as any)
+
+      expect(result.metadata.success).toBe(false)
+      expect(result.metadata.error_class).toBe("input_validation")
+      expect(String(result.output)).toContain("only a single read-only query can be analyzed")
+      expect(spy).not.toHaveBeenCalled()
+      spy.mockRestore()
+    })
+  }
+
+  test("still explains a write statement without analyze, and analyzes a read", async () => {
+    mockDispatcher({ success: true, plan_text: "plan", plan_rows: [], analyzed: false, warehouse_type: "duckdb" })
+    const tool = await initTool(SqlExplainTool)
+    expect((await tool.execute({ sql: "INSERT INTO t VALUES (1)", analyze: false }, ctx as any)).metadata.success).toBe(true)
+    expect((await tool.execute({ sql: "SELECT id FROM t", analyze: true }, ctx as any)).metadata.success).toBe(true)
+  })
+
   test("returns success when dispatcher reports success", async () => {
     mockDispatcher({
       success: true,
