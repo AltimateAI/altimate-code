@@ -48,6 +48,9 @@ import { MessageID } from "../../session/schema"
 // altimate_change start — run implies run mode (fork-only module)
 import { applyRunModeDefault } from "./run/run-mode"
 // altimate_change end
+// altimate_change start — a failed provider list is reported as itself, not "Model not found" (fork-only module)
+import { providerListOrThrow } from "./run/provider-list"
+// altimate_change end
 // altimate_change start — run-mode-only idle-done fallback (fork-only modules).
 // Detection lives in idle-done.ts; the confirm-DONE challenge text and the DONE
 // token contract live in session/termination.ts; delivery goes through the nudge
@@ -622,7 +625,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // `run` waiting until the process-level timeout kills it.
       if (args.model) {
         const parsed = Provider.parseModel(args.model)
-        const providers = (await sdk.provider.list()).data?.all ?? []
+        const providers = providerListOrThrow(await sdk.provider.list(), args.model)
         const provider = providers.find((item) => item.id === parsed.providerID)
         if (!provider?.models?.[parsed.modelID]) {
           throw new Provider.ModelNotFoundError({

@@ -3,6 +3,7 @@ import { Effect } from "effect"
 import type { JSONSchema7, JSONSchema7Definition } from "@ai-sdk/provider"
 import { Tool } from "../../tool/tool"
 import { ToolRegistry } from "../../tool/registry"
+import { hiddenToolIds } from "../workspace/datamate-manager-gate"
 
 export const ToolLookupTool = Tool.define("tool_lookup", {
   description:
@@ -12,7 +13,10 @@ export const ToolLookupTool = Tool.define("tool_lookup", {
     tool_name: z.string().describe("Exact tool ID (e.g., 'sql_analyze', 'altimate_core_migration')"),
   }),
   async execute(args) {
-    const infos = await ToolRegistry.allInfos()
+    // A tool turned off for this project is not described either: a lookup that
+    // finds it invites a call the model's catalog no longer carries.
+    const hidden = await hiddenToolIds()
+    const infos = (await ToolRegistry.allInfos()).filter((t) => !hidden.has(t.id))
     const info = infos.find((t) => t.id === args.tool_name)
     if (!info) {
       const ids = infos.map((t) => t.id).sort()
