@@ -510,6 +510,67 @@ describe("/learn menu", () => {
   })
 })
 
+describe("/learn review and held proposals", () => {
+  test("staged review lists added, changed and removed lessons; promote sends them for review", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await approve(root, [lesson("L-0e01", "Keep this rule."), lesson("L-0e02", "Old wording."), lesson("L-0e03", "Drop this rule.")])
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    await Store.transaction(root, () => fs.writeFile(Store.paths(root, NAME).candidate, canonical([
+      lesson("L-0e01", "Keep this rule."), lesson("L-0e02", "New wording."), lesson("L-0e04", "A new rule."),
+    ])))
+    const review = (await Menu.stagedReview(root, NAME))!
+    expect(review.added.map((l) => l.id)).toEqual(["L-0e04"])
+    expect(review.changed.map(({ before, after }) => [before.text, after.text])).toEqual([["Old wording.", "New wording."]])
+    expect(review.removed.map((l) => l.id)).toEqual(["L-0e03"])
+    const result = await Menu.promote(root, root, NAME, review.candidateHash, learn)
+    expect(result.message).toMatch(/^Promoted "team-playbook" \(previous version archived as v1\)\. \d+ sent for the workspace owner's review\.$/)
+    expect((await Store.loadApproved(root, NAME)).map((l) => l.text)).toEqual(["Keep this rule.", "New wording.", "A new rule."])
+    expect(await Store.readCandidate(root, NAME)).toBeUndefined()
+    expect(server.rows.map((r) => r.text)).toEqual(expect.arrayContaining(["New wording.", "A new rule."]))
+    expect(await Menu.stagedReview(root, NAME)).toBeUndefined()
+  })
+
+  test("promote refuses a candidate that changed after the review; discard drops it", async () => {
+    const root = await project()
+    await approve(root, [lesson("L-0e05", "Rule.")])
+    const write = (text: string) => Store.transaction(root, () => fs.writeFile(Store.paths(root, NAME).candidate, canonical([lesson("L-0e05", text)])))
+    await write("Rule, revised.")
+    const review = (await Menu.stagedReview(root, NAME))!
+    await write("Rule, revised again.")
+    expect(String(await Menu.promote(root, root, NAME, review.candidateHash, { sync: false }).catch((e) => e))).toContain("Candidate changed")
+    expect((await Store.loadApproved(root, NAME)).map((l) => l.text)).toEqual(["Rule."])
+    expect(await Store.reject(root, NAME)).toBe(true)
+    expect(await Menu.stagedReview(root, NAME)).toBeUndefined()
+  })
+
+  test("held proposals are listed with their reason, and resubmit sends them against the current version", async () => {
+    const root = await project()
+    await home.signIn(server.url, "key-a")
+    // The scope `learn sync` resolves for this checkout, as a session's proposals carry it.
+    const ctx = (await Sync.context(root, learn)) as Ready
+    await Sync.pull(root, NAME, ctx)
+    await queue(root, ctx, [upsert("L-0e06", "Document every mart in its schema file.")])
+    await Sync.push(root, NAME, ctx)
+    await Sync.pull(root, NAME, ctx)
+    const mine = server.rows.find((r) => r.lesson_key === "L-0e06")!
+    server.editCandidate(mine.public_id, "Document every mart and its grain.")
+    await queue(root, ctx, [upsert("L-0e06", "Document every new mart.")])
+    await Sync.push(root, NAME, ctx)
+    const held = await Menu.heldProposals(root, learn)
+    expect(held).toEqual([expect.objectContaining({ store: NAME, lesson_key: "L-0e06", text: "Document every new mart." })])
+    expect(held[0].reason).toContain("version_conflict")
+    const result = await Menu.resubmit(root, root, "L-0e06", learn)
+    expect(result).toMatchObject({ ok: true })
+    expect(result.message).toStartWith("Resubmitted L-0e06.")
+    expect(await Menu.heldProposals(root, learn)).toEqual([])
+    expect(batches().at(-1)!.body.items[0]).toMatchObject({ revises_public_id: mine.public_id, revises_version: 2 })
+    // Nothing held for the key any more: a resubmit says there is nothing to send.
+    expect(await Menu.resubmit(root, root, "L-0e06", learn)).toEqual({ ok: true, message: "L-0e06 needed nothing more: the workspace already holds that change." })
+  })
+})
+
 describe("auto-promote gate 9", () => {
   test("a team lesson is person-approved even when a stale local auto mark claims it", async () => {
     const root = await project()

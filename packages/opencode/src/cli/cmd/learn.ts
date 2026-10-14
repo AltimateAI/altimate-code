@@ -86,14 +86,11 @@ const LEARN_DISABLED_HINT =
 // altimate_change start — lesson sync with the bound workspace
 type LearnSettings = Parameters<typeof syncEnabled>[0]
 
-/** The sync scope reflection and promote record proposals for: the cached pull, or a fresh pull when there is none. */
+/** The sync scope reflection and promote record proposals for (see `Sync.proposalScope`). */
 async function syncScope(root: string, learn: LearnSettings) {
   if (!syncEnabled(learn)) return undefined
   const [{ Instance }, Sync] = await Promise.all([import("@/project/instance"), import("../../altimate/learn/sync")])
-  const cached = await Sync.cachedScope(root, Instance.directory)
-  if (cached) return cached
-  await Sync.run(root, Instance.directory, learn, { push: false })
-  return Sync.cachedScope(root, Instance.directory)
+  return Sync.proposalScope(root, Instance.directory, learn)
 }
 
 /** After a command changed lessons: push its proposals, bounded, and say what happened. Never fails the command. */
@@ -101,7 +98,7 @@ async function pushAfter(root: string, learn: LearnSettings) {
   if (!syncEnabled(learn)) return
   try {
     const [{ Instance }, Sync] = await Promise.all([import("@/project/instance"), import("../../altimate/learn/sync")])
-    const report = await Sync.run(root, Instance.directory, learn, { pull: false, deadline: Date.now() + PUSH_BUDGET_MS })
+    const report = await Sync.run(root, Instance.directory, learn, { pull: false, deadline: Date.now() + Sync.PUSH_BUDGET_MS })
     const line = describePushes(report.pushes)
     if (line) out(`Lesson sync: ${line}`)
   } catch (error) {
@@ -109,7 +106,6 @@ async function pushAfter(root: string, learn: LearnSettings) {
   }
 }
 
-const PUSH_BUDGET_MS = 15_000
 
 function describePushes(pushes: { submitted: number; duplicate: number; conflict: number; deferred: number; dropped: number; held: number; heldOtherScope: number; backfilled: number; error?: string }[]): string {
   const sum = (key: "submitted" | "duplicate" | "conflict" | "deferred" | "dropped" | "held" | "heldOtherScope" | "backfilled") =>

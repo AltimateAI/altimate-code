@@ -33,6 +33,8 @@ import type { ActAs } from "../workspace/api-client"
 
 const log = Log.create({ service: "learn.sync" })
 export const SESSION_WAIT_MS = 2_000
+/** How long a command or menu action waits for the push that follows a change it made. */
+export const PUSH_BUDGET_MS = 15_000
 /** How long a session trusts its last pull before a later turn pulls again in the background, like workspace skills. */
 export const SESSION_REFRESH_MS = 5 * 60_000
 export const UNSUPPORTED_BACKOFF_MS = 24 * 60 * 60_000
@@ -144,6 +146,15 @@ async function localKeys(root: string, store: string, offset: number): Promise<{
   if (keys.length <= MAX_LOCAL_KEYS) return { keys, next: 0 }
   const start = offset % keys.length
   return { keys: [...keys.slice(start), ...keys.slice(0, start)].slice(0, MAX_LOCAL_KEYS), next: (start + MAX_LOCAL_KEYS) % keys.length }
+}
+
+/** The scope a promotion or reflection records proposals for: the cached pull, or a fresh pull when there is none. */
+export async function proposalScope(root: string, directory: string, learn: LearnConfig): Promise<Scope | undefined> {
+  if (!syncEnabled(learn)) return undefined
+  const cached = await cachedScope(root, directory)
+  if (cached) return cached
+  await run(root, directory, learn, { push: false })
+  return cachedScope(root, directory)
 }
 
 /** Concurrent pulls of one store share a request. */
@@ -685,7 +696,7 @@ export async function status(root: string, store: string, learn: LearnConfig) {
     pending_review: current?.pending_count ?? 0,
     outbox: {
       queued: queued.length,
-      held: outbox.proposals.filter((p) => p.state === "held" && scoped(p.scope)).map((p) => ({ lesson_key: p.item.lesson_key, change_type: p.item.change_type, reason: p.reason ?? "" })),
+      held: outbox.proposals.filter((p) => p.state === "held" && scoped(p.scope)).map((p) => ({ lesson_key: p.item.lesson_key, change_type: p.item.change_type, text: p.item.text, reason: p.reason ?? "" })),
       other_scope: outbox.proposals.filter((p) => !scoped(p.scope)).length + outbox.usage.filter((u) => !scoped(u.scope)).length,
       usage_batches: outbox.usage.filter((u) => scoped(u.scope)).length,
       oldest_queued_at: queued.map((p) => p.created_at).sort()[0] ?? null,

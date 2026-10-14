@@ -198,7 +198,7 @@ altimate-code learn disable --sync  # turn sync off (or set learn.sync=false, or
 altimate-code learn enable --sync   # turn it back on
 ```
 
-In a session, `/learn` shows the project's lessons and their sync, and offers **Sync now**, **Turn sync off** or **on**, and **Open review queue** (the workspace's Learned rules tab). The workspace tile in the sidebar shows the same counts, for example `3 team lessons · 1 pending review · synced 4m ago`. Turning sync off or on from `/learn` writes the project config and applies from the next session.
+In a session, `/learn` shows the project's lessons and their sync. **Review staged changes** lists what a staged candidate adds, changes, and removes, then promotes or discards it after a confirmation, like `learn promote` and `learn reject`. **Held proposals** lists proposals held after a conflict, with the reason, and resubmits the one you choose, like `learn push --resubmit`. The menu also offers **Sync now**, **Turn sync off** or **on**, and **Open review queue** (the workspace's Learned rules tab). The workspace tile in the sidebar shows the same counts, for example `3 team lessons · 1 pending review · synced 4m ago`. Turning sync off or on from `/learn` writes the project config and applies from the next session.
 
 Sync needs all of the following:
 
