@@ -57,7 +57,8 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   const Pool = pg.default?.Pool ?? pg.Pool
   let pool: any
   // The role/database/session default a pooled client starts each call with
-  // (we RESET back to it), so it is read once per client. `undefined` = not read yet.
+  // (we RESET back to it), cached until user SQL mentions statement_timeout.
+  // `undefined` = not read yet.
   const existingTimeout = new WeakMap<object, { ms: number | undefined } | null>()
 
   const connector: Connector = {
@@ -150,6 +151,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         // The deadline can also expire while the session's timeout or read-only
         // transaction is being set up. Never start the user's SQL afterwards.
         options?.signal?.throwIfAborted()
+        // User SQL can change a stricter session timeout that we did not SET or
+        // RESET. Recheck it on the next call instead of trusting stale state.
+        if (/statement_timeout/i.test(sql)) existingTimeout.delete(client)
         // altimate_change start — pg Query row listeners disable pg's result-array accumulation
         if (options?.maxResultBytes !== undefined) {
           const consume = createResultByteBudget(options.maxResultBytes)

@@ -8,6 +8,7 @@ const { Binary } = createRequire(import.meta.resolve("mongodb"))("bson")
 async function fakeMongo(docs: Record<string, unknown>[] = []) {
   const finds: unknown[] = []
   const pipelines: Record<string, unknown>[][] = []
+  const aggregateOptions: unknown[] = []
   const counts: { filter: unknown; options: unknown }[] = []
   const distincts: { field: string; filter: unknown; options: unknown }[] = []
   mock.module("mongodb", () => ({
@@ -22,8 +23,9 @@ async function fakeMongo(docs: Record<string, unknown>[] = []) {
                 finds.push(filter)
                 return { limit: () => ({ toArray: async () => docs }) }
               },
-              aggregate: (pipeline: Record<string, unknown>[]) => {
+              aggregate: (pipeline: Record<string, unknown>[], options: unknown) => {
                 pipelines.push(pipeline)
+                aggregateOptions.push(options)
                 return { toArray: async () => docs }
               },
               countDocuments: async (filter: unknown, options: unknown) => {
@@ -44,7 +46,7 @@ async function fakeMongo(docs: Record<string, unknown>[] = []) {
   const connector = await connect({ type: "mongodb", database: "test" })
   await connector.connect()
   const query = (command: string, extra: object = {}) => JSON.stringify({ collection: "articles", command, ...extra })
-  return { connector, query, finds, pipelines, counts, distincts }
+  return { connector, query, finds, pipelines, aggregateOptions, counts, distincts }
 }
 
 describe("normalizeMqlCommand bounds", () => {
@@ -177,25 +179,47 @@ describe("MongoDB extraction limits", () => {
     const result = await connector.execute(query("aggregate", { pipeline }), 10)
 
     // Fetch one extra document to report truncation, but only return the tool limit.
-    expect(pipelines).toEqual([[{ $match: {} }, { $limit: 11 }]])
+    expect(pipelines).toEqual([[...pipeline, { $limit: 11 }]])
     expect(result.rows).toEqual(docs.slice(0, 10).map(({ n }) => [n]))
     expect(result.row_count).toBe(10)
     expect(result.truncated).toBe(true)
   })
 
-  test("aggregate preserves a smaller user $limit", async () => {
+  test("aggregate appends a terminal cap after $limit 5 followed by $unwind", async () => {
+    const { connector, query, pipelines } = await fakeMongo()
+    const pipeline = [{ $limit: 5 }, { $unwind: "$items" }]
+    await connector.execute(query("aggregate", { pipeline }), 100)
+    expect(pipelines).toEqual([[...pipeline, { $limit: 101 }]])
+  })
+
+  test("aggregate preserves a terminal $limit 3 with cap 100", async () => {
     const { connector, query, pipelines } = await fakeMongo([{ n: 1 }])
-    const result = await connector.execute(query("aggregate", { pipeline: [{ $limit: 1 }] }), 10)
-    expect(pipelines).toEqual([[{ $limit: 1 }]])
+    const result = await connector.execute(query("aggregate", { pipeline: [{ $limit: 3 }] }), 100)
+    expect(pipelines).toEqual([[{ $limit: 3 }]])
     expect(result.truncated).toBe(false)
   })
 
-  test("aggregate preserves the bounded preflight count pipeline", async () => {
+  test("aggregate appends a terminal cap to the bounded preflight count pipeline", async () => {
     const { connector, query, pipelines } = await fakeMongo([{ n: 11 }])
     const pipeline = [{ $match: { category: "news" } }, { $limit: 11 }, { $count: "n" }]
     const result = await connector.execute(query("aggregate", { pipeline }), 11)
-    expect(pipelines).toEqual([pipeline])
+    expect(pipelines).toEqual([[...pipeline, { $limit: 12 }]])
     expect(result.rows).toEqual([[11]])
+  })
+
+  test("distinct uses a bounded aggregate with the filter and deadline and reports truncation", async () => {
+    const docs = [{ _id: "A" }, { _id: "B" }, { _id: "C" }]
+    const { connector, query, pipelines, aggregateOptions, distincts } = await fakeMongo(docs)
+    const result = await connector.execute(
+      query("distinct", { field: "status", filter: { customer: 42 } }),
+      2,
+      undefined,
+      { queryTimeoutMs: 250 },
+    )
+    expect(pipelines).toEqual([[{ $match: { customer: 42 } }, { $group: { _id: "$status" } }, { $limit: 3 }]])
+    expect(aggregateOptions).toEqual([{ maxTimeMS: 250 }])
+    expect(distincts).toEqual([])
+    expect(result).toEqual({ columns: ["status"], rows: [["A"], ["B"]], row_count: 2, truncated: true })
   })
 
   test("countDocuments forwards the count bound, filter, skip and deadline", async () => {
@@ -252,14 +276,15 @@ describe("MongoDB native command filters", () => {
   })
 
   test("distinct forwards the native key and query filter", async () => {
-    const { connector, distincts } = await fakeMongo()
+    const { connector, pipelines, aggregateOptions } = await fakeMongo([{ _id: "A" }])
     const result = await connector.execute(
       JSON.stringify({ distinct: "orders", key: "status", query: { customer: 42 } }),
       10,
       undefined,
       { queryTimeoutMs: 0 },
     )
-    expect(distincts).toEqual([{ field: "status", filter: { customer: 42 }, options: {} }])
+    expect(pipelines).toEqual([[{ $match: { customer: 42 } }, { $group: { _id: "$status" } }, { $limit: 11 }]])
+    expect(aggregateOptions).toEqual([{}])
     expect(result.rows).toEqual([["A"]])
   })
 
