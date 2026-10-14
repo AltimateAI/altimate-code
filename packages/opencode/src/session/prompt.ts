@@ -988,8 +988,8 @@ export namespace SessionPrompt {
         if (old.id !== part.id) await Session.removePart({ sessionID, messageID: message.id, partID: old.id })
       }
       if (cause) message.metadata = { ...message.metadata, answer_commit_echo_error: cause }
-      // altimate_change start — the follow-up budget prompt reuses this terminal answer without another publication
-      if (deadline) message.metadata = { ...message.metadata, answer_commit_deadline: true }
+      // altimate_change start — reuse delivered commits even when the deadline arrives during publication
+      message.metadata = { ...message.metadata, answer_commit_finalized: true }
       // altimate_change end
       delete message.error
       // A failed summariser becomes the original request's answer, so clients must no longer hide it as compaction machinery.
@@ -1108,11 +1108,11 @@ export namespace SessionPrompt {
       // altimate_change start — always track the current agent name so early breaks still report it
       if (lastUser.agent) sessionAgentName = lastUser.agent
       // altimate_change end
-      // altimate_change start — budget finalization acknowledges a deadline-delivered commit without a model turn
+      // altimate_change start — budget finalization acknowledges a delivered commit without a model turn
       const finalizationParts = msgs.find((msg) => msg.info.id === lastUser.id)?.parts
       if (
         RunBudgetEffort.toolsDisabled(sessionID) &&
-        lastAssistant?.metadata?.answer_commit_deadline === true &&
+        lastAssistant?.metadata?.answer_commit_finalized === true &&
         lastAssistant.finish === "stop" && !lastAssistant.error &&
         lastUser.agent === "analyst" && (lastUser.format?.type ?? "text") === "text" &&
         finalizationParts?.length === 1 &&

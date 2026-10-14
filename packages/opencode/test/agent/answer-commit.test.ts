@@ -452,6 +452,7 @@ for (const scenario of [
   "echo-harness-deadline",
   "echo-user-cancelled",
   "echo-budget-finalization",
+  "echo-budget-finalization-publishing",
   "echo-content-filter",
   "echo-http-content-filter",
   "echo-other",
@@ -474,6 +475,7 @@ for (const scenario of [
 ] as const) {
   const structured = scenario.startsWith("json_schema")
   const priorCommit = scenario === "json_schema-history"
+  const budgetFinalization = scenario.startsWith("echo-budget-finalization")
   const tinyCap = scenario === "echo-capped" || scenario === "echo-under-cap"
   const compacting = scenario.startsWith("compaction-")
   const emptySummary = scenario.startsWith("compaction-empty-summary")
@@ -520,6 +522,7 @@ for (const scenario of [
     "echo-harness-deadline": "a harness deadline abort during echo publishes the stored committed text exactly once",
     "echo-user-cancelled": "a user cancellation during echo does not finalize the stored committed answer",
     "echo-budget-finalization": "budget finalization after a hard abort reuses the committed answer without starting a model turn",
+    "echo-budget-finalization-publishing": "budget finalization reuses the committed answer when the hard deadline arrives during publication",
     "echo-content-filter": "a content-filtered echo retains its fatal error and original text",
     "echo-http-content-filter": "an HTTP content-filtered echo retains its fatal error without publishing the committed output",
     "echo-other": "an echo with an other finish keeps other and publishes the committed output",
@@ -815,11 +818,20 @@ for (const scenario of [
                 return result
               }, processCompaction))
             : undefined
-          const commitSpy = userAfterCommit
+          let publicationAborts = 0
+          const commitSpy = userAfterCommit || scenario === "echo-budget-finalization-publishing"
             ? spyOn(LegacySession, "updatePart").mockImplementation(Object.assign(async (part: MessageV2.Part) => {
                 const result = await updatePart(part)
-                if (part.type === "tool" && part.tool === "answer_commit" && part.state.status === "completed" && !queuedUserID)
+                if (userAfterCommit && part.type === "tool" && part.tool === "answer_commit" && part.state.status === "completed" && !queuedUserID)
                   await insertUser()
+                if (scenario === "echo-budget-finalization-publishing" && requests.length === 2 && part.type === "text" && part.time?.end) {
+                  publicationAborts++
+                  const response = await SessionRoutes().request(`/${chat.id}/abort`, {
+                    method: "POST",
+                    headers: { "x-altimate-run-budget": "hard-deadline" },
+                  })
+                  expect(response.status).toBe(200)
+                }
                 return result
               }, updatePart))
             : undefined
@@ -982,7 +994,8 @@ for (const scenario of [
             }
             const result = yield* pending
             if (result.info.role === "assistant") accounting.onPromptResult(result.info)
-            if (["echo-harness-deadline", "echo-user-cancelled", "echo-budget-finalization"].includes(scenario)) {
+            if (budgetFinalization || ["echo-harness-deadline", "echo-user-cancelled"].includes(scenario)) {
+              if (scenario === "echo-budget-finalization-publishing") expect(publicationAborts).toBe(1)
               if (scenario === "echo-user-cancelled") {
                 expect(result.info).toHaveProperty("error.name", "MessageAbortedError")
                 expect(result.parts.filter((part) => part.type === "text")).toEqual([])
@@ -991,7 +1004,7 @@ for (const scenario of [
                 expect(requests).toHaveLength(2)
                 return
               }
-              if (scenario === "echo-budget-finalization") {
+              if (budgetFinalization) {
                 const messageID = MessageID.ascending()
                 const response = yield* Effect.promise(() => Promise.resolve(SessionRoutes().request(`/${chat.id}/message`, {
                   method: "POST",
