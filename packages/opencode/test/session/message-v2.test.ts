@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { APICallError } from "ai"
-import { MessageV2 } from "../../src/session/message-v2"
+import { MessageV2, isEchoTransportError } from "../../src/session/message-v2"
 import { SessionRetry } from "../../src/session/retry"
 import { ProviderError } from "../../src/provider/error"
 import { ProviderTransform } from "@/provider/transform"
@@ -1548,7 +1548,7 @@ describe("session.message-v2.fromError", () => {
 
         expect(result.name).toBe("APIError")
         expect((result.data as MessageV2.APIError["data"]).metadata?.code).toBe(code)
-        expect(MessageV2.isEchoTransportError(result)).toBe(false)
+        expect(isEchoTransportError(result)).toBe(false)
       })
     }
 
@@ -1567,7 +1567,7 @@ describe("session.message-v2.fromError", () => {
 
       expect(result.name).toBe("APIError")
       expect((result.data as MessageV2.APIError["data"]).metadata?.code).toBe("guardrail_intervened")
-      expect(MessageV2.isEchoTransportError(result)).toBe(false)
+      expect(isEchoTransportError(result)).toBe(false)
     })
   }
 
@@ -1607,7 +1607,7 @@ describe("session.message-v2.fromError", () => {
       }), { providerID })
 
       expect(result.name).toBe("APIError")
-      expect(MessageV2.isEchoTransportError(result)).toBe(false)
+      expect(isEchoTransportError(result)).toBe(false)
       expect((result as any).data.metadata.code).toBe("policy_violation")
     })
   }
