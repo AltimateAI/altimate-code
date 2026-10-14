@@ -778,10 +778,12 @@ async function push(
       return "deferred"
     }
     await MemoryApi.update(match, block.content, metadata)
-    await recordIndexEntry(key, { memoryId: match, contentHash: hash, syncedAt: Date.now() })
-    // One live record per block.
+    // One live record per block. Indexed only after the copies are archived:
+    // an entry at this hash makes the next save of the same content return
+    // "unchanged", and a failed archive would then never be retried.
     const others = copies.filter((r) => r.id !== match).map((r) => r.id)
     await archiveDuplicates(others, block, metadata, "archiving a second live record of one block")
+    await recordIndexEntry(key, { memoryId: match, contentHash: hash, syncedAt: Date.now() })
     return "stored"
   }
 
@@ -806,13 +808,14 @@ async function push(
   // dict, restoring the block exactly as written.
   const [primary, ...extras] = created
   await MemoryApi.update(primary, block.content, metadata)
-  await recordIndexEntry(key, { memoryId: primary, contentHash: hash, syncedAt: Date.now() })
 
   // An extractor may split one submission into several records, each carrying
   // the metadata we sent. Only one can represent the block; the rest would
   // otherwise be injected as duplicates under the same block id, holding text
-  // the user never wrote.
+  // the user never wrote. Indexed after, as for copies above: a failed archive
+  // leaves the block unindexed, and the next save finds the extras by identity.
   await archiveDuplicates(extras, block, metadata, "archiving an extra record produced by one create")
+  await recordIndexEntry(key, { memoryId: primary, contentHash: hash, syncedAt: Date.now() })
   return "stored"
 }
 
@@ -1031,6 +1034,17 @@ async function archiveNow(
     // Keep the text — archiving hides a record from injection, it does not erase
     // what it said.
     await MemoryApi.update(current.id, current.memory ?? "", metadata)
+  }
+  // A cut-short listing can hold one copy of the block and not another.
+  // Archiving the copies in reach is still right; refusing would leave them
+  // live too.
+  if (truncated) {
+    log.warn("archived the copies in reach; the record set is truncated at LIST_LIMIT, so another may still be live", {
+      blockId,
+      scope,
+      archived: live.length,
+      limit: LIST_LIMIT,
+    })
   }
   // Written only after the remote archives land, so a failure leaves the entry
   // pointing at a record that is still live rather than losing track of it.

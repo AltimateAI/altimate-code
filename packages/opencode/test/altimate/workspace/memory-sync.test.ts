@@ -81,6 +81,8 @@ let createResult: any = [{ id: "mem-new" }]
 let workspaces: any[] = [{ id: 42, name: "acme", memory_enabled: true }]
 /** When set, GET /list fails -- used to prove a failed lookup never creates. */
 let listFails = false
+/** When set, a PATCH to this record id fails. */
+let failPatchOf: string | undefined
 
 function stubFetch() {
   globalThis.fetch = (async (input: any, init?: any) => {
@@ -88,6 +90,9 @@ function stubFetch() {
     const method = (init?.method ?? "GET").toUpperCase()
     captured.push({ method, url, body: init?.body ? JSON.parse(init.body) : undefined })
     if (listFails && url.includes("/datamates/memory/list")) {
+      return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
+    }
+    if (failPatchOf && method === "PATCH" && url.endsWith(`/datamates/memory/${failPatchOf}`)) {
       return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
     }
     const payload = (() => {
@@ -164,6 +169,7 @@ beforeEach(() => {
   captured = []
   listResponse = []
   listFails = false
+  failPatchOf = undefined
   createResult = [{ id: "mem-new" }]
   workspaces = [{ id: 42, name: "acme", memory_enabled: true }]
   serverBinding = null
@@ -2326,6 +2332,51 @@ describe("two live records of one block", () => {
     expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
   })
 
+  test("a copy whose archive failed is archived by the next save of the same content", async () => {
+    boundTo({ repoRemote: HTTPS })
+    listResponse = [
+      copy("mem-retry-ssh", "copies-retry", { repo_remote: SSH, block_updated: OLDER }),
+      copy("mem-retry-https", "copies-retry", { repo_remote: HTTPS, block_updated: NEWER }),
+    ]
+    failPatchOf = "mem-retry-ssh"
+    const b = edited("copies-retry")
+    await mirrorBlock(b).catch(() => undefined)
+    expect(callsTo("/datamates/memory/mem-retry-ssh", "PATCH").length).toBe(1)
+
+    failPatchOf = undefined
+    captured = []
+    await mirrorBlock(b)
+    const archived = callsTo("/datamates/memory/mem-retry-ssh", "PATCH")
+    expect(archived.length).toBe(1)
+    expect(archived[0].body.metadata.archived).toBe("true")
+  })
+
+  test("a split create's extra whose archive failed is archived by the next save", async () => {
+    boundTo({ repoRemote: HTTPS })
+    createResult = [{ id: "mem-split-primary" }, { id: "mem-split-extra" }]
+    failPatchOf = "mem-split-extra"
+    const b = edited("copies-split")
+    await mirrorBlock(b).catch(() => undefined)
+    expect(callsTo("/datamates/memory/mem-split-extra", "PATCH").length).toBe(1)
+    // What the service now holds: both records under the metadata the create
+    // sent, the primary's rewritten by its repair update.
+    const sent = callsTo("/datamates/memory/", "POST")[0].body.memory_options.metadata
+    const repair = callsTo("/datamates/memory/mem-split-primary", "PATCH")[0].body
+    listResponse = [
+      { id: "mem-split-primary", memory: repair.memory, metadata: repair.metadata },
+      { id: "mem-split-extra", memory: "rewritten by the extractor", metadata: sent },
+    ]
+
+    failPatchOf = undefined
+    captured = []
+    await mirrorBlock(b)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    const patched = ["mem-split-primary", "mem-split-extra"].map(
+      (id) => callsTo(`/datamates/memory/${id}`, "PATCH")[0]?.body.metadata.archived,
+    )
+    expect(patched.sort()).toEqual(["true", undefined].sort())
+  })
+
   test("a delete archives every live copy", async () => {
     boundTo({ repoRemote: HTTPS })
     listResponse = [
@@ -2344,6 +2395,20 @@ describe("two live records of one block", () => {
       expect(patches[0].body.metadata.archived).toBe("true")
     }
     expect(callsTo("/datamates/memory/mem-del-other", "PATCH").length).toBe(0)
+  })
+
+  test("a delete on a truncated listing archives the copies in reach", async () => {
+    boundTo({ repoRemote: HTTPS })
+    listResponse = [
+      copy("mem-trunc-ssh", "copies-trunc", { repo_remote: SSH, block_updated: OLDER }),
+      ...Array.from({ length: LIST_LIMIT - 1 }, (_, i) => ({
+        id: `trunc-filler-${i}`,
+        memory: "x",
+        metadata: { source: MIRROR_SOURCE, block_id: `filler/${i}`, block_scope: "global" },
+      })),
+    ]
+    await archiveBlock("project", "copies-trunc")
+    expect(callsTo("/datamates/memory/mem-trunc-ssh", "PATCH")[0].body.metadata.archived).toBe("true")
   })
 
   test("a delete whose indexed record is already archived still archives a live copy", async () => {
