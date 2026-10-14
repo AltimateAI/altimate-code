@@ -28,3 +28,6 @@ paths-ignore:
   - packages/opencode/test/altimate/learn/digest.test.ts
   - packages/opencode/test/altimate/learn/import-reviews.test.ts
   - packages/opencode/test/altimate/learn/sensitive-data.test.ts
+  # The shared lint fixture is built from the guardrail corpus above: the same synthetic credentials,
+  # listed as texts the lint must refuse.
+  - packages/opencode/test/altimate/learn/fixtures/lint_cases.json
