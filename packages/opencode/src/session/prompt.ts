@@ -129,14 +129,15 @@ IMPORTANT:
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
 
+// altimate_change start - request identity is independent of compaction message adjacency
+const RequestStarted = BusEvent.define(
+  "session.request.started",
+  z.object({ sessionID: SessionID.zod, messageID: MessageID.zod }),
+)
+// altimate_change end
+
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
-  // altimate_change start - request identity is independent of compaction message adjacency
-  export const RequestStarted = BusEvent.define(
-    "session.request.started",
-    z.object({ sessionID: SessionID.zod, messageID: MessageID.zod }),
-  )
-  // altimate_change end
 
   // altimate_change start — how long a turn will wait for the workspace skill
   // sync before proceeding without it. See the block in `prompt`.
