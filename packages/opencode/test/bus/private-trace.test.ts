@@ -37,10 +37,20 @@ test("request snapshots reach only the typed trace subscription", async () => {
       const global = (event: unknown) => globalEvents.push(event)
       GlobalBus.on("event", global)
       const unsubscribeAll = Bus.subscribeAll((event) => publicEvents.push(event))
-      const unsubscribeTrace = Bus.subscribe(LLMRequestEvent, (event) => privateEvents.push(event))
+      // Delivery runs on a forked fiber: wait for the subscription itself to signal, not for the clock.
+      const delivered = Promise.withResolvers<void>()
+      const unsubscribeTrace = Bus.subscribe(LLMRequestEvent, (event) => {
+        privateEvents.push(event)
+        delivered.resolve()
+      })
       try {
         await Bus.publish(LLMRequestEvent, snapshot)
-        await new Promise((resolve) => setTimeout(resolve, 10))
+        await Promise.race([
+          delivered.promise,
+          new Promise((_, reject) => setTimeout(() => reject(new Error("private event was not delivered within 5000ms")), 5000)),
+        ])
+        // Public and global listeners would have been notified by the same publish; give them one tick.
+        await new Promise((resolve) => setTimeout(resolve, 0))
         expect(privateEvents).toHaveLength(1)
         expect(publicEvents).toEqual([])
         expect(globalEvents).toEqual([])

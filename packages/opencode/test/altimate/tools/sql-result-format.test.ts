@@ -121,6 +121,107 @@ describe("SQL result previews", () => {
     expect(saved.writes).toHaveLength(0)
   })
 
+  test("quotes column separators in aliases without spilling", async () => {
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[1, 2]], ["a | b", "plain"]), {
+      limit: 100,
+      write: saved.write,
+    })
+
+    expect(formatted.output).toBe('"a | b" | plain\n--------+------\n1 | 2\n\n(1 rows)')
+    expect(formatted.metadata).toMatchObject({
+      preview_rows: 1,
+      preview_columns: 2,
+      schema_truncated: false,
+      output_truncated: false,
+    })
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("quotes newline and carriage return aliases without spilling", async () => {
+    for (const alias of ["alpha\nbeta", 'alpha\r"beta"\\tail']) {
+      const saved = spill()
+      const formatted = await formatSqlResult(result([[1]], [alias]), { limit: 100, write: saved.write })
+      const rendered = JSON.stringify(alias)
+
+      expect(formatted.output).toBe(`${rendered}\n${"-".repeat(rendered.length)}\n1\n\n(1 rows)`)
+      expect(formatted.metadata).toMatchObject({
+        preview_rows: 1,
+        preview_columns: 1,
+        schema_truncated: false,
+        output_truncated: false,
+      })
+      expect(saved.writes).toHaveLength(0)
+    }
+  })
+
+  test("clips aliases after accounting for JSON escaping", async () => {
+    const alias = "\n".repeat(64)
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[1]], [alias]), { limit: 100, write: saved.write })
+
+    expect(formatted.output).toContain('"\\n\\n')
+    expect(formatted.output).toContain("…[alias clipped]")
+    expect(formatted.metadata).toMatchObject({ schema_truncated: true, output_truncated: true })
+    expect(Buffer.byteLength(formatted.output, "utf8")).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
+    expect(saved.rows()).toEqual([{ columns: [alias], values: [1] }])
+  })
+
+  test("renders distinct small Buffer cells as base64 without spilling", async () => {
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[Buffer.from([0x80])], [Buffer.from([0x81])]]), {
+      limit: 100,
+      write: saved.write,
+    })
+
+    expect(body(formatted.output)).toBe("base64:gA==\nbase64:gQ==")
+    expect(formatted.metadata).toMatchObject({ preview_rows: 2, output_truncated: false, truncated: false })
+    expect(formatted.metadata.result_path).toBeUndefined()
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("renders Uint8Array views and nested binary cells as base64 without spilling", async () => {
+    const cell = new Uint8Array([255, 1, 128, 254]).subarray(1, 3)
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[cell], [new Uint8Array()], [[cell, Buffer.from([0x81])]]]), {
+      limit: 100,
+      write: saved.write,
+    })
+
+    expect(body(formatted.output)).toBe("base64:AYA=\nbase64:\nbase64:AYA=,base64:gQ==")
+    expect(formatted.metadata.output_truncated).toBe(false)
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("clips base64 expansion below the binary threshold and spills complete bytes", async () => {
+    const cell = Buffer.alloc(SQL_MAX_PREVIEW_BYTES - 1, 0x80)
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[cell]]), { limit: 100, write: saved.write })
+
+    expect(body(formatted.output)).toStartWith("base64:gICAgICA")
+    expect(body(formatted.output)).toContain("…[cell clipped,")
+    expect(formatted.metadata.output_truncated).toBe(true)
+    expect(Buffer.byteLength(formatted.output, "utf8")).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
+    expect(saved.rows()).toEqual([{ columns: ["value"], values: [{ $bytes: cell.toString("base64") }] }])
+  })
+
+  test("renders oversized binary cells as a base64 prefix with the existing clip marker", async () => {
+    const bytes = Buffer.alloc(SQL_MAX_PREVIEW_BYTES * 2, Buffer.from([0x80, 0x81, 0x82]))
+    for (const cell of [bytes, new Uint8Array(bytes)]) {
+      const saved = spill()
+      const formatted = await formatSqlResult(result([[cell]]), { limit: 100, write: saved.write })
+      const preview = body(formatted.output)
+
+      expect(preview).toStartWith("base64:gIGCgIGC")
+      expect(preview).toContain("…[cell clipped,")
+      expect(preview).not.toContain("\uFFFD")
+      expect(bytes.toString("base64")).toStartWith(preview.slice("base64:".length).split("…[cell clipped,")[0]!)
+      expect(formatted.metadata.output_truncated).toBe(true)
+      expect(Buffer.byteLength(formatted.output, "utf8")).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
+      expect(saved.rows()).toEqual([{ columns: ["value"], values: [{ $bytes: bytes.toString("base64") }] }])
+    }
+  })
+
   test("quotes comma-bearing strings in array cells", async () => {
     const saved = spill()
     const formatted = await formatSqlResult(result([[["x,y", "z"]]]), { limit: 100, write: saved.write })
@@ -253,7 +354,7 @@ describe("SQL result previews", () => {
     const saved = spill()
     const formatted = await formatSqlResult(result(cells.map((cell) => [cell])), { limit: 100, write: saved.write })
 
-    expect(body(formatted.output)).toBe(cells.map(String).join("\n"))
+    expect(body(formatted.output)).toBe([String(cells[0]), String(cells[1]), "base64:AYA=", "42", "true"].join("\n"))
     expect(saved.writes).toHaveLength(0)
   })
 

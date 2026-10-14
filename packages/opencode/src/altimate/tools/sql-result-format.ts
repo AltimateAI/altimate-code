@@ -45,19 +45,22 @@ function clipCell(text: string, maxBytes: number, maxLines: number): string | un
 }
 
 function previewSchema(columns: string[], maxBytes: number, maxLines: number) {
+  const rendered = columns
+    .slice(0, SQL_MAX_PREVIEW_COLUMNS)
+    .map((name) => (/[\n\r]| \| /.test(name) ? JSON.stringify(name) : name))
   for (let count = Math.min(columns.length, SQL_MAX_PREVIEW_COLUMNS); count > 0; count--) {
     const omitted = count < columns.length ? `(+${columns.length - count} more columns, see spill)\n` : ""
     // Both the aliases and their separator consume space, along with delimiters/newlines.
     const available = maxBytes - Buffer.byteLength(omitted, "utf8") - 2 - (count - 1) * 6
     const aliasBytes = Math.min(128, Math.floor(available / (2 * count)))
     if (aliasBytes < 4) continue
-    const aliases = columns.slice(0, count).map((name) => clipText(name, aliasBytes, 1, "…[alias clipped]"))
+    const aliases = rendered.slice(0, count).map((name) => clipText(name, aliasBytes, 1, "…[alias clipped]"))
     if (aliases.some((name) => name === undefined)) continue
     const names = aliases as string[]
     const text =
       names.join(" | ") + "\n" + names.map((name) => "-".repeat(Math.max(name.length, 4))).join("-+-") + "\n" + omitted
     if (Buffer.byteLength(text, "utf8") > maxBytes || lineCount(text) > maxLines) continue
-    return { text, columns: count, clipped: count < columns.length || names.some((name, i) => name !== columns[i]) }
+    return { text, columns: count, clipped: count < columns.length || names.some((name, i) => name !== rendered[i]) }
   }
   return { text: "", columns: 0, clipped: columns.length > 0 }
 }
@@ -93,12 +96,11 @@ function displayObject(value: object, ancestors: Set<unknown>): { text: string; 
 }
 
 function displayCell(value: unknown, ancestors = new Set<unknown>()): { text: string; clipped: boolean } {
-  // Avoid allocating a full comma-separated array or decoded BLOB just to clip it.
-  if (value instanceof Uint8Array && value.byteLength > SQL_MAX_PREVIEW_BYTES) {
-    const prefix = Buffer.isBuffer(value)
-      ? new TextDecoder().decode(value.subarray(0, SQL_MAX_PREVIEW_BYTES), { stream: true })
-      : String(value.subarray(0, SQL_MAX_PREVIEW_BYTES / 4))
-    return { text: prefix + `…[cell clipped, ${value.byteLength} bytes]`, clipped: true }
+  // Only encode a bounded binary prefix before the preview applies its byte cap.
+  if (value instanceof Uint8Array) {
+    const clipped = value.byteLength > SQL_MAX_PREVIEW_BYTES
+    const text = "base64:" + Buffer.from(value.subarray(0, SQL_MAX_PREVIEW_BYTES)).toString("base64")
+    return { text: clipped ? text + `…[cell clipped, ${value.byteLength} bytes]` : text, clipped }
   }
   if (Array.isArray(value)) {
     if (ancestors.has(value)) return { text: "", clipped: false } // Array.toString omits cycles.
