@@ -113,24 +113,22 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       try {
         options?.signal?.throwIfAborted()
         if (ourMs !== undefined) {
-          // Never loosen a stricter limit the server or role already imposes.
-          let existing = existingTimeout.get(client)
-          if (existing === undefined) {
-            const signal = options?.signal
+          // Session setup runs before the user's SQL has a deadline of its own. Race each
+          // setup query against the effective deadline and the caller's signal; pg's promise
+          // API has no cancellation handle, so an abandoned client is discarded, never reused.
+          const signal = options?.signal
+          const bounded = async <T>(run: () => Promise<T>): Promise<T> => {
             let timer: ReturnType<typeof setTimeout> | undefined
             let abort: (() => void) | undefined
             try {
-              const shown = await new Promise<any>((resolve, reject) => {
-                // pg's promise query API has no cancellation handle. Discard
-                // the connection in finally so a stalled probe is never reused.
+              return await new Promise<T>((resolve, reject) => {
                 const fail = (error: unknown) => {
                   discardClient = true
                   reject(error)
                 }
                 abort = () => fail(signal!.reason)
                 signal?.addEventListener("abort", abort, { once: true })
-                // The effective deadline bounds the probe even when a signal is present:
-                // a caller's signal may fire only after its own grace period, or never.
+                // A caller's signal may fire only after its own grace period, or never.
                 timer = setTimeout(
                   () => fail(new QueryTimeoutError({ engine: "PostgreSQL", timeoutMs: ourMs })),
                   Math.min(ourMs, MAX_TIMER_MS),
@@ -140,21 +138,28 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
                   return
                 }
                 // Handle late settlement too, just as acquireClient does.
-                Promise.resolve(client.query("SHOW statement_timeout")).then(resolve, reject)
+                Promise.resolve(run()).then(resolve, reject)
               })
+            } finally {
+              if (timer !== undefined) clearTimeout(timer)
+              if (abort) signal?.removeEventListener("abort", abort)
+            }
+          }
+          // Never loosen a stricter limit the server or role already imposes.
+          let existing = existingTimeout.get(client)
+          if (existing === undefined) {
+            try {
+              const shown = await bounded<any>(() => client.query("SHOW statement_timeout"))
               existing = parsePgDuration(shown?.rows?.[0]?.statement_timeout) ?? null
             } catch (error) {
               if (discardClient) throw error
               existing = null
-            } finally {
-              if (timer !== undefined) clearTimeout(timer)
-              if (abort) signal?.removeEventListener("abort", abort)
             }
             existingTimeout.set(client, existing)
           }
           effectiveMs = tighter(existing?.ms, ourMs)
           if (existing?.ms === undefined || ourMs < existing.ms) {
-            await client.query(`SET statement_timeout TO ${ourMs}`)
+            await bounded(() => client.query(`SET statement_timeout TO ${ourMs}`))
             timeoutApplied = true
           }
         }

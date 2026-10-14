@@ -306,6 +306,45 @@ test("Postgres caps a statement_timeout above the timer limit instead of timing 
   }
 })
 
+test("Postgres bounds a stalled SET statement_timeout and discards the client", async () => {
+  const queries: string[] = []
+  const releases: unknown[] = []
+  mock.module("pg", () => ({
+    default: {
+      Pool: class {
+        async connect() {
+          return {
+            async query(sql: string) {
+              queries.push(sql)
+              if (sql === "SHOW statement_timeout") return { fields: [], rows: [{ statement_timeout: "0" }] }
+              if (sql.startsWith("SET statement_timeout")) return new Promise(() => {})
+              return { fields: [], rows: [] }
+            },
+            release(discard?: boolean) { releases.push(discard) },
+          }
+        }
+        async end() {}
+      },
+    },
+  }))
+  const connector = await connect({ type: "postgres", query_timeout_ms: 1000 })
+  await connector.connect()
+  const controller = new AbortController()
+  try {
+    const execution = connector.execute("INSERT INTO sentinel VALUES (1)", undefined, undefined, {
+      signal: controller.signal,
+      queryTimeoutMs: 20,
+    }).catch((error) => error)
+    const error = await Promise.race([execution, Bun.sleep(1000).then(() => "still setting")])
+    expect(error).toBeInstanceOf(QueryTimeoutError)
+    expect(error.timeoutMs).toBe(20)
+    expect(queries).toEqual(["SHOW statement_timeout", "SET statement_timeout TO 20"])
+    expect(releases).toEqual([true])
+  } finally {
+    await connector.close()
+  }
+})
+
 test("Postgres executes user SQL after a fast initial timeout probe", async () => {
   const db = await probeDatabase()
   const controller = new AbortController()
