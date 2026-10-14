@@ -139,6 +139,9 @@ export namespace Server {
   }
   const TRACE_PAGE_SIZE = 50
   const TRACE_PAGE_MAX = 200
+  /** No requests or form posts from the trace viewer page: its content is tool output, not ours. */
+  const TRACE_VIEW_CSP =
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'"
   const TRACE_SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
   /** The traces directory, honoring `tracing.dir` like the CLI and TUI; a config that fails to load
    * falls back to the default rather than hiding every trace. */
@@ -1372,6 +1375,7 @@ export namespace Server {
           ])
           const trace = await Trace.loadTrace(sessionID, await tracesDir())
           if (!trace) return c.json({ ok: false, error: `Trace not found: ${sessionID}` }, 404)
+          c.header("Content-Security-Policy", TRACE_VIEW_CSP)
           return c.html(renderTraceViewer(trace, { embedded: true }))
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
