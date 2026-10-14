@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { Server } from "../../src/server/server"
 import * as Manage from "../../src/altimate/workspace/manage"
 import * as State from "../../src/altimate/workspace/state"
+import * as SyncState from "../../src/altimate/workspace/sync-state"
 import * as Starter from "../../src/altimate/workspace/starter"
 import { Session } from "../../src/session"
 import { NotFoundError } from "../../src/storage/db"
@@ -231,6 +232,98 @@ describe("POST /altimate/workspace/sync", () => {
     expect(sync).not.toHaveBeenCalled()
   })
 })
+
+// altimate_change start — GET /altimate/workspace/status
+describe("GET /altimate/workspace/status", () => {
+  const get = (headers: Record<string, string> = {}) => Server.Default().request("/altimate/workspace/status", { headers })
+  const bound = (datamateId: number) =>
+    spyOn(State, "resolveBindingOutcome").mockResolvedValue({
+      status: "bound",
+      binding: { datamateId, datamateName: "Analytics", repoRemote: null, projectPath: null, linkedAt: 1 },
+    } as never)
+
+  beforeEach(() => {
+    // State is recorded and served per account.
+    spies.push(
+      spyOn(State, "currentScope").mockResolvedValue({ tenant: "acme", apiUrl: "https://api.example.com", account: "d" }),
+    )
+  })
+
+  test("returns the recorded state for the bound workspace", async () => {
+    spies.push(bound(5))
+    await SyncState.record(process.cwd(), 5, "skills", { items: { a: { label: "Alpha", version: "v1" } } })
+
+    const response = await get()
+    expect(response.status).toBe(200)
+    const body = (await response.json()) as { ok: boolean; datamateId: number; entities: Record<string, any> }
+    expect(body.ok).toBe(true)
+    expect((body as { binding?: string }).binding).toBe("bound")
+    expect(body.datamateId).toBe(5)
+    expect(body.entities.skills).toMatchObject({ kind: "skills", status: "ok", count: 1 })
+    // The item map is internal; the route serves the metadata only.
+    expect(body.entities.skills.items).toBeUndefined()
+  })
+
+  test("answers an unbound project with no workspace and no state", async () => {
+    spies.push(spyOn(State, "resolveBindingOutcome").mockResolvedValue({ status: "unbound" } as never))
+    expect(await (await get()).json()).toEqual({
+      ok: true,
+      binding: "unbound",
+      stale: false,
+      datamateId: null,
+      entities: {},
+    })
+  })
+
+  test("says when the binding could not be resolved, rather than reporting it unbound", async () => {
+    spies.push(spyOn(State, "resolveBindingOutcome").mockResolvedValue({ status: "unknown" } as never))
+    expect(await (await get()).json()).toEqual({
+      ok: true,
+      binding: "unknown",
+      stale: false,
+      datamateId: null,
+      entities: {},
+    })
+  })
+
+  test("marks a binding the server could not confirm just now as last known", async () => {
+    spies.push(
+      spyOn(State, "resolveBindingOutcome").mockResolvedValue({
+        status: "bound",
+        stale: true,
+        binding: { datamateId: 987_653, datamateName: "Analytics", repoRemote: null, projectPath: null, linkedAt: 1 },
+      } as never),
+    )
+    expect(await (await get()).json()).toEqual({
+      ok: true,
+      binding: "bound",
+      stale: true,
+      datamateId: 987_653,
+      entities: {},
+    })
+  })
+
+  test("a bound project with nothing recorded yet has no entities", async () => {
+    spies.push(bound(987_654))
+    expect(await (await get()).json()).toEqual({
+      ok: true,
+      binding: "bound",
+      stale: false,
+      datamateId: 987_654,
+      entities: {},
+    })
+  })
+
+  test("is refused under the kill switch", async () => {
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    expect((await get()).status).toBe(409)
+  })
+
+  test("refuses a browser origin on an unsecured server", async () => {
+    expect((await get({ origin: "https://evil.test" })).status).toBe(403)
+  })
+})
+// altimate_change end
 
 describe("GET /altimate/workspace/starter", () => {
   const get = (headers: Record<string, string> = {}) =>

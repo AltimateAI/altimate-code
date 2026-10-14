@@ -45,7 +45,14 @@ import { Global } from "@/global"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
-import { credentialDigest, readLocalBinding, resolveBindingOutcome, type CachedBinding } from "./state"
+import {
+  credentialDigest,
+  currentScope,
+  readLocalBinding,
+  resolveBindingOutcome,
+  type AccountKey,
+  type CachedBinding,
+} from "./state"
 import { altimateRequest, WorkspaceApiError } from "./api-client"
 import { readPin, resolveWithinRoot } from "./pin"
 import * as PendingTurns from "./pending-turns"
@@ -101,6 +108,8 @@ export interface Manifest {
 interface RemoteSummary {
   publicId: string
   updatedAt: string
+  /** Display name, for the sync-state change list. Optional: sync never depends on it. */
+  name?: string
 }
 
 /** ``CustomSkillDetail.files`` — ``CustomSkillFileMeta`` is ``{path, size}``. */
@@ -243,6 +252,68 @@ export function describeSyncProblems(result: SyncResult): { title: string; messa
   if (result.error) lines.push(result.error)
   return { title: `${n} workspace skill${n === 1 ? "" : "s"} skipped`, message: lines.join("\n") }
 }
+
+// altimate_change start — workspace sync state
+const pendingRecords = new Map<string, Promise<void>>()
+
+/** Settles once the sync-state record of the last run for `directory` has been written. */
+export function syncStateRecorded(directory: string): Promise<void> {
+  return pendingRecords.get(path.resolve(directory)) ?? Promise.resolve()
+}
+
+/** Record this run in the workspace sync state. `rows` is the list the published snapshot
+ * describes, or null when the run left the snapshot as it was — the items are then
+ * unknown to this run and the previous record stands. Imported lazily: the state module
+ * reaches the bus, which this module must not load on the opted-out path. */
+async function recordSyncState(
+  directory: string,
+  datamateId: number,
+  result: SyncResult,
+  rows: RemoteSummary[] | null,
+  dropped: Set<string>,
+  carried: Map<string, string>,
+  stamp: { scope: AccountKey | null; observedAt: number },
+): Promise<void> {
+  const problem = describeSyncProblems(result)
+  // A carried skill is recorded at the version the snapshot still holds, not the one the list
+  // advertised: the update did not land, and the run that installs it reports it as updated.
+  const items = rows
+    ? Object.fromEntries(
+        rows
+          .filter((row) => !dropped.has(row.publicId))
+          .map((row) => [
+            row.publicId,
+            { label: displayId(row.name ?? row.publicId), version: carried.get(row.publicId) ?? row.updatedAt },
+          ]),
+      )
+    : undefined
+  // A sync can outlast a relink. Its result describes the workspace it read, so it is dropped
+  // when the project is now known to be elsewhere: bound to another workspace, or unbound. A
+  // lookup that cannot answer keeps it — the run resolved this binding moments ago, and a blip
+  // is no evidence it changed.
+  const isCurrent = async () => {
+    const now = await resolveBindingOutcome(directory).catch(() => null)
+    if (now?.status === "bound") return now.binding.datamateId === datamateId
+    return now?.status !== "unbound"
+  }
+  try {
+    const SyncState = await import("./sync-state")
+    await SyncState.record(
+      directory,
+      datamateId,
+      "skills",
+      {
+        ...(items ? { items } : {}),
+        ...(problem ? { error: `${problem.title}: ${problem.message.split("\n").join("; ")}` } : {}),
+      },
+      { isCurrent, scope: stamp.scope, observedAt: stamp.observedAt },
+    )
+  } catch (err) {
+    // Status metadata: never the reason a sync fails.
+    log.warn("could not record the skill sync state", { err: String(err) })
+  }
+}
+// altimate_change end
 
 /** A fixed, user-facing reason for a skill that failed to sync. The raw error
  * can carry request URLs, server text or local paths — diagnostics for the
@@ -751,10 +822,14 @@ function parsePage(
   const rows: RemoteSummary[] = []
   for (const row of p.items) {
     if (!row || typeof row !== "object") return null
-    const r = row as { public_id?: unknown; updated_at?: unknown }
+    const r = row as { public_id?: unknown; updated_at?: unknown; name?: unknown }
     if (typeof r.public_id !== "string" || !r.public_id) return null
     if (typeof r.updated_at !== "string" || !r.updated_at) return null
-    rows.push({ publicId: r.public_id, updatedAt: r.updated_at })
+    rows.push({
+      publicId: r.public_id,
+      updatedAt: r.updated_at,
+      ...(typeof r.name === "string" && r.name ? { name: r.name } : {}),
+    })
   }
   return { rows, pages: rawPages, total }
 }
@@ -1028,17 +1103,26 @@ async function deactivate(directory: string, why: string): Promise<boolean> {
   // An empty workspace leaves no tree, so its "known empty" record and sync stamps are cleared
   // here, before the early return: relinking must sync again rather than repeat a stale "none".
   const canon = path.resolve(directory)
+  // altimate_change start — workspace sync state
+  const startedAt = Date.now()
+  // altimate_change end
   await clearEmptyRecord(canon)
   try {
     await fs.stat(root)
   } catch {
     lastSyncedAt.delete(canon)
     syncedFor.delete(canon)
+    // altimate_change start — workspace sync state
+    await retireSyncState(canon, startedAt)
+    // altimate_change end
     return false // nothing published here
   }
   if (!(await ownsManagedDir(directory))) return false
   await removeManaged(directory)
   await sweepStaging(directory)
+  // altimate_change start — workspace sync state
+  await retireSyncState(canon, startedAt)
+  // altimate_change end
   // The tree is gone, so the stamps that say "recently synced" no longer
   // describe anything. Left behind, a purge that is not followed by a
   // successful sync — an account switch to a project this user has not bound —
@@ -1048,6 +1132,20 @@ async function deactivate(directory: string, why: string): Promise<boolean> {
   log.info("removed the workspace skill snapshot", { why, path: root })
   return true
 }
+
+// altimate_change start — workspace sync state
+/** The snapshot is gone, so its record describes nothing here: a relink to the same workspace
+ * starts from a fresh baseline rather than the old count. Only after the removal succeeded (a
+ * refused or failed one leaves the snapshot, and its record, in place), and only a record
+ * observed before this deactivation began — a sync for a newer binding keeps its own. */
+async function retireSyncState(canon: string, before: number): Promise<void> {
+  // A detached record from an earlier run lands first, so it cannot bring the record back.
+  await pendingRecords.get(canon)
+  await import("./sync-state")
+    .then((SyncState) => SyncState.forget(canon, "skills", { before }))
+    .catch((err) => log.warn("could not clear the skill sync state", { err: String(err) }))
+}
+// altimate_change end
 
 async function removeManaged(directory: string): Promise<void> {
   await fs.rm(managedRoot(directory), { recursive: true, force: true })
@@ -1114,6 +1212,20 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
   // Set once the workspace's list has actually been read. Only then has this
   // project been "checked", and only then should the poll interval start.
   let sawRemote = false
+  // altimate_change start — workspace sync state
+  // What the sync-state record needs: the workspace checked, the list it read, the skills
+  // that list named but this run could not install (and had no previous copy of), and
+  // whether the run left a snapshot describing that list.
+  let checkedDatamateId: number | undefined
+  let remoteRows: RemoteSummary[] | null = null
+  const dropped = new Set<string>()
+  /** Skills kept at their previous copy, mapped to that copy's version. */
+  const carriedVersions = new Map<string, string>()
+  let published = false
+  /** When this run started reading, and under which account (set once credentials are known). */
+  const observedAt = Date.now()
+  let runScope: AccountKey | null = null
+  // altimate_change end
   const run = (async () => {
     // Checked BEFORE the binding: `resolveBinding` needs credentials too, so a
     // disconnected client would otherwise return on a null binding and never
@@ -1148,6 +1260,9 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     // to an account with no binding here left the previous tenant's skills on
     // disk and loading into prompts, with every retry hitting the same return.
     const credsForPurge = await AltimateApi.getCredentials().catch(() => null)
+    // altimate_change start — workspace sync state
+    runScope = await currentScope().catch(() => null)
+    // altimate_change end
     // A credential with no key names no account, so nothing here can be judged
     // foreign — and the sync below will fail for the same reason, so there is
     // no replacement coming. Purging on it deleted a good snapshot and put
@@ -1217,6 +1332,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       return
     }
     const binding = outcome.binding
+    checkedDatamateId = binding.datamateId
 
     // Refuse to touch a directory we did not create. Everything below either
     // deletes this tree or replaces it wholesale, so without this a user's own
@@ -1284,6 +1400,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       return
     }
     sawRemote = true
+    remoteRows = remote
     syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account))
     // The workspace has skills now, even if installing them fails below.
     if (remote.length > 0) await clearEmptyRecordFor(canon, currentEmptyKey)
@@ -1294,6 +1411,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       // live by then — another process can swap a partial snapshot in
       // between, and the marker would vouch for a sync this run never made.
       validated = manifest
+      published = true
       return
     }
 
@@ -1307,6 +1425,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       if (written && (after?.status !== "bound" || after.binding.datamateId !== binding.datamateId))
         await withdrawEmptyRecord(canon, written)
       changed = true
+      published = true
       log.info("workspace has no custom skills; removed the local snapshot")
       return
     }
@@ -1359,6 +1478,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           failed = true
           log.warn("skipping a workspace skill with an unusable id", { skill: summary.publicId })
           skippedSkills.push({ skill: displayId(summary.publicId), reason: "its id is not usable as a folder name" })
+          dropped.add(summary.publicId)
           continue
         }
         try {
@@ -1434,12 +1554,14 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
               await fs.cp(priorDir, path.join(staging, summary.publicId), { recursive: true })
               next.skills[summary.publicId] = prior
               carried = true
+              carriedVersions.set(summary.publicId, prior.updatedAt)
             } catch {
               carried = false
             }
           }
           if (!carried) {
             await fs.rm(path.join(staging, summary.publicId), { recursive: true, force: true }).catch(() => {})
+            dropped.add(summary.publicId)
           }
           log.warn("skipping a workspace skill; the rest of the snapshot still publishes", {
             skill: summary.publicId,
@@ -1521,6 +1643,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
       await clearEmptyRecordFor(canon, currentEmptyKey)
       changed = true
+      published = true
       log.info("workspace skills synced", {
         datamateId: binding.datamateId,
         skills: remote.length,
@@ -1571,7 +1694,29 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     // too — otherwise a problem it fixed would stay latched, and its return
     // would never be announced.
     if (skippedSkills.length === 0 && !syncError) store.announced.delete(canon)
-    return { changed, skipped: skippedSkills, error: syncError }
+    const result: SyncResult = { changed, skipped: skippedSkills, error: syncError }
+    // altimate_change start — workspace sync state
+    // Detached: the turn waits on the sync, not on its status metadata.
+    if (checkedDatamateId !== undefined) {
+      const recorded = recordSyncState(
+        canon,
+        checkedDatamateId,
+        result,
+        published ? remoteRows : null,
+        dropped,
+        carriedVersions,
+        {
+          scope: runScope,
+          observedAt,
+        },
+      )
+      pendingRecords.set(canon, recorded)
+      void recorded.finally(() => {
+        if (pendingRecords.get(canon) === recorded) pendingRecords.delete(canon)
+      })
+    }
+    // altimate_change end
+    return result
   })()
   inFlight.set(canon, settled)
   try {
