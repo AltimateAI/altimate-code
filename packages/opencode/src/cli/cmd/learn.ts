@@ -1188,7 +1188,7 @@ const SyncCommand = effectCmd({
             "Lessons retired in review stay in that skill until the workspace owner detaches it in the workspace's Skills page.")
       }
       if (report.pulls.some((pull) => pull.outcome === "error" || pull.outcome === "unsupported")) throw new Error("Lesson sync did not complete; see above.")
-      if (report.pushes.some((push) => push.error)) throw new Error("Some proposals were not sent; they stay queued.")
+      if (report.pushes.some((push) => push.error)) throw new Error("Some proposals were not sent; see the push summary above.")
     })
   }),
 })
@@ -1213,7 +1213,7 @@ const PushCommand = effectCmd({
       if (report.context.status !== "ready")
         throw new Error(`Lesson sync skipped: ${report.context.status === "skipped" ? report.context.reason : "sync is off"}.`)
       out(`Push: ${describePushes(report.pushes)}`)
-      if (report.pushes.some((push) => push.error)) throw new Error("Some proposals were not sent; they stay queued.")
+      if (report.pushes.some((push) => push.error)) throw new Error("Some proposals were not sent; see the push summary above.")
     })
   }),
 })

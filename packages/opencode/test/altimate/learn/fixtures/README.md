@@ -26,3 +26,11 @@ const cases = (await Bun.file(file).json()).map(({ text }: { text: string }) => 
 await Bun.write(file, JSON.stringify(cases, null, 2) + "\n")
 '
 ```
+
+## `submission-hash-cases.json`
+
+`/batch` items with the `submission_hash` altimate-backend computes for them (`material_hash` in
+`app/crud/learned_lessons.py`, over a validated `BatchLessonItem`). Push matches results on exact hashes, so
+`sync-effective.test.ts` checks that `submissionHash` here, and the test server's `materialHash`, produce the same
+values. The cases cover non-ASCII text and tags, escapes, trigger paths, pinned, coexists refs and replaces. After
+changing the hashed fields on either side, regenerate the file from the backend and keep the cases.

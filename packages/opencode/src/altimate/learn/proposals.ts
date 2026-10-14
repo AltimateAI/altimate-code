@@ -27,7 +27,11 @@ import {
   type BatchItem, type CoexistsRef, type Origin, type TargetRef, type UsageItem,
 } from "../workspace/lesson-api"
 import { assertLearnLock } from "./lock"
+import { redactSecrets } from "./digest"
+import { Log } from "@/util/log"
 import * as Store from "./store"
+
+const log = Log.create({ service: "learn.proposals" })
 
 /** A change to one lesson, before the ledger decides how to propose it. */
 export interface Intent {
@@ -404,8 +408,16 @@ export function promotionHooks(root: string, store: string, scope: Scope, origin
       const supersededBy = new Map(retired.flatMap((lesson) => (lesson.supersededBy ? [[lesson.id, lesson.supersededBy] as const] : [])))
       intents = promoteIntents(store, remote, before, after, origin, supersededBy)
     },
+    // Sync never fails a publish: the approved set is already replaced. A failed enqueue reopens the backfill, so
+    // the next push derives these proposals again.
     afterPublish: async () => {
-      if (intents.length) await enqueue(root, store, scope, intents)
+      if (!intents.length) return
+      await enqueue(root, store, scope, intents).catch(async (error) => {
+        log.warn("learn sync proposals not queued after promote", { store, error: redactSecrets(error instanceof Error ? error.message : String(error)) })
+        const state = forScope(await readSyncState(root, store), scope)
+        state.backfill = { complete: false, done: [] }
+        await writeSyncState(root, store, state)
+      }).catch((error) => log.warn("learn sync backfill not reopened", { store, error: redactSecrets(error instanceof Error ? error.message : String(error)) }))
     },
   }
 }

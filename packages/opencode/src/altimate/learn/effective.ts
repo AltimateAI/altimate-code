@@ -3,7 +3,8 @@
 // The effective lesson set when sync is on: local lessons plus the approved team lessons pulled from the
 // workspace (`remote.json`), keyed by qualified identity (repo_identity, store, lesson_key).
 //
-// - For the same identity the remote lesson wins, and an exact-identity tombstone hides the local copy.
+// - For the same identity the remote lesson wins, and an exact-identity tombstone hides the local copy. A
+//   workspace-wide team lesson (no repo_identity) with the same key also stands in for the local copy.
 //   Local lessons always have this repository's identity; pending or rejected proposals never hide anything.
 // - Remote lessons become `Lesson` records with an `L-` id: their key, or a stable alias derived from the
 //   identity when that key is already taken (another repository's lesson with the same key, under sharing).
@@ -46,9 +47,11 @@ export function resolve(store: string, localIds: readonly string[], remote: Remo
   const lessons = remote.lessons.filter((lesson) => lesson.store === store)
   const live = new Set(lessons.map((lesson) => identityKey(remoteIdentity(lesson))))
   const tombstones = new Set(remote.tombstones.filter((t) => t.store === store).map(identityKey))
+  // A workspace-wide team lesson is the team's copy of a local lesson with its key, as `learn show` marks it.
+  const workspaceWide = new Set(lessons.filter((lesson) => lesson.repo_identity === null).map((lesson) => lesson.lesson_key))
   const hidden = new Set(localIds.filter((id) => {
     const key = identityKey(localIdentity(store, id, remote))
-    return live.has(key) || tombstones.has(key)
+    return live.has(key) || tombstones.has(key) || workspaceWide.has(id)
   }))
   // This repository's lessons claim their keys first, then workspace-wide ones, then other repositories'.
   const rank = (lesson: LessonOut) => lesson.repo_identity === remote.repo_identity ? 0 : lesson.repo_identity === null ? 1 : 2

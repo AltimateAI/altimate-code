@@ -1,0 +1,137 @@
+{
+  "_comment": "Generated from altimate-backend app.crud.learned_lessons.material_hash over BatchLessonItem; regenerate there when the hash changes.",
+  "cases": [
+    {
+      "name": "plain ascii add",
+      "item": {
+        "tags": [],
+        "trigger_paths": [],
+        "coexists": [],
+        "pinned": false,
+        "replaces": [],
+        "lesson_key": "L-0001",
+        "change_type": "add",
+        "text": "Use cents for money columns.",
+        "origin": "reflection"
+      },
+      "submission_hash": "feb8a11b41e096a97aefc8ce5c83bff50a7f0dd38bb2cd3d36d0d919a68b3081"
+    },
+    {
+      "name": "non-ASCII text and tags",
+      "item": {
+        "tags": [
+          "finance",
+          "données"
+        ],
+        "trigger_paths": [],
+        "coexists": [],
+        "pinned": false,
+        "replaces": [],
+        "lesson_key": "L-0002",
+        "change_type": "add",
+        "text": "Montant en euros (€): arrondir à 2 décimales — 金额 🙂",
+        "origin": "reflection"
+      },
+      "submission_hash": "67276a6d3b44c7cfcbbdf1e425e5bcdfba74b662347ada9ebca365cc44973230"
+    },
+    {
+      "name": "trigger paths and pinned",
+      "item": {
+        "tags": [],
+        "trigger_paths": [
+          "models/staging/**",
+          "dbt_project.yml"
+        ],
+        "coexists": [],
+        "pinned": true,
+        "replaces": [],
+        "lesson_key": "L-0003",
+        "change_type": "add",
+        "text": "Staging models stay views.",
+        "origin": "person"
+      },
+      "submission_hash": "66fc827de93551eb24fe922b7f85229db13de464d27b22165be672ec473ec369"
+    },
+    {
+      "name": "coexists refs",
+      "item": {
+        "tags": [],
+        "trigger_paths": [],
+        "coexists": [
+          {
+            "lesson_key": "L-0001",
+            "source_text_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "target_text_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          },
+          {
+            "lesson_key": "L-0002",
+            "source_text_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "target_text_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        ],
+        "pinned": false,
+        "replaces": [],
+        "lesson_key": "L-0004",
+        "change_type": "add",
+        "text": "Prefer incremental for events.",
+        "origin": "reflection"
+      },
+      "submission_hash": "6148d135d590185ed4eba478b9cf47359bd2ccd419a2cdd77402f3e81252b0c0"
+    },
+    {
+      "name": "edit with replaces",
+      "item": {
+        "tags": [],
+        "trigger_paths": [],
+        "coexists": [],
+        "pinned": false,
+        "replaces": [
+          {
+            "public_id": "LL-abc123",
+            "version": 3
+          }
+        ],
+        "lesson_key": "L-0001",
+        "change_type": "edit",
+        "text": "Use integer cents for every money column.",
+        "origin": "person"
+      },
+      "submission_hash": "a3518de4f520dfb5a89298793ed2f6cbf9fd717196b0dd2c4202e9914bf30653"
+    },
+    {
+      "name": "remove",
+      "item": {
+        "tags": [],
+        "trigger_paths": [],
+        "coexists": [],
+        "pinned": false,
+        "replaces": [
+          {
+            "public_id": "LL-def456",
+            "version": 1
+          }
+        ],
+        "lesson_key": "L-0005",
+        "change_type": "remove",
+        "text": "Old rule to drop.",
+        "origin": "person"
+      },
+      "submission_hash": "1c4a386930a3a7adac49578eda982fb413c282cce2a8034633145f55233a327f"
+    },
+    {
+      "name": "escapes in text",
+      "item": {
+        "tags": [],
+        "trigger_paths": [],
+        "coexists": [],
+        "pinned": false,
+        "replaces": [],
+        "lesson_key": "L-0006",
+        "change_type": "add",
+        "text": "Quote \"identifiers\" and use \\ in regex; tab\there",
+        "origin": "reflection"
+      },
+      "submission_hash": "b2ed9d7754e1412b83e0c2590ae263a96cfe4bf5b6a5186645c8bfc93221341b"
+    }
+  ]
+}

@@ -65,7 +65,7 @@ export interface Server {
   delayMs: number
   /** Answer every lesson route with `lessons_not_available` (a tenant whose migration has not run). */
   notMigrated: boolean
-  /** Refuse a whole `/batch` request (422 with an array `detail`) that carries an item with this key. */
+  /** Refuse a whole `/batch` request that carries an item with this key, as the backend answers a wire limit: 400 `VALIDATION_ERROR`. */
   refuseKey?: string
   /** Rewrite the next `/batch` results (drop, reorder, duplicate or blank them) to probe the client's matching. */
   mangleBatch?: (results: any[]) => any[]
@@ -226,7 +226,7 @@ export function startServer(opts: { datamateId?: number } = {}): Server {
       }
       // batch
       if (server.refuseKey && (body.items as any[]).some((item) => item.lesson_key === server.refuseKey))
-        return json({ detail: [{ loc: ["body", "items"], msg: "too long", type: "value_error" }] }, 422)
+        return json({ error_code: "VALIDATION_ERROR", detail: "items.0.text: String should have at most 280 characters" }, 400)
       const identity = bound(body.repo_remote)
       if (!identity) return coded(422, "repo_not_bound")
       const store = body.store ?? "team-playbook"

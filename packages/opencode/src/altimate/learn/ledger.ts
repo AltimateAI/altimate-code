@@ -211,7 +211,7 @@ export const writeSyncState = (root: string, store: string, state: SyncState) =>
 /** The ledger as it stands for `scope`; a different scope's ledger and backfill are discarded, never reused. */
 export function forScope(state: SyncState, scope: Scope): SyncState {
   if (state.scope === scopeKey(scope)) return state
-  return { ...state, scope: scopeKey(scope), submissions_cursor: undefined, submissions_after_id: undefined, backfill: { complete: false, done: [] }, ledger: {}, unsyncable: {} }
+  return { ...state, scope: scopeKey(scope), submissions_cursor: undefined, submissions_after_id: undefined, backfill: { complete: false, done: [] }, ledger: {}, unsyncable: {}, unsupported_until: undefined }
 }
 
 /** The pulled cache, only when it was pulled for exactly this scope. */

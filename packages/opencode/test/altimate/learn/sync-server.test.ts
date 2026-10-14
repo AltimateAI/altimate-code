@@ -135,6 +135,20 @@ describe("pull", () => {
     expect(server.requests.length).toBe(count)
   })
 
+  test("the unsupported backoff belongs to its account: another account on the same project pulls at once", async () => {
+    const root = await project()
+    const first = await ready("key-a")
+    server.routesMissing = true
+    expect((await Sync.pull(root, NAME, first)).outcome).toBe("unsupported")
+    server.routesMissing = false
+    const count = server.requests.length
+    expect((await Sync.pull(root, NAME, first)).outcome).toBe("unsupported")
+    expect(server.requests.length).toBe(count)
+    const second = await ready("key-b")
+    expect((await Sync.pull(root, NAME, second)).outcome).toBe("ok")
+    expect((await Sync.push(root, NAME, second)).error).toBeUndefined()
+  })
+
   test("transient errors keep the cache; workspace_not_found invalidates it", async () => {
     const root = await project()
     const ctx = await ready("key-a")
@@ -775,6 +789,27 @@ describe("review fixes", () => {
       .toEqual([["Promoted wording.", server.rows[0].public_id]])
   })
 
+  test("a failed enqueue after publishing completes the promotion and reopens the backfill", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    await Store.transaction(root, () => fs.writeFile(Store.paths(root, NAME).candidate, canonical([lesson("L-0f35", "Promoted rule.")])))
+    // An outbox that cannot be read makes the enqueue fail after the approved set was replaced.
+    const outbox = files(root, NAME).outbox
+    await fs.mkdir(outbox, { recursive: true })
+    await Store.promote(root, NAME, promotionHooks(root, NAME, ctx.scope, "manual"))
+    expect((await Store.loadApproved(root, NAME)).map((l) => l.text)).toEqual(["Promoted rule."])
+    expect(await fs.stat(Store.paths(root, NAME).candidate).catch(() => undefined)).toBeUndefined()
+    const history = (await fs.readFile(Store.paths(root, NAME).history, "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+    expect(history.at(-1)?.action).toBe("promote")
+    expect((await readSyncState(root, NAME)).backfill.complete).toBe(false)
+    // The next push derives the promotion's proposal again.
+    await fs.rm(outbox, { recursive: true })
+    expect(await Sync.push(root, NAME, ctx)).toMatchObject({ submitted: 1 })
+    expect(server.rows.map((r) => r.text)).toEqual(["Promoted rule."])
+  })
+
   test("learn show markers: held proposals and the local copy of a workspace-wide team lesson", async () => {
     const root = await project()
     const ctx = await ready("key-a")
@@ -792,6 +827,19 @@ describe("review fixes", () => {
     expect(markers.mark("L-0f41", "Workspace-wide rule.")).toBe("team")
     expect(markers.mark("L-0f42", "Held rule.")).toBe("held — run `learn push --resubmit L-0f42`")
     expect(markers.mark("L-0f43", "Queued rule.")).toBe("pending review")
+  })
+
+  test("a workspace-wide team lesson stands in for the local lesson with its key, in delivery and in learn show", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await approve(root, [lesson("L-0f44", "Local wording: store money in cents.")])
+    server.add({ lesson_key: "L-0f44", text: "Team wording: store money as integer cents." })
+    await Sync.pull(root, NAME, ctx)
+    const delivery = new Delivery(root, limits, root, { scope: () => ctx.scope })
+    const section = (await delivery.prepare("ses_1", "msg_1", "money cents")).section
+    expect(section).toContain("Team wording: store money as integer cents.")
+    expect(section).not.toContain("Local wording")
+    expect((await Sync.markers(root, NAME))!.mark("L-0f44", "Local wording: store money in cents.")).toBe("team")
   })
 })
 
@@ -850,6 +898,22 @@ describe("contract limits and matching", () => {
     // Held: not sent again by later pushes.
     await Sync.push(root, NAME, ctx)
     expect(batches()).toHaveLength(4)
+  })
+
+  test("a 401 on /batch stops the push after one request and keeps every proposal queued", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    await queue(root, ctx, [upsert("L-0f64", "Rule one."), upsert("L-0f65", "Rule two.")])
+    // The login expired after the pull: the cached binding resolves without a network call.
+    server.users.delete("key-a")
+    const report = await Sync.push(root, NAME, ctx)
+    expect(report.error).toBeDefined()
+    expect(report).toMatchObject({ submitted: 0, held: 0, deferred: 2 })
+    expect(batches()).toHaveLength(1)
+    expect((await readOutbox(root, NAME)).proposals.map((p) => [p.item.lesson_key, p.state]))
+      .toEqual([["L-0f64", "queued"], ["L-0f65", "queued"]])
   })
 
   test("items over a wire limit are never sent, coalesced or queued by an earlier version", async () => {

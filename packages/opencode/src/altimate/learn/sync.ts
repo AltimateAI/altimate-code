@@ -36,6 +36,8 @@ export const BACKFILL_CAP = 200
 const LOCK_OPTIONS = { timeoutMs: 5_000 }
 /** Errors the server reports when a proposal's base moved: refresh, compare, and hold instead of resending. */
 const CONFLICTS = new Set(["version_conflict", "open_proposal_exists", "bad_target", "stale_target"])
+/** Statuses answering a request the server refused as invalid: request validation, wire limits, body size. */
+const REFUSED_REQUEST = new Set([400, 413, 422])
 /** Item errors that end a proposal: the server will never accept it as is. */
 const FINAL = new Set(["invalid", "no_change"])
 
@@ -153,7 +155,8 @@ export function pull(root: string, store: string, ctx: Extract<Context, { status
 async function pullOnce(root: string, store: string, ctx: Extract<Context, { status: "ready" }>): Promise<PullOutcome> {
   const { scope, actAs } = ctx
   const before = await readSyncState(root, store)
-  if (before.unsupported_until && Date.parse(before.unsupported_until) > Date.now())
+  const backoff = forScope(before, scope).unsupported_until
+  if (backoff && Date.parse(backoff) > Date.now())
     return { store, outcome: "unsupported", error: "the workspace server does not support lesson sync yet" }
   const cached = await remoteFor(root, store, scope)
   const started = Date.now()
@@ -168,7 +171,7 @@ async function pullOnce(root: string, store: string, ctx: Extract<Context, { sta
       local_keys: local.keys,
     })
   } catch (error) {
-    return recordPullFailure(root, store, error, Date.now() - started)
+    return recordPullFailure(root, store, scope, error, Date.now() - started)
   }
   // The caller's own proposals refresh the ledger's pending and receipt slots. Optional: a failure keeps the pull.
   const submissions = await ownSubmissions(actAs, scope.datamateId, forScope(before, scope)).catch((error) => {
@@ -195,7 +198,7 @@ async function pullOnce(root: string, store: string, ctx: Extract<Context, { sta
     await writeRemote(root, store, remote)
     const state = forScope(await readSyncState(root, store), scope)
     // No earlier cache: sync was off, or access was lost. Lessons changed meanwhile were never proposed, so the
-    // backfill runs again (it skips every identity the ledger already knows).
+    // backfill runs again (it skips a lesson only when the ledger already holds its exact content).
     if (!previous) state.backfill = { complete: false, done: [] }
     state.local_keys_offset = local.next
     applyPull(state, remote, !response.unchanged || !previous)
@@ -230,13 +233,14 @@ async function ownSubmissions(actAs: ActAs, datamateId: number, state: Pick<Sync
   return rows
 }
 
-async function recordPullFailure(root: string, store: string, error: unknown, latency: number): Promise<PullOutcome> {
+async function recordPullFailure(root: string, store: string, scope: Scope, error: unknown, latency: number): Promise<PullOutcome> {
   const failure = error instanceof LessonApiError ? error : new LessonApiError("transient", errText(error))
   const message = redactSecrets(failure.message)
   log.warn("learn sync pull failed", { store, kind: failure.kind, latency_ms: latency, error: message })
   track({ operation: "pull", outcome: "error", error_kind: failure.kind, latency_ms: latency })
   await Store.transaction(root, async () => {
-    const state = await readSyncState(root, store)
+    // Recorded under the scope, so the backoff applies to this account and workspace only.
+    const state = forScope(await readSyncState(root, store), scope)
     state.last_pull = { at: now(), outcome: failure.kind === "unsupported" ? "unsupported" : "error", error: message, latency_ms: latency }
     if (failure.kind === "unsupported") state.unsupported_until = new Date(Date.now() + UNSUPPORTED_BACKOFF_MS).toISOString()
     // Access answers invalidate the cache; transient failures keep it.
@@ -297,7 +301,8 @@ function satisfied(proposal: Proposal, store: string, remote: Remote | undefined
   if (entry?.pending?.submission_hash === proposal.submission_hash || entry?.pending?.content_hash === proposal.submission_hash) return true
   if (entry?.receipts.some((r) => r.submission_hash === proposal.submission_hash && r.status !== "rejected")) return true
   const live = remote?.lessons.find((l) => identityKey(remoteIdentity(l)) === identityKey(identity))
-  if (proposal.item.change_type === "remove") return !live
+  // Without a pulled cache nothing proves the lesson is gone.
+  if (proposal.item.change_type === "remove") return !!remote && !live
   return !!live && live.text === proposal.item.text && live.pinned === proposal.item.pinned &&
     JSON.stringify(live.tags) === JSON.stringify(proposal.item.tags) && JSON.stringify(live.trigger_paths) === JSON.stringify(proposal.item.trigger_paths)
 }
@@ -327,8 +332,8 @@ export async function push(root: string, store: string, ctx: Extract<Context, { 
   const report = emptyReport(store)
   const { scope, actAs } = ctx
   const live = () => opts.deadline === undefined || Date.now() < opts.deadline
-  const sync = await readSyncState(root, store)
-  if (sync.unsupported_until && Date.parse(sync.unsupported_until) > Date.now()) {
+  const backoff = forScope(await readSyncState(root, store), scope).unsupported_until
+  if (backoff && Date.parse(backoff) > Date.now()) {
     report.error = "the workspace server does not support lesson sync yet"
     return report
   }
@@ -356,7 +361,10 @@ export async function push(root: string, store: string, ctx: Extract<Context, { 
       outbox.proposals = outbox.proposals.flatMap((p) => {
         if (p.state !== "held" || p.item.lesson_key !== opts.resubmit || !sameScope(p.scope, scope)) return [p]
         const next = rebase(p, store, remote, state)
-        return next ? [next] : []
+        if (next) return [next]
+        report.dropped++
+        log.info("learn sync held proposal dropped on resubmit: nothing left to propose", { store, key: p.item.lesson_key })
+        return []
       })
       await writeOutbox(root, store, outbox)
     }
@@ -405,9 +413,10 @@ export async function push(root: string, store: string, ctx: Extract<Context, { 
       }
     } catch (error) {
       const classified = error instanceof LessonApiError ? error : new LessonApiError("transient", errText(error))
-      // A request the server refused (a 4xx answer, such as a wire limit) is never resent as it was: its items are
-      // sent one by one to find the item it refused, and that item is held.
-      if (classified.kind !== "rejected" || classified.status === undefined) failure = classified
+      // A request the server refused as invalid (a wire limit answers 400 `VALIDATION_ERROR`) is never resent as it
+      // was: its items are sent one by one to find the item it refused, and that item is held. Any other answer, such
+      // as a 401 for an expired login, stops the push and leaves the queue as it is.
+      if (classified.kind !== "rejected" || !REFUSED_REQUEST.has(classified.status ?? 0)) failure = classified
       else if (chunk.length > 1) pending.unshift(...chunk.map((proposal) => [proposal]))
       else refusedAlone.push({ proposal: chunk[0], message: redactSecrets(classified.message) })
     }
