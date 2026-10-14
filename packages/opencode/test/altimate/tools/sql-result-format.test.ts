@@ -93,8 +93,17 @@ describe("SQL result previews", () => {
     const saved = spill()
     const formatted = await formatSqlResult(result([[[null, "NULL"]], [[""]], [[[]]]]), { limit: 100, write: saved.write })
 
-    // `[NULL]`, `['']` and `[[]]` stay distinguishable: NULL marker, empty item, empty nested array.
-    expect(body(formatted.output)).toBe('NULL,"NULL"\n\n')
+    // `[NULL]`, `['']` and `[[]]` stay distinguishable: NULL marker, quoted empty item, empty nested array.
+    expect(body(formatted.output)).toBe('NULL,"NULL"\n""\n[]')
+    expect(saved.writes).toHaveLength(0)
+  })
+
+  test("renders an empty array distinctly from an empty string and from the literal text []", async () => {
+    const columns = ["empty_array", "empty_string", "bracket_text"]
+    const saved = spill()
+    const formatted = await formatSqlResult(result([[[], "", "[]"]], columns), { limit: 100, write: saved.write })
+
+    expect(body(formatted.output, columns)).toBe('[] |  | "[]"')
     expect(saved.writes).toHaveLength(0)
   })
 

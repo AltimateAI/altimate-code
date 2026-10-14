@@ -6,6 +6,8 @@ import type { SqlExplainResult } from "../native/types"
 import * as Precedence from "../workspace/precedence"
 // altimate_change end
 import { validateWarehouseName } from "./input-validation"
+import * as Registry from "../native/connections/registry"
+import { classifyAndCheck, isSingleQuery } from "./sql-classify"
 
 /**
  * Detect SQL input that cannot be meaningfully EXPLAIN'd.
@@ -86,6 +88,21 @@ export const SqlExplainTool = Tool.define("sql_explain", {
           error_class: "input_validation",
         },
         output: `Invalid input: ${sqlError}`,
+      }
+    }
+    // EXPLAIN ANALYZE executes the statement. Only a single read-only query may be analyzed,
+    // so a plan request can never perform a write on engines without a read-only transaction.
+    if (args.analyze) {
+      const dialect = Registry.canonicalType(args.warehouse ? Registry.getConfig(args.warehouse)?.type : undefined) ?? undefined
+      const { queryType, blocked } = classifyAndCheck(args.sql, dialect)
+      if (blocked || queryType !== "read" || !isSingleQuery(args.sql, dialect)) {
+        const error =
+          "EXPLAIN ANALYZE executes the statement, so only a single read-only query can be analyzed. Use analyze: false for a plan of this statement."
+        return {
+          title: "Explain: INVALID INPUT",
+          metadata: { success: false, analyzed: false, warehouse_type: "unknown", error, error_class: "input_validation" },
+          output: `Invalid input: ${error}`,
+        }
       }
     }
     const warehouseError = validateWarehouseName(args.warehouse)

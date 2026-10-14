@@ -5,7 +5,7 @@
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { loadOptionalDriver } from "./resolve"
 import { QueryTimeoutError } from "./types"
-import { resolveQueryTimeout, tighter } from "./query-timeout"
+import { MAX_TIMER_MS, resolveQueryTimeout, tighter } from "./query-timeout"
 // altimate_change start — enforce extraction byte limits while rows arrive
 import { createResultByteBudget } from "./result-byte-limit"
 // altimate_change end
@@ -121,15 +121,20 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
             let abort: (() => void) | undefined
             try {
               const shown = await new Promise<any>((resolve, reject) => {
-                abort = () => {
-                  // pg's promise query API has no cancellation handle. Discard
-                  // the connection in finally so a stalled probe is never reused.
+                // pg's promise query API has no cancellation handle. Discard
+                // the connection in finally so a stalled probe is never reused.
+                const fail = (error: unknown) => {
                   discardClient = true
-                  reject(signal ? signal.reason : new QueryTimeoutError({ engine: "PostgreSQL", timeoutMs: ourMs }))
+                  reject(error)
                 }
+                abort = () => fail(signal!.reason)
                 signal?.addEventListener("abort", abort, { once: true })
-                // The effective deadline also covers a configured statement_timeout alone.
-                if (!signal) timer = setTimeout(abort, ourMs)
+                // The effective deadline bounds the probe even when a signal is present:
+                // a caller's signal may fire only after its own grace period, or never.
+                timer = setTimeout(
+                  () => fail(new QueryTimeoutError({ engine: "PostgreSQL", timeoutMs: ourMs })),
+                  Math.min(ourMs, MAX_TIMER_MS),
+                )
                 if (signal?.aborted) {
                   abort()
                   return
