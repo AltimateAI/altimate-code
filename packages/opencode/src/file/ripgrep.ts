@@ -108,58 +108,74 @@ export namespace Ripgrep {
       if (!response.ok) throw new DownloadFailedError({ url, status: response.status })
 
       const arrayBuffer = await response.arrayBuffer()
-      const archivePath = path.join(Global.Path.bin, filename)
-      await Filesystem.write(archivePath, Buffer.from(arrayBuffer))
-      if (config.extension === "tar.gz") {
-        const args = ["tar", "-xzf", archivePath, "--strip-components=1"]
+      // altimate_change start — upstream_fix: install the binary atomically. A lookup trusts `filepath` because
+      // it exists, so an extraction that failed partway used to leave a broken `rg` that every later lookup
+      // accepted. The archive is unpacked in a fresh staging directory and the binary renamed into place
+      // last; whatever happens, the staging directory (archive and partial files included) is removed.
+      // Mirrors packages/core/src/ripgrep/binary.ts.
+      await fs.mkdir(Global.Path.bin, { recursive: true })
+      const staging = await fs.mkdtemp(path.join(Global.Path.bin, "ripgrep-"))
+      try {
+        const staged = path.join(staging, path.basename(filepath))
+        const archivePath = path.join(staging, filename)
+        await Filesystem.write(archivePath, Buffer.from(arrayBuffer))
+        if (config.extension === "tar.gz") {
+          const args = ["tar", "-xzf", archivePath, "--strip-components=1"]
 
-        if (platformKey.endsWith("-darwin")) args.push("--include=*/rg")
-        if (platformKey.endsWith("-linux")) args.push("--wildcards", "*/rg")
+          if (platformKey.endsWith("-darwin")) args.push("--include=*/rg")
+          if (platformKey.endsWith("-linux")) args.push("--wildcards", "*/rg")
 
-        const proc = Process.spawn(args, {
-          cwd: Global.Path.bin,
-          stderr: "pipe",
-          stdout: "pipe",
-        })
-        const exit = await proc.exited
-        if (exit !== 0) {
-          const stderr = proc.stderr ? await text(proc.stderr) : ""
-          throw new ExtractionFailedError({
-            filepath,
-            stderr,
+          const proc = Process.spawn(args, {
+            cwd: staging,
+            stderr: "pipe",
+            stdout: "pipe",
           })
-        }
-      }
-      if (config.extension === "zip") {
-        const zipFileReader = new ZipReader(new BlobReader(new Blob([arrayBuffer])))
-        const entries = await zipFileReader.getEntries()
-        let rgEntry: any
-        for (const entry of entries) {
-          if (entry.filename.endsWith("rg.exe")) {
-            rgEntry = entry
-            break
+          const exit = await proc.exited
+          if (exit !== 0) {
+            const stderr = proc.stderr ? await text(proc.stderr) : ""
+            throw new ExtractionFailedError({
+              filepath,
+              stderr,
+            })
           }
         }
+        if (config.extension === "zip") {
+          const zipFileReader = new ZipReader(new BlobReader(new Blob([arrayBuffer])))
+          const entries = await zipFileReader.getEntries()
+          let rgEntry: any
+          for (const entry of entries) {
+            if (entry.filename.endsWith("rg.exe")) {
+              rgEntry = entry
+              break
+            }
+          }
 
-        if (!rgEntry) {
-          throw new ExtractionFailedError({
-            filepath: archivePath,
-            stderr: "rg.exe not found in zip archive",
-          })
-        }
+          if (!rgEntry) {
+            throw new ExtractionFailedError({
+              filepath: archivePath,
+              stderr: "rg.exe not found in zip archive",
+            })
+          }
 
-        const rgBlob = await rgEntry.getData(new BlobWriter())
-        if (!rgBlob) {
-          throw new ExtractionFailedError({
-            filepath: archivePath,
-            stderr: "Failed to extract rg.exe from zip archive",
-          })
+          const rgBlob = await rgEntry.getData(new BlobWriter())
+          if (!rgBlob) {
+            throw new ExtractionFailedError({
+              filepath: archivePath,
+              stderr: "Failed to extract rg.exe from zip archive",
+            })
+          }
+          await Filesystem.write(staged, Buffer.from(await rgBlob.arrayBuffer()))
+          await zipFileReader.close()
         }
-        await Filesystem.write(filepath, Buffer.from(await rgBlob.arrayBuffer()))
-        await zipFileReader.close()
+        if (!platformKey.endsWith("-win32")) await fs.chmod(staged, 0o755)
+        // If the rename fails because another process installed ripgrep first, use that one.
+        await fs.rename(staged, filepath).catch(async (error) => {
+          if (!(await Filesystem.exists(filepath))) throw error
+        })
+      } finally {
+        await fs.rm(staging, { recursive: true, force: true })
       }
-      await fs.unlink(archivePath)
-      if (!platformKey.endsWith("-win32")) await fs.chmod(filepath, 0o755)
+      // altimate_change end
     }
 
     return {
@@ -167,16 +183,24 @@ export namespace Ripgrep {
     }
   })
 
+  // altimate_change start — upstream_fix: retry a failed lookup, but at most once per cooldown. `state` caches
+  // its promise, so one failed download or extraction used to make every later search in this process fail the
+  // same way. Retrying on every call instead would start a new download for each search on an offline machine.
+  // An unsupported platform never changes, so that lookup is kept and only its failure is re-reported.
+  const RETRY_COOLDOWN_MS = 30_000
+  let lastFailure: { at: number; error: unknown } | undefined
+
   export async function filepath() {
-    // altimate_change start — upstream_fix: do not keep a failed lookup. `state` caches its promise, so
-    // one failed download or extraction made every later search in this process fail the same way.
+    if (lastFailure && Date.now() - lastFailure.at < RETRY_COOLDOWN_MS) throw lastFailure.error
     const { filepath } = await state().catch((error) => {
-      state.reset()
+      if (!UnsupportedPlatformError.isInstance(error)) state.reset()
+      lastFailure = { at: Date.now(), error }
       throw error
     })
-    // altimate_change end
+    lastFailure = undefined
     return filepath
   }
+  // altimate_change end
 
   export async function* files(input: {
     cwd: string
