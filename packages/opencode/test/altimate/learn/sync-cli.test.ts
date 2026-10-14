@@ -70,9 +70,9 @@ describe("learn CLI with sync", () => {
     expect(await Store.readPromoted(dir.path, Playbook.DEFAULT_NAME)).toBeUndefined()
   }, 60_000)
 
-  test("learn sync without sync on, or without an account, says why", async () => {
+  test("learn sync with sync turned off, or without an account, says why", async () => {
     await using dir = await tmpdir({ git: true })
-    const off = await learn(dir.path, ["sync"])
+    const off = await learn(dir.path, ["sync"], { ALTIMATE_LEARN_SYNC: "0" })
     expect(off.code).not.toBe(0)
     expect(off.stderr + off.stdout).toContain("Lesson sync is off")
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "learn-sync-empty-home-"))

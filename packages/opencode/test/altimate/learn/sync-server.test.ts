@@ -9,6 +9,8 @@ import path from "node:path"
 import { canonical, type Lesson } from "../../../src/altimate/learn/lesson"
 import * as Store from "../../../src/altimate/learn/store"
 import * as Sync from "../../../src/altimate/learn/sync"
+import * as Menu from "../../../src/altimate/learn/menu"
+import { readProjectLearning } from "../../../src/altimate/learn/project-config"
 import {
   files, forScope, readOutbox, readRemote, readSyncState, removeRemote, usageBatches, writeOutbox, writeSyncState, type Scope,
 } from "../../../src/altimate/learn/ledger"
@@ -17,8 +19,9 @@ import { reflectCore } from "../../../src/altimate/learn/session-reflect"
 import { autoPromote, autoPromoteStateFile } from "../../../src/altimate/learn/auto-promote"
 import { DEFAULT_AUTO_PROMOTE_LIMITS } from "../../../src/altimate/learn/config"
 import { Delivery } from "../../../src/altimate/learn/delivery"
-import { credentialDigest } from "../../../src/altimate/workspace/state"
+import { credentialDigest, readLocalBinding, resolveBinding } from "../../../src/altimate/workspace/state"
 import { checkout, repoIdentity, sandboxHome, startServer, syncEnv, type Server } from "./sync-fixture"
+import { lessonsLine } from "../../../src/plugin/tui/altimate/workspace-sidebar"
 
 const NAME = "team-playbook"
 const REMOTE = "git@github.com:acme/analytics.git"
@@ -303,10 +306,10 @@ describe("push", () => {
 })
 
 describe("gate", () => {
-  test("off: no requests at all", async () => {
+  test("turned off: no requests at all", async () => {
     const root = await project()
     await home.signIn(server.url, "key-a")
-    const report = await Sync.run(root, root, {})
+    const report = await Sync.run(root, root, { sync: false })
     expect(report.context.status).toBe("off")
     expect(server.requests).toEqual([])
   })
@@ -332,10 +335,12 @@ describe("gate", () => {
 describe("session start", () => {
   const syncs = () => server.requests.filter((r) => r.path.endsWith("/lessons/sync")).length
 
-  test("without a valid cache it waits for the pull before the first delivery, once per session", async () => {
+  test("without a valid cache a linked project waits for the pull before the first delivery, once per session", async () => {
     const root = await project()
     await home.signIn(server.url, "key-a")
     server.add({ lesson_key: "L-00a1", text: "Prefix staging models with stg_." }, REMOTE)
+    // Linked here: the binding is recorded locally, as `link` does.
+    expect(await readLocalBinding(await resolveBinding(root).then(() => root))).not.toBeNull()
     const started = await Sync.sessionStart(root, root, learn, { session: "ses_start_1" })
     expect(started!.scope()).toMatchObject({ datamateId: server.datamateId })
     expect((await new Delivery(root, limits, root, started).prepare("ses_start_1", "m1", "staging")).section).toContain("stg_")
@@ -390,11 +395,118 @@ describe("session start", () => {
     expect(syncs()).toBe(1)
   })
 
-  test("sync off: no session sync at all", async () => {
+  test("sync turned off: no session sync at all", async () => {
     const root = await project()
     await home.signIn(server.url, "key-a")
-    expect(await Sync.sessionStart(root, root, {}, { session: "ses_off" })).toBeUndefined()
+    expect(await Sync.sessionStart(root, root, { sync: false }, { session: "ses_off" })).toBeUndefined()
     expect(server.requests).toEqual([])
+  })
+
+  test("on by default; a project not linked here never delays the session", async () => {
+    const root = await project()
+    await home.signIn(server.url, "key-a")
+    server.delayMs = 1_500
+    const at = Date.now()
+    const started = await Sync.sessionStart(root, root, {}, { session: "ses_default", waitMs: 5_000 })
+    expect(Date.now() - at).toBeLessThan(1_000)
+    expect(started).toBeDefined()
+    await started!.done
+  })
+
+  test("a later turn pulls again in the background once the refresh interval has passed", async () => {
+    const root = await project()
+    await home.signIn(server.url, "key-a")
+    const started = await Sync.sessionStart(root, root, learn, { session: "ses_refresh" })
+    await started!.done
+    expect(syncs()).toBe(1)
+    // Within the interval: the session's pull is reused.
+    await Sync.sessionStart(root, root, learn, { session: "ses_refresh" })
+    await started!.done
+    expect(syncs()).toBe(1)
+    // An approval lands; once the interval has passed the next turn pulls it.
+    server.add({ lesson_key: "L-00a2", text: "Approved mid-session." }, REMOTE)
+    const realNow = Date.now
+    Date.now = () => realNow() + Sync.SESSION_REFRESH_MS + 1_000
+    try {
+      await Sync.sessionStart(root, root, learn, { session: "ses_refresh" })
+      await started!.done
+    } finally {
+      Date.now = realNow
+    }
+    expect(syncs()).toBe(2)
+    expect((await readRemote(root, NAME))!.lessons.map((l) => l.lesson_key)).toContain("L-00a2")
+  })
+})
+
+describe("workspace sidebar", () => {
+  test("lessons line: team, pending review and queued counts after a pull; nothing when sync is off", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    server.add({ lesson_key: "L-0c01", text: "Team rule one." }, REMOTE)
+    server.add({ lesson_key: "L-0c02", text: "Team rule two." }, REMOTE)
+    server.add({ lesson_key: "L-0c03", text: "Waiting for the owner.", status: "candidate" }, REMOTE)
+    expect(await Sync.sidebarStatus(root, learn)).toBeUndefined()
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    await queue(root, ctx, [upsert("L-0c04", "Queued here.")])
+    const status = (await Sync.sidebarStatus(root, learn))!
+    expect(status).toMatchObject({ team: 2, pendingReview: 1, queued: 1, held: 0 })
+    expect(Date.now() - status.pulledAt!).toBeLessThan(60_000)
+    expect(lessonsLine(status)).toBe("2 team lessons · 1 pending review · 1 queued · synced just now")
+    // From a subdirectory of the project, too.
+    expect(await Sync.sidebarStatus(path.join(root, ".altimate-code"), learn)).toMatchObject({ team: 2 })
+    expect(await Sync.sidebarStatus(root, { sync: false })).toBeUndefined()
+  })
+
+  test("lessons line leaves out zero counts", () => {
+    expect(lessonsLine({ team: 1, pendingReview: 0, queued: 0, held: 2, pulledAt: null })).toBe("1 team lesson · 2 held")
+  })
+})
+
+describe("/learn menu", () => {
+  test("summary: approved lessons, staged stores, and the sync line once synced", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await approve(root, [lesson("L-0d01", "Local rule.")])
+    await Store.transaction(root, () => fs.writeFile(Store.paths(root, NAME).candidate, canonical([lesson("L-0d01", "Local rule, revised.")])))
+    expect(await Menu.summary(root, root, learn)).toEqual({ learning: true, sync: true, approved: 1, staged: [NAME] })
+    server.add({ lesson_key: "L-0d02", text: "Team rule." }, REMOTE)
+    await Sync.pull(root, NAME, ctx)
+    expect((await Menu.summary(root, root, learn)).lessons).toMatchObject({ team: 1 })
+    expect(await Menu.summary(root, root, { sync: false })).toEqual({ learning: true, sync: false, approved: 1, staged: [NAME] })
+    // An environment override wins over the project config: the menu says so instead of offering a toggle.
+    process.env["ALTIMATE_LEARN_SYNC"] = "0"
+    try {
+      expect((await Menu.summary(root, root, learn)).forcedOff).toContain("ALTIMATE_LEARN_SYNC=0")
+    } finally {
+      delete process.env["ALTIMATE_LEARN_SYNC"]
+    }
+  })
+
+  test("sync now reports what it pulled and sent", async () => {
+    const root = await project()
+    await home.signIn(server.url, "key-a")
+    server.add({ lesson_key: "L-0d03", text: "Team rule." }, REMOTE)
+    await approve(root, [lesson("L-0d04", "Mine to propose.")])
+    const result = await Menu.syncNow(root, root, learn)
+    expect(result).toEqual({ ok: true, message: "Synced: 1 team lesson, 1 sent for review. The session picks it up on your next message." })
+    expect(await Menu.syncNow(root, root, { sync: false })).toEqual({ ok: false, message: "Lesson sync is off for this project." })
+  })
+
+  test("turning sync off writes learn.sync=false and drops the pulled team lessons; on writes it back", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    server.add({ lesson_key: "L-0d05", text: "Team rule." }, REMOTE)
+    await Sync.pull(root, NAME, ctx)
+    const { file } = await Menu.setSync(root, root, false)
+    expect(JSON.parse(await fs.readFile(file, "utf8")).learn.sync).toBe(false)
+    expect(await readRemote(root, NAME)).toBeUndefined()
+    await Menu.setSync(root, root, true)
+    expect(JSON.parse(await fs.readFile(file, "utf8")).learn.sync).toBe(true)
+    // The menu reads the file it wrote, not the session's loaded config.
+    expect(await readProjectLearning(root, root)).toMatchObject({ sync: true })
+    await Menu.setSync(root, root, false)
+    expect(await readProjectLearning(root, root)).toMatchObject({ sync: false })
   })
 })
 

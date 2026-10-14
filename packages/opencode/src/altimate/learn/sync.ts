@@ -1,13 +1,15 @@
 // altimate_change - new file
 //
-// Lesson sync with the bound workspace (`learn.sync`, opt-in). Pull: approved team lessons and tombstones into
+// Lesson sync with the bound workspace (`learn.sync`, on by default). Pull: approved team lessons and tombstones into
 // `remote.json`, the caller's own proposals into the ledger. Push: the outbox (proposals, usage batches) and the
 // first-sync backfill. See ledger.ts for the state files, effective.ts for how remote lessons are delivered, and
 // proposals.ts for how local changes become review-queue proposals.
 //
 // Rules this module keeps:
-// - Gate: learning on, workspaces on, `learn.sync` / `ALTIMATE_LEARN_SYNC` on, and a binding (pin first) to a
-//   workspace with a git remote. Otherwise no network traffic at all.
+// - Gate: learning on, workspaces on, `learn.sync` / `ALTIMATE_LEARN_SYNC` not off, and a binding (pin first) to a
+//   workspace with a git remote. Otherwise no lesson requests at all.
+// - Timing: a pull at session start, then one in the background on a later turn every `SESSION_REFRESH_MS`, and a
+//   push after reflection and promotion. `learn sync` and `learn push` run them on demand.
 // - No network I/O under the learn lock: requests run first, state is written in a short locked step after.
 // - Requests use the credential captured for the scope; a result whose scope changed in flight is discarded.
 // - A missing route (404 without a code) backs off for 24 hours. Transient errors keep every cache.
@@ -31,6 +33,8 @@ import type { ActAs } from "../workspace/api-client"
 
 const log = Log.create({ service: "learn.sync" })
 export const SESSION_WAIT_MS = 2_000
+/** How long a session trusts its last pull before a later turn pulls again in the background, like workspace skills. */
+export const SESSION_REFRESH_MS = 5 * 60_000
 export const UNSUPPORTED_BACKOFF_MS = 24 * 60 * 60_000
 export const BACKFILL_CAP = 200
 const LOCK_OPTIONS = { timeoutMs: 5_000 }
@@ -554,13 +558,17 @@ export interface RemoteView {
 }
 
 export interface SessionSync extends RemoteView {
-  /** Resolves when the session-start pull and push have finished (or failed). */
+  /** Resolves when the latest pull and push of this session have finished (or failed). */
   done: Promise<unknown>
+  /** Pull and push again in the background when the last run started `SESSION_REFRESH_MS` ago and has finished. */
+  refresh(): void
 }
 
 /**
  * Session start, before the first delivery: read the cache first; wait (at most `SESSION_WAIT_MS`) for the pull
- * only when there is no valid cache. Pull and outbox push continue in the background.
+ * only when there is no valid cache and the project is linked here. Pull and outbox push continue in the
+ * background, and later turns of the session refresh them every `SESSION_REFRESH_MS`. Delivery picks up a
+ * refreshed cache on the next turn.
  */
 const sessions = new Map<string, { account: string | null; seen: { epoch: number }; sync: Promise<SessionSync | undefined> }>()
 const SESSION_MEMO_MAX = 64
@@ -588,6 +596,7 @@ export async function sessionStart(root: string, directory: string, learn: Learn
     if (existing.account === account && existing.seen.epoch === epochOf(directory)) {
       // Least recently used is evicted first.
       sessions.set(key, existing)
+      void existing.sync.then((sync) => sync?.refresh())
       return existing.sync
     }
   }
@@ -603,7 +612,7 @@ export async function sessionStart(root: string, directory: string, learn: Learn
 /** `seen.epoch` is the project's binding epoch the view belongs to; a later link, unlink or rebind ends the view. */
 async function startSession(root: string, directory: string, learn: LearnConfig, waitMs: number, seen: { epoch: number }): Promise<SessionSync | undefined> {
   let scope = await cachedScope(root, directory).catch(() => undefined)
-  const done = (async () => {
+  const once = () => (async () => {
     const ctx = await context(directory, learn)
     // Resolving the binding can record it locally, which bumps the epoch: that is this view's own link.
     seen.epoch = epochOf(directory)
@@ -617,13 +626,29 @@ async function startSession(root: string, directory: string, learn: LearnConfig,
     else if (result.pulls.some((p) => p.kind === "workspace_not_found" || p.kind === "forbidden" || p.kind === "repo_not_bound")) scope = undefined
     else if (scope && !sameScope(scope, ctx.scope)) scope = undefined
   })().catch((error) => log.warn("learn session sync failed", { error: redactSecrets(errText(error)) }))
-  if (!scope) {
+  let started = Date.now()
+  let running = true
+  const track = (run: Promise<unknown>) => run.finally(() => { running = false })
+  let done = track(once())
+  // An unlinked project never waits: sync is on by default, and most projects are not linked.
+  const { readLocalBinding } = await import("../workspace/state")
+  const linked = !!(await readLocalBinding(directory).catch(() => null))
+  if (!scope && linked) {
     let timer: ReturnType<typeof setTimeout> | undefined
     await Promise.race([done, new Promise((resolve) => { timer = setTimeout(resolve, waitMs) })])
     clearTimeout(timer)
   }
   // A link, unlink or rebind of this project in this process ends the view; the next prompt loop starts a new one.
-  return { scope: () => (epochOf(directory) === seen.epoch ? scope : undefined), done }
+  return {
+    scope: () => (epochOf(directory) === seen.epoch ? scope : undefined),
+    get done() { return done },
+    refresh() {
+      if (running || Date.now() - started < SESSION_REFRESH_MS) return
+      started = Date.now()
+      running = true
+      done = track(once())
+    },
+  }
 }
 
 /** Workspace skills synced to this project that are learn-managed playbooks (published by `promote --publish`). */
@@ -674,6 +699,51 @@ export async function status(root: string, store: string, learn: LearnConfig) {
     hidden_local: [...hiddenReasons(store, current ? await Store.loadApproved(root, store).catch(() => []) : [], current)]
       .map(([lesson_key, reason]) => ({ lesson_key, reason })),
   }
+}
+
+/** The workspace sidebar's lessons line, summed over the project's stores. */
+export interface SidebarStatus {
+  team: number
+  pendingReview: number
+  queued: number
+  held: number
+  /** When the last pull of this account's lessons succeeded, epoch ms; null before the first one. */
+  pulledAt: number | null
+}
+
+/** The project's learn root: the nearest directory, from `directory` up, holding `.altimate-code/learn`. */
+async function learnRootFrom(directory: string): Promise<string | undefined> {
+  for (let dir = path.resolve(directory); ; dir = path.dirname(dir)) {
+    if (await fs.stat(path.join(dir, ".altimate-code", "learn")).then((s) => s.isDirectory(), () => false)) return dir
+    if (path.dirname(dir) === dir) return undefined
+  }
+}
+
+/**
+ * Lesson sync at a glance for the workspace sidebar, from local files only (no request). Undefined when sync is
+ * off, or when this account has not synced lessons in this project yet.
+ */
+export async function sidebarStatus(directory: string, learn?: LearnConfig): Promise<SidebarStatus | undefined> {
+  if (!syncEnabled(learn)) return undefined
+  const root = await learnRootFrom(directory)
+  if (!root) return undefined
+  const { accountDigest } = await import("../workspace/state")
+  const account = await accountDigest().catch(() => null)
+  const total: SidebarStatus = { team: 0, pendingReview: 0, queued: 0, held: 0, pulledAt: null }
+  let seen = false
+  for (const store of await stores(root)) {
+    const [remote, outbox] = await Promise.all([readRemote(root, store).catch(() => undefined), readOutbox(root, store).catch(() => undefined)])
+    if (!remote || remote.scope.account !== account) continue
+    seen = true
+    total.team += remote.lessons.filter((lesson) => lesson.store === store).length
+    total.pendingReview = Math.max(total.pendingReview, remote.pending_count)
+    const mine = (outbox?.proposals ?? []).filter((p) => sameScope(p.scope, remote.scope))
+    total.queued += mine.filter((p) => p.state === "queued").length
+    total.held += mine.filter((p) => p.state === "held").length
+    const at = Date.parse(remote.pulled_at)
+    if (Number.isFinite(at)) total.pulledAt = Math.max(total.pulledAt ?? 0, at)
+  }
+  return seen ? total : undefined
 }
 
 /**

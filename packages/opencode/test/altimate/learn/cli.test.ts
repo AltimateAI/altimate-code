@@ -698,8 +698,8 @@ mock.module(${publisher}, () => ({
   },
 }))
 `)
-  // The preload turns workspaces off for the suite; publishing needs them on.
-  const env = { ALTIMATE_DISABLE_WORKSPACE: "" }
+  // The preload turns workspaces off for the suite; publishing needs them on, and lesson sync (on by default) off.
+  const env = { ALTIMATE_DISABLE_WORKSPACE: "", ALTIMATE_LEARN_SYNC: "0" }
   const result = await runLearn(dir.path, ["promote", "--name", name, "--yes", "--publish"], preload, env)
   expect(result.code).not.toBe(0)
   expect(result.stderr).toContain("Promoted locally, but publish failed")
@@ -923,7 +923,7 @@ mock.module(${publisher}, () => ({
   explainPublishError: () => undefined,
 }))
 `)
-  const result = await runLearn(dir.path, ["promote", "--yes", "--publish", "--name", name], preload, { ALTIMATE_DISABLE_WORKSPACE: "" })
+  const result = await runLearn(dir.path, ["promote", "--yes", "--publish", "--name", name], preload, { ALTIMATE_DISABLE_WORKSPACE: "", ALTIMATE_LEARN_SYNC: "0" })
   expect(result.code).toBe(0)
   expect(result.stdout).toContain("Published approved lessons.")
   expect(await Store.readCandidate(dir.path, name)).toBeUndefined()

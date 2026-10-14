@@ -24,6 +24,16 @@ import { openManageUrl } from "./workspace"
 
 const id = "altimate:sidebar-workspace"
 
+/** "3 team lessons · 1 pending review · 2 queued · synced 4m ago": counts that are zero are left out. */
+export function lessonsLine(l: { team: number; pendingReview: number; queued: number; held: number; pulledAt: number | null }): string {
+  const parts = [`${l.team} team ${l.team === 1 ? "lesson" : "lessons"}`]
+  if (l.pendingReview > 0) parts.push(`${l.pendingReview} pending review`)
+  if (l.queued > 0) parts.push(`${l.queued} queued`)
+  if (l.held > 0) parts.push(`${l.held} held`)
+  if (l.pulledAt !== null) parts.push(`synced ${describeAge(l.pulledAt)}`)
+  return parts.join(" · ")
+}
+
 /** Cache-file poll cadence. Longer than a "reactive" ideal but the cheapest
  * option that does not require plumbing an event bus through the binding
  * writers. Trade-off documented (m1 in the consensus review): a fresh bind
@@ -306,6 +316,9 @@ function View(props: { api: TuiPluginApi }) {
             </Show>
             <Show when={detail()?.skillsSyncedAt}>
               {(at) => <text fg={theme().textMuted}>{`skills synced ${describeAge(at())}`}</text>}
+            </Show>
+            <Show when={detail()?.lessons}>
+              {(l) => <text fg={theme().textMuted}>{lessonsLine(l())}</text>}
             </Show>
             {/* altimate_change end */}
             {/* ``pinned via --workspace`` means "this SESSION was launched

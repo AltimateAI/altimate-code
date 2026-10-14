@@ -729,8 +729,9 @@ export namespace SessionPrompt {
     // An unused project pays only an existence check; do not load stores, migrate,
     // create state, or even schedule async learning work on that default-off path.
     const learnRoot = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-    // Lesson sync (opt-in): once per session and before the first delivery, read the team-lesson cache;
-    // wait at most 2s for the pull only when there is no valid cache. Off: no network and no team lessons.
+    // Lesson sync (on by default): before the first delivery, read the team-lesson cache; wait at most 2s for the
+    // pull only when there is no valid cache and the project is linked. Later turns of the session pull again in the
+    // background every few minutes, like workspace skills. Off: no network and no team lessons.
     const learnSync = syncEnabled(altCfg.learn)
       ? await import("../altimate/learn/sync")
           .then((m) => m.sessionStart(learnRoot, Instance.directory, altCfg.learn, { session: sessionID }))

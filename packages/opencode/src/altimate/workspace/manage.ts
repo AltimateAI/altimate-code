@@ -59,6 +59,8 @@ export interface StatusReport {
    * per-process, so a fresh session has not synced yet even for a project whose
    * snapshot is current on disk. Callers must not render it as "never synced". */
   skillsSyncedAt: number | null
+  /** Lesson sync for this project from local files; absent when lesson sync is off or has not run here yet. */
+  lessons?: import("../learn/sync").SidebarStatus
 }
 
 export interface RefreshReport {
@@ -156,6 +158,20 @@ export async function status(
     ...(memory === "unreadable" ? { memoryUnreadable: true as const } : {}),
     skillsEnabled: SkillSync.isEnabled(),
     skillsSyncedAt: await skillsSyncedAt(directory, binding),
+    ...(binding ? await lessonsStatus(directory) : {}),
+  }
+}
+
+/** Read lazily: the learn modules stay out of the workspace graph until a bound project asks. */
+async function lessonsStatus(directory: string): Promise<{ lessons?: import("../learn/sync").SidebarStatus }> {
+  try {
+    const [{ Config }, Sync] = await Promise.all([import("@/config/config"), import("../learn/sync")])
+    const learn = await Config.get().then((cfg) => cfg.learn, () => undefined)
+    const lessons = await Sync.sidebarStatus(directory, learn)
+    return lessons ? { lessons } : {}
+  } catch (err) {
+    log.warn("lesson sync status unavailable", { err: String(err) })
+    return {}
   }
 }
 

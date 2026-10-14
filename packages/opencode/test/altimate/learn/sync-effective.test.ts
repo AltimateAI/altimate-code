@@ -34,8 +34,11 @@ const id = (key: string, repo: string | null = REPO) => ({ repo_identity: repo, 
 
 describe("sync gate", () => {
   const on = { sync: true }
-  test("off by default, opt-in through config, env overrides both ways", () => {
-    expect(syncEnabled(undefined, {})).toBe(false)
+  test("on by default, off through config, env overrides both ways", () => {
+    expect(syncEnabled(undefined, {})).toBe(true)
+    expect(syncEnabled({}, {})).toBe(true)
+    expect(syncEnabled({ sync: false }, {})).toBe(false)
+    expect(syncEnabled({ sync: false }, { ALTIMATE_LEARN_SYNC: "1" })).toBe(true)
     expect(syncEnabled(on, {})).toBe(true)
     expect(syncEnabled(on, { ALTIMATE_LEARN_SYNC: "0" })).toBe(false)
     expect(syncEnabled({}, { ALTIMATE_LEARN_SYNC: "TRUE" })).toBe(true)

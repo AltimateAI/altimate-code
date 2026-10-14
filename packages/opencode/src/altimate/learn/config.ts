@@ -42,11 +42,13 @@ function workspaceDisabled(env: NodeJS.ProcessEnv): boolean {
 }
 
 /**
- * Lesson sync with the bound workspace (sync.ts) is opt-in and independent of capture: approved team lessons are
- * delivered whether or not this project records signals. The learning and workspace kill switches both turn it off.
+ * Lesson sync with the bound workspace (sync.ts) is on by default, like workspace skills, and independent of
+ * capture: approved team lessons are delivered whether or not this project records signals. It does anything only
+ * for a project linked to a workspace. `learn.sync: false`, `ALTIMATE_LEARN_SYNC=0`, and the learning and workspace
+ * kill switches turn it off.
  */
 export function syncEnabled(cfg?: LearnConfig, env: NodeJS.ProcessEnv = process.env): boolean {
-  return learnEnabled(cfg, env) && !workspaceDisabled(env) && (booleanFlag(env["ALTIMATE_LEARN_SYNC"]) ?? cfg?.sync === true)
+  return learnEnabled(cfg, env) && !workspaceDisabled(env) && (booleanFlag(env["ALTIMATE_LEARN_SYNC"]) ?? cfg?.sync !== false)
 }
 
 export interface AutoPromoteLimits {

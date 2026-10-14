@@ -10,19 +10,16 @@ import { EOL } from "os"
 import fs from "node:fs/promises"
 import path from "node:path"
 // altimate_change start — reject symlinks in learning configuration writes
-import { constants } from "node:fs"
 import * as SafeFS from "../../altimate/learn/safe-fs"
-// altimate_change end
-// altimate_change start — unique sibling files for atomic project config updates
-import { randomUUID } from "node:crypto"
 // altimate_change end
 import * as prompts from "@clack/prompts"
 import { Cause, Effect } from "effect"
-import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
+import { parse } from "jsonc-parser"
 import { cmd } from "./cmd"
 import { effectCmd, fail } from "../effect-cmd"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import * as Playbook from "../../altimate/learn/playbook"
+import { writeProjectLearning } from "../../altimate/learn/project-config"
 import * as Store from "../../altimate/learn/store"
 import { MAX_TEXT, summarize, describeApplied, describeRejected } from "../../altimate/learn/curator"
 import { sourceFromTrajectory, redactSecrets, type DigestSource } from "../../altimate/learn/digest"
@@ -61,6 +58,10 @@ const nameOption = (yargs: Argv) =>
   })
 
 /** The project root: where `.altimate-code/` lives and what `skill publish` treats as the boundary. */
+async function cwd() {
+  return (await import("@/project/instance")).Instance.directory
+}
+
 async function projectRoot() {
   const { Instance } = await import("@/project/instance")
   return Instance.worktree !== "/" ? Instance.worktree : Instance.directory
@@ -124,83 +125,6 @@ function describePushes(pushes: { submitted: number; duplicate: number; conflict
 }
 // altimate_change end
 
-/** Match the project locations loaded by Config, never the user's global configuration. */
-// altimate_change start — `autoPromote` writes learn.auto_promote; `false` only clears a key the file already sets
-async function writeProjectLearning(root: string, enabled: boolean | undefined, autoPromote?: boolean, sync?: boolean): Promise<string> {
-// altimate_change end
-  // altimate_change start — match discovered project config precedence from the current directory
-  const [{ Instance }, { Filesystem }] = await Promise.all([
-    import("@/project/instance"), import("@/util/filesystem"),
-  ])
-  // Config merges in the opposite order. Edit the highest-precedence existing project file
-  // so a second supported config cannot silently override the new opt-in setting.
-  const names = ["opencode.jsonc", "opencode.json", "altimate-code.jsonc", "altimate-code.json"]
-  const directories: string[] = []
-  for await (const dir of Filesystem.up({ targets: [".altimate-code", ".opencode"], start: Instance.directory, stop: root }))
-    directories.push(dir)
-  const candidates = directories.reverse().flatMap((dir) => names.map((name) => path.join(dir, name)))
-  for await (const file of Filesystem.up({ targets: ["opencode.jsonc", "opencode.json"], start: Instance.directory, stop: root }))
-    candidates.push(file)
-  // altimate_change end
-  let file = path.join(root, ".altimate-code", "altimate-code.json")
-  let text = "{}\n"
-  for (const candidate of candidates) {
-    // altimate_change start — reject linked project config files and their ancestors before reading
-    await SafeFS.assertSafePath(root, candidate, root)
-    // altimate_change end
-    const current = await fs.readFile(candidate, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return undefined
-      throw error
-    })
-    if (current === undefined) continue
-    file = candidate
-    text = current
-    break
-  }
-  const errors: ParseError[] = []
-  const config = parse(text, errors, { allowTrailingComma: true })
-  if (errors.length || !config || typeof config !== "object" || Array.isArray(config))
-    throw new Error(`Cannot update ${file}: expected a JSON configuration object.`)
-  const indent = /^([ \t]+)"/m.exec(text)?.[1]
-  const formattingOptions = {
-    insertSpaces: !indent?.includes("\t"),
-    tabSize: indent?.length ?? 2,
-    eol: text.includes("\r\n") ? "\r\n" : "\n",
-  }
-  // Like the MCP config writer, patch JSONC without expanding variables or rewriting other keys.
-  // altimate_change start — `disable --sync` turns only sync off
-  if (enabled !== undefined)
-    for (const key of ["capture", "auto_reflect"])
-      text = applyEdits(text, modify(text, ["learn", key], enabled, { formattingOptions }))
-  if (sync !== undefined) text = applyEdits(text, modify(text, ["learn", "sync"], sync, { formattingOptions }))
-  // altimate_change end
-  // altimate_change start — automatic promotion is a separate opt-in; disable turns it off where it is set
-  if (autoPromote === true || (autoPromote === false && config.learn?.auto_promote !== undefined))
-    text = applyEdits(text, modify(text, ["learn", "auto_promote"], autoPromote, { formattingOptions }))
-  // altimate_change end
-  // altimate_change start — preserve regular config permissions without following linked targets or ancestors
-  await SafeFS.mkdir(root, path.dirname(file), root)
-  await SafeFS.assertSafePath(root, file, root)
-  const mode = await fs.lstat(file).then((stat) => stat.mode & 0o777).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return 0o600
-    throw error
-  })
-  const temporary = `${file}.${randomUUID()}.tmp`
-  try {
-    const handle = await SafeFS.open(root, temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, mode, root)
-    try {
-      await handle.writeFile(text)
-      await handle.chmod(mode)
-    } finally {
-      await handle.close()
-    }
-    await SafeFS.rename(root, temporary, file, root)
-  } finally {
-    await SafeFS.remove(root, temporary, root)
-  }
-  // altimate_change end
-  return file
-}
 
 // altimate_change start — explain effective capture overrides after project opt-in
 async function captureOverrideHint(): Promise<string> {
@@ -244,18 +168,18 @@ const EnableCommand = effectCmd({
       type: "boolean",
       describe: "also promote automatically reflected candidates without review when every safety gate passes (undo with `learn rollback`)",
     })
-      // altimate_change start — lesson sync opt-in
+      // altimate_change start — lesson sync switch
       .option("sync", {
         type: "boolean",
-        describe: "also sync lessons with the linked workspace: receive approved team lessons, send yours to the owner's review queue",
+        describe: "turn lesson sync with the linked workspace back on (it is on by default): receive approved team lessons, send yours to the owner's review queue",
       }),
       // altimate_change end
   handler: Effect.fn("Cli.learn.enable")(function* (args) {
     yield* run("", async () => {
       const root = await projectRoot()
       const requested = args["auto-promote"] as boolean | undefined
-      // altimate_change start — lesson sync opt-in
-      const file = await writeProjectLearning(root, true, requested, args.sync === true ? true : undefined)
+      // altimate_change start — lesson sync switch
+      const file = await writeProjectLearning(root, await cwd(), true, requested, args.sync === true ? true : undefined)
       // altimate_change end
       // altimate_change end
       // altimate_change start — explicit capture opt-in checks effective config and preserves the learning kill switch
@@ -322,7 +246,7 @@ const DisableCommand = effectCmd({
     if (args.sync === true) {
       return yield* run("", async () => {
         const root = await projectRoot()
-        const file = await writeProjectLearning(root, undefined, undefined, false)
+        const file = await writeProjectLearning(root, await cwd(), undefined, undefined, false)
         const { Config } = await import("@/config/config")
         await Config.invalidate()
         const learn = (await Config.get()).learn
@@ -337,7 +261,7 @@ const DisableCommand = effectCmd({
     // altimate_change end
     yield* run("", async () => {
       // altimate_change start — disable also turns automatic promotion off
-      const file = await writeProjectLearning(await projectRoot(), false, false)
+      const file = await writeProjectLearning(await projectRoot(), await cwd(), false, false)
       // altimate_change end
       // altimate_change start — verify effective settings before reporting learning disabled
       const { Config } = await import("@/config/config")
@@ -1171,7 +1095,7 @@ const SyncCommand = effectCmd({
       ])
       const learn = (await Config.get()).learn
       if (!syncEnabled(learn))
-        throw new Error("Lesson sync is off. Turn it on with `altimate-code learn enable --sync` (or ALTIMATE_LEARN_SYNC=1).")
+        throw new Error("Lesson sync is off for this project (learn.sync=false or ALTIMATE_LEARN_SYNC=0). Turn it back on with `altimate-code learn enable --sync`.")
       const report = await Sync.run(root, Instance.directory, learn)
       const legacy = report.context.status === "ready" ? await Sync.legacyPlaybookSkills(Instance.directory) : []
       if (args.json) out(JSON.stringify({ ...report, context: report.context.status === "ready" ? { status: "ready", scope: report.context.scope } : report.context, legacy_playbook_skills: legacy }, null, 2))
@@ -1208,7 +1132,7 @@ const PushCommand = effectCmd({
       ])
       const learn = (await Config.get()).learn
       if (!syncEnabled(learn))
-        throw new Error("Lesson sync is off. Turn it on with `altimate-code learn enable --sync` (or ALTIMATE_LEARN_SYNC=1).")
+        throw new Error("Lesson sync is off for this project (learn.sync=false or ALTIMATE_LEARN_SYNC=0). Turn it back on with `altimate-code learn enable --sync`.")
       const report = await Sync.run(root, Instance.directory, learn, { pull: !!args.resubmit, resubmit: args.resubmit })
       if (report.context.status !== "ready")
         throw new Error(`Lesson sync skipped: ${report.context.status === "skipped" ? report.context.reason : "sync is off"}.`)
@@ -1258,7 +1182,7 @@ const LEARN_HELP = [
   "  Undo with `learn rollback`.",
   // altimate_change end
   // altimate_change start — lesson sync
-  "Sync with the linked workspace (opt-in): `learn enable --sync` (off: `learn disable --sync`; env ALTIMATE_LEARN_SYNC).",
+  "Sync with the linked workspace (on by default, every few minutes in a session): `learn disable --sync` to turn it off, `learn enable --sync` to turn it back on (env ALTIMATE_LEARN_SYNC).",
   "  Approved team lessons are delivered in every session; staged and promoted lessons go to the owner's review queue.",
   "  altimate-code learn sync                      pull team lessons and send queued proposals",
   "  altimate-code learn push [--resubmit <key>]   send queued proposals; resend a held one after reviewing its conflict",

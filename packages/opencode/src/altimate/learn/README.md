@@ -47,9 +47,10 @@ including after learning is subsequently disabled.
 
 # Lesson sync
 
-`learn.sync` (or `ALTIMATE_LEARN_SYNC`, overriding config in both directions) is opt-in and needs learning on,
-workspaces on (`ALTIMATE_DISABLE_WORKSPACE` unset), a workspace link (the IDE pin first) and a git remote. Off,
-there is no network traffic and no team lesson is delivered.
+`learn.sync` (or `ALTIMATE_LEARN_SYNC`, overriding config in both directions) is on by default and needs learning
+on, workspaces on (`ALTIMATE_DISABLE_WORKSPACE` unset), a workspace link (the IDE pin first) and a git remote. A
+session pulls at its start and again on a later turn every five minutes, in the background, like workspace skills.
+Off, there is no network traffic and no team lesson is delivered.
 
 - `sync.ts` pulls approved team lessons and tombstones (`POST /sync`) and the caller's own proposals
   (`GET /submissions`), and pushes the outbox (`POST /batch`, `POST /usage`). No request runs under the learn lock;

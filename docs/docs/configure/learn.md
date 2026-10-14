@@ -187,15 +187,20 @@ Delivery waits at most about 5 seconds for the learn lock; if another process st
 
 ## Sync with your workspace
 
-By default lessons stay in the project: `approved.json` is shared through Git and everything else is local. With lesson sync on, a project linked to an Altimate workspace shares lessons through the workspace instead. Teammates receive the lessons the workspace owner approved, and the lessons you stage or promote go to the owner's review queue.
+A project linked to an Altimate workspace shares its lessons through the workspace. Teammates receive the lessons the workspace owner approved, and the lessons you stage or promote go to the owner's review queue. A project that is not linked keeps lessons in the project: `approved.json` is shared through Git and everything else is local.
+
+Sync is on by default and runs by itself, like workspace skills. You do not need to run anything in a session.
 
 ```bash
-altimate-code learn enable --sync   # or set learn.sync=true, or ALTIMATE_LEARN_SYNC=1
-altimate-code learn sync            # pull team lessons now and send anything queued
 altimate-code learn status          # the "Lesson sync" block
+altimate-code learn sync            # optional: pull team lessons now and send anything queued
+altimate-code learn disable --sync  # turn sync off (or set learn.sync=false, or ALTIMATE_LEARN_SYNC=0)
+altimate-code learn enable --sync   # turn it back on
 ```
 
-Sync is off by default. It needs all of the following:
+In a session, `/learn` shows the project's lessons and their sync, and offers **Sync now**, **Turn sync off** or **on**, and **Open review queue** (the workspace's Learned rules tab). The workspace tile in the sidebar shows the same counts, for example `3 team lessons · 1 pending review · synced 4m ago`. Turning sync off or on from `/learn` writes the project config and applies from the next session.
+
+Sync needs all of the following:
 
 - learning on (`learn.enabled`);
 - workspaces on (`ALTIMATE_DISABLE_WORKSPACE` unset);
@@ -204,7 +209,7 @@ Sync is off by default. It needs all of the following:
 
 With sync off, learn makes no network requests for lessons and delivers no team lessons.
 
-**What you receive.** At the start of each session the approved team lessons for this repository are pulled into `.altimate-code/learn/<name>/remote.json` and delivered like your own approved lessons. The pull uses the cached copy when there is one. Without a cache it waits at most 2 seconds before the first delivery and otherwise finishes in the background. A team lesson replaces a local lesson with the same key. Lessons from other repositories in the workspace arrive only when the owner turns on sharing across repositories.
+**What you receive.** At the start of each session the approved team lessons for this repository are pulled into `.altimate-code/learn/<name>/remote.json` and delivered like your own approved lessons. The pull uses the cached copy when there is one. Without a cache, in a linked project, it waits at most 2 seconds before the first delivery and otherwise finishes in the background. During the session a later turn pulls again in the background once five minutes have passed, so a lesson the owner approves reaches open sessions on their next turn after that. A team lesson replaces a local lesson with the same key. Lessons from other repositories in the workspace arrive only when the owner turns on sharing across repositories.
 
 **What you send.** Lessons only, never signals:
 
