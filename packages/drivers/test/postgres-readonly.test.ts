@@ -183,7 +183,7 @@ test("Postgres never starts user SQL when cancellation arrives during session se
   }
 })
 
-async function probeDatabase() {
+async function probeDatabase(config: Record<string, unknown> = { query_timeout_ms: 1000 }) {
   const queries: string[] = []
   const releases: unknown[] = []
   const started = Promise.withResolvers<void>()
@@ -208,7 +208,7 @@ async function probeDatabase() {
       },
     },
   }))
-  const connector = await connect({ type: "postgres", query_timeout_ms: 1000 })
+  const connector = await connect({ type: "postgres", ...config })
   await connector.connect()
   return { connector, queries, releases, started: started.promise, shown }
 }
@@ -251,6 +251,26 @@ test("Postgres abandons a stalled initial timeout probe at the resolved deadline
     await db.connector.close()
   }
 })
+
+for (const config of [
+  { query_timeout_ms: 0, statement_timeout: 20 },
+  { query_timeout_ms: 5000, statement_timeout: 20 },
+]) {
+  test(`Postgres bounds a stalled initial timeout probe by the effective deadline (query_timeout_ms ${config.query_timeout_ms})`, async () => {
+    const db = await probeDatabase(config)
+    try {
+      const execution = db.connector.execute("INSERT INTO sentinel VALUES (1)").catch((error) => error)
+      await db.started
+      const error = await Promise.race([execution, Bun.sleep(1000).then(() => "still probing")])
+      expect(error).toBeInstanceOf(QueryTimeoutError)
+      expect(error.timeoutMs).toBe(20)
+      expect(db.queries).toEqual(["SHOW statement_timeout"])
+      expect(db.releases).toEqual([true])
+    } finally {
+      await db.connector.close()
+    }
+  })
+}
 
 test("Postgres executes user SQL after a fast initial timeout probe", async () => {
   const db = await probeDatabase()

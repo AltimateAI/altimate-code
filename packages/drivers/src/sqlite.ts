@@ -74,7 +74,14 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
       if (!isSelect) {
         // Non-SELECT statements (INSERT, UPDATE, DELETE, CREATE, etc.)
-        const info = await engine.call<{ changes: number; lastInsertRowid: number | bigint }>("run", { sql }, timeoutMs)
+        // altimate_change start — report dispatch so callers can order follow-up work
+        const info = await engine.call<{ changes: number; lastInsertRowid: number | bigint }>(
+          "run",
+          { sql },
+          timeoutMs,
+          options?.onDispatch,
+        )
+        // altimate_change end
         return {
           columns: ["changes", "lastInsertRowid"],
           rows: [[info.changes, info.lastInsertRowid]],
@@ -84,7 +91,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       }
 
       // altimate_change start — forward the budget before the helper collects rows
-      const rows = await engine.call<any[]>("all", { sql: query, maxResultBytes: options?.maxResultBytes }, timeoutMs)
+      const rows = await engine.call<any[]>("all", { sql: query, maxResultBytes: options?.maxResultBytes }, timeoutMs, options?.onDispatch)
       // altimate_change end
       const columns = rows.length > 0 ? Object.keys(rows[0]) : []
       const truncated = effectiveLimit > 0 && rows.length > effectiveLimit

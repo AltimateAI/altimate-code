@@ -125,12 +125,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
                   // pg's promise query API has no cancellation handle. Discard
                   // the connection in finally so a stalled probe is never reused.
                   discardClient = true
-                  reject(signal ? signal.reason : new QueryTimeoutError({
-                    engine: "PostgreSQL", timeoutMs: queryTimeout.ms!,
-                  }))
+                  reject(signal ? signal.reason : new QueryTimeoutError({ engine: "PostgreSQL", timeoutMs: ourMs }))
                 }
                 signal?.addEventListener("abort", abort, { once: true })
-                if (!signal && queryTimeout.ms !== undefined) timer = setTimeout(abort, queryTimeout.ms)
+                // The effective deadline also covers a configured statement_timeout alone.
+                if (!signal) timer = setTimeout(abort, ourMs)
                 if (signal?.aborted) {
                   abort()
                   return

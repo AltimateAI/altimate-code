@@ -215,9 +215,17 @@ describe("sql.execute deadline — native engines", () => {
     seed.close()
     Registry.setConfigs({ lite: { type: "sqlite", path: db } as never })
     try {
+      // Observe A's dispatch to the helper so B is queued strictly behind it.
+      const dispatched = Promise.withResolvers<void>()
+      const connector = await Registry.get("lite")
+      const execute = connector.execute.bind(connector)
+      const spy = spyOn(connector, "execute").mockImplementation((sql, limit, binds, options) =>
+        execute(sql, limit, binds, sql === FOREVER_SQLITE ? { ...options, onDispatch: dispatched.resolve } : options),
+      )
       // A holds the engine for 7s (past B's 500ms budget + the 5s outer grace).
       const a = run({ sql: FOREVER_SQLITE, warehouse: "lite", query_timeout_ms: 7000 })
-      await Bun.sleep(200)
+      await dispatched.promise
+      spy.mockRestore()
       const b = await Promise.race([
         run({ sql: "INSERT INTO sentinel VALUES (1)", warehouse: "lite", query_timeout_ms: 500 }),
         Bun.sleep(20_000).then(() => "stuck"),
