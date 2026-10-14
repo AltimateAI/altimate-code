@@ -1079,8 +1079,8 @@ describe.skipIf(!canRunBrowserTests)("Trace Viewer Adversarial", () => {
     const scriptContent = html.match(/<script>([\s\S]*?)<\/script>/)?.[1] ?? ""
     // The only </script> should be the closing tag itself
     expect(scriptContent).not.toContain("</script>")
-    // But should contain the escaped version
-    expect(scriptContent).toContain("<\\/script>")
+    // But should contain the escaped version: every `<` from the trace as `\u003c`
+    expect(scriptContent).toContain("\\u003c/script>\\u003cscript>alert(1)")
   })
 
   test("unicode in span names renders correctly", async () => {

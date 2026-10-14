@@ -40,6 +40,7 @@ import { Filesystem } from "@/util/filesystem"
 import { AltimateApi } from "@/altimate/api/client"
 import { isInWorkspaceSnapshot } from "./snapshot-path"
 import { ConflictError, ForbiddenError, NotFoundError, WorkspaceApi, altimateRequest } from "./api-client"
+import type { ConflictDetail } from "./api-client"
 import { resolveBinding } from "./state"
 
 const log = Log.create({ service: "altimate-workspace-skill-publish" })
@@ -266,20 +267,36 @@ export class SkillChangedElsewhereError extends Error {
   }
 }
 
+/** Names are unique per creator across the whole ACCOUNT, not per workspace: the
+ * conflicting skill may live in a workspace this project was never linked to, so
+ * the message names the account scope — and the owning workspace when the 409
+ * detail carries it — rather than sending the user to look in the wrong place. */
 export class SkillNameConflictError extends Error {
   constructor(
     readonly skillName: string,
     operation: "create" | "rename" = "create",
+    owner?: Pick<ConflictDetail, "existing_datamate_id" | "existing_datamate_name">,
   ) {
+    const where = ownerWorkspace(owner)
+    const scope = where ? `in your account (in workspace ${where})` : "in your account"
     super(
       operation === "rename"
-        ? `You already have another skill named "${skillName}" in this workspace. Choose a different name for this skill, or rename the other skill in the workspace first.`
-        : `You already have a skill named "${skillName}" in this workspace. It was published ` +
-          `from somewhere else, so this machine cannot update it — rename this one, edit ` +
-          `it in the workspace, or publish again with \`--replace\` to update it from here.`,
+        ? `You already have another skill named "${skillName}" ${scope}. Choose a different name for this skill, or rename the other skill first.`
+        : `A skill named "${skillName}" already exists ${scope}, published from another project ` +
+          `or machine, so this publish cannot update it — rename this skill, update the original ` +
+          `from where it was published, or publish again with \`--replace\` to update it from here.`,
     )
     this.name = "SkillNameConflictError"
   }
+}
+
+function ownerWorkspace(owner?: Pick<ConflictDetail, "existing_datamate_id" | "existing_datamate_name">) {
+  const name = typeof owner?.existing_datamate_name === "string" ? owner.existing_datamate_name.trim() : ""
+  const id = typeof owner?.existing_datamate_id === "number" ? owner.existing_datamate_id : undefined
+  if (name && id !== undefined) return `"${name}" (id ${id})`
+  if (name) return `"${name}"`
+  if (id !== undefined) return `id ${id}`
+  return ""
 }
 
 export interface PublishReport {
@@ -783,12 +800,12 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     // altimate_change start — learn: `--replace` adopts this user's own same-name skill
     if (err instanceof ConflictError && input.replace) {
       const own = await findOwnSkillByName(input.name, scope.userId, binding.datamateId)
-      if (!own) throw new SkillNameConflictError(input.name)
+      if (!own) throw new SkillNameConflictError(input.name, "create", err.detail)
       const updated = await update(own, true)
       if (updated) return updated
     }
     // altimate_change end
-    if (err instanceof ConflictError) throw new SkillNameConflictError(input.name)
+    if (err instanceof ConflictError) throw new SkillNameConflictError(input.name, "create", err.detail)
     throw err
   }
 
@@ -885,7 +902,7 @@ export function explainPublishError(err: unknown): string | null {
  * relabelled — a wrong explanation is worse than a bare one. */
 function updateConflict(err: ConflictError, skillName: string): Error {
   const detail = err.detail.message ?? ""
-  if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName, "rename")
+  if (/already have a skill named/i.test(detail)) return new SkillNameConflictError(skillName, "rename", err.detail)
   if (/changed while you were editing/i.test(detail)) return new SkillChangedElsewhereError(skillName)
   return err
 }

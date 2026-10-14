@@ -311,14 +311,17 @@ export namespace AltimateApi {
     return parsed.data.knowledge_bases.filter((d) => d.is_deleted !== true).map((d) => ({ id: d.id, name: d.name }))
   }
 
-  export async function createDatamate(payload: {
-    name: string
-    description?: string
-    integrations?: Array<{ id: string; tools: Array<{ key: string }> }>
-    memory_enabled?: boolean
-    privacy?: string
-  }) {
-    const creds = await getCredentials()
+  export async function createDatamate(
+    payload: {
+      name: string
+      description?: string
+      integrations?: Array<{ id: string; tools: Array<{ key: string }> }>
+      memory_enabled?: boolean
+      privacy?: string
+    },
+    creds?: AltimateCredentials,
+  ) {
+    creds ??= await getCredentials()
     const data = await request(creds, "POST", "/datamates/", payload)
     // Backend returns { id: number } for create
     const id = String(data.id ?? data.datamate?.id)
@@ -341,8 +344,8 @@ export namespace AltimateApi {
     return DatamateSummary.parse(raw)
   }
 
-  export async function deleteDatamate(id: string) {
-    const creds = await getCredentials()
+  export async function deleteDatamate(id: string, creds?: AltimateCredentials) {
+    creds ??= await getCredentials()
     await request(creds, "DELETE", `/datamates/${id}`)
   }
 

@@ -20,7 +20,9 @@ export function renderTraceViewer(
   // shareable, so the Copy Link button is left out.
   options?: { live?: boolean; apiPath?: string; embedded?: boolean },
 ): string {
-  const traceJSON = JSON.stringify(trace).replace(/<\//g, "<\\/")
+  // Every `<` as `\u003c`, not just `</`: `<!--<script` in tool output would otherwise put the HTML parser in a
+  // state where this script's own `</script>` no longer ends it, and the page renders empty.
+  const traceJSON = JSON.stringify(trace).replace(/</g, "\\u003c")
   const apiPath = options?.apiPath ?? "/api/trace"
   const live = options?.live ?? false
   const embedded = options?.embedded ?? false
@@ -1242,7 +1244,7 @@ function showDetail(span) {
   }
 
   el.innerHTML = html;
-  } catch(err) { el.innerHTML = '<div style="color:var(--red);padding:20px">Summary rendering error: ' + (err.message || err) + '</div>'; console.error('[trace] Summary error:', err); }
+  } catch(err) { el.innerHTML = '<div style="color:var(--red);padding:20px">Summary rendering error: ' + e(err.message || err) + '</div>'; console.error('[trace] Summary error:', err); }
 })();
 
 // ===================== WATERFALL VIEW =====================
