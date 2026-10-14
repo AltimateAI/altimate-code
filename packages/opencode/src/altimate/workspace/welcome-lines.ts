@@ -75,7 +75,7 @@ export function welcomeLines(input: {
   return {
     mode: `Workspace mode · linked to ${modeName(binding.datamateName)}`,
     commands: WORKSPACE_COMMANDS,
-    integrations: `Integrations (last session, ${describeAge(snapshot.at, input.now)}): ${statusHeadline(counts)}${counts.gaps > 0 ? " — /workspace for the reasons" : ""}`,
+    integrations: `Integrations (last session, ${describeAge(snapshot.at, input.now)}): ${statusHeadline(counts)}${counts.gaps > 0 ? " — /integrations for the reasons" : ""}`,
   }
 }
 

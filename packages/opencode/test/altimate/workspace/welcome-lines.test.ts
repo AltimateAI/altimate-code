@@ -42,7 +42,7 @@ describe("welcomeLines", () => {
   test("after a session: the last session's numbers, its age, and a pointer when something needs attention", () => {
     const lines = welcomeLines({ binding, snapshot: snapshot(), now: 2 * 3_600_000 })
     expect(lines.integrations).toBe(
-      "Integrations (last session, 2h ago): 1 of 3 integration tools available · 2 need attention · 1 more via VS Code — /workspace for the reasons",
+      "Integrations (last session, 2h ago): 1 of 3 integration tools available · 2 need attention · 1 more via VS Code — /integrations for the reasons",
     )
   })
 

@@ -1197,6 +1197,49 @@ export namespace Server {
         }
       })
       // altimate_change end
+      // altimate_change start — GET /altimate/workspace/status
+      // The recorded sync state for the request's directory: per entity kind, when it was last
+      // checked and changed, and what changed. Reads local files past the binding resolution, which
+      // asks the server only when its cached answer is older than the revalidation window. Changes
+      // after this read arrive as `altimate.workspace.sync.changed` on `/event`.
+      //
+      // `binding` says why there may be no state: `unbound` is a project with no workspace,
+      // `unknown` one whose link could not be confirmed (no credentials, an invalid pin, the
+      // service unreachable) — which a client must not show as "not linked". `stale` marks a
+      // last-known answer (`bound` or `unbound`) the server could not confirm just now, for a
+      // client to show as last known.
+      .get("/altimate/workspace/status", async (c) => {
+        const refused = workspaceRouteRefusal(
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { resolveBindingOutcome } = await import("../altimate/workspace/state")
+          const SyncState = await import("../altimate/workspace/sync-state")
+          const outcome = await resolveBindingOutcome(Instance.directory)
+          const stale = "stale" in outcome && outcome.stale === true
+          if (outcome.status !== "bound") {
+            return c.json({ ok: true as const, binding: outcome.status, stale, datamateId: null, entities: {} })
+          }
+          const datamateId = outcome.binding.datamateId
+          const state = await SyncState.read(Instance.directory, datamateId)
+          return c.json({
+            ok: true as const,
+            binding: "bound" as const,
+            stale,
+            datamateId,
+            entities: state?.entities ?? {},
+          })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace status: failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
       // altimate_change start — GET /altimate/skill/publishable, POST /altimate/skill/publish
       // The CLI's `skill publish <name>` for the IDE extension. Only `serve` holds the extension's
       // pin, so publishing here targets the workspace selected in the panel — through the same

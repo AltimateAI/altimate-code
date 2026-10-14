@@ -42,6 +42,7 @@ import * as Precedence from "../altimate/workspace/precedence"
 import * as Awareness from "../altimate/workspace/awareness"
 import * as WorkspaceIdentity from "../altimate/workspace/identity"
 import * as PendingTurns from "../altimate/workspace/pending-turns"
+import * as DatamateManagerGate from "../altimate/workspace/datamate-manager-gate"
 // altimate_change end
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
@@ -673,6 +674,8 @@ export namespace SessionPrompt {
     // iterations, and an iteration can `continue` before cataloguing (pending
     // compaction, context overflow), so "step === 1" is not "first catalog".
     let catalogued = false
+    // The linked-project notice for this turn, settled at its first catalog.
+    const workspaceNotice = DatamateManagerGate.turnNotice()
     // altimate_change end
     // altimate_change start (AI-7519) — capture bootstrap start; emitted as a
     // single "bootstrap" span right before the first processor.process call so
@@ -1455,6 +1458,7 @@ export namespace SessionPrompt {
       catalogued = true
       const tools = firstCatalog ? await WorkspaceEngine.atTurnStart(sessionID, catalog) : await catalog()
       WorkspaceEngine.pinTurnTools(sessionID, firstCatalog, tools)
+      if (firstCatalog) workspaceNotice.settle(sessionID)
       // altimate_change end
 
       // Inject StructuredOutput tool if JSON schema mode enabled
@@ -1638,6 +1642,12 @@ export namespace SessionPrompt {
       // workspace's engine is attributed AND its tools materialised — so a session
       // with no workspace assembles exactly the array it did before this shipped.
       const workspaceAwareness = Awareness.systemSection(Precedence.forSession(sessionID))
+      // A linked session: `datamate_manager` is turned off for the project, so the
+      // model is told that a request to connect a datamate is about this link and
+      // what the engine's state means for it — as settled at this turn's first
+      // catalog, like the tools it describes. "" for an unlinked project, so other
+      // sessions assemble the same array as before.
+      const workspaceEngineNotice = workspaceNotice.text()
       // altimate_change end
       const system = [
         ...(await SystemPrompt.environment(model)),
@@ -1645,6 +1655,8 @@ export namespace SessionPrompt {
         // trailing) per the placement finding in session/system.ts: content near the
         // front of a section is treated as binding, trailing content as background.
         ...(workspaceIdentity ? [workspaceIdentity] : []),
+        // Beside the identity it qualifies, and early for the same reason.
+        ...(workspaceEngineNotice ? [workspaceEngineNotice] : []),
         // altimate_change end
         ...(skills ? [skills] : []),
         ...(knowledgeInjection ? [knowledgeInjection] : []),
