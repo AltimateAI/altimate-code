@@ -545,6 +545,28 @@ describe("/learn review and held proposals", () => {
     expect(await Menu.stagedReview(root, NAME)).toBeUndefined()
   })
 
+  test("view lessons: approved lessons with their markers, then team lessons with no local copy", async () => {
+    const root = await project()
+    const ctx = await ready("key-a")
+    await approve(root, [lesson("L-0e11", "Shared rule."), lesson("L-0e12", "Only mine.", { pinned: true }), lesson("L-0e13", "Retired by the team.")])
+    server.add({ lesson_key: "L-0e11", text: "Shared rule." }, REMOTE)
+    server.add({ lesson_key: "L-0e14", text: "From a teammate.", tags: ["dbt"] }, REMOTE)
+    server.add({ lesson_key: "L-0e15", text: "For every repository." })
+    server.add({ lesson_key: "L-0e13", text: "Retired by the team.", status: "retired" }, REMOTE)
+    await Sync.pull(root, NAME, ctx)
+    const rows = await Menu.lessons(root, learn)
+    expect(rows.map((r) => [r.source, r.id, r.marks])).toEqual([
+      ["approved", "L-0e11", ["team"]],
+      ["approved", "L-0e12", ["local", "pinned"]],
+      ["approved", "L-0e13", ["retired by team — not delivered"]],
+      ["team", "L-0e14", ["team"]],
+      ["team", "L-0e15", ["team", "workspace-wide"]],
+    ])
+    expect(rows.find((r) => r.id === "L-0e14")!.tags).toEqual(["dbt"])
+    // Sync off: the local lessons only, with no sync markers.
+    expect((await Menu.lessons(root, { sync: false })).map((r) => [r.id, r.marks])).toEqual([["L-0e11", []], ["L-0e12", ["pinned"]], ["L-0e13", []]])
+  })
+
   test("held proposals are listed with their reason, and resubmit sends them against the current version", async () => {
     const root = await project()
     await home.signIn(server.url, "key-a")

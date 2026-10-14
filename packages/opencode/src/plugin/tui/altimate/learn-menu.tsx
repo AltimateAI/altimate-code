@@ -82,6 +82,9 @@ async function showLearnMenu(api: TuiPluginApi) {
   }
 
   const actions = [
+    ...(summary.approved || summary.lessons?.team
+      ? [{ title: "View lessons", value: "view", description: "Read the approved and team lessons, with their status.", category: "Actions" }]
+      : []),
     ...summary.staged.map((store) => ({
       title: summary.staged.length > 1 ? `Review staged changes: ${store}` : "Review staged changes",
       value: `review:${store}`,
@@ -116,6 +119,10 @@ async function showLearnMenu(api: TuiPluginApi) {
         }
         if (option.value.startsWith("review:")) {
           showStagedReview(api, root, directory, learn, option.value.slice("review:".length)).catch((err) => failed(api, err))
+          return
+        }
+        if (option.value === "view") {
+          showLessons(api, root, learn).catch((err) => failed(api, err))
           return
         }
         if (option.value === "held") {
@@ -228,6 +235,47 @@ async function showStagedReview(api: TuiPluginApi, root: string, directory: stri
                 .then((done) => api.ui.toast({ variant: "success", message: done ? `Discarded the candidate for "${store}".` : `No candidate for "${store}".`, duration: 6_000 }))
                 .catch((err) => failed(api, err))
             }, again)
+      }}
+    />
+  ))
+}
+
+/** A short status tag in front of a lesson: the first marker that says how it is delivered, then pinned. */
+function statusTag(marks: string[]): string {
+  const status = marks.find((mark) => mark !== "pinned" && mark !== "workspace-wide")
+  const short = status === undefined ? undefined
+    : status.startsWith("retired") ? "retired"
+    : status.startsWith("held") ? "held"
+    : status.startsWith("pending") ? "pending"
+    : status.startsWith("team version") ? "team version used"
+    : status
+  const tags = [short, marks.includes("pinned") ? "pinned" : undefined].filter(Boolean)
+  return tags.length ? `[${tags.join(", ")}] ` : ""
+}
+
+/** Read-only, searchable: type to filter by text, id, tag or status. */
+async function showLessons(api: TuiPluginApi, root: string, learn: LearnConfig) {
+  const Menu = await import("@/altimate/learn/menu")
+  const rows = await Menu.lessons(root, learn)
+  const stores = new Set(rows.map((row) => row.store))
+  const group = (row: { store: string; source: string }) =>
+    `${row.source === "team" ? "Team (not in this project)" : "Approved"}${stores.size > 1 ? ` · ${row.store}` : ""}`
+  api.ui.dialog.replace(() => (
+    <api.ui.DialogSelect
+      title={`Lessons · ${rows.length}`}
+      placeholder="Search lessons"
+      options={[
+        ...rows.map((row) => ({
+          // The status leads: the dialog is narrow, and a long lesson would push a trailing marker out of view.
+          title: `${statusTag(row.marks)}${row.text}`,
+          value: `info:${row.store}:${row.source}:${row.id}`,
+          description: [...row.marks, row.id, ...(row.tags.length ? [`tags: ${row.tags.join(", ")}`] : [])].join(" · "),
+          category: group(row),
+        })),
+        { title: "Back", value: "back", description: "Return to the Learn menu.", category: "Actions" },
+      ]}
+      onSelect={(option) => {
+        if (option.value === "back") void showLearnMenu(api).catch((err) => failed(api, err))
       }}
     />
   ))

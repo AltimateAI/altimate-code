@@ -161,3 +161,39 @@ export async function resubmit(root: string, directory: string, key: string, lea
     return { ok: true, message: `${key} needed nothing more: the workspace already holds that change.` }
   return { ok: true, message: `Resubmitted ${key}. ${result.message}` }
 }
+
+export interface LessonRow {
+  store: string
+  id: string
+  text: string
+  tags: string[]
+  /** `learn show` markers: team, local, pending review, held, retired by team, pinned, workspace-wide. */
+  marks: string[]
+  source: "approved" | "team"
+}
+
+/**
+ * The project's lessons as `learn show` lists them, for reading in the TUI: approved lessons with their sync
+ * markers, then team lessons from the workspace that have no local copy. Local files only.
+ */
+export async function lessons(root: string, learn: LearnConfig | undefined): Promise<LessonRow[]> {
+  const rows: LessonRow[] = []
+  for (const store of await Sync.stores(root)) {
+    const approved = await Store.loadApproved(root, store).catch(() => [])
+    const team = syncEnabled(learn) ? await Sync.markers(root, store).catch(() => undefined) : undefined
+    for (const lesson of approved)
+      rows.push({
+        store, id: lesson.id, text: lesson.text, tags: lesson.tags, source: "approved",
+        marks: [team?.mark(lesson.id, lesson.text) ?? "", lesson.pinned ? "pinned" : ""].filter(Boolean),
+      })
+    const local = new Set(approved.map((lesson) => lesson.id))
+    for (const lesson of team?.team ?? []) {
+      if (local.has(lesson.lesson_key)) continue
+      rows.push({
+        store, id: lesson.lesson_key, text: lesson.text, tags: lesson.tags, source: "team",
+        marks: ["team", lesson.pinned ? "pinned" : "", lesson.repo_identity === null ? "workspace-wide" : ""].filter(Boolean),
+      })
+    }
+  }
+  return rows
+}
