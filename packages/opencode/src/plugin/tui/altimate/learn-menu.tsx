@@ -202,7 +202,14 @@ async function showStagedReview(api: TuiPluginApi, root: string, directory: stri
       description: syncEnabled(learn) ? "Make these the approved lessons and send them for the owner's review." : "Make these the approved lessons.",
       category: "Actions",
     },
-    { title: "Discard", value: "reject", description: "Throw the staged candidate away; the approved lessons stay.", category: "Actions" },
+    {
+      title: "Discard",
+      value: "reject",
+      description: syncEnabled(learn)
+        ? "Throw the local candidate away. Lessons already sent stay in the workspace's review queue."
+        : "Throw the staged candidate away; the approved lessons stay.",
+      category: "Actions",
+    },
     { title: "Back", value: "back", description: "Return to the Learn menu.", category: "Actions" },
   ]
   const back = () => void showLearnMenu(api).catch((err) => failed(api, err))
@@ -227,12 +234,23 @@ async function showStagedReview(api: TuiPluginApi, root: string, directory: stri
             }, again)
         if (option.value === "reject")
           return confirm(api, `Discard the staged candidate for "${store}"?`,
-            { title: "Discard", description: "This cannot be undone; the approved lessons stay as they are." },
+            {
+              title: "Discard",
+              description: syncEnabled(learn)
+                ? "Cannot be undone locally. Lessons already sent for review stay there: the owner approves or rejects them."
+                : "This cannot be undone; the approved lessons stay as they are.",
+            },
             () => {
               api.ui.dialog.clear()
               import("@/altimate/learn/store")
                 .then((Store) => Store.reject(root, store))
-                .then((done) => api.ui.toast({ variant: "success", message: done ? `Discarded the candidate for "${store}".` : `No candidate for "${store}".`, duration: 6_000 }))
+                .then((done) => api.ui.toast({
+                  variant: "success",
+                  message: !done
+                    ? `No candidate for "${store}".`
+                    : `Discarded the local candidate for "${store}".${syncEnabled(learn) ? " Lessons already sent stay in the workspace's review queue." : ""}`,
+                  duration: 8_000,
+                }))
                 .catch((err) => failed(api, err))
             }, again)
       }}

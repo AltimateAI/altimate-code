@@ -459,6 +459,34 @@ describe("workspace sidebar", () => {
     expect(await Sync.sidebarStatus(root, { sync: false })).toBeUndefined()
   })
 
+  test("the pending-review count is fresh after a push that sent proposals", async () => {
+    const root = await project()
+    await home.signIn(server.url, "key-a")
+    const ctx = (await Sync.context(root, learn)) as Ready
+    await Sync.pull(root, NAME, ctx)
+    await backfillDone(root, ctx)
+    await queue(root, ctx, [upsert("L-0c11", "Sent for review.")])
+    await Sync.run(root, root, learn, { pull: false })
+    expect((await readRemote(root, NAME))!.pending_count).toBe(1)
+    expect((await Sync.sidebarStatus(root, learn))!.pendingReview).toBe(1)
+  })
+
+  test("the sidebar pulls in the background when its count is stale, at most once per interval", async () => {
+    const root = await project()
+    await home.signIn(server.url, "key-a")
+    await Sync.pull(root, NAME, (await Sync.context(root, learn)) as Ready)
+    const syncs = () => server.requests.filter((r) => r.path.endsWith("/lessons/sync")).length
+    const before = syncs()
+    // Fresh: nothing to do.
+    Sync.refreshIfStale(root, learn, await Sync.sidebarStatus(root, learn))
+    // Stale (an owner acted while the session sat idle): one background pull.
+    const stale = { ...(await Sync.sidebarStatus(root, learn))!, pulledAt: Date.now() - Sync.SESSION_REFRESH_MS - 1_000 }
+    Sync.refreshIfStale(root, learn, stale)
+    Sync.refreshIfStale(root, learn, stale)
+    for (let i = 0; i < 50 && syncs() === before; i++) await Bun.sleep(20)
+    expect(syncs()).toBe(before + 1)
+  })
+
   test("lessons line leaves out zero counts", () => {
     expect(lessonsLine({ team: 1, pendingReview: 0, queued: 0, held: 2, pulledAt: null })).toBe("1 team lesson · 2 held")
   })

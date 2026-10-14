@@ -168,6 +168,7 @@ async function lessonsStatus(directory: string): Promise<{ lessons?: import("../
     const [{ Config }, Sync] = await Promise.all([import("@/config/config"), import("../learn/sync")])
     const learn = await Config.get().then((cfg) => cfg.learn, () => undefined)
     const lessons = await Sync.sidebarStatus(directory, learn)
+    Sync.refreshIfStale(directory, learn, lessons)
     return lessons ? { lessons } : {}
   } catch (err) {
     log.warn("lesson sync status unavailable", { err: String(err) })

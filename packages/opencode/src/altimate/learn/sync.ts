@@ -543,7 +543,11 @@ export async function run(root: string, directory: string, learn: LearnConfig, o
     if (ctx.status !== "ready") return report
     for (const store of await stores(root)) {
       if (opts.pull !== false) report.pulls.push(await pull(root, store, ctx))
-      if (opts.push !== false) report.pushes.push(await push(root, store, ctx, opts).catch((error) => ({ ...emptyReport(store), error: redactSecrets(errText(error)) })))
+      if (opts.push === false) continue
+      const pushed = await push(root, store, ctx, opts).catch((error) => ({ ...emptyReport(store), error: redactSecrets(errText(error)) }))
+      report.pushes.push(pushed)
+      // New proposals change the pending-review count, which only a pull reports. Not counted in the report.
+      if (pushed.submitted > 0) await pull(root, store, ctx).catch(() => undefined)
     }
   } catch (error) {
     log.warn("learn sync skipped", { error: redactSecrets(errText(error)) })
@@ -728,6 +732,24 @@ async function learnRootFrom(directory: string): Promise<string | undefined> {
     if (await fs.stat(path.join(dir, ".altimate-code", "learn")).then((s) => s.isDirectory(), () => false)) return dir
     if (path.dirname(dir) === dir) return undefined
   }
+}
+
+const sidebarRefreshed = new Map<string, number>()
+
+/**
+ * The sidebar shows the last pull; while a session is idle nothing pulls, so an owner's approval or rejection would
+ * not show. Pull in the background when the last pull is `SESSION_REFRESH_MS` old, at most that often per project.
+ */
+export function refreshIfStale(directory: string, learn: LearnConfig | undefined, status: SidebarStatus | undefined) {
+  if (!syncEnabled(learn)) return
+  if (status && status.pulledAt !== null && Date.now() - status.pulledAt < SESSION_REFRESH_MS) return
+  const last = sidebarRefreshed.get(directory)
+  if (last !== undefined && Date.now() - last < SESSION_REFRESH_MS) return
+  sidebarRefreshed.set(directory, Date.now())
+  void (async () => {
+    const root = (await learnRootFrom(directory)) ?? directory
+    await run(root, directory, learn ?? {}, { push: false })
+  })().catch((error) => log.warn("learn sidebar refresh failed", { error: redactSecrets(errText(error)) }))
 }
 
 /**
