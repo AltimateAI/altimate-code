@@ -139,6 +139,101 @@ export namespace Provider {
   }
 
   // altimate_change start — one provider-agnostic idle watchdog, including Bedrock event streams
+  function modelOutputDetector(contentType: string) {
+    const decoder = new TextDecoder()
+    let prefix = ""
+    let pending: Uint8Array = new Uint8Array()
+    let headersLength: number | undefined
+    let remaining = 0
+    let frameOutput = false
+    return (chunk: Uint8Array) => {
+      let output = false
+      if (contentType.includes("text/event-stream")) {
+        // Retain only the field prefix across partial lines, never the model payload.
+        for (const char of decoder.decode(chunk, { stream: true })) {
+          if (char === "\n" || char === "\r") {
+            if (prefix === "data:") output = true
+            prefix = ""
+          } else if (prefix.length < 5) {
+            prefix += char
+          }
+        }
+        return output
+      }
+
+      let offset = 0
+      while (offset < chunk.length) {
+        if (headersLength === undefined && remaining > 0) {
+          // Skip payload and CRC bytes without retaining or decoding them.
+          const count = Math.min(remaining, chunk.length - offset)
+          remaining -= count
+          offset += count
+          if (remaining === 0 && frameOutput) output = true
+          continue
+        }
+        const length = headersLength ?? 12
+        const count = Math.min(length - pending.length, chunk.length - offset)
+        const bytes = new Uint8Array(pending.length + count)
+        bytes.set(pending)
+        bytes.set(chunk.subarray(offset, offset + count), pending.length)
+        pending = bytes
+        offset += count
+        if (pending.length < length) break
+        if (headersLength === undefined) {
+          const prelude = new DataView(pending.buffer, pending.byteOffset, pending.byteLength)
+          const total = prelude.getUint32(0)
+          const headers = prelude.getUint32(4)
+          if (total < 16 || headers > total - 16) {
+            // Framing is unknown: let the SDK handle it and conservatively count output.
+            pending = new Uint8Array()
+            return true
+          }
+          headersLength = headers
+          remaining = total - 12 - headers
+        } else {
+          frameOutput = eventStreamFrameHasOutput(pending)
+          headersLength = undefined
+        }
+        pending = new Uint8Array()
+      }
+      return output
+    }
+  }
+
+  function eventStreamFrameHasOutput(headers: Uint8Array) {
+    const view = new DataView(headers.buffer, headers.byteOffset, headers.byteLength)
+    const decoder = new TextDecoder("utf-8", { fatal: true })
+    let offset = 0
+    let eventType: string | undefined
+    try {
+      while (offset < headers.length) {
+        const nameLength = view.getUint8(offset++)
+        if (!nameLength || offset + nameLength >= headers.length) return true
+        const name = decoder.decode(headers.subarray(offset, offset + nameLength))
+        offset += nameLength
+        const type = view.getUint8(offset++)
+        let length: number
+        if (type === 6 || type === 7) {
+          length = view.getUint16(offset)
+          offset += 2
+        } else {
+          const fixed = [0, 0, 1, 2, 4, 8, undefined, undefined, 8, 16][type]
+          if (fixed === undefined) return true
+          length = fixed
+        }
+        if (offset + length > headers.length) return true
+        if (name === ":event-type") {
+          if (type !== 7 || eventType !== undefined) return true
+          eventType = decoder.decode(headers.subarray(offset, offset + length))
+        }
+        offset += length
+      }
+    } catch {
+      return true
+    }
+    return !/^(heartbeat|ping|keepalive|metadata)$/i.test(eventType ?? "")
+  }
+
   function wrapModelStream(res: Response, ms: number, ctl: AbortController, signal: AbortSignal | null) {
     if (typeof ms !== "number" || ms <= 0 || !res.body) return res
     const contentType = (res.headers.get("content-type") ?? "").toLowerCase()
@@ -146,6 +241,8 @@ export namespace Provider {
       return res
 
     const reader = res.body.getReader()
+    const hasModelOutput = modelOutputDetector(contentType)
+    let deadline: number | undefined
     let cancelled = false
     // Once bytes reach the SDK, they may emit text, reasoning, or execute a tool.
     // Be conservative even for protocol-only chunks: replay is no longer safe.
@@ -154,6 +251,8 @@ export namespace Provider {
     const cancelReader = (reason: unknown) => reader.cancel(reason).catch(() => {})
     const body = new ReadableStream<Uint8Array>({
       async pull(ctrl) {
+        const remaining = deadline === undefined ? ms : deadline - performance.now()
+        deadline ??= performance.now() + ms
         const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
           const cleanup = () => {
             clearTimeout(id)
@@ -168,13 +267,14 @@ export namespace Provider {
             fail(signal?.reason)
             void cancelReader(signal?.reason)
           }
-          const id = setTimeout(() => {
+          const expire = () => {
             const error = new ProviderError.StreamIdleTimeoutError(ms, emitted)
             // Preserve the timeout cause and replay safety before aborting the underlying fetch.
             fail(error)
             ctl.abort(error)
             void cancelReader(error)
-          }, ms)
+          }
+          const id = setTimeout(expire, Math.max(0, remaining))
           cancelPending = () => {
             cleanup()
             resolve({ done: true, value: undefined })
@@ -182,6 +282,11 @@ export namespace Provider {
           signal?.addEventListener("abort", abort, { once: true })
           if (signal?.aborted) {
             abort()
+            return
+          }
+          // Already-buffered protocol traffic must not starve a zero-delay timer.
+          if (remaining <= 0) {
+            expire()
             return
           }
           reader.read().then((part) => {
@@ -196,6 +301,7 @@ export namespace Provider {
           return
         }
         if (part.value.byteLength > 0) emitted = true
+        if (hasModelOutput(part.value)) deadline = performance.now() + ms
         ctrl.enqueue(part.value)
       },
       async cancel(reason) {

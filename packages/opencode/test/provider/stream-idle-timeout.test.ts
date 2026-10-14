@@ -171,6 +171,168 @@ it.live("steady model chunks reset the idle deadline", () =>
   }),
 )
 
+it.live("SSE keepalives every 10ms time out at the 50ms model-output deadline", () =>
+  Effect.gen(function* () {
+    const result = yield* request({
+      contentType: "text/event-stream",
+      delays: Array.from({ length: 15 }, (_, i) => i * 10),
+      chunks: Array(15).fill(": keepalive\n\n"),
+      idleTimeout: 50,
+    })
+
+    expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
+    expect(result.text).toBe("")
+    expect(result.aborts).toBe(1)
+  }),
+)
+
+it.live("SSE data every 10ms resets the 50ms model-output deadline", () =>
+  Effect.gen(function* () {
+    const result = yield* request({
+      contentType: "text/event-stream",
+      delays: Array.from({ length: 15 }, (_, i) => i * 10),
+      idleTimeout: 50,
+    })
+
+    expect(result.error).toBeUndefined()
+    expect(result.text).toBe("chunk".repeat(15))
+    expect(result.aborts).toBe(0)
+  }),
+)
+
+for (const chunk of [": keepalive\n\n", "\n\r\n", "event: ping\nid: 1\nretry: 10\n\n"]) {
+  it.live(`SSE protocol-only bytes ${JSON.stringify(chunk)} are forwarded without resetting the deadline`, () =>
+    Effect.gen(function* () {
+      const bytes = new TextEncoder().encode(chunk)
+      const result = yield* requestBody("text/event-stream", Array(15).fill(bytes))
+
+      expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
+      expect((result.error as ProviderError.StreamIdleTimeoutError).emitted).toBe(true)
+      expect(result.chunks.length).toBeGreaterThan(0)
+      expect(result.chunks.length).toBeLessThan(15)
+      for (const value of result.chunks) expect(value).toEqual(bytes)
+      expect(result.signal?.aborted).toBe(true)
+      expect(result.cancelled).toBe(true)
+    }),
+  )
+}
+
+it.live("an SSE data line split across chunks resets the deadline once complete", () =>
+  Effect.gen(function* () {
+    const chunks = ["da", 'ta: {"text":"hello"}\r', '\ndata: {"text":"world"}\n\n'].map((value) =>
+      new TextEncoder().encode(value),
+    )
+    const result = yield* requestBody("text/event-stream", chunks, [0, 30, 65])
+
+    expect(result.error).toBeUndefined()
+    expect(result.chunks).toEqual(chunks)
+    expect(result.signal?.aborted).toBe(false)
+  }),
+)
+
+it.live("an incomplete SSE data line does not reset the deadline", () =>
+  Effect.gen(function* () {
+    const chunks = ["data:", ...Array(14).fill(" ")].map((value) => new TextEncoder().encode(value))
+    const result = yield* requestBody("text/event-stream", chunks)
+
+    expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
+    expect(result.chunks.length).toBeLessThan(chunks.length)
+  }),
+)
+
+for (const eventType of ["heartbeat", "ping", "keepalive", "metadata"]) {
+  it.live(`Amazon event-stream ${eventType} frames do not reset the deadline`, () =>
+    Effect.gen(function* () {
+      const frame = eventFrame(eventType)
+      const result = yield* requestBody("application/vnd.amazon.eventstream", Array(15).fill(frame))
+
+      expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
+      expect((result.error as ProviderError.StreamIdleTimeoutError).emitted).toBe(true)
+      expect(result.chunks.length).toBeGreaterThan(0)
+      expect(result.chunks.length).toBeLessThan(15)
+      for (const value of result.chunks) expect(value).toEqual(frame)
+      expect(result.signal?.aborted).toBe(true)
+    }),
+  )
+}
+
+it.live("Amazon event-stream chunk frames reset the deadline", () =>
+  Effect.gen(function* () {
+    const chunks = Array(15).fill(eventFrame("chunk"))
+    const result = yield* requestBody("application/vnd.amazon.eventstream", chunks)
+
+    expect(result.error).toBeUndefined()
+    expect(result.chunks).toEqual(chunks)
+    expect(result.signal?.aborted).toBe(false)
+  }),
+)
+
+it.live("Amazon event-stream heartbeat frames with typed headers do not reset the deadline", () =>
+  Effect.gen(function* () {
+    const headers = Uint8Array.from(
+      [0, 0, 1, 2, 4, 8, 2, 2, 8, 16].flatMap((length, type) => [1, 97 + type, type, ...Array(length).fill(0)]),
+    )
+    const frame = eventFrame("heartbeat", headers)
+    const result = yield* requestBody("application/vnd.amazon.eventstream", Array(15).fill(frame))
+
+    expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
+    expect(result.chunks.length).toBeLessThan(15)
+  }),
+)
+
+it.live("a malformed header after an Amazon event-stream heartbeat counts as output", () =>
+  Effect.gen(function* () {
+    const frame = eventFrame("heartbeat", new Uint8Array(), new Uint8Array([1, 120, 255]))
+    const chunks = Array(15).fill(frame)
+    const result = yield* requestBody("application/vnd.amazon.eventstream", chunks)
+
+    expect(result.error).toBeUndefined()
+    expect(result.chunks).toEqual(chunks)
+  }),
+)
+
+it.live("split and coalesced Amazon event-stream frames reset only for model output", () =>
+  Effect.gen(function* () {
+    const heartbeat = eventFrame("heartbeat")
+    const chunk = eventFrame("chunk")
+    const combined = new Uint8Array(heartbeat.length + chunk.length)
+    combined.set(heartbeat)
+    combined.set(chunk, heartbeat.length)
+    const chunks = [chunk.slice(0, 6), chunk.slice(6), combined]
+    const result = yield* requestBody("application/vnd.amazon.eventstream", chunks, [0, 30, 65])
+
+    expect(result.error).toBeUndefined()
+    expect(result.chunks).toEqual(chunks)
+  }),
+)
+
+it.live("split Amazon event-stream heartbeat frames do not reset the deadline", () =>
+  Effect.gen(function* () {
+    const frame = eventFrame("heartbeat")
+    const chunks = Array.from({ length: 8 }, () => [frame.slice(0, 6), frame.slice(6)]).flat()
+    const result = yield* requestBody("application/vnd.amazon.eventstream", chunks)
+
+    expect(result.error).toBeInstanceOf(ProviderError.StreamIdleTimeoutError)
+    expect(result.chunks.length).toBeLessThan(chunks.length)
+  }),
+)
+
+for (const invalid of ["prelude", "header"] as const) {
+  it.live(`an unparseable Amazon event-stream ${invalid} counts as output`, () =>
+    Effect.gen(function* () {
+      const frame = eventFrame("heartbeat")
+      if (invalid === "prelude") new DataView(frame.buffer).setUint32(0, 1)
+      else frame[12] = 255
+      const chunks = Array(15).fill(frame)
+      const result = yield* requestBody("application/vnd.amazon.eventstream", chunks)
+
+      expect(result.error).toBeUndefined()
+      expect(result.chunks).toEqual(chunks)
+      expect(result.signal?.aborted).toBe(false)
+    }),
+  )
+}
+
 it.live("zero idle timeout disables the watchdog including a configured chunk timeout", () =>
   Effect.gen(function* () {
     const result = yield* request({
@@ -264,6 +426,110 @@ it.live("caller cancellation clears the pending idle watchdog", () =>
     expect(result.error).toBeUndefined()
   }),
 )
+
+// Capture the real fetch wrapper through a temporary provider so binary frames reach
+// the watchdog without an unrelated SDK decoder consuming or rejecting them first.
+function requestBody(contentType: string, chunks: Uint8Array[], delays = chunks.map((_, i) => i * 10)) {
+  return provideTmpdirInstance((directory) =>
+    Effect.gen(function* () {
+      const moduleURL = new URL(`file://${directory}/capture-provider.mjs`).href
+      yield* Effect.promise(async () => {
+        await Bun.write(
+          new URL(moduleURL),
+          "export let fetch; export function createProvider(options) { fetch = options.fetch; return { languageModel: () => ({}) } }",
+        )
+        const config = testProviderConfig("https://idle-timeout.test")
+        config.provider.test.npm = moduleURL
+        await Bun.write(`${directory}/opencode.json`, JSON.stringify(config))
+      })
+      const state = { signal: undefined as AbortSignal | undefined, cancelled: false }
+      const timers = new Set<ReturnType<typeof setTimeout>>()
+      const clearTimers = () => {
+        for (const timer of timers) clearTimeout(timer)
+      }
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          const originalFetch = globalThis.fetch
+          const originalTimeout = process.env.ALTIMATE_STREAM_IDLE_TIMEOUT_MS
+          process.env.ALTIMATE_STREAM_IDLE_TIMEOUT_MS = "50"
+          const fakeFetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+            state.signal = init?.signal ?? undefined
+            return new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  for (const [index, delay] of delays.entries()) {
+                    timers.add(
+                      setTimeout(() => {
+                        controller.enqueue(chunks[index])
+                        if (index === chunks.length - 1) controller.close()
+                      }, delay),
+                    )
+                  }
+                },
+                cancel() {
+                  state.cancelled = true
+                  clearTimers()
+                },
+              }),
+              { headers: { "content-type": contentType } },
+            )
+          }
+          globalThis.fetch = Object.assign(fakeFetch, { preconnect: originalFetch.preconnect.bind(originalFetch) })
+          return { originalFetch, originalTimeout }
+        }),
+        ({ originalFetch, originalTimeout }) =>
+          Effect.sync(() => {
+            clearTimers()
+            globalThis.fetch = originalFetch
+            if (originalTimeout === undefined) delete process.env.ALTIMATE_STREAM_IDLE_TIMEOUT_MS
+            else process.env.ALTIMATE_STREAM_IDLE_TIMEOUT_MS = originalTimeout
+          }),
+      )
+      const provider = yield* Provider.Service
+      const model = yield* provider.getModel(ProviderID.make("test"), ModelID.make("test-model"))
+      yield* provider.getLanguage(model)
+      return yield* Effect.promise(async () => {
+        const sdk = await import(moduleURL)
+        const response: Response = await sdk.fetch("https://idle-timeout.test/stream")
+        const reader = response.body!.getReader()
+        const received: Uint8Array[] = []
+        let error: unknown
+        try {
+          while (true) {
+            const part = await reader.read()
+            if (part.done) break
+            received.push(part.value)
+          }
+        } catch (cause) {
+          error = cause
+        } finally {
+          reader.releaseLock()
+        }
+        return { ...state, chunks: received, error }
+      })
+    }),
+  )
+}
+
+function eventFrame(eventType: string, before = new Uint8Array(), after = new Uint8Array()) {
+  const name = new TextEncoder().encode(":event-type")
+  const value = new TextEncoder().encode(eventType)
+  const headersLength = before.length + 1 + name.length + 1 + 2 + value.length + after.length
+  // CRCs and payload are opaque to the watchdog; only framing and headers matter.
+  const frame = new Uint8Array(16 + headersLength)
+  const view = new DataView(frame.buffer)
+  view.setUint32(0, frame.length)
+  view.setUint32(4, headersLength)
+  frame.set(before, 12)
+  const start = 12 + before.length
+  frame[start] = name.length
+  frame.set(name, start + 1)
+  frame[start + 1 + name.length] = 7 // string header
+  view.setUint16(start + 2 + name.length, value.length)
+  frame.set(value, start + 4 + name.length)
+  frame.set(after, start + 4 + name.length + value.length)
+  return frame
+}
 
 function request(options: {
   contentType?: string
