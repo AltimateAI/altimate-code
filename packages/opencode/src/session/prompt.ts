@@ -138,6 +138,10 @@ const RequestStarted = BusEvent.define(
   "session.request.started",
   z.object({ sessionID: SessionID.zod, messageID: MessageID.zod }),
 )
+const RequestContinued = BusEvent.define(
+  "session.request.continued",
+  z.object({ sessionID: SessionID.zod, messageID: MessageID.zod, parentID: MessageID.zod }),
+)
 // altimate_change end
 
 export namespace SessionPrompt {
@@ -675,7 +679,7 @@ export namespace SessionPrompt {
     // altimate_change start — client trace: the turns this generation runs. Released when it ends
     // (disposed before the generation's own cleanup, so no newer generation exists yet).
     const tracedTurns = new Set<string>()
-    let currentTurn: string | undefined
+    let currentTurn: MessageID | undefined
     using _traceGeneration = defer(() => TraceContext.release(sessionID, tracedTurns))
     // altimate_change end
 
@@ -1097,8 +1101,10 @@ export namespace SessionPrompt {
       const isCompaction = msgs.some(
         (msg) => msg.info.id === stepUser.id && msg.parts.some((part) => part.type === "compaction"),
       )
-      if (isCompaction && currentTurn && !TraceContext.forMessage(stepUser.id)) {
-        TraceContext.inherit(stepUser.id, currentTurn)
+      if (isCompaction && currentTurn) {
+        // Request ownership must survive even when no client trace is active.
+        await Bus.publish(RequestContinued, { sessionID, messageID: stepUser.id, parentID: currentTurn })
+        if (!TraceContext.forMessage(stepUser.id)) TraceContext.inherit(stepUser.id, currentTurn)
       } else if (!isCompaction) {
         currentTurn = stepUser.id
       }
@@ -1353,6 +1359,7 @@ export namespace SessionPrompt {
           await Session.updateMessage(summaryUserMsg)
           // altimate_change start — this loop-written message continues the step's turn (client trace)
           TraceContext.inherit(summaryUserMsg.id, lastUser.id)
+          await Bus.publish(RequestContinued, { sessionID, messageID: summaryUserMsg.id, parentID: lastUser.id })
           // altimate_change end
           await Session.updatePart({
             id: PartID.ascending(),
@@ -1375,6 +1382,9 @@ export namespace SessionPrompt {
           return false
         })
         // altimate_change end
+        // altimate_change start — publish the recorded continuation origin before its next assistant
+        let continuationID: MessageID | undefined
+        // altimate_change end
         const result = await SessionCompaction.process({
           messages: msgs,
           parentID: lastUser.id,
@@ -1385,6 +1395,7 @@ export namespace SessionPrompt {
           // altimate_change start - distinguish automatic continuations from user-authored synthetic parts
           onContinuation: (messageID) => {
             compactionContinuations.add(messageID)
+            continuationID = messageID
           },
           recoverCommittedAnswer: committedAnswer !== undefined,
           // altimate_change end
@@ -1398,6 +1409,11 @@ export namespace SessionPrompt {
           learnDelivery: learnDelivery ? lessonState : undefined,
           // altimate_change end
         })
+        // altimate_change start — attached run clients cannot read the compactor's in-memory origin
+        if (continuationID) {
+          await Bus.publish(RequestContinued, { sessionID, messageID: continuationID, parentID: lastUser.id })
+        }
+        // altimate_change end
         // altimate_change start — treat any non-"continue" result as stop: an
         // undefined/unknown result must never fall through to `continue`, which
         // re-enters compaction on the same unresolved marker and busy-loops.
@@ -2344,6 +2360,7 @@ export namespace SessionPrompt {
             } as MessageV2.Info)
             // This loop-written message continues the step's turn (client trace).
             TraceContext.inherit(syntheticMessageID, lastUser.id)
+            await Bus.publish(RequestContinued, { sessionID, messageID: syntheticMessageID, parentID: lastUser.id })
 
             // Append the validator body as a text part on the new user message.
             await Session.updatePart({

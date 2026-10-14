@@ -1630,7 +1630,7 @@ describe("session.message-v2.fromError", () => {
     })
   }
 
-  test("HTTP 413 remains overflow despite a structured policy code", () => {
+  test("an explicit policy code on HTTP 413 stays a policy error, not an overflow", () => {
     const result = MessageV2.fromError(new APICallError({
       message: "Request failed",
       url: "https://example.com",
@@ -1638,6 +1638,20 @@ describe("session.message-v2.fromError", () => {
       statusCode: 413,
       isRetryable: false,
       responseBody: JSON.stringify({ error: { code: "policy_violation" } }),
+    }), { providerID })
+
+    expect(result.name).toBe("APIError")
+    expect(result).toHaveProperty("data.metadata.code", "policy_violation")
+  })
+
+  test("HTTP 413 without a policy code is still an overflow", () => {
+    const result = MessageV2.fromError(new APICallError({
+      message: "Request failed",
+      url: "https://example.com",
+      requestBodyValues: {},
+      statusCode: 413,
+      isRetryable: false,
+      responseBody: JSON.stringify({ error: { message: "request entity too large" } }),
     }), { providerID })
 
     expect(result.name).toBe("ContextOverflowError")

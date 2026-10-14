@@ -727,19 +727,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change start — turn accounting + dual-attribution
       // termination state for this run (see run-accounting.ts).
       const accounting = RunAccounting.create()
-      let activeRequestID: string | undefined
-      const assistantRequests = new Map<string, string | undefined>()
+      const requestOwnership = RunAccounting.createRequestOwnership()
       // A queued request must not revoke the in-flight echo owned by an earlier request.
       const committedRequests = new Set<string>()
-      const userRequests = new Map<string, string | undefined>()
-      const seenRequests = new Set<string>()
       const beginRequest = (messageID: string) => {
         // The persisted request boundary includes requests from other attached clients.
         // Retries retain their ID; internal synthetic/compaction rows do not emit this event.
-        if (seenRequests.has(messageID)) return
-        seenRequests.add(messageID)
-        userRequests.set(messageID, messageID)
-        activeRequestID = messageID
+        if (!requestOwnership.beginRequest(messageID)) return
         accounting.resetCommittedAnswer()
       }
       // altimate_change end
@@ -968,14 +962,24 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (options?.signal?.aborted) break
           await runTracing?.observe(event)
           if (options?.signal?.aborted) break
-          // altimate_change start - other attached clients can submit a new request within this stream
-          const requestEvent = event as { type: string; properties: { sessionID?: string; messageID?: string } }
+          // altimate_change start — preserve request boundaries and internal continuation ownership on attached streams
+          const requestEvent = event as {
+            type: string
+            properties: { sessionID?: string; messageID?: string; parentID?: string }
+          }
           if (
             requestEvent.type === "session.request.started" &&
             requestEvent.properties.sessionID === sessionID &&
             requestEvent.properties.messageID
           )
             beginRequest(requestEvent.properties.messageID)
+          if (
+            requestEvent.type === "session.request.continued" &&
+            requestEvent.properties.sessionID === sessionID &&
+            requestEvent.properties.messageID &&
+            requestEvent.properties.parentID
+          )
+            requestOwnership.onUserMessage(requestEvent.properties.messageID, requestEvent.properties.parentID)
           // altimate_change end
           // altimate_change start — shared SDKs omit fork-only run budget events
           const budgetEvent = event as { type: string; properties: { sessionID?: string; timestamp?: number } }
@@ -997,12 +1001,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (
             event.type === "message.updated" &&
             event.properties.info.role === "user" &&
-            event.properties.info.sessionID === sessionID &&
-            !userRequests.has(event.properties.info.id)
+            event.properties.info.sessionID === sessionID
           ) {
-            // Compaction-created parent rows inherit the current request; a real
-            // request's subsequent persisted boundary replaces this with its own ID.
-            userRequests.set(event.properties.info.id, activeRequestID)
+            // This provisional owner is replaced by the persisted request boundary
+            // or the internal continuation's explicit origin before its assistant starts.
+            requestOwnership.onUserMessage(event.properties.info.id)
           }
           if (
             event.type === "message.updated" &&
@@ -1012,9 +1015,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
             accounting.onAssistantMessage(event.properties.info)
             // Keep the request that owned the assistant's creation, even if an older
             // tool finishes after another attached client persists a new request.
-            if (!assistantRequests.has(event.properties.info.id)) {
-              assistantRequests.set(event.properties.info.id, userRequests.get(event.properties.info.parentID))
-            }
+            requestOwnership.onAssistantMessage(event.properties.info)
             assistantStarted = true
             // Enrich only from this run's assistant, independently of presentation.
             const info = event.properties.info
@@ -1056,12 +1057,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
               part.type === "tool" && part.tool === "answer_commit" &&
               (part.state.status === "completed" || part.state.status === "error")
             ) {
-              const requestID = assistantRequests.get(part.messageID)
+              const requestID = requestOwnership.ownerOf(part.messageID)
               if (requestID !== undefined) {
                 // Success and failed retries affect only the request that owns this tool.
                 if (part.state.status === "completed") committedRequests.add(requestID)
                 else committedRequests.delete(requestID)
-                if (requestID === activeRequestID) accounting.onAnswerCommit(part.state.status)
+                if (requestID === requestOwnership.activeRequestID) accounting.onAnswerCommit(part.state.status)
               }
             }
             // altimate_change end
@@ -1117,7 +1118,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // the owning message's agent is resolved via the message.updated lookup
               // above, so compacting models are not differentially charged turns.
               const counted = accounting.onStepStart(part.messageID)
-              const requestID = assistantRequests.get(part.messageID)
+              const requestID = requestOwnership.ownerOf(part.messageID)
               const committedAnswer = requestID !== undefined && committedRequests.has(requestID)
               // altimate_change start — the time-budget abort already owns the interrupted work phase
               if (

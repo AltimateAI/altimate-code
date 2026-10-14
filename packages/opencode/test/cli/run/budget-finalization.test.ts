@@ -558,6 +558,70 @@ describe("opencode run: budget finalization subprocess", () => {
       }),
     90_000,
   )
+  // altimate_change start — compaction continuations keep their originating request's echo allowance
+  // These exercise the same ownership helper as run.ts without requiring a listening socket.
+  for (const queued of ["none", "before the marker", "during the summary"] as const) {
+    test(`proactive compaction preserves committed echo ownership with a queued request: ${queued}`, () => {
+      const ownership = RunAccounting.createRequestOwnership()
+      const accounting = RunAccounting.create()
+      const committedRequests = new Set<string>()
+      ownership.beginRequest("original")
+      ownership.onAssistantMessage({ id: "commit", parentID: "original" })
+      accounting.onStepStart("commit")
+      committedRequests.add(ownership.ownerOf("commit")!)
+      const queue = () => {
+        ownership.onUserMessage("queued")
+        ownership.beginRequest("queued")
+      }
+      if (queued === "before the marker") queue()
+      ownership.onUserMessage("marker")
+      ownership.onUserMessage("marker", "original")
+      ownership.onAssistantMessage({ id: "summary", parentID: "marker" })
+      accounting.onAssistantMessage({ id: "summary", summary: true })
+      expect(accounting.onStepStart("summary")).toBe(false)
+      if (queued === "during the summary") queue()
+
+      // SessionCompaction persists this synthetic user before reporting its origin.
+      ownership.onUserMessage("continuation")
+      ownership.onUserMessage("continuation", "marker")
+      // Another compaction must preserve the original ID, not the intervening user ID.
+      ownership.onUserMessage("second-marker", "continuation")
+      ownership.onUserMessage("second-continuation", "second-marker")
+      ownership.onAssistantMessage({ id: "echo", parentID: "second-continuation" })
+      expect(ownership.ownerOf("echo")).toBe("original")
+      expect(accounting.onStepStart("echo")).toBe(true)
+      expect(accounting.turnCount).toBe(2)
+      expect(committedRequests.has(ownership.ownerOf("echo")!)).toBe(true)
+
+      if (queued !== "none") {
+        ownership.onAssistantMessage({ id: "queued-work", parentID: "queued" })
+        // Late updates from the old request cannot transfer its exemption to the new one.
+        ownership.onAssistantMessage({ id: "commit", parentID: "original" })
+        expect(ownership.ownerOf("queued-work")).toBe("queued")
+        expect(committedRequests.has(ownership.ownerOf("queued-work")!)).toBe(false)
+      }
+    })
+  }
+
+  test("an ordinary request compacted after a committed echo keeps its own over-budget ownership", () => {
+    const ownership = RunAccounting.createRequestOwnership()
+    ownership.beginRequest("committed")
+    ownership.onAssistantMessage({ id: "old-echo", parentID: "committed" })
+    ownership.onUserMessage("ordinary")
+    ownership.beginRequest("ordinary")
+    ownership.onUserMessage("ordinary", "committed")
+    // The new request can compact before creating its first assistant.
+    ownership.onUserMessage("marker", "ordinary")
+    ownership.onUserMessage("continuation", "marker")
+    ownership.onAssistantMessage({ id: "ordinary-work", parentID: "continuation" })
+    expect(ownership.ownerOf("ordinary-work")).toBe("ordinary")
+    expect(ownership.ownerOf("ordinary-work")).not.toBe(ownership.ownerOf("old-echo"))
+    // A continuation with an unobserved parent cannot borrow the active request.
+    ownership.onUserMessage("unknown", "unobserved")
+    ownership.onAssistantMessage({ id: "unknown-work", parentID: "unknown" })
+    expect(ownership.ownerOf("unknown-work")).toBeUndefined()
+  })
+  // altimate_change end
   cliIt.concurrent(
     "answer_commit on --max-turns 1 publishes the committed output on its extra echo turn",
     ({ llm, opencode }) =>

@@ -33,6 +33,41 @@ export type Termination = {
 // Timeout classification for why_harness_stopped="timeout" and retry decisions.
 const TIMEOUT_PATTERN = /\btimed?\s*out\b|\bETIMEDOUT\b|TimeoutError/i
 
+/** Request ownership from the ordered message/request event stream. */
+export function createRequestOwnership() {
+  let activeRequestID: string | undefined
+  const users = new Map<string, string | undefined>()
+  const assistants = new Map<string, string | undefined>()
+  const seenRequests = new Set<string>()
+  return {
+    get activeRequestID() {
+      return activeRequestID
+    },
+    beginRequest(messageID: string) {
+      if (seenRequests.has(messageID)) return false
+      seenRequests.add(messageID)
+      users.set(messageID, messageID)
+      activeRequestID = messageID
+      return true
+    },
+    onUserMessage(messageID: string, parentID?: string) {
+      // Internal rows have no parentID in their message schema. The prompt loop
+      // reports their origin separately, before creating the next assistant.
+      // A persisted real request always retains its own boundary.
+      if (seenRequests.has(messageID)) return
+      if (parentID !== undefined) users.set(messageID, users.get(parentID))
+      else if (!users.has(messageID)) users.set(messageID, activeRequestID)
+    },
+    onAssistantMessage(info: { id: string; parentID: string }) {
+      if (assistants.has(info.id)) return
+      assistants.set(info.id, users.get(info.parentID))
+    },
+    ownerOf(messageID: string) {
+      return assistants.get(messageID)
+    },
+  }
+}
+
 /** Holds only overflow errors whose trace status depends on later recovery. */
 export function createRecoverableOverflowTraceErrors() {
   let pending: string[] = []

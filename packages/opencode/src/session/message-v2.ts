@@ -1302,9 +1302,10 @@ export namespace MessageV2 {
         })
         // altimate_change start — structured policy decisions override overflow text, while explicit overflow codes win
         // Only the provider's own code decides overflow; a nested diagnostic code must not mask a policy denial.
+        // An explicit policy code also beats a 413 status: a policy denial must stay fatal, never a recoverable overflow.
         const overflowCode = isOverflowCode(providerErrorCode(e.responseBody))
         const policyCode = echoPolicyCode(e.responseBody)
-        if (policyCode && e.statusCode !== 413 && !overflowCode) {
+        if (policyCode && !overflowCode) {
           return new MessageV2.APIError(
             {
               message: parsed.message,
