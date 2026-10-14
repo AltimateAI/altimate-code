@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Fiber } from "effect"
+import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { RunAccounting } from "@/cli/cmd/run-accounting"
@@ -466,6 +467,97 @@ describe("opencode run: budget finalization subprocess", () => {
   }
   // altimate_change end
   // altimate_change start — a completed answer gets one tool-free echo beyond the work-turn limit
+  cliIt.concurrent(
+    "a request queued before the committed echo step-start preserves its output and is refused for the exhausted budget",
+    ({ llm, opencode }) =>
+      Effect.gen(function* () {
+        const committed = "Committed revenue before the queued request: 42"
+        const echoDispatched = Promise.withResolvers<void>()
+        const releaseEcho = Promise.withResolvers<void>()
+        let generations = 0
+        const provider = yield* Effect.acquireRelease(
+          Effect.sync(() => Bun.serve({
+            hostname: "127.0.0.1",
+            port: 0,
+            idleTimeout: 0,
+            async fetch(request) {
+              const body = await request.text()
+              if (!body.includes("Generate a title for this conversation") && ++generations === 2) {
+                // Hold even the response headers: the provider cannot emit step-start yet.
+                echoDispatched.resolve()
+                await releaseEcho.promise
+              }
+              return fetch(`${llm.url}/chat/completions`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body,
+                signal: request.signal,
+              })
+            },
+          })),
+          (server) => Effect.sync(() => {
+            releaseEcho.resolve()
+            server.stop(true)
+          }),
+        )
+        yield* llm.tool("answer_commit", {
+          fields: [{ name: "", value: committed }],
+          answer_only: true,
+          basis: "Summed orders.amount over all orders at order grain.",
+        })
+        yield* llm.text("The provider echo must be replaced by the stored commit.")
+        yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().reason("The queued request must be refused.").hang())
+        yield* llm.textMatch(({ body }) => isFinalization(body), "No budget remains for the queued request.")
+        const server = yield* opencode.serve({
+          env: {
+            ALTIMATE_ANSWER_COMMIT: "1",
+            // An attached run cannot resolve --agent locally, so the server defaults to the analyst.
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...testProviderConfig(`${provider.url}v1`), default_agent: "analyst" }),
+          },
+          bunRun: true,
+        })
+        const sdk = createOpencodeClient({ baseUrl: server.url, throwOnError: true })
+        const session = yield* Effect.promise(() => sdk.session.create({ title: "Queued echo budget" }))
+        const sessionID = session.data!.id
+        const run = yield* opencode.run("Commit the revenue answer.", {
+          format: "json",
+          extraArgs: ["--attach", server.url, "--session", sessionID, "--max-turns", "1", "--no-trace"],
+          env: { ALTIMATE_ANSWER_COMMIT: "1" },
+          timeoutMs: 60_000,
+          bunRun: true,
+        }).pipe(Effect.forkChild)
+        yield* Effect.promise(() => echoDispatched.promise).pipe(Effect.timeout("30 seconds"))
+        // noReply persists the foreign request and publishes its boundary; the running loop will pick it up.
+        const queued = yield* Effect.promise(() => sdk.session.prompt({
+          sessionID,
+          agent: "analyst",
+          model: { providerID: "test", modelID: "test-model" },
+          noReply: true,
+          parts: [{ type: "text", text: "Now answer a different question." }],
+        }))
+        releaseEcho.resolve()
+        const result = yield* Fiber.join(run)
+        opencode.expectExit(result, 1)
+        const events = opencode.parseJsonEvents(result.stdout)
+        const budgetIndex = events.findIndex((event) => event.type === "budget_exhausted")
+        expect(budgetIndex).toBeGreaterThan(-1)
+        const beforeBudget = events.slice(0, budgetIndex)
+        expect(beforeBudget.filter((event) => event.type === "step_start")).toHaveLength(2)
+        expect(beforeBudget.filter((event) => event.type === "text").map((event) => (event.part as { text: string }).text))
+          .toEqual([committed])
+        expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(1)
+        const messages = yield* Effect.promise(() => sdk.session.messages({ sessionID }))
+        const echo = messages.data!.find((message) => message.parts.some((part) => part.type === "text" && part.text === committed))!
+        expect(echo.info).toMatchObject({ role: "assistant", finish: "stop" })
+        expect(echo.info).not.toHaveProperty("parentID", queued.data!.info.id)
+        expect(messages.data!.map((message) => message.info)).toContainEqual(expect.objectContaining({
+          role: "assistant",
+          parentID: queued.data!.info.id,
+          error: expect.objectContaining({ name: "MessageAbortedError" }),
+        }))
+      }),
+    90_000,
+  )
   cliIt.concurrent(
     "answer_commit on --max-turns 1 publishes the committed output on its extra echo turn",
     ({ llm, opencode }) =>

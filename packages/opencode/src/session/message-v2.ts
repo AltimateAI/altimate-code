@@ -27,6 +27,79 @@ interface FetchDecompressionError extends Error {
   path: string
 }
 
+// altimate_change start — keep committed-echo parsing helpers private at module scope
+const echoNetworkCodes = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ESOCKETTIMEDOUT",
+  "EPIPE",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+])
+
+const echoPolicyCodes = new Set([
+  "policy_violation",
+  "content_filter",
+  "content_policy",
+  "content_policy_violation",
+  "guardrail_intervened",
+])
+
+function isEchoPolicyCode(code: string | undefined): boolean {
+  if (!code) return false
+  return echoPolicyCodes.has(code.toLowerCase()) || /^(content_policy.*|(safety|moderation)_.+)$/i.test(code)
+}
+
+function responseErrorCode(responseBody: string | undefined, matches: (code: string) => boolean): string | undefined {
+  if (!responseBody) return undefined
+  const find = (value: unknown): string | undefined => {
+    if (!value || typeof value !== "object") return undefined
+    for (const [key, child] of Object.entries(value)) {
+      if (key === "code" && typeof child === "string" && matches(child)) return child
+      const nested = find(child)
+      if (nested) return nested
+    }
+  }
+  try {
+    return find(JSON.parse(responseBody))
+  } catch {
+    return undefined
+  }
+}
+
+function echoPolicyCode(responseBody: string | undefined): string | undefined {
+  return responseErrorCode(responseBody, isEchoPolicyCode)
+}
+
+/**
+ * The provider's own error code: `error.code`, the root `code`, or the upstream code that the
+ * LiteLLM / Altimate Base gateway wraps under `error.provider_specific_fields.error.code`.
+ * Arbitrary nested diagnostic fields are never consulted.
+ */
+function providerErrorCode(responseBody: string | undefined): string | undefined {
+  if (!responseBody) return undefined
+  try {
+    const body = JSON.parse(responseBody) as {
+      code?: unknown
+      error?: { code?: unknown; provider_specific_fields?: { error?: { code?: unknown } } }
+    }
+    const candidates = [body?.error?.provider_specific_fields?.error?.code, body?.error?.code, body?.code]
+    return candidates.find((code): code is string => typeof code === "string")
+  } catch {
+    return undefined
+  }
+}
+
+function isOverflowCode(code: string | undefined): boolean {
+  return !!code && ["context_length_exceeded", "content_length_exceeded"].includes(code.toLowerCase())
+}
+// altimate_change end
+
 export namespace MessageV2 {
   export function isMedia(mime: string) {
     return mime.startsWith("image/") || mime === "application/pdf"
@@ -520,77 +593,6 @@ export namespace MessageV2 {
   export type Assistant = z.infer<typeof Assistant>
 
   // altimate_change start — recover committed echoes only from transient transport failures
-  const echoNetworkCodes = new Set([
-    "ECONNRESET",
-    "ECONNREFUSED",
-    "ETIMEDOUT",
-    "ESOCKETTIMEDOUT",
-    "EPIPE",
-    "ENOTFOUND",
-    "EAI_AGAIN",
-    "UND_ERR_SOCKET",
-    "UND_ERR_CONNECT_TIMEOUT",
-    "UND_ERR_HEADERS_TIMEOUT",
-    "UND_ERR_BODY_TIMEOUT",
-  ])
-
-  const echoPolicyCodes = new Set([
-    "policy_violation",
-    "content_filter",
-    "content_policy",
-    "content_policy_violation",
-    "guardrail_intervened",
-  ])
-
-  function isEchoPolicyCode(code: string | undefined): boolean {
-    if (!code) return false
-    return echoPolicyCodes.has(code.toLowerCase()) || /^(content_policy.*|(safety|moderation)_.+)$/i.test(code)
-  }
-
-  function responseErrorCode(responseBody: string | undefined, matches: (code: string) => boolean): string | undefined {
-    if (!responseBody) return undefined
-    const find = (value: unknown): string | undefined => {
-      if (!value || typeof value !== "object") return undefined
-      for (const [key, child] of Object.entries(value)) {
-        if (key === "code" && typeof child === "string" && matches(child)) return child
-        const nested = find(child)
-        if (nested) return nested
-      }
-    }
-    try {
-      return find(JSON.parse(responseBody))
-    } catch {
-      return undefined
-    }
-  }
-
-  function echoPolicyCode(responseBody: string | undefined): string | undefined {
-    return responseErrorCode(responseBody, isEchoPolicyCode)
-  }
-
-  /**
-   * The provider's own error code: `error.code`, the root `code`, or the upstream code that the
-   * LiteLLM / Altimate Base gateway wraps under `error.provider_specific_fields.error.code`.
-   * Arbitrary nested diagnostic fields are never consulted.
-   */
-  function providerErrorCode(responseBody: string | undefined): string | undefined {
-    if (!responseBody) return undefined
-    try {
-      const body = JSON.parse(responseBody) as {
-        code?: unknown
-        error?: { code?: unknown; provider_specific_fields?: { error?: { code?: unknown } } }
-      }
-      const candidates = [body?.error?.provider_specific_fields?.error?.code, body?.error?.code, body?.code]
-      return candidates.find((code): code is string => typeof code === "string")
-    } catch {
-      return undefined
-    }
-  }
-
-  function isOverflowCode(code: string | undefined): boolean {
-    return !!code && ["context_length_exceeded", "content_length_exceeded"].includes(code.toLowerCase())
-  }
-
   export function isEchoTransportError(error: Assistant["error"]): boolean {
     if (error?.name !== "APIError") return false
     const { statusCode, responseBody, metadata, isRetryable } = error.data

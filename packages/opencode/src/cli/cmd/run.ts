@@ -729,6 +729,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const accounting = RunAccounting.create()
       let activeRequestID: string | undefined
       const assistantRequests = new Map<string, string | undefined>()
+      // A queued request must not revoke the in-flight echo owned by an earlier request.
+      const committedRequests = new Set<string>()
       const userRequests = new Map<string, string | undefined>()
       const seenRequests = new Set<string>()
       const beginRequest = (messageID: string) => {
@@ -1052,11 +1054,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
             if (part.type === "tool" && !accounting.isCompactionStep(part.messageID)) lastToolStep = step
             if (
               part.type === "tool" && part.tool === "answer_commit" &&
-              (part.state.status === "completed" || part.state.status === "error") &&
-              activeRequestID !== undefined && assistantRequests.get(part.messageID) === activeRequestID
+              (part.state.status === "completed" || part.state.status === "error")
             ) {
-              // Only this request's successful commit can exempt its echo; a failed retry revokes it.
-              accounting.onAnswerCommit(part.state.status)
+              const requestID = assistantRequests.get(part.messageID)
+              if (requestID !== undefined) {
+                // Success and failed retries affect only the request that owns this tool.
+                if (part.state.status === "completed") committedRequests.add(requestID)
+                else committedRequests.delete(requestID)
+                if (requestID === activeRequestID) accounting.onAnswerCommit(part.state.status)
+              }
             }
             // altimate_change end
 
@@ -1111,9 +1117,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // the owning message's agent is resolved via the message.updated lookup
               // above, so compacting models are not differentially charged turns.
               const counted = accounting.onStepStart(part.messageID)
+              const requestID = assistantRequests.get(part.messageID)
+              const committedAnswer = requestID !== undefined && committedRequests.has(requestID)
               // altimate_change start — the time-budget abort already owns the interrupted work phase
               if (
-                counted && maxTurns && accounting.turnCount > maxTurns && !accounting.committedAnswer && !budgetAborted &&
+                counted && maxTurns && accounting.turnCount > maxTurns && !committedAnswer && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
                 stopTimeBudget()
