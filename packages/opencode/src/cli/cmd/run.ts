@@ -856,12 +856,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const abortForTimeBudget = () => {
         if (!sessionID || timeAbortRequested) return
         timeAbortRequested = true
-        timeBudgetAbort = sdk.session.abort({ sessionID }, { signal: AbortSignal.timeout(5_000) }).then((result) => {
+        // altimate_change start — distinguish harness deadlines from user cancellation on the server
+        timeBudgetAbort = sdk.session.abort(
+          { sessionID },
+          { signal: AbortSignal.timeout(5_000), headers: { "x-altimate-run-budget": "hard-deadline" } },
+        ).then((result) => {
           if (result.error) throw result.error
         }).catch((e) => {
           accounting.onSessionError("TimeBudgetAbortError", String(e))
           eventAbort.abort()
         })
+        // altimate_change end
       }
       const checkTimeBudget = () => {
         if (!sessionID || !workActive || timeExhausted()) return

@@ -115,6 +115,10 @@ import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altima
 // altimate_change start — keyless public Zen predicate (flat module)
 import { isPublicZen } from "@/provider/public-zen"
 // altimate_change end
+// altimate_change start — distinguish harness deadlines and reuse their committed answer during finalization
+import { RunBudget } from "@/altimate/run-budget"
+import * as RunBudgetEffort from "@/altimate/session/run-budget-effort"
+// altimate_change end
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -585,7 +589,7 @@ export namespace SessionPrompt {
   }
 
   // altimate_change start — SessionStatus.set became async in v1.4.0; await so idle state actually flushes
-  export async function cancel(sessionID: SessionID) {
+  export async function cancel(sessionID: SessionID, reason?: RunBudget.HarnessDeadline) {
     log.info("cancel", { sessionID })
     const s = state()
     const match = s[sessionID]
@@ -598,7 +602,7 @@ export namespace SessionPrompt {
     // arrive synchronously after cancel() and must start a fresh generation,
     // never queue its callback on the signal that was just aborted.
     match.closing = true
-    match.abort.abort()
+    match.abort.abort(reason)
     if (!match.loopOwned) {
       // shell() also uses start(), but it has no loop disposer when no prompt
       // callbacks are queued. That owner must restore idle directly.
@@ -909,16 +913,18 @@ export namespace SessionPrompt {
       deferredText: MessageV2.TextPart[] = [],
       error = message.error,
     ) => {
+      // altimate_change start — a work deadline may publish the answer already committed before cancellation
+      const deadline = abort.reason instanceof RunBudget.HarnessDeadline
       if (
-        !committedAnswer || abort.aborted ||
+        !committedAnswer || (abort.aborted && !deadline) ||
         compareMessageOrder(readMessageOrder(), message.id, committedAnswer.userID) <= 0
       ) return false
-      // Keep aborts and HTTP policy rejections fatal even if a later operation throws another error.
+      // Keep user aborts and HTTP policy rejections fatal even if a later operation throws another error.
       if (
         message.finish === "content-filter" ||
         [message.error, error].some(
           (cause) =>
-            cause?.name === "MessageAbortedError" ||
+            (cause?.name === "MessageAbortedError" && !deadline) ||
             cause?.name === "ContentFilterError" ||
             (cause &&
               ["APIError", "UnknownError", "ProviderAuthError"].includes(cause.name) &&
@@ -926,6 +932,7 @@ export namespace SessionPrompt {
         )
       )
         return false
+      // altimate_change end
       // Once the echo has started, this answer still belongs to the earlier request.
       // Publish it before the loop continues to any user request queued during generation.
       const recoveryCause = error ?? message.metadata?.answer_commit_echo_error
@@ -981,6 +988,9 @@ export namespace SessionPrompt {
         if (old.id !== part.id) await Session.removePart({ sessionID, messageID: message.id, partID: old.id })
       }
       if (cause) message.metadata = { ...message.metadata, answer_commit_echo_error: cause }
+      // altimate_change start — the follow-up budget prompt reuses this terminal answer without another publication
+      if (deadline) message.metadata = { ...message.metadata, answer_commit_deadline: true }
+      // altimate_change end
       delete message.error
       // A failed summariser becomes the original request's answer, so clients must no longer hide it as compaction machinery.
       if (message.summary) {
@@ -1097,6 +1107,22 @@ export namespace SessionPrompt {
       // altimate_change end
       // altimate_change start — always track the current agent name so early breaks still report it
       if (lastUser.agent) sessionAgentName = lastUser.agent
+      // altimate_change end
+      // altimate_change start — budget finalization acknowledges a deadline-delivered commit without a model turn
+      const finalizationParts = msgs.find((msg) => msg.info.id === lastUser.id)?.parts
+      if (
+        RunBudgetEffort.toolsDisabled(sessionID) &&
+        lastAssistant?.metadata?.answer_commit_deadline === true &&
+        lastAssistant.finish === "stop" && !lastAssistant.error &&
+        lastUser.agent === "analyst" && (lastUser.format?.type ?? "text") === "text" &&
+        finalizationParts?.length === 1 &&
+        finalizationParts[0].type === "text" && finalizationParts[0].synthetic &&
+        finalizationParts[0].text === SessionTermination.REPLY_AFTER_BUDGET &&
+        !msgs.some((msg) =>
+          msg.info.role === "user" && msg.info.id !== lastUser.id &&
+          compareMessageOrder(messageOrder, msg.info.id, lastAssistant!.id) > 0,
+        )
+      ) break
       // altimate_change end
       // altimate_change start — upstream_fix: a provider can finish with
       // "stop" while still emitting tool parts; those tools must be replayed

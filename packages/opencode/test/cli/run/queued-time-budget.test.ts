@@ -33,6 +33,37 @@ test("hard deadline aborts a queued session without a post-subscription busy eve
   })
   expect(calls).toEqual(["ses_queued"])
 })
+
+test("hard deadline abort carries the harness deadline marker", async () => {
+  const source = await fs.readFile(new URL("../../../src/cli/cmd/run.ts", import.meta.url), "utf8")
+  const start = source.indexOf("      const abortForTimeBudget = () => {")
+  const end = source.indexOf("      const checkTimeBudget =", start)
+  expect(start).toBeGreaterThan(0)
+  let abortOptions: { signal: AbortSignal; headers?: Record<string, string> } | undefined
+  const setup = new Function(
+    "sdk",
+    `
+    const sessionID = "ses_deadline_marker"
+    let timeAbortRequested = false
+    let timeBudgetAbort
+    const accounting = { onSessionError() {} }
+    const eventAbort = new AbortController()
+    ${source.slice(start, end)}
+    abortForTimeBudget()
+    return timeBudgetAbort
+  `,
+  )
+  await setup({
+    session: {
+      abort: async (_: unknown, options: NonNullable<typeof abortOptions>) => {
+        abortOptions = options
+        return {}
+      },
+    },
+  })
+  expect(abortOptions?.headers?.["x-altimate-run-budget"]).toBe("hard-deadline")
+  expect(abortOptions?.signal.aborted).toBe(false)
+})
 // altimate_change end
 
 // altimate_change start — the request lifetime also ends when queued work never becomes busy
@@ -51,6 +82,7 @@ for (const command of [undefined, "inspect"]) {
       const files = [], audienceSystem = undefined
       const eventAbort = new AbortController()
       const startWorkClock = () => {}
+      const beginRequest = () => {}
       const budgetHeaders = () => ({})
       const Telemetry = { startupReady() {} }
       ${source.slice(start, end)}

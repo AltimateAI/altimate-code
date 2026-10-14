@@ -7,6 +7,7 @@ import { ProjectV2 } from "@opencode-ai/core/project"
 import { Effect, Layer } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { renderAnswer } from "../../src/altimate/tools/answer-commit"
+import { TraceContext } from "../../src/altimate/observability/trace-context"
 import { ToolLookupTool } from "../../src/altimate/tools/tool-lookup"
 import { GlobalBus, type GlobalEvent } from "../../src/bus/global"
 import { OutputCollector } from "../../src/cli/cmd/run-output"
@@ -17,6 +18,8 @@ import { Provider } from "../../src/provider/provider"
 import { Session } from "../../src/session/session"
 import { Session as LegacySession } from "../../src/session"
 import { SessionPrompt } from "../../src/session/prompt"
+import { SessionRoutes } from "../../src/server/routes/session"
+import { SessionTermination } from "../../src/session/termination"
 import { SessionCompaction } from "../../src/session/compaction"
 import { MessageV2 } from "../../src/session/message-v2"
 import { SessionSummary } from "../../src/session/summary"
@@ -446,6 +449,9 @@ for (const scenario of [
   "echo-overflow-disabled",
   "echo-preparation-error",
   "echo-aborted",
+  "echo-harness-deadline",
+  "echo-user-cancelled",
+  "echo-budget-finalization",
   "echo-content-filter",
   "echo-http-content-filter",
   "echo-other",
@@ -511,6 +517,9 @@ for (const scenario of [
     "echo-overflow-disabled": "an unrecoverable context overflow after a commit publishes the committed output and records the cause",
     "echo-preparation-error": "a local echo preparation failure after a commit is not recovered",
     "echo-aborted": "an aborted echo retains its fatal error without publishing the committed output",
+    "echo-harness-deadline": "a harness deadline abort during echo publishes the stored committed text exactly once",
+    "echo-user-cancelled": "a user cancellation during echo does not finalize the stored committed answer",
+    "echo-budget-finalization": "budget finalization after a hard abort reuses the committed answer without starting a model turn",
     "echo-content-filter": "a content-filtered echo retains its fatal error and original text",
     "echo-http-content-filter": "an HTTP content-filtered echo retains its fatal error without publishing the committed output",
     "echo-other": "an echo with an other finish keeps other and publishes the committed output",
@@ -660,6 +669,15 @@ for (const scenario of [
                 }
                 if (step === 2 && (scenario === "echo-aborted" || scenario === "compaction-aborted")) {
                   throw new DOMException("Echo request aborted", "AbortError")
+                }
+                if (step === 2 && ["echo-harness-deadline", "echo-user-cancelled", "echo-budget-finalization"].includes(scenario)) {
+                  const response = await SessionRoutes().request(`/${chat.id}/abort`, {
+                    method: "POST",
+                    headers: scenario === "echo-user-cancelled" ? {} : { "x-altimate-run-budget": "hard-deadline" },
+                  })
+                  expect(response.status).toBe(200)
+                  expect(init?.signal?.aborted).toBe(true)
+                  throw init!.signal!.reason
                 }
                 if (
                   (scenario === "new-user" && requests.length === 1) ||
@@ -964,6 +982,53 @@ for (const scenario of [
             }
             const result = yield* pending
             if (result.info.role === "assistant") accounting.onPromptResult(result.info)
+            if (["echo-harness-deadline", "echo-user-cancelled", "echo-budget-finalization"].includes(scenario)) {
+              if (scenario === "echo-user-cancelled") {
+                expect(result.info).toHaveProperty("error.name", "MessageAbortedError")
+                expect(result.parts.filter((part) => part.type === "text")).toEqual([])
+                expect(textUpdates.filter((part) => part.time?.end)).toEqual([])
+                expect(textDeltas).toEqual([])
+                expect(requests).toHaveLength(2)
+                return
+              }
+              if (scenario === "echo-budget-finalization") {
+                const messageID = MessageID.ascending()
+                const response = yield* Effect.promise(() => Promise.resolve(SessionRoutes().request(`/${chat.id}/message`, {
+                  method: "POST",
+                  headers: {
+                    "content-type": "application/json",
+                    "x-altimate-run-budget": "finalization",
+                    traceparent: "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01",
+                  },
+                  body: JSON.stringify({
+                    messageID,
+                    agent: "analyst",
+                    model: promptModel,
+                    parts: [{ type: "text", text: SessionTermination.REPLY_AFTER_BUDGET, synthetic: true }],
+                  }),
+                })))
+                expect(response.status).toBe(200)
+                const finalized = yield* Effect.promise(() => response.json())
+                expect(requests).toHaveLength(2)
+                expect(TraceContext.forMessage(messageID)).toBeUndefined()
+                expect(finalized.info.id).toBe(result.info.id)
+                expect(finalized.parts.filter((part: MessageV2.Part) => part.type === "text").map((part: MessageV2.TextPart) => part.text))
+                  .toEqual([renderedAnswer])
+              }
+              expect(result.info).not.toHaveProperty("error")
+              expect(result.info).toHaveProperty("finish", "stop")
+              expect(result.parts.filter((part) => part.type === "text").map((part) => part.text)).toEqual([renderedAnswer])
+              expect(textUpdates.filter((part) => part.time?.end).map((part) => part.text)).toEqual([renderedAnswer])
+              expect(textDeltas.map((part) => part.text)).toEqual([renderedAnswer])
+              expect(output.content()).toBe(renderedAnswer)
+              expect(requests).toHaveLength(2)
+              expect(requests[1].messages.at(-1)).toEqual({ role: "user", content: echoInstruction })
+              const history = yield* sessions.messages({ sessionID: chat.id })
+              const commit = history.flatMap((message) => message.parts)
+                .find((part) => part.type === "tool" && part.tool === "answer_commit")
+              expect(commit).toHaveProperty("state.metadata.committed_text", renderedAnswer)
+              return
+            }
             if (userDuringFailedCompaction) {
               if (!queuedUserID) throw new Error("missing queued user request")
               const callbacks = yield* Effect.promise(() => Promise.all(queuedReplies))
