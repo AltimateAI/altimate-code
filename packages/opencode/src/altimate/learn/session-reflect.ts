@@ -11,7 +11,7 @@ import * as Playbook from "./playbook"
 import * as Store from "./store"
 import * as Lessons from "./lesson"
 import * as Signals from "./signals"
-import { curate, flagSuspiciousFeedback, type CurateResult } from "./curator"
+import { curate, flagSuspiciousFeedback, type CurateResult, type Delta } from "./curator"
 import { buildDigest, redactSecrets, sourceFromMessages, type DigestSource } from "./digest"
 import { FEEDBACK_CAP, feedbackText, reflect, replace, type FeedbackKind, type Generate } from "./reflect"
 import { sharedAnchors } from "./anchors"
@@ -63,7 +63,13 @@ export interface ReflectCoreInput {
   /** Session id or trajectory path: scopes the distinct-feedback count. */
   origin: string
   session?: string
-  generate: Generate
+  /** The model; not called when `deltas` is given. */
+  generate?: Generate
+  /**
+   * Changes decided without a model, such as a rule a person asked the agent to save. They go through the same
+   * curation, staging, proposals and history as a reflection's. Requires `recoverPending: false`.
+   */
+  deltas?: Delta[]
   applyPaths?: string[]
   maxStored?: number
   /** Shown in the error when the model call fails, e.g. `--model x` or `the default model`. */
@@ -116,7 +122,11 @@ export async function prepareReflection(root: string, name: string, applyPaths?:
 export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreResult> {
   const { root, name } = input
   const tracker = createUsageTracker()
-  const generate: Generate = (request) => input.generate(request, tracker.add)
+  const generate: Generate = (request) => {
+    if (!input.generate) throw new Error("reflectCore: no model for this reflection")
+    return input.generate(request, tracker.add)
+  }
+  if (input.deltas && input.recoverPending !== false) throw new Error("reflectCore: `deltas` needs `recoverPending: false`")
   const flagged = flagSuspiciousFeedback(input.feedback)
   const digest = buildDigest(input.source)
   const snapshot = await prepareReflection(root, name, input.applyPaths)
@@ -125,7 +135,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
     input.sync ? curatorView(name, bullets.map((b) => b.id), await remoteFor(root, name, input.sync.scope)) : undefined
   const snapshotBullets = withRemote(Playbook.bullets(snapshot), await view(Playbook.bullets(snapshot)))
   const originalText = new Map(snapshotBullets.map((b) => [b.id, b.text]))
-  const deltas = await reflect(
+  const deltas = input.deltas ?? await reflect(
     { digest, feedback: input.feedback, kind: input.kind, bullets: snapshotBullets },
     generate,
   ).catch((e) => {

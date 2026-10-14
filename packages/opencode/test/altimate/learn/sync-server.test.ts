@@ -11,6 +11,7 @@ import * as Store from "../../../src/altimate/learn/store"
 import * as Sync from "../../../src/altimate/learn/sync"
 import * as Menu from "../../../src/altimate/learn/menu"
 import { readProjectLearning } from "../../../src/altimate/learn/project-config"
+import { saveTeamRule } from "../../../src/altimate/learn/team-rule"
 import {
   files, forScope, readOutbox, readRemote, readSyncState, removeRemote, usageBatches, writeOutbox, writeSyncState, type Scope,
 } from "../../../src/altimate/learn/ledger"
@@ -590,6 +591,42 @@ describe("/learn review and held proposals", () => {
     expect(batches().at(-1)!.body.items[0]).toMatchObject({ revises_public_id: mine.public_id, revises_version: 2 })
     // Nothing held for the key any more: a resubmit says there is nothing to send.
     expect(await Menu.resubmit(root, root, "L-0e06", learn)).toEqual({ ok: true, message: "L-0e06 needed nothing more: the workspace already holds that change." })
+  })
+})
+
+describe("team rule routing (training_save)", () => {
+  test("with sync on, a rule is staged as a lesson and sent for the owner's review", async () => {
+    const root = await project()
+    await home.signIn(server.url, "key-a")
+    const ctx = (await Sync.context(root, learn)) as Ready
+    await Sync.pull(root, NAME, ctx)
+    // A project that has synced before: its first-sync upload is done.
+    await backfillDone(root, ctx)
+    const result = await saveTeamRule({ root, directory: root, learn, text: "Prefix new models with `model_`.", session: "ses_rule" })
+    expect(result).toEqual({ status: "proposed", text: "Prefix new models with `model_`." })
+    expect((await Store.loadCandidateLessons(root, NAME))!.map((l) => l.text)).toEqual(["Prefix new models with `model_`."])
+    await Sync.pushSoon(root, root, learn)
+    expect(server.rows.map((r) => [r.text, r.status, r.origin])).toEqual([["Prefix new models with `model_`.", "candidate", "manual"]])
+  })
+
+  test("sync off or no link: not routed, so training keeps the rule", async () => {
+    const root = await project()
+    await home.signIn(server.url, "key-a")
+    expect(await saveTeamRule({ root, directory: root, learn: { sync: false }, text: "Prefix new models with `model_`." })).toEqual({ status: "not_routed" })
+    const unlinked = await project(OTHER_REMOTE)
+    expect(await saveTeamRule({ root: unlinked, directory: unlinked, learn, text: "Prefix new models with `model_`." })).toEqual({ status: "not_routed" })
+    expect(await Store.loadCandidateLessons(root, NAME)).toBeUndefined()
+  })
+
+  test("a rule that cannot be a lesson is refused with the reason; a rule the team has is not proposed again", async () => {
+    const root = await project()
+    await home.signIn(server.url, "key-a")
+    server.add({ lesson_key: "L-0f91", text: "Prefix staging models with stg_." }, REMOTE)
+    await Sync.pull(root, NAME, (await Sync.context(root, learn)) as Ready)
+    expect(await saveTeamRule({ root, directory: root, learn, text: "Line one.\nLine two." })).toEqual({ status: "invalid", reason: "must be a single line" })
+    expect(await saveTeamRule({ root, directory: root, learn, text: "x".repeat(200) })).toMatchObject({ status: "invalid" })
+    expect(await saveTeamRule({ root, directory: root, learn, text: "Prefix staging models with stg_." })).toMatchObject({ status: "exists" })
+    expect(batches()).toEqual([])
   })
 })
 

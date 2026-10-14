@@ -5,6 +5,9 @@ import { Log } from "@/altimate/util/log"
 import { TrainingStore, TrainingPrompt } from "../training"
 import { TrainingKind, TRAINING_MAX_PATTERNS_PER_KIND, TRAINING_BUDGET } from "../training/types"
 import { CitationSchema } from "../../memory/types"
+// altimate_change start — the lesson text limit for team rules routed into learn
+import { MAX_TEXT } from "../learn/curator"
+// altimate_change end
 
 const log = Log.create({ service: "tool.training_save" })
 
@@ -23,6 +26,12 @@ export const TrainingSaveTool = Tool.define("training_save", {
     "",
     `Max ${TRAINING_MAX_PATTERNS_PER_KIND} entries per kind. Training persists across sessions.`,
     "Project-scope training is committed to git so the whole team benefits.",
+    // altimate_change start — team rules go to the workspace review queue when lesson sync is on
+    "",
+    "When the project is linked to a workspace with lesson sync on, a project-scope rule is not written to training:",
+    "it is sent to the workspace owner's review queue as a lesson and applies to the team once approved. Keep such a",
+    `rule to one line of at most ${MAX_TEXT} characters.`,
+    // altimate_change end
   ].join("\n"),
   parameters: z.object({
     kind: TrainingKind.describe("Type of knowledge being saved"),
@@ -62,6 +71,16 @@ export const TrainingSaveTool = Tool.define("training_save", {
   }),
   async execute(args, ctx) {
     try {
+      // altimate_change start — with lesson sync on, a project rule becomes a lesson for the owner's review
+      if (args.kind === "rule" && args.scope === "project") {
+        // Routing never fails a save: anything unexpected falls back to training as before.
+        const routed = await routeTeamRule(args.content, ctx.sessionID).catch((e) => {
+          log.warn("team rule routing failed; saving to training", { error: e instanceof Error ? e.message : String(e) })
+          return undefined
+        })
+        if (routed) return routed(args.name)
+      }
+      // altimate_change end
       const scopeForCount = args.scope === "global" ? "global" : "project"
 
       // Check if this is an update to an existing entry
@@ -157,3 +176,36 @@ export const TrainingSaveTool = Tool.define("training_save", {
     }
   },
 })
+
+// altimate_change start — routing a project rule into learn (see `learn/team-rule.ts`)
+/** The tool result for a rule learn took, or undefined to save it to training as before. */
+async function routeTeamRule(content: string, session: string | undefined) {
+  const [{ Instance }, { Config }, { saveTeamRule }] = await Promise.all([
+    import("@/project/instance"), import("@/config/config"), import("../learn/team-rule"),
+  ])
+  const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+  const result = await saveTeamRule({ root, directory: Instance.directory, learn: (await Config.get()).learn, text: content, session })
+  if (result.status === "not_routed") return undefined
+  const metadata = (name: string, action: string) => ({ action, kind: "rule", name, scope: "project" })
+  if (result.status === "invalid")
+    return (name: string) => ({
+      title: "Team rule: not saved",
+      metadata: metadata(name, "error"),
+      output: `Not saved: a team rule must be one line of at most ${MAX_TEXT} characters, without commands or secrets (${result.reason}). ` +
+        "Restate it as one short rule and call training_save again.",
+    })
+  if (result.status === "exists")
+    return (name: string) => ({
+      title: `Team rule: already known "${name}"`,
+      metadata: metadata(name, "exists"),
+      output: `Already a lesson for this project: ${result.text}`,
+    })
+  return (name: string) => ({
+    title: `Team rule: sent for review "${name}"`,
+    metadata: metadata(name, "proposed"),
+    output: `Sent to the workspace owner's review queue as a lesson: ${result.text}\n` +
+      "It applies to the whole team once approved; keep following it for the rest of this session. " +
+      "Tell the user it is waiting for review (they can see it with /learn).",
+  })
+}
+// altimate_change end
