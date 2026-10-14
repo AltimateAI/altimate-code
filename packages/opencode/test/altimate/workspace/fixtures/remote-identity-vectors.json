@@ -1372,5 +1372,77 @@
   "canonical": "ssh://github.com/acme/x",
   "unify": "ssh://a\rb@github.com/acme/x",
   "unified": "https://github.com/acme/x"
+ },
+ {
+  "input": "https://github.com/acme/x?ref=1",
+  "canonical": "https://github.com/acme/x?ref=1",
+  "unify": "https://github.com/acme/x?ref=1",
+  "unified": "https://github.com/acme/x?ref=1"
+ },
+ {
+  "input": "https://github.com/acme/x#readme",
+  "canonical": "https://github.com/acme/x#readme",
+  "unify": "https://github.com/acme/x#readme",
+  "unified": "https://github.com/acme/x#readme"
+ },
+ {
+  "input": "https://github.com/acme/x.git?ref=1",
+  "canonical": "https://github.com/acme/x.git?ref=1",
+  "unify": "https://github.com/acme/x.git?ref=1",
+  "unified": "https://github.com/acme/x.git?ref=1"
+ },
+ {
+  "input": "https://github.com/acme/x/tree/main",
+  "canonical": "https://github.com/acme/x/tree/main",
+  "unify": "https://github.com/acme/x/tree/main",
+  "unified": "https://github.com/acme/x/tree/main"
+ },
+ {
+  "input": "https://gitlab.com/group/sub/x.git",
+  "canonical": "https://gitlab.com/group/sub/x",
+  "unify": "https://gitlab.com/group/sub/x.git",
+  "unified": "https://gitlab.com/group/sub/x"
+ },
+ {
+  "input": "git@gitlab.com:group/sub/x.git",
+  "canonical": "ssh://git@gitlab.com/group/sub/x",
+  "unify": "https://gitlab.com/group/sub/x.git",
+  "unified": "https://gitlab.com/group/sub/x"
+ },
+ {
+  "input": "https://github.com:8443/acme/x",
+  "canonical": "https://github.com:8443/acme/x",
+  "unify": "https://github.com/acme/x",
+  "unified": "https://github.com/acme/x"
+ },
+ {
+  "input": "ssh://git@github.com:2222/acme/x",
+  "canonical": "ssh://git@github.com:2222/acme/x",
+  "unify": "https://github.com/acme/x",
+  "unified": "https://github.com/acme/x"
+ },
+ {
+  "input": "https://github.com/acme/x?",
+  "canonical": "https://github.com/acme/x?",
+  "unify": "https://github.com/acme/x?",
+  "unified": "https://github.com/acme/x?"
+ },
+ {
+  "input": "https://github.com/acme/x#",
+  "canonical": "https://github.com/acme/x#",
+  "unify": "https://github.com/acme/x#",
+  "unified": "https://github.com/acme/x#"
+ },
+ {
+  "input": "https://github.com:443/acme/x?ref=1",
+  "canonical": "https://github.com:443/acme/x?ref=1",
+  "unify": "https://github.com/acme/x?ref=1",
+  "unified": "https://github.com/acme/x?ref=1"
+ },
+ {
+  "input": "https://git.acme.internal:8443/data/x",
+  "canonical": "https://git.acme.internal:8443/data/x",
+  "unify": "https://git.acme.internal:8443/data/x",
+  "unified": "https://git.acme.internal:8443/data/x"
  }
 ]

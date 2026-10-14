@@ -11,13 +11,17 @@
 // the binding, and the link dialog reports drift for a remote that has not
 // changed.
 //
-// `canonicalRepoRemote` and `unifyPublicHost` port the service's two steps
-// line for line, including where Python's string and URL parsing differ from
-// JavaScript's; test/altimate/workspace/fixtures/remote-identity-vectors.json
-// holds the service's own output, under the Python version it runs (3.10.22),
-// for every case the tests check.
+// `canonicalRepoRemote` and `unifyPublicHost` port the service's two steps,
+// reproducing Python's string and URL parsing where it differs from
+// JavaScript's (`pyStrip`, `partition`, `rpartition`, `authorityHost`).
+// test/altimate/workspace/fixtures/remote-identity-vectors.json holds the
+// service's own output for every case the tests check: each row is one input
+// run through the service's two functions, extracted from its source, under the
+// Python it runs in production (3.10.22, whose `urlsplit` refuses some
+// authorities older 3.10 releases accept).
 
 const IDENTIFIER_MAX_LENGTH = 2048
+const UTF8 = new TextEncoder()
 
 // Hosts whose repository paths are case-insensitive, and where every URL form
 // of a repo names the same repo.
@@ -176,13 +180,16 @@ function publicHostRepo(canonical: string): { host: string; path: string } | und
   else if (WEB_SCHEMES.has(scheme)) host = WEB_HOST_ALIASES[host] ?? host
   if (!CASE_INSENSITIVE_HOSTS.has(host) || !isAscii(path)) return undefined
   path = stripChar(path, "/", "both").toLowerCase()
-  if (!path || new TextEncoder().encode(`https://${host}/${path}`).length > IDENTIFIER_MAX_LENGTH) return undefined
+  if (!path || UTF8.encode(`https://${host}/${path}`).length > IDENTIFIER_MAX_LENGTH) return undefined
   return { host, path }
 }
 
 /** `https://<host>/<path>` for a repo on github.com, gitlab.com or
  * bitbucket.org, whatever URL form `canonical` is in; otherwise `canonical`
- * unchanged: the service's `_unify_public_host`. */
+ * unchanged: the service's `_unify_public_host`.
+ *
+ * @internal For the parity tests. The client compares through
+ * `publicRepoKey` and never stores this value. */
 export function unifyPublicHost(canonical: string): string {
   const repo = publicHostRepo(canonical)
   return repo ? `https://${repo.host}/${repo.path}` : canonical
@@ -205,7 +212,12 @@ export function publicRepoKey(value: string): string | undefined {
   return `${repo.host}/${path}`
 }
 
-/** Do two cached remotes name the same repo? */
+/** Do two cached remotes name the same repo?
+ *
+ * Off the public hosts this is exact equality, even where one value is the
+ * service's canonical form of the other: either value may be raw or the
+ * service's, and only `sameIdentifier`, which knows which is which, can take
+ * the canonical step safely. */
 export function sameRepoRemote(a: string, b: string): boolean {
   if (a === b) return true
   const key = publicRepoKey(a)
@@ -216,11 +228,14 @@ export function sameRepoRemote(a: string, b: string): boolean {
  * it has one, otherwise its path. */
 export type ProjectIdentity = { kind: "remote" | "path"; value: string }
 
-/** The identity a remote/path pair names, preferring the remote, as both the
- * binding cache and memory record metadata do. Non-string values are absent. */
-export function projectIdentity(remote: unknown, projectPath: unknown): ProjectIdentity | undefined {
-  if (typeof remote === "string") return { kind: "remote", value: remote }
-  if (typeof projectPath === "string") return { kind: "path", value: projectPath }
+/** The identity a binding's remote/path pair names, preferring the remote. An
+ * empty value is no value, as when the pair is written into record metadata. */
+export function projectIdentity(
+  remote: string | null | undefined,
+  projectPath: string | null | undefined,
+): ProjectIdentity | undefined {
+  if (remote) return { kind: "remote", value: remote }
+  if (projectPath) return { kind: "path", value: projectPath }
   return undefined
 }
 
@@ -233,6 +248,14 @@ export function sameProjectIdentity(a: ProjectIdentity | undefined, b: ProjectId
   return a.kind === "remote" ? sameRepoRemote(a.value, b.value) : a.value === b.value
 }
 
+/** A string two identities share exactly when `sameProjectIdentity` holds, for
+ * grouping records by project. */
+export function projectIdentityKey(identity: ProjectIdentity): string {
+  if (identity.kind === "path") return `path:${identity.value}`
+  const key = publicRepoKey(identity.value)
+  return key === undefined ? `remote:${identity.value}` : `repo:${key}`
+}
+
 /** Does the identifier a binding was found by still name this project? `kind`
  * is which identifier matched; `stored` is the binding's value, from the
  * service or the local cache, and `current` is this project's, with the remote
@@ -240,6 +263,8 @@ export function sameProjectIdentity(a: ProjectIdentity | undefined, b: ProjectId
 export function sameIdentifier(kind: "remote" | "path", stored: string, current: string): boolean {
   if (kind === "path") return stored === current
   // The service found the binding by the canonical form of `current`, and off
-  // the public hosts that form is the value it stores.
+  // the public hosts that form is the value it stores. One direction only:
+  // `stored` is already the service's value, and canonicalizing it again would
+  // take a `.git` off the value it stores for repo `x.git` and match repo `x`.
   return sameRepoRemote(stored, current) || canonicalRepoRemote(current) === stored
 }

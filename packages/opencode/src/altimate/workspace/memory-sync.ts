@@ -26,7 +26,7 @@ import { TRAINING_META_COMMENT } from "@/altimate/training/types"
 // Aliased: `syncInternals.resolveBinding` below is an unrelated test seam.
 import { canonicalDirectory, onBindingChanged, resolveBinding as resolveProjectBinding, type CachedBinding } from "./state"
 import { indexKey, readIndex, readIndexEntry, recordIndexEntry } from "./memory-index"
-import { projectIdentity, sameProjectIdentity, type ProjectIdentity } from "./remote-identity"
+import { projectIdentity, projectIdentityKey, sameProjectIdentity, type ProjectIdentity } from "./remote-identity"
 import { WorkspaceApi } from "./api-client"
 import { AltimateApi } from "@/altimate/api/client"
 import {
@@ -151,8 +151,35 @@ export function projectIdentityFor(binding: CachedBinding): ProjectIdentity | un
   return projectIdentity(binding.repoRemote, binding.projectPath)
 }
 
-function recordProjectIdentity(meta: Record<string, unknown>): ProjectIdentity | undefined {
-  return projectIdentity(meta.repo_remote, meta.project_path)
+/** The project a record's metadata names: its `repo_remote`, or its
+ * `project_path` when it has no remote, an empty value counting as none, as
+ * `buildMetadata` writes them. `"none"` when it names neither; `"invalid"` when
+ * the value it names isn't a string. */
+function recordProject(meta: Record<string, unknown>): ProjectIdentity | "none" | "invalid" {
+  const named = (value: unknown) => value != null && value !== ""
+  if (named(meta.repo_remote))
+    return typeof meta.repo_remote === "string" ? { kind: "remote", value: meta.repo_remote } : "invalid"
+  if (named(meta.project_path))
+    return typeof meta.project_path === "string" ? { kind: "path", value: meta.project_path } : "invalid"
+  return "none"
+}
+
+/** Does a record belong to this project? The one rule for sync and the reaper
+ * (`mirrorIdentityOf`) and for display (`toBlock`).
+ *
+ * A record that names no project belongs to every project in its workspace:
+ * `buildMetadata` writes one for a binding with neither field. One whose value
+ * isn't a string belongs to none. */
+function recordInProject(meta: Record<string, unknown>, own: ProjectIdentity | undefined): boolean {
+  const project = recordProject(meta)
+  if (project === "none") return true
+  return project !== "invalid" && sameProjectIdentity(project, own)
+}
+
+/** A record's `block_updated`, or "" when it has none. */
+function blockUpdatedOf(record: CloudMemoryRecord | undefined): string {
+  const value = (record?.metadata ?? {}).block_updated
+  return typeof value === "string" ? value : ""
 }
 
 /** ``directory`` is the tree that owned the operation. Fire-and-forget mirrors
@@ -429,15 +456,7 @@ function mirrorIdentityOf(record: CloudMemoryRecord, binding: CachedBinding | nu
   if (!blockId || !scope) return undefined
   if (scope === "project") {
     if (String(m.datamate_id ?? "") !== String(binding?.datamateId ?? "")) return undefined
-    // The record's key as written. One that isn't a string, falsy or not, names
-    // no project of ours, so it never matches.
-    const recordKey = m.repo_remote ?? m.project_path
-    if (
-      recordKey != null &&
-      binding &&
-      !(typeof recordKey === "string" && sameProjectIdentity(recordProjectIdentity(m), projectIdentityFor(binding)))
-    )
-      return undefined
+    if (binding && !recordInProject(m, projectIdentityFor(binding))) return undefined
   }
   return `${scope}:${blockId}`
 }
@@ -728,16 +747,27 @@ async function push(
   // that already has one — the duplicate this function works hardest to avoid.
   const indexedGone = existing?.memoryId !== undefined && indexed === undefined && !view.truncated
   const indexUsable = existing?.memoryId && !indexedGone && (!indexed || !isArchived(indexed))
-  const match = (indexUsable ? existing?.memoryId : undefined) ?? view.records.find((r) => isSameBlock(r, block, binding))?.id
+  // Every live record holding this block. More than one are copies: a client
+  // that compared remotes as raw strings wrote a second record once its
+  // binding's cached form of the repo changed.
+  const copies = view.records.filter((r) => isSameBlock(r, block, binding))
+  const newest = copies.reduce<CloudMemoryRecord | undefined>(
+    (best, r) => (best && blockUpdatedOf(best) >= blockUpdatedOf(r) ? best : r),
+    undefined,
+  )
+  const match = (indexUsable ? existing?.memoryId : undefined) ?? newest?.id
   if (match) {
     // Refuse to move a record backwards. Two machines editing the same block,
     // or a stale clone running a sweep, would otherwise overwrite a newer cloud
     // value with older local content — last-request-wins rather than
     // convergence. This narrows the window rather than closing it; closing it
-    // needs a conditional update the service does not offer.
-    const remote = view.records.find((r) => r.id === match)
-    const remoteUpdated = remote && (remote.metadata ?? {}).block_updated
-    if (typeof remoteUpdated === "string" && remoteUpdated > block.updated) {
+    // needs a conditional update the service does not offer. Checked against
+    // the newest copy too: the other copies are archived below, so a newer
+    // one's content would be lost.
+    const remoteUpdated = [view.records.find((r) => r.id === match), newest]
+      .map(blockUpdatedOf)
+      .reduce((a, b) => (a > b ? a : b))
+    if (remoteUpdated > block.updated) {
       log.warn("declining to overwrite a newer workspace record with older local content", {
         id: block.id,
         localUpdated: block.updated,
@@ -747,6 +777,15 @@ async function push(
     }
     await MemoryApi.update(match, block.content, metadata)
     await recordIndexEntry(key, { memoryId: match, contentHash: hash, syncedAt: Date.now() })
+    // One live record per block. The other copies are archived as a split
+    // create's extras are below: emptied, under this push's metadata, so any
+    // client that reads one as this block's tombstone also reads `match` as
+    // its live record and keeps the block.
+    for (const copy of copies) {
+      if (copy.id === match) continue
+      log.warn("archiving a second live record of one block", { id: block.id, memoryId: copy.id })
+      await MemoryApi.update(copy.id, "", { ...metadata, archived: "true", archived_at: new Date().toISOString() })
+    }
     return "stored"
   }
 
@@ -918,8 +957,8 @@ async function archiveNow(
 
   // Read through ``fetchKnownRecords`` so a truncated response is detectable
   // — a workspace with >= LIST_LIMIT records that includes the target block
-  // beyond the window would silently fall through the ``!current`` branch and
-  // the delete would no-op. The block then stays live in the cloud and gets
+  // beyond the window would silently fall through the no-live-record branch
+  // and the delete would no-op. The block then stays live in the cloud and gets
   // re-injected on every session with no diagnostic trace. (altimate-harness-
   // bot #1116 comment 3841102064.)
   const { records, truncated } = await fetchKnownRecords()
@@ -929,16 +968,35 @@ async function archiveNow(
   // that has lost its index leaves the record live, and every later session
   // re-injects it with no way to remove it. Match on logical identity instead,
   // exactly as the write path does.
-  const current = entry
-    ? records.find((r) => r.id === entry.memoryId)
-    : // Matching on workspace alone is too coarse: two projects in one
-      // workspace may hold the same block id, and deleting one would archive
-      // the other's record. Use the write path's own identity test so the
-      // fallback can only ever hit the record this block would have written.
-      records.find((r) =>
-        isSameBlock(r, { id: blockId, scope, tags: [], content: "", created: "", updated: "" } as MemoryBlock, binding),
-      )
-  if (!current) {
+  //
+  // Every live record of the block, not just one: a block can hold copies (see
+  // `push`), and archiving one would leave the block live through the others.
+  // Matching on workspace alone is too coarse: two projects in one workspace
+  // may hold the same block id, and deleting one would archive the other's
+  // record. Use the write path's own identity test so the search can only ever
+  // hit records this block would have written.
+  const indexed = entry ? records.find((r) => r.id === entry.memoryId) : undefined
+  const target = { id: blockId, scope, tags: [], content: "", created: "", updated: "" } as MemoryBlock
+  const live = records.filter((r) => !isArchived(r) && (r.id === indexed?.id || isSameBlock(r, target, binding)))
+  if (live.length === 0) {
+    // The record the index names is already a tombstone: leave it exactly as
+    // it is.
+    //
+    // Not merely a saved request. `archived_at` is read as the moment the record
+    // stopped being wanted, and the reaper on another machine compares a local
+    // block's `updated` against it. Re-stamping it to now moves that moment
+    // forward, so a block legitimately recreated AFTER the original archive
+    // starts looking older than the tombstone and gets deleted — on every
+    // machine, taking the recreated record with it, because this function then
+    // follows the index to whatever the block points at now. (review)
+    if (indexed) {
+      log.info("record is already archived; leaving its tombstone untouched", {
+        blockId,
+        scope,
+        memoryId: indexed.id,
+      })
+      return
+    }
     if (truncated) {
       // Distinguish "record isn't there" (silent no-op is correct) from
       // "record is beyond the LIST_LIMIT window" (silent no-op leaves a
@@ -951,44 +1009,25 @@ async function archiveNow(
     return
   }
 
-  // Already a tombstone: leave it exactly as it is.
-  //
-  // Not merely a saved request. `archived_at` is read as the moment the record
-  // stopped being wanted, and the reaper on another machine compares a local
-  // block's `updated` against it. Re-stamping it to now moves that moment
-  // forward, so a block legitimately recreated AFTER the original archive
-  // starts looking older than the tombstone and gets deleted — on every
-  // machine, taking the recreated record with it, because this function then
-  // follows the index to whatever the block points at now.
-  //
-  // The identity search below already skips archived records, so a caller with
-  // no index entry lands here anyway. This closes the path a caller WITH one
-  // takes. (review)
-  if (isArchived(current)) {
-    log.info("record is already archived; leaving its tombstone untouched", {
-      blockId,
-      scope,
-      memoryId: current.id,
-    })
-    return
-  }
-
   const now = new Date().toISOString()
-  const metadata: MirrorMetadata = {
-    ...((current.metadata ?? {}) as unknown as MirrorMetadata),
-    source: MIRROR_SOURCE,
-    block_id: blockId,
-    block_scope: scope,
-    visibility: "private",
-    archived: "true",
-    archived_at: now,
+  for (const current of live) {
+    const metadata: MirrorMetadata = {
+      ...((current.metadata ?? {}) as unknown as MirrorMetadata),
+      source: MIRROR_SOURCE,
+      block_id: blockId,
+      block_scope: scope,
+      visibility: "private",
+      archived: "true",
+      archived_at: now,
+    }
+    // Keep the text — archiving hides a record from injection, it does not erase
+    // what it said.
+    await MemoryApi.update(current.id, current.memory ?? "", metadata)
   }
-  // Keep the text — archiving hides a record from injection, it does not erase
-  // what it said.
-  await MemoryApi.update(current.id, current.memory ?? "", metadata)
-  // Written only after the remote archive lands, so a failure leaves the entry
+  // Written only after the remote archives land, so a failure leaves the entry
   // pointing at a record that is still live rather than losing track of it.
-  await recordIndexEntry(key, { memoryId: current.id, contentHash: "", syncedAt: Date.now() })
+  const kept = live.find((r) => r.id === indexed?.id) ?? live[0]
+  await recordIndexEntry(key, { memoryId: kept.id, contentHash: "", syncedAt: Date.now() })
 }
 
 async function runQueue<T>(
@@ -1292,8 +1331,7 @@ export function toBlock(record: CloudMemoryRecord, ownProject: ProjectIdentity |
     record.updated_at ??
     new Date().toISOString()
 
-  const recordProject = recordProjectIdentity(meta)
-  const fromSibling = scope === "project" && !!recordProject?.value && !sameProjectIdentity(recordProject, ownProject)
+  const fromSibling = scope === "project" && !recordInProject(meta, ownProject)
 
   return {
     id: blockId,
@@ -1306,6 +1344,17 @@ export function toBlock(record: CloudMemoryRecord, ownProject: ProjectIdentity |
     remote: true,
     ...(fromSibling ? { origin: originLabel(meta) } : {}),
   }
+}
+
+/** Which block a loaded record holds: its scope and id, and for a sibling
+ * project's block, that project. Records with one key are copies of one block. */
+function copyKey(record: CloudMemoryRecord, block: RemoteMemoryBlock, ownProject: ProjectIdentity | undefined): string {
+  const id = `${block.scope}:${block.id}`
+  const meta = record.metadata ?? {}
+  if (block.scope === "global" || recordInProject(meta, ownProject)) return id
+  const project = recordProject(meta)
+  // A sibling's record whose project isn't a string can't be paired with another.
+  return typeof project === "object" ? `${id}\u0000${projectIdentityKey(project)}` : `${id}\u0000record:${record.id}`
 }
 
 /** Does this record apply to the workspace the current project is bound to?
@@ -1444,18 +1493,25 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
       log.warn("could not reap archived blocks", { err: String(err) }),
     )
 
-    const blocks: RemoteMemoryBlock[] = []
+    // One block per copy key. A block can hold several live records (see
+    // `push`), and serving each would inject it twice, one copy stale; the
+    // newest is served, as `push` keeps it on the block's next save.
+    const newest = new Map<string, RemoteMemoryBlock>()
     for (const record of records) {
       if (!record?.id) continue
       if (!isMirrorRecord(record) || isArchived(record)) continue
       if (!belongsHere(record, ownWorkspace)) continue
       const block = toBlock(record, ownProject)
       if (!block) continue
-      // A TTL'd block must expire everywhere, not just on the machine that
-      // wrote it. The cloud copy is not swept, so honour it on read.
-      if (block.expires && new Date(block.expires) <= new Date()) continue
-      blocks.push(block)
+      const key = copyKey(record, block, ownProject)
+      const prior = newest.get(key)
+      if (!prior || block.updated > prior.updated) newest.set(key, block)
     }
+    // A TTL'd block must expire everywhere, not just on the machine that
+    // wrote it. The cloud copy is not swept, so honour it on read. Checked on
+    // the newest copy only: an older one without the TTL must not outlive it.
+    const now = new Date()
+    const blocks = [...newest.values()].filter((b) => !b.expires || new Date(b.expires) > now)
     return { status: "loaded", blocks, epoch, dir }
   } catch (err) {
     log.warn("workspace memory load failed", { err: String(err) })

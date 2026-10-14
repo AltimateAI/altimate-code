@@ -10,6 +10,7 @@ import vectors from "./fixtures/remote-identity-vectors.json"
 import {
   canonicalRepoRemote,
   projectIdentity,
+  projectIdentityKey,
   publicRepoKey,
   sameIdentifier,
   sameProjectIdentity,
@@ -32,9 +33,14 @@ describe("parity with the workspace service", () => {
       "\ufeffgit@github.com:acme/x.git",
       "https://bitbuc\u212aet.org/Team/Repo",
       "C:\\repos\\analytics.git",
+      "https://github.com/acme/x?ref=1",
+      "https://github.com/acme/x#readme",
+      "https://github.com/acme/x/tree/main",
+      "https://gitlab.com/group/sub/x.git",
+      "https://github.com:8443/acme/x",
     ])
       expect(inputs.has(input)).toBe(true)
-    expect(rows.length).toBeGreaterThan(150)
+    expect(rows.length).toBe(241)
   })
 
   test("canonicalization matches on every row", () => {
@@ -94,6 +100,14 @@ describe("sameRepoRemote", () => {
     expect(sameRepoRemote("git@github.com:acme/x.git", "https://github.com/acme/y")).toBe(false)
     expect(sameRepoRemote("https://github.com/acme/x", "https://gitlab.com/acme/x")).toBe(false)
   })
+
+  test("a query, fragment or extra path segment stays in the key, as in the service's value; a port does not", () => {
+    expect(publicRepoKey("https://github.com/acme/x?ref=1")).toBe("github.com/acme/x?ref=1")
+    expect(publicRepoKey("https://github.com/acme/x#readme")).toBe("github.com/acme/x#readme")
+    expect(sameRepoRemote("https://github.com/acme/x/tree/main", X)).toBe(false)
+    expect(publicRepoKey("git@gitlab.com:group/sub/x.git")).toBe("gitlab.com/group/sub/x")
+    expect(sameRepoRemote("https://github.com:8443/acme/x", X)).toBe(true)
+  })
 })
 
 describe("sameProjectIdentity", () => {
@@ -117,10 +131,28 @@ describe("sameProjectIdentity", () => {
     expect(sameProjectIdentity(undefined, undefined)).toBe(false)
   })
 
-  test("projectIdentity prefers the remote and ignores non-strings", () => {
+  test("projectIdentity prefers the remote, and an empty value is none", () => {
     expect(projectIdentity("https://github.com/acme/x", "/work/x")).toEqual(remote("https://github.com/acme/x"))
     expect(projectIdentity(null, "/work/x")).toEqual(path("/work/x"))
-    expect(projectIdentity(42, undefined)).toBeUndefined()
+    expect(projectIdentity("", "/work/x")).toEqual(path("/work/x"))
+    expect(projectIdentity("", "")).toBeUndefined()
+    expect(projectIdentity(undefined, null)).toBeUndefined()
+  })
+
+  test("projectIdentityKey is shared exactly when sameProjectIdentity holds", () => {
+    const identities = [
+      ...rows.map((r) => remote(r.input)),
+      ...rows.map((r) => remote(r.unified)),
+      ...rows.slice(0, 40).map((r) => path(r.input)),
+      remote("github.com/acme/x"),
+      path("github.com/acme/x"),
+    ]
+    const wrong: string[] = []
+    for (const a of identities)
+      for (const b of identities)
+        if ((projectIdentityKey(a) === projectIdentityKey(b)) !== sameProjectIdentity(a, b))
+          wrong.push(`${a.kind}:${a.value} | ${b.kind}:${b.value}`)
+    expect(wrong).toEqual([])
   })
 })
 
