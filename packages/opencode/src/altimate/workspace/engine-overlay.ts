@@ -23,10 +23,16 @@
 // (see `managedWorkspace`), and anything another process changes is observed
 // at the next turn boundary. The tools a turn holds are the ones resolved at
 // that turn's start.
+import os from "os"
+import path from "path"
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
 import { MCP } from "@/mcp"
 import { sanitize } from "@/mcp/catalog"
+import { findAllConfigPaths, listMcpInConfig } from "@/mcp/config"
 import { Config } from "@/config/config"
+import { Global } from "@/global"
+import { Instance } from "@/project/instance"
+import { displayWorkspaceName } from "./workspace-name"
 import {
   currentDirectory,
   isEnabled,
@@ -180,6 +186,11 @@ type DirectoryState = {
   droppedForeign?: boolean
   /** The key is set by organisation-managed config: nothing here claims it. */
   managed?: boolean
+  /** The workspace the directory's binding last read as, while workspace routing
+   * applies to it: set whenever the overlay or a turn boundary reads the binding,
+   * whatever happens to the engine afterwards. Null when unlinked, when the read
+   * failed, and when routing is off (disabled, `serve`, managed config). */
+  linked?: { id: string; name: string; key: string } | null
 }
 const directories = new Map<string, DirectoryState>()
 
@@ -216,6 +227,7 @@ export async function overlay(
   state.failedAt = undefined
   state.linkUnreadable = undefined
   state.managed = opts.managed === true
+  state.linked = null
   try {
     if (!isEnabled() || isServe()) {
       state.current = null
@@ -252,6 +264,9 @@ export async function overlay(
       name: binding.datamateName,
       key: workspaceKey(binding),
     }
+    // Recorded before the probe: a probe that throws leaves no overlay, but the
+    // directory is still linked.
+    state.linked = workspace
     const probe = await probeEngine()
     if (probe.kind === "ok") {
       const entry = engineEntry(workspace.id)
@@ -310,6 +325,25 @@ export async function managedWorkspaceLoaded(
   return managedWorkspace(directory)
 }
 
+/** The workspace this directory is linked to, while workspace routing applies
+ * to it, or null. Unlike `managedWorkspace` — which answers "who owns the key",
+ * and so follows the overlay — this follows the binding read: a linked directory
+ * whose engine probe failed has no overlay, but is still linked. */
+export function linkedWorkspace(directory: string | null = currentDirectory()): { id: string; name: string } | null {
+  if (!directory) return null
+  const linked = directories.get(directory)?.linked
+  return linked ? { id: linked.id, name: linked.name } : null
+}
+
+/** `linkedWorkspace` once the overlay has run for this instance. */
+export async function linkedWorkspaceLoaded(
+  directory: string | null = currentDirectory(),
+): Promise<{ id: string; name: string } | null> {
+  if (!directory) return null
+  await config().get()
+  return linkedWorkspace(directory)
+}
+
 // ── per-session outcome ─────────────────────────────────────────────────────
 
 /** `retried`: this session already spent its one re-add on a failed handshake.
@@ -321,6 +355,9 @@ type SessionRecord = {
   retried?: boolean
   /** The last attach saw a report it had to drop as malformed. */
   reportMalformed?: boolean
+  /** The workspace the directory was linked to when the boundary settled this
+   * outcome. */
+  linked?: { id: string; name: string } | null
 }
 const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
@@ -352,6 +389,12 @@ function record(sessionID: string, outcome: Outcome): SessionRecord {
  * `undefined` before the first `beforeTurn` for that session. */
 export function settledOutcome(sessionID: string): Outcome | undefined {
   return sessions.get(sessionID)?.outcome
+}
+
+/** The workspace this session's settled outcome is about, as its boundary read
+ * the link, or null. */
+export function settledWorkspace(sessionID: string): { id: string; name: string } | null {
+  return sessions.get(sessionID)?.linked ?? null
 }
 
 function mcp() {
@@ -448,13 +491,39 @@ export async function atTurnStart<T>(sessionID: string, body: () => Promise<T>):
     } catch (err) {
       log.warn("workspace engine turn hook failed", { sessionID, err: String(err) })
     }
-    return body()
+    // Kept with the outcome, under the lock: the directory's link moves with any
+    // later config load, and a turn's notice must name the workspace its own
+    // outcome is about.
+    const settled = sessions.get(sessionID)
+    if (settled) settled.linked = linkedWorkspace(directory)
+    const catalogued = await body()
+    // After the catalog, not before: the TUI shows one toast at a time, and the
+    // routing summary precedence announces while the catalog is built would
+    // replace this warning within half a second of it appearing (measured).
+    await warnLegacyEntries(directory)
+    return catalogued
   })
   state.chain = run.then(
     () => undefined,
     () => undefined,
   )
   return run
+}
+
+/** Hold the current directory's turn-boundary lock until the handle is
+ * released or disposed, whichever comes first: no boundary links the directory,
+ * or attaches, replaces or releases its engine, meanwhile. For a writer of MCP
+ * config that must check it is allowed and write as one step. */
+export async function holdDirectoryLock(): Promise<Disposable & { release(): void }> {
+  const directory = currentDirectory()
+  if (!directory) return { release() {}, [Symbol.dispose]() {} }
+  const state = stateFor(directory)
+  let release!: () => void
+  const held = new Promise<void>((resolve) => (release = resolve))
+  const previous = state.chain
+  state.chain = previous.then(() => held)
+  await previous
+  return { release, [Symbol.dispose]: release }
 }
 
 /** The engine tools a turn catalogued first, kept for its later catalogs.
@@ -495,6 +564,102 @@ export function pinTurnTools<T>(sessionID: string, firstCatalog: boolean, tools:
   for (const key of ordered) tools[key] = next[key]
 }
 
+/** Sets of `datamate-<name>` entries already reported, per directory and
+ * workspace, for the life of this process. */
+const legacyWarned = new Set<string>()
+
+/** In a linked project the workspace engine is the only route to the
+ * workspace's integrations, and `datamate_manager` is off. A standalone
+ * `datamate-<name>` MCP entry saved before that still loads, as a second route
+ * outside the engine. Say so once per set of entries, naming the files they are
+ * in; the config is never edited — the entries are the user's. Failures are
+ * logged, never thrown: this must not hold up the turn. On the turn it fires,
+ * it is the boundary's last toast, so it takes the TUI's single toast slot from
+ * that turn's routing summary — the second route it reports is the thing that
+ * summary cannot be trusted over. */
+async function warnLegacyEntries(directory: string): Promise<void> {
+  try {
+    const loaded = await config().get()
+    const workspace = directories.get(directory)?.linked
+    if (!workspace) return
+    const names = Object.entries(loaded.mcp ?? {})
+      .filter(([key, entry]) => key.startsWith(`${DATAMATE_KEY}-`) && (entry as { enabled?: unknown } | null)?.enabled !== false)
+      .map(([key]) => key)
+      .sort()
+    if (names.length === 0) return
+    // The account-qualified key, not the id: ids are tenant-local, and a relink
+    // to another tenant's workspace with the same id is another workspace.
+    const signature = `${directory}\0${workspace.key}\0${names.join("\0")}`
+    if (legacyWarned.has(signature)) return
+    const where = await locateEntries(directory, names)
+    const listed = names
+      .map((name) => {
+        const files = where.get(name)
+        return files ? `${name} (${files.map((file) => displayPath(file, directory)).join(", ")})` : name
+      })
+      .join(", ")
+    // The title is one line in the TUI's toast box (about 60 columns): it stays
+    // fixed and short, and the workspace name goes in the message.
+    const toast: Toast = {
+      title: "Older datamate entries still configured",
+      message:
+        `This project is linked to workspace "${displayWorkspaceName(workspace.name)}", whose engine serves its ` +
+        `integrations, but these older datamate MCP entries still load beside it: ${listed}. Remove them from ` +
+        `that config to keep a single route to the workspace's integrations.`,
+      variant: "warning",
+    }
+    log.info("linked project still configures datamate entries", { directory, names })
+    // Marked only once delivered: a publication that fails (false, or a throw
+    // caught below) is tried again at the next turn boundary.
+    if (isHeadless()) printLine(`${toast.title}: ${toast.message}`)
+    else if (!(await notify(toast))) return
+    legacyWarned.add(signature)
+  } catch (err) {
+    log.warn("could not check for older datamate entries", { directory, err: String(err) })
+  }
+}
+
+/** Every config file each entry is defined in, project files first: an entry
+ * in two files still loads after it is removed from one. An entry found in none
+ * of them (set by an environment or remote config) is left out. */
+async function locateEntries(directory: string, names: string[]): Promise<Map<string, string[]>> {
+  const found = new Map<string, string[]>()
+  const projectDirs = new Set([directory, projectRoot(directory)])
+  const paths = new Set<string>()
+  for (const dir of projectDirs) for (const p of await findAllConfigPaths(dir, Global.Path.config)) paths.add(p)
+  for (const p of paths) {
+    const keys = new Set(
+      await listMcpInConfig(p).catch((err) => {
+        log.warn("could not read a config file for older datamate entries", { file: p, err: String(err) })
+        return [] as string[]
+      }),
+    )
+    for (const name of names) if (keys.has(name)) found.set(name, [...(found.get(name) ?? []), p])
+  }
+  return found
+}
+
+/** A config path as the warning shows it: relative to the project when inside
+ * it, under `~` when inside the home directory, else as is. */
+function displayPath(file: string, directory: string): string {
+  const inProject = path.relative(directory, file)
+  if (inProject && !inProject.startsWith("..") && !path.isAbsolute(inProject)) return inProject
+  const home = os.homedir()
+  const inHome = path.relative(home, file)
+  if (inHome && !inHome.startsWith("..") && !path.isAbsolute(inHome)) return path.join("~", inHome)
+  return file
+}
+
+/** The instance's worktree when it has one, else the directory itself. */
+function projectRoot(directory: string): string {
+  try {
+    const wt = Instance.worktree
+    return wt && wt !== "/" ? wt : directory
+  } catch {
+    return directory
+  }
+}
+
 async function reconcile(sessionID: string, directory: string, state: DirectoryState): Promise<void> {
   // The overlay runs inside config load; make sure it has run at least once.
   await config().get()
@@ -512,6 +677,10 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   }
 
   const read = await resolveBinding(directory)
+  state.linked =
+    read.kind === "bound"
+      ? { id: String(read.binding.datamateId), name: read.binding.datamateName, key: workspaceKey(read.binding) }
+      : null
   if (read.kind === "failed") return refuseUnreadableLink(sessionID, state, read.error)
   const binding = read.kind === "bound" ? read.binding : null
   if (!binding) {
@@ -848,6 +1017,7 @@ export function resetForTests(): void {
   turnTools.clear()
   declaredCache.clear()
   headlessPrinted.clear()
+  legacyWarned.clear()
 }
 
 /** Test-only views. */
