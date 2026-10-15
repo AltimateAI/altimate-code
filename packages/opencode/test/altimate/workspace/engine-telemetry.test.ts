@@ -134,9 +134,10 @@ describe("workspace engine telemetry builders", () => {
     expect(
       (precedenceEvent(offSnap, { escapeHatch: true, connections: 0, types: 0, workspaceId: 7 }) as any).workspace_id,
     ).toBe(7)
-    expect("workspace_id" in (precedenceEvent(offSnap, { escapeHatch: true, connections: 0, types: 0 }) as any)).toBe(
-      false,
-    )
+    // Unbound and no linked workspace: the key is present and undefined, so the row names none.
+    const unboundRow = precedenceEvent(offSnap, { escapeHatch: true, connections: 0, types: 0 }) as any
+    expect("workspace_id" in unboundRow).toBe(true)
+    expect(unboundRow.workspace_id).toBeUndefined()
     expect(precedenceEvent(on, { escapeHatch: false, connections: 1, types: 2 })).toEqual(
       expect.objectContaining({
         type: "workspace_engine_precedence",

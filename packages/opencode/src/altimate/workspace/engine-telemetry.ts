@@ -178,7 +178,9 @@ export function precedenceEvent(
     shadowed_connections: opts.connections,
     extensions: p.extensions?.length ?? 0,
     escape_hatch: opts.escapeHatch,
-    ...(id !== undefined && Number.isInteger(id) && id > 0 ? { workspace_id: id } : {}),
+    // Present and undefined for an unbound or disabled snapshot with no linked workspace, as on the
+    // attach row: the row names no workspace, and nothing else may name one for it.
+    workspace_id: id !== undefined && Number.isInteger(id) && id > 0 ? id : undefined,
   }
 }
 
