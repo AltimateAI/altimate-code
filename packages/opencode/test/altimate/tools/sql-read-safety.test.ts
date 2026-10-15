@@ -80,9 +80,11 @@ describe("read-only SQL parser boundary", () => {
     expect(classifyAndCheck("WITH invalid syntax").queryType).toBe("write")
   })
 
-  test("scratch batches admit verified reads alongside local writes", () => {
+  test("scratch batches admit only a final verified read alongside local writes", () => {
     expect(isScratchSafeWrite("CREATE TABLE items AS SELECT 1 AS value; SELECT value FROM items")).toBe(true)
-    expect(isScratchSafeWrite("SELECT 1; INSERT INTO items VALUES (2); SELECT * FROM items")).toBe(true)
+    expect(isScratchSafeWrite("SELECT 1; INSERT INTO items VALUES (2); SELECT * FROM items")).toBe(false)
+    expect(isScratchSafeWrite("INSERT INTO items VALUES (2); SELECT * FROM items; INSERT INTO items VALUES (3)")).toBe(false)
+    expect(isScratchSafeWrite("INSERT INTO items VALUES (2); SELECT * FROM items")).toBe(true)
     for (const suffix of [
       "SELECT 1 INTO other",
       "WITH removed AS (DELETE FROM other.items RETURNING *) SELECT * FROM removed",

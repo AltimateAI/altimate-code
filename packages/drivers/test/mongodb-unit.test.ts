@@ -78,7 +78,7 @@ async function fakeMongo(
   const connector = await connect({ type: "mongodb", database: "test" })
   await connector.connect()
   const query = (command: string, extra: object = {}) => JSON.stringify({ collection: "articles", command, ...extra })
-  return { connector, query, finds, pipelines, aggregateOptions, counts, distincts, collectionLists, databaseLists, estimates }
+  return { connector, query, collections, finds, pipelines, aggregateOptions, counts, distincts, collectionLists, databaseLists, estimates }
 }
 
 describe("MongoDB read command shapes", () => {
@@ -154,6 +154,14 @@ describe("MongoDB read namespace validation", () => {
       database: "test", options: { nameOnly: true, authorizedCollections: true, maxTimeMS: 250 },
     }])
     expect(databaseLists).toEqual([])
+  })
+
+  test("a collection created by another client is found after one re-list", async () => {
+    const { connector, query, collections, collectionLists } = await fakeMongo()
+    await connector.execute(query("find"))
+    collections.test.push("late")
+    await connector.execute(query("find", { collection: "late" }))
+    expect(collectionLists).toHaveLength(2)
   })
 
   test("an existing empty database can list its collections", async () => {

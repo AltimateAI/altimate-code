@@ -61,6 +61,18 @@ describe("sql_execute writes to scratch", () => {
     expect(asked).toHaveLength(0)
   })
 
+  test("a scratch batch with a read before the final statement still asks for write permission", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const asked: any[] = []
+    await expect(
+      tool.execute(
+        { query: "CREATE TABLE items AS SELECT 1 AS value; SELECT * FROM items; INSERT INTO items VALUES (2)", warehouse: "scratch", limit: 10 },
+        { ...ctx, ask: async (req: any) => { asked.push(req); throw new Error("write denied by test") } },
+      ),
+    ).rejects.toThrow("write denied by test")
+    expect(asked).toHaveLength(1)
+  })
+
   test("DDL and DML in scratch run without asking for write permission", async () => {
     const tool = await initTool(SqlExecuteTool)
     const asked: any[] = []

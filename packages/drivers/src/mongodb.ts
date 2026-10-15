@@ -545,7 +545,13 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       }
 
       if (MONGO_COLLECTION_READS.has(cmd)) {
-        const collections = await readCollections(db, maxTimeMS)
+        let collections = await readCollections(db, maxTimeMS)
+        if (!collections.some((collection) => collection.name === parsed.collection)) {
+          // A collection created by another client after the first listing is not cached; re-list once before refusing.
+          collectionCache.delete(db.databaseName as string)
+          databaseNames = undefined
+          collections = await readCollections(db, maxTimeMS)
+        }
         if (!collections.some((collection) => collection.name === parsed.collection)) {
           const names = collections.map((collection) => collection.name).sort()
           throw new Error(

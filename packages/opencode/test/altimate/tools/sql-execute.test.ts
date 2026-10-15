@@ -48,14 +48,14 @@ afterEach(() => {
 })
 
 describe("sql_execute parser read boundary", () => {
-  test("reports parser failures before requesting write permission", async () => {
+  test("explains a refused write approval for parser failures", async () => {
     const tool = await initTool(SqlExecuteTool)
     const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
     try {
       await expect(tool.execute({ query: "SELECT (" }, ctx)).rejects.toThrowErrorMatchingInlineSnapshot(
         `"Could not prove this SQL is read-only: Parse error at line 1, column 9: Unexpected token: LParen. Rewrite or split the statement."`,
       )
-      expect(ask).not.toHaveBeenCalled()
+      expect(ask).toHaveBeenCalledTimes(1)
       expect(dispatch).not.toHaveBeenCalled()
       expect(precedence).not.toHaveBeenCalled()
     } finally {
@@ -74,11 +74,23 @@ describe("sql_execute parser read boundary", () => {
     const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
     try {
       await expect(tool.execute({ query, warehouse: "source" }, ctx)).rejects.toThrow(/read-only: Parse error.*Rewrite or split/)
-      expect(ask).not.toHaveBeenCalled()
+      expect(ask).toHaveBeenCalledTimes(1)
       expect(dispatch).not.toHaveBeenCalled()
     } finally {
       ask.mockRestore()
       config.mockRestore()
+    }
+  })
+
+  test("executes parser-rejected SQL only after write approval", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.void)
+    try {
+      await tool.execute({ query: "SELECT (" }, ctx)
+      expect(ask).toHaveBeenCalledTimes(1)
+      expect(dispatch).toHaveBeenCalledTimes(1)
+    } finally {
+      ask.mockRestore()
     }
   })
 
@@ -88,12 +100,12 @@ describe("sql_execute parser read boundary", () => {
     "EXPLAIN ANALYZE DELETE FROM victim",
     "SELECT $tag$'--$tag$ AS a; DELETE FROM victim",
     String.raw`SELECT E'\'--' AS a) x) y; DELETE FROM victim; SELECT * FROM (SELECT * FROM (SELECT ''`,
-  ])("refuses parser-rejected statements before permission or execution: %s", async (query) => {
+  ])("requires write approval and explains the refusal for parser-rejected statements: %s", async (query) => {
     const tool = await initTool(SqlExecuteTool)
-    const ask = spyOn(ctx, "ask")
+    const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
     try {
       await expect(tool.execute({ query }, ctx)).rejects.toThrow(/Could not prove this SQL is read-only/)
-      expect(ask).not.toHaveBeenCalled()
+      expect(ask).toHaveBeenCalledTimes(1)
       expect(dispatch).not.toHaveBeenCalled()
       expect(precedence).not.toHaveBeenCalled()
     } finally {

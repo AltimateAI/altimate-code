@@ -102,11 +102,7 @@ export const SqlExecuteTool = Tool.define(
                 "DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety. This cannot be overridden.",
               )
             }
-            if ("parseError" in classification && classification.parseError) {
-              throw new Error(
-                `Could not prove this SQL is read-only: ${classification.parseError}. Rewrite or split the statement.`,
-              )
-            }
+            const parseError = "parseError" in classification ? classification.parseError : undefined
             if (!mongo && queryType === "read") {
               // classifyAndCheck verifies complete lexical/parser agreement and every
               // statement's read status, including metadata. Unlike check/materialize,
@@ -124,12 +120,20 @@ export const SqlExecuteTool = Tool.define(
             // reach outside the engine (COPY TO, ATTACH, INSTALL/LOAD, EXPORT, SET) still ask, and
             // the hard-deny list above still applies.
             if (queryType === "write" && !(isScratch(args.warehouse) && isScratchSafeWrite(args.query))) {
-              await ctx.ask({
-                permission: "sql_execute_write",
-                patterns: [args.query.slice(0, 200)],
-                always: ["*"],
-                metadata: { queryType },
-              })
+              // Unprovable SQL still goes through write approval; a refusal explains why it was not treated as a read.
+              try {
+                await ctx.ask({
+                  permission: "sql_execute_write",
+                  patterns: [args.query.slice(0, 200)],
+                  always: ["*"],
+                  metadata: { queryType },
+                })
+              } catch (error) {
+                if (parseError) {
+                  throw new Error(`Could not prove this SQL is read-only: ${parseError}. Rewrite or split the statement.`)
+                }
+                throw error
+              }
             }
             // altimate_change end
 

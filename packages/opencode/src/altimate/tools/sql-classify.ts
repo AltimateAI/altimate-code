@@ -278,7 +278,7 @@ function hasLocalScratchTarget(statement: string): boolean {
 }
 
 /**
- * True for local table/view DDL or row DML, optionally mixed with verified reads.
+ * True for local table/view DDL or row DML, optionally ending with one verified read.
  * Unparseable or unknown statements are not scratch-safe.
  */
 export function isScratchSafeWrite(sql: string): boolean {
@@ -295,7 +295,9 @@ export function isScratchSafeWrite(sql: string): boolean {
       statements.every((s, i) =>
         SCRATCH_WRITE_TYPES.has(String(s.statement_type ?? "").toUpperCase())
           ? hasLocalScratchTarget(source[i])
-          : otherIsReadOnly(source[i], [s], dialect),
+          : // Only the final statement's rows are returned and a row cap is appended to the whole text,
+            // so a read is admitted solely in last position.
+            i === statements.length - 1 && otherIsReadOnly(source[i], [s], dialect),
       )
     )
   } catch {
