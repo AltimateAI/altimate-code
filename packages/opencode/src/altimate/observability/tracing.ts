@@ -138,6 +138,8 @@ export interface RunTraceLineage {
   }>
 }
 
+const RESUME_ABORT_REASON = "Recording resumed before the tool finished"
+
 function abortOpenTools(spans: TraceSpan[], reason: string, endTime = Date.now()) {
   for (const span of spans) {
     if (span.kind !== "tool" || span.endTime !== undefined) continue
@@ -873,7 +875,7 @@ export class Trace {
     // `rootSpanId`, silently degrading the trace shape. Marking them
     // interrupted preserves the partial data and makes the boundary visible.
     const now = Date.now()
-    abortOpenTools(this.spans, "Recording resumed before the tool finished", now)
+    abortOpenTools(this.spans, RESUME_ABORT_REASON, now)
     for (const s of this.spans) {
       if (s.kind === "generation" && s.endTime === undefined) {
         s.endTime = now
@@ -1142,7 +1144,18 @@ export class Trace {
       }
       if (!this.recordPart("tool", part, part?.messageID ? part.callID : undefined)) return
       this.recordPart("tool-start", part, part?.messageID ? part.callID : undefined)
-      const running = this.runningTools.get(key)
+      // A completion that arrives after the trace was rebuilt from disk finds its span closed as
+      // interrupted by rehydration; finish that span instead of recording a second one.
+      const running =
+        this.runningTools.get(key) ??
+        this.spans.find(
+          (s) =>
+            s.kind === "tool" &&
+            s.interrupted === true &&
+            s.statusMessage === RESUME_ABORT_REASON &&
+            s.tool?.callId === part.callID &&
+            s.attributes?.messageId === part.messageID,
+        )
       this.runningTools.delete(key)
       const isError = state.status === "error"
       const interrupted = isError && state.metadata?.interrupted === true
@@ -1196,8 +1209,10 @@ export class Trace {
           }),
         },
       }
-      if (running) Object.assign(running, span)
-      else {
+      if (running) {
+        Object.assign(running, span)
+        if (!interrupted) delete (running as { interrupted?: boolean }).interrupted
+      } else {
         this.spans.push(span)
         this.toolCallCount++
       }

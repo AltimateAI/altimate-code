@@ -321,7 +321,8 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     Math.max(0, maxLines - lineCount(schema.text + footer) + 1),
     schema.columns,
   )
-  if (!preview.clipped && schema.columns === result.columns.length && !result.truncated) {
+  // Clipped column names are lossy; keep the full schema in the saved file instead of an inline preview.
+  if (!preview.clipped && !schema.clipped && schema.columns === result.columns.length && !result.truncated) {
     metadata.preview_rows = preview.rows
     metadata.preview_columns = schema.columns
     metadata.schema_truncated = schema.clipped

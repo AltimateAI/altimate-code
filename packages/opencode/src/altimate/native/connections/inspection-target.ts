@@ -3,11 +3,24 @@ import * as Registry from "./registry"
 import type { Connector } from "@altimateai/drivers"
 import type { SchemaInspectParams } from "../types"
 
+// The database a MongoDB URI names (`mongodb://host/analytics?...`) is the connection's default.
+function mongoUriDatabase(uri: unknown): string | undefined {
+  if (typeof uri !== "string") return undefined
+  const match = uri.match(/^mongodb(?:\+srv)?:\/\/[^/?#]*\/([^?#]+)/)
+  if (!match) return undefined
+  try {
+    return decodeURIComponent(match[1]) || undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function defaultInspectionSchema(warehouse: string): string | undefined {
   const config = Registry.getConfig(warehouse)
   const type = Registry.canonicalType(config?.type)
   const configured = type === "bigquery" ? config?.dataset : type === "mysql" || type === "mongodb" ? config?.database : config?.schema
   if (typeof configured === "string" && configured) return configured
+  if (type === "mongodb") return mongoUriDatabase(config?.connection_string)
   if (type === "duckdb" || type === "sqlite") return "main"
   if (type === "postgres" || type === "redshift") return "public"
   return undefined

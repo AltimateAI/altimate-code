@@ -160,6 +160,26 @@ describe("running tool traces", () => {
     ])
   })
 
+  test("a completion after rehydration finishes the existing span without a duplicate", async () => {
+    await using tmp = await tmpdir()
+    const original = Trace.withExporters([new FileExporter(tmp.path)])
+    original.startTrace("session", {})
+    const part = running()
+    original.logToolCall(part)
+    await original.flush()
+    const trace = Trace.withExporters([new FileExporter(tmp.path)])
+    expect(await trace.rehydrateFromFile("session")).toBe(true)
+    const end = part.state.time.start + 500
+    trace.logToolCall({ ...part, state: { ...part.state, status: "completed", output: "late", time: { ...part.state.time, end } } })
+    await trace.endTrace()
+    const file = await readTrace(tmp.path)
+    const tools = file.spans.filter((span) => span.kind === "tool")
+    expect(tools).toHaveLength(1)
+    expect(tools[0]).toMatchObject({ status: "ok", output: "late", endTime: end })
+    expect(tools[0]!.interrupted).toBeUndefined()
+    expect(file.summary.totalToolCalls).toBe(1)
+  })
+
   test("shared event consumer captures a running call before synchronous shutdown", async () => {
     await using tmp = await tmpdir()
     const consumer = new TraceConsumer({ exporters: [new FileExporter(tmp.path)] })

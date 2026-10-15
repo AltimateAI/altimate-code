@@ -174,7 +174,8 @@ describe("SQL result previews", () => {
     expect(formatted.output).toContain("…[alias clipped]")
     expect(formatted.metadata).toMatchObject({ schema_truncated: true, output_truncated: false, truncated: false })
     expect(Buffer.byteLength(formatted.output, "utf8")).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
-    expect(saved.writes).toHaveLength(0)
+    // Clipped names are lossy, so the full result is saved for recovery.
+    expect(saved.writes).toHaveLength(1)
   })
 
   test("renders distinct small Buffer cells as base64 without spilling", async () => {
@@ -518,8 +519,8 @@ describe("SQL result previews", () => {
       truncated: false,
     })
     expect(formatted.output).not.toContain("Output truncated: yes")
-    expect(formatted.metadata.result_path).toBeUndefined()
-    expect(saved.writes).toHaveLength(0)
+    expect(formatted.metadata.result_path).toBeDefined()
+    expect(saved.writes).toHaveLength(1)
   })
 
   test("caps a 500-column preview and saves the full schema and rows", async () => {
