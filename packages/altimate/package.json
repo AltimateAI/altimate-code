@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "@altimateai/opencode-plugin",
+  "version": "0.0.0-spike",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./server": "./src/server.ts",
+    "./tui": "./src/tui.tsx",
+    "./rpc": "./src/rpc.ts"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsgo --noEmit"
+  },
+  "dependencies": {
+    "@altimateai/drivers": "workspace:*",
+    "@opencode/plugin": "workspace:*",
+    "@opencode/schema": "workspace:*",
+    "duckdb": "1.4.4",
+    "effect": "catalog:"
+  },
+  "devDependencies": {
+    "@ai-sdk/provider": "3.0.8",
+    "@opencode/sdk": "workspace:*",
+    "@opencode/core": "workspace:*",
+    "@tsconfig/bun": "catalog:",
+    "@types/bun": "catalog:"
+  }
+}

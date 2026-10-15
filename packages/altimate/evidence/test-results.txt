@@ -1,0 +1,23 @@
+bun test v1.4.2 (744846f84)
+
+test/sql-classification.test.ts:
+(pass) sql_execute applies the requested row limit and reports truncation [717.64ms]
+(pass) a read followed by a write is denied before executing the SQL batch [229.79ms]
+(pass) EXPLAIN ANALYZE cannot bypass write permission [159.11ms]
+(pass) comment-looking string cannot bypass write permission [426.76ms]
+
+test/s1-data-tools.test.ts:
+(pass) a. sql_execute SELECT returns structured rows and a text table [519.02ms]
+(pass) b1. configured deny prevents write execution [203.09ms]
+(pass) b2. plain reject ends the step and prevents write execution [374.86ms]
+(pass) b3. reject with feedback returns a tool failure and prevents write execution [369.45ms]
+(pass) b4. once approval executes the write and the table can be read [308.40ms]
+(todo) c. native DuckDB cancellation prevents a running query from committing
+(pass) d. schema_inspect lists the created table and its columns [182.41ms]
+(pass) e. warehouse definitions persist across hosts sharing DB and storage [589.29ms]
+
+ 11 pass
+ 1 todo
+ 0 fail
+ 28 expect() calls
+Ran 12 tests across 2 files. [4.56s]

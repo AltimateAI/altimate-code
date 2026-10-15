@@ -1,0 +1,67 @@
+Root bun run check: exit 0. Output excerpt; repetitive lint warnings omitted.
+Found 1353 warnings and 0 errors.
+@opencode/www:typecheck: 02:13:35 [@astrojs/cloudflare] Enabling sessions with Cloudflare KV with the "SESSION" KV binding.
+@opencode/www:typecheck: [31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mFailed to write to log file Error: EPERM: operation not permitted, mkdir '/Users/anandgupta/Library/Preferences/.wrangler'[0m
+@opencode/www:typecheck: 
+@opencode/www:typecheck:       at async Object.mkdir (node:internal/fs/promises:858:10)
+@opencode/www:typecheck:       at async ensureDirectoryExists (/Users/anandgupta/codebase/altimate-code-v2-spike/node_modules/.bun/wrangler@4.110.0+768a352c8cefbacd/node_modules/wrangler/wrangler-dist/cli.js:47331:3)
+@opencode/www:typecheck:       at async /Users/anandgupta/codebase/altimate-code-v2-spike/node_modules/.bun/wrangler@4.110.0+768a352c8cefbacd/node_modules/wrangler/wrangler-dist/cli.js:47406:7
+@opencode/www:typecheck:       at async Mutex.runWith (/Users/anandgupta/codebase/altimate-code-v2-spike/node_modules/.bun/miniflare@4.20260708.1/node_modules/miniflare/dist/src/index.js:59727:48)
+@opencode/www:typecheck:       at async appendToDebugLogFile (/Users/anandgupta/codebase/altimate-code-v2-spike/node_modules/.bun/wrangler@4.110.0+768a352c8cefbacd/node_modules/wrangler/wrangler-dist/cli.js:47404:3) {
+@opencode/www:typecheck:     errno: -1,
+@opencode/www:typecheck:     code: 'EPERM',
+@opencode/www:typecheck:     syscall: 'mkdir',
+@opencode/www:typecheck:     path: '/Users/anandgupta/Library/Preferences/.wrangler'
+@opencode/www:typecheck:   }
+@opencode/www:typecheck: 
+@opencode/www:typecheck: 
+@opencode/www:typecheck: [31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mWould have written: [0m
+@opencode/www:typecheck: 
+@opencode/www:typecheck:   --- 2026-10-15T09:13:35.030Z debug
+@opencode/www:typecheck:   🪵  Writing logs to "/Users/anandgupta/Library/Preferences/.wrangler/logs/wrangler-2026-10-15_09-13-34_670.log"
+@opencode/www:typecheck:   ---
+@opencode/www:typecheck:   
+@opencode/www:typecheck: 
+@opencode/www:typecheck: 
+@opencode/www:typecheck: 02:13:35 [content] Syncing content
+@opencode/www:typecheck: 02:13:35 [content] Synced content
+@opencode/www:typecheck: 02:13:35 [types] Generated 723ms
+@opencode/www:typecheck: 02:13:35 [check] Getting diagnostics for Astro files in /Users/anandgupta/codebase/altimate-code-v2-spike/services/www...
+@opencode/www:typecheck: Result (31 files): 
+@opencode/www:typecheck: - 0 errors
+@opencode/www:typecheck: - 0 warnings
+@opencode/www:typecheck: - 0 hints
+@opencode/www:typecheck: 
+@opencode/www:typecheck: 🪵  Logs were written to "/Users/anandgupta/Library/Preferences/.wrangler/logs/wrangler-2026-10-15_09-13-34_670.log"
+@opencode/ui:typecheck: cache hit, replaying logs 9ea423b04e353309
+@opencode/ui:typecheck: $ tsgo --noEmit
+@opencode/plugin-figma:typecheck: cache hit, replaying logs 7f2dacbd1afa947d
+@opencode/httpapi-codegen:typecheck: cache hit, replaying logs 543967fb9d64eef9
+@opencode/plugin-figma:typecheck: $ tsgo --noEmit
+@opencode/httpapi-codegen:typecheck: $ tsgo --noEmit
+@opencode/schema:typecheck: cache hit, replaying logs a9e3b2078cac0514
+@opencode/schema:typecheck: $ tsgo --noEmit
+@opencode/stats-core:typecheck: cache hit, replaying logs 50320edd13e33bbd
+@opencode/ai:typecheck: cache hit, replaying logs 3ce9a290a76b5e30
+@opencode/ai:typecheck: $ tsgo --noEmit && tsgo --noEmit -p tsconfig.types.json
+@opencode/stats-core:typecheck: $ tsgo --noEmit
+@opencode/protocol:typecheck: cache hit, replaying logs c5fba2a81d618985
+@opencode/protocol:typecheck: $ tsgo --noEmit
+@opencode/server:typecheck: cache hit, replaying logs 9dc6fed1d8cf5d05
+@opencode/server:typecheck: $ tsgo -b
+@opencode/simulation:typecheck: cache hit, replaying logs a740c2522096074c
+@opencode/simulation:typecheck: $ tsgo -b
+@opencode/enterprise:typecheck: cache hit, replaying logs 91aaa4e953cff0e2
+@opencode/enterprise:typecheck: $ tsgo -b
+@opencode/tui:typecheck: cache hit, replaying logs 7155b33f9ad299fd
+@opencode/tui:typecheck: $ tsgo -b
+@opencode/sdk:typecheck: cache hit, replaying logs 0f75296e169332d9
+@opencode/sdk:typecheck: $ tsgo -b
+@opencode/cli:typecheck: cache hit, replaying logs 7e20663ed88b3f79
+@altimateai/opencode-plugin:typecheck: $ tsgo --noEmit
+@opencode/cli:typecheck: $ tsgo -b
+
+ Tasks:    37 successful, 37 total
+Cached:    36 cached, 37 total
+  Time:    6.124s 
+

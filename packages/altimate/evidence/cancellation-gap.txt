@@ -1,0 +1,42 @@
+Cancellation TODO temporarily enabled as a normal test; restored afterwards.
+Exit: 1
+bun test v1.4.2 (744846f84)
+
+test/sql-classification.test.ts:
+
+test/s1-data-tools.test.ts:
+170 |             sql: "SELECT table_name FROM information_schema.tables WHERE table_name = 'after_abort'",
+171 |           },
+172 |         },
+173 |       ])
+174 |       // A successful followup proves usability; no table would prove native abort.
+175 |       expect(success(checked, "after").metadata).toMatchObject({ rows: [] })
+                                                       ^
+error: expect(received).toMatchObject(expected)
+
+  {
+-   "rows": [],
++   "columns": [
++     "table_name",
++   ],
++   "row_count": 1,
++   "rows": [
++     [
++       "after_abort",
++     ],
++   ],
++   "truncated": false,
++   "warehouse": "local",
+  }
+
+- Expected  - 1
++ Received  + 11
+
+      at <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/s1-data-tools.test.ts:175:50)
+(fail) c. native DuckDB cancellation prevents a running query from committing [889.31ms]
+
+ 0 pass
+ 11 filtered out
+ 1 fail
+ 3 expect() calls
+Ran 1 test across 2 files. [1170.00ms]
