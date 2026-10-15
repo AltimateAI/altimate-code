@@ -28,6 +28,10 @@ export type Metadata = { [key: string]: any; error?: string }
 export interface LegacyContext<M extends Metadata = Metadata> {
   sessionID: SessionID
   messageID: MessageID
+  // altimate_change start — the calling turn's workspace and token, as on Tool.Context
+  workspaceId?: number
+  turn?: number
+  // altimate_change end
   agent: string
   abort: AbortSignal
   callID?: string
@@ -221,6 +225,10 @@ function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
           const legacyCtx: LegacyContext = {
             sessionID: ctx.sessionID,
             messageID: ctx.messageID,
+            // altimate_change start — carried through for the rows a legacy tool emits
+            workspaceId: ctx.workspaceId,
+            turn: ctx.turn,
+            // altimate_change end
             agent: ctx.agent,
             abort: ctx.abort,
             callID: ctx.callID,

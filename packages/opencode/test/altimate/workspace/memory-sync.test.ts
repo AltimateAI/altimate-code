@@ -6,7 +6,7 @@
 // the mirror actually issues — method, path, body — rather than a mock's call
 // log. Cases claiming "nothing was sent" check a zero request count, not merely
 // the absence of a throw.
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, test, spyOn } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -53,9 +53,7 @@ const {
   toBlock,
   whenHydrated,
 } = await import("../../../src/altimate/workspace/memory-sync")
-const { MIRROR_SOURCE, extractRecordId, LIST_LIMIT } = await import(
-  "../../../src/altimate/workspace/memory-api"
-)
+const { MIRROR_SOURCE, extractRecordId, LIST_LIMIT } = await import("../../../src/altimate/workspace/memory-api")
 
 import { AltimateApi } from "../../../src/altimate/api/client"
 
@@ -113,7 +111,8 @@ function stubFetch() {
         if (method === "POST") {
           const body = init?.body ? JSON.parse(init.body) : {}
           for (const rec of Array.isArray(createResult) ? createResult : []) {
-            if (rec?.id) listResponse.push({ id: rec.id, memory: body.messages?.[0]?.content ?? "", metadata: body.metadata })
+            if (rec?.id)
+              listResponse.push({ id: rec.id, memory: body.messages?.[0]?.content ?? "", metadata: body.metadata })
           }
         }
         return { message: "ok", result: createResult }
@@ -121,8 +120,7 @@ function stubFetch() {
       if (url.includes("/datamates/")) return { datamates: workspaces }
       return { message: "ok" }
     })()
-    const status =
-      url.includes("/datamate-project-bindings/by-") && !serverBinding ? 404 : 200
+    const status = url.includes("/datamate-project-bindings/by-") && !serverBinding ? 404 : 200
     return new Response(JSON.stringify(payload), {
       status,
       headers: { "Content-Type": "application/json" },
@@ -182,10 +180,8 @@ afterEach(() => {
   // seam fall through to the real lookup, so a leaked value from a previous
   // test would decide their outcome.
   serverBinding = null
-  ;(AltimateApi as unknown as { isConfigured: typeof originalIsConfigured }).isConfigured =
-    originalIsConfigured
-  ;(AltimateApi as unknown as { getCredentials: typeof originalGetCreds }).getCredentials =
-    originalGetCreds
+  ;(AltimateApi as unknown as { isConfigured: typeof originalIsConfigured }).isConfigured = originalIsConfigured
+  ;(AltimateApi as unknown as { getCredentials: typeof originalGetCreds }).getCredentials = originalGetCreds
   delete process.env.ALTIMATE_DISABLE_WORKSPACE
   delete syncInternals.resolveBinding
   delete syncInternals.blockExists
@@ -516,7 +512,11 @@ describe("mirrorBlock", () => {
     createResult = [{ id: "mem-archive-late" }]
     await mirrorBlock(b)
     listResponse = [
-      { id: "mem-archive-late", memory: b.content, metadata: { source: MIRROR_SOURCE, block_id: "to-archive-late", block_scope: "global" } },
+      {
+        id: "mem-archive-late",
+        memory: b.content,
+        metadata: { source: MIRROR_SOURCE, block_id: "to-archive-late", block_scope: "global" },
+      },
     ]
     const net = gatedFetch()
     let settled = false
@@ -828,8 +828,7 @@ describe("mirrorBlock", () => {
     // incrementApplied rewrites a training block on EVERY session start to bump
     // a counter inside the content body. Mirroring that would cost a request
     // per training block per session.
-    const meta = (applied: number) =>
-      `<!-- training\nkind: rule\napplied: ${applied}\n-->\nAlways alias CTEs.`
+    const meta = (applied: number) => `<!-- training\nkind: rule\napplied: ${applied}\n-->\nAlways alias CTEs.`
     const b = block({ id: "training/rule/aliases", tags: ["training", "rule"], content: meta(1) })
     await mirrorBlock(b)
     captured = []
@@ -876,7 +875,7 @@ describe("memory_enabled", () => {
     expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
 
     workspaces = [{ id: 42, name: "acme", memory_enabled: true }]
-  serverBinding = null
+    serverBinding = null
     captured = []
     await mirrorBlock(block({ id: "after-enable" }))
     expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
@@ -955,10 +954,7 @@ describe("toBlock", () => {
 
   test("a record from this same project is not labelled", () => {
     const own = "ssh://git@github.com/acme/analytics.git"
-    const b = toBlock(
-      record({ source: MIRROR_SOURCE, block_id: "x", block_scope: "project", repo_remote: own }),
-      own,
-    )
+    const b = toBlock(record({ source: MIRROR_SOURCE, block_id: "x", block_scope: "project", repo_remote: own }), own)
     expect(b?.origin).toBeUndefined()
   })
 
@@ -990,10 +986,7 @@ describe("tag encoding", () => {
     // The previous comma-joined form split this tag into two on read.
     const tags = ["warehouse", "owner: data, platform", "prod"]
     const meta = buildMetadata(block({ tags }), null)
-    const back = toBlock(
-      { id: "1", memory: "x", metadata: { ...meta, source: MIRROR_SOURCE } } as any,
-      undefined,
-    )
+    const back = toBlock({ id: "1", memory: "x", metadata: { ...meta, source: MIRROR_SOURCE } } as any, undefined)
     expect(back?.tags).toEqual(tags)
   })
 
@@ -1053,9 +1046,7 @@ describe("reaping blocks archived elsewhere", () => {
   const seeThrough = (blocks: Record<string, { updated: string; scope?: "global" | "project" }>) => {
     const removed: { id: string; scope: string; directory?: string; expectUpdated?: string }[] = []
     syncInternals.readBlock = async (scope, id) =>
-      blocks[id]
-        ? ({ id, scope, content: "c", tags: [], created: "", updated: blocks[id].updated } as any)
-        : undefined
+      blocks[id] ? ({ id, scope, content: "c", tags: [], created: "", updated: blocks[id].updated } as any) : undefined
     syncInternals.removeBlock = async (scope, id, directory, expectUpdated) => {
       removed.push({ id, scope, directory, expectUpdated })
       return true
@@ -1152,7 +1143,11 @@ describe("reaping blocks archived elsewhere", () => {
     const removed = seeThrough({ split: { updated: "2026-05-01T00:00:00.000Z" } })
     listResponse = [
       // The live primary.
-      { id: "mem-primary", memory: "kept", metadata: { source: MIRROR_SOURCE, block_id: "split", block_scope: "global" } },
+      {
+        id: "mem-primary",
+        memory: "kept",
+        metadata: { source: MIRROR_SOURCE, block_id: "split", block_scope: "global" },
+      },
       // The extra, archived at push time.
       archived("split", { archived_at: "2026-06-01T00:00:00.000Z" }),
     ]
@@ -1351,7 +1346,11 @@ describe("hydrate", () => {
   test("drops archived records", async () => {
     listResponse = [
       { id: "1", memory: "live", metadata: { source: MIRROR_SOURCE, block_id: "live", block_scope: "global" } },
-      { id: "2", memory: "gone", metadata: { source: MIRROR_SOURCE, block_id: "gone", block_scope: "global", archived: "true" } },
+      {
+        id: "2",
+        memory: "gone",
+        metadata: { source: MIRROR_SOURCE, block_id: "gone", block_scope: "global", archived: "true" },
+      },
     ]
     await hydrate(SES)
     expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["live"])
@@ -1360,7 +1359,11 @@ describe("hydrate", () => {
   test("drops project records belonging to another workspace", async () => {
     listResponse = [
       { id: "1", memory: "g", metadata: { source: MIRROR_SOURCE, block_id: "g", block_scope: "global" } },
-      { id: "2", memory: "other", metadata: { source: MIRROR_SOURCE, block_id: "other", block_scope: "project", datamate_id: "999" } },
+      {
+        id: "2",
+        memory: "other",
+        metadata: { source: MIRROR_SOURCE, block_id: "other", block_scope: "project", datamate_id: "999" },
+      },
     ]
     await hydrate(SES)
     expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["g"])
@@ -1434,7 +1437,11 @@ describe("archiveBlock", () => {
     await mirrorBlock(b)
     captured = []
     listResponse = [
-      { id: "mem-archive", memory: b.content, metadata: { source: MIRROR_SOURCE, block_id: "to-archive", block_scope: "global" } },
+      {
+        id: "mem-archive",
+        memory: b.content,
+        metadata: { source: MIRROR_SOURCE, block_id: "to-archive", block_scope: "global" },
+      },
     ]
 
     await archiveBlock("global", "to-archive")
@@ -1571,6 +1578,26 @@ describe("backfill", () => {
     Array.from({ length: n }, (_, i) =>
       block({ id: `${prefix}/${i}`, content: `Block ${prefix} ${i} describes a warehouse convention.` }),
     )
+
+  test("every block stored in the workspace reports workspace_memory_contributed with the workspace id", async () => {
+    const { Telemetry } = await import("../../../src/altimate/telemetry")
+    const events: any[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((e) => {
+      events.push(e)
+    })
+    try {
+      createResult = [{ id: "mem-contrib" }]
+      // Project-scope blocks are the ones bound to the workspace; global memory is the account's.
+      const bound = blocks("contrib", 2).map((b) => ({ ...b, scope: "project" }))
+      const result = await backfill(bound, BINDING as any)
+      expect(result.ok).toBe(2)
+      const contributed = events.filter((e) => e.type === "workspace_memory_contributed")
+      expect(contributed).toHaveLength(2)
+      expect(contributed[0]).toEqual(expect.objectContaining({ workspace_id: 42, block_count: 1 }))
+    } finally {
+      spy.mockRestore()
+    }
+  })
 
   test("reads the record set once for the whole sweep, not once per block", async () => {
     // Every block in a first bind is an index miss, so resolving each through
@@ -1748,7 +1775,11 @@ describe("binding changes", () => {
       // The first lookup adopts (and notifies); later ones read the cache, as in production.
       if (!adopted) {
         adopted = true
-        await recordApprovedBinding(dir, { ...BINDING, projectPath: dir, linkedAt: 3 }, { awaitBackfill: true, seed: false })
+        await recordApprovedBinding(
+          dir,
+          { ...BINDING, projectPath: dir, linkedAt: 3 },
+          { awaitBackfill: true, seed: false },
+        )
       }
       return BINDING as any
     }
@@ -1779,7 +1810,11 @@ describe("refresh racing a relink", () => {
     await reachedList
     const { recordApprovedBinding } = await import("../../../src/altimate/workspace/state")
     const dir = mkdtempSync(path.join(SANDBOX, "race-"))
-    await recordApprovedBinding(dir, { ...BINDING, datamateId: 44, projectPath: dir, linkedAt: 4 }, { awaitBackfill: true, seed: false })
+    await recordApprovedBinding(
+      dir,
+      { ...BINDING, datamateId: 44, projectPath: dir, linkedAt: 4 },
+      { awaitBackfill: true, seed: false },
+    )
     release?.()
     const result = await pending
     // Superseded: neither its read nor the prior overlay belongs to the new binding.
@@ -1803,7 +1838,11 @@ describe("overlay invalidation", () => {
     await hydrate(SES)
     expect(overlayBlocks(SES).length).toBe(1)
     const dir = mkdtempSync(path.join(SANDBOX, "hide-"))
-    await recordApprovedBinding(dir, { ...BINDING, datamateId: 45, projectPath: dir, linkedAt: 5 }, { awaitBackfill: true, seed: false })
+    await recordApprovedBinding(
+      dir,
+      { ...BINDING, datamateId: 45, projectPath: dir, linkedAt: 5 },
+      { awaitBackfill: true, seed: false },
+    )
     expect(overlayBlocks(SES)).toEqual([])
   })
 
@@ -1846,7 +1885,11 @@ describe("epoch bracketing and scope", () => {
       calls++
       // First lookup returns A, but the relink to B lands before it returns.
       if (calls === 1) {
-        await recordApprovedBinding(dir, { ...BINDING, datamateId: 46, projectPath: dir, linkedAt: 6 }, { awaitBackfill: true, seed: false })
+        await recordApprovedBinding(
+          dir,
+          { ...BINDING, datamateId: 46, projectPath: dir, linkedAt: 6 },
+          { awaitBackfill: true, seed: false },
+        )
         return BINDING as any
       }
       return { ...BINDING, datamateId: 46 } as any
@@ -1868,10 +1911,18 @@ describe("epoch bracketing and scope", () => {
     const other = mkdtempSync(path.join(SANDBOX, "other-"))
     await refresh(SES, mine)
     expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["mine"])
-    await recordApprovedBinding(other, { ...BINDING, datamateId: 47, projectPath: other, linkedAt: 7 }, { awaitBackfill: true, seed: false })
+    await recordApprovedBinding(
+      other,
+      { ...BINDING, datamateId: 47, projectPath: other, linkedAt: 7 },
+      { awaitBackfill: true, seed: false },
+    )
     expect(overlayBlocks(SES).map((x) => x.id)).toEqual(["mine"])
     // A change to this project's own binding still hides it.
-    await recordApprovedBinding(mine, { ...BINDING, datamateId: 48, projectPath: mine, linkedAt: 8 }, { awaitBackfill: true, seed: false })
+    await recordApprovedBinding(
+      mine,
+      { ...BINDING, datamateId: 48, projectPath: mine, linkedAt: 8 },
+      { awaitBackfill: true, seed: false },
+    )
     expect(overlayBlocks(SES)).toEqual([])
   })
 })
@@ -1930,9 +1981,7 @@ describe("session isolation and turn behaviour", () => {
     // The caller's enclosing block runs on EVERY user turn, not once per
     // session. Without idempotence a 20-turn conversation costs 40 requests,
     // and the first injection of every turn blocks on them.
-    listResponse = [
-      { id: "1", memory: "x", metadata: { source: MIRROR_SOURCE, block_id: "x", block_scope: "global" } },
-    ]
+    listResponse = [{ id: "1", memory: "x", metadata: { source: MIRROR_SOURCE, block_id: "x", block_scope: "global" } }]
     await hydrate(SES)
     await hydrate(SES)
     await hydrate(SES)
@@ -1970,9 +2019,7 @@ describe("session isolation and turn behaviour", () => {
   })
 
   test("overlayBlocks returns a copy, so a caller cannot corrupt the cache", async () => {
-    listResponse = [
-      { id: "1", memory: "x", metadata: { source: MIRROR_SOURCE, block_id: "x", block_scope: "global" } },
-    ]
+    listResponse = [{ id: "1", memory: "x", metadata: { source: MIRROR_SOURCE, block_id: "x", block_scope: "global" } }]
     await hydrate(SES)
     overlayBlocks(SES).length = 0
     expect(overlayBlocks(SES).length).toBe(1)
@@ -2031,9 +2078,7 @@ describe("binding resolution for the mirror", () => {
 
     await mirrorBlock(block(), dir)
 
-    const posts = captured.filter(
-      (c) => c.method === "POST" && c.url.includes("/datamates/memory/"),
-    )
+    const posts = captured.filter((c) => c.method === "POST" && c.url.includes("/datamates/memory/"))
     expect(posts.length).toBe(1)
   })
 
@@ -2047,9 +2092,7 @@ describe("binding resolution for the mirror", () => {
 
     await mirrorBlock(block(), dir)
 
-    const posts = captured.filter(
-      (c) => c.method === "POST" && c.url.includes("/datamates/memory/"),
-    )
+    const posts = captured.filter((c) => c.method === "POST" && c.url.includes("/datamates/memory/"))
     expect(posts.length).toBe(0)
   })
 })
@@ -2093,7 +2136,11 @@ describe("sync state", () => {
     listResponse = [note("a", "Naming conventions", "2026-02-01T00:00:00.000Z"), note("c", "Cost alerts")]
     await refresh(`${SES}-state-3`, dir)
     const entity = await memoryState(dir, (e) => e.changes !== null)
-    expect(entity?.changes).toEqual({ added: ["Cost alerts"], removed: ["Warehouse sizing"], updated: ["Naming conventions"] })
+    expect(entity?.changes).toEqual({
+      added: ["Cost alerts"],
+      removed: ["Warehouse sizing"],
+      updated: ["Naming conventions"],
+    })
     expect(entity?.count).toBe(2)
   })
 
@@ -2190,7 +2237,9 @@ describe("sync state", () => {
       listFails = false
     }
     const failed = await memoryState(dir, (e) => e.status === "error")
-    expect(failed).toMatchObject({ status: "error", count: 1, error: "could not load workspace memory" })
+    expect(failed).toMatchObject({ status: "error", count: 1 })
+    // The record keeps what failed, so the sync-failure reason class is real rather than "other".
+    expect(failed?.error).toMatch(/^could not load workspace memory: /)
     // "memory loaded Xm ago" reads the last success, which the failure did not move.
     expect(failed?.lastSucceededAt).toBe(loaded!.lastSucceededAt)
   })
@@ -2226,12 +2275,18 @@ describe("sync state", () => {
     // project is relinked.
     let release!: () => void
     const gate = new Promise<void>((r) => (release = r))
-    const holder = SyncState.record(dir, BINDING.datamateId, "memory", {}, {
-      isCurrent: async () => {
-        await gate
-        return false
+    const holder = SyncState.record(
+      dir,
+      BINDING.datamateId,
+      "memory",
+      {},
+      {
+        isCurrent: async () => {
+          await gate
+          return false
+        },
       },
-    })
+    )
     listResponse = []
     await refresh(`${SES}-state-late-2`, dir)
     // Unlink: every binding epoch moves, and the queued "nothing left" record is now stale.

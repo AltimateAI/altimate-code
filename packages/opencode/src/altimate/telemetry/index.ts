@@ -238,6 +238,8 @@ export namespace Telemetry {
     // altimate_change start — add os/arch/node_version for environment segmentation
     | {
         type: "session_start"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         model_id: string
@@ -252,12 +254,18 @@ export namespace Telemetry {
     // altimate_change end
     | {
         type: "session_end"
+        /** altimate_change — the turn's own workspace, set by the prompt loop's end-of-turn rows */
+        workspace_id?: number
         timestamp: number
         session_id: string
         total_cost: number
         total_tokens: number
         tool_call_count: number
         duration_ms: number
+        // altimate_change — what of the bound workspace this session used (see noteWorkspaceUse)
+        workspace_skills_used?: number
+        workspace_memory_blocks?: number
+        workspace_integration_calls?: number
       }
     | {
         type: "generation"
@@ -316,6 +324,10 @@ export namespace Telemetry {
         previous_tool: string | null
         input_signature?: string
         error?: string
+        // altimate_change — the call went to the bound workspace (a datamate MCP server)
+        via_workspace?: boolean
+        // altimate_change — the turn's workspace, named by the MCP path on a workspace call
+        workspace_id?: number
       }
     | {
         type: "native_call"
@@ -513,6 +525,8 @@ export namespace Telemetry {
       }
     | {
         type: "agent_outcome"
+        /** altimate_change — the turn's own workspace, set by the prompt loop's end-of-turn rows */
+        workspace_id?: number
         timestamp: number
         session_id: string
         agent: string
@@ -596,6 +610,35 @@ export namespace Telemetry {
         status?: number
         workspace_id?: number
       }
+    | {
+        /** The post-link starter message was served (TUI or extension chat); what the workspace provides. */
+        type: "starter_shown"
+        timestamp: number
+        session_id: string
+        workspace_id: number
+        /** Absent when the starter could not tell (unsynced, unreadable, timed out). */
+        skills?: number
+        integrations?: number
+        knowledge: string
+        memory_enabled?: boolean
+      }
+    | {
+        /** A memory block was written back to the bound workspace's cloud memory. */
+        type: "workspace_memory_contributed"
+        timestamp: number
+        session_id: string
+        workspace_id: number
+        block_count: number
+      }
+    | {
+        /** A kind's sync status flipped to error. */
+        type: "workspace_sync_failed"
+        timestamp: number
+        session_id: string
+        workspace_id: number
+        kind: "skills" | "memory"
+        reason: "auth" | "not_found" | "network" | "other"
+      }
     // altimate_change end
     | {
         type: "mcp_server_census"
@@ -627,12 +670,16 @@ export namespace Telemetry {
       }
     | {
         type: "memory_injection"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         block_count: number
         total_chars: number
         budget: number
         scopes_used: string[]
+        /** Blocks that came from the bound workspace's cloud memory (overlay). */
+        workspace_blocks?: number
       }
     | {
         // Sent before connecting, so an attempt that hangs or ends the process is still counted.
@@ -697,11 +744,13 @@ export namespace Telemetry {
       }
     | {
         type: "skill_used"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         message_id: string
         skill_name: string
-        skill_source: "builtin" | "global" | "project"
+        skill_source: "builtin" | "global" | "project" | "workspace"
         duration_ms: number
         // altimate_change start — skill trigger classification for discovery analytics
         trigger: "user_command" | "llm_selected" | "auto_suggested" | "unknown"
@@ -801,11 +850,15 @@ export namespace Telemetry {
         file_count: number
         // "serve": published from the IDE extension over the serve route
         source: "cli" | "tui" | "serve"
+        // altimate_change — the workspace the skill was attached to
+        workspace_id?: number
       }
     // altimate_change end
     // altimate_change start — plan refinement telemetry event
     | {
         type: "plan_revision"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         revision_number: number
@@ -834,6 +887,8 @@ export namespace Telemetry {
     // altimate_change end
     | {
         type: "core_failure"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         tool_name: string
@@ -888,6 +943,8 @@ export namespace Telemetry {
     // altimate_change start — sql quality telemetry for issue prevention metrics
     | {
         type: "sql_quality"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         tool_name: string
@@ -902,6 +959,8 @@ export namespace Telemetry {
     // implicit quality signal for task outcome intelligence
     | {
         type: "task_outcome_signal"
+        /** altimate_change — the turn's own workspace, set by the prompt loop's end-of-turn rows */
+        workspace_id?: number
         timestamp: number
         session_id: string
         /** Behavioral signal derived from session outcome patterns */
@@ -914,10 +973,14 @@ export namespace Telemetry {
         duration_ms: number
         /** Last tool category the agent used (or "none") */
         last_tool_category: string
+        // altimate_change — true when the session had used workspace skills, memory or integrations
+        workspace_context_used?: boolean
       }
     // task intent classification for understanding DE problem distribution
     | {
         type: "task_classified"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         /** Classified intent category */
@@ -977,6 +1040,8 @@ export namespace Telemetry {
     // error pattern fingerprint — hashed error grouping with recovery data
     | {
         type: "error_fingerprint"
+        /** altimate_change — the turn's own workspace, set by the prompt loop's end-of-turn rows */
+        workspace_id?: number
         timestamp: number
         session_id: string
         /** SHA256 hash of normalized (masked) error message for grouping */
@@ -995,6 +1060,8 @@ export namespace Telemetry {
     // tool chain effectiveness — aggregated tool sequence + outcome at session end
     | {
         type: "tool_chain_outcome"
+        /** altimate_change — the turn's own workspace, set by the prompt loop's end-of-turn rows */
+        workspace_id?: number
         timestamp: number
         session_id: string
         /** JSON-encoded ordered tool names (capped at 50) */
@@ -1200,6 +1267,8 @@ export namespace Telemetry {
     | {
         /** derived — see activation_job_selected */
         type: "first_job_completed"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         job: "sample_duck_db" | "breaks_downstream" | "sql_review" | "cost" | "something_else"
@@ -1222,6 +1291,8 @@ export namespace Telemetry {
       }
     | {
         type: "first_prompt_sent"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
       }
@@ -1914,6 +1985,17 @@ export namespace Telemetry {
   let machineId = ""
   let sessionId = ""
   let projectId = ""
+  // altimate_change — the workspace the current session's project is linked to (the backend
+  // datamate id), set per prompt turn from the local binding cache and read back through
+  // `getContext()` by callers that ask for it; nothing is stamped from it (see `track`).
+  let workspaceId: number | undefined
+  // altimate_change start — the current turn token per session: `setContext` issues one, `endSession`
+  // ends only its own, so a cancelled turn unwinding late cannot end the replacement's counters.
+  // Tokens come from one process-wide counter, so a token is never reused. The map holds sessions
+  // mid-turn; an entry goes at the turn's end.
+  const sessionTurns = new Map<string, number>()
+  let nextTurn = 0
+  // altimate_change end
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
   let initPromise: Promise<void> | undefined
@@ -2177,13 +2259,65 @@ export namespace Telemetry {
     }
   }
 
-  export function setContext(opts: { sessionId: string; projectId: string }) {
+  // altimate_change start — per-session use of the bound workspace. The skill, memory and tool
+  // emit sites note what they used; session_end reports the counts and task_outcome_signal
+  // whether any workspace context was in play. Keyed by session so a serve process with several
+  // sessions keeps them apart; cleared when the session ends.
+  export type WorkspaceUse = { skills: number; memory: number; integrations: number }
+  /** Keyed by session and turn, so a cancelled turn unwinding late and its replacement never share
+   * counts; a site that carries no turn counts toward the session's current one. */
+  const workspaceUse = new Map<string, WorkspaceUse>()
+  const useKey = (sessionId: string, turn?: number) => `${sessionId}#${turn ?? sessionTurns.get(sessionId) ?? 0}`
+  /** `add` accumulates; `max` records the largest value seen in the turn (memory is injected on every
+   * step of a turn, so a sum would multiply the blocks by the step count). */
+  export function noteWorkspaceUse(
+    sessionId: string,
+    kind: keyof WorkspaceUse,
+    n = 1,
+    mode: "add" | "max" = "add",
+    /** The turn the use belongs to (from `setContext`): a use landing after its turn was replaced
+     * does not count toward the replacement. */
+    turn?: number,
+  ) {
+    if (!sessionId || n <= 0) return
+    if (turn !== undefined && sessionTurns.get(sessionId) !== turn) return
+    const key = useKey(sessionId, turn)
+    const use = workspaceUse.get(key) ?? { skills: 0, memory: 0, integrations: 0 }
+    use[kind] = mode === "max" ? Math.max(use[kind], n) : use[kind] + n
+    workspaceUse.set(key, use)
+  }
+  /** The counts of a turn (the session's current one when no turn is given). */
+  export function workspaceUseOf(sessionId: string, turn?: number): WorkspaceUse {
+    return { skills: 0, memory: 0, integrations: 0, ...workspaceUse.get(useKey(sessionId, turn)) }
+  }
+  export function clearWorkspaceUse(sessionId: string, turn?: number) {
+    workspaceUse.delete(useKey(sessionId, turn))
+  }
+  /** A session's turn ended: its use counts are read out and its `session_end` tracked by then. With
+   * `turn` (from `setContext`), a turn that is no longer the session's current one ends only its own
+   * counts: the replacement's are the replacement's. */
+  export function endSession(sessionId: string, turn?: number) {
+    workspaceUse.delete(useKey(sessionId, turn))
+    if (turn !== undefined && sessionTurns.get(sessionId) !== turn) return
+    sessionTurns.delete(sessionId)
+  }
+  // altimate_change end
+
+  /** Returns the turn generation for the session; pass it to `endSession` so only this turn ends it. */
+  export function setContext(opts: { sessionId: string; projectId: string; workspaceId?: number }): number {
     sessionId = opts.sessionId
     projectId = opts.projectId
+    workspaceId = opts.workspaceId
+    // altimate_change start — a turn token for the session's counters and its end
+    if (!opts.sessionId) return 0
+    const turn = ++nextTurn
+    sessionTurns.set(opts.sessionId, turn)
+    return turn
+    // altimate_change end
   }
 
-  export function getContext() {
-    return { sessionId, projectId }
+  export function getContext(): { sessionId: string; projectId: string; workspaceId?: number } {
+    return { sessionId, projectId, ...(workspaceId !== undefined ? { workspaceId } : {}) }
   }
 
   /** Returns true only after init() has completed and telemetry is enabled. */
@@ -2333,6 +2467,10 @@ export namespace Telemetry {
     const operationId = typeof eventSession === "string" ? TraceContext.activeTraceId(eventSession) : undefined
     if (operationId) (event as any)._operation_id = operationId
     // altimate_change end
+    // altimate_change — no ambient workspace stamping: a row names its workspace itself (the prompt
+    // loop's rows, tool rows and memory rows carry the turn's; workspace rows carry their own) or it
+    // carries none. A process-wide or per-session fallback kept attributing cancelled turns' rows to
+    // their replacements.
     buffer.push(event)
     if (buffer.length > MAX_BUFFER_SIZE) {
       buffer.shift()
@@ -2529,6 +2667,7 @@ export namespace Telemetry {
     droppedEvents = 0
     sessionId = ""
     projectId = ""
+    workspaceId = undefined
     machineId = ""
     // doInit() only assigns userEmail when Account.active() returns one, so without this a
     // logout followed by a re-init in the same process kept hashing the previous account into

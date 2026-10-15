@@ -46,6 +46,10 @@ export const AGENT_TRAINING_RELEVANCE: Record<string, Partial<Record<string, num
 }
 
 export interface InjectionContext {
+  // altimate_change start — the prompt turn's workspace and token, for the injection row and its count
+  workspaceId?: number
+  turn?: number
+  // altimate_change end
   agent?: string
   disableTraining?: boolean
   /** Identifies which session's workspace-memory overlay to merge. Omitted in

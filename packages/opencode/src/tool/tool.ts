@@ -55,6 +55,10 @@ export class InvalidArgumentsError extends Schema.TaggedErrorClass<InvalidArgume
 export type Context<M extends Metadata = Metadata> = {
   sessionID: SessionID
   messageID: MessageID
+  // altimate_change start — the calling turn's workspace and token, named on the rows a tool emits
+  workspaceId?: number
+  turn?: number
+  // altimate_change end
   agent: string
   abort: AbortSignal
   callID?: string
@@ -139,6 +143,7 @@ function altimateTrackError(id: string, args: unknown, ctx: Context, startTime: 
       type: "tool_call",
       timestamp: Date.now(),
       session_id: ctx.sessionID,
+      workspace_id: ctx.workspaceId, // altimate_change — the turn's workspace
       message_id: ctx.messageID,
       tool_name: id,
       tool_type: "standard",
@@ -154,6 +159,7 @@ function altimateTrackError(id: string, args: unknown, ctx: Context, startTime: 
       type: "core_failure",
       timestamp: Date.now(),
       session_id: ctx.sessionID,
+      workspace_id: ctx.workspaceId, // altimate_change — the turn's workspace
       tool_name: id,
       tool_category: Telemetry.categorizeToolName(id, "standard"),
       error_class: Telemetry.classifyError(errorMsg),
@@ -184,6 +190,7 @@ function altimateTrackSuccess(
         type: "tool_call",
         timestamp: Date.now(),
         session_id: ctx.sessionID,
+        workspace_id: ctx.workspaceId, // altimate_change — the turn's workspace
         message_id: ctx.messageID,
         tool_name: id,
         tool_type: "standard",
@@ -221,6 +228,7 @@ function altimateTrackSuccess(
         type: "core_failure",
         timestamp: Date.now(),
         session_id: ctx.sessionID,
+        workspace_id: ctx.workspaceId, // altimate_change — the turn's workspace
         tool_name: id,
         tool_category: Telemetry.categorizeToolName(id, "standard"),
         error_class: Telemetry.classifyError(errorMsg),
@@ -238,6 +246,7 @@ function altimateTrackSuccess(
         type: "sql_quality",
         timestamp: Date.now(),
         session_id: ctx.sessionID,
+        workspace_id: ctx.workspaceId, // altimate_change — the turn's workspace
         tool_name: id,
         tool_category: toolCategory,
         finding_count: findings.length,
