@@ -42,6 +42,7 @@ import {
   type Namesakes,
 } from "@/altimate/workspace/workspace-name"
 import { currentAttachSnapshot } from "@/altimate/workspace/attach-snapshot"
+import { trackEngineError, trackInstallPrompt } from "@/altimate/workspace/engine-telemetry"
 import {
   accountScope,
   loadStatusView,
@@ -1865,6 +1866,8 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   const performInstall = async () => {
     const result = await installEngine()
     if (!result.ok) {
+      trackInstallPrompt("install_failed", props.offer)
+      trackEngineError("install", result.error)
       installing = false
       if (!mounted) {
         // Dismissed mid-install: the failed-phase rows have nowhere to render,
@@ -1880,6 +1883,7 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
       setPhase("failed")
       return
     }
+    trackInstallPrompt("installed", props.offer)
     // Only clear a dialog we still own — by now the user may have opened
     // another, and clearing the stack would take theirs down instead.
     if (mounted) props.api.ui.dialog.clear()
@@ -1942,6 +1946,7 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
         if (option.value === "install") {
           if (installing) return
           installing = true
+          trackInstallPrompt("accepted", props.offer)
           void runInstall().catch((err) => {
             const message = err instanceof Error ? err.message : String(err)
             installing = false
@@ -1961,11 +1966,13 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
           return
         }
         if (option.value === "copy") {
+          trackInstallPrompt("copied", props.offer)
           copyCommand()
           props.api.ui.dialog.clear()
           return
         }
         if (option.value === "skip") {
+          trackInstallPrompt("declined", props.offer)
           recordEngineSkip(props.api, props.offer.workspaceId, props.latchScope, Date.now())
         }
         props.api.ui.dialog.clear()

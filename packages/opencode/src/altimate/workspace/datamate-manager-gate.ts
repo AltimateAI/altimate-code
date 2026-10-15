@@ -19,6 +19,7 @@
 // key. Null for an unlinked project, an unreadable binding with no engine
 // running, workspaces disabled, `altimate serve`, and organisation-managed
 // config that owns the `datamate` key.
+import { trackRedirect } from "./engine-telemetry"
 import { linkedWorkspaceLoaded, managedWorkspace, settledOutcome, settledWorkspace } from "./engine-overlay"
 import { installCommand } from "./engine-offer"
 import { log } from "./engine-seams"
@@ -53,6 +54,7 @@ export async function hiddenToolIds(): Promise<ReadonlySet<string>> {
 /** What `datamate_manager` answers in a linked project, whatever the operation.
  * Nothing is looked up or written before it. */
 export function refusal(operation: string, workspace: { id: string; name: string }) {
+  trackRedirect("datamate", operation, Number(workspace.id)) // telemetry: the engine is off for this workspace
   return {
     title: `Datamate ${operation}: off in a project linked to a workspace`,
     metadata: { operation, managedBy: workspace.id },

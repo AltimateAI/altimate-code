@@ -29,6 +29,7 @@ import {
 } from "../../../src/altimate/workspace/engine-overlay"
 import type { ScopedBinding } from "../../../src/altimate/workspace/engine-seams"
 import type { AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
+import { Telemetry } from "../../../src/altimate/telemetry"
 import { log } from "../../../src/altimate/workspace/engine-seams"
 import { DATAMATE_KEY } from "../../../src/altimate/datamate-transport"
 
@@ -1260,5 +1261,57 @@ describe("beforeTurn — what a turn boundary does", () => {
     install({ which: null })
     await beforeTurn("s1")
     expect(managedWorkspace()).toEqual({ id: "42", name: "analytics" })
+  })
+})
+
+describe("telemetry — the attach", () => {
+  const rows: Array<Record<string, unknown>> = []
+  let spy: ReturnType<typeof spyOn>
+  beforeEach(() => {
+    rows.length = 0
+    spy = spyOn(Telemetry, "track").mockImplementation((e) => {
+      rows.push(e as Record<string, unknown>)
+    })
+  })
+  afterEach(() => spy.mockRestore())
+  const attaches = () => rows.filter((r) => r.type === "workspace_engine_attach")
+
+  test("a settled attach is reported once with its inventory; a repeated boundary adds nothing; a change reports again", async () => {
+    const report = [{ key: "dbt_execute_sql", integrationId: "dbt", reason: "invalid-connection" }]
+    const h = install({ meta: { [UNFULFILLED_META_KEY]: report } })
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    expect(attaches()).toEqual([
+      expect.objectContaining({
+        session_id: "s1",
+        outcome: "attached",
+        available: 2,
+        declared: 3,
+        missing: 1,
+        engine_version: "0.7.3",
+      }),
+    ])
+    h.binding = null
+    await beforeTurn("s1")
+    expect(attaches().map((r) => r.outcome)).toEqual(["attached", "unbound"])
+  })
+
+  test("an engine below the floor reports the version it found", async () => {
+    install({ version: "0.1.0" })
+    await beforeTurn("s1")
+    expect(attaches()).toEqual([expect.objectContaining({ outcome: "engine_too_old", found_version: "0.1.0" })])
+  })
+
+  test("a probe that throws during the overlay is an attach-stage error with a masked message", async () => {
+    const h = install({ mcp: { datamate: IDE_ENTRY } })
+    syncInternals.versionOf = async () => {
+      throw new Error("probe exploded at /home/someone/bin/datamate")
+    }
+    await overlay(DIR, h.config)
+    const errors = rows.filter((r) => r.type === "workspace_engine_error")
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toEqual(expect.objectContaining({ stage: "attach" }))
+    expect(String(errors[0].message)).toContain("probe exploded")
+    expect(String(errors[0].message)).not.toContain("/home/someone")
   })
 })

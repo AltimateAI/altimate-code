@@ -44,6 +44,7 @@ import {
 } from "./engine-seams"
 import { declaredBounded, fingerprint, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
 import { OFFER_RECHECK_MS, OFFER_SKIP_TTL_MS, installCommand, offerOrNotify, type EngineOffer } from "./engine-offer"
+import { trackAttach, trackEngineError } from "./engine-telemetry"
 import {
   ENGINE_BINARY,
   INSTALL_HELPS,
@@ -293,6 +294,7 @@ export async function overlay(
     log.warn("workspace engine overlay failed; leaving the MCP config as loaded", { err: String(err) })
     state.current = null
     state.failedAt = now()
+    trackEngineError("attach", String(err))
   }
 }
 
@@ -364,8 +366,9 @@ const declaredCache = new Map<string, { value: Declared | null; at: number }>()
 /** Verdict signatures a headless process has already printed to stderr. */
 const headlessPrinted = new Set<string>()
 
-function record(sessionID: string, outcome: Outcome): SessionRecord {
+function record(sessionID: string, outcome: Outcome, extra: { engineVersion?: string | null } = {}): SessionRecord {
   const previous = sessions.get(sessionID)
+  trackAttach(outcome, previous?.outcome, extra, sessionID) // telemetry: only when the outcome changed
   sessions.delete(sessionID)
   const next: SessionRecord = {
     outcome,
@@ -873,7 +876,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     ...(unfulfilled === undefined ? {} : { unfulfilled }),
     ...(declared?.extensions?.length ? { extensions: declared.extensions } : {}),
   }
-  const rec = record(sessionID, outcome)
+  const rec = record(sessionID, outcome, { engineVersion: overlayNow.version })
   const snapshot: AttachSnapshot = {
     workspace: { id: workspace.id, name: workspace.name, key: workspace.key },
     engineVersion: overlayNow.version,
