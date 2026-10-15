@@ -1960,6 +1960,12 @@ export namespace Telemetry {
   // the session, first-use, skill, memory, tool and outcome rows join the workspace without each
   // emit site knowing about it.
   let workspaceId: number | undefined
+  // altimate_change start — the workspace of every session that set the context, by session: a serve
+  // process runs sessions side by side, so the singleton above can belong to another session's turn
+  // when an event is tracked. Insertion-ordered; the oldest entry goes past the cap.
+  const sessionWorkspaces = new Map<string, number | undefined>()
+  const MAX_SESSION_WORKSPACES = 256
+  // altimate_change end
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
   let initPromise: Promise<void> | undefined
@@ -2247,6 +2253,15 @@ export namespace Telemetry {
     sessionId = opts.sessionId
     projectId = opts.projectId
     workspaceId = opts.workspaceId
+    // altimate_change start — remembered per session for the stamping in track()
+    if (opts.sessionId) {
+      sessionWorkspaces.delete(opts.sessionId)
+      sessionWorkspaces.set(opts.sessionId, opts.workspaceId)
+      if (sessionWorkspaces.size > MAX_SESSION_WORKSPACES) {
+        sessionWorkspaces.delete(sessionWorkspaces.keys().next().value!)
+      }
+    }
+    // altimate_change end
   }
 
   export function getContext(): { sessionId: string; projectId: string; workspaceId?: number } {
@@ -2400,9 +2415,15 @@ export namespace Telemetry {
     const operationId = typeof eventSession === "string" ? TraceContext.activeTraceId(eventSession) : undefined
     if (operationId) (event as any)._operation_id = operationId
     // altimate_change end
-    // altimate_change start — the bound workspace is read now, not at flush: a serve process can start
-    // another session's turn, and move the context, before this event is serialised.
-    if (workspaceId !== undefined && !("workspace_id" in event)) (event as any).workspace_id = workspaceId
+    // altimate_change start — the bound workspace is read now, not at flush, and for the event's own
+    // session: a serve process runs sessions side by side, so the process-wide context can belong to
+    // another session's turn. A row with no session takes the current context; a row naming a session
+    // that never set the context gains no key rather than another session's.
+    if (!("workspace_id" in event)) {
+      const own =
+        typeof eventSession === "string" && eventSession !== "" ? sessionWorkspaces.get(eventSession) : workspaceId
+      if (own !== undefined) (event as any).workspace_id = own
+    }
     // altimate_change end
     buffer.push(event)
     if (buffer.length > MAX_BUFFER_SIZE) {
@@ -2601,6 +2622,7 @@ export namespace Telemetry {
     sessionId = ""
     projectId = ""
     workspaceId = undefined
+    sessionWorkspaces.clear() // altimate_change
     machineId = ""
     // doInit() only assigns userEmail when Account.active() returns one, so without this a
     // logout followed by a re-init in the same process kept hashing the previous account into
