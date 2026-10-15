@@ -185,3 +185,17 @@ New slice totals: **S2 11 passing tests**, **S3 4 passing tests**, **S4 2 passin
 tests**. All **25 pre-existing tests** also pass. Each slice has a restored,
 expected-failing negative-control receipt. Work completed within the 40-minute
 round budget (approximately 22 minutes).
+
+## Live run (2026-10-15)
+
+`ALTIMATE_LIVE=1 bun test test/s2-live.test.ts` was run with credentials from the local
+`~/.altimate/altimate.json`. The request path worked: the provider registered, the step started and
+streamed, and core retried transport errors with backoff (attempts 2–7, ~90 s). Every attempt failed
+with `provider.transport: Unable to connect`, because that local file points at
+`http://localhost:12345`, a stale local-dev login with no gateway running. The URL construction
+matches v1 (`<altimateUrl>/agents/v1`, `packages/opencode/src/provider/provider.ts:393` in the fork).
+**A live completion is unverified until it is re-run with a real tenant key** (e.g. `api.myaltimate.com`).
+`ALTIMATE_LIVE_DEBUG=1` prints step/retry/error events for diagnosis.
+
+Side observation: v2 retries an unreachable provider 6+ times over ~90 s before giving up. That is
+default core retry policy, which a plugin can tune through `session.hook("retry")`.
