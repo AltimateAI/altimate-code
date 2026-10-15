@@ -60,6 +60,8 @@ export interface StatusReport {
    * per-process, so a fresh session has not synced yet even for a project whose
    * snapshot is current on disk. Callers must not render it as "never synced". */
   skillsSyncedAt: number | null
+  /** Lesson sync for this project from local files; absent when lesson sync is off or has not run here yet. */
+  lessons?: import("../learn/sync").SidebarStatus
   // altimate_change start — workspace sync state
   /** When this project's workspace memory was last loaded, from the shared sync state, or
    * null when no load has been recorded for this binding. */
@@ -168,6 +170,21 @@ export async function status(
         ? ((await SyncState.read(directory, binding.datamateId).catch(() => null))?.entities.memory?.lastSucceededAt ??
           null)
         : null,
+    ...(binding ? await lessonsStatus(directory) : {}),
+  }
+}
+
+/** Read lazily: the learn modules stay out of the workspace graph until a bound project asks. */
+async function lessonsStatus(directory: string): Promise<{ lessons?: import("../learn/sync").SidebarStatus }> {
+  try {
+    const [{ Config }, Sync] = await Promise.all([import("@/config/config"), import("../learn/sync")])
+    const learn = await Config.get().then((cfg) => cfg.learn, () => undefined)
+    const lessons = await Sync.sidebarStatus(directory, learn)
+    Sync.refreshIfStale(directory, learn, lessons)
+    return lessons ? { lessons } : {}
+  } catch (err) {
+    log.warn("lesson sync status unavailable", { err: String(err) })
+    return {}
   }
 }
 

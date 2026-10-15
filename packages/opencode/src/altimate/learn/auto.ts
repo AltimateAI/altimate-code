@@ -7,7 +7,7 @@
 import * as Playbook from "./playbook"
 import { DEFAULT_MAX_STORED, summarize } from "./curator"
 import { autoReflectEnabled, captureEnabled, flushCapture } from "./capture"
-import { autoPromoteEnabled, resolveAutoPromoteLimits } from "./config"
+import { autoPromoteEnabled, resolveAutoPromoteLimits, syncEnabled } from "./config"
 import { autoPromote, type AutoPromoteResult } from "./auto-promote"
 import { DEFAULT_TIMEOUT_MS, providerGenerate } from "./reflect"
 import { candidatePath, errText, reflectSessionSignals, sourceFromSession } from "./session-reflect"
@@ -22,6 +22,7 @@ import { Log } from "@/util/log"
 
 const log = Log.create({ service: "learn.auto" })
 export const RUN_EXIT_TIMEOUT_MS = 60_000
+const PUSH_WAIT_MS = 10_000
 
 export interface AutoReflectOutcome {
   /** One line for the user. */
@@ -118,6 +119,10 @@ async function runReflection(
     if (((await readScheduleState(root)).recoveries[sessionID]?.retryAt ?? 0) > Date.now()) return scheduled
     const modelArg = learnModel(learn?.model)
     const modelLabel = modelArg ? `model ${modelArg}` : undefined
+    // Lesson sync: curate against the cached team lessons (no network here); proposals are pushed afterwards.
+    const syncScope = syncEnabled(learn)
+      ? await import("./sync").then((m) => m.cachedScope(root!, context.directory)).catch(() => undefined)
+      : undefined
     const out = await reflectSessionSignals({
       root,
       name: Playbook.DEFAULT_NAME,
@@ -127,6 +132,7 @@ async function runReflection(
       recoverPending: options.recoverPending,
       loadSource: (id) => sourceFromSession(id, context),
       maxStored: learnMaxStored(learn?.max_stored),
+      ...(syncScope ? { sync: { scope: syncScope, origin: "auto_reflect" as const } } : {}),
       modelLabel,
       getGenerate: async (source) => {
         const { Provider } = await import("@/provider/provider")
@@ -161,9 +167,21 @@ async function runReflection(
           limits: resolveAutoPromoteLimits(learn),
           shouldContinue: ready,
           deadline: options.deadline,
+          ...(syncScope ? { sync: { scope: syncScope } } : {}),
         })
       } catch (e) {
         promotion = { status: "held", reason: redactSecrets(errText(e)) }
+      }
+    }
+    // Proposals go to the workspace review queue in the background, bounded by the run's deadline.
+    if (syncEnabled(learn) && ready()) {
+      const budget = Math.min(PUSH_WAIT_MS, (options.deadline ?? Infinity) - Date.now() - 5_000)
+      const push = import("./sync").then((m) => m.pushSoon(root!, context.directory, learn, Math.max(0, budget))).catch(() => undefined)
+      // At the end of `run` the process exits next: wait briefly; whatever is left is sent by the next session.
+      if (options.waitForScheduled && budget > 1_000) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([push, new Promise((resolve) => { timer = setTimeout(resolve, budget) })])
+        clearTimeout(timer)
       }
     }
     const line = describeOutcome(
