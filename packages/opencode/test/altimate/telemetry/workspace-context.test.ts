@@ -82,6 +82,25 @@ describe("workspace id on the telemetry context", () => {
     expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 0, memory: 0, integrations: 0 })
   })
 
+  test("a turn ends only its own entries: a cancelled turn unwinding late leaves the replacement's", () => {
+    const first = Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 42 })
+    Telemetry.noteWorkspaceUse("s7", "skills")
+    const second = Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 42 })
+    expect(second).toBe(first + 1)
+    Telemetry.noteWorkspaceUse("s7", "memory", 2)
+    Telemetry.endSession("s7", first) // the old generation, after the replacement started
+    expect(Telemetry.workspaceOf("s7")).toBe(42)
+    expect(Telemetry.workspaceUseOf("s7").memory).toBe(2)
+    Telemetry.endSession("s7", second)
+    expect(Telemetry.workspaceOf("s7")).toBeUndefined()
+    expect(Telemetry.workspaceUseOf("s7")).toEqual({ skills: 0, memory: 0, integrations: 0 })
+    // Without a turn, the end is unconditional (tests and shutdown paths).
+    Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 9 })
+    Telemetry.endSession("s7")
+    expect(Telemetry.workspaceOf("s7")).toBeUndefined()
+    Telemetry.setContext({ sessionId: "", projectId: "" })
+  })
+
   test("every event of a bound session carries the workspace id; an event's own id wins; unbound sessions carry none", async () => {
     await Telemetry.shutdown()
     await Telemetry.init()
