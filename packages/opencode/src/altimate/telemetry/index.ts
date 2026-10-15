@@ -2268,7 +2268,10 @@ export namespace Telemetry {
   // whether any workspace context was in play. Keyed by session so a serve process with several
   // sessions keeps them apart; cleared when the session ends.
   export type WorkspaceUse = { skills: number; memory: number; integrations: number }
+  /** Keyed by session and turn, so a cancelled turn unwinding late and its replacement never share
+   * counts; a site that carries no turn counts toward the session's current one. */
   const workspaceUse = new Map<string, WorkspaceUse>()
+  const useKey = (sessionId: string, turn?: number) => `${sessionId}#${turn ?? sessionTurns.get(sessionId) ?? 0}`
   /** `add` accumulates; `max` records the largest value seen in the turn (memory is injected on every
    * step of a turn, so a sum would multiply the blocks by the step count). */
   export function noteWorkspaceUse(
@@ -2282,15 +2285,17 @@ export namespace Telemetry {
   ) {
     if (!sessionId || n <= 0) return
     if (turn !== undefined && sessionTurns.get(sessionId) !== turn) return
-    const use = workspaceUse.get(sessionId) ?? { skills: 0, memory: 0, integrations: 0 }
+    const key = useKey(sessionId, turn)
+    const use = workspaceUse.get(key) ?? { skills: 0, memory: 0, integrations: 0 }
     use[kind] = mode === "max" ? Math.max(use[kind], n) : use[kind] + n
-    workspaceUse.set(sessionId, use)
+    workspaceUse.set(key, use)
   }
-  export function workspaceUseOf(sessionId: string): WorkspaceUse {
-    return { skills: 0, memory: 0, integrations: 0, ...workspaceUse.get(sessionId) }
+  /** The counts of a turn (the session's current one when no turn is given). */
+  export function workspaceUseOf(sessionId: string, turn?: number): WorkspaceUse {
+    return { skills: 0, memory: 0, integrations: 0, ...workspaceUse.get(useKey(sessionId, turn)) }
   }
-  export function clearWorkspaceUse(sessionId: string) {
-    workspaceUse.delete(sessionId)
+  export function clearWorkspaceUse(sessionId: string, turn?: number) {
+    workspaceUse.delete(useKey(sessionId, turn))
   }
   /** The workspace a session's turn bound, or undefined when unbound or unknown. */
   export function workspaceOf(sessionId: string): number | undefined {
@@ -2300,8 +2305,12 @@ export namespace Telemetry {
    * its workspace entry goes. With `turn` (from `setContext`), a turn that is no longer the session's
    * current one ends nothing: the replacement's entries are the replacement's. */
   export function endSession(sessionId: string, turn?: number) {
-    if (turn !== undefined && sessionTurns.get(sessionId) !== turn) return
-    workspaceUse.delete(sessionId)
+    if (turn !== undefined && sessionTurns.get(sessionId) !== turn) {
+      // A turn that was replaced ends only its own counts; the replacement's entries stay.
+      workspaceUse.delete(useKey(sessionId, turn))
+      return
+    }
+    workspaceUse.delete(useKey(sessionId, turn))
     sessionWorkspaces.delete(sessionId)
     sessionTurns.delete(sessionId)
   }
