@@ -29,7 +29,13 @@ export function trackWorkspaceToolCall(input: {
   if (Telemetry.workspaceOf(input.sessionID) === undefined) return false
   try {
     if (input.outcome === "success") Telemetry.noteWorkspaceUse(input.sessionID, "integrations")
-    const message = input.error instanceof Error ? input.error.message : String(input.error)
+    const error =
+      input.error === undefined
+        ? undefined
+        : redact(Telemetry.maskString(input.error instanceof Error ? input.error.message : String(input.error))).slice(
+            0,
+            500,
+          )
     Telemetry.track({
       type: "tool_call",
       timestamp: Date.now(),
@@ -43,7 +49,7 @@ export function trackWorkspaceToolCall(input: {
       duration_ms: Date.now() - input.startedAt,
       sequence_index: 0,
       previous_tool: null,
-      ...(input.error !== undefined && { error: redact(Telemetry.maskString(message)).slice(0, 500) }),
+      ...(error !== undefined && { error }),
     })
   } catch {
     // telemetry never surfaces into the tool call

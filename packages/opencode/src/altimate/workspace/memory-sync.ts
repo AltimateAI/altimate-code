@@ -773,7 +773,7 @@ async function push(
     }
     await MemoryApi.update(match, block.content, metadata)
     await recordIndexEntry(key, { memoryId: match, contentHash: hash, syncedAt: Date.now() })
-    if (binding) trackContributed(binding, sessionID)
+    if (block.scope === "project" && binding) trackContributed(binding, sessionID)
     return "stored"
   }
 
@@ -808,11 +808,13 @@ async function push(
     log.warn("archiving an extra record produced by one create", { id: block.id, memoryId: extra })
     await MemoryApi.update(extra, "", { ...metadata, archived: "true", archived_at: new Date().toISOString() })
   }
-  if (binding) trackContributed(binding, sessionID)
+  if (block.scope === "project" && binding) trackContributed(binding, sessionID)
   return "stored"
 }
 
-// altimate_change start — a successful write-back is the workspace getting something back
+// altimate_change start — a successful write-back of a project block is the workspace getting something
+// back; a global block is the account's (the live mirror resolves a binding for it too, to consult the
+// memory setting), so it is not reported.
 function trackContributed(binding: CachedBinding, sessionID?: string) {
   try {
     Telemetry.track({

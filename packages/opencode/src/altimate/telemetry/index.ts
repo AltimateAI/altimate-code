@@ -2236,10 +2236,12 @@ export namespace Telemetry {
   // sessions keeps them apart; cleared when the session ends.
   export type WorkspaceUse = { skills: number; memory: number; integrations: number }
   const workspaceUse = new Map<string, WorkspaceUse>()
-  export function noteWorkspaceUse(sessionId: string, kind: keyof WorkspaceUse, n = 1) {
+  /** `add` accumulates; `max` records the largest value seen in the turn (memory is injected on every
+   * step of a turn, so a sum would multiply the blocks by the step count). */
+  export function noteWorkspaceUse(sessionId: string, kind: keyof WorkspaceUse, n = 1, mode: "add" | "max" = "add") {
     if (!sessionId || n <= 0) return
     const use = workspaceUse.get(sessionId) ?? { skills: 0, memory: 0, integrations: 0 }
-    use[kind] += n
+    use[kind] = mode === "max" ? Math.max(use[kind], n) : use[kind] + n
     workspaceUse.set(sessionId, use)
   }
   export function workspaceUseOf(sessionId: string): WorkspaceUse {
