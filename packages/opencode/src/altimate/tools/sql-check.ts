@@ -325,35 +325,55 @@ async function checkKeys(
   const text = (col: string) =>
     `CAST(${col} AS ${dialect === "postgres" ? "TEXT" : "VARCHAR"})${dialect === "sqlite" ? " COLLATE BINARY" : ""}`
   const type = (col: string) => (dialect === "postgres" ? `CAST(pg_typeof(${col}) AS TEXT)` : `typeof(${col})`)
-  const trim = (v: string) => `LOWER(TRIM(${v}))`
-  const normalize = (v: string) => `regexp_replace(${trim(v)}, '[^a-z0-9]', '', 'g')`
-  const base = (v: string) => (dialect === "sqlite" ? trim(v) : normalize(v))
-  const zeros = (v: string) =>
-    `CASE WHEN ${base(v)} = '' THEN '' ELSE COALESCE(NULLIF(${dialect === "sqlite" ? `LTRIM(${base(v)}, '0')` : `regexp_replace(${base(v)}, '^0+', '')`}, ''), '0') END`
-  const count = (condition: string) =>
-    `(SELECT COUNT(*) FROM ${scope}l l WHERE EXISTS (SELECT 1 FROM ${scope}r r WHERE ${condition}))`
-  const exists = (condition: string) =>
-    `CASE WHEN EXISTS (SELECT 1 FROM ${scope}l l WHERE EXISTS (SELECT 1 FROM ${scope}r r WHERE l.v <> r.v AND ${condition})) THEN 1 ELSE 0 END`
+  const integerTypes =
+    "'integer', 'smallint', 'bigint', 'tinyint', 'hugeint', 'utinyint', 'usmallint', 'uinteger', 'ubigint', 'uhugeint'"
+  // Materialize each normalization once per distinct key, never once per candidate pair.
+  const normalized = (side: string) => `${scope}${side}trim AS MATERIALIZED (
+      SELECT v, LOWER(v) AS lower_v, LOWER(TRIM(v)) AS trim_v, CASE WHEN TRIM(v) <> v THEN 1 ELSE 0 END AS spaced
+      FROM ${scope}${side} WHERE (SELECT integer_keys FROM ${scope}typing) = 0),
+    ${scope}${side}base AS MATERIALIZED (SELECT *, ${dialect === "sqlite" ? "trim_v" : "regexp_replace(trim_v, '[^a-z0-9]', '', 'g')"} AS base_v FROM ${scope}${side}trim),
+    ${scope}${side}norm AS MATERIALIZED (SELECT *, CASE WHEN base_v = '' THEN '' ELSE COALESCE(NULLIF(${dialect === "sqlite" ? "LTRIM(base_v, '0')" : "regexp_replace(base_v, '^0+', '')"}, ''), '0') END AS zero_v FROM ${scope}${side}base)`
   const edge = (a: string, b: string) =>
     `(LENGTH(${a}) > 0 AND LENGTH(${b}) > LENGTH(${a}) AND (SUBSTR(${b}, 1, LENGTH(${a})) = ${a} OR SUBSTR(${b}, LENGTH(${b}) - LENGTH(${a}) + 1) = ${a}))`
+  // Group the right forms before joining so normalization collisions cannot multiply rows.
   const rows = await run(`${sources},
-    ${scope}l AS (SELECT DISTINCT ${text(left)} AS v FROM ${scope}lhs src WHERE ${left} IS NOT NULL),
-    ${scope}r AS (SELECT DISTINCT ${text(right)} AS v FROM ${scope}rhs src WHERE ${right} IS NOT NULL),
+    ${scope}l AS MATERIALIZED (SELECT DISTINCT ${text(left)} AS v FROM ${scope}lhs src WHERE ${left} IS NOT NULL),
+    ${scope}r AS MATERIALIZED (SELECT DISTINCT ${text(right)} AS v FROM ${scope}rhs src WHERE ${right} IS NOT NULL),
+    ${scope}lt AS (SELECT DISTINCT ${type(left)} AS t FROM ${scope}lhs src WHERE ${left} IS NOT NULL),
+    ${scope}rt AS (SELECT DISTINCT ${type(right)} AS t FROM ${scope}rhs src WHERE ${right} IS NOT NULL),
+    ${scope}typing AS (SELECT CASE WHEN EXISTS (SELECT 1 FROM ${scope}lt) AND EXISTS (SELECT 1 FROM ${scope}rt)
+      AND NOT EXISTS (SELECT 1 FROM ${scope}lt WHERE LOWER(t) NOT IN (${integerTypes}))
+      AND NOT EXISTS (SELECT 1 FROM ${scope}rt WHERE LOWER(t) NOT IN (${integerTypes})) THEN 1 ELSE 0 END AS integer_keys,
+      CASE WHEN EXISTS (SELECT t FROM ${scope}lt EXCEPT SELECT t FROM ${scope}rt)
+        OR EXISTS (SELECT t FROM ${scope}rt EXCEPT SELECT t FROM ${scope}lt) THEN 1 ELSE 0 END AS type_diff),
+    ${normalized("l")}, ${normalized("r")},
+    ${scope}rcase AS (SELECT lower_v AS k, MIN(v) AS min_v, MAX(v) AS max_v FROM ${scope}rnorm GROUP BY lower_v),
+    ${scope}rtrimmed AS (SELECT trim_v AS k, MIN(v) AS min_v, MAX(v) AS max_v, MAX(spaced) AS spaced FROM ${scope}rnorm GROUP BY trim_v),
+    ${scope}rnormalized AS (SELECT DISTINCT base_v AS k FROM ${scope}rnorm),
+    ${scope}rzero AS (SELECT zero_v AS k, MIN(base_v) AS min_v, MAX(base_v) AS max_v FROM ${scope}rnorm GROUP BY zero_v),
+    ${scope}probes AS (SELECT COUNT(t.k) AS matched_trim_lower,
+      ${dialect === "sqlite" ? "NULL" : "COUNT(n.k)"} AS matched_normalized, COUNT(z.k) AS matched_without_leading_zeros,
+      MAX(CASE WHEN l.v <> c.min_v OR l.v <> c.max_v THEN 1 ELSE 0 END) AS case_only,
+      MAX(CASE WHEN (l.v <> t.min_v OR l.v <> t.max_v) AND (l.spaced = 1 OR t.spaced = 1) THEN 1 ELSE 0 END) AS whitespace,
+      MAX(CASE WHEN l.base_v <> z.min_v OR l.base_v <> z.max_v THEN 1 ELSE 0 END) AS leading_zeros
+      FROM ${scope}lnorm l LEFT JOIN ${scope}rcase c ON l.lower_v = c.k
+      LEFT JOIN ${scope}rtrimmed t ON l.trim_v = t.k
+      LEFT JOIN ${scope}rnormalized n ON l.base_v = n.k
+      LEFT JOIN ${scope}rzero z ON l.zero_v = z.k),
+    ${scope}lu AS MATERIALIZED (SELECT l.v FROM ${scope}l l LEFT JOIN ${scope}r r ON l.v = r.v WHERE r.v IS NULL),
+    ${scope}ru AS (SELECT r.v FROM ${scope}r r LEFT JOIN ${scope}l l ON r.v = l.v WHERE l.v IS NULL ORDER BY r.v LIMIT 5),
+    ${scope}lp AS MATERIALIZED (SELECT LOWER(TRIM(v)) AS v FROM ${scope}lu WHERE (SELECT integer_keys FROM ${scope}typing) = 0 ORDER BY v LIMIT 100),
+    ${scope}rp AS MATERIALIZED (SELECT LOWER(TRIM(v)) AS v FROM ${scope}r WHERE (SELECT integer_keys FROM ${scope}typing) = 0 ORDER BY v LIMIT 100),
     ${scope}summary AS (SELECT (SELECT COUNT(*) FROM ${scope}l) AS distinct_left, (SELECT COUNT(*) FROM ${scope}r) AS distinct_right,
-      ${count("l.v = r.v")} AS matched_exact, ${count(`${trim("l.v")} = ${trim("r.v")}`)} AS matched_trim_lower,
-      ${dialect === "sqlite" ? "NULL" : count(`${normalize("l.v")} = ${normalize("r.v")}`)} AS matched_normalized,
-      ${count(`${zeros("l.v")} = ${zeros("r.v")}`)} AS matched_without_leading_zeros,
-      ${exists("LOWER(l.v) = LOWER(r.v)")} AS case_only,
-      ${exists(`${trim("l.v")} = ${trim("r.v")} AND (TRIM(l.v) <> l.v OR TRIM(r.v) <> r.v)`)} AS whitespace,
-      ${exists(`${base("l.v")} <> ${base("r.v")} AND ${zeros("l.v")} = ${zeros("r.v")}`)} AS leading_zeros,
-      ${exists(`${edge(trim("l.v"), trim("r.v"))} OR ${edge(trim("r.v"), trim("l.v"))}`)} AS prefix_suffix,
-      CASE WHEN EXISTS (SELECT ${type(left)} FROM ${scope}lhs src WHERE ${left} IS NOT NULL EXCEPT SELECT ${type(right)} FROM ${scope}rhs src WHERE ${right} IS NOT NULL)
-        OR EXISTS (SELECT ${type(right)} FROM ${scope}rhs src WHERE ${right} IS NOT NULL EXCEPT SELECT ${type(left)} FROM ${scope}lhs src WHERE ${left} IS NOT NULL) THEN 1 ELSE 0 END AS type_diff),
-    ${scope}lu AS (SELECT v FROM ${scope}l l WHERE NOT EXISTS (SELECT 1 FROM ${scope}r r WHERE r.v = l.v) ORDER BY v LIMIT 5),
-    ${scope}ru AS (SELECT v FROM ${scope}r r WHERE NOT EXISTS (SELECT 1 FROM ${scope}l l WHERE l.v = r.v) ORDER BY v LIMIT 5),
-    ${scope}samples AS (SELECT 'left' AS side, v FROM ${scope}lu UNION ALL SELECT 'right' AS side, v FROM ${scope}ru)
+      (SELECT COUNT(*) FROM ${scope}l l JOIN ${scope}r r ON l.v = r.v) AS matched_exact,
+      probes.*, typing.*,
+      CASE WHEN EXISTS (SELECT 1 FROM ${scope}lp l CROSS JOIN ${scope}rp r WHERE ${edge("l.v", "r.v")} OR ${edge("r.v", "l.v")}) THEN 1 ELSE 0 END AS prefix_suffix
+      FROM ${scope}probes probes CROSS JOIN ${scope}typing typing),
+    ${scope}lsamples AS (SELECT v FROM ${scope}lu ORDER BY v LIMIT 5),
+    ${scope}samples AS (SELECT 'left' AS side, v FROM ${scope}lsamples UNION ALL SELECT 'right' AS side, v FROM ${scope}ru)
     SELECT summary.*, samples.* FROM ${scope}summary summary LEFT JOIN ${scope}samples samples ON 1 = 1`)
   const row = rows[0]
+  const integerKeys = number(row.integer_keys) > 0
   const diffs = [
     ["case_only", "case-only"],
     ["whitespace", "whitespace"],
@@ -367,22 +387,33 @@ async function checkKeys(
     distinct_left: number(row.distinct_left),
     distinct_right: number(row.distinct_right),
     matched_exact: number(row.matched_exact),
-    matched_trim_lower: number(row.matched_trim_lower),
-    matched_normalized: dialect === "sqlite" ? "n/a" : number(row.matched_normalized),
-    matched_without_leading_zeros: number(row.matched_without_leading_zeros),
+    left_coverage: share(number(row.matched_exact), number(row.distinct_left)),
+    right_coverage: share(number(row.matched_exact), number(row.distinct_right)),
+    matched_trim_lower: integerKeys ? "n/a" : number(row.matched_trim_lower),
+    matched_normalized: integerKeys || dialect === "sqlite" ? "n/a" : number(row.matched_normalized),
+    matched_without_leading_zeros: integerKeys ? "n/a" : number(row.matched_without_leading_zeros),
     format_differences: diffs,
-    normalization:
-      dialect === "sqlite"
+    prefix_suffix_probe: integerKeys ? "skipped (integer keys)" : "up to 100 unmatched left keys and 100 right keys",
+    normalization: integerKeys
+      ? "skipped (integer keys)"
+      : dialect === "sqlite"
         ? "trim + lower; strip non-alphanumerics: n/a (no regexp_replace)"
         : "trim + lower + strip non-alphanumerics (ASCII)",
     unmatched_left: rows.filter((r) => r.side === "left").map((r) => r.v),
     unmatched_right: rows.filter((r) => r.side === "right").map((r) => r.v),
   }
+  const verdict = !metadata.distinct_left
+    ? "no left keys"
+    : metadata.matched_exact === metadata.distinct_left
+      ? "left coverage complete"
+      : "unmatched left keys found"
   return result("keys", metadata, [
-    `keys: ${metadata.matched_exact === metadata.distinct_left && metadata.matched_exact === metadata.distinct_right ? "exact text coverage" : "unmatched keys found"}${diffs.includes("type") ? "; type differences require review" : ""}; distinct non-null text left ${metadata.distinct_left}, right ${metadata.distinct_right}`,
+    `keys: ${verdict}${diffs.includes("type") ? "; type differences require review" : ""}; distinct non-null text left ${metadata.distinct_left}, right ${metadata.distinct_right}`,
+    `exact text coverage: left ${metadata.matched_exact}/${metadata.distinct_left}; right ${metadata.matched_exact}/${metadata.distinct_right}; shares: left ${ratio(metadata.left_coverage)}, right ${ratio(metadata.right_coverage)}`,
     `matched left keys: exact text ${metadata.matched_exact}; trim/lower ${metadata.matched_trim_lower}; normalized ${metadata.matched_normalized}; normalized + leading-zero removal ${metadata.matched_without_leading_zeros}`,
     `normalization: ${metadata.normalization}; matches count distinct left text values, not pairs; native join coercion may differ`,
     `format differences (possible, not fixes): ${diffs.join(", ") || "none detected"}`,
+    `prefix/suffix probe: ${metadata.prefix_suffix_probe}`,
     `unmatched exact left (up to 5): ${metadata.unmatched_left.map(display).join(", ") || "none"}`,
     `unmatched exact right (up to 5): ${metadata.unmatched_right.map(display).join(", ") || "none"}`,
   ])
