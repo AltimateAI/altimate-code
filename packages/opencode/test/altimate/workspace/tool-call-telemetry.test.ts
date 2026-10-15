@@ -17,6 +17,9 @@ describe("workspace integration tool calls", () => {
     spy.mockRestore()
     Telemetry.endSession("s1")
     Telemetry.endSession("s0")
+    // The singleton context is process-wide: left at s1/42 it would stamp a later suite's
+    // session-less rows.
+    Telemetry.setContext({ sessionId: "", projectId: "" })
   })
 
   const call = (clientName: string, outcome: "success" | "error", error?: unknown) =>
