@@ -102,6 +102,8 @@ describe("tool.bash permissions", () => {
     ["cd -P ../sibling && cat output.md", "cat", "sibling/output.md"],
     ["cd ../sibling && cat output.md &", "cat", "sibling/output.md"],
     ["cat -- ../sibling/output.md", "cat", "sibling/output.md"],
+    ["chmod -w ../sibling/output.md", "chmod -w", "sibling/output.md"],
+    ["cd ../sibling; cd a; cd b; cd c; cd d; cd e; cd f; cat output.md", "cat", "sibling/a/b/c/d/e/f/output.md"],
     ["cd missing; cd ../sibling; cat output.md", "cat", "sibling/output.md"],
   ])("denies normalized paths in %s", async (command, executable, target) => {
     await using tmp = await tmpdir({ git: true })
@@ -177,6 +179,30 @@ describe("tool.bash permissions", () => {
       await expect(bash.execute({ command: "mkdir -m 700 private", description: "Make" }, testCtx)).rejects.toThrow(
         "Path denied",
       )
+    })
+  })
+
+  test("denies mixed authored and absolute operand spellings and numeric cd targets", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const deny = async (rule: string, command: string) => {
+        const ruleset: PermissionNext.Ruleset = [
+          { permission: "*", pattern: "*", action: "allow" },
+          { permission: "bash", pattern: rule, action: "deny" },
+        ]
+        const testCtx = {
+          ...ctx,
+          ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+            for (const pattern of request.patterns) {
+              if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+            }
+          },
+        }
+        await expect(bash.execute({ command, description: "Probe" }, testCtx)).rejects.toThrow("Path denied")
+      }
+      await deny(`cp public.txt ${path.join(tmp.path, "private.txt")}`, "cp public.txt private.txt")
+      await deny(`cat ${path.join(tmp.path, "123", "secret")}`, "cd 123 && cat secret")
     })
   })
 

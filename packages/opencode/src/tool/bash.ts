@@ -52,6 +52,9 @@ function literalWord(node: Node | null): string | undefined {
 
 // Cap on tracked directories so pathological scripts cannot blow up alias generation.
 const MAX_TRACKED_DIRECTORIES = 32
+// Operand-spelling combinations are enumerated in full up to this many operands.
+const MAX_MIXED_OPERANDS = 3
+const MAX_ALIAS_VARIANTS = 512
 
 // Options that take a separate non-path value; the value must not be read as an operand.
 const VALUE_OPTIONS: Record<string, string[]> = {
@@ -76,12 +79,10 @@ function afterCd(cwds: string[], words: Node[]): string[] {
   if (args[i] === "--") i++
   const target = i < args.length ? args[i] : homedir()
   if (target === undefined || target === "-") return cwds
-  const next = new Set(cwds)
-  for (const cwd of cwds) {
-    if (next.size >= MAX_TRACKED_DIRECTORIES) break
-    next.add(path.resolve(cwd, target))
-  }
-  return [...next]
+  // Newly reachable directories come first so the cap drops the oldest speculative
+  // branches, never the directory a straight-line script actually enters.
+  const fresh = cwds.map((cwd) => path.resolve(cwd, target))
+  return [...new Set([...fresh, ...cwds])].slice(0, MAX_TRACKED_DIRECTORIES)
 }
 
 // Walk commands in source order, tracking every directory a command could run in.
@@ -91,7 +92,7 @@ function* shellCommands(node: Node | null, cwds: string[]): Generator<{ node: No
   if (node.type === "command") {
     yield { node, cwds }
     for (const child of node.namedChildren) yield* shellCommands(child, cwds)
-    const words = shellWords(node)
+    const words = shellWords(node, true)
     return words[0] && literalWord(words[0]) === "cd" ? afterCd(cwds, words) : cwds
   }
   const local = ["subshell", "command_substitution"].includes(node.type)
@@ -119,7 +120,9 @@ function pathOperands(name: string, words: Node[]): PathOperand[] {
       skipNext = false
       continue
     }
-    if (!terminated && arg?.startsWith("-")) {
+    // chmod symbolic modes such as `-w` or `-rwx` are the mode operand, not options.
+    const symbolicMode = name === "chmod" && arg !== undefined && /^-[ugoa]*[rwxXst]+[ugoa,rwxXst=+-]*$/.test(arg)
+    if (!terminated && !symbolicMode && arg?.startsWith("-")) {
       if (arg === "--") terminated = true
       else {
         const option = PATH_OPTIONS.find((candidate) => arg.startsWith(candidate + "="))
@@ -317,36 +320,60 @@ export const BashTool = Tool.define("bash", async () => {
                 directories.add(dir)
               }
             }
-            // One spelling keeps the operand's quoting, one is bare, one follows symlinks.
-            const spellings: ((item: (typeof targets)[number], real: string) => string)[] = [
-              (item) => item.operand.prefix + quoteLike(item.operand.word, item.target),
-              (item) => item.operand.prefix + item.target,
-              (item, real) => item.operand.prefix + (real || item.target),
-            ]
+            // Each operand can be written as authored, absolute (keeping its quoting), bare
+            // absolute or symlink-resolved, and the rule may mix them (`cp a /abs/b`).
+            const written = targets.flatMap((item, index) => (item.operand ? [{ item, real: reals[index] }] : []))
+            const choices = written.map(({ item, real }) =>
+              item.operand
+                ? [
+                    item.operand.word.text,
+                    item.operand.prefix + quoteLike(item.operand.word, item.target),
+                    item.operand.prefix + item.target,
+                    item.operand.prefix + (real || item.target),
+                  ].filter((value, i, all) => all.indexOf(value) === i)
+                : [],
+            )
+            const combos: number[][] = []
+            if (written.length <= MAX_MIXED_OPERANDS) {
+              const expand = (prefix: number[]) => {
+                if (prefix.length === choices.length) return void combos.push(prefix)
+                choices[prefix.length].forEach((_, i) => expand([...prefix, i]))
+              }
+              expand([])
+            } else {
+              for (let i = 0; i < 4; i++) combos.push(choices.map((options) => Math.min(i, options.length - 1)))
+            }
             // `cat -- x` and `cat x` read the same file, so also alias the form without `--`.
             const terminator =
               name === "cd" ? undefined : operandWords.slice(1).find((word) => literalWord(word) === "--")
-            for (const spell of spellings.flatMap((fn) =>
-              terminator ? [[fn, false] as const, [fn, true] as const] : [[fn, false] as const],
-            )) {
-              const [fn, dropTerminator] = spell
-              const replacements = targets
-                .filter((item) => item.operand)
-                .map((item) => ({
-                  start: item.operand.word.startIndex,
-                  end: item.operand.word.endIndex,
-                  text: fn(item, reals[targets.indexOf(item)]),
-                }))
-              if (listing) replacements.push({ start: node.endIndex, end: node.endIndex, text: ` ${commandCwd}` })
-              if (terminator && dropTerminator)
-                replacements.push({ start: terminator.startIndex - 1, end: terminator.endIndex, text: "" })
-              let text = original
-              for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
-                const start = replacement.start - source.startIndex
-                const end = replacement.end - source.startIndex
-                text = text.slice(0, start) + replacement.text + text.slice(end)
+            for (const combo of combos) {
+              for (const dropTerminator of terminator ? [false, true] : [false]) {
+                if (variants.size >= MAX_ALIAS_VARIANTS) break
+                const replacements = written
+                  .map(({ item }, index) => ({
+                    start: item.operand?.word.startIndex ?? 0,
+                    end: item.operand?.word.endIndex ?? 0,
+                    text: choices[index][combo[index]],
+                    skip: !item.operand,
+                  }))
+                  .filter((replacement) => !replacement.skip)
+                if (listing)
+                  replacements.push({ start: node.endIndex, end: node.endIndex, text: ` ${commandCwd}`, skip: false })
+                if (terminator && dropTerminator)
+                  replacements.push({
+                    start: terminator.startIndex - 1,
+                    end: terminator.endIndex,
+                    text: "",
+                    skip: false,
+                  })
+                let text = original
+                for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
+                  const start = replacement.start - source.startIndex
+                  const end = replacement.end - source.startIndex
+                  text = text.slice(0, start) + replacement.text + text.slice(end)
+                }
+                variants.add(text)
               }
-              variants.add(text)
             }
           }
         }
