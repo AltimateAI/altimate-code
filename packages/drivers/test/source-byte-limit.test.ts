@@ -2,7 +2,7 @@ import { expect, mock, test } from "bun:test"
 import { createRequire } from "node:module"
 import { dirname, join } from "node:path"
 import { connect as connectPostgres } from "../src/postgres"
-import { connect as connectMongo } from "../src/mongodb"
+import { connect as connectMongo, BOUNDED_READ_BATCH } from "../src/mongodb"
 import { restoreModuleMocksAfterTests } from "./module-mock"
 
 await restoreModuleMocksAfterTests("pg", "mongodb")
@@ -154,7 +154,7 @@ test.each(["find", "aggregate"])("Mongo %s closes the cursor before fetching pas
     ).rejects.toMatchObject({ code: "RESULT_BYTE_LIMIT" })
     expect(db.consumed()).toBe(2)
     expect(db.closed()).toBe(true)
-    expect(db.batchSize()).toBe(1)
+    expect(db.batchSize()).toBe(BOUNDED_READ_BATCH)
   } finally {
     await db.connector.close()
   }
