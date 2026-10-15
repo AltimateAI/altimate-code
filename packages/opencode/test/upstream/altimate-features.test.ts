@@ -413,7 +413,7 @@ describe("altimate features: telemetry fail-safe init", () => {
     // The hashed account email left with the user-identity change: events carry the backend
     // user uuid and tenant resolved by TelemetryIdentity, so there is no Account.active() caller
     // here any more (it used to be awaited; Account.active() became async in v1.4.0).
-    expect(src).not.toMatch(/Account\.active/)
+    expect(src).not.toMatch(/Account\.active\s*\(/)
     expect(src).toMatch(/TelemetryIdentity\.resolve\(/)
   })
 })

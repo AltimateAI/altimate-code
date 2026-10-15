@@ -90,7 +90,7 @@ describe("bridge merge cycle 1: Account.active() is async — every caller await
     // Telemetry stopped reading the account when events gained user_id and tenant from the
     // stored credential; the generic no-unawaited-call check below still covers any new caller.
     const content = await readText(path.join(srcDir, "altimate", "telemetry", "index.ts"))
-    expect(content).not.toMatch(/Account\.active/)
+    expect(content).not.toMatch(/Account\.active\s*\(/)
   })
 
   test("no source file calls Account.active() without await or assignment", async () => {

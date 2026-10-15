@@ -1859,6 +1859,11 @@ export namespace Telemetry {
   // resolution started under credential A must not land after a sign-in installed B, nor after
   // shutdown() cleared the state. shutdown() and every new resolution bump it.
   let identityGeneration = 0
+  // altimate_change — stamp of the credential files when the current identity was resolved; a
+  // flush that sees a different stamp re-resolves, so a sign-in, sign-out or key change made on
+  // disk by any path (manual file edit, the TUI, another thread's auth flow) is picked up within
+  // one flush interval instead of at the next process start.
+  let identityStamp = ""
   let machineId = ""
   let sessionId = ""
   let projectId = ""
@@ -1927,7 +1932,16 @@ export namespace Telemetry {
     return { iKey, endpoint: `${base}v2/track` }
   }
 
-  function toAppInsightsEnvelopes(events: Event[], cfg: AppInsightsConfig): object[] {
+  // altimate_change — `ids` lets a caller build envelopes for a machine and identity other than
+  // the module's current state (the opt-out marker runs while telemetry is disabled and must not
+  // touch the state an enabled init may be using concurrently).
+  function toAppInsightsEnvelopes(
+    events: Event[],
+    cfg: AppInsightsConfig,
+    ids?: { machineId: string; identity: TelemetryIdentity.Identity | undefined },
+  ): object[] {
+    const mid = ids ? ids.machineId : machineId
+    const who = ids ? ids.identity : identity
     // Process-level client, read live from the env flag (defaults to "cli") so events
     // emitted before any prompt runs — startup, connection setup, standalone CLI
     // subcommands — are labelled correctly instead of stuck at a hardcoded default.
@@ -1944,10 +1958,10 @@ export namespace Telemetry {
         cli_version: InstallationVersion,
         source: clientSource,
         project_id: fields.project_id ?? projectId,
-        ...(machineId && { machine_id: machineId }),
+        ...(mid && { machine_id: mid }),
         // altimate_change — the backend user uuid and tenant when signed in to Altimate, so a CLI
         // row joins the PostHog person and the backend record for the same account.
-        ...(identity && { user_id: identity.user_id, tenant: identity.tenant }),
+        ...(who && { user_id: who.user_id, tenant: who.tenant }),
         // altimate_change — groups every event from one process launch. The onboarding funnel
         // spans the TUI main thread and the server worker, and most of it runs before any chat
         // session exists, so `session_id` is empty for the first half and real for the second —
@@ -1975,7 +1989,7 @@ export namespace Telemetry {
           // altimate_change start — the backend user uuid when signed in, else the machine id.
           // Anonymous machines each keep a distinct identity (the random machine UUID, already a
           // custom property) instead of sharing ai.user.id="". No email, hashed or not, is sent.
-          "ai.user.id": identity?.user_id || machineId || "",
+          "ai.user.id": who?.user_id || mid || "",
           // altimate_change end
           "ai.cloud.role": "altimate",
           "ai.application.ver": InstallationVersion,
@@ -2121,6 +2135,7 @@ export namespace Telemetry {
   // process (the browser login flow saves the credential while telemetry is already running).
   function resolveIdentity(opts: { refresh?: boolean } = {}): Promise<void> {
     const generation = ++identityGeneration
+    identityStamp = TelemetryIdentity.credentialStamp()
     return TelemetryIdentity.resolve(opts)
       .then((resolved) => {
         if (generation === identityGeneration) identity = resolved
@@ -2128,8 +2143,12 @@ export namespace Telemetry {
       .catch(() => {})
   }
 
-  /** Re-resolve who the machine is signed in as; clears it when no credential is stored. */
+  /** Re-resolve who the machine is signed in as; clears it when no credential is stored. Events
+   * already buffered are flushed under the identity they were tracked with first, and events
+   * tracked while the new answer is pending carry no account rather than the previous one. */
   export async function refreshIdentity(): Promise<void> {
+    await flush()
+    identity = undefined
     await resolveIdentity({ refresh: true })
   }
 
@@ -2330,6 +2349,19 @@ export namespace Telemetry {
   }
 
   async function doFlush(timeoutMs: number) {
+    // altimate_change start — this batch is attributed to the identity in force when it is sent,
+    // captured before the credential check below can start replacing it; then notice a credential
+    // change on disk and re-resolve (cheap: two stats, and the cache answers unless the key changed).
+    const who = identity
+    const mid = machineId
+    if (enabled) {
+      const stamp = TelemetryIdentity.credentialStamp()
+      if (stamp !== identityStamp) {
+        identity = undefined
+        void resolveIdentity()
+      }
+    }
+    // altimate_change end
     if (!enabled || buffer.length === 0 || !appInsights) return
 
     const events = buffer.splice(0, buffer.length)
@@ -2353,7 +2385,7 @@ export namespace Telemetry {
       const response = await fetch(appInsights.endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(toAppInsightsEnvelopes(events, appInsights)),
+        body: JSON.stringify(toAppInsightsEnvelopes(events, appInsights, { machineId: mid, identity: who })),
         signal: controller.signal,
       })
       if (!response.ok) {

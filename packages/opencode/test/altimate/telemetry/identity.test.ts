@@ -3,11 +3,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, existsSync, wri
 import os from "os"
 import path from "path"
 import { Telemetry } from "../../../src/altimate/telemetry"
+import { Auth } from "../../../src/auth"
 import { TelemetryIdentity } from "../../../src/altimate/telemetry/identity"
 
 const UUID = "0f3c2a1e-6b7d-4c8e-9f10-1a2b3c4d5e6f"
 const UUID_B = "7a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d"
 const API = "https://api.example.invalid"
+const DEFAULT_API = "https://api.myaltimate.com"
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: string }
 
@@ -29,6 +31,9 @@ describe("telemetry identity", () => {
   let savedTestHome: string | undefined
   let savedCs: string | undefined
   let meStatus = 200
+  /** When set, /users/me answers 200 with this raw body instead of a user. */
+  let meBody: string | undefined
+  let authSpy: ReturnType<typeof spyOn>
   /** Per-api-key gates: a /users/me request for that key waits on the promise before answering. */
   let gates: Record<string, Promise<void> | undefined> = {}
 
@@ -54,16 +59,21 @@ describe("telemetry identity", () => {
     homedirSpy = spyOn(os, "homedir").mockImplementation(() => home)
     calls = []
     meStatus = 200
+    meBody = undefined
     gates = {}
+    // The auth store lives in the real data directory; never let a test read it.
+    authSpy = spyOn(Auth, "get").mockResolvedValue(undefined)
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: any, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
       calls.push({ url, method: init?.method ?? "GET", headers: headersOf(init), body: String(init?.body ?? "") })
-      if (url === `${API}/users/me`) {
+      if (url === `${API}/users/me` || url === `${DEFAULT_API}/users/me`) {
         const key = headersOf(init)["authorization"]?.replace("Bearer ", "") ?? ""
         const gate = gates[key]
         if (gate) await gate
         if (meStatus !== 200) return new Response("nope", { status: meStatus })
-        const uuid = key === "key-B" ? UUID_B : UUID.toUpperCase()
+        if (meBody !== undefined)
+          return new Response(meBody, { status: 200, headers: { "content-type": "application/json" } })
+        const uuid = key.startsWith("key-B") ? UUID_B : UUID.toUpperCase()
         return new Response(JSON.stringify({ id: 7, uuid, email: "someone@example.invalid" }), {
           status: 200,
           headers: { "content-type": "application/json" },
@@ -77,6 +87,7 @@ describe("telemetry identity", () => {
     await Telemetry.shutdown()
     fetchSpy.mockRestore()
     homedirSpy.mockRestore()
+    authSpy.mockRestore()
     if (savedTestHome === undefined) delete process.env.OPENCODE_TEST_HOME
     else process.env.OPENCODE_TEST_HOME = savedTestHome
     if (savedCs === undefined) delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
@@ -130,12 +141,109 @@ describe("telemetry identity", () => {
     expect(existsSync(TelemetryIdentity.cachePath())).toBe(false)
 
     meStatus = 200
+    meBody = JSON.stringify({ id: 7, uuid: "not-a-uuid" })
+    expect(await TelemetryIdentity.resolve()).toBeUndefined()
+    meBody = "<html>proxy error</html>"
+    expect(await TelemetryIdentity.resolve()).toBeUndefined()
+    expect(existsSync(TelemetryIdentity.cachePath())).toBe(false)
+
+    meBody = undefined
     await TelemetryIdentity.resolve()
     expect(existsSync(TelemetryIdentity.cachePath())).toBe(true)
+
+    // A rejection drops the cache for that credential; a transient failure keeps it.
+    meStatus = 503
+    expect(await TelemetryIdentity.resolve({ refresh: true })).toBeUndefined()
+    expect(await TelemetryIdentity.cached()).toEqual({ user_id: UUID, tenant: "acme" })
+    meStatus = 401
+    expect(await TelemetryIdentity.resolve({ refresh: true })).toBeUndefined()
+    expect(await TelemetryIdentity.cached()).toBeUndefined()
+    expect(existsSync(TelemetryIdentity.cachePath())).toBe(false)
+    meStatus = 200
     // Signing out (credential gone) forgets the cached identity.
     rmSync(path.join(home, ".altimate", "altimate.json"))
     expect(await TelemetryIdentity.resolve()).toBeUndefined()
     expect(existsSync(TelemetryIdentity.cachePath())).toBe(false)
+  })
+
+  test("an answer for a credential that was removed mid-flight is neither cached nor returned", async () => {
+    writeCreds("key-A")
+    let releaseA: () => void = () => {}
+    gates["key-A"] = new Promise<void>((r) => (releaseA = r))
+    const pending = TelemetryIdentity.resolve()
+    await new Promise((r) => setTimeout(r, 20))
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+    releaseA()
+    expect(await pending).toBeUndefined()
+    expect(existsSync(TelemetryIdentity.cachePath())).toBe(false)
+  })
+
+  test("a key entered in the TUI (auth store) resolves like the credential file", async () => {
+    authSpy.mockResolvedValue({ type: "api", key: "acme::key-S" })
+    expect(await TelemetryIdentity.resolve()).toEqual({ user_id: UUID, tenant: "acme" })
+    expect(meCalls().length + calls.filter((c) => c.url === `${DEFAULT_API}/users/me`).length).toBe(1)
+    expect(await TelemetryIdentity.cached()).toEqual({ user_id: UUID, tenant: "acme" })
+    // The credential file wins over the store when both exist.
+    writeCreds("key-F")
+    await TelemetryIdentity.resolve()
+    const last = calls.filter((c) => c.url.endsWith("/users/me")).at(-1)!
+    expect(last.headers["authorization"]).toBe("Bearer key-F")
+  })
+
+  test("a credential change on disk is noticed at the next flush, and a buffered batch keeps the identity it was tracked under", async () => {
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+      "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+    writeCreds("key-A")
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    await Telemetry.refreshIdentity()
+    expect(Telemetry.identityForTest()).toEqual({ user_id: UUID, tenant: "acme" })
+
+    Telemetry.track({
+      type: "startup_ready",
+      session_id: "",
+      command: "a",
+      duration_ms: 1,
+      fresh_install: false,
+      timestamp: Date.now(),
+    })
+    await new Promise((r) => setTimeout(r, 15)) // a distinct mtime for the rewritten file
+    writeCreds("key-B-longer-so-the-size-differs-too")
+    await Telemetry.flush()
+    const first = (JSON.parse(trackCalls().at(-1)!.body) as any[]).find(
+      (e) => e.data?.baseData?.name === "startup_ready",
+    )
+    expect(first.data.baseData.properties.user_id).toBe(UUID) // the batch tracked under A stays A
+    const ok = await (async () => {
+      const until = Date.now() + 2000
+      while (Date.now() < until) {
+        if (Telemetry.identityForTest()?.user_id === UUID_B) return true
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      return false
+    })()
+    expect(ok).toBe(true)
+
+    Telemetry.track({
+      type: "startup_ready",
+      session_id: "",
+      command: "b",
+      duration_ms: 1,
+      fresh_install: false,
+      timestamp: Date.now(),
+    })
+    await Telemetry.flush()
+    const second = (JSON.parse(trackCalls().at(-1)!.body) as any[]).find(
+      (e) => e.data?.baseData?.properties?.command === "b",
+    )
+    expect(second.data.baseData.properties.user_id).toBe(UUID_B)
+
+    // Sign-out on disk: noticed the same way, and the account is gone from the next batch.
+    await new Promise((r) => setTimeout(r, 15))
+    rmSync(path.join(home, ".altimate", "altimate.json"))
+    await Telemetry.flush()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(Telemetry.identityForTest()).toBeUndefined()
   })
 
   test("a resolution that started under the old credential never overwrites a newer sign-in", async () => {
