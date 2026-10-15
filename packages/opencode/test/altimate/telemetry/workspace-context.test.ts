@@ -86,7 +86,7 @@ describe("workspace id on the telemetry context", () => {
     const first = Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 42 })
     Telemetry.noteWorkspaceUse("s7", "skills")
     const second = Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 42 })
-    expect(second).toBe(first + 1)
+    expect(second).toBeGreaterThan(first)
     Telemetry.noteWorkspaceUse("s7", "memory", 2)
     Telemetry.endSession("s7", first) // the old generation, after the replacement started
     expect(Telemetry.workspaceOf("s7")).toBe(42)
@@ -98,6 +98,16 @@ describe("workspace id on the telemetry context", () => {
     Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 9 })
     Telemetry.endSession("s7")
     expect(Telemetry.workspaceOf("s7")).toBeUndefined()
+    // Evicted and re-created entries never reuse a token a stale turn still holds.
+    const stale = Telemetry.setContext({ sessionId: "s8", projectId: "p1", workspaceId: 5 })
+    for (let i = 0; i < 1100; i++) Telemetry.setContext({ sessionId: `evict-${i}`, projectId: "p1" })
+    expect(Telemetry.workspaceOf("s8")).toBeUndefined() // evicted
+    const fresh = Telemetry.setContext({ sessionId: "s8", projectId: "p1", workspaceId: 6 })
+    expect(fresh).toBeGreaterThan(stale)
+    Telemetry.endSession("s8", stale)
+    expect(Telemetry.workspaceOf("s8")).toBe(6)
+    Telemetry.endSession("s8", fresh)
+    for (let i = 0; i < 1100; i++) Telemetry.endSession(`evict-${i}`)
     Telemetry.setContext({ sessionId: "", projectId: "" })
   })
 
