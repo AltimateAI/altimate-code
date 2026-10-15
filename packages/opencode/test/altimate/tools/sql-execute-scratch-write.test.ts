@@ -38,35 +38,12 @@ afterAll(() => {
 })
 
 describe("sql_execute writes to scratch", () => {
-  test("a scratch write batch returns its final read without write permission", async () => {
-    const tool = await initTool(SqlExecuteTool)
-    const asked: any[] = []
-    const result = await tool.execute(
-      {
-        query: "CREATE TABLE items AS SELECT 1 AS value; INSERT INTO items VALUES (2); SELECT sum(value) AS total FROM items",
-        warehouse: "scratch",
-        limit: 10,
-      },
-      {
-        ...ctx,
-        ask: async (req: any) => {
-          asked.push(req)
-          throw new Error("write denied by test")
-        },
-      },
-    )
-    expect(result.metadata?.error).toBeUndefined()
-    expect(result.output).toContain("total")
-    expect(result.output).toMatch(/\b3\b/)
-    expect(asked).toHaveLength(0)
-  })
-
-  test("a scratch batch with a read before the final statement still asks for write permission", async () => {
+  test("a scratch batch that ends with a read still asks for write permission", async () => {
     const tool = await initTool(SqlExecuteTool)
     const asked: any[] = []
     await expect(
       tool.execute(
-        { query: "CREATE TABLE items AS SELECT 1 AS value; SELECT * FROM items; INSERT INTO items VALUES (2)", warehouse: "scratch", limit: 10 },
+        { query: "CREATE TABLE items AS SELECT 1 AS value; SELECT * FROM items", warehouse: "scratch", limit: 10 },
         { ...ctx, ask: async (req: any) => { asked.push(req); throw new Error("write denied by test") } },
       ),
     ).rejects.toThrow("write denied by test")

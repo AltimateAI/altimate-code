@@ -278,8 +278,9 @@ function hasLocalScratchTarget(statement: string): boolean {
 }
 
 /**
- * True for local table/view DDL or row DML, optionally ending with one verified read.
- * Unparseable or unknown statements are not scratch-safe.
+ * True when every statement is a table/view DDL or row DML the scratch database can absorb
+ * without side effects outside it. Unparseable or unknown statements are not scratch-safe.
+ * Reads are excluded: the driver caps rows only when the whole text starts with a read.
  */
 export function isScratchSafeWrite(sql: string): boolean {
   const dialect = "duckdb"
@@ -287,18 +288,12 @@ export function isScratchSafeWrite(sql: string): boolean {
   if (!tokenizeSql(sql, dialect).complete) return false
   try {
     const result = getStatementTypes(sql, dialect)
-    const statements: Array<{ statement_type?: string; category: string }> = result?.statements ?? []
+    const statements: Array<{ statement_type?: string }> = result?.statements ?? []
     const source = statementsOf(sql, dialect)
     if (statements.length === 0 || statements.length !== source.length) return false
     return (
-      statements.some((s) => SCRATCH_WRITE_TYPES.has(String(s.statement_type ?? "").toUpperCase())) &&
-      statements.every((s, i) =>
-        SCRATCH_WRITE_TYPES.has(String(s.statement_type ?? "").toUpperCase())
-          ? hasLocalScratchTarget(source[i])
-          : // Only the final statement's rows are returned and a row cap is appended to the whole text,
-            // so a read is admitted solely in last position.
-            i === statements.length - 1 && otherIsReadOnly(source[i], [s], dialect),
-      )
+      statements.every((s) => SCRATCH_WRITE_TYPES.has(String(s.statement_type ?? "").toUpperCase())) &&
+      source.every(hasLocalScratchTarget)
     )
   } catch {
     return false
