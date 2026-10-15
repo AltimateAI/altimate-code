@@ -312,7 +312,8 @@ export namespace MemoryStore {
     Telemetry.track({
       type: "memory_operation",
       timestamp: Date.now(),
-      session_id: Telemetry.getContext().sessionId,
+      // altimate_change — the writing session when the caller passed it, else the context's
+      session_id: opts.sessionID ?? Telemetry.getContext().sessionId,
       operation: "write",
       scope: block.scope,
       block_id: block.id,
