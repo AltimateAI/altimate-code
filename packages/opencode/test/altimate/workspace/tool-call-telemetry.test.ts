@@ -11,7 +11,6 @@ describe("workspace integration tool calls", () => {
       rows.push(e)
     })
     Telemetry.endSession("s1")
-    Telemetry.setContext({ sessionId: "s1", projectId: "p1", workspaceId: 42 }) // s1's turn is bound
   })
   afterEach(() => {
     spy.mockRestore()
@@ -22,12 +21,18 @@ describe("workspace integration tool calls", () => {
     Telemetry.setContext({ sessionId: "", projectId: "" })
   })
 
-  const call = (clientName: string, outcome: "success" | "error", error?: unknown) =>
+  const call = (
+    clientName: string,
+    outcome: "success" | "error",
+    error?: unknown,
+    workspaceId: number | undefined = 42,
+  ) =>
     trackWorkspaceToolCall({
       key: `${clientName}_jira_get_issue`,
       clientName,
       sessionID: "s1",
       messageID: "m1",
+      workspaceId,
       startedAt: Date.now() - 5,
       outcome,
       error,
@@ -43,6 +48,7 @@ describe("workspace integration tool calls", () => {
         tool_type: "mcp",
         status: "success",
         via_workspace: true,
+        workspace_id: 42,
         session_id: "s1",
         message_id: "m1",
       }),
@@ -63,20 +69,24 @@ describe("workspace integration tool calls", () => {
     expect(rows[1].error).not.toContain("u:pw@")
   })
 
-  test("the engine key in a session whose turn is not bound is not the workspace's", () => {
-    Telemetry.setContext({ sessionId: "s0", projectId: "p1" }) // unbound turn; s1 keeps its entry
+  test("the engine key in an unbound turn is not the workspace's; the turn's workspace, not the session's entry, names the row", () => {
     expect(
       trackWorkspaceToolCall({
         key: "datamate_x",
         clientName: "datamate",
-        sessionID: "s0",
+        sessionID: "s1",
         messageID: "m",
+        workspaceId: undefined,
         startedAt: Date.now(),
         outcome: "success",
       }),
     ).toBe(false)
     expect(rows).toHaveLength(0)
-    expect(call("datamate", "success")).toBe(true) // s1 is still bound
+    // The session's current entry says 7 (a replacement turn), but this call ran for turn 42.
+    Telemetry.setContext({ sessionId: "s1", projectId: "p1", workspaceId: 7 })
+    expect(call("datamate", "success")).toBe(true)
+    expect(rows[0].workspace_id).toBe(42)
+    Telemetry.setContext({ sessionId: "", projectId: "" })
   })
 
   test("other MCP clients, standalone datamate servers and registry tool ids are not the workspace's engine", () => {

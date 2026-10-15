@@ -789,7 +789,9 @@ export namespace SessionPrompt {
     })
     // The turn's own workspace, named on the rows this loop emits at its end: a cancelled turn
     // unwinding after its replacement started must not take the replacement's entry.
-    const turnWorkspace = boundWorkspace?.datamateId !== undefined ? { workspace_id: boundWorkspace.datamateId } : {}
+    // Always keyed, undefined for an unbound turn: a row that carries the key is never stamped from
+    // the session's entry, and the envelope drops an undefined value.
+    const turnWorkspace = { workspace_id: boundWorkspace?.datamateId }
     // altimate_change end
     // altimate_change start — the learn kill switch disables new delivery, while retaining trusted note cleanup.
     // An unused project pays only an existence check; do not load stores, migrate,
@@ -1755,6 +1757,7 @@ export namespace SessionPrompt {
               messages: msgs,
               // altimate_change start — file rules append only to this tool result
               lessons,
+              workspaceId: boundWorkspace?.datamateId,
               // altimate_change end
             }),
           { step, agent: agent.name },
@@ -2759,6 +2762,8 @@ export namespace SessionPrompt {
     messages: MessageV2.WithParts[]
     // altimate_change start — optional for callers outside the main prompt loop
     lessons?: LessonDelivery
+    /** The workspace the calling turn resolved, for the rows its MCP calls emit. */
+    workspaceId?: number
     // altimate_change end
   }) {
     using _ = log.time("resolveTools")
@@ -2964,6 +2969,7 @@ export namespace SessionPrompt {
               clientName,
               sessionID: ctx.sessionID,
               messageID: ctx.messageID,
+              workspaceId: input.workspaceId,
               startedAt,
               outcome: "error",
               error: err,
@@ -2975,6 +2981,7 @@ export namespace SessionPrompt {
             clientName,
             sessionID: ctx.sessionID,
             messageID: ctx.messageID,
+            workspaceId: input.workspaceId,
             startedAt,
             outcome: (result as { isError?: boolean }).isError === true ? "error" : "success",
           })

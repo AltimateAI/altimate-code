@@ -324,6 +324,8 @@ export namespace Telemetry {
         error?: string
         // altimate_change — the call went to the bound workspace (a datamate MCP server)
         via_workspace?: boolean
+        // altimate_change — the turn's workspace, named by the MCP path on a workspace call
+        workspace_id?: number
       }
     | {
         type: "native_call"
