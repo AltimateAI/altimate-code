@@ -215,12 +215,17 @@ export function renderAnswer(payload: unknown): string {
     // altimate_change start - render the requested format before applying the shared size cap
     const { columns, values, precision, format = "markdown" } = args.rows
     // Float noise: more than 6 decimals, yet either a double-precision artifact of, or the exact float32 widening of, a value with at most 6 decimals (0.30000000000000004, 18.440000534057617). Genuine long decimals (1234567.8901234) are not.
+    // Two units in the last place of a double: arithmetic artifacts (0.1 + 0.2) sit within it, genuine 15+ digit decimals do not.
+    const DOUBLE_ARTIFACT_RELATIVE_ERROR = Number.EPSILON * 2
     const isNoise = (value: number) => {
       const decimal = new Decimal(value)
       if (decimal.decimalPlaces() <= 6) return false
       const rounded = decimal.toDecimalPlaces(6)
       // Only a double-precision artifact or the exact float32 widening of the rounded value qualifies.
-      return Math.fround(rounded.toNumber()) === value || decimal.minus(rounded).abs().lte(decimal.abs().times("1e-15"))
+      return (
+        Math.fround(rounded.toNumber()) === value ||
+        decimal.minus(rounded).abs().lte(decimal.abs().times(DOUBLE_ARTIFACT_RELATIVE_ERROR))
+      )
     }
     const scales = columns.map((_, index) =>
       values.reduce((scale, cells) => {

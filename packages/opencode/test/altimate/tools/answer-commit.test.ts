@@ -436,6 +436,15 @@ describe("answer_commit display precision", () => {
     )
   })
 
+  test("a decimal a few ulps from a six-place rounding is kept", () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Value"], values: [[1.000000000000001], [2.1]] },
+    }
+    expect(AnswerCommit.renderAnswer(payload)).toBe("| Value |\n|---|\n| 1.000000000000001 |\n| 2.100000000000000 |")
+  })
+
   test("a column of only float-noise cells renders each in its own form", () => {
     const payload = {
       basis: recordBasis,
