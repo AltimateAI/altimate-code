@@ -256,6 +256,12 @@ describe("optional tool parameter fillers", () => {
         yield* tool.execute(input, context())
         expect(pluginCalls.at(-1)).toEqual(expected)
       }
+      // Arguments the schema does not list are kept, and a call the schema rejects still reaches the handler as sent.
+      yield* tool.execute({ extra: "kept", labels: [] }, context())
+      expect(pluginCalls.at(-1)).toEqual({ extra: "kept", limit: 3 })
+      const mismatched = { limit: "not-a-number", extra: 1 }
+      yield* tool.execute(mismatched, context())
+      expect(pluginCalls.at(-1)).toEqual(mismatched)
     }),
   )
 
