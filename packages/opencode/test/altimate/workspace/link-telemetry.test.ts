@@ -15,8 +15,16 @@ writeFileSync(
   JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: "acme", altimateApiKey: "test-key" }),
 )
 
-const { WorkspaceApi, linkFailureReason, endpointOf, WorkspaceApiError, NotFoundError, ForbiddenError, ConflictError } =
-  await import("../../../src/altimate/workspace/api-client")
+const {
+  WorkspaceApi,
+  linkFailureReason,
+  endpointOf,
+  altimateRequest,
+  WorkspaceApiError,
+  NotFoundError,
+  ForbiddenError,
+  ConflictError,
+} = await import("../../../src/altimate/workspace/api-client")
 const { Telemetry } = await import("../../../src/altimate/telemetry")
 
 type Reply = { status: number; body?: unknown } | { throw: Error } | { hang: true }
@@ -215,10 +223,32 @@ describe("workspace link telemetry", () => {
     expect(endpointOf("POST", "/datamates", "/42/skills/pub_Ab12Cd/attach")).toBe(
       "POST /datamates/:id/skills/:id/attach",
     )
-    expect(endpointOf("GET", "/dbt", "/v3/validate-credentials")).toBe("GET /dbt/v3/validate-credentials")
+    // Spelling is not evidence: a public id that looks like a route word is still an id.
+    expect(endpointOf("GET", "/skills", "/pub-many")).toBe("GET /skills/:id")
+    expect(endpointOf("GET", "/datamates", "/42/skills/pub_Ab12Cd/files/readme.md")).toBe(
+      "GET /datamates/:id/skills/:id/files/:id",
+    )
 
     replies = [{ status: 200 }] // 2xx with an empty body where JSON was required
     await expect(WorkspaceApi.listDatamates()).rejects.toThrow(/Empty 200 body/)
+    expect(of("workspace_api_error")).toEqual([expect.objectContaining({ status_class: "response", status: 200 })])
+  })
+
+  test("a body that fails after the server answered keeps the answer's status class", async () => {
+    // Oversized 500: readBounded() refuses the body before the status branch; the row is still a 5xx.
+    globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) =>
+      new Response("x", { status: 500, headers: { "content-length": "100000000" } })) as typeof globalThis.fetch
+    await expect(altimateRequest("GET", "/x", { base: "/datamates", boundResponse: true })).rejects.toBeInstanceOf(
+      WorkspaceApiError,
+    )
+    expect(of("workspace_api_error")).toEqual([expect.objectContaining({ status_class: "5xx", status: 500 })])
+
+    events = []
+    globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) =>
+      new Response("x", { status: 200, headers: { "content-length": "100000000" } })) as typeof globalThis.fetch
+    await expect(altimateRequest("GET", "/x", { base: "/datamates", boundResponse: true })).rejects.toBeInstanceOf(
+      WorkspaceApiError,
+    )
     expect(of("workspace_api_error")).toEqual([expect.objectContaining({ status_class: "response", status: 200 })])
   })
 
