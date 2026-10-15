@@ -54,6 +54,24 @@ function readCappedUtf8(idPath: string): string {
  * @param machineIdPath Override path (for tests). Defaults to `~/.altimate/machine-id`.
  * @returns A v4 UUID string, or `""` if the value is invalid or unreadable.
  */
+/**
+ * Read an existing machine id without minting one. Same regular-file, size-cap and UUID
+ * checks as {@link getOrCreateMachineId}; returns `""` when the file is absent, unreadable,
+ * not a regular file, oversized or not a UUID. For callers that must not create a machine
+ * identity as a side effect (the telemetry opt-out marker).
+ */
+export function readExistingMachineId(machineIdPath?: string): string {
+  const idPath = machineIdPath ?? path.join(os.homedir(), ".altimate", "machine-id")
+  try {
+    const stat = fs.lstatSync(idPath)
+    if (!stat.isFile() || stat.size > MAX_BYTES) return ""
+    const raw = readCappedUtf8(idPath)
+    return UUID_RE.test(raw) ? raw : ""
+  } catch {
+    return ""
+  }
+}
+
 export function getOrCreateMachineId(machineIdPath?: string): string {
   const idPath = machineIdPath ?? path.join(os.homedir(), ".altimate", "machine-id")
 
