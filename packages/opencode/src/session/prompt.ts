@@ -1354,6 +1354,7 @@ export namespace SessionPrompt {
             sessionID,
             callID: part.id,
             args: taskArgs,
+            workspaceId: boundWorkspace?.datamateId, // altimate_change — the turn's workspace, for plugin rows
           },
           result,
         )
@@ -2908,6 +2909,7 @@ export namespace SessionPrompt {
                 sessionID: ctx.sessionID,
                 callID: ctx.callID,
                 args,
+                workspaceId: input.workspaceId, // altimate_change — the turn's workspace, for plugin rows
               },
               // altimate_change start — plugins observe the source-stamped output
               stamped,
@@ -3011,6 +3013,7 @@ export namespace SessionPrompt {
               sessionID: ctx.sessionID,
               callID: opts.toolCallId,
               args,
+              workspaceId: input.workspaceId, // altimate_change — the turn's workspace, for plugin rows
             },
             result,
           )

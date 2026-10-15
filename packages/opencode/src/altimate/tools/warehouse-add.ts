@@ -121,6 +121,7 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
               type: "core_failure",
               timestamp: Date.now(),
               session_id: Telemetry.getContext().sessionId || "unknown-session",
+              workspace_id: ctx.workspaceId,
               tool_name: "warehouse_add",
               tool_category: "warehouse",
               error_class: "internal",
