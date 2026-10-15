@@ -3,21 +3,28 @@
 const secretName =
   /(?:api.?key|access.?key|secret|password|passwd|token$|authorization$|cookie$|credential|private.?key|bearer|(?:^|[_-])auth(?:[_-]|$)|dsn$|connection.?string)/i
 
-function credentialURL(value: string): boolean {
+function redactURL(value: string): string {
   // Also covers malformed authorities and opaque schemes such as jdbc:postgresql://.
   const authority = /^[^/?#]*:\/\/([^/?#]*)/.exec(value)?.[1]
-  if (authority?.includes("@")) return true
-  if (!URL.canParse(value)) return /^https?:\/\//i.test(value)
+  if (authority?.includes("@")) return "***"
+  if (!URL.canParse(value)) return /^https?:\/\//i.test(value) ? "***" : value
   const url = new URL(value)
-  return !!(
-    url.username ||
-    url.password ||
-    [...url.searchParams.keys(), ...new URLSearchParams(url.hash.slice(1)).keys()].some((name) => secretName.test(name))
-  )
+  if (url.username || url.password) return "***"
+
+  const redactParams = (params: string) =>
+    params
+      .split("&")
+      .map((param) => (param ? `${param.split("=", 1)[0]}=***` : param))
+      .join("&")
+
+  // Preserve the original URL spelling and fragments that are only anchors.
+  return value
+    .replace(/^([^?#]*\?)([^#]*)/, (_, prefix, params) => prefix + redactParams(params))
+    .replace(/#(.*)/s, (fragment, params) => (params.includes("=") ? `#${redactParams(params)}` : fragment))
 }
 
 export function redactConfig(value: unknown, headers = false): unknown {
-  if (typeof value === "string") return headers || credentialURL(value) ? "***" : value
+  if (typeof value === "string") return headers ? "***" : redactURL(value)
   if (Array.isArray(value))
     return value.map((item, index) => {
       if (typeof item === "string") {

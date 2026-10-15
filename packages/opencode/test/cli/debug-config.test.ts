@@ -59,7 +59,7 @@ describe("debug config redaction", () => {
     expect(config).toEqual(before)
   })
 
-  test("masks credentials in URL queries and malformed HTTP URLs", () => {
+  test("masks all URL query values and malformed HTTP URLs", () => {
     expect(
       redactConfig({
         api: "https://example.com/path?api_key=secret",
@@ -69,12 +69,41 @@ describe("debug config redaction", () => {
         public: "https://example.com/path?model=demo",
       }),
     ).toEqual({
-      api: "***",
-      session: "***",
-      browser: "***",
+      api: "https://example.com/path?api_key=***",
+      session: "https://example.com/path?token=***",
+      browser: "https://example.com/path?cookie=***",
       invalid: "***",
-      public: "https://example.com/path?model=demo",
+      public: "https://example.com/path?model=***",
     })
+  })
+
+  test.each(["key", "sig", "signature", "code"])("masks URL query value for %s", (key) => {
+    expect(redactConfig({ endpoint: `https://example.com/path?${key}=secret` })).toEqual({
+      endpoint: `https://example.com/path?${key}=***`,
+    })
+  })
+
+  test("masks every query and fragment value, including repeated and empty values and bare query flags", () => {
+    expect(
+      redactConfig({
+        endpoint: "https://example.com/path?model=demo&model=other&empty=&flag#state=ready&state=done&empty=",
+      }),
+    ).toEqual({
+      endpoint: "https://example.com/path?model=***&model=***&empty=***&flag=***#state=***&state=***&empty=***",
+    })
+  })
+
+  test("preserves URLs without parameters and fragment-only anchors", () => {
+    const input = {
+      plain: "https://example.com/path",
+      plainJdbc: "jdbc:postgresql://example.com/database",
+      plainOpaque: "custom:database",
+      anchor: "https://example.com/path#section",
+      namedAnchor: "https://example.com/path#access_token",
+      jdbc: "jdbc:postgresql://example.com/database#section",
+      opaque: "custom:database#section",
+    }
+    expect(redactConfig(input)).toEqual(input)
   })
 
   test("redacts objects inside arrays and nested headers while preserving primitive values", () => {
@@ -105,12 +134,12 @@ describe("debug config redaction", () => {
         withUser: "***",
         withPass: "***",
         withBoth: "***",
-        public: `${scheme}://example.com/database?model=demo#section`,
+        public: `${scheme}://example.com/database?model=***#section`,
       })
     },
   )
 
-  test("masks JDBC URL credentials and opaque URL secret parameters", () => {
+  test("masks JDBC URL credentials and all JDBC and opaque URL parameter values", () => {
     expect(
       redactConfig({
         jdbcUser: "jdbc:postgresql://user@example.com/database",
@@ -127,12 +156,12 @@ describe("debug config redaction", () => {
       jdbcUser: "***",
       jdbcPass: "***",
       jdbcBoth: "***",
-      jdbcQuery: "***",
-      jdbcFragment: "***",
-      opaqueQuery: "***",
-      opaqueFragment: "***",
-      publicJdbc: "jdbc:postgresql://example.com/database?model=demo#section",
-      publicOpaque: "custom:database?model=demo#section",
+      jdbcQuery: "jdbc:postgresql://example.com/database?password=***",
+      jdbcFragment: "jdbc:mysql://example.com/database#access_token=***",
+      opaqueQuery: "custom:database?api_key=***",
+      opaqueFragment: "custom:database#session_token=***",
+      publicJdbc: "jdbc:postgresql://example.com/database?model=***#section",
+      publicOpaque: "custom:database?model=***#section",
     })
   })
 
@@ -149,7 +178,7 @@ describe("debug config redaction", () => {
     expect(redactConfig({ endpoint: url })).toEqual({ endpoint: "***" })
   })
 
-  test("preserves public URLs with @ outside the authority", () => {
+  test("preserves URL structure with @ outside the authority", () => {
     const input = {
       path: "https://example.com/users/@public",
       query: "mysql://example.com/database?email=public@example.com",
@@ -157,7 +186,13 @@ describe("debug config redaction", () => {
       jdbc: "jdbc:postgresql://example.com/database?email=public@example.com",
       malformed: "custom://[invalid/path@public",
     }
-    expect(redactConfig(input)).toEqual(input)
+    expect(redactConfig(input)).toEqual({
+      path: input.path,
+      query: "mysql://example.com/database?email=***",
+      fragment: "custom://example.com/database#email=***",
+      jdbc: "jdbc:postgresql://example.com/database?email=***",
+      malformed: input.malformed,
+    })
   })
 
   test.each([
@@ -184,11 +219,14 @@ describe("debug config redaction", () => {
         query: `mysql://example.com/database?model=demo&${key}=secret`,
         fragment: `https://example.com/path#state=demo&${key}=secret`,
       }),
-    ).toEqual({ query: "***", fragment: "***" })
+    ).toEqual({
+      query: `mysql://example.com/database?model=***&${key}=***`,
+      fragment: `https://example.com/path#state=***&${key}=***`,
+    })
   })
 
   test.each(["max_tokens", "maxTokens", "context_tokens", "tokenizer", "author", "authorize_url"])(
-    "preserves non-secret %s strings in keys, URL parameters, and argv",
+    "preserves non-secret %s strings in keys and argv while masking URL parameter values",
     (key) => {
       const input = {
         [key]: "public-value",
@@ -196,7 +234,11 @@ describe("debug config redaction", () => {
         fragment: `https://example.com/path#${key}=public-value`,
         command: ["example", `--${key}=public-value`, `-${key}=public-value`, `--${key}`, "public-value"],
       }
-      expect(redactConfig(input)).toEqual(input)
+      expect(redactConfig(input)).toEqual({
+        ...input,
+        query: `https://example.com/path?${key}=***`,
+        fragment: `https://example.com/path#${key}=***`,
+      })
     },
   )
 
@@ -218,7 +260,18 @@ describe("debug config redaction", () => {
     }
     const before = structuredClone(input)
     expect(redactConfig(input)).toEqual({
-      endpoints: ["***", "***", "***", "***", "***", ["***", "https://example.com/public"], null, 1200, false, "demo"],
+      endpoints: [
+        "***",
+        "redis://example.com/0?password=***",
+        "https://example.com/path#access_token=***",
+        "***",
+        "***",
+        ["***", "https://example.com/public"],
+        null,
+        1200,
+        false,
+        "demo",
+      ],
       headers: { custom: ["***", 1200, true, null] },
     })
     expect(input).toEqual(before)
