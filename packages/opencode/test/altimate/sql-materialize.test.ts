@@ -630,26 +630,34 @@ describe("sql_materialize", () => {
     })
   }
 
-  test("the tool rejects max_bytes above the hard 2 GiB ceiling before querying", async () => {
+  test("the tool clamps oversized max_bytes to the hard 2 GiB ceiling during preflight", async () => {
     const seen: string[] = []
     const get = fakePostgres(async (sql) => {
       seen.push(sql)
-      throw new Error("No query should run")
+      if (/^SELECT count\(\*\)/i.test(sql)) {
+        return { columns: ["count"], rows: [[1_000_000]], row_count: 1, truncated: false }
+      }
+      if (sql.endsWith("LIMIT 1000")) {
+        return { columns: ["description"], rows: [["x".repeat(4096)]], row_count: 1, truncated: false }
+      }
+      throw new Error("Extraction must not run")
     })
     try {
       const tool = await initTool(SqlMaterializeTool)
-      await expect(
-        tool.execute(
-          {
-            source_warehouse: "pg_source",
-            sql: "SELECT 1 AS n",
-            target_table: "invalid_cap",
-            max_bytes: 2 * 1024 ** 3 + 1,
-          },
-          ctx as any,
-        ),
-      ).rejects.toThrow(/invalid arguments|SchemaError|Expected/i)
-      expect(seen).toHaveLength(0)
+      const result = await tool.execute(
+        {
+          source_warehouse: "pg_source",
+          sql: "SELECT description FROM languages",
+          target_table: "capped_transfer",
+          max_bytes: 4 * 1024 ** 3,
+        },
+        ctx as any,
+      )
+      expect(result.title).toContain("ERROR")
+      expect(result.output).toContain("2.0 GiB bound")
+      expect(seen).toHaveLength(2)
+      expect(seen[0]).toMatch(/^SELECT count\(\*\)/)
+      expect(seen[1]).toMatch(/LIMIT 1000$/)
     } finally {
       get.mockRestore()
     }
@@ -718,6 +726,43 @@ describe("sql_materialize", () => {
       get.mockRestore()
     }
   })
+
+  for (const [label, query_timeout_ms, expected] of [
+    ["omitted", undefined, undefined],
+    ["zero", 0, undefined],
+    ["empty array", [], undefined],
+    ["empty string", "", undefined],
+    ["null", null, undefined],
+    ["positive", 4321, 4321],
+  ] as const) {
+    test(`the registered tool normalizes ${label} deadlines before running source queries`, async () => {
+      const seen: { sql: string; timeout: number | undefined }[] = []
+      const get = fakePostgres(async (sql, _limit, _binds, options) => {
+        seen.push({ sql, timeout: options?.queryTimeoutMs })
+        return { columns: ["n"], rows: [[1]], row_count: 1, truncated: false }
+      })
+      try {
+        const tool = await initTool(SqlMaterializeTool)
+        const result = await tool.execute(
+          {
+            source_warehouse: "pg_source",
+            sql: "SELECT 1 AS n",
+            target_table: "deadline",
+            query_timeout_ms,
+          },
+          ctx as any,
+        )
+        expect(result.metadata.error).toBeUndefined()
+        expect(result.metadata.rowCount).toBe(1)
+        expect(seen).toHaveLength(3)
+        expect(seen[0].sql).toMatch(/^SELECT count\(\*\)/)
+        expect(seen[1].sql).toMatch(/LIMIT 1000$/)
+        expect(seen.map((query) => query.timeout)).toEqual([expected, expected, expected])
+      } finally {
+        get.mockRestore()
+      }
+    })
+  }
 
   test("a preflight timeout stops before sampling or extraction", async () => {
     const seen: string[] = []

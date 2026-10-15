@@ -41,7 +41,7 @@ import { normalizeError } from "./response-normalization"
 // altimate_change end
 
 const MAX_SQL_ROWS = 10_000
-const LIMIT_ERROR = `limit must be a finite positive integer between 1 and ${MAX_SQL_ROWS}`
+const LIMIT_ERROR = "limit must be a finite positive integer"
 
 const parameters = z.object({
   query: z.string().describe("SQL query to execute"),
@@ -50,10 +50,10 @@ const parameters = z.object({
     .number({ error: LIMIT_ERROR })
     .int(LIMIT_ERROR)
     .min(1, LIMIT_ERROR)
-    .max(MAX_SQL_ROWS, LIMIT_ERROR)
+    .transform((limit) => Math.min(limit, MAX_SQL_ROWS))
     .optional()
     .default(100)
-    .describe(`Max rows to return (1-${MAX_SQL_ROWS}; default 100)`),
+    .describe(`Max rows to return (default 100; larger values are capped at ${MAX_SQL_ROWS})`),
   query_timeout_ms: z
     .number()
     .int()
@@ -61,7 +61,7 @@ const parameters = z.object({
     .max(3_600_000)
     .optional()
     .describe(
-      "Optional per-query execution deadline in ms. Omit to use the configured deadline (connection setting or environment). Set only when a specific query needs a longer or shorter budget; 0 disables.",
+      "Optional per-query execution deadline in ms. Omit or use 0 to use the configured deadline (connection setting or environment). Set a positive value only when a specific query needs a longer or shorter budget.",
     ),
 })
 

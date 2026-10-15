@@ -43,6 +43,11 @@ import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change start — upstream_fix: task.background schema follows RuntimeFlags.
 import { RuntimeFlags } from "@/effect/runtime-flags"
 // altimate_change end
+// altimate_change start — upstream_fix: plugin tools share the optional filler contract
+import { Schema } from "effect"
+import { fillerSafeParameters } from "./filler-parameters"
+import { ToolJsonSchema } from "./json-schema"
+// altimate_change end
 // altimate_change start — Effect Context.Service facade so v1.17.9 consumers that compose
 // ToolRegistry into the Effect runtime (yield* ToolRegistry.Service / .defaultLayer / .node)
 // compile. Delegates to the existing namespace functions; behavior preserved.
@@ -155,6 +160,18 @@ import { TrainingImportTool } from "../altimate/tools/training-import"
 // altimate_change end
 // altimate_change start - import dbt PR review tool
 import { DbtPrReviewTool } from "../altimate/tools/dbt-pr-review"
+// altimate_change end
+
+// altimate_change start — upstream_fix: plugin tools share the optional filler contract
+function fillerSafePlugin(tool: Tool.DefWithoutID): Tool.DefWithoutID {
+  const parameters = fillerSafeParameters(tool.parameters, ToolJsonSchema.fromTool({ ...tool, id: "plugin" }))
+  const decode = Schema.decodeUnknownEffect(parameters)
+  return {
+    ...tool,
+    parameters,
+    execute: (args, ctx) => decode(args).pipe(Effect.orDie, Effect.flatMap((decoded) => tool.execute(decoded, ctx))),
+  }
+}
 // altimate_change end
 
 export namespace ToolRegistry {
@@ -275,7 +292,7 @@ export namespace ToolRegistry {
               ...(result.attachments ? { attachments: result.attachments as any } : {}),
             }
           },
-        }),
+        }).pipe(Effect.map(fillerSafePlugin)),
     }
   }
   // altimate_change end

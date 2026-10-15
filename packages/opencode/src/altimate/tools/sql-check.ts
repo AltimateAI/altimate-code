@@ -1,5 +1,6 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
+import { zodToJsonSchema } from "../tool-zod-compat"
 import * as Precedence from "../workspace/precedence"
 import * as Registry from "../native/connections/registry"
 import { classifyAndCheck, isSingleQuery } from "./sql-classify"
@@ -60,11 +61,23 @@ const publicParameters = z
     right_col: z.string().optional().describe("Right output column for keys"),
     left_warehouse: z.string().optional().describe("Optional assertion: must equal warehouse"),
     right_warehouse: z.string().optional().describe("Optional assertion: must equal warehouse"),
-    query_timeout_ms: z.number().int().min(0).max(3_600_000).optional(),
+    query_timeout_ms: z
+      .number()
+      .int()
+      .min(0)
+      .max(3_600_000)
+      .optional()
+      .describe("Query deadline in ms; omitted or 0 uses the common connection policy"),
   })
   .strict()
 
 export type SqlCheckPublicInput = z.input<typeof publicParameters>
+
+// Coverage requires a pattern, and an empty pattern is meaningful for that check.
+const toolParameters = z.discriminatedUnion("check", [
+  publicParameters.extend({ check: z.literal("coverage"), pattern: publicParameters.shape.pattern.unwrap() }),
+  publicParameters.extend({ check: z.enum(["fanout", "keys", "grain", "nulls"]) }),
+])
 
 /**
  * Treat "", [] and null as absent so strict-schema callers can leave unused fields empty.
@@ -395,7 +408,9 @@ export const SqlCheckTool = Tool.define("sql_check", {
     "Use sql_materialize to put cross-warehouse or other-engine sources into scratch first. " +
     "Key normalization is diagnostic and may collapse unrelated values; no automatic fixes. Coverage uses regex except SQLite's explicit LIKE fallback. " +
     "Leave fields a check does not use empty.",
-  parameters: publicParameters,
+  parameters: toolParameters,
+  // Strict-schema providers require a flat object at the root of the wire schema.
+  jsonSchema: zodToJsonSchema(publicParameters),
   async execute(args, ctx) {
     try {
       // altimate_change start — validate and authorize reads before workspace redirects
