@@ -1,0 +1,40 @@
+   Greeting                      +
+
+  ┃                                                                    Warehouses
+  ┃  hello
+  ┃                                                                    demo (duckdb)
+
+     Hello! How can I help you today?                                  Last query result
+
+     Build · Gemini 4 Argon · 2.7s · 5.0 tok/s                         demo · 1 row
+                                                                       answer | animal | nothing
+  ┃                                                                    42 | duck | NULL
+  ┃  Call the warehouse_add tool with name "demo" and path ":memory:
+  ┃  ", then call sql_execute on warehouse demo with SQL: SELECT 42
+  ┃  AS answer, 'duck' AS animal, NULL AS nothing
+  ┃
+
+     ✓ warehouse_add [path=:memory:, name=demo]
+
+     ✓ sql_execute [sql=SELECT 42 AS answer, 'duck' AS animal, NULL
+       AS nothing, warehouse=demo]
+
+     I have registered the demo warehouse and executed the query:
+
+     ┌────────────────────┬───────────────────┬────────────────────┐
+     │ answer             │ animal            │ nothing            │
+     ├────────────────────┼───────────────────┼────────────────────┤
+     │ 42                 │ duck              │ NULL               │
+     └────────────────────┴───────────────────┴────────────────────┘
+
+     Build · Gemini 4 Argon · 7.9s · 14.9 tok/s
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Gemini 4 Argon Vertex
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /…/scratchpad/s8/proj2:maingit  5.6K (1%) · $0.03  ctrl+p commands   r refresh · f full screen · esc close
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments

@@ -1,0 +1,30 @@
+
+ Warehouses
+
+ demo (duckdb)
+
+ Last query result
+
+ demo · 1 row
+ answer | animal | nothing
+ 42 | duck | NULL
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ r refresh · f full screen · esc close
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments

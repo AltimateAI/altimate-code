@@ -114,3 +114,41 @@ passed again. Receipt: [registration mutation](evidence/s8-rpc-mutation.txt).
 - `packages/altimate/evidence/s8-rpc-mutation.txt`
 
 All files are left unstaged. No S6a or S6b file is included in this set.
+
+## Live terminal capture (2026-10-15)
+
+Result: **PASS** in the real OpenCode v2.0.29 TUI (packages/cli, `--standalone`), once the plugin is loadable by path.
+
+### Root cause of the earlier "No matching commands"
+The plugin was never loaded. A local plugin declared by absolute directory path is resolved by
+`Host.resolve({ directory })` (packages/plugin/src/host.ts:17-27) as `<dir>/server`, `<dir>/index`, `<dir>/tui`,
+`<dir>/rpc`; it does NOT consult package.json `exports`. For `packages/altimate` (sources under `src/`) it returns
+`{server: undefined, tui: undefined, rpc: undefined}` (verified by calling it), and
+packages/core/src/config/plugin/source.ts:~165 (`if (!entrypoints.server) return []`) silently drops the plugin: no
+log line, empty TUI plugin manager. Only npm-style package names (`name` set) honor `exports`.
+Fix for the spike: declare a directory that has root-level `server.ts`, `tui.tsx`, `rpc.ts` (shims re-exporting
+`src/*`: [evidence/s8-live-plugin-shim](evidence/s8-live-plugin-shim)). A real publish should either install by package name or ship root entry files.
+Secondary: the spawned server needs the OpenTUI preload (cwd bunfig), see below.
+
+### Exact setup
+- Bun 1.4.2; isolated HOME/XDG under scratchpad; project dir outside the repo with git init and a bunfig.toml
+  ([evidence/s8-live-bunfig.toml](evidence/s8-live-bunfig.toml), absolute `@opentui/solid/scripts/preload.js`), because the standalone server child
+  inherits cwd and needs the preload.
+- `~/.config/opencode/opencode.json` and `cli.json` (both): `{"plugins":[{"package":"<shim dir>"}]}`.
+- Launch: [evidence/s8-live-run.sh](evidence/s8-live-run.sh) (`bun run packages/cli/src/index.ts --standalone <proj>`) inside `tmux -L s8`, 140x40 then resized to 60x30.
+- A real model replied (Build agent), so a genuine session existed; the model called the plugin's `warehouse_add` and `sql_execute` (DuckDB `:memory:`).
+
+### Observed per step (captures in evidence/s8-live-*.txt)
+| Step | Result |
+| --- | --- |
+| Home screen renders; typing `/warehouse` shows autocomplete "/warehouse  Open warehouses" (140x40-1) | PASS |
+| Enter on home (no session): toast "Open a session to view warehouses." (140x40-2) | PASS |
+| In session, `/warehouse` opens side panel: "No warehouses registered." / "No query result in this session." via RPC (140x40-3) | PASS |
+| After real `warehouse_add` + `sql_execute`: panel lists `demo (duckdb)`, `demo · 1 row`, `answer | animal | nothing`, `42 | duck | NULL` (140x40-7) | PASS |
+| `f` full screen: panel fills the terminal (140x40-9, 60x30-3) | PASS (60x30 panel already full-width, so no visible difference there) |
+| `esc` closes, session view restored (140x40-10, 60x30-4) | PASS |
+| 60x30: panel renders same content, fits width (60x30-1) | PASS |
+| `r` refresh | NOT VERIFIED: key sent, output unchanged (140x40-4/8, 60x30-2); no visible effect is expected when data is unchanged, so this capture cannot show it ran |
+| Auto-refresh on tool events | not exercised live (only covered by component test) |
+
+Warnings: the model made real API calls (about $0.03). Servers and tmux were killed afterwards.

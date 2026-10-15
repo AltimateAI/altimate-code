@@ -1,0 +1,40 @@
+
+ Warehouses
+
+ No warehouses registered.
+
+ Last query result
+
+ No query result in this session.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ r refresh · f full screen · esc close
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments

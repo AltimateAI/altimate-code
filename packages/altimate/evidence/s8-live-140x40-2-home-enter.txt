@@ -1,0 +1,40 @@
+
+                                                                                               ┃                                         ┃
+                                                                                               ┃  Open a session to view warehouses.  x  ┃
+                                                                                               ┃                                         ┃
+
+
+
+
+
+
+
+
+
+
+                                                                                    ▄
+                                                   █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀ █▀▀█ █▀▀█ █▀▀█
+                                                   █  █ █  █ █▀▀▀ █  █ █    █  █ █  █ █▀▀▀
+                                                   ▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀
+
+
+                                 ┃
+                                 ┃  Ask anything… "Fix a TODO in the codebase"
+                                 ┃
+                                 ┃  Build · Gemini 4 Argon Vertex
+                                 ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                                 /…/a3ba8813…/scratchpad/s8/proj2:maingit  shift+tab agents  ctrl+p commands
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                                     local
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments

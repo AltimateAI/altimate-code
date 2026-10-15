@@ -1,0 +1,40 @@
+   Greeting                      +
+
+  ┃                                                                                                 Greeting
+  ┃  hello
+  ┃                                                                                                 Context
+                                                                                                    5,391 tokens
+     Hello! How can I help you today?                                                               1% used
+                                                                                                    $0.01 spent
+     Build · Gemini 4 Argon · 2.7s · 5.0 tok/s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Gemini 4 Argon Vertex
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /…/a3ba8813-c4f4-4234-9efe-d5…/scratchpad/s8/proj2:maingit  5.4K (1%) · $0.01  ctrl+p commands    /…/a3ba88…/scratchpad/s8/proj2:maingit
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments
