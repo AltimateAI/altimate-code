@@ -1,4 +1,6 @@
 import { Plugin } from "@opencode/plugin"
+import { Env } from "@opencode/util/env"
+import { Identity } from "@opencode/util/identity"
 import { Schema } from "effect"
 import { realpath } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -21,16 +23,16 @@ export function claudeInstructions(options: InstructionOptions = {}) {
     id: "altimate.claude-instructions",
     async setup(ctx) {
       const policy = { ...Schema.decodeUnknownSync(Options)(ctx.options.instructions ?? {}), ...options }
-      const home = policy.home ?? process.env.OPENCODE_TEST_HOME ?? homedir()
+      const home = policy.home ?? Env.get("OPENCODE_TEST_HOME") ?? homedir()
       const configDirectory =
         policy.configDirectory ??
-        process.env.OPENCODE_CONFIG_DIR ??
-        path.join(process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"), "opencode")
-      const project = policy.project ?? !enabled(process.env.OPENCODE_DISABLE_PROJECT_CONFIG)
+        Env.get("OPENCODE_CONFIG_DIR") ??
+        path.join(process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"), Identity.app)
+      const project = policy.project ?? !enabled(Env.get("OPENCODE_DISABLE_PROJECT_CONFIG"))
       const global = policy.global !== false
       const disableClaudeCodePrompt =
         policy.disableClaudeCodePrompt ??
-        (enabled(process.env.OPENCODE_DISABLE_CLAUDE_CODE) || enabled(process.env.OPENCODE_DISABLE_CLAUDE_CODE_PROMPT))
+        (enabled(Env.get("OPENCODE_DISABLE_CLAUDE_CODE")) || enabled(Env.get("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT")))
       const directories = project
         ? ancestors(await realpath(ctx.location.directory), await realpath(ctx.location.project.directory))
         : []

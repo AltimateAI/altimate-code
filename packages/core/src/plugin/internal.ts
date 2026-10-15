@@ -2,6 +2,8 @@ export * as PluginInternal from "./internal.js"
 
 import { LLMClient } from "@opencode/ai"
 import type { Plugin } from "@opencode/plugin/effect/plugin"
+// altimate: ALT-F02
+import { HostContributions } from "@opencode/plugin/host-contributions"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { httpClient } from "@opencode/util/effect/app-node-platform"
 import { AppProcess } from "@opencode/util/process"
@@ -104,6 +106,8 @@ import { VcsGitPlugin } from "./vcs/git.js"
 import { VerbosityPlugin } from "./verbosity.js"
 import { WarmingPlugin } from "./warming.js"
 import { WellKnownPlugin } from "../wellknown/plugin.js"
+// altimate: ALT-F02
+import { PluginPromise } from "./promise.js"
 
 const services = [
   Agent.Service,
@@ -211,9 +215,27 @@ export const requirements = LayerNode.group([
   WorktreeStrategies.node,
 ])
 
-export type InternalPlugin = Plugin<Requirements | Scope.Scope>
+// altimate: ALT-F02
+export type InternalPlugin = Plugin<Requirements | Scope.Scope> & { readonly protected?: boolean }
 
 const pre = [
+  // altimate: ALT-F02 - Load distribution definitions before user/config plugins, in every Location.
+  ...HostContributions.server.map(
+    (contribution): InternalPlugin => ({
+      id: contribution.id,
+      protected: contribution.protected,
+      effect: (host) =>
+        Effect.promise(contribution.plugin).pipe(
+          Effect.flatMap((module) => {
+            if (module.default.id !== contribution.id)
+              return Effect.die(
+                new Error(`Host plugin ID mismatch: expected ${contribution.id}, got ${module.default.id}`),
+              )
+            return PluginPromise.fromPromise(module.default).effect(host)
+          }),
+        ),
+    }),
+  ),
   ToolInputRepairPlugin.Plugin,
   ConfigWorktreePlugin.Plugin,
   ConfigMcpPlugin.Plugin,
@@ -271,15 +293,22 @@ const post = [
 
 // Repository config must not switch off policy enforcement or the Console connection that delivers
 // organization statements, so plugin remove operations skip these IDs.
-export const guarded: ReadonlySet<string> = new Set([OpencodePlugin.id, ConfigPolicyPlugin.Plugin.id])
+// altimate: ALT-F02
+export const guarded: ReadonlySet<string> = new Set([
+  OpencodePlugin.id,
+  ConfigPolicyPlugin.Plugin.id,
+  ...HostContributions.server.filter((plugin) => plugin.protected).map((plugin) => plugin.id),
+])
 
 export const list = Effect.fn("PluginInternal.list")(function* () {
   // Capture only services; activation supplies the child Scope and batching context.
   const context = Context.pick(...services)(yield* Effect.context<Requirements>())
   const resolve = (plugins: readonly InternalPlugin[]) =>
     plugins.map(
-      (plugin): Plugin => ({
+      // altimate: ALT-F02
+      (plugin): Plugin & { readonly protected?: boolean } => ({
         id: plugin.id,
+        protected: plugin.protected,
         effect: (host) => plugin.effect(host).pipe(Effect.provide(context)),
       }),
     )

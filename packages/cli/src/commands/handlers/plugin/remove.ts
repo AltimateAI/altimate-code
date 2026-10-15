@@ -7,10 +7,21 @@ import { Commands } from "../../commands"
 import { Runtime } from "../../../framework/runtime"
 import { Config } from "../../../config"
 import { resolveConfigPath } from "../mcp/add"
+// altimate: ALT-F02
+import { HostContributions } from "@opencode/plugin/host-contributions"
 
 export default Runtime.handler(
   Commands.commands.plugin.commands.remove,
   Effect.fn("cli.plugin.remove")(function* (input) {
+    // altimate: ALT-F02
+    if (
+      [...HostContributions.server, ...HostContributions.tui].some(
+        (entry) => entry.id === input.package && entry.protected,
+      )
+    ) {
+      process.stdout.write(`Plugin "${input.package}" is a protected host builtin and cannot be removed${EOL}`)
+      return
+    }
     const global = yield* Global.Service
     const configPath = yield* Effect.promise(() => resolveConfigPath(global.config))
     const server = yield* Effect.promise(() => removePluginConfig(configPath, input.package))

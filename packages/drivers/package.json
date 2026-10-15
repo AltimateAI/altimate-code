@@ -11,6 +11,7 @@
     "src"
   ],
   "dependencies": {
-    "@duckdb/node-api": "1.4.4-r.1"
+    "@duckdb/node-api": "1.4.4-r.1",
+    "@opencode/util": "workspace:*"
   }
 }

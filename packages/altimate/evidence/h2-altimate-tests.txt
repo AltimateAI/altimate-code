@@ -1,0 +1,33 @@
+bun test v1.4.2 (744846f84)
+
+test/s3-mcp.test.ts:
+[18:34:51.024] INFO (#13673): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-host/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-blMcTA",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+[18:34:51.476] INFO (#15031): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-host/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-DCehpE",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+[18:34:54.398] INFO (#16567): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-host/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-QENSrQ",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+[18:34:56.399] INFO (#17847): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-host/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-GBIfwv",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+
+ 63 pass
+ 1 skip
+ 0 fail
+ 335 expect() calls
+Ran 64 tests across 15 files. [31.54s]

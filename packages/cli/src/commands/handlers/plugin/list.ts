@@ -12,6 +12,8 @@ import { Npm } from "@opencode/util/npm"
 import { Host } from "@opencode/plugin/host"
 import { fileURLToPath } from "node:url"
 import { discoverPluginTargets, localPluginDirectories, localSource } from "@opencode/tui/plugin/discovery"
+// altimate: ALT-F02
+import { HostContributions } from "@opencode/plugin/host-contributions"
 
 export default Runtime.handler(
   Commands.commands.plugin.commands.list,
@@ -87,7 +89,18 @@ export function format(
     )
     .filter((plugin, index, all) => all.findIndex((candidate) => candidate.target === plugin.target) === index)
     .map((plugin) => ({ id: "-", version: plugin.version ?? "-", target: plugin.target }))
-  const rows = [...server, ...targets]
+  // altimate: ALT-F02 - server builtin inventory does not discover host TUI entries.
+  const rows = [
+    ...server,
+    ...targets,
+    ...(builtin
+      ? HostContributions.tui.map((entry) => ({
+          id: entry.id,
+          version: "-",
+          target: "builtin (tui)",
+        }))
+      : []),
+  ]
     .toSorted((a, b) => a.id.localeCompare(b.id) || a.target.localeCompare(b.target))
     .map((item) => [
       item.id,

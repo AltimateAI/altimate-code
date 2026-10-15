@@ -34,6 +34,8 @@ import { createPluginSources } from "./source"
 import { isMissingPath } from "../util/config-directories"
 import { createMarkdownRenderer } from "./markdown"
 import { useLog, type LogTags } from "../context/log"
+// altimate: ALT-F02
+import { HostPluginError } from "./host-error"
 
 export interface PackageSource {
   readonly prepare: (spec: string, install?: boolean) => Promise<Host.Target>
@@ -68,6 +70,8 @@ type Value = {
 
 type Registration = {
   plugin: Plugin.Definition
+  // altimate: ALT-F02
+  protected?: boolean
   source: RegisteredPlugin["source"]
   target?: string
   version: string
@@ -80,7 +84,10 @@ type Registration = {
 }
 
 // One entry of the desired plugin generation produced by the resolve phase.
-type Desired = Pick<Registration, "plugin" | "source" | "target" | "version" | "options"> & { enabled: boolean }
+// altimate: ALT-F02
+type Desired = Pick<Registration, "plugin" | "protected" | "source" | "target" | "version" | "options"> & {
+  enabled: boolean
+}
 type Trace = <T>(stage: string, tags: LogTags, task: () => Promise<T>) => Promise<T>
 
 const PluginContext = createContext<Value>()
@@ -258,7 +265,8 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
     pending = setTimeout(() => {
       // Observe failures immediately: a plugin cleanup that throws would
       // otherwise surface as an unhandled rejection until the next trigger.
-      void enqueue(reconcile).catch(() => undefined)
+      // altimate: ALT-F02
+      void enqueue(reconcile).catch(reportHostFailure)
     }, 100)
   })
   const stopWatching = () => {
@@ -267,6 +275,13 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
   }
   const sources = createPluginSources(watcher.wait)
   onCleanup(stopWatching)
+
+  // altimate: ALT-F02
+  const reportHostFailure = (error: unknown) => {
+    if (!(error instanceof HostPluginError)) return
+    log.warn("TUI plugin bootstrap failed", { error: error.message })
+    host.toast.show({ variant: "error", title: "TUI plugin bootstrap failed", message: error.message })
+  }
 
   // Rebuild the plugin generation as resolve → compare → swap, mirroring the
   // core plugin registry: fold the ordered entries into a desired end state
@@ -310,16 +325,19 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
 
     // Resolve: fold entries into one desired generation. A source that fails
     // to import keeps its running previous version and only reports failure.
-    const { builtins } = await import("./builtins")
+    // altimate: ALT-F02
+    const { loadBuiltins } = await import("./builtins")
     const desired = new Map<string, Desired>()
-    for (const plugin of builtins)
-      desired.set(plugin.id, { plugin, source: "builtin", version: "builtin", enabled: true })
+    for (const item of await loadBuiltins())
+      desired.set(item.plugin.id, { ...item, source: "builtin", version: "builtin", enabled: true })
     const failures: State[] = []
     for (const source of entries) {
       const entry = source.entry
       const target = typeof entry === "string" ? entry : entry.package
       if (target.startsWith("-")) {
-        for (const item of desired.values()) if (matches(target.slice(1), item.plugin.id)) item.enabled = false
+        // altimate: ALT-F02
+        for (const item of desired.values())
+          if (!item.protected && matches(target.slice(1), item.plugin.id)) item.enabled = false
         continue
       }
 
@@ -373,6 +391,15 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
           error: previous?.active ? `${resolved.error} (previous version still active)` : resolved.error,
         })
         if (previous) desired.set(previous.plugin.id, toDesired(previous))
+        continue
+      }
+      // altimate: ALT-F02
+      if (desired.get(resolved.plugin.id)?.protected) {
+        failures.push({
+          target,
+          status: "failed",
+          error: `Cannot replace protected host plugin: ${resolved.plugin.id}`,
+        })
         continue
       }
       const setupFailure = setupFailures.get(target)
@@ -445,6 +472,8 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
       }
       const error = await activate(id).then(() => undefined, errorMessage)
       if (!error) continue
+      // altimate: ALT-F02
+      if (item.protected) throw new HostPluginError(`Protected host TUI plugin "${id}" failed: ${error}`)
       errors.set(id, error)
       if (!fallback) continue
       setStore("registrations", id, toRegistration(fallback))
@@ -531,7 +560,11 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
         npmFailures.clear()
         void enqueue(reconcile).then(
           () => setStore("ready", true),
-          () => setStore("ready", true),
+          // altimate: ALT-F02
+          (error) => {
+            reportHostFailure(error)
+            setStore("ready", true)
+          },
         )
       },
     ),
@@ -611,7 +644,12 @@ export function PluginProvider(props: ParentProps<{ packages: PackageSource; dir
         // Manual dialog toggles join the same chain as reconciles so a
         // toggle mid-reload cannot mix registrations across generations.
         activate: (id) => enqueue(() => activate(id)),
-        deactivate: (id) => enqueue(() => deactivate(id)),
+        // altimate: ALT-F02 - internal teardown remains available for reload and shutdown.
+        deactivate: (id) =>
+          enqueue(() => {
+            if (store.registrations[id]?.protected) throw new Error(`Cannot disable protected host plugin: ${id}`)
+            return deactivate(id)
+          }),
       }}
     >
       {props.children}
@@ -700,6 +738,8 @@ async function resolvePlugin(
 function toRegistration(item: Desired): Registration {
   return {
     plugin: item.plugin,
+    // altimate: ALT-F02
+    protected: item.protected,
     source: item.source,
     target: item.target,
     version: item.version,
@@ -715,6 +755,8 @@ function toRegistration(item: Desired): Registration {
 function toDesired(item: Registration): Desired {
   return {
     plugin: item.plugin,
+    // altimate: ALT-F02
+    protected: item.protected,
     source: item.source,
     target: item.target,
     version: item.version,

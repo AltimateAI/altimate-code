@@ -11,6 +11,9 @@ import Storybook from "../feature-plugins/system/storybook"
 import Stats from "../feature-plugins/system/stats"
 import Latex from "@opencode/latex/plugin"
 import Merman from "@opencode/merman/plugin"
+// altimate: ALT-F02
+import { HostContributions } from "@opencode/plugin/host-contributions"
+import { HostPluginError } from "./host-error"
 
 export const builtins = [
   HomeFooter,
@@ -29,3 +32,23 @@ export const builtins = [
   ...(process.env.OPENCODE_STORY ? [Storybook] : []),
   DiffViewer,
 ]
+
+// altimate: ALT-F02
+export async function loadBuiltins() {
+  return [
+    ...builtins.map((plugin) => ({ plugin, protected: false })),
+    ...(await Promise.all(
+      HostContributions.tui.map(async (entry) => {
+        const plugin = (
+          await entry.plugin().catch((error) => {
+            if (entry.protected)
+              throw new HostPluginError(`Protected host TUI plugin "${entry.id}" failed to load: ${error}`)
+            throw error
+          })
+        ).default
+        if (plugin.id !== entry.id) throw new HostPluginError(`Host TUI plugin ID mismatch: ${entry.id} / ${plugin.id}`)
+        return { plugin, protected: entry.protected }
+      }),
+    )),
+  ]
+}

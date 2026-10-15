@@ -11,6 +11,8 @@ import { KV } from "./kv.js"
 import { PluginHost } from "./plugin/host.js"
 import { type Failure, type Generation, Service } from "./plugin/service.js"
 import { State } from "./state.js"
+// altimate: ALT-F02
+import { Tool } from "./tool.js"
 
 export { awaitActivation, type Generation, type Interface, Service } from "./plugin/service.js"
 
@@ -23,6 +25,19 @@ const layer = Layer.effect(
     // One slot per requested definition in activation order, including ones whose setup failed, so
     // the prefix diff below stays index-aligned and a failed revision is not retried until it changes.
     const active = new Map<Plugin.ID, Slot>()
+    // altimate: ALT-F02 - The supervisor is asynchronous; readiness must propagate required setup failures.
+    const requireProtected = Effect.suspend(() => {
+      const failed = Array.from(active.values()).find(
+        (slot) => slot.plugin.protected && (slot.error || slot.activation?.failure),
+      )
+      return failed
+        ? Effect.die(
+            new Error(
+              `Protected host plugin ${failed.plugin.id} failed: ${failed.error ?? failed.activation?.failure?.error}`,
+            ),
+          )
+        : Effect.void
+    })
     const lock = Semaphore.makeUnsafe(1)
     const ready = yield* Latch.make(true)
     const pending = new Set<object>()
@@ -64,6 +79,8 @@ const layer = Layer.effect(
       const exit = yield* Effect.suspend(() =>
         plugin.effect({ ...host, storage: PluginHost.storage(kv, plugin.id) }),
       ).pipe(
+        // altimate: ALT-F02 - Tool transforms retain their registering plugin across state replay.
+        Effect.provideService(Tool.Owner, { id: plugin.id, protected: plugin.protected === true }),
         grouped,
         inherit,
         Effect.updateContext((context: Context.Context<never>) =>
@@ -79,10 +96,11 @@ const layer = Layer.effect(
         Effect.exit,
       )
       if (activation.failure || Exit.isSuccess(exit)) return { activation } as const
-      yield* Effect.logWarning("failed to load plugin", {
-        "plugin.id": plugin.id,
-        cause: exit.cause,
-      })
+      // altimate: ALT-F02
+      yield* (plugin.protected ? Effect.logError : Effect.logWarning)(
+        plugin.protected ? `Protected host plugin ${plugin.id} failed to initialize` : "failed to load plugin",
+        { "plugin.id": plugin.id, cause: exit.cause },
+      )
       return { error: Cause.pretty(exit.cause) } as const
     })
 
@@ -177,6 +195,8 @@ const layer = Layer.effect(
           ),
         (release) => release,
       )
+      // altimate: ALT-F02
+      yield* requireProtected
     })
 
     yield* Queue.take(pendingFailures).pipe(
@@ -250,7 +270,8 @@ const layer = Layer.effect(
     return Service.of({
       activate,
       close,
-      awaitActivation: ready.await,
+      // altimate: ALT-F02
+      awaitActivation: ready.await.pipe(Effect.andThen(requireProtected)),
       hold,
       list,
     })

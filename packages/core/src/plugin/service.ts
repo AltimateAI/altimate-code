@@ -19,6 +19,8 @@ export interface Interface {
 export type Failure = Plugin.Info & { readonly state: Extract<Plugin.State, { readonly status: "failed" }> }
 
 export type Generation = PluginDefinition & {
+  // altimate: ALT-F02 - Required host plugins must not leave a usable, partially initialized Location.
+  readonly protected?: boolean
   readonly revision: string
   readonly source?: Plugin.Source
   readonly features?: Plugin.Features

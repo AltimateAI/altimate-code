@@ -26,6 +26,8 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { spawn } from "node:child_process"
 import { performance } from "node:perf_hooks"
 import { randomUUID } from "node:crypto"
+// altimate: ALT-F02
+import { Env } from "@opencode/util/env"
 
 /**
  * Quote a path for a copy-pasteable shell command on the current platform.
@@ -128,7 +130,8 @@ function xdgDataHome(): string {
 
 function homeDir(): string {
   // Honoured by the test suite to redirect global state away from the real home.
-  return process.env["OPENCODE_TEST_HOME"] ?? os.homedir()
+  // altimate: ALT-F02
+  return Env.get("OPENCODE_TEST_HOME") ?? os.homedir()
 }
 
 /**

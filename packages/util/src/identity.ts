@@ -11,6 +11,8 @@ export type Descriptor = {
   readonly logo: { readonly left: readonly string[]; readonly right: readonly string[] }
   readonly narrowLogo: { readonly left: readonly string[]; readonly right: readonly string[] }
   readonly title: { readonly home: string; readonly prefix: string }
+  // altimate: ALT-F02 - module path relative to the descriptor, resolved only by the build host.
+  readonly hostPlugins?: string
 }
 
 export const defaults: Descriptor = {
@@ -36,6 +38,9 @@ export const defaults: Descriptor = {
 export function resolveIdentity(input: unknown): Descriptor {
   if (typeof input !== "object" || input === null) throw new Error("Identity must be an object")
   const value = input as Record<string, unknown>
+  // altimate: ALT-F02
+  if (value.hostPlugins !== undefined && (typeof value.hostPlugins !== "string" || !value.hostPlugins))
+    throw new Error("Identity.hostPlugins must be a nonempty module path")
   for (const key of ["app", "displayName", "userAgent", "serviceName"]) {
     if (typeof value[key] !== "string" || value[key] === "") throw new Error(`Identity.${key} must be nonempty`)
   }

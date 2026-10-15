@@ -34,6 +34,8 @@ export interface Editor {
 
 type Data = {
   tools: Map<string, Tool.Info & { readonly id: string }>
+  // altimate: ALT-F02
+  protectedOwners: Map<string, string>
   namespaces: Map<string, Tool.Namespace>
   errors: { kind: "tool" | "namespace"; name: string; namespace?: string; error: RegistrationError }[]
 }
@@ -63,6 +65,12 @@ export interface Snapshot {
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Tool") {}
+
+// altimate: ALT-F02 - Internal ownership metadata, captured when a plugin registers a transform.
+export const Owner = Context.Reference<{ readonly id: string; readonly protected: boolean } | undefined>(
+  "@opencode/Tool/Owner",
+  { defaultValue: () => undefined },
+)
 
 const layer = Layer.effect(
   Service,
@@ -156,14 +164,16 @@ const layer = Layer.effect(
     })
 
     let catalog: { data: Data; names: string; value: CodeModeCatalog.Inventory } | undefined
-    const state = State.create<Data, Editor>({
+    // altimate: ALT-F02
+    const state = State.create<Data, (owner: Context.Service.Shape<typeof Owner>) => Editor>({
       name: "tool",
       initial: () => ({
         tools: new Map(),
+        protectedOwners: new Map(),
         namespaces: new Map(),
         errors: [],
       }),
-      editor: (editor) => ({
+      editor: (editor) => (owner) => ({
         list: () => Array.from(editor.tools.values()),
         get: (id) => editor.tools.get(id),
         namespace: (namespace) => {
@@ -181,6 +191,21 @@ const layer = Layer.effect(
             return
           }
           const id = effectiveName(tool)
+          // altimate: ALT-F02 - Keep the protected implementation, and report the rejected registration.
+          const protectedOwner = editor.protectedOwners.get(id)
+          if (protectedOwner && protectedOwner !== owner?.id) {
+            editor.errors.push({
+              kind: "tool",
+              name: tool.name,
+              namespace: tool.options?.namespace,
+              error: new RegistrationError({
+                name: id,
+                message: `Tool ${id} is protected by host plugin ${protectedOwner}; registration from ${owner?.id ?? "unknown"} rejected`,
+              }),
+            })
+            return
+          }
+          if (owner?.protected) editor.protectedOwners.set(id, owner.id)
           editor.tools.set(id, { ...tool, id, options: tool.options && { ...tool.options } })
         },
         update: (id, update) => {
@@ -219,7 +244,8 @@ const layer = Layer.effect(
     })
 
     return Service.of({
-      transform: state.transform,
+      // altimate: ALT-F02
+      transform: (transform) => Effect.flatMap(Owner, (owner) => state.transform((editor) => transform(editor(owner)))),
       reload: state.reload,
       list: () => Effect.sync(() => Array.from(state.get().tools.values())),
       snapshot: Effect.fn("Tool.snapshot")((permissions) =>

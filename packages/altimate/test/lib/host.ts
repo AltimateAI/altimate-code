@@ -36,10 +36,12 @@ export async function createHost(input: {
   steps?: readonly ScriptedStep[]
   permissions?: Permission.Ruleset
   plugins?: readonly Plugin.Plugin[]
+  log?: OpenCode.CreateOptions["log"]
 }): Promise<Host> {
   await mkdir(join(input.directory, "config"), { recursive: true })
   const model = createScriptedModel(input.steps)
   const opencode = await OpenCode.create({
+    log: input.log,
     database: { path: join(input.directory, "opencode.sqlite") },
     events: { persist: true },
     models: { fetch: false },

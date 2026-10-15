@@ -60,6 +60,7 @@
         "@altimateai/drivers": "workspace:*",
         "@opencode/plugin": "workspace:*",
         "@opencode/schema": "workspace:*",
+        "@opencode/util": "workspace:*",
         "effect": "catalog:",
       },
       "devDependencies": {
@@ -419,6 +420,7 @@
       "version": "0.1.0",
       "dependencies": {
         "@duckdb/node-api": "1.4.4-r.1",
+        "@opencode/util": "workspace:*",
       },
     },
     "packages/enterprise": {

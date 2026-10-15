@@ -1,0 +1,13 @@
+H2 canonical check: exit 0
+Command: bun run check (repository root), Bun 1.4.2
+Full diagnostic log: /private/tmp/altimate-h2-check-final.log
+Lint warnings and sandbox-denied Wrangler log writes are omitted from this compact receipt.
+
+$ bun run lint && bun run typecheck
+$ oxlint && ast-grep scan -c script/ast-grep/gui-extensions/sgconfig.yml && bun script/sdk-docs.ts
+Found 1353 warnings and 0 errors.
+Finished in 1.5s on 5110 files with 1 rules using 16 threads.
+$ bun turbo typecheck --concurrency=3
+ Tasks:    37 successful, 37 total
+Cached:    0 cached, 37 total
+  Time:    20.933s 

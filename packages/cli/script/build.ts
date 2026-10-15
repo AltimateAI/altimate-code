@@ -15,11 +15,18 @@ import { resolveOpencodePty } from "./opencode-pty"
 import { NativeArch } from "../../../script/native-arch"
 // altimate: ALT-F01
 import { defaults, Identity, resolveIdentity } from "@opencode/util/identity"
+// altimate: ALT-F02
+import { hostContributionsPlugin } from "./host-contributions"
 
 const dir = path.resolve(import.meta.dirname, "..")
 // altimate: ALT-F01
 const identityFile = process.argv.find((arg) => arg.startsWith("--identity="))?.slice("--identity=".length)
 const identity = identityFile ? resolveIdentity(await Bun.file(path.resolve(identityFile)).json()) : Identity
+// altimate: ALT-F02 - resolve before the build changes cwd.
+const hostPlugins =
+  identityFile && identity.hostPlugins
+    ? [hostContributionsPlugin(path.resolve(identityFile), identity.hostPlugins)]
+    : []
 const binary = identity.app
 const outdir = path.resolve(
   dir,
@@ -163,6 +170,8 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
     entrypoints: ["./src/index.ts"],
     tsconfig: "./tsconfig.json",
     plugins: [
+      // altimate: ALT-F02
+      ...hostPlugins,
       appAssetsPlugin,
       solidPlugin,
       parcelWatcherPlugin,

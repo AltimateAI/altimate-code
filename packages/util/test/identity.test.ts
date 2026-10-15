@@ -36,6 +36,9 @@ describe("host identity", () => {
     expect(() => resolveIdentity({ ...altimate, servicePort: 65_535 })).toThrow("servicePort")
     expect(() => resolveIdentity({ ...altimate, envPrefixes: [] })).toThrow("envPrefixes")
     expect(() => resolveIdentity({ ...altimate, logo: { left: ["x"], right: [] } })).toThrow("logo")
+    // altimate: ALT-F02
+    expect(() => resolveIdentity({ ...altimate, hostPlugins: "" })).toThrow("hostPlugins")
+    expect(() => resolveIdentity({ ...altimate, hostPlugins: 42 })).toThrow("hostPlugins")
   })
 
   for (const branded of [false, true]) {

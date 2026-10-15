@@ -1,0 +1,805 @@
+$ bun run script/test.ts test/plugin/provider-cloudflare-workers-ai.test.ts test/plugin/provider-cerebras.test.ts test/plugin/session-remove.test.ts test/plugin/tool-input-repair-integration.test.ts test/plugin/mcp-codemode-defaults.test.ts test/plugin/supervisor.test.ts test/plugin/provider-amazon-bedrock.test.ts test/plugin/permission-assert.test.ts test/plugin/provider-google-vertex.test.ts test/plugin/worktree.test.ts test/plugin/provider-dynamic.test.ts test/plugin/skill.test.ts test/plugin/models-dev.test.ts test/plugin/plan.test.ts test/plugin/promise-tool.test.ts test/plugin/provider-openrouter.test.ts test/plugin/module.test.ts test/plugin/provider-factory.test.ts test/plugin/provider-zenmux.test.ts test/plugin/provider-vercel.test.ts test/plugin/optimize.test.ts test/plugin/provider-github-copilot.test.ts test/plugin/provider-openai.test.ts test/plugin/identity.test.ts test/plugin/tool-input-repair.test.ts test/plugin/provider-cloudflare-ai-gateway.test.ts test/plugin/provider-kilo.test.ts test/plugin/provider-nvidia.test.ts test/plugin/websearch.test.ts test/plugin/provider-sap-ai-core.test.ts test/plugin/command.test.ts test/plugin/supervisor-reload.test.ts test/plugin/session-compact.test.ts test/plugin/verbosity.test.ts test/plugin/vcs-init.test.ts test/plugin/provider-xai.test.ts test/plugin/provider-llmgateway.test.ts test/plugin/provider-gitlab.test.ts test/plugin/host-protection.test.ts test/plugin.test.ts test/plugin-failure.test.ts test/tool-registry.test.ts --test-name-pattern "^(?!.*watches creation of an external helper)"
+bun test v1.4.2 (744846f84)
+
+test/plugin.test.ts:
+[00:02:00.000] INFO (#6628): credential updated {
+  credentialID: "cred_140d4e40d0012Q2NH0SPCHUyra",
+  integrationID: "refresh-fixture",
+  valueChanged: true,
+  labelChanged: false,
+}
+[18:30:56.280] INFO (#7165): credential activated {
+  integrationID: "activate-fixture",
+  credentialID: "cred_140d4e416001qWW9eJ847c3Pdk",
+}
+
+test/plugin/supervisor-reload.test.ts:
+[18:30:56.884] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-GwlgwT/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:56.884] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-pEnhRe/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:56.884] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:56.884] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:56.894] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-GwlgwT/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:56.894] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-GwlgwT/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:56.895] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-pEnhRe/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:56.895] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-pEnhRe/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.032] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-GwlgwT/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.032] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-pEnhRe/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.032] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.032] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.037] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-GwlgwT/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.037] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-GwlgwT/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.037] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-pEnhRe/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.038] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-pEnhRe/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.267] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-GwlgwT/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.267] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-pEnhRe/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.267] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.267] INFO (#21477): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.319] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kPPDsN/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.319] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-SvyDAq/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.319] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.319] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.324] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kPPDsN/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.324] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kPPDsN/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.325] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-SvyDAq/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.325] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-SvyDAq/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.447] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kPPDsN/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.447] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-SvyDAq/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.447] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.447] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.451] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kPPDsN/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.452] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kPPDsN/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.453] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-SvyDAq/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.453] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-SvyDAq/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.661] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kPPDsN/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.661] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-SvyDAq/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.661] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.661] INFO (#22530): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.710] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-KAVMWz/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.710] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-BeewLt/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.710] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.710] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.713] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-KAVMWz/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.714] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-KAVMWz/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.714] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-BeewLt/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.715] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-BeewLt/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.840] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-KAVMWz/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.840] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-BeewLt/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.840] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.840] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.844] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-KAVMWz/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.844] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-KAVMWz/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.845] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-BeewLt/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:57.845] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-BeewLt/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.070] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-KAVMWz/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.070] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-BeewLt/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.070] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.070] INFO (#23586): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.117] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-rYhNQc/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.117] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-ikI23O/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.117] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.117] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.123] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-rYhNQc/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.123] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-rYhNQc/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.124] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-ikI23O/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.124] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-ikI23O/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.151] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-rYhNQc/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.151] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-ikI23O/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.151] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.151] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.155] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-rYhNQc/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.156] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-rYhNQc/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.156] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-ikI23O/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.157] INFO (#24635): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-ikI23O/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.239] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-C7Qd1Y/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.239] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-Acu1DE/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.239] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.239] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.243] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-C7Qd1Y/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.244] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-C7Qd1Y/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.244] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-Acu1DE/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.244] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-Acu1DE/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.264] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-C7Qd1Y/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.264] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-Acu1DE/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.264] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.264] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.268] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-C7Qd1Y/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.269] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-C7Qd1Y/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.270] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-Acu1DE/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.271] INFO (#25659): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-Acu1DE/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.328] INFO (#26681): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-5i2HuG/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.328] INFO (#26681): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-diWSnz/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.328] INFO (#26681): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.328] INFO (#26681): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.332] INFO (#26681): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-5i2HuG/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.332] INFO (#26681): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-5i2HuG/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.332] INFO (#26681): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-diWSnz/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.333] INFO (#26681): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-diWSnz/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.364] INFO (#26817): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-5i2HuG/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.365] INFO (#26817): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-5i2HuG/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.365] INFO (#26817): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-diWSnz/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.365] INFO (#26817): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-diWSnz/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.537] INFO (#27658): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-eU5zaH/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.537] INFO (#27658): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kGtQk8/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.537] INFO (#27658): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.537] INFO (#27658): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.540] INFO (#27658): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-eU5zaH/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.541] INFO (#27658): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-eU5zaH/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.541] INFO (#27658): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kGtQk8/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.541] INFO (#27658): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kGtQk8/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.572] INFO (#27792): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-eU5zaH/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.573] INFO (#27792): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-eU5zaH/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.573] INFO (#27792): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kGtQk8/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:58.574] INFO (#27792): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-kGtQk8/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.223] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.223] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.223] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.223] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.227] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.227] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.227] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.228] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.249] INFO (#28796): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.250] INFO (#28796): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.250] INFO (#28796): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.251] INFO (#28796): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.316] INFO (#28796): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.317] INFO (#28796): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.317] INFO (#28796): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.317] INFO (#28796): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.421] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.421] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.421] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.421] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.424] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.424] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.425] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.425] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.545] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.545] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.545] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.546] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.550] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.550] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.550] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.551] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.674] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.674] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.674] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.674] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/AGENTS.md",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.678] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.678] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-WAQJuW/config/skills",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.679] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skill",
+  type: "file",
+  ignores: 0,
+}
+[18:30:59.679] INFO (#28660): watcher subscribe {
+  path: "/private/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/oc-OzKtX7/tmp/opencode-core-test-tnI39O/.opencode/skills",
+  type: "file",
+  ignores: 0,
+}
+
+test/plugin/module.test.ts:
+[18:31:00.669] INFO (#56010): setup log from plugin
+
+ 304 pass
+ 1 filtered out
+ 0 fail
+ 1040 expect() calls
+Ran 304 tests across 42 files. [5.97s]

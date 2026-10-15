@@ -1,0 +1,30 @@
+bun test v1.4.2 (744846f84)
+
+test/config.test.ts:
+[18:35:02.824] INFO (#6): migrated cli config {
+  from: [ "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/opencode-cli-test-E1Jx79/tui.json",
+    "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/opencode-cli-test-E1Jx79/kv.json"
+  ],
+  to: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/opencode-cli-test-E1Jx79/cli.json",
+}
+[18:35:02.828] INFO (#7): migrated cli config {
+  from: [ "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/opencode-cli-test-9YWebr/tui.json" ],
+  to: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/opencode-cli-test-9YWebr/cli.json",
+}
+[18:35:02.831] INFO (#8): migrated cli config {
+  from: [ "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/opencode-cli-test-40nrHz/tui.json" ],
+  to: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/opencode-cli-test-40nrHz/cli.json",
+}
+[18:35:02.844] WARN (#14): failed to persist migrated cli config {
+  cause: {
+    _id: "Cause",
+    failures: [
+      [Object ...]
+    ],
+  },
+}
+
+ 32 pass
+ 0 fail
+ 129 expect() calls
+Ran 32 tests across 6 files. [6.50s]
