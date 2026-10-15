@@ -40,7 +40,12 @@ export namespace OptOutMarker {
     fs.writeFileSync(markerPath(), `${new Date().toISOString()}\n`, { mode: 0o600 })
   }
 
+  /** Best effort: an unremovable marker (read-only directory) must never fail an init. */
   export function clear(): void {
-    fs.rmSync(markerPath(), { force: true })
+    try {
+      fs.rmSync(markerPath(), { force: true })
+    } catch {
+      // leave it; the next opt-out is then not recorded again, which is the lesser failure
+    }
   }
 }

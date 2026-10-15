@@ -1887,6 +1887,9 @@ export namespace Telemetry {
   // once by the stamp comparison; the backoff only throttles retries of the unchanged one.
   const IDENTITY_RETRY_MS = 60_000
   let identityRetryAt = 0 // 0: no retry pending
+  // altimate_change — bumped by shutdown(); a detached opt-out send started under an earlier
+  // lifecycle neither posts nor writes its marker once a later init may have cleared it.
+  let lifecycleGeneration = 0
   let machineId = ""
   let sessionId = ""
   let projectId = ""
@@ -2210,6 +2213,7 @@ export namespace Telemetry {
     optOutUnderTestRunner = on
   }
   async function recordOptOut(source: "env" | "config"): Promise<void> {
+    const lifecycle = lifecycleGeneration
     try {
       if (underTestRunner() && !optOutUnderTestRunner) return
       // The force flag is a developer knob for running telemetry under a test runner; the opt-out
@@ -2226,6 +2230,9 @@ export namespace Telemetry {
         cfg,
         { machineId: id, identity: await TelemetryIdentity.cached() },
       )
+      // A shutdown since this task started means a later init may own the marker now: neither
+      // send nor write, and let the next disabled init start over.
+      if (lifecycle !== lifecycleGeneration) return
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), OPT_OUT_TIMEOUT_MS)
       try {
@@ -2235,7 +2242,7 @@ export namespace Telemetry {
           body: JSON.stringify(envelopes),
           signal: controller.signal,
         })
-        if (res.ok) OptOutMarker.write()
+        if (res.ok && lifecycle === lifecycleGeneration) OptOutMarker.write()
       } finally {
         clearTimeout(timeout)
       }
@@ -2616,6 +2623,7 @@ export namespace Telemetry {
     // previous account on events; doInit() resolves it again from whatever credential is on disk.
     // The generation bump makes any resolution still in flight a no-op when it settles.
     identityGeneration++
+    lifecycleGeneration++
     identity = undefined
     identityStamp = ""
     identityRetryAt = 0

@@ -23,6 +23,8 @@ describe("telemetry opt-out marker", () => {
   let home: string
   let calls: Call[]
   let trackStatus = 200
+  /** When set, the next /v2/track POST waits on it before answering. */
+  let holdTrack: Promise<void> | undefined
   let fetchSpy: ReturnType<typeof spyOn>
   let homedirSpy: ReturnType<typeof spyOn>
   const saved: Record<string, string | undefined> = {}
@@ -31,6 +33,7 @@ describe("telemetry opt-out marker", () => {
     "APPLICATIONINSIGHTS_CONNECTION_STRING",
     "ALTIMATE_TELEMETRY_DISABLED",
     "OPENCODE_DISABLE_TELEMETRY",
+    "ALTIMATE_TELEMETRY_FORCE",
   ]
 
   const optOuts = () =>
@@ -59,10 +62,12 @@ describe("telemetry opt-out marker", () => {
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = CS
     delete process.env.ALTIMATE_TELEMETRY_DISABLED
     delete process.env.OPENCODE_DISABLE_TELEMETRY
+    delete process.env.ALTIMATE_TELEMETRY_FORCE
     homedirSpy = spyOn(os, "homedir").mockImplementation(() => home)
     Telemetry.allowOptOutUnderTestRunner(true)
     calls = []
     trackStatus = 200
+    holdTrack = undefined
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: any, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
       calls.push({ url, body: String(init?.body ?? "") })
@@ -72,7 +77,10 @@ describe("telemetry opt-out marker", () => {
           headers: { "content-type": "application/json" },
         })
       }
-      if (url.includes("/v2/track")) return new Response("", { status: trackStatus })
+      if (url.includes("/v2/track")) {
+        if (holdTrack) await holdTrack
+        return new Response("", { status: trackStatus })
+      }
       return new Response("", { status: 200 })
     }) as any)
   })
@@ -167,6 +175,32 @@ describe("telemetry opt-out marker", () => {
     expect(optOuts()).toHaveLength(2)
     expect(optOuts()[1].data.baseData.properties.user_id).toBeUndefined()
     expect(optOuts()[1].tags["ai.user.id"]).toBe(MACHINE)
+  })
+
+  test("a send still pending when telemetry is re-enabled never recreates the marker", async () => {
+    writeMachineId()
+    let release: () => void = () => {}
+    holdTrack = new Promise<void>((r) => (release = r))
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(await waitFor(() => trackPosts().length === 1)).toBe(true) // the POST is in flight
+
+    delete process.env.ALTIMATE_TELEMETRY_DISABLED
+    await Telemetry.shutdown()
+    await Telemetry.init() // telemetry on again; this lifecycle owns the marker now
+    expect(Telemetry.isEnabled()).toBe(true)
+    release()
+    await new Promise((r) => setTimeout(r, 100))
+    expect(OptOutMarker.exists()).toBe(false)
+
+    // Opting out again is recorded afresh.
+    holdTrack = undefined
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(await waitFor(() => optOuts().length === 2)).toBe(true)
+    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
   })
 
   test("turning telemetry back on clears the marker", async () => {
