@@ -353,7 +353,7 @@ export class LocalEngine {
         session.stateful = true
         // SQLite shares one native session. DuckDB configuration, attachments
         // and loaded extensions can affect every connection in the helper.
-        if (this.opts.engine === "sqlite" || /\b(SET|RESET|USE|ATTACH|DETACH|PRAGMA|INSTALL|LOAD|LOAD_EXTENSION|SETSEED|SECRET)\b/i.test(String(payload["sql"]))) {
+        if (this.opts.engine === "sqlite" || /\b(SET|RESET|USE|ATTACH|DETACH|PRAGMA|INSTALL|LOAD|LOAD_EXTENSION|SETSEED)\b/i.test(String(payload["sql"])) || /\b(CREATE|DROP|ALTER)\s+(OR\s+REPLACE\s+)?(PERSISTENT\s+|TEMPORARY\s+)?(IF\s+(NOT\s+)?EXISTS\s+)?SECRET\b/i.test(String(payload["sql"]))) {
           this.sharedStateful = true
         }
       }
