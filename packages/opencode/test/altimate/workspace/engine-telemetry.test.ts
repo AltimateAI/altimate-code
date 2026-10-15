@@ -63,10 +63,18 @@ describe("workspace engine telemetry builders", () => {
     expect(trackAttach(attached, attachKey(attached))).toBe(false)
     expect(trackAttach({ kind: "attached", available: 3 }, attachKey(attached))).toBe(true)
     expect(trackAttach({ kind: "engine-missing" }, attachKey({ kind: "attached", available: 3 }))).toBe(true)
-    // The same-shaped attach to another workspace (a relink) is a change.
-    expect(trackAttach(attached, attachKey(attached, 42), { workspaceId: 42 })).toBe(false)
-    expect(trackAttach(attached, attachKey(attached, 42), { workspaceId: 7 })).toBe(true)
-    expect(events.map((e) => e.outcome)).toEqual(["attached", "attached", "engine_missing", "attached"])
+    // The same-shaped attach to another workspace (a relink) is a change, and the identity is the
+    // account-scoped key: the same id under another account is another workspace.
+    expect(
+      trackAttach(attached, attachKey(attached, "acme|42"), { workspaceId: 42, workspaceIdentity: "acme|42" }),
+    ).toBe(false)
+    expect(trackAttach(attached, attachKey(attached, "acme|42"), { workspaceId: 7, workspaceIdentity: "acme|7" })).toBe(
+      true,
+    )
+    expect(
+      trackAttach(attached, attachKey(attached, "acme|42"), { workspaceId: 42, workspaceIdentity: "other|42" }),
+    ).toBe(true)
+    expect(events.map((e) => e.outcome)).toEqual(["attached", "attached", "engine_missing", "attached", "attached"])
     expect(attachSignature({ kind: "connect-failed", error: "a" })).toBe(
       attachSignature({ kind: "connect-failed", error: "b" }),
     )

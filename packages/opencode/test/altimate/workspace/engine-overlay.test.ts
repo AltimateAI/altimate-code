@@ -1331,6 +1331,14 @@ describe("telemetry — the attach", () => {
       ["attached", 42],
       ["attached", 7],
     ])
+    // The same id under another account is another workspace: reported again.
+    h.binding = bound(7, "growth", "other|https://api.other.example")
+    await beforeTurn("s1")
+    expect(attaches().map((r) => [r.outcome, r.workspace_id])).toEqual([
+      ["attached", 42],
+      ["attached", 7],
+      ["attached", 7],
+    ])
   })
 
   test("an engine below the floor reports the version it found", async () => {

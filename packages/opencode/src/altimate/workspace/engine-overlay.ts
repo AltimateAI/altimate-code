@@ -337,6 +337,12 @@ export function linkedWorkspace(directory: string | null = currentDirectory()): 
   return linked ? { id: linked.id, name: linked.name } : null
 }
 
+/** The linked workspace's account-scoped identity (credential scope plus id), for telemetry's dedupe. */
+function linkedWorkspaceKey(directory: string | null = currentDirectory()): string | undefined {
+  if (!directory) return undefined
+  return directories.get(directory)?.linked?.key
+}
+
 /** `linkedWorkspace` once the overlay has run for this instance. */
 export async function linkedWorkspaceLoaded(
   directory: string | null = currentDirectory(),
@@ -379,8 +385,10 @@ function record(
   // record (the retry sentinel) reports nothing and keeps the last reported key for the next
   // comparison.
   const workspaceId = Number(linkedWorkspace()?.id) || undefined
-  const tracked = extra.transient ? previous?.tracked : attachKey(outcome, workspaceId)
-  if (!extra.transient) trackAttach(outcome, previous?.tracked, { ...extra, workspaceId }, sessionID)
+  const tracked = extra.transient ? previous?.tracked : attachKey(outcome, linkedWorkspaceKey())
+  if (!extra.transient) {
+    trackAttach(outcome, previous?.tracked, { ...extra, workspaceId, workspaceIdentity: linkedWorkspaceKey() }, sessionID)
+  }
   sessions.delete(sessionID)
   const next: SessionRecord = {
     outcome,
