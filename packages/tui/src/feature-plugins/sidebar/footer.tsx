@@ -38,7 +38,6 @@ function View(props: { api: TuiPluginApi }) {
         <text fg={theme().textMuted} wrapMode="word" width="100%">
           Ideas or issues? Join the community.
         </text>
-        {/* altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s) */}
         <text
           wrapMode="word"
           width="100%"
@@ -51,7 +50,6 @@ function View(props: { api: TuiPluginApi }) {
           <span style={{ fg: theme().textMuted }}>Docs · </span>
           <span style={{ fg: theme().accent, underline: true }}>help.altimate.ai/code</span>
         </text>
-        {/* altimate_change end */}
       </box>
       {/* altimate_change end */}
     </box>

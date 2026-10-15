@@ -1210,10 +1210,8 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         name: "docs.open",
         title: "Open docs",
         run: () => {
-          // altimate_change start — altimate docs URL
-          // altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+          // altimate_change start — altimate docs URL; upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
           openUrl("https://help.altimate.ai/code").catch(() => {})
-          // altimate_change end
           // altimate_change end
           dialog.clear()
         },
