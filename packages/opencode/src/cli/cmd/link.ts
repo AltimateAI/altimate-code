@@ -13,7 +13,7 @@
 import { cmd } from "./cmd"
 import { UI } from "../ui"
 import * as prompts from "@clack/prompts"
-import open from "open"
+import { openUrl } from "@opencode-ai/core/open"
 import { AltimateApi } from "@/altimate/api/client"
 import {
   WorkspaceApi,
@@ -735,7 +735,7 @@ export async function createThenBindOrRebind(
     if (opts.openBrowser === false) {
       // printed above; nothing to open
     } else if (isSafeHttpUrl(manageUrl)) {
-      await open(manageUrl).catch(() => undefined)
+      await openUrl(manageUrl).catch(() => undefined)
     } else {
       prompts.log.warn(`Skipped auto-open: manage_url is not an http/https URL.`)
     }

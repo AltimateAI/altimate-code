@@ -25,7 +25,7 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
-import open from "open"
+import { openUrl } from "@opencode-ai/core/open"
 // altimate_change start - the /workspace action menu
 import * as Manage from "@/altimate/workspace/manage"
 import { describeSyncProblems, pendingSync } from "@/altimate/workspace/skill-sync"
@@ -891,7 +891,7 @@ export function openManageUrl(api: TuiPluginApi, url: string) {
     })
     return
   }
-  open(url).catch(() => {
+  openUrl(url).catch(() => {
     api.ui.toast({
       variant: "warning",
       message: `Could not open browser. Copy this URL: ${url}`,

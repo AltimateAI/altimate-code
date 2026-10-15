@@ -89,7 +89,9 @@ import { isDefaultTitle } from "./util/session"
 import { KVProvider, useKV } from "./context/kv"
 import * as Model from "./util/model"
 import { ArgsProvider, useArgs, type Args } from "./context/args"
-import open from "open"
+// altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+import { openUrl } from "@opencode-ai/core/open"
+// altimate_change end
 import { PromptRefProvider, usePromptRef } from "./context/prompt"
 import { TuiConfigProvider, useTuiConfig, type TuiConfig } from "./config"
 import { createTuiApiAdapters } from "./plugin/adapters"
@@ -1209,7 +1211,9 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
         title: "Open docs",
         run: () => {
           // altimate_change start — altimate docs URL
-          open("https://help.altimate.ai/code").catch(() => {})
+          // altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+          openUrl("https://help.altimate.ai/code").catch(() => {})
+          // altimate_change end
           // altimate_change end
           dialog.clear()
         },
