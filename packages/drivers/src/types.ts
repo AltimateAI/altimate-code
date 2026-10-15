@@ -93,6 +93,34 @@ export function isQueryTimeoutError(e: unknown): boolean {
   return typeof e === "object" && e !== null && (e as { code?: unknown }).code === QUERY_TIMEOUT_CODE
 }
 
+/** Stable code for an unexpected local helper exit, distinct from a query deadline. */
+export const LOCAL_ENGINE_PROCESS_EXITED = "LOCAL_ENGINE_PROCESS_EXITED"
+
+export class LocalEngineProcessError extends Error {
+  readonly code = LOCAL_ENGINE_PROCESS_EXITED
+  readonly stateLost = true
+  readonly engine: string
+  readonly exitCode: number | null
+  readonly signal: string | null
+  readonly stderr: string
+
+  constructor(opts: { engine: string; exitCode: number | null; signal: string | null; stderr: string }) {
+    const cause = opts.signal ? `signal ${opts.signal}` : `exit code ${opts.exitCode ?? "unknown"}`
+    super(`${LOCAL_ENGINE_PROCESS_EXITED}: ${opts.engine} helper process exited unexpectedly (${cause}).` +
+      (opts.stderr.trim() ? ` Helper stderr: ${opts.stderr.trim()}` : ""))
+    this.name = "LocalEngineProcessError"
+    this.engine = opts.engine
+    this.exitCode = opts.exitCode
+    this.signal = opts.signal
+    this.stderr = opts.stderr
+  }
+}
+
+/** Duck-typed so helper failures remain identifiable through wrapper boundaries. */
+export function isLocalEngineProcessError(e: unknown): boolean {
+  return typeof e === "object" && e !== null && (e as { code?: unknown }).code === LOCAL_ENGINE_PROCESS_EXITED
+}
+
 export interface Connector {
   // altimate_change start — callers must fail closed when byte-bounded transfer is unavailable
   readonly supportsResultByteLimit?: boolean

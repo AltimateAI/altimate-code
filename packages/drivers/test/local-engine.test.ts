@@ -99,6 +99,63 @@ test("dispatch notification fires once per dispatched call and never for rejecte
 })
 
 describe.each(["sqlite", "duckdb"] as const)("%s query deadline", (engine) => {
+  test.each([false, true])("queued stateless file reads survive a sibling timeout (readonly=%s)", async (readonly) => {
+    const file = path.join(tmp, `${engine}-read-queue-${crypto.randomUUID()}.db`)
+    const writer = await make(engine, { path: file, create: true })
+    await writer.execute("CREATE TABLE kept(value INTEGER)")
+    await writer.execute("INSERT INTO kept VALUES (7)")
+    await writer.close()
+    open.pop()
+
+    const reader = await make(engine, { path: file, readonly })
+    await reader.execute("SELECT value FROM kept")
+    const calls = [
+      reader.execute(FOREVER[engine], 10, undefined, { queryTimeoutMs: 100 }),
+      reader.execute("SELECT value FROM kept", 10, undefined, { queryTimeoutMs: 1000 }),
+      reader.execute("WITH values_read AS (SELECT value FROM kept) SELECT value + 1 AS value FROM values_read"),
+    ]
+    const results = await Promise.allSettled(calls)
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "QUERY_TIMEOUT" } })
+    expect(results[1]).toMatchObject({ status: "fulfilled", value: { rows: [[7]] } })
+    expect(results[2]).toMatchObject({ status: "fulfilled", value: { rows: [[8]] } })
+  })
+
+  test("state created after a stateless restart does not invalidate the remaining queue", async () => {
+    const file = path.join(tmp, `${engine}-new-state-${crypto.randomUUID()}.db`)
+    const c = await make(engine, { path: file, create: true })
+    const results = await Promise.allSettled([
+      c.execute(FOREVER[engine], 10, undefined, { queryTimeoutMs: 100 }),
+      c.execute("CREATE TEMP TABLE new_values AS SELECT 7 AS value"),
+      c.execute("SELECT value FROM new_values"),
+    ])
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "QUERY_TIMEOUT" } })
+    expect(results[1].status).toBe("fulfilled")
+    expect(results[2]).toMatchObject({ status: "fulfilled", value: { rows: [[7]] } })
+    const lost = await Promise.allSettled([
+      c.execute(FOREVER[engine], 10, undefined, { queryTimeoutMs: 100 }),
+      c.execute("SELECT value FROM new_values"),
+    ])
+    expect(lost[0]).toMatchObject({ status: "rejected", reason: { code: "QUERY_TIMEOUT" } })
+    expect(lost[1]).toMatchObject({ status: "rejected", reason: { code: "SESSION_STATE_LOST" } })
+  })
+
+  test("a read-only connection with temporary state still rejects queued reads after a timeout", async () => {
+    const file = path.join(tmp, `${engine}-readonly-state-${crypto.randomUUID()}.db`)
+    const writer = await make(engine, { path: file, create: true })
+    await writer.execute("CREATE TABLE kept(value INTEGER)")
+    await writer.close()
+    open.pop()
+    const reader = await make(engine, { path: file, readonly: true })
+    await reader.execute("CREATE TEMP TABLE session_values AS SELECT 7 AS value")
+    const results = await Promise.allSettled([
+      reader.execute(FOREVER[engine], 10, undefined, { queryTimeoutMs: 100 }),
+      reader.execute("SELECT value FROM session_values"),
+    ])
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "QUERY_TIMEOUT" } })
+    expect(results[1]).toMatchObject({ status: "rejected", reason: { code: "SESSION_STATE_LOST" } })
+    expect((await reader.execute("SELECT value FROM kept")).rows).toEqual([])
+  })
+
   test("an expensive query stops within the deadline and reports QUERY_TIMEOUT", async () => {
     const c = await make(engine)
     const r = await timed(() => c.execute(FOREVER[engine], 10, undefined, { queryTimeoutMs: 700 }))
@@ -351,6 +408,37 @@ describe("sqlite session restart disclosure", () => {
 })
 
 describe("duckdb concurrent stores", () => {
+  test.each(["SET GLOBAL", "PRAGMA"])("helper-wide %s settings preserve state-loss disclosure for otherwise stateless peers", async (statement) => {
+    const file = path.join(tmp, `duckdb-shared-setting-${crypto.randomUUID()}.db`)
+    const caller = await make("duckdb", { path: file, create: true })
+    const peer = await make("duckdb", { path: file })
+    await caller.execute(`${statement} default_null_order = 'NULLS_FIRST'`)
+    expect((await peer.execute("SELECT value FROM (VALUES (1), (NULL)) t(value) ORDER BY value")).rows).toEqual([[null], [1]])
+    const results = await Promise.allSettled([
+      caller.execute(FOREVER.duckdb, 10, undefined, { queryTimeoutMs: 100 }),
+      peer.execute("SELECT value FROM (VALUES (1), (NULL)) t(value) ORDER BY value"),
+    ])
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "QUERY_TIMEOUT" } })
+    expect(results[1]).toMatchObject({ status: "rejected", reason: { code: "SESSION_STATE_LOST" } })
+  })
+
+  test("a stateless peer keeps queued reads when another connection loses temporary state", async () => {
+    const file = path.join(tmp, `duckdb-peer-reads-${crypto.randomUUID()}.db`)
+    const caller = await make("duckdb", { path: file, create: true })
+    const peer = await make("duckdb", { path: file })
+    await caller.execute("CREATE TEMP TABLE session_values AS SELECT 7 AS value")
+    const results = await Promise.allSettled([
+      caller.execute(FOREVER.duckdb, 10, undefined, { queryTimeoutMs: 100 }),
+      peer.execute("SELECT 7 AS value"),
+      peer.execute("SELECT 8 AS value"),
+      caller.execute("SELECT value FROM session_values"),
+    ])
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "QUERY_TIMEOUT" } })
+    expect(results[1]).toMatchObject({ status: "fulfilled", value: { rows: [[7]] } })
+    expect(results[2]).toMatchObject({ status: "fulfilled", value: { rows: [[8]] } })
+    expect(results[3]).toMatchObject({ status: "rejected", reason: { code: "SESSION_STATE_LOST" } })
+  })
+
   test("rejects all three peer writes enqueued after restart before state-loss acknowledgement", async () => {
     const file = path.join(tmp, `duckdb-peer-disclosure-${crypto.randomUUID()}.db`)
     const caller = await make("duckdb", { path: file, create: true })
@@ -409,11 +497,9 @@ describe("duckdb concurrent stores", () => {
     open.pop()
     const a = await make("duckdb", { path: file, readonly: true })
     const b = await make("duckdb", { path: file, readonly: true })
-    // Both native sessions share a helper. Killing it must disclose the peer's
-    // lost session before allowing another statement against the reopened store.
+    // Both native sessions share a helper; a stateless peer can reopen directly.
     const killed = await timed(() => a.execute(FOREVER.duckdb, 10, undefined, { queryTimeoutMs: 400 }))
     expect(killed.error?.code).toBe("QUERY_TIMEOUT")
-    await expect(b.execute("SELECT count(*) AS n FROM t")).rejects.toMatchObject({ stateLost: true })
     expect(Number((await b.execute("SELECT count(*) AS n FROM t")).rows[0]![0])).toBe(1)
   })
 })

@@ -741,6 +741,48 @@ describe("sql_materialize", () => {
     }
   })
 
+  test.each(["count", "sample"])("a preflight %s helper crash surfaces without extracting or clamping", async (stage) => {
+    Registry.setConfigs({ local_source: { type: "duckdb" } })
+    const seen: string[] = []
+    const crash = Object.assign(new Error("DuckDB helper process exited unexpectedly (signal SIGKILL)"), {
+      code: "LOCAL_ENGINE_PROCESS_EXITED",
+    })
+    const real = Registry.get.bind(Registry)
+    const get = spyOn(Registry, "get").mockImplementation(async (name) =>
+      name === "local_source"
+        ? ({
+            supportsResultByteLimit: true,
+            execute: async (sql: string) => {
+              seen.push(sql)
+              if (stage === "count" ? /^SELECT count\(\*\)/i.test(sql) : sql.endsWith("LIMIT 1000")) throw crash
+              return { columns: ["n"], rows: [[1]], row_count: 1, truncated: false }
+            },
+          } as Connector)
+        : real(name),
+    )
+    try {
+      const tool = await initTool(SqlMaterializeTool)
+      const result = await tool.execute(
+        { source_warehouse: "local_source", sql: "SELECT 1 AS n", target_table: "crashed" },
+        ctx as any,
+      )
+      expect(result.title).toBe("Materialize: ERROR")
+      expect(result.metadata).toMatchObject({ materialized: false, error: crash.message })
+      expect(result.output).toContain("SIGKILL")
+      expect(result.output).not.toContain("cap clamped")
+      expect(seen).toHaveLength(stage === "count" ? 1 : 2)
+      expect(
+        Number(
+          (await withScratchSession(ctx.sessionID, () =>
+            scratchSql("SELECT count(*) FROM information_schema.tables WHERE table_name = 'crashed'"),
+          )).rows[0][0],
+        ),
+      ).toBe(0)
+    } finally {
+      get.mockRestore()
+    }
+  })
+
   test("a truncated extraction is refused even when the preflight count is below the cap", async () => {
     const get = fakePostgres(async (sql) => ({
       columns: ["n"],

@@ -2,7 +2,7 @@ import z from "zod"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { normalizeMqlCommand, type Connector } from "@altimateai/drivers"
-import { isQueryTimeoutError, QueryTimeoutError } from "@altimateai/drivers/types"
+import { isLocalEngineProcessError, isQueryTimeoutError, QueryTimeoutError } from "@altimateai/drivers/types"
 import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
 import { isResultByteLimitError, rowBytes } from "@altimateai/drivers/result-byte-limit"
 import { Tool } from "../../tool/tool"
@@ -319,7 +319,7 @@ async function preflight(
         : 0
     }
   } catch (e) {
-    if (isQueryTimeoutError(e) || isResultByteLimitError(e)) throw e
+    if (isQueryTimeoutError(e) || isResultByteLimitError(e) || isLocalEngineProcessError(e)) throw e
     const cap = Math.min(maxRows, FALLBACK_MAX_ROWS)
     return {
       maxRows: cap,
