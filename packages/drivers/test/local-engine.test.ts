@@ -408,15 +408,31 @@ describe("sqlite session restart disclosure", () => {
 })
 
 describe("duckdb concurrent stores", () => {
-  test.each(["SET GLOBAL", "PRAGMA"])("helper-wide %s settings preserve state-loss disclosure for otherwise stateless peers", async (statement) => {
+  test.each([
+    ["SET GLOBAL", "default_null_order = 'NULLS_FIRST'"],
+    ["PRAGMA", "default_null_order = 'NULLS_FIRST'"],
+  ])("helper-wide %s settings preserve state-loss disclosure for otherwise stateless peers", async (statement, setting) => {
     const file = path.join(tmp, `duckdb-shared-setting-${crypto.randomUUID()}.db`)
     const caller = await make("duckdb", { path: file, create: true })
     const peer = await make("duckdb", { path: file })
-    await caller.execute(`${statement} default_null_order = 'NULLS_FIRST'`)
+    await caller.execute(`${statement} ${setting}`)
     expect((await peer.execute("SELECT value FROM (VALUES (1), (NULL)) t(value) ORDER BY value")).rows).toEqual([[null], [1]])
     const results = await Promise.allSettled([
       caller.execute(FOREVER.duckdb, 10, undefined, { queryTimeoutMs: 100 }),
       peer.execute("SELECT value FROM (VALUES (1), (NULL)) t(value) ORDER BY value"),
+    ])
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "QUERY_TIMEOUT" } })
+    expect(results[1]).toMatchObject({ status: "rejected", reason: { code: "SESSION_STATE_LOST" } })
+  })
+
+  test("a helper-wide secret preserves state-loss disclosure for otherwise stateless peers", async () => {
+    const file = path.join(tmp, `duckdb-shared-secret-${crypto.randomUUID()}.db`)
+    const caller = await make("duckdb", { path: file, create: true })
+    const peer = await make("duckdb", { path: file })
+    await caller.execute("CREATE OR REPLACE SECRET shared_secret (TYPE http, BEARER_TOKEN 'x')")
+    const results = await Promise.allSettled([
+      caller.execute(FOREVER.duckdb, 10, undefined, { queryTimeoutMs: 100 }),
+      peer.execute("SELECT 1 AS value"),
     ])
     expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "QUERY_TIMEOUT" } })
     expect(results[1]).toMatchObject({ status: "rejected", reason: { code: "SESSION_STATE_LOST" } })
