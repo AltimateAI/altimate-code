@@ -178,23 +178,35 @@ async function creds(): Promise<{ url: string; instance: string; apiKey: string 
 // `workspace_api_error` (or `workspace_auth_expired` on 401/403) with the endpoint masked of
 // ids; the link lifecycle functions below report linked / created / switched / unlinked on the
 // success response and `workspace_link_failed` with a reason class otherwise.
-/** The static segments of the routes the workspace clients call. Anything not in this list —
- * numeric ids, uuids, memory ids, skill public ids however they are spelled — is replaced by
- * ":id" in telemetry. A new static word that is missing here is masked too, which only costs
- * detail; the list must never be widened with a dynamic value. */
+/** Endpoint labels mask by ROUTE POSITION, not by spelling. The routers whose subpaths start
+ * with a static word are listed here; on every other base (``/skills``, ``/datamates/memory``)
+ * the first subpath segment is an identifier and is masked whatever it is spelled like — a
+ * public id equal to a route word must not reach telemetry. Segments after that, and the
+ * segments of the base itself, are kept only when they are known static words; an unknown
+ * static word is masked too, which only costs detail. A new router with a static first segment
+ * is added here; a new identifier-first router needs nothing. */
+const STATIC_FIRST_SEGMENT_BASES = new Set(["/datamate-project-bindings", "/datamates", "/users"])
 const ROUTE_WORDS = new Set([
   "datamate-project-bindings", "bind", "by-remote", "by-path", "datamates", "users", "me",
   "memory", "blocks", "skills", "files", "list", "attach", "publish", "sync", "status", "search",
   "versions", "lessons", "learned-lessons", "content", "download",
 ])
 
-/** "METHOD /base/path" with every dynamic segment replaced by ":id" (see ROUTE_WORDS). */
+/** "METHOD /base/path" with every dynamic segment replaced by ":id" (see the note above). */
 export function endpointOf(method: string, basePath: string, subpath: string): string {
-  const masked = `${basePath}${subpath}`
+  const word = (seg: string) => (seg === "" || ROUTE_WORDS.has(seg) ? seg : ":id")
+  const base = basePath.split("/").map(word).join("/")
+  let first = true
+  const sub = subpath
     .split("/")
-    .map((seg) => (seg === "" || ROUTE_WORDS.has(seg) ? seg : ":id"))
+    .map((seg) => {
+      if (seg === "") return seg
+      const idPosition = first && !STATIC_FIRST_SEGMENT_BASES.has(basePath)
+      first = false
+      return idPosition ? ":id" : word(seg)
+    })
     .join("/")
-  return `${method} ${masked}`
+  return `${method} ${base}${sub}`
 }
 
 function workspaceIdIn(body: unknown): number | undefined {
@@ -384,7 +396,15 @@ async function req<T>(
     // The abort fires equally when it kills the fetch OR the body read. (m8)
     const name = (err as { name?: string } | undefined)?.name
     if (name === "AbortError") {
-      reportApiError({ endpoint, kind: "timeout", workspaceId: bodyWorkspaceId })
+      // A timeout after the server answered (the body stalled) keeps the answer's status:
+      // a 500 whose body never arrives is still a 5xx row; a 2xx whose body never arrives
+      // stays a timeout, with the status attached.
+      reportApiError({
+        endpoint,
+        ...(answered !== undefined ? { status: answered } : {}),
+        kind: answered === undefined ? "timeout" : answered >= 500 ? "5xx" : answered >= 400 ? "4xx" : "timeout",
+        workspaceId: bodyWorkspaceId,
+      })
       throw new WorkspaceApiError(
         `Request to ${target} timed out after ${Math.round(timeoutMs / 1000)}s`,
       )
