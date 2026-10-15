@@ -82,7 +82,11 @@ describe("workspace engine telemetry builders", () => {
       attachSignature({ kind: "attached", available: 2 }),
     )
     expect((attachEvent({ kind: "attached", available: 1 }, { workspaceId: 42 }) as any).workspace_id).toBe(42)
-    expect("workspace_id" in (attachEvent({ kind: "unbound" }, { workspaceId: 42 }) as any)).toBe(false)
+    // An unbound attach names no workspace, explicitly: the key is present and undefined, so the
+    // session's entry cannot be stamped onto it.
+    const unbound = attachEvent({ kind: "unbound" }, { workspaceId: 42 }) as any
+    expect("workspace_id" in unbound).toBe(true)
+    expect(unbound.workspace_id).toBeUndefined()
   })
 
   test("the install prompt event carries the offer, the surface and node detection", () => {
