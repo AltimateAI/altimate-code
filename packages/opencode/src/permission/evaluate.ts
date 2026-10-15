@@ -3,28 +3,30 @@ import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Wildcard } from "@opencode-ai/core/util/wildcard"
 
 // `pattern` is the spelling the caller authored; `aliases` are equivalent normalized
-// spellings. Only deny/ask rules consider aliases, so normalization can tighten a
-// decision but never lets an allow rule apply to something it did not match before.
+// spellings. An alias only ever tightens a decision: the result is the strictest of the
+// authored spelling's rule and the last rule matching it or, for deny/ask rules, an alias.
+// An alias match can never relax a stricter authored match.
+const STRICTNESS = { allow: 0, ask: 1, deny: 2 } as const
+
 function evaluatePatterns(
   permission: string,
   pattern: string,
   aliases: string[],
   ...rulesets: PermissionV1.Ruleset[]
 ): PermissionV1.Rule {
-  return (
-    rulesets
-      .flat()
-      .findLast(
-        (rule) =>
-          Wildcard.match(permission, rule.permission) &&
-          (Wildcard.match(pattern, rule.pattern) ||
-            (rule.action !== "allow" && aliases.some((alias) => Wildcard.match(alias, rule.pattern)))),
-      ) ?? {
-      action: "ask",
-      permission,
-      pattern: "*",
-    }
+  const rules = rulesets.flat().filter((rule) => Wildcard.match(permission, rule.permission))
+  const authored = rules.findLast((rule) => Wildcard.match(pattern, rule.pattern)) ?? {
+    action: "ask" as const,
+    permission,
+    pattern: "*",
+  }
+  // Rule order still decides: an allow rule only applies to the authored spelling.
+  const aliased = rules.findLast(
+    (rule) =>
+      Wildcard.match(pattern, rule.pattern) ||
+      (rule.action !== "allow" && aliases.some((alias) => Wildcard.match(alias, rule.pattern))),
   )
+  return aliased && STRICTNESS[aliased.action] > STRICTNESS[authored.action] ? aliased : authored
 }
 
 export function evaluate(permission: string, pattern: string, ...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule {
@@ -39,7 +41,9 @@ export function evaluateRequest(
   const aliases = request.metadata.permissionAliases
   const values = aliases && typeof aliases === "object" ? (aliases as Record<string, unknown>)[pattern] : undefined
   const groups = Array.isArray(values)
-    ? values.filter((group): group is string[] => Array.isArray(group) && group.every((value) => typeof value === "string"))
+    ? values.filter(
+        (group): group is string[] => Array.isArray(group) && group.every((value) => typeof value === "string"),
+      )
     : []
   if (!groups.length) return evaluate(request.permission, pattern, ...rulesets)
   // Preserve rule order within each access. Distinct invocations must all be allowed,
@@ -58,3 +62,5 @@ export function evaluateRequestPatterns(
     .sort((a, b) => Number(b.rule.action === "deny") - Number(a.rule.action === "deny"))
 }
 // altimate_change end
+
+export * as PermissionEvaluate from "./evaluate"

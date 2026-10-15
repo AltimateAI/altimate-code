@@ -14,7 +14,9 @@ import { Effect, Layer, ManagedRuntime } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { Truncate as TruncateService } from "../../src/tool/truncate"
 import { InstanceRef } from "../../src/effect/instance-ref"
-import { evaluateRequest } from "../../src/permission/evaluate"
+import { PermissionEvaluate } from "../../src/permission/evaluate"
+
+const evaluateRequest = PermissionEvaluate.evaluateRequest
 
 // The shared tool fixture stubs Truncate with a no-op so most tool tests don't
 // truncate. Truncation tests need the REAL Truncate service, so build the tool
@@ -95,6 +97,12 @@ describe("tool.bash permissions", () => {
     ["ls ..", "ls", ""],
     ["ls; ls ..", "ls", ""],
     ["cd .. && ls", "ls", ""],
+    ["cd ../sibling || exit 1; cat output.md", "cat", "sibling/output.md"],
+    ["cd -- ../sibling && cat output.md", "cat", "sibling/output.md"],
+    ["cd -P ../sibling && cat output.md", "cat", "sibling/output.md"],
+    ["cd ../sibling && cat output.md &", "cat", "sibling/output.md"],
+    ["cat -- ../sibling/output.md", "cat", "sibling/output.md"],
+    ["cd missing; cd ../sibling; cat output.md", "cat", "sibling/output.md"],
   ])("denies normalized paths in %s", async (command, executable, target) => {
     await using tmp = await tmpdir({ git: true })
     await fs.mkdir(path.join(tmp.path, "workspace"))
@@ -146,6 +154,54 @@ describe("tool.bash permissions", () => {
         },
       }
       await expect(bash.execute({ command, description: "Read file" }, testCtx)).rejects.toThrow("Path denied")
+    })
+  })
+
+  test("denies the operand of a command when an option consumes a separate value", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const exact = `mkdir -m 700 ${path.join(tmp.path, "private")}`
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "*", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: exact, action: "deny" },
+      ]
+      const testCtx = {
+        ...ctx,
+        ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          for (const pattern of request.patterns) {
+            if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+          }
+        },
+      }
+      await expect(bash.execute({ command: "mkdir -m 700 private", description: "Make" }, testCtx)).rejects.toThrow(
+        "Path denied",
+      )
+    })
+  })
+
+  test("denies a symlinked operand by its resolved destination", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "real"))
+    await Bun.write(path.join(tmp.path, "real", "key"), "secret")
+    await fs.symlink(path.join(tmp.path, "real"), path.join(tmp.path, "link"))
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "*", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: `cat ${await fs.realpath(path.join(tmp.path, "real"))}/key`, action: "deny" },
+      ]
+      const testCtx = {
+        ...ctx,
+        ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          for (const pattern of request.patterns) {
+            if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+          }
+        },
+      }
+      await expect(bash.execute({ command: "cat link/key", description: "Read" }, testCtx)).rejects.toThrow(
+        "Path denied",
+      )
     })
   })
 

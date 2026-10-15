@@ -8,6 +8,7 @@ import { Instance } from "../project/instance"
 import { lazy } from "@/util/lazy"
 import { Language } from "web-tree-sitter"
 import fs from "fs/promises"
+import { homedir } from "os"
 
 import { Filesystem } from "@/util/filesystem"
 import { fileURLToPath } from "url"
@@ -21,22 +22,27 @@ import { Global } from "@/global"
 // altimate_change start — upstream_fix: resolve literal shell paths for permission matching
 import type { Node } from "web-tree-sitter"
 
-function shellWords(node: Node) {
-  return node.namedChildren.filter(
-    (child): child is Node =>
-      child !== null && ["command_name", "word", "string", "raw_string", "concatenation"].includes(child.type),
-  )
+function shellWords(node: Node, includeNumbers = false) {
+  const types = ["command_name", "word", "string", "raw_string", "concatenation"]
+  // tree-sitter parses a bare numeric argument (`mkdir -m 700`) as `number`.
+  if (includeNumbers) types.push("number")
+  return node.namedChildren.filter((child): child is Node => child !== null && types.includes(child.type))
 }
 
 function literalWord(node: Node | null): string | undefined {
   if (!node) return
   if (node.type === "raw_string") return node.text.slice(1, -1)
-  if (node.type === "word") {
-    if (/[~$*?{\[]/.test(node.text)) return
-    return node.text.replace(/\\(.)/gs, "$1")
+  if (node.type === "word" || node.type === "number") {
+    let text = node.text
+    if (text === "~" || text.startsWith("~/")) text = homedir() + text.slice(1)
+    if (/[~$*?{\[]/.test(text)) return
+    return text.replace(/\\(.)/gs, "$1")
   }
   if (node.type === "string" && node.namedChildren.every((child) => child?.type === "string_content")) {
-    return node.text.slice(1, -1).replace(/\\\n/g, "").replace(/\\([$`"\\])/g, "$1")
+    return node.text
+      .slice(1, -1)
+      .replace(/\\\n/g, "")
+      .replace(/\\([$`"\\])/g, "$1")
   }
   if (node.type === "command_name" || node.type === "concatenation") {
     const parts = node.namedChildren.map(literalWord)
@@ -44,25 +50,100 @@ function literalWord(node: Node | null): string | undefined {
   }
 }
 
-// Track literal directory changes in straight-line sequences. Analyze branches
-// independently and keep subshell, substitution, and pipeline changes local.
-function* shellCommands(node: Node | null, cwd: string): Generator<{ node: Node; cwd: string }, string> {
-  if (!node) return cwd
+// Cap on tracked directories so pathological scripts cannot blow up alias generation.
+const MAX_TRACKED_DIRECTORIES = 32
+
+// Options that take a separate non-path value; the value must not be read as an operand.
+const VALUE_OPTIONS: Record<string, string[]> = {
+  mkdir: ["-m", "--mode"],
+  cp: ["-S", "--suffix"],
+  mv: ["-S", "--suffix"],
+  touch: ["-d", "--date", "-t"],
+  ls: ["-I", "--ignore", "-w", "--width", "-T", "--tabsize"],
+}
+// Long options whose `=value` is a path operand.
+const PATH_OPTIONS = ["--reference", "--target-directory"]
+const CD_FLAGS = ["-L", "-P", "-e", "-@"]
+
+// cwds that a following command may run in after `cd`. `cd` can fail (`cd missing; cat x`)
+// or sit behind `||`, a conditional or a background marker, so the previous directories
+// stay possible. An unresolvable target (`cd $VAR`, `cd -`) adds nothing: the extra
+// directories only ever add aliases, which can tighten a decision but never relax it.
+function afterCd(cwds: string[], words: Node[]): string[] {
+  const args = words.slice(1).map(literalWord)
+  let i = 0
+  while (i < args.length && args[i] !== undefined && CD_FLAGS.includes(args[i]!)) i++
+  if (args[i] === "--") i++
+  const target = i < args.length ? args[i] : homedir()
+  if (target === undefined || target === "-") return cwds
+  const next = new Set(cwds)
+  for (const cwd of cwds) {
+    if (next.size >= MAX_TRACKED_DIRECTORIES) break
+    next.add(path.resolve(cwd, target))
+  }
+  return [...next]
+}
+
+// Walk commands in source order, tracking every directory a command could run in.
+// Subshells and substitutions keep their directory changes local.
+function* shellCommands(node: Node | null, cwds: string[]): Generator<{ node: Node; cwds: string[] }, string[]> {
+  if (!node) return cwds
   if (node.type === "command") {
-    yield { node, cwd }
-    for (const child of node.namedChildren) yield* shellCommands(child, cwd)
-    const [name, arg] = shellWords(node).map(literalWord)
-    return name === "cd" && arg && !arg.startsWith("-") ? path.resolve(cwd, arg) : cwd
+    yield { node, cwds }
+    for (const child of node.namedChildren) yield* shellCommands(child, cwds)
+    const words = shellWords(node)
+    return words[0] && literalWord(words[0]) === "cd" ? afterCd(cwds, words) : cwds
   }
-  const sequential =
-    ["program", "list", "subshell", "command_substitution", "compound_statement", "redirected_statement"].includes(node.type) &&
-    !node.children.some((child) => child?.type === "||" || child?.type === "&")
-  let next = cwd
-  for (const child of node.namedChildren) {
-    const result = yield* shellCommands(child, sequential ? next : cwd)
-    if (sequential) next = result
+  const local = ["subshell", "command_substitution"].includes(node.type)
+  let next = cwds
+  for (const child of node.namedChildren) next = yield* shellCommands(child, next)
+  return local ? cwds : next
+}
+
+interface PathOperand {
+  word: Node
+  arg: string | undefined
+  prefix: string
+}
+
+// Collect path operands, honoring `--`, quoted flags, option values and `--reference=`.
+function pathOperands(name: string, words: Node[]): PathOperand[] {
+  const operands: PathOperand[] = []
+  const valueOptions = VALUE_OPTIONS[name] ?? []
+  let terminated = false
+  let skipNext = false
+  let referenced = false
+  for (const word of words.slice(1)) {
+    const arg = literalWord(word)
+    if (skipNext) {
+      skipNext = false
+      continue
+    }
+    if (!terminated && arg?.startsWith("-")) {
+      if (arg === "--") terminated = true
+      else {
+        const option = PATH_OPTIONS.find((candidate) => arg.startsWith(candidate + "="))
+        if (option) {
+          if (option === "--reference") referenced = true
+          operands.push({ word, arg: arg.slice(option.length + 1), prefix: option + "=" })
+        } else if (valueOptions.includes(arg)) skipNext = true
+      }
+      continue
+    }
+    operands.push({ word, arg, prefix: "" })
   }
-  return ["program", "list", "compound_statement", "redirected_statement"].includes(node.type) ? next : cwd
+  // chmod/chown take a mode/owner first unless --reference supplies it.
+  if (["chmod", "chown"].includes(name) && !referenced) {
+    const first = operands.findIndex((operand) => !operand.prefix)
+    if (first >= 0) operands.splice(first, 1)
+  }
+  return operands
+}
+
+function quoteLike(word: Node, text: string) {
+  if (word.type === "string") return `"${text}"`
+  if (word.type === "raw_string") return `'${text}'`
+  return text
 }
 // altimate_change end
 
@@ -111,7 +192,10 @@ const HOST_MARKERS = new Set([
   "ALTIMATE_PINNED_WORKSPACE_NAME",
   "ALTIMATE_PINNED_WORKSPACE_ROOT",
 ])
-export function stripHostMarkers(env: Record<string, string | undefined>, platform: NodeJS.Platform = process.platform) {
+export function stripHostMarkers(
+  env: Record<string, string | undefined>,
+  platform: NodeJS.Platform = process.platform,
+) {
   // Windows environment names are case-insensitive: a child reads `altimate_code_serve`
   // as the marker, so every spelling goes there. POSIX keeps exact matching.
   for (const key of Object.keys(env)) {
@@ -197,40 +281,35 @@ export const BashTool = Tool.define("bash", async () => {
       // altimate_change start — upstream_fix: retain raw command rules alongside absolute path rules
       const permissionAliases = new Map<string, Set<string>>()
 
-      for (const { node, cwd: commandCwd } of shellCommands(tree.rootNode, cwd)) {
+      for (const { node, cwds } of shellCommands(tree.rootNode, [cwd])) {
         // altimate_change end
-        if (!node) continue
-
         // Get full command text including redirects if present
-        let commandText = node.parent?.type === "redirected_statement" ? node.parent.text : node.text
+        const original = node.parent?.type === "redirected_statement" ? node.parent.text : node.text
 
         // altimate_change start — upstream_fix: normalize static path operands, including directory listings
         const words = shellWords(node)
+        const operandWords = shellWords(node, true)
         const command = words.map((word) => word.text)
         const name = words[0] && literalWord(words[0])
         const source = node.parent?.type === "redirected_statement" ? node.parent : node
-        const replacements: { start: number; end: number; text: string }[] = []
+        const variants = new Set<string>([original])
 
         // not an exhaustive list, but covers most common cases
         if (name && ["cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat", "ls"].includes(name)) {
-          const operands = words.slice(1).filter((word) => !word.text.startsWith("-"))
-          const targets = operands.flatMap((word) => {
-            const arg = literalWord(word)
-            if (arg === undefined || (name === "chmod" && arg.startsWith("+"))) return []
-            const target = path.resolve(commandCwd, arg)
-            if (!["chmod", "chown"].includes(name) || word !== operands[0]) {
-              replacements.push({ start: word.startIndex, end: word.endIndex, text: target })
-            }
-            return [target]
-          })
-          if (name === "ls" && operands.length === 0) {
-            targets.push(commandCwd)
-            replacements.push({ start: node.endIndex, end: node.endIndex, text: ` ${commandCwd}` })
-          }
-          for (const arg of targets) {
-            const resolved = await fs.realpath(arg).catch(() => "")
-            log.info("resolved path", { arg, resolved })
-            if (resolved) {
+          const operands = name === "cd" ? pathOperands("cat", operandWords) : pathOperands(name, operandWords)
+          for (const commandCwd of cwds) {
+            const targets = operands.flatMap((operand) => {
+              if (operand.arg === undefined || (name === "chmod" && operand.arg.startsWith("+"))) return []
+              return [{ operand, target: path.resolve(commandCwd, operand.arg) }]
+            })
+            const listing = name === "ls" && operands.length === 0
+            if (listing) targets.push({ operand: undefined as never, target: commandCwd })
+            const reals = await Promise.all(targets.map((item) => fs.realpath(item.target).catch(() => "")))
+            reals.forEach((resolved, index) => {
+              log.info("resolved path", { arg: targets[index].target, resolved })
+            })
+            for (const resolved of reals) {
+              if (!resolved) continue
               const normalized =
                 process.platform === "win32" ? Filesystem.windowsPath(resolved).replace(/\//g, "\\") : resolved
               if (!Instance.containsPath(normalized)) {
@@ -238,16 +317,41 @@ export const BashTool = Tool.define("bash", async () => {
                 directories.add(dir)
               }
             }
+            // One spelling keeps the operand's quoting, one is bare, one follows symlinks.
+            const spellings: ((item: (typeof targets)[number], real: string) => string)[] = [
+              (item) => item.operand.prefix + quoteLike(item.operand.word, item.target),
+              (item) => item.operand.prefix + item.target,
+              (item, real) => item.operand.prefix + (real || item.target),
+            ]
+            // `cat -- x` and `cat x` read the same file, so also alias the form without `--`.
+            const terminator =
+              name === "cd" ? undefined : operandWords.slice(1).find((word) => literalWord(word) === "--")
+            for (const spell of spellings.flatMap((fn) =>
+              terminator ? [[fn, false] as const, [fn, true] as const] : [[fn, false] as const],
+            )) {
+              const [fn, dropTerminator] = spell
+              const replacements = targets
+                .filter((item) => item.operand)
+                .map((item) => ({
+                  start: item.operand.word.startIndex,
+                  end: item.operand.word.endIndex,
+                  text: fn(item, reals[targets.indexOf(item)]),
+                }))
+              if (listing) replacements.push({ start: node.endIndex, end: node.endIndex, text: ` ${commandCwd}` })
+              if (terminator && dropTerminator)
+                replacements.push({ start: terminator.startIndex - 1, end: terminator.endIndex, text: "" })
+              let text = original
+              for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
+                const start = replacement.start - source.startIndex
+                const end = replacement.end - source.startIndex
+                text = text.slice(0, start) + replacement.text + text.slice(end)
+              }
+              variants.add(text)
+            }
           }
         }
-        const original = commandText
-        for (const replacement of replacements.reverse()) {
-          const start = replacement.start - source.startIndex
-          const end = replacement.end - source.startIndex
-          commandText = commandText.slice(0, start) + replacement.text + commandText.slice(end)
-        }
         const aliases = permissionAliases.get(original) ?? new Set<string>()
-        aliases.add(commandText)
+        for (const variant of variants) aliases.add(variant)
         permissionAliases.set(original, aliases)
         // altimate_change end
 

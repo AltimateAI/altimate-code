@@ -14,7 +14,7 @@ import { Wildcard } from "@/util/wildcard"
 import os from "os"
 import z from "zod"
 // altimate_change start — upstream_fix: share normalized path matching with Effect permissions
-import { evaluateRequest, evaluateRequestPatterns } from "./evaluate"
+import { PermissionEvaluate } from "./evaluate"
 // altimate_change end
 
 export namespace PermissionNext {
@@ -139,7 +139,7 @@ export namespace PermissionNext {
       const s = await state()
       const { ruleset, ...request } = input
       // altimate_change start — upstream_fix: check normalized denies before any approval prompt
-      for (const { pattern, rule } of evaluateRequestPatterns(request, ruleset, s.approved)) {
+      for (const { pattern, rule } of PermissionEvaluate.evaluateRequestPatterns(request, ruleset, s.approved)) {
         // altimate_change end
         log.info("evaluated", { permission: request.permission, pattern, action: rule })
         if (rule.action === "deny") {
@@ -234,7 +234,7 @@ export namespace PermissionNext {
           if (pending.info.sessionID !== sessionID) continue
           const ok = pending.info.patterns.every(
             // altimate_change start — upstream_fix: apply approvals to equivalent path spellings
-            (pattern) => evaluateRequest(pending.info, pattern, s.approved).action === "allow",
+            (pattern) => PermissionEvaluate.evaluateRequest(pending.info, pattern, s.approved).action === "allow",
             // altimate_change end
           )
           if (!ok) continue

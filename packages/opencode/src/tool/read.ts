@@ -258,13 +258,14 @@ export const ReadTool = Tool.define<
 
       // altimate_change start — upstream_fix: match absolute and symlink-resolved deny rules; allow rules keep the authored spelling
       const resolved = yield* Effect.promise(() => realpath(filepath).catch(() => filepath))
+      const relative = path.relative(instance.worktree, filepath)
       yield* ctx.ask({
         permission: "read",
-        patterns: [path.relative(instance.worktree, filepath)],
+        patterns: [relative],
         always: ["*"],
         metadata: {
           permissionAliases: {
-            [path.relative(instance.worktree, filepath)]: [Array.from(new Set([filepath, resolved]))],
+            [relative]: [Array.from(new Set([filepath, resolved, path.relative(instance.worktree, resolved)]))],
           },
         },
         // altimate_change end

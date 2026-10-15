@@ -8,7 +8,7 @@ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 // altimate_change start — upstream_fix: evaluate normalized aliases without changing rule order
-import { evaluateRequest } from "./evaluate"
+import { PermissionEvaluate } from "./evaluate"
 // altimate_change end
 // altimate_change start — upstream_fix: load persisted permission approvals
 import { Database, eq } from "@/storage/db"
@@ -87,7 +87,7 @@ export const layer = Layer.effect(
 
       for (const pattern of request.patterns) {
         // altimate_change start — upstream_fix: include normalized aliases in permission matching
-        const rule = evaluateRequest(request, pattern, ruleset, approved)
+        const rule = PermissionEvaluate.evaluateRequest(request, pattern, ruleset, approved)
         // altimate_change end
         yield* Effect.logInfo("evaluated", { permission: request.permission, pattern, action: rule })
         if (rule.action === "deny") {
@@ -172,7 +172,7 @@ export const layer = Layer.effect(
         if (item.info.sessionID !== existing.info.sessionID) continue
         const ok = item.info.patterns.every(
           // altimate_change start — upstream_fix: apply approvals to equivalent path spellings
-          (pattern) => evaluateRequest(item.info, pattern, approved).action === "allow",
+          (pattern) => PermissionEvaluate.evaluateRequest(item.info, pattern, approved).action === "allow",
           // altimate_change end
         )
         if (!ok) continue

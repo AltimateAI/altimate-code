@@ -14,6 +14,7 @@ import { testEffect } from "../lib/effect"
 import { MessageID, SessionID } from "../../src/session/schema"
 import { PermissionNext as LegacyPermission } from "../../src/permission/next"
 import { Instance } from "../../src/project/instance"
+import { PermissionEvaluate } from "../../src/permission/evaluate"
 
 const events = EventV2Bridge.defaultLayer
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
@@ -1404,3 +1405,12 @@ it.instance(
     }),
   { git: true },
 )
+
+test("evaluateRequest - an ask rule matching only an alias never relaxes an authored deny", () => {
+  const request = { permission: "read", metadata: { permissionAliases: { "a.txt": [["/abs/a.txt"]] } } }
+  const rule = PermissionEvaluate.evaluateRequest(request, "a.txt", [
+    { permission: "read", pattern: "a.txt", action: "deny" },
+    { permission: "read", pattern: "/abs/*", action: "ask" },
+  ])
+  expect(rule.action).toBe("deny")
+})
