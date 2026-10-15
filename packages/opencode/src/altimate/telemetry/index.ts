@@ -1864,6 +1864,11 @@ export namespace Telemetry {
   // disk by any path (manual file edit, the TUI, another thread's auth flow) is picked up within
   // one flush interval instead of at the next process start.
   let identityStamp = ""
+  // altimate_change — a resolution that failed while a credential exists (backend down, timeout)
+  // must be tried again, but not on every 5 s flush: the stamp is reset so the next flush after
+  // this time re-resolves.
+  const IDENTITY_RETRY_MS = 60_000
+  let identityRetryAt = 0
   let machineId = ""
   let sessionId = ""
   let projectId = ""
@@ -2137,8 +2142,16 @@ export namespace Telemetry {
     const generation = ++identityGeneration
     identityStamp = TelemetryIdentity.credentialStamp()
     return TelemetryIdentity.resolve(opts)
-      .then((resolved) => {
-        if (generation === identityGeneration) identity = resolved
+      .then(async (resolved) => {
+        if (generation !== identityGeneration) return
+        identity = resolved
+        if (resolved === undefined && (await TelemetryIdentity.hasCredential())) {
+          // Signed in but unresolved: a transient failure. Retry at a later flush.
+          if (generation === identityGeneration) {
+            identityStamp = ""
+            identityRetryAt = Date.now() + IDENTITY_RETRY_MS
+          }
+        }
       })
       .catch(() => {})
   }
@@ -2155,6 +2168,11 @@ export namespace Telemetry {
   /** Test seam. */
   export function identityForTest(): TelemetryIdentity.Identity | undefined {
     return identity
+  }
+
+  /** Test seam: end the retry backoff so the next flush re-resolves. */
+  export function retryIdentityNowForTest() {
+    identityRetryAt = 0
   }
   // altimate_change end
 
@@ -2354,7 +2372,7 @@ export namespace Telemetry {
     // change on disk and re-resolve (cheap: two stats, and the cache answers unless the key changed).
     const who = identity
     const mid = machineId
-    if (enabled) {
+    if (enabled && Date.now() >= identityRetryAt) {
       const stamp = TelemetryIdentity.credentialStamp()
       if (stamp !== identityStamp) {
         identity = undefined
@@ -2529,6 +2547,8 @@ export namespace Telemetry {
     // The generation bump makes any resolution still in flight a no-op when it settles.
     identityGeneration++
     identity = undefined
+    identityStamp = ""
+    identityRetryAt = 0
     // NOTE: cachedLaunchId is deliberately NOT cleared here. session/prompt.ts shuts telemetry
     // down at the end of every session, so clearing it would mint a fresh launch_id per prompt in
     // a long-lived `serve` process and shatter the per-launch correlation it exists to provide.

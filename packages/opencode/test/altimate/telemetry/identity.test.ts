@@ -36,6 +36,8 @@ describe("telemetry identity", () => {
   let authSpy: ReturnType<typeof spyOn>
   /** Per-api-key gates: a /users/me request for that key waits on the promise before answering. */
   let gates: Record<string, Promise<void> | undefined> = {}
+  /** Resolved when a /users/me request for that key has reached its gate. */
+  let entered: Record<string, () => void> = {}
 
   function writeCreds(apiKey = "key-1") {
     mkdirSync(path.join(home, ".altimate"), { recursive: true })
@@ -61,6 +63,7 @@ describe("telemetry identity", () => {
     meStatus = 200
     meBody = undefined
     gates = {}
+    entered = {}
     // The auth store lives in the real data directory; never let a test read it.
     authSpy = spyOn(Auth, "get").mockResolvedValue(undefined)
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: any, init?: RequestInit) => {
@@ -69,6 +72,7 @@ describe("telemetry identity", () => {
       if (url === `${API}/users/me` || url === `${DEFAULT_API}/users/me`) {
         const key = headersOf(init)["authorization"]?.replace("Bearer ", "") ?? ""
         const gate = gates[key]
+        entered[key]?.()
         if (gate) await gate
         if (meStatus !== 200) return new Response("nope", { status: meStatus })
         if (meBody !== undefined)
@@ -170,8 +174,9 @@ describe("telemetry identity", () => {
     writeCreds("key-A")
     let releaseA: () => void = () => {}
     gates["key-A"] = new Promise<void>((r) => (releaseA = r))
+    const reached = new Promise<void>((r) => (entered["key-A"] = r))
     const pending = TelemetryIdentity.resolve()
-    await new Promise((r) => setTimeout(r, 20))
+    await reached // the request is in flight at the gate
     rmSync(path.join(home, ".altimate", "altimate.json"))
     releaseA()
     expect(await pending).toBeUndefined()
@@ -179,9 +184,10 @@ describe("telemetry identity", () => {
   })
 
   test("a key entered in the TUI (auth store) resolves like the credential file", async () => {
-    authSpy.mockResolvedValue({ type: "api", key: "acme::key-S" })
+    authSpy.mockResolvedValue({ type: "api", key: `${API}///::acme::key-S` })
     expect(await TelemetryIdentity.resolve()).toEqual({ user_id: UUID, tenant: "acme" })
-    expect(meCalls().length + calls.filter((c) => c.url === `${DEFAULT_API}/users/me`).length).toBe(1)
+    expect(calls.filter((c) => c.url.includes("/users/me")).at(-1)!.url).toBe(`${API}/users/me`)
+    expect(meCalls()).toHaveLength(1)
     expect(await TelemetryIdentity.cached()).toEqual({ user_id: UUID, tenant: "acme" })
     // The credential file wins over the store when both exist.
     writeCreds("key-F")
@@ -244,6 +250,36 @@ describe("telemetry identity", () => {
     await Telemetry.flush()
     await new Promise((r) => setTimeout(r, 50))
     expect(Telemetry.identityForTest()).toBeUndefined()
+  })
+
+  test("a transient failure at startup is retried at a later flush, not on every flush", async () => {
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+      "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+    writeCreds()
+    meStatus = 503
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    await new Promise((r) => setTimeout(r, 60))
+    expect(Telemetry.identityForTest()).toBeUndefined()
+    const after = meCalls().length
+    expect(after).toBeGreaterThanOrEqual(1)
+    await Telemetry.flush()
+    await Telemetry.flush()
+    await new Promise((r) => setTimeout(r, 30))
+    expect(meCalls().length).toBe(after) // backoff: no retry within the window
+
+    meStatus = 200
+    Telemetry.retryIdentityNowForTest()
+    await Telemetry.flush()
+    const ok = await (async () => {
+      const until = Date.now() + 2000
+      while (Date.now() < until) {
+        if (Telemetry.identityForTest()?.user_id === UUID) return true
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      return false
+    })()
+    expect(ok).toBe(true)
   })
 
   test("a resolution that started under the old credential never overwrites a newer sign-in", async () => {

@@ -39,6 +39,11 @@ export namespace TelemetryIdentity {
     return path.join(Global.Path.home, ".altimate", "telemetry-identity.json")
   }
 
+  /** True when a credential is in use (file or auth store), whatever its validity. */
+  export async function hasCredential(): Promise<boolean> {
+    return (await loadCredential()) !== undefined
+  }
+
   /** The credential the Altimate provider would use, or undefined when signed out. */
   export async function loadCredential(): Promise<Credential | undefined> {
     try {
@@ -51,7 +56,11 @@ export namespace TelemetryIdentity {
         }
       }
       const auth = await Auth.get(AUTH_STORE_KEY)
-      if (auth?.type === "api") return AltimateApi.parseAltimateKey(auth.key) ?? undefined
+      if (auth?.type === "api") {
+        const parsed = AltimateApi.parseAltimateKey(auth.key)
+        // Same normalisation as getCredentials(): a trailing slash would yield "//users/me".
+        return parsed ? { ...parsed, altimateUrl: parsed.altimateUrl.replace(/\/+$/, "") } : undefined
+      }
       return undefined
     } catch {
       return undefined
