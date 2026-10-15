@@ -324,3 +324,35 @@ describe("computeSqlFingerprint", () => {
     expect(result === null || typeof result === "object").toBe(true)
   })
 })
+
+describe("SQL-building aggregates are reads", () => {
+  const cases: [string, string][] = [
+    ["duckdb", "SELECT string_agg('SELECT * FROM ' || table_name, ' UNION ALL ') FROM information_schema.tables WHERE table_schema = 'main'"],
+    ["duckdb", "SELECT string_agg('''' || Symbol || '''', ',' ORDER BY Symbol) FROM t"],
+    ["duckdb", "SELECT string_agg('INSERT INTO x SELECT * FROM ' || table_name, '; ') FROM information_schema.tables"],
+    ["duckdb", "SELECT string_agg('DROP TABLE ' || table_name, '; ') FROM information_schema.tables"],
+    ["sqlite", "SELECT group_concat('SELECT * FROM ' || name, ' UNION ALL ') FROM sqlite_master WHERE type = 'table'"],
+    ["postgres", "SELECT string_agg('SELECT * FROM ' || quote_ident(table_name), ' UNION ALL ') FROM information_schema.tables"],
+    ["postgres", "SELECT string_agg(format('CREATE INDEX ON %I', table_name), '; ') FROM information_schema.tables"],
+  ]
+  for (const [dialect, sql] of cases) {
+    test(`${dialect}: ${sql.slice(0, 60)} → read, with no keyword-in-literal false positive`, () => {
+      expect(classifyAndCheck(sql, dialect)).toEqual({ queryType: "read", blocked: false })
+    })
+  }
+
+  // Known core-parser gap (altimate-core-internal): DuckDB `//` integer division fails to parse,
+  // so a read-only string_agg query using it is conservatively classified as a write.
+  // Flip to `test` once the parser supports it.
+  test.skip("duckdb: `//` integer division in a string_agg query → read (core parser gap)", () => {
+    const sql = "SELECT 'c' || (rn // 240) c, count(*), string_agg('''' || Symbol || '''', ',' ORDER BY Symbol) FROM t GROUP BY 1"
+    expect(classifyAndCheck(sql, "duckdb").queryType).toBe("read")
+  })
+
+  test("duckdb: `//` currently fails closed with an explanatory diagnostic", () => {
+    const r = classifyAndCheck("SELECT 'c' || (rn // 240) c, string_agg(Symbol, ',') FROM t GROUP BY 1", "duckdb")
+    expect(r.queryType).toBe("write")
+    expect(r.blocked).toBe(false)
+    expect(r.parseError).toBeTruthy()
+  })
+})
