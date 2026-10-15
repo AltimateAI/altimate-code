@@ -1296,6 +1296,21 @@ describe("telemetry — the attach", () => {
     expect(attaches().map((r) => r.outcome)).toEqual(["attached", "unbound"])
   })
 
+  test("the retry sentinel is not a settled attach: a retry that succeeds reports one attach, one that fails reports one failure", async () => {
+    const h = install({ status: "failed" })
+    h.onAdd = () => {
+      h.status = "connected"
+    }
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    expect(attaches().map((r) => r.outcome)).toEqual(["attached"])
+    rows.length = 0
+    install({ status: "failed", statusError: "Connection closed" })
+    await beforeTurn("s2")
+    await beforeTurn("s2")
+    expect(attaches().map((r) => r.outcome)).toEqual(["connect_failed"])
+  })
+
   test("an engine below the floor reports the version it found", async () => {
     install({ version: "0.1.0" })
     await beforeTurn("s1")

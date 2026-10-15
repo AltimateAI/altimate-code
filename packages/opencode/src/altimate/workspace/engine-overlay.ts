@@ -360,18 +360,28 @@ type SessionRecord = {
   /** The workspace the directory was linked to when the boundary settled this
    * outcome. */
   linked?: { id: string; name: string } | null
+  /** The last outcome reported to telemetry; a transient record carries the previous one. */
+  tracked?: Outcome
 }
 const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
 /** Verdict signatures a headless process has already printed to stderr. */
 const headlessPrinted = new Set<string>()
 
-function record(sessionID: string, outcome: Outcome, extra: { engineVersion?: string | null } = {}): SessionRecord {
+function record(
+  sessionID: string,
+  outcome: Outcome,
+  extra: { engineVersion?: string | null; transient?: boolean } = {},
+): SessionRecord {
   const previous = sessions.get(sessionID)
-  trackAttach(outcome, previous?.outcome, extra, sessionID) // telemetry: only when the outcome changed
+  // telemetry: a settled outcome, when it changed. A transient record (the retry sentinel) reports
+  // nothing and keeps the last reported outcome for the next comparison.
+  const tracked = extra.transient ? previous?.tracked : outcome
+  if (!extra.transient) trackAttach(outcome, previous?.tracked, extra, sessionID)
   sessions.delete(sessionID)
   const next: SessionRecord = {
     outcome,
+    tracked,
     announced: previous?.announced,
     announcedAt: previous?.announcedAt,
     retried: previous?.retried,
@@ -831,7 +841,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   let status = statusMap[DATAMATE_KEY]
   const session = sessions.get(sessionID)
   if (status?.status !== "connected" && !session?.retried) {
-    ;(session ?? record(sessionID, { kind: "connect-failed", error: "retrying" })).retried = true
+    ;(session ?? record(sessionID, { kind: "connect-failed", error: "retrying" }, { transient: true })).retried = true
     log.info("workspace engine not connected; retrying once for this session", {
       workspaceId: workspace.id,
       sessionID,
