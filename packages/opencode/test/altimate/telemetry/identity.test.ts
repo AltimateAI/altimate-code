@@ -6,6 +6,7 @@ import { Telemetry } from "../../../src/altimate/telemetry"
 import { TelemetryIdentity } from "../../../src/altimate/telemetry/identity"
 
 const UUID = "0f3c2a1e-6b7d-4c8e-9f10-1a2b3c4d5e6f"
+const UUID_B = "7a1b2c3d-4e5f-4a6b-8c9d-0e1f2a3b4c5d"
 const API = "https://api.example.invalid"
 
 type Call = { url: string; method: string; headers: Record<string, string>; body: string }
@@ -28,6 +29,8 @@ describe("telemetry identity", () => {
   let savedTestHome: string | undefined
   let savedCs: string | undefined
   let meStatus = 200
+  /** Per-api-key gates: a /users/me request for that key waits on the promise before answering. */
+  let gates: Record<string, Promise<void> | undefined> = {}
 
   function writeCreds(apiKey = "key-1") {
     mkdirSync(path.join(home, ".altimate"), { recursive: true })
@@ -51,12 +54,17 @@ describe("telemetry identity", () => {
     homedirSpy = spyOn(os, "homedir").mockImplementation(() => home)
     calls = []
     meStatus = 200
+    gates = {}
     fetchSpy = spyOn(globalThis, "fetch").mockImplementation((async (input: any, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url
       calls.push({ url, method: init?.method ?? "GET", headers: headersOf(init), body: String(init?.body ?? "") })
       if (url === `${API}/users/me`) {
+        const key = headersOf(init)["authorization"]?.replace("Bearer ", "") ?? ""
+        const gate = gates[key]
+        if (gate) await gate
         if (meStatus !== 200) return new Response("nope", { status: meStatus })
-        return new Response(JSON.stringify({ id: 7, uuid: UUID.toUpperCase(), email: "someone@example.invalid" }), {
+        const uuid = key === "key-B" ? UUID_B : UUID.toUpperCase()
+        return new Response(JSON.stringify({ id: 7, uuid, email: "someone@example.invalid" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         })
@@ -128,6 +136,31 @@ describe("telemetry identity", () => {
     rmSync(path.join(home, ".altimate", "altimate.json"))
     expect(await TelemetryIdentity.resolve()).toBeUndefined()
     expect(existsSync(TelemetryIdentity.cachePath())).toBe(false)
+  })
+
+  test("a resolution that started under the old credential never overwrites a newer sign-in", async () => {
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+      "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+    writeCreds("key-A")
+    let releaseA: () => void = () => {}
+    gates["key-A"] = new Promise<void>((r) => (releaseA = r))
+    await Telemetry.shutdown()
+    await Telemetry.init() // kicks off the resolution for key-A, which is now held
+    writeCreds("key-B")
+    await Telemetry.refreshIdentity()
+    expect(Telemetry.identityForTest()).toEqual({ user_id: UUID_B, tenant: "acme" })
+    releaseA()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(Telemetry.identityForTest()).toEqual({ user_id: UUID_B, tenant: "acme" })
+
+    // Likewise after shutdown: a resolution still in flight cannot repopulate the cleared state.
+    let releaseB: () => void = () => {}
+    gates["key-B"] = new Promise<void>((r) => (releaseB = r))
+    void Telemetry.refreshIdentity()
+    await Telemetry.shutdown()
+    releaseB()
+    await new Promise((r) => setTimeout(r, 50))
+    expect(Telemetry.identityForTest()).toBeUndefined()
   })
 
   test("events carry user_id and tenant when signed in, and only the machine id otherwise", async () => {

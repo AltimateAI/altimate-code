@@ -1854,6 +1854,11 @@ export namespace Telemetry {
   // altimate_change — who the machine is signed in as (backend user uuid + tenant), for the
   // funnel join with web events. Resolved off the stored credential in doInit(); see identity.ts.
   let identity: TelemetryIdentity.Identity | undefined
+  // altimate_change — resolutions are detached (doInit does not await the backend), so each one
+  // carries the generation it started in and applies only while it is still the newest: a
+  // resolution started under credential A must not land after a sign-in installed B, nor after
+  // shutdown() cleared the state. shutdown() and every new resolution bump it.
+  let identityGeneration = 0
   let machineId = ""
   let sessionId = ""
   let projectId = ""
@@ -2080,11 +2085,7 @@ export namespace Telemetry {
       // the stored Altimate credential, cached per credential so this costs no network unless the
       // credential changed. Replaces the hashed account email. Not awaited: events flushed before it
       // resolves carry only the machine id, and telemetry never waits on the backend.
-      void TelemetryIdentity.resolve()
-        .then((resolved) => {
-          identity = resolved
-        })
-        .catch(() => {})
+      void resolveIdentity()
       // altimate_change end
       // altimate_change — use shared getOrCreateMachineId() from util/machine-id.ts.
       // Returns "" on all error conditions (ENOENT: mints new UUID; EACCES/corrupt/oversized:
@@ -2118,9 +2119,18 @@ export namespace Telemetry {
 
   // altimate_change start — re-resolve the signed-in user after a sign-in or sign-out in this
   // process (the browser login flow saves the credential while telemetry is already running).
+  function resolveIdentity(opts: { refresh?: boolean } = {}): Promise<void> {
+    const generation = ++identityGeneration
+    return TelemetryIdentity.resolve(opts)
+      .then((resolved) => {
+        if (generation === identityGeneration) identity = resolved
+      })
+      .catch(() => {})
+  }
+
   /** Re-resolve who the machine is signed in as; clears it when no credential is stored. */
   export async function refreshIdentity(): Promise<void> {
-    identity = await TelemetryIdentity.resolve({ refresh: true })
+    await resolveIdentity({ refresh: true })
   }
 
   /** Test seam. */
@@ -2484,6 +2494,8 @@ export namespace Telemetry {
     machineId = ""
     // Cleared so a sign-out followed by a re-init in the same process does not keep stamping the
     // previous account on events; doInit() resolves it again from whatever credential is on disk.
+    // The generation bump makes any resolution still in flight a no-op when it settles.
+    identityGeneration++
     identity = undefined
     // NOTE: cachedLaunchId is deliberately NOT cleared here. session/prompt.ts shuts telemetry
     // down at the end of every session, so clearing it would mint a fresh launch_id per prompt in
