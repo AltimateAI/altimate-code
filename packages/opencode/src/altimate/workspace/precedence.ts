@@ -533,7 +533,7 @@ export async function refresh(
     result = await derive(sessionID, tools)
   } catch (err) {
     log.warn("precedence could not be derived; running locally with a notice", { sessionID, err: String(err) })
-    trackEngineError("precedence", String(err))
+    trackEngineError("precedence", String(err), sessionID)
     result = EMPTY("derive-failed")
   }
   if (ruleset) result.ruleset = ruleset

@@ -137,6 +137,8 @@ describe("workspace engine telemetry builders", () => {
     expect(err.stage).toBe("attach")
     expect(err.message.length).toBeLessThanOrEqual(200)
     expect(err.message).not.toContain("/home/someone")
+    trackEngineError("precedence", "derive boom", "ses_p")
+    expect(events.at(-1)).toEqual(expect.objectContaining({ stage: "precedence", session_id: "ses_p" }))
     trackRedirect("datamate", "status", 9)
     expect(events.at(-1)).toEqual(
       expect.objectContaining({
