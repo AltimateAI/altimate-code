@@ -18,6 +18,13 @@ describe("classifySkillSource", () => {
     expect(classifySkillSource("C:\\Users\\x\\.altimate\\builtin\\dbt-analyze\\SKILL.md")).toBe("builtin")
   })
 
+  test("skills synced from the bound workspace (the managed _workspace folder) → workspace", () => {
+    expect(classifySkillSource("/work/repo/.altimate-code/skill/_workspace/dbt-review/SKILL.md")).toBe("workspace")
+    expect(classifySkillSource("C:\\work\\repo\\.altimate-code\\skill\\_workspace\\x\\SKILL.md")).toBe("workspace")
+    // a project skill that merely mentions the word is still the project's
+    expect(classifySkillSource("/work/repo/.altimate-code/skill/_workspace-notes/SKILL.md")).toBe("project")
+  })
+
   test("a third-party skill under some other node_modules is NOT tagged Altimate", () => {
     expect(classifySkillSource("/work/repo/node_modules/some-other-pkg/skills/x/SKILL.md")).toBe("project")
   })

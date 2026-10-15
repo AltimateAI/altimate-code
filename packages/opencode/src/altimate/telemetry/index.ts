@@ -258,6 +258,11 @@ export namespace Telemetry {
         total_tokens: number
         tool_call_count: number
         duration_ms: number
+        // altimate_change — what of the bound workspace this session used (see noteWorkspaceUse)
+        workspace_skills_used?: number
+        workspace_documents_used?: number
+        workspace_memory_blocks?: number
+        workspace_integration_calls?: number
       }
     | {
         type: "generation"
@@ -316,6 +321,8 @@ export namespace Telemetry {
         previous_tool: string | null
         input_signature?: string
         error?: string
+        // altimate_change — the call went to the bound workspace (a datamate MCP server)
+        via_workspace?: boolean
       }
     | {
         type: "native_call"
@@ -596,6 +603,34 @@ export namespace Telemetry {
         status?: number
         workspace_id?: number
       }
+    | {
+        /** The post-link starter message was served (TUI or extension chat); what the workspace provides. */
+        type: "starter_shown"
+        timestamp: number
+        session_id: string
+        workspace_id: number
+        skills: number
+        integrations: number
+        knowledge: string
+        memory_enabled: boolean
+      }
+    | {
+        /** A memory block was written back to the bound workspace's cloud memory. */
+        type: "workspace_memory_contributed"
+        timestamp: number
+        session_id: string
+        workspace_id: number
+        block_count: number
+      }
+    | {
+        /** A kind's sync status flipped to error. */
+        type: "workspace_sync_failed"
+        timestamp: number
+        session_id: string
+        workspace_id: number
+        kind: "skills" | "memory"
+        reason: "auth" | "not_found" | "network" | "other"
+      }
     // altimate_change end
     | {
         type: "mcp_server_census"
@@ -633,6 +668,8 @@ export namespace Telemetry {
         total_chars: number
         budget: number
         scopes_used: string[]
+        /** Blocks that came from the bound workspace's cloud memory (overlay). */
+        workspace_blocks?: number
       }
     | {
         // Sent before connecting, so an attempt that hangs or ends the process is still counted.
@@ -701,7 +738,7 @@ export namespace Telemetry {
         session_id: string
         message_id: string
         skill_name: string
-        skill_source: "builtin" | "global" | "project"
+        skill_source: "builtin" | "global" | "project" | "workspace"
         duration_ms: number
         // altimate_change start — skill trigger classification for discovery analytics
         trigger: "user_command" | "llm_selected" | "auto_suggested" | "unknown"
@@ -801,6 +838,8 @@ export namespace Telemetry {
         file_count: number
         // "serve": published from the IDE extension over the serve route
         source: "cli" | "tui" | "serve"
+        // altimate_change — the workspace the skill was attached to
+        workspace_id?: number
       }
     // altimate_change end
     // altimate_change start — plan refinement telemetry event
@@ -914,6 +953,8 @@ export namespace Telemetry {
         duration_ms: number
         /** Last tool category the agent used (or "none") */
         last_tool_category: string
+        // altimate_change — true when the session had used workspace skills, memory, documents or integrations
+        workspace_context_used?: boolean
       }
     // task intent classification for understanding DE problem distribution
     | {
@@ -2182,6 +2223,26 @@ export namespace Telemetry {
       // altimate_change end
     }
   }
+
+  // altimate_change start — per-session use of the bound workspace. The skill, memory and tool
+  // emit sites note what they used; session_end reports the counts and task_outcome_signal
+  // whether any workspace context was in play. Keyed by session so a serve process with several
+  // sessions keeps them apart; cleared when the session ends.
+  export type WorkspaceUse = { skills: number; documents: number; memory: number; integrations: number }
+  const workspaceUse = new Map<string, WorkspaceUse>()
+  export function noteWorkspaceUse(sessionId: string, kind: keyof WorkspaceUse, n = 1) {
+    if (!sessionId || n <= 0) return
+    const use = workspaceUse.get(sessionId) ?? { skills: 0, documents: 0, memory: 0, integrations: 0 }
+    use[kind] += n
+    workspaceUse.set(sessionId, use)
+  }
+  export function workspaceUseOf(sessionId: string): WorkspaceUse {
+    return { skills: 0, documents: 0, memory: 0, integrations: 0, ...workspaceUse.get(sessionId) }
+  }
+  export function clearWorkspaceUse(sessionId: string) {
+    workspaceUse.delete(sessionId)
+  }
+  // altimate_change end
 
   export function setContext(opts: { sessionId: string; projectId: string; workspaceId?: number }) {
     sessionId = opts.sessionId

@@ -50,6 +50,21 @@ describe("workspace id on the telemetry context", () => {
       timestamp: Date.now(),
     }) as const
 
+  test("workspace use is counted per session and cleared on read-out", () => {
+    Telemetry.clearWorkspaceUse("s9")
+    expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 0, documents: 0, memory: 0, integrations: 0 })
+    Telemetry.noteWorkspaceUse("s9", "skills")
+    Telemetry.noteWorkspaceUse("s9", "memory", 3)
+    Telemetry.noteWorkspaceUse("s9", "integrations")
+    Telemetry.noteWorkspaceUse("s9", "integrations")
+    Telemetry.noteWorkspaceUse("", "skills") // no session: ignored
+    Telemetry.noteWorkspaceUse("s9", "documents", 0) // nothing to count
+    expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 1, documents: 0, memory: 3, integrations: 2 })
+    expect(Telemetry.workspaceUseOf("other")).toEqual({ skills: 0, documents: 0, memory: 0, integrations: 0 })
+    Telemetry.clearWorkspaceUse("s9")
+    expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 0, documents: 0, memory: 0, integrations: 0 })
+  })
+
   test("every event of a bound session carries the workspace id; an event's own id wins; unbound sessions carry none", async () => {
     await Telemetry.shutdown()
     await Telemetry.init()

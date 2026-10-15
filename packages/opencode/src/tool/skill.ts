@@ -23,7 +23,7 @@ import { isBuiltinSkillLocation } from "../altimate/skill-source"
 const MAX_DISPLAY_SKILLS = 50
 
 // altimate_change start — classifySkillSource helper for skill telemetry + source badge
-export function classifySkillSource(location: string): "builtin" | "global" | "project" {
+export function classifySkillSource(location: string): "builtin" | "global" | "project" | "workspace" {
   // Normalize separators so `.altimate/builtin` / homedir prefix match on Windows too.
   const normalized = location.replace(/\\/g, "/")
   // Embedded skills load with a `builtin:<name>/SKILL.md` location and Altimate's
@@ -33,6 +33,10 @@ export function classifySkillSource(location: string): "builtin" | "global" | "p
   // `node_modules/<pkg>` isn't tagged as Altimate.
   // altimate_change - the same predicate the skill listing labels with, so the two cannot drift apart
   if (isBuiltinSkillLocation(location)) return "builtin"
+  // altimate_change start — skills synced from the bound workspace live under the managed
+  // `_workspace` folder; they are the workspace's, not the project's.
+  if (/\/\.altimate-code\/skill\/_workspace\//.test(normalized)) return "workspace"
+  // altimate_change end
   if (normalized.startsWith(os.homedir().replace(/\\/g, "/"))) return "global"
   return "project"
 }
@@ -257,6 +261,9 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
 
       // altimate_change start — classify origin once, reused for telemetry and the source badge
       const skillOrigin = classifySkillSource(skill.location)
+      // altimate_change start — count workspace skill use for the session's summary rows
+      if (skillOrigin === "workspace") Telemetry.noteWorkspaceUse(ctx.sessionID, "skills")
+      // altimate_change end
       // altimate_change end
 
       // altimate_change start — telemetry instrumentation for skill loading with trigger classification
