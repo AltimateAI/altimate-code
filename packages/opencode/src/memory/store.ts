@@ -265,7 +265,11 @@ export namespace MemoryStore {
     })
   }
 
-  export async function write(block: MemoryBlock): Promise<{ duplicates: MemoryBlock[] }> {
+  export async function write(
+    block: MemoryBlock,
+    // altimate_change — the writing session, for the workspace write-back's row
+    opts: { sessionID?: string } = {},
+  ): Promise<{ duplicates: MemoryBlock[] }> {
     if (block.content.length > MEMORY_MAX_BLOCK_SIZE) {
       throw new Error(
         `Memory block "${block.id}" content exceeds maximum size of ${MEMORY_MAX_BLOCK_SIZE} characters (got ${block.content.length})`,
@@ -327,7 +331,7 @@ export namespace MemoryStore {
     // local-existence check would then look for this block in the wrong tree
     // and skip it as deleted.
     const owningDirectory = safeDirectory()
-    void mirrorBlock(block, owningDirectory).catch((e) => {
+    void mirrorBlock(block, owningDirectory, opts.sessionID).catch((e) => {
       mirrorLog.warn("failed to mirror memory block to workspace", {
         id: block.id,
         scope: block.scope,

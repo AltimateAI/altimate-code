@@ -24,6 +24,8 @@ export function trackWorkspaceToolCall(input: {
   messageID: string
   /** The workspace the calling turn resolved; undefined for an unbound turn. */
   workspaceId: number | undefined
+  /** The calling turn (from `setContext`); a success landing after it was replaced is not counted. */
+  turn?: number
   startedAt: number
   outcome: "success" | "error"
   error?: unknown
@@ -31,7 +33,7 @@ export function trackWorkspaceToolCall(input: {
   if (!isWorkspaceClient(input.clientName)) return false
   if (input.workspaceId === undefined) return false
   try {
-    if (input.outcome === "success") Telemetry.noteWorkspaceUse(input.sessionID, "integrations")
+    if (input.outcome === "success") Telemetry.noteWorkspaceUse(input.sessionID, "integrations", 1, "add", input.turn)
     const error =
       input.error === undefined
         ? undefined

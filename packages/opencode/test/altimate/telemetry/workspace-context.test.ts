@@ -91,6 +91,11 @@ describe("workspace id on the telemetry context", () => {
     Telemetry.endSession("s7", first) // the old generation, after the replacement started
     expect(Telemetry.workspaceOf("s7")).toBe(42)
     expect(Telemetry.workspaceUseOf("s7").memory).toBe(2)
+    // A use landing with a stale turn does not count toward the replacement.
+    Telemetry.noteWorkspaceUse("s7", "integrations", 1, "add", first)
+    expect(Telemetry.workspaceUseOf("s7").integrations).toBe(0)
+    Telemetry.noteWorkspaceUse("s7", "integrations", 1, "add", second)
+    expect(Telemetry.workspaceUseOf("s7").integrations).toBe(1)
     Telemetry.endSession("s7", second)
     expect(Telemetry.workspaceOf("s7")).toBeUndefined()
     expect(Telemetry.workspaceUseOf("s7")).toEqual({ skills: 0, memory: 0, integrations: 0 })
