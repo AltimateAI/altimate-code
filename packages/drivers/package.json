@@ -10,7 +10,7 @@
   "files": [
     "src"
   ],
-  "optionalDependencies": {
-    "duckdb": "1.4.4"
+  "dependencies": {
+    "@duckdb/node-api": "1.4.4-r.1"
   }
 }

@@ -1,0 +1,39 @@
+bun test v1.4.2 (744846f84)
+
+test/sql-classification.test.ts:
+(pass) sql_execute applies the requested row limit and reports truncation [322.45ms]
+(pass) a read followed by a write is denied before executing the SQL batch [136.14ms]
+(pass) EXPLAIN ANALYZE cannot bypass write permission [130.90ms]
+(pass) comment-looking string cannot bypass write permission [122.33ms]
+
+test/s1-data-tools.test.ts:
+(pass) a. sql_execute SELECT returns structured rows and a text table [98.43ms]
+(pass) b1. configured deny prevents write execution [120.08ms]
+(pass) b2. plain reject ends the step and prevents write execution [150.03ms]
+(pass) b3. reject with feedback returns a tool failure and prevents write execution [136.82ms]
+(pass) b4. once approval executes the write and the table can be read [130.99ms]
+(pass) c. native DuckDB cancellation prevents a running query from committing [272.97ms]
+(pass) d. schema_inspect lists the created table and its columns [137.19ms]
+(pass) e. warehouse definitions persist across hosts sharing DB and storage [163.29ms]
+
+test/s5-instructions.test.ts:
+(pass) S5.1. default Altimate injects project-root CLAUDE.md [154.93ms]
+(pass) S5.2. core AGENTS.md wins over CLAUDE.md without duplicate injection [135.78ms]
+(pass) S5.3. nested CLAUDE.md precedes project-root CLAUDE.md [137.52ms]
+(pass) S5.4. root AGENTS.md suppresses nested CLAUDE.md across the entire walk [140.39ms]
+(pass) S5.5. global CLAUDE.md fallback precedes project CLAUDE.md [142.49ms]
+(pass) S5.6. global config AGENTS.md suppresses home fallback but permits project CLAUDE.md [139.60ms]
+(pass) S5.7. disabling the home Claude prompt preserves project CLAUDE.md [127.42ms]
+(pass) S5.8. disabling project discovery preserves the global fallback [115.86ms]
+(pass) S5.9. home fallback precedes core project AGENTS while project CLAUDE stays suppressed [137.30ms]
+(pass) S5.10. empty root AGENTS.md still suppresses nested CLAUDE.md [133.92ms]
+
+test/duckdb-cancellation.test.ts:
+(pass) aborting a queued DuckDB write leaves the active query running and never executes the write [541.90ms]
+(pass) an already-aborted DuckDB signal rejects before executing SQL [7.96ms]
+(pass) DuckDB preserves Date and byte binds, empty result columns, and noLimit [6.67ms]
+
+ 25 pass
+ 0 fail
+ 106 expect() calls
+Ran 25 tests across 4 files. [4.15s]

@@ -50,7 +50,7 @@ export const DRIVER_PACKAGES = {
   mysql: ["mysql2"],
   sqlserver: ["mssql"],
   oracle: ["oracledb"],
-  duckdb: ["duckdb"],
+  duckdb: ["@duckdb/node-api"],
   mongodb: ["mongodb"],
   clickhouse: ["@clickhouse/client"],
   trino: ["trino-client"],

@@ -1,0 +1,10 @@
+bun test v1.4.2 (744846f84)
+
+test/s1-data-tools.test.ts:
+(pass) c. native DuckDB cancellation prevents a running query from committing [540.82ms]
+
+ 1 pass
+ 7 filtered out
+ 0 fail
+ 5 expect() calls
+Ran 1 test across 1 file. [926.00ms]

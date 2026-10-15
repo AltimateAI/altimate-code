@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test"
+import { connect } from "@altimateai/drivers/duckdb"
+import { join } from "node:path"
 import { createFixture, createHost } from "./lib/host"
 
 type Host = Awaited<ReturnType<typeof createHost>>
@@ -119,67 +121,88 @@ test("b4. once approval executes the write and the table can be read", async () 
   expect(await host.opencode.permission.list({ sessionID: session.id })).toEqual([])
 }, 30_000)
 
-// Run with `bun test --todo --test-name-pattern 'c\. native'` to reproduce the
-// binding gap. The bounded query finishes in about a second; it must not commit
-// its table after the SDK reports that the tool was aborted.
-test.todo(
-  "c. native DuckDB cancellation prevents a running query from committing",
-  async () => {
-    await using fixture = await createFixture()
-    await using host = await createHost({
-      directory: fixture.path,
-      permissions: [{ action: "sql_execute_write", resource: "*", effect: "allow" }],
-    })
-    const session = await host.createSession()
-    await host.run(session.id, [warehouse])
-    const controller = new AbortController()
-    const stream = host.opencode.events.subscribe({ signal: controller.signal })[Symbol.asyncIterator]()
-    await stream.next()
-    const executing = (async () => {
-      for (;;) {
-        const event = await stream.next()
-        if (event.done) throw new Error("Event stream closed before query started")
-        if (event.value.type === "session.tool.progress" && event.value.data.id === "long") return
-      }
-    })()
-    try {
-      await host.start(session.id, [
-        {
-          tool: "sql_execute",
-          id: "long",
-          input: {
-            warehouse: "local",
-            sql: "CREATE TABLE after_abort AS SELECT sum(sin(i::DOUBLE)) AS value FROM range(100000000) AS t(i)",
-          },
-        },
-      ])
-      await executing
-      await Bun.sleep(50)
-      const interrupted = performance.now()
-      await host.opencode.sessions.interrupt({ sessionID: session.id })
-      await host.opencode.sessions.wait({ sessionID: session.id })
-      expect(performance.now() - interrupted).toBeLessThan(2_000)
-      const events = await Array.fromAsync(host.opencode.sessions.log({ sessionID: session.id }))
-      expect(failure(events, "long").error).toMatchObject({ type: "aborted" })
-      const checked = await host.run(session.id, [
-        {
-          tool: "sql_execute",
-          id: "after",
-          input: {
-            warehouse: "local",
-            sql: "SELECT table_name FROM information_schema.tables WHERE table_name = 'after_abort'",
-          },
-        },
-      ])
-      // A successful followup proves usability; no table would prove native abort.
-      expect(success(checked, "after").metadata).toMatchObject({ rows: [] })
-    } finally {
-      controller.abort()
-      await stream.return?.()
+test("c. native DuckDB cancellation prevents a running query from committing", async () => {
+  await using fixture = await createFixture()
+  const database = join(fixture.path, "cancellation.duckdb")
+  const initial = await connect({ type: "duckdb", path: database, create: true })
+  await initial.connect()
+  try {
+    await initial.execute("CREATE TABLE before_abort AS SELECT 7 AS value")
+  } finally {
+    await initial.close()
+  }
+  await using host = await createHost({
+    directory: fixture.path,
+    permissions: [{ action: "sql_execute_write", resource: "*", effect: "allow" }],
+  })
+  const session = await host.createSession()
+  success(
+    await host.run(session.id, [{ tool: "warehouse_add", id: "file", input: { name: "local", path: database } }]),
+    "file",
+  )
+  const controller = new AbortController()
+  const stream = host.opencode.events.subscribe({ signal: controller.signal })[Symbol.asyncIterator]()
+  await stream.next()
+  const executing = (async () => {
+    for (;;) {
+      const event = await stream.next()
+      if (event.done) throw new Error("Event stream closed before query started")
+      if (event.value.type === "session.tool.progress" && event.value.data.id === "long") return
     }
-  },
-  30_000,
-)
+  })()
+  try {
+    await host.start(session.id, [
+      {
+        tool: "sql_execute",
+        id: "long",
+        input: {
+          warehouse: "local",
+          sql: "CREATE TABLE after_abort AS SELECT sum(sin((a.i + b.i)::DOUBLE)) AS value FROM range(10000) AS a(i) CROSS JOIN range(100000) AS b(i)",
+        },
+      },
+    ])
+    await executing
+    await Bun.sleep(50)
+    const interrupted = performance.now()
+    await host.opencode.sessions.interrupt({ sessionID: session.id })
+    await host.opencode.sessions.wait({ sessionID: session.id })
+    expect(performance.now() - interrupted).toBeLessThan(2_000)
+    const events = await Array.fromAsync(host.opencode.sessions.log({ sessionID: session.id }))
+    expect(failure(events, "long").error).toMatchObject({ type: "aborted" })
+    const checked = await host.run(session.id, [
+      {
+        tool: "sql_execute",
+        id: "after",
+        input: {
+          warehouse: "local",
+          sql: "SELECT table_name FROM information_schema.tables WHERE table_name = 'after_abort'",
+        },
+      },
+    ])
+    // The same connection remains usable, and the interrupted DDL rolled back.
+    expect(success(checked, "after").metadata).toMatchObject({ rows: [] })
+    // Replacing the warehouse awaits its connector's close before returning.
+    success(await host.run(session.id, [warehouse]), "add")
+    // A separate process cannot share DuckDB's in-process instance cache. A
+    // successful write here proves native file-lock release without forced GC.
+    const reopened = Bun.spawn({
+      cmd: [process.execPath, join(import.meta.dir, "lib/reopen-duckdb.ts"), database],
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: 5_000,
+    })
+    const [status, stdout, stderr] = await Promise.all([
+      reopened.exited,
+      new Response(reopened.stdout).text(),
+      new Response(reopened.stderr).text(),
+    ])
+    expect({ status, stderr }).toEqual({ status: 0, stderr: "" })
+    expect(JSON.parse(stdout)).toEqual({ absent: [], before: [[7]], written: [[42]] })
+  } finally {
+    controller.abort()
+    await stream.return?.()
+  }
+}, 30_000)
 
 test("d. schema_inspect lists the created table and its columns", async () => {
   await using fixture = await createFixture()

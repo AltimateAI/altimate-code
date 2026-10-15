@@ -3,6 +3,7 @@ import { Plugin } from "@opencode/plugin"
 import { Schema } from "effect"
 import path from "node:path"
 import { classifyAndCheck } from "./sql-classify"
+import { ClaudeInstructions } from "./instructions"
 
 const Warehouse = Schema.Struct({
   name: Schema.String,
@@ -21,6 +22,7 @@ const QueryResult = Schema.Struct({
 export const Altimate = Plugin.define({
   id: "altimate",
   async setup(ctx) {
+    await ClaudeInstructions.setup(ctx)
     const storageKey = `warehouses:${ctx.location.project.id}:${encodeURIComponent(ctx.location.directory)}:${ctx.location.workspaceID ?? "local"}`
     const warehouses = new Map(
       Schema.decodeUnknownSync(Schema.Array(Warehouse))((await ctx.storage.get(storageKey)) ?? []).map((warehouse) => [
@@ -111,9 +113,7 @@ export const Altimate = Plugin.define({
           const connector = await connection(input.warehouse)
           context.signal.throwIfAborted()
           await context.progress({ warehouse: input.warehouse, status: "executing" })
-          // duckdb@1.4.4 exposes no Connection.interrupt(); its Database.interrupt()
-          // is a native no-op. The SDK aborts this tool, but cannot stop its query.
-          const result = await connector.execute(input.sql, input.limit ?? 100)
+          const result = await connector.execute(input.sql, input.limit ?? 100, undefined, { signal: context.signal })
           context.signal.throwIfAborted()
           const output = {
             warehouse: input.warehouse,

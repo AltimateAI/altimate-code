@@ -30,6 +30,9 @@ export async function createFixture() {
 
 export async function createHost(input: {
   directory: string
+  sessionDirectory?: string
+  project?: boolean
+  altimate?: boolean
   steps?: readonly ScriptedStep[]
   permissions?: Permission.Ruleset
   plugins?: readonly Plugin.Plugin[]
@@ -41,10 +44,10 @@ export async function createHost(input: {
     events: { persist: true },
     models: { fetch: false },
     fs: { filewatcher: false, fff: false },
-    plugins: [Altimate, model.plugin, ...(input.plugins ?? [])],
+    plugins: [...(input.altimate === false ? [] : [Altimate]), model.plugin, ...(input.plugins ?? [])],
     config: {
       directory: join(input.directory, "config"),
-      project: false,
+      project: input.project ?? false,
       content: JSON.stringify({
         model: "scripted/scripted",
         agents: { title: { disabled: true } },
@@ -61,7 +64,8 @@ export async function createHost(input: {
   return {
     opencode,
     model,
-    createSession: () => opencode.sessions.create({ location: { directory: input.directory } }),
+    createSession: () =>
+      opencode.sessions.create({ location: { directory: input.sessionDirectory ?? input.directory } }),
     start,
     async run(sessionID: string, steps: readonly ScriptedStep[]) {
       await start(sessionID, steps)

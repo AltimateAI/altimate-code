@@ -1,0 +1,29 @@
+bun test v1.4.2 (744846f84)
+
+test/sql-classification.test.ts:
+
+test/s1-data-tools.test.ts:
+
+test/s5-instructions.test.ts:
+65 |     await host.run(session.id, [])
+66 |     expect(host.model.calls).toHaveLength(1)
+67 |     expect(contexts).toHaveLength(1)
+68 |     const system = systemPrompt(host)
+69 |     for (const marker of scenario.expected) {
+70 |       expect(system.split(marker)).toHaveLength(2)
+                                        ^
+error: expect(received).toHaveLength(expected)
+
+Expected length: 2
+Received length: 1
+
+      at <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/s5-instructions.test.ts:70:36)
+(fail) S5.1. default Altimate injects project-root CLAUDE.md [309.14ms]
+
+ 0 pass
+ 19 filtered out
+ 1 fail
+ 5 expect() calls
+Ran 1 test across 3 files. [599.00ms]
+
+Exit code: 1

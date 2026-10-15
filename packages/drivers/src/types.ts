@@ -21,6 +21,8 @@ export interface SchemaColumn {
 }
 
 export interface ExecuteOptions {
+  /** Interrupt native execution when the calling tool is aborted. */
+  signal?: AbortSignal
   /** Skip the default LIMIT injection and post-truncation. Use when the caller
    *  needs the complete, untruncated result set (e.g. data-diff pipelines). */
   noLimit?: boolean

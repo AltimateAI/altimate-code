@@ -143,3 +143,101 @@ release is required before c can pass. No upstream patch was attempted.
 
 Wall-clock work began at 09:03:41 UTC and finished at 09:21:53 UTC,
 approximately 18 minutes, within the 40-minute budget.
+
+## S1b — interruptible DuckDB binding (2026-10-15, round 2)
+
+**The native cancellation blocker above is resolved.** All original S1 scenarios,
+including the former TODO (c), pass with `@duckdb/node-api@1.4.4-r.1` on darwin-arm64
+and Bun 1.4.2. Classification: **P\*** for the binding/driver adaptation; the v2
+plugin interfaces themselves are **P**, with no upstream extension point or patch
+required for this slice.
+
+### Changes and behavior
+
+- Rewrote `packages/drivers/src/duckdb.ts` against the installed Node API. Its
+  async instance/connection/query APIs replace callback-based legacy `duckdb`.
+  Existing path guards, explicit read-only opening, lock-error fallback,
+  configurable open timeout, binds, limits, and schema operations remain behind
+  the same `Connector` interface.
+- `ExecuteOptions.signal` is optional, so existing callers remain compatible.
+  `packages/altimate/src/server.ts:116` forwards the tool's `context.signal`.
+  The driver calls the real `DuckDBConnection.interrupt()`, awaits native query
+  settlement, and removes the listener in `finally`.
+- Queries sharing a connection are admitted serially. A reproduced concurrent
+  case showed why this is necessary: attaching a queued query's signal directly
+  to the connection interrupted its predecessor, while the cancelled queued
+  write still committed. The pre-admission abort check now prevents that write
+  from starting and leaves its predecessor running.
+- Close interrupts active work, waits for tracked queries, then calls connection
+  `closeSync()` followed by instance `closeSync()`. No timers, forced garbage
+  collection, or native dependency patches are used to release file locks.
+- Removed the legacy `duckdb` declaration from both package manifests and updated
+  the optional-driver package map to `@duckdb/node-api`. The pre-existing root
+  `bun.lock` edit was left untouched; no install or lockfile regeneration ran.
+
+### Cancellation evidence
+
+Test (c) creates a real database and a committed baseline table, registers it via
+SDK `warehouse_add`, starts a billion-row cross-join CTAS aggregate, waits for tool
+progress plus 50 ms, then calls public `sessions.interrupt` and `sessions.wait`.
+It asserts interruption under two seconds, `session.tool.failed` with `aborted`,
+and absence of `after_abort` through a subsequent SDK query on the same connection.
+Replacing the warehouse awaits close. A fresh Bun process immediately opens the
+same file, verifies the interrupted table is absent and the baseline is preserved,
+and commits/reads a new table. This proves rollback, connection reuse, and file-lock
+release independently of an in-process cache.
+
+Temporarily removing only the signal forwarding made (c) fail: the CTAS completed
+and `after_abort` existed after 5.93 seconds. The forwarding was restored in a
+`finally` block and the tests rerun. See
+[cancellation negative control](evidence/s1b-cancellation-mutation.txt),
+[first passing cancellation](evidence/s1b-cancellation.txt), and
+[S1 rerun](evidence/s1b-tests.txt).
+
+| S1 acceptance / regression | Result |
+| --- | --- |
+| a. structured SELECT rows and text table | PASS |
+| b1. configured deny prevents write | PASS |
+| b2. plain reject ends the step and prevents write | PASS |
+| b3. reject with feedback reports failure and prevents write | PASS |
+| b4. once approval executes write | PASS |
+| c. native cancellation, no committed CTAS, same-connection reuse, independent reopen/write | PASS (was TODO) |
+| d. schema inspection | PASS |
+| e. warehouse persistence across hosts | PASS |
+| requested row limit/truncation | PASS |
+| read/write batch permission | PASS |
+| EXPLAIN ANALYZE permission | PASS |
+| comment-looking string permission | PASS |
+| queued cancellation does not interrupt active query or commit queued write | PASS |
+| already-aborted signal prevents execution | PASS |
+| Date/Buffer/Uint8Array binds, empty-result columns, and noLimit compatibility | PASS |
+
+### Remaining scope and v2 gaps
+
+No v2 cancellation API gap remains for this acceptance slice. Native interruption
+is a connection operation, so serialization is driver-owned. Cancellation is not
+a rollback guarantee for a write that committed before the signal arrived; the
+acceptance query is deliberately long-running and its negative control establishes
+that it was still executing when interrupted.
+
+The driver retains lazy `loadOptionalDriver` lookup, now targeting the Node API
+package, including its existing managed-path fallback. Workspace loading is
+proven; compiled-binary/managed discovery, registry installation, and other
+platforms remain unverified S7 work. S1's optional SQL-parser limitation remains
+unchanged. Date and byte binds are normalized to the Node API's timestamp/blob
+wrappers; a real-query regression covers Date, Buffer, Uint8Array, empty-result
+column metadata, and `noLimit`.
+
+Final combined test/typecheck/check receipts are
+[round2-tests.txt](evidence/round2-tests.txt),
+[round2-typecheck.txt](evidence/round2-typecheck.txt), and
+[round2-root-check.txt](evidence/round2-root-check.txt).
+Only `packages/altimate/**` and `packages/drivers/**` were edited; all changes are
+unstaged. The explicit write boundary also precludes the default Obsidian copy.
+
+Final round-2 verification: **25 pass / 0 fail / 0 TODO, 106 assertions** (12 S1,
+3 driver regressions, 10 S5). Package typecheck and canonical root check both exit
+0; root lint reports 1,353 warnings and zero errors, SDK documentation reports zero
+problems, and all 37 package typechecks succeed. `git diff --check` passes and the
+Git index is empty. Work ran approximately 09:27:50–09:40:32 UTC (13 minutes),
+within the 40-minute budget.

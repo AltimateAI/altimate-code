@@ -17,7 +17,6 @@
     "@altimateai/drivers": "workspace:*",
     "@opencode/plugin": "workspace:*",
     "@opencode/schema": "workspace:*",
-    "duckdb": "1.4.4",
     "effect": "catalog:"
   },
   "devDependencies": {
