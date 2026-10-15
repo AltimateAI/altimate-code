@@ -1982,9 +1982,11 @@ export namespace Telemetry {
   // the insertion-ordered cap only matters past that many sessions mid-turn at once.
   const sessionWorkspaces = new Map<string, number | undefined>()
   const MAX_SESSION_WORKSPACES = 1024
-  /** The turn generation per session: `setContext` starts one, `endSession` ends only its own, so a
-   * cancelled turn unwinding late cannot end the replacement's entries. */
+  /** The current turn token per session: `setContext` issues one, `endSession` ends only its own, so a
+   * cancelled turn unwinding late cannot end the replacement's entries. Tokens come from one
+   * process-wide counter, so an entry evicted and re-created never reuses a token a stale turn holds. */
   const sessionTurns = new Map<string, number>()
+  let nextTurn = 0
   // altimate_change end
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
@@ -2298,7 +2300,7 @@ export namespace Telemetry {
       sessionWorkspaces.delete(oldest)
       sessionTurns.delete(oldest)
     }
-    const turn = (sessionTurns.get(opts.sessionId) ?? 0) + 1
+    const turn = ++nextTurn
     sessionTurns.set(opts.sessionId, turn)
     return turn
     // altimate_change end
