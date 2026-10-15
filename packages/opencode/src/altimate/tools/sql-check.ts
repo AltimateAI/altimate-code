@@ -132,8 +132,10 @@ export function readSql(sql: string, dialect?: string): string {
     /\b(nextval|setval|set_config|load_extension|writefile|dblink_exec|lo_import|lo_export|lo_create|lo_unlink|lo_put|pg_write_file|pg_append_file|pg_file_write|pg_file_rename|pg_file_unlink|pg_advisory_lock|pg_advisory_xact_lock)\s*\(/i.test(
       functions,
     ) ||
+    // PostgreSQL Unicode-escaped identifiers can spell a denied function without its literal name.
+    /\bU&/i.test(functions) ||
     // Session-state, backend-signalling and replication functions are callable from a plain SELECT.
-    /\b(pg_try_advisory\w*|pg_advisory_unlock\w*|pg_advisory_lock\w*|pg_advisory_xact\w*|pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_rotate_logfile|pg_promote|pg_switch_wal|pg_logical_emit_message|pg_create_\w*_replication_slot|pg_drop_replication_slot|pg_replication_slot_advance|pg_replication_origin_\w+|dblink|dblink_\w+|pg_notify|pg_stat_reset\w*|pg_log_backend_memory_contexts|pg_create_restore_point|pg_backup_\w+|pg_start_backup|pg_stop_backup|lo_from_bytea)\s*\(/i.test(
+    /\b(pg_try_advisory\w*|pg_advisory_unlock\w*|pg_advisory_lock\w*|pg_advisory_xact\w*|pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_rotate_logfile|pg_promote|pg_switch_wal|pg_logical_emit_message|pg_create_\w*_replication_slot|pg_drop_replication_slot|pg_replication_slot_advance|pg_replication_origin_\w+|dblink|dblink_\w+|pg_notify|pg_stat_reset\w*|pg_wal_replay_\w+|pg_xlog_replay_\w+|pg_log_backend_memory_contexts|pg_create_restore_point|pg_backup_\w+|pg_start_backup|pg_stop_backup|lo_from_bytea)\s*\(/i.test(
       functions,
     )
   ) {

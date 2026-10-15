@@ -44,6 +44,8 @@ import { readSql } from "./sql-check"
 const MAX_SQL_ROWS = 10_000
 const LIMIT_ERROR = `limit must be a finite positive integer between 1 and ${MAX_SQL_ROWS}`
 const MAX_GENERATED_SQL_BYTES = 1024 * 1024
+// Below the default tool-output cap, so a redirect never spills the SQL into a truncated file.
+const MAX_REDIRECT_SQL_BYTES = 40 * 1024
 
 function generatedRead(sql: string, warehouse: string, stage: "source" | "result"): string {
   try {
@@ -222,6 +224,11 @@ export const SqlExecuteTool = Tool.define(
             if (precedence.redirect) {
               // The workspace tool needs the SQL; a generated statement exists only in this
               // frame, so hand it to the caller or the redirect cannot be followed.
+              if (queryFrom && Buffer.byteLength(sql, "utf8") > MAX_REDIRECT_SQL_BYTES) {
+                throw new Error(
+                  "query_from generated SQL is too large to hand to the workspace tool; run it on a local connection.",
+                )
+              }
               const redirect = queryFrom
                 ? {
                     ...precedence.redirect,
