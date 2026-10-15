@@ -276,55 +276,60 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
   await Registry.get(SCRATCH_NAME)
   const type = Registry.canonicalType(Registry.getConfig(input.source_warehouse)?.type)
   const query = mongo ? boundedMongo(sql, maxRows + 1) : boundedSql(sql, type, maxRows + 1)
-  // Buffer one bounded source read before taking the destination's transaction lock.
-  // For a scratch source, its managed connector serializes this read on its own.
-  const result = await executeSource(source, input, query, maxRows + 1, maxBytes).catch((e) => {
-    if (isResultByteLimitError(e)) {
+  const prepare = async (reader: Connector) => {
+    const result = await executeSource(reader, input, query, maxRows + 1, maxBytes).catch((e) => {
+      if (isResultByteLimitError(e)) {
+        throw new MaterializeError(
+          `The source result is above the ${sizeLabel(maxBytes)} bound; transfer stopped and nothing was materialized. ` +
+            "Select fewer columns, filter/aggregate in the source query, or raise max_bytes (hard limit 2 GiB).",
+        )
+      }
+      throw e
+    })
+    if (result.rows.length > maxRows || result.truncated) {
       throw new MaterializeError(
-        `The source result is above the ${sizeLabel(maxBytes)} bound; transfer stopped and nothing was materialized. ` +
-          "Select fewer columns, filter/aggregate in the source query, or raise max_bytes (hard limit 2 GiB).",
+        `The source query returned more than the row cap of ${maxRows.toLocaleString("en-US")} rows; nothing was materialized. ` +
+          "Aggregate or filter in the source query, or raise max_rows (hard limit " +
+          `${HARD_MAX_ROWS.toLocaleString("en-US")}).`,
       )
     }
-    throw e
-  })
-  if (result.rows.length > maxRows || result.truncated) {
-    throw new MaterializeError(
-      `The source query returned more than the row cap of ${maxRows.toLocaleString("en-US")} rows; nothing was materialized. ` +
-        "Aggregate or filter in the source query, or raise max_rows (hard limit " +
-        `${HARD_MAX_ROWS.toLocaleString("en-US")}).`,
-    )
-  }
 
-  const names = uniqueColumnNames(result.columns)
-  let bytes = 0
-  for (const row of result.rows) {
-    bytes += rowBytes(row)
-    if (bytes > maxBytes) {
-      throw new MaterializeError(
-        `The source result is about ${sizeLabel(bytes)}, above the ${sizeLabel(maxBytes)} bound; nothing was materialized. ` +
-          "Select fewer columns, filter/aggregate in the source query, or raise max_bytes (hard limit 2 GiB).",
-      )
-    }
-  }
-
-  // Type inference (the drivers expose no column metadata, only names, so the type comes from the values:
-  // integers stay BIGINT, any fractional value widens to DOUBLE, mixed kinds fall back to VARCHAR, an
-  // all-NULL column is VARCHAR).
-  const types: ScratchType[] = []
-  for (let c = 0; c < names.length; c++) {
-    let t: ScratchType | null = null
+    const names = uniqueColumnNames(result.columns)
+    let bytes = 0
     for (const row of result.rows) {
-      const v = row[c]
-      if (t !== "VARCHAR") {
-        const k = kindOf(v)
-        if (k !== null) t = widen(t, k === "JSON" ? "VARCHAR" : k)
+      bytes += rowBytes(row)
+      if (bytes > maxBytes) {
+        throw new MaterializeError(
+          `The source result is about ${sizeLabel(bytes)}, above the ${sizeLabel(maxBytes)} bound; nothing was materialized. ` +
+            "Select fewer columns, filter/aggregate in the source query, or raise max_bytes (hard limit 2 GiB).",
+        )
       }
     }
-    types.push(t ?? "VARCHAR")
+
+    // Type inference (the drivers expose no column metadata, only names, so the type comes from the values:
+    // integers stay BIGINT, any fractional value widens to DOUBLE, mixed kinds fall back to VARCHAR, an
+    // all-NULL column is VARCHAR).
+    const types: ScratchType[] = []
+    for (let c = 0; c < names.length; c++) {
+      let t: ScratchType | null = null
+      for (const row of result.rows) {
+        const v = row[c]
+        if (t !== "VARCHAR") {
+          const k = kindOf(v)
+          if (k !== null) t = widen(t, k === "JSON" ? "VARCHAR" : k)
+        }
+      }
+      types.push(t ?? "VARCHAR")
+    }
+    return { result, names, types }
   }
 
+  // Remote sources are read and buffered before taking the destination's transaction lock. A scratch
+  // source is read inside the lock so a derivation sees and replaces consistent state.
+  const prepared = isScratch(input.source_warehouse) ? undefined : await prepare(source)
   const warnings: string[] = []
   return withScratchConnection(async (scratch, directory) => {
+    const { result, names, types } = prepared ?? (await prepare(scratch))
     const run = (sql: string) => scratch.execute(sql, undefined, undefined, { noLimit: true })
     const scratchRows = async (sql: string) => (await run(sql)).rows
     const q = quoteIdent(table)

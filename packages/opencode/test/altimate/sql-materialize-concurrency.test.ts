@@ -215,3 +215,29 @@ it.instance("concurrent materializations append atomically to the same scratch t
     })
   }),
 )
+
+it.instance("concurrent scratch-to-scratch derivations from one table lose no update", () =>
+  Effect.gen(function* () {
+    const sessions = yield* Session.Service
+    const root = yield* sessions.create({})
+    const first = yield* sessions.create({ parentID: root.id })
+    const second = yield* sessions.create({ parentID: root.id })
+    yield* Effect.promise(async () => {
+      const scratch = await getScratch(root.id)
+      await scratch.execute("CREATE TABLE counter AS SELECT 0::BIGINT AS n")
+      const materialize = await initTool(SqlMaterializeTool)
+      const input = {
+        source_warehouse: "scratch",
+        sql: "SELECT n + 1 AS n FROM counter",
+        target_table: "counter",
+        mode: "replace" as const,
+      }
+      const results = await Promise.all([
+        materialize.execute(input, context(first.id)),
+        materialize.execute(input, context(second.id)),
+      ])
+      for (const result of results) expect(result.metadata.error).toBeUndefined()
+      expect((await scratch.execute("SELECT n::INTEGER AS n FROM counter")).rows).toEqual([[2]])
+    })
+  }),
+)
