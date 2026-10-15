@@ -338,7 +338,7 @@ export function linkedWorkspace(directory: string | null = currentDirectory()): 
 }
 
 /** The linked workspace's account-scoped identity (credential scope plus id), for telemetry's dedupe. */
-function linkedWorkspaceKey(directory: string | null = currentDirectory()): string | undefined {
+export function linkedWorkspaceKey(directory: string | null = currentDirectory()): string | undefined {
   if (!directory) return undefined
   return directories.get(directory)?.linked?.key
 }

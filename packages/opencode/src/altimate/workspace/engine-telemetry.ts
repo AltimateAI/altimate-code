@@ -183,12 +183,13 @@ const MAX_SEEN_SESSIONS = 256
 export function trackPrecedence(
   sessionID: string,
   p: Pick<Precedence, "enabled" | "disabledReason" | "shadowed" | "extensions" | "workspaceId">,
-  opts: { escapeHatch: boolean; connections: number },
+  opts: { escapeHatch: boolean; connections: number; identity?: string },
 ): boolean {
   try {
-    // The local connections shadowed are part of what is reported, so a registry change that
-    // moves the count re-reports the same snapshot.
-    const signature = `${precedenceSignature(p)}|c=${opts.connections}|e=${opts.escapeHatch}`
+    // The local connections shadowed and the escape hatch are part of what is reported, so a change
+    // in either re-reports the same snapshot; the account-scoped identity (credential scope plus
+    // id) tells the same id under another account apart.
+    const signature = `${precedenceSignature(p)}|c=${opts.connections}|e=${opts.escapeHatch}|w=${opts.identity ?? ""}`
     if (precedenceSeen.get(sessionID) === signature) return false
     precedenceSeen.set(sessionID, signature)
     if (precedenceSeen.size > MAX_SEEN_SESSIONS) precedenceSeen.delete(precedenceSeen.keys().next().value!)
