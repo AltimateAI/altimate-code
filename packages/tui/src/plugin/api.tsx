@@ -32,6 +32,9 @@ import { useSessionTabs } from "../context/session-tabs"
 import { useOptionalPanel } from "../context/panel"
 import { useLocal } from "../context/local"
 import { abbreviateHome } from "../util/path-format"
+// ALT-P02
+import { usePromptRef } from "../context/prompt"
+import { emptyPrompt } from "../prompt/history"
 
 export type Dispose = () => Promise<void>
 
@@ -82,6 +85,8 @@ export function usePluginHost() {
     sessionTabs: useSessionTabs(),
     panel: useOptionalPanel(),
     local: useLocal(),
+    // ALT-P02
+    prompt: usePromptRef(),
   }
 }
 
@@ -204,6 +209,22 @@ export function createPluginContext(input: {
     ui: {
       dialog: dialogApi,
       toast: toastApi,
+      // ALT-P02
+      composer: {
+        get: () => host.prompt.current?.current.text,
+        set(text) {
+          const prompt = host.prompt.current
+          if (!prompt) return false
+          prompt.set({ ...emptyPrompt(), text })
+          return true
+        },
+        focus() {
+          const prompt = host.prompt.current
+          if (!prompt) return false
+          prompt.focus()
+          return prompt.focused
+        },
+      },
       format: {
         path: (value) => abbreviateHome(value, host.paths.home),
       },

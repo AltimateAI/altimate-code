@@ -490,6 +490,15 @@ export interface Keymap {
 export interface UI {
   readonly dialog: Dialog
   readonly toast: Toast
+  // ALT-P02
+  readonly composer: {
+    /** Returns the active composer's text, or undefined when no composer is mounted. */
+    get(): string | undefined
+    /** Replaces the draft with plain text, clearing attachments and mentions. Returns false when no composer is mounted. */
+    set(text: string): boolean
+    /** Focuses the active composer. Returns false when it is absent or cannot receive focus. */
+    focus(): boolean
+  }
   readonly format: {
     path(value: string): string
   }
