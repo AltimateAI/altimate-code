@@ -854,6 +854,34 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.added).toHaveLength(1)
   })
 
+  test.each([
+    [
+      "a changed choice",
+      (h: Harness): void => {
+        h.choices = '[["jira","9"]]'
+      },
+    ],
+    [
+      "a re-link",
+      (h: Harness): void => {
+        h.binding = bound(7, "growth")
+      },
+    ],
+  ] as const)("an engine started for %s that fails its handshake gets the session's one retry, like any start", async (_, change) => {
+    // The restart and the failed-handshake retry are separate rules: a start that
+    // fails is retried once per session, whatever started it. (codex r1)
+    const h = install({})
+    await beforeTurn("s1")
+    h.status = "failed"
+    change(h)
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(2)
+    expect(settledOutcome("s1")?.kind).toBe("connect-failed")
+    // Spent: later boundaries neither restart nor retry.
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(2)
+  })
+
   test("a choice made before the first boundary counts against the engine's own start", async () => {
     // MCP bootstrapped the engine from the first config load, which read "[]".
     const h = install({})
