@@ -35,7 +35,8 @@ function literalWord(node: Node | null): string | undefined {
   if (node.type === "word" || node.type === "number") {
     let text = node.text
     if (text === "~" || text.startsWith("~/")) text = homedir() + text.slice(1)
-    if (/[~$*?{\[]/.test(text)) return
+    // Backslash-escaped metacharacters are literal; only unescaped ones mean expansion.
+    if (/[~$*?{\[]/.test(text.replace(/\\./gs, ""))) return
     return text.replace(/\\(.)/gs, "$1")
   }
   if (node.type === "string" && node.namedChildren.every((child) => child?.type === "string_content")) {
@@ -53,8 +54,8 @@ function literalWord(node: Node | null): string | undefined {
 // Cap on tracked directories so pathological scripts cannot blow up alias generation.
 const MAX_TRACKED_DIRECTORIES = 32
 // Operand-spelling combinations are enumerated in full up to this many operands.
-const MAX_MIXED_OPERANDS = 3
-const MAX_ALIAS_VARIANTS = 512
+const MAX_MIXED_OPERANDS = 4
+const MAX_ALIAS_VARIANTS = 4096
 
 // Options that take a separate non-path value; the value must not be read as an operand.
 const VALUE_OPTIONS: Record<string, string[]> = {
@@ -95,7 +96,7 @@ function* shellCommands(node: Node | null, cwds: string[]): Generator<{ node: No
     const words = shellWords(node, true)
     return words[0] && literalWord(words[0]) === "cd" ? afterCd(cwds, words) : cwds
   }
-  const local = ["subshell", "command_substitution"].includes(node.type)
+  const local = ["subshell", "command_substitution", "pipeline"].includes(node.type)
   let next = cwds
   for (const child of node.namedChildren) next = yield* shellCommands(child, next)
   return local ? cwds : next
@@ -141,6 +142,21 @@ function pathOperands(name: string, words: Node[]): PathOperand[] {
     if (first >= 0) operands.splice(first, 1)
   }
   return operands
+}
+
+// Resolve symlinks in the deepest existing parent so a not-yet-created destination
+// behind a symlinked directory still maps to where it will really be written.
+async function realpathThroughParents(target: string): Promise<string> {
+  const missing: string[] = []
+  let current = target
+  while (true) {
+    const resolved = await fs.realpath(current).catch(() => "")
+    if (resolved) return path.join(resolved, ...missing.reverse())
+    const parent = path.dirname(current)
+    if (parent === current) return ""
+    missing.push(path.basename(current))
+    current = parent
+  }
 }
 
 function quoteLike(word: Node, text: string) {
@@ -307,7 +323,7 @@ export const BashTool = Tool.define("bash", async () => {
             })
             const listing = name === "ls" && operands.length === 0
             if (listing) targets.push({ operand: undefined as never, target: commandCwd })
-            const reals = await Promise.all(targets.map((item) => fs.realpath(item.target).catch(() => "")))
+            const reals = await Promise.all(targets.map((item) => realpathThroughParents(item.target)))
             reals.forEach((resolved, index) => {
               log.info("resolved path", { arg: targets[index].target, resolved })
             })
@@ -341,7 +357,12 @@ export const BashTool = Tool.define("bash", async () => {
               }
               expand([])
             } else {
+              // Too many operands to enumerate: uniform spellings plus each operand spelled
+              // differently from the rest.
               for (let i = 0; i < 4; i++) combos.push(choices.map((options) => Math.min(i, options.length - 1)))
+              choices.forEach((options, index) => {
+                options.forEach((_, i) => combos.push(choices.map((_, j) => (j === index ? i : 0))))
+              })
             }
             // `cat -- x` and `cat x` read the same file, so also alias the form without `--`.
             const terminator =
@@ -377,6 +398,8 @@ export const BashTool = Tool.define("bash", async () => {
             }
           }
         }
+        // Insignificant shell whitespace must not let an exact rule miss the command.
+        for (const variant of [...variants]) if (!/["'\\]/.test(variant)) variants.add(variant.replace(/[ \t]+/g, " "))
         const aliases = permissionAliases.get(original) ?? new Set<string>()
         for (const variant of variants) aliases.add(variant)
         permissionAliases.set(original, aliases)
