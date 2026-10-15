@@ -308,6 +308,9 @@ async function memoryEnabled(binding: CachedBinding): Promise<boolean> {
   return (await memoryStatus(binding)) === "enabled"
 }
 
+/** A failed read says what failed, so the sync record can classify it. */
+type MemoryStatusOutcome = "enabled" | "disabled" | { status: "error"; error: string }
+
 /** Three-way, because a read that cannot reach the service must not be reported
  * as "this workspace has no memory" — that reads as success while destroying
  * whatever the session already had. */
@@ -320,7 +323,7 @@ async function memoryStatus(
      * inherit a positive written under a previous account. */
     fresh?: boolean
   } = {},
-): Promise<"enabled" | "disabled" | "error"> {
+): Promise<MemoryStatusOutcome> {
   const cached = opts.fresh ? undefined : memoryEnabledCache.get(binding.datamateId)
   if (cached && Date.now() - cached.checkedAt < MEMORY_ENABLED_TTL_MS) return "enabled"
   try {
@@ -336,7 +339,7 @@ async function memoryStatus(
         missingFromListWarned.add(binding.datamateId)
         log.warn("workspace missing from the workspace list; memory setting unknown", { workspace: binding.datamateId })
       }
-      return "error"
+      return { status: "error", error: "workspace missing from the workspace list" }
     }
     missingFromListWarned.delete(binding.datamateId)
     if (match.memoryEnabled === undefined && !missingFieldWarned.has(binding.datamateId)) {
@@ -363,7 +366,7 @@ async function memoryStatus(
     log.warn("could not confirm workspace memory setting", { err: String(err) })
     // Not cached either way: a transient failure should neither disable the
     // mirror for a minute nor keep it enabled.
-    return "error"
+    return { status: "error", error: String(err) }
   }
 }
 
@@ -1218,7 +1221,7 @@ export async function memoryEnabledForPoller(binding: CachedBinding): Promise<"e
   const ask = (async () => {
     try {
       const status = await memoryStatus(binding, { fresh: true })
-      const answer = status === "error" ? ("unknown" as const) : status
+      const answer = typeof status === "string" ? status : ("unknown" as const)
       pollMemo.set(key, { at: Date.now(), status: answer })
       return answer
     } finally {
@@ -1352,8 +1355,10 @@ export async function backfill(
   if (!binding)
     return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true, gateReason: "unbound" }
   const status = await memoryStatus(binding)
-  if (status !== "enabled")
-    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true, gateReason: status }
+  if (status !== "enabled") {
+    const gateReason = typeof status === "string" ? status : status.status
+    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true, gateReason }
+  }
   const index = await readIndex()
 
   const { pending, skipped } = partitionPending(blocks, binding, index)
@@ -1530,7 +1535,7 @@ type LoadOutcome = (
     }
   | { status: "unlinked"; /** The server confirmed it, rather than a lookup failing. */ confirmed: boolean }
   | { status: "disabled" }
-  | { status: "error" }
+  | { status: "error"; /** What failed, for the sync record and its reason class. */ error: string }
 ) & {
   epoch?: string
   dir?: string | null
@@ -1572,12 +1577,12 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
       stable = before === epoch
     }
     vouched = epoch
-    if (!stable) return { status: "error", epoch, dir, ...stamp }
+    if (!stable) return { status: "error", error: "the workspace link changed while loading", epoch, dir, ...stamp }
     if (!binding) return { status: "unlinked", confirmed, epoch, dir, ...stamp }
     const datamateId = binding.datamateId
     resolved = datamateId
     const enabled = await memoryStatus(binding)
-    if (enabled === "error") return { status: "error", epoch, dir, datamateId, ...stamp }
+    if (typeof enabled !== "string") return { status: "error", error: enabled.error, epoch, dir, datamateId, ...stamp }
     if (enabled === "disabled") return { status: "disabled", epoch, dir, datamateId, ...stamp }
 
     const ownProject = projectIdentityFor(binding)
@@ -1632,7 +1637,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     log.warn("workspace memory load failed", { err: String(err) })
     // Stamped like any other outcome: without an epoch the session would reload (and make
     // the prompt wait) on every turn for as long as the service is down.
-    return { status: "error", epoch: vouched, dir, datamateId: resolved, ...stamp }
+    return { status: "error", error: String(err), epoch: vouched, dir, datamateId: resolved, ...stamp }
   }
 }
 
@@ -1678,7 +1683,9 @@ function recordSyncState(outcome: LoadOutcome): void {
       if (retire) return SyncState.forget(dir, "memory", { isCurrent, before: outcome.observedAt })
       if (outcome.datamateId === undefined) return
       const result =
-        outcome.status === "loaded" ? { items: outcome.items } : { error: "could not load workspace memory" }
+        outcome.status === "loaded"
+          ? { items: outcome.items }
+          : { error: `could not load workspace memory: ${"error" in outcome ? outcome.error : outcome.status}` }
       return SyncState.record(dir, outcome.datamateId, "memory", result, {
         isCurrent,
         scope: outcome.scope,

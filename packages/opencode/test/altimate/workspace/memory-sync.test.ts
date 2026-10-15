@@ -2800,7 +2800,9 @@ describe("sync state", () => {
       listFails = false
     }
     const failed = await memoryState(dir, (e) => e.status === "error")
-    expect(failed).toMatchObject({ status: "error", count: 1, error: "could not load workspace memory" })
+    expect(failed).toMatchObject({ status: "error", count: 1 })
+    // The record keeps what failed, so the sync-failure reason class is real rather than "other".
+    expect(failed?.error).toMatch(/^could not load workspace memory: /)
     // "memory loaded Xm ago" reads the last success, which the failure did not move.
     expect(failed?.lastSucceededAt).toBe(loaded!.lastSucceededAt)
   })

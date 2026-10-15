@@ -2060,7 +2060,6 @@ export namespace Telemetry {
         // still says how this CLI was launched (cli, tui, serve, datamates).
         client: "altimate-code",
         source: clientSource,
-        ...(workspaceId !== undefined && !("workspace_id" in fields) && { workspace_id: String(workspaceId) }),
         project_id: fields.project_id ?? projectId,
         ...(machineId && { machine_id: machineId }),
         // altimate_change — groups every event from one process launch. The onboarding funnel
@@ -2434,6 +2433,10 @@ export namespace Telemetry {
     const eventSession = (event as { session_id?: unknown }).session_id
     const operationId = typeof eventSession === "string" ? TraceContext.activeTraceId(eventSession) : undefined
     if (operationId) (event as any)._operation_id = operationId
+    // altimate_change end
+    // altimate_change start — the bound workspace is read now, not at flush: a serve process can start
+    // another session's turn, and move the context, before this event is serialised.
+    if (workspaceId !== undefined && !("workspace_id" in event)) (event as any).workspace_id = workspaceId
     // altimate_change end
     buffer.push(event)
     if (buffer.length > MAX_BUFFER_SIZE) {

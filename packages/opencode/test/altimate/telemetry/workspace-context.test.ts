@@ -80,16 +80,16 @@ describe("workspace id on the telemetry context", () => {
       workspace_id: 7,
       how: "bind_existing",
     })
+    // Another session's turn moves the context before the batch is serialised (a serve process):
+    // the rows above keep the workspace they were tracked under.
+    Telemetry.setContext({ sessionId: "s2", projectId: "p1" })
+    Telemetry.track(startup("unbound"))
     await Telemetry.flush()
     const bound = envelopes().find((e) => e.data.baseData.properties.command === "bound")
     expect(bound.data.baseData.properties.workspace_id).toBe("42")
     expect(bound.data.baseData.properties.client).toBe("altimate-code")
     const linked = envelopes().find((e) => e.data.baseData.name === "workspace_linked")
     expect(linked.data.baseData.properties.workspace_id).toBe("7") // the row's own id, not the context's
-
-    Telemetry.setContext({ sessionId: "s2", projectId: "p1" })
-    Telemetry.track(startup("unbound"))
-    await Telemetry.flush()
     const unbound = envelopes().find((e) => e.data.baseData.properties.command === "unbound")
     expect("workspace_id" in unbound.data.baseData.properties).toBe(false)
   })
