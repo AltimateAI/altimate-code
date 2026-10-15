@@ -1,0 +1,7 @@
+64 |         if (/step|error|fail|retry/.test(event.type))
+error: expect(received).toBe(expected)
+Expected: true
+Received: false
+(fail) S2.live. real Altimate gateway streams a completion [737.87ms]
+ 0 pass
+ 1 fail
