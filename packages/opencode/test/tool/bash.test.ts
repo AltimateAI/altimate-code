@@ -14,6 +14,7 @@ import { Effect, Layer, ManagedRuntime } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { Truncate as TruncateService } from "../../src/tool/truncate"
 import { InstanceRef } from "../../src/effect/instance-ref"
+import { evaluateRequest } from "../../src/permission/evaluate"
 
 // The shared tool fixture stubs Truncate with a no-op so most tool tests don't
 // truncate. Truncation tests need the REAL Truncate service, so build the tool
@@ -86,6 +87,214 @@ describe("tool.bash", () => {
 })
 
 describe("tool.bash permissions", () => {
+  test.each([
+    ["cat ../sibling/output.md", "cat", "sibling/output.md"],
+    ['cat "../sibling/output.md"', "cat", "sibling/output.md"],
+    ["cd ../sibling && cat output.md", "cat", "sibling/output.md"],
+    ["cd ../sibling; cat output.md", "cat", "sibling/output.md"],
+    ["ls ..", "ls", ""],
+    ["ls; ls ..", "ls", ""],
+    ["cd .. && ls", "ls", ""],
+  ])("denies normalized paths in %s", async (command, executable, target) => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "workspace"))
+    await fs.mkdir(path.join(tmp.path, "sibling"))
+    await Bun.write(path.join(tmp.path, "sibling", "output.md"), "private content")
+    await provideInstance(path.join(tmp.path, "workspace"), async () => {
+      const bash = await initTool(BashTool)
+      const absolute = `${executable} ${path.join(tmp.path, target)}`
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "*", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: absolute, action: "deny" },
+      ]
+      const testCtx = {
+        ...ctx,
+        ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          for (const pattern of request.patterns) {
+            if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+          }
+        },
+      }
+      for (const spelling of [absolute, command]) {
+        await expect(bash.execute({ command: spelling, description: "Inspect path" }, testCtx)).rejects.toThrow(
+          "Path denied",
+        )
+      }
+    })
+  })
+
+  test.each([
+    ["cd nested & cat local.txt", "cat nested/local.txt"],
+    ["cat 'one two'", "cat one two"],
+  ])("does not let an allow rule for a normalized spelling cover %s", async (command, allowedSpelling) => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "nested"))
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const absolute = (value: string) => value.replace(/(\S+)$/, (_, last) => path.join(tmp.path, last))
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "*", pattern: "*", action: "deny" },
+        { permission: "bash", pattern: absolute(allowedSpelling), action: "allow" },
+        { permission: "bash", pattern: "cd *", action: "allow" },
+      ]
+      const testCtx = {
+        ...ctx,
+        ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          for (const pattern of request.patterns) {
+            if (evaluateRequest(request, pattern, ruleset).action !== "allow") throw new Error("Path denied")
+          }
+        },
+      }
+      await expect(bash.execute({ command, description: "Read file" }, testCtx)).rejects.toThrow("Path denied")
+    })
+  })
+
+  test("keeps directory changes inside subshells and substitutions", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "nested"))
+    await Bun.write(path.join(tmp.path, "local.txt"), "local content")
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      for (const command of ["(cd nested); cat local.txt", 'echo "$(cd nested)"; cat local.txt']) {
+        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+        await bash.execute(
+          { command, description: "Read local file" },
+          {
+            ...ctx,
+            ask: async (req: (typeof requests)[number]) => {
+              requests.push(req)
+            },
+          },
+        )
+        const request = requests.find((req) => req.permission === "bash")!
+        const ruleset: PermissionNext.Ruleset = [
+          { permission: "bash", pattern: "*", action: "allow" },
+          { permission: "bash", pattern: `cat ${path.join(tmp.path, "local.txt")}`, action: "deny" },
+        ]
+        expect(request.patterns.some((pattern) => evaluateRequest(request, pattern, ruleset).action === "deny")).toBe(
+          true,
+        )
+      }
+    })
+  })
+
+  test("retains exact relative command allow rules", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Bun.write(path.join(tmp.path, "local.txt"), "local content")
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "bash", pattern: "*", action: "deny" },
+        { permission: "bash", pattern: "cat local.txt", action: "allow" },
+      ]
+      const result = await bash.execute(
+        { command: "cat local.txt", description: "Read local file" },
+        {
+          ...ctx,
+          ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+            for (const pattern of request.patterns)
+              expect(evaluateRequest(request, pattern, ruleset).action).toBe("allow")
+          },
+        },
+      )
+      expect(result.output).toContain("local content")
+    })
+  })
+
+  test("keeps repeated commands in different directories as separate accesses", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "nested"))
+    await Bun.write(path.join(tmp.path, "local.txt"), "private content")
+    await Bun.write(path.join(tmp.path, "nested", "local.txt"), "public content")
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "bash", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: `cat ${path.join(tmp.path, "local.txt")}`, action: "deny" },
+        { permission: "bash", pattern: `cat ${path.join(tmp.path, "nested", "local.txt")}`, action: "allow" },
+      ]
+      await expect(
+        bash.execute(
+          {
+            command: "cat local.txt; cd nested && cat local.txt",
+            description: "Read files in two directories",
+          },
+          {
+            ...ctx,
+            ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+              for (const pattern of request.patterns) {
+                if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+              }
+            },
+          },
+        ),
+      ).rejects.toThrow("Path denied")
+    })
+  })
+
+  test("checks external_directory for parent listings", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      await expect(
+        bash.execute(
+          { command: "ls ..", description: "List parent directory" },
+          {
+            ...ctx,
+            ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+              if (request.permission === "external_directory") throw new Error("External directory denied")
+            },
+          },
+        ),
+      ).rejects.toThrow("External directory denied")
+    })
+  })
+
+  test("does not merge distinct raw rules for the same absolute command", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Bun.write(path.join(tmp.path, "local.txt"), "private content")
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "bash", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: "cat local.txt", action: "deny" },
+        { permission: "bash", pattern: "cat ./local.txt", action: "allow" },
+      ]
+      await expect(
+        bash.execute(
+          { command: "cat local.txt; cat ./local.txt", description: "Read local file twice" },
+          {
+            ...ctx,
+            ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+              for (const pattern of request.patterns) {
+                if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+              }
+            },
+          },
+        ),
+      ).rejects.toThrow("Path denied")
+    })
+  })
+
+  test("resolves relative workdir from the instance directory", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "nested"))
+    await Bun.write(path.join(tmp.path, "nested", "local.txt"), "nested content")
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute(
+        {
+          command: "cat local.txt",
+          workdir: "nested",
+          description: "Read nested file",
+        },
+        ctx,
+      )
+      expect(result.metadata.exit).toBe(0)
+      expect(result.output).toContain("nested content")
+    })
+  })
+
   test("asks for bash permission with correct pattern", async () => {
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {

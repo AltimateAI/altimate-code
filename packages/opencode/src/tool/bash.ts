@@ -18,6 +18,53 @@ import { BashArity } from "@/permission/arity"
 import { Truncate } from "./truncation"
 import { Plugin } from "@/plugin"
 import { Global } from "@/global"
+// altimate_change start — upstream_fix: resolve literal shell paths for permission matching
+import type { Node } from "web-tree-sitter"
+
+function shellWords(node: Node) {
+  return node.namedChildren.filter(
+    (child): child is Node =>
+      child !== null && ["command_name", "word", "string", "raw_string", "concatenation"].includes(child.type),
+  )
+}
+
+function literalWord(node: Node | null): string | undefined {
+  if (!node) return
+  if (node.type === "raw_string") return node.text.slice(1, -1)
+  if (node.type === "word") {
+    if (/[~$*?{\[]/.test(node.text)) return
+    return node.text.replace(/\\(.)/gs, "$1")
+  }
+  if (node.type === "string" && node.namedChildren.every((child) => child?.type === "string_content")) {
+    return node.text.slice(1, -1).replace(/\\\n/g, "").replace(/\\([$`"\\])/g, "$1")
+  }
+  if (node.type === "command_name" || node.type === "concatenation") {
+    const parts = node.namedChildren.map(literalWord)
+    if (parts.every((part) => part !== undefined)) return parts.join("")
+  }
+}
+
+// Track literal directory changes in straight-line sequences. Analyze branches
+// independently and keep subshell, substitution, and pipeline changes local.
+function* shellCommands(node: Node | null, cwd: string): Generator<{ node: Node; cwd: string }, string> {
+  if (!node) return cwd
+  if (node.type === "command") {
+    yield { node, cwd }
+    for (const child of node.namedChildren) yield* shellCommands(child, cwd)
+    const [name, arg] = shellWords(node).map(literalWord)
+    return name === "cd" && arg && !arg.startsWith("-") ? path.resolve(cwd, arg) : cwd
+  }
+  const sequential =
+    ["program", "list", "subshell", "command_substitution", "compound_statement", "redirected_statement"].includes(node.type) &&
+    !node.children.some((child) => child?.type === "||" || child?.type === "&")
+  let next = cwd
+  for (const child of node.namedChildren) {
+    const result = yield* shellCommands(child, sequential ? next : cwd)
+    if (sequential) next = result
+  }
+  return ["program", "list", "compound_statement", "redirected_statement"].includes(node.type) ? next : cwd
+}
+// altimate_change end
 
 // altimate_change start — run-mode markers must not reach bash child processes.
 // `run` sets ALTIMATE_RUN_MODE on its own process to arm run-mode-only
@@ -132,7 +179,9 @@ export const BashTool = Tool.define("bash", async () => {
         ),
     }),
     async execute(params, ctx) {
-      const cwd = params.workdir || Instance.directory
+      // altimate_change start — upstream_fix: resolve workdir relative to the active instance
+      const cwd = path.resolve(Instance.directory, params.workdir || ".")
+      // altimate_change end
       if (params.timeout !== undefined && params.timeout < 0) {
         throw new Error(`Invalid timeout value: ${params.timeout}. Timeout must be a positive number.`)
       }
@@ -145,34 +194,41 @@ export const BashTool = Tool.define("bash", async () => {
       if (!Instance.containsPath(cwd)) directories.add(cwd)
       const patterns = new Set<string>()
       const always = new Set<string>()
+      // altimate_change start — upstream_fix: retain raw command rules alongside absolute path rules
+      const permissionAliases = new Map<string, Set<string>>()
 
-      for (const node of tree.rootNode.descendantsOfType("command")) {
+      for (const { node, cwd: commandCwd } of shellCommands(tree.rootNode, cwd)) {
+        // altimate_change end
         if (!node) continue
 
         // Get full command text including redirects if present
         let commandText = node.parent?.type === "redirected_statement" ? node.parent.text : node.text
 
-        const command = []
-        for (let i = 0; i < node.childCount; i++) {
-          const child = node.child(i)
-          if (!child) continue
-          if (
-            child.type !== "command_name" &&
-            child.type !== "word" &&
-            child.type !== "string" &&
-            child.type !== "raw_string" &&
-            child.type !== "concatenation"
-          ) {
-            continue
-          }
-          command.push(child.text)
-        }
+        // altimate_change start — upstream_fix: normalize static path operands, including directory listings
+        const words = shellWords(node)
+        const command = words.map((word) => word.text)
+        const name = words[0] && literalWord(words[0])
+        const source = node.parent?.type === "redirected_statement" ? node.parent : node
+        const replacements: { start: number; end: number; text: string }[] = []
 
         // not an exhaustive list, but covers most common cases
-        if (["cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat"].includes(command[0])) {
-          for (const arg of command.slice(1)) {
-            if (arg.startsWith("-") || (command[0] === "chmod" && arg.startsWith("+"))) continue
-            const resolved = await fs.realpath(path.resolve(cwd, arg)).catch(() => "")
+        if (name && ["cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat", "ls"].includes(name)) {
+          const operands = words.slice(1).filter((word) => !word.text.startsWith("-"))
+          const targets = operands.flatMap((word) => {
+            const arg = literalWord(word)
+            if (arg === undefined || (name === "chmod" && arg.startsWith("+"))) return []
+            const target = path.resolve(commandCwd, arg)
+            if (!["chmod", "chown"].includes(name) || word !== operands[0]) {
+              replacements.push({ start: word.startIndex, end: word.endIndex, text: target })
+            }
+            return [target]
+          })
+          if (name === "ls" && operands.length === 0) {
+            targets.push(commandCwd)
+            replacements.push({ start: node.endIndex, end: node.endIndex, text: ` ${commandCwd}` })
+          }
+          for (const arg of targets) {
+            const resolved = await fs.realpath(arg).catch(() => "")
             log.info("resolved path", { arg, resolved })
             if (resolved) {
               const normalized =
@@ -184,10 +240,22 @@ export const BashTool = Tool.define("bash", async () => {
             }
           }
         }
+        const original = commandText
+        for (const replacement of replacements.reverse()) {
+          const start = replacement.start - source.startIndex
+          const end = replacement.end - source.startIndex
+          commandText = commandText.slice(0, start) + replacement.text + commandText.slice(end)
+        }
+        const aliases = permissionAliases.get(original) ?? new Set<string>()
+        aliases.add(commandText)
+        permissionAliases.set(original, aliases)
+        // altimate_change end
 
         // cd covered by above check
         if (command.length && command[0] !== "cd") {
-          patterns.add(commandText)
+          // altimate_change start — upstream_fix: rules match the authored command text
+          patterns.add(original)
+          // altimate_change end
           always.add(BashArity.prefix(command).join(" ") + " *")
         }
       }
@@ -211,7 +279,13 @@ export const BashTool = Tool.define("bash", async () => {
           permission: "bash",
           patterns: Array.from(patterns),
           always: Array.from(always),
-          metadata: {},
+          // altimate_change start — upstream_fix: evaluate raw and normalized commands as equivalent spellings
+          metadata: {
+            permissionAliases: Object.fromEntries(
+              Array.from(permissionAliases, ([key, values]) => [key, [...values].map((value) => [value])]),
+            ),
+          },
+          // altimate_change end
         })
       }
 

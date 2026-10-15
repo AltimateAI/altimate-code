@@ -53,6 +53,7 @@ const readLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
     CrossSpawnSpawner.defaultLayer,
     Instruction.defaultLayer,
     LSP.defaultLayer,
+    Permission.defaultLayer,
     Ripgrep.defaultLayer,
     Truncate.defaultLayer,
   )
@@ -275,6 +276,67 @@ describe("tool.read external_directory permission", () => {
       yield* exec(dir, { filePath: path.join(dir, "internal.txt") }, next)
       const ext = items.find((item) => item.permission === "external_directory")
       expect(ext).toBeUndefined()
+    }),
+  )
+})
+
+describe("tool.read absolute path permissions", () => {
+  const guarded = Effect.fn("ReadToolTest.guarded")(function* (ruleset: PermissionV1.Ruleset) {
+    const permission = yield* Permission.Service
+    return {
+      ...ctx,
+      ask: (request: Omit<PermissionV1.Request, "id" | "sessionID" | "tool">) =>
+        permission.ask({ ...request, sessionID: ctx.sessionID, ruleset }).pipe(Effect.orDie),
+    }
+  })
+
+  it.live("denies relative and absolute sibling paths with the same absolute rule", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const current = path.join(dir, "current")
+      const sibling = path.join(dir, "sibling", "output.md")
+      yield* put(path.join(current, "local.md"), "local content")
+      yield* put(sibling, "private content")
+      const next = yield* guarded([
+        { permission: "read", pattern: "*", action: "allow" },
+        { permission: "read", pattern: full(sibling), action: "deny" },
+      ])
+
+      for (const filePath of ["../sibling/output.md", sibling, `${current}/../sibling/output.md`]) {
+        expect(yield* fail(current, { filePath }, next)).toBeInstanceOf(PermissionV1.DeniedError)
+      }
+    }),
+  )
+
+  it.live("denies directory aliases and relative filenames with absolute rules", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      const filepath = path.join(dir, "private.md")
+      yield* put(filepath, "private content")
+      const next = yield* guarded([
+        { permission: "read", pattern: "*", action: "allow" },
+        { permission: "read", pattern: full(dir), action: "deny" },
+        { permission: "read", pattern: "*/private.md", action: "deny" },
+      ])
+
+      for (const filePath of ["", ".", dir, "private.md", filepath]) {
+        expect(yield* fail(dir, { filePath }, next)).toBeInstanceOf(PermissionV1.DeniedError)
+      }
+    }),
+  )
+
+  it.live("preserves worktree-relative allowlist rules", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped({ git: true })
+      yield* put(path.join(dir, "public.md"), "public content")
+      yield* put(path.join(dir, "private.md"), "private content")
+      const next = yield* guarded([
+        { permission: "read", pattern: "*", action: "deny" },
+        { permission: "read", pattern: "public.md", action: "allow" },
+      ])
+
+      expect((yield* exec(dir, { filePath: "public.md" }, next)).output).toContain("public content")
+      expect(yield* fail(dir, { filePath: "private.md" }, next)).toBeInstanceOf(PermissionV1.DeniedError)
     }),
   )
 })

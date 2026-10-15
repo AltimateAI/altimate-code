@@ -13,6 +13,9 @@ import { ProjectID } from "@/project/schema"
 import { Wildcard } from "@/util/wildcard"
 import os from "os"
 import z from "zod"
+// altimate_change start — upstream_fix: share normalized path matching with Effect permissions
+import { evaluateRequest, evaluateRequestPatterns } from "./evaluate"
+// altimate_change end
 
 export namespace PermissionNext {
   const log = Log.create({ service: "permission" })
@@ -135,8 +138,9 @@ export namespace PermissionNext {
     async (input) => {
       const s = await state()
       const { ruleset, ...request } = input
-      for (const pattern of request.patterns ?? []) {
-        const rule = evaluate(request.permission, pattern, ruleset, s.approved)
+      // altimate_change start — upstream_fix: check normalized denies before any approval prompt
+      for (const { pattern, rule } of evaluateRequestPatterns(request, ruleset, s.approved)) {
+        // altimate_change end
         log.info("evaluated", { permission: request.permission, pattern, action: rule })
         if (rule.action === "deny") {
           Telemetry.track({
@@ -229,7 +233,9 @@ export namespace PermissionNext {
         for (const [id, pending] of s.pending) {
           if (pending.info.sessionID !== sessionID) continue
           const ok = pending.info.patterns.every(
-            (pattern) => evaluate(pending.info.permission, pattern, s.approved).action === "allow",
+            // altimate_change start — upstream_fix: apply approvals to equivalent path spellings
+            (pattern) => evaluateRequest(pending.info, pattern, s.approved).action === "allow",
+            // altimate_change end
           )
           if (!ok) continue
           s.pending.delete(id)

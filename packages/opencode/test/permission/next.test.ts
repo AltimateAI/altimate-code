@@ -12,6 +12,8 @@ import { InstanceStore } from "../../src/project/instance-store"
 import { requireInstance, TestInstance, tmpdirScoped } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { MessageID, SessionID } from "../../src/session/schema"
+import { PermissionNext as LegacyPermission } from "../../src/permission/next"
+import { Instance } from "../../src/project/instance"
 
 const events = EventV2Bridge.defaultLayer
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
@@ -559,6 +561,172 @@ test("disabled - specific allow overrides wildcard deny", () => {
 // ask tests
 
 it.instance(
+  "ask - one allowed spelling cannot mask another denied command invocation",
+  () =>
+    Effect.gen(function* () {
+      const err = yield* fail(
+        ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "bash",
+          patterns: ["cat /project/note.md"],
+          metadata: { permissionAliases: { "cat /project/note.md": [["cat note.md"], ["cat ./note.md"]] } },
+          always: [],
+          ruleset: Permission.fromConfig({
+            bash: { "*": "allow", "cat note.md": "deny", "cat ./note.md": "allow" },
+          }),
+        }),
+      )
+      expect(err).toBeInstanceOf(PermissionV1.DeniedError)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "legacy ask - checks normalized denies before prompting for an earlier command",
+  () =>
+    Effect.gen(function* () {
+      const instance = yield* requireInstance
+      const result = yield* Effect.promise(() =>
+        Instance.restore(instance, async () => {
+          const request = LegacyPermission.ask({
+            sessionID: SessionID.make("ses_alias_legacy"),
+            permission: "bash",
+            patterns: ["ls", "ls /project"],
+            metadata: { permissionAliases: { "ls /project": [["ls .."]] } },
+            always: [],
+            ruleset: [{ permission: "bash", pattern: "ls /project", action: "deny" }],
+          }).then(() => "allowed", (err: unknown) => err)
+          const result = await Promise.race([request, new Promise((resolve) => setTimeout(() => resolve("pending"), 100))])
+          for (const item of await LegacyPermission.list()) {
+            await LegacyPermission.reply({ requestID: item.id, reply: "reject" })
+          }
+          await request
+          return result
+        }),
+      )
+      expect(result).toBeInstanceOf(LegacyPermission.DeniedError)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - denies a relative path through its absolute alias",
+  () =>
+    Effect.gen(function* () {
+      const err = yield* fail(
+        ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "read",
+          patterns: ["../sibling/output.md"],
+          metadata: { permissionAliases: { "../sibling/output.md": [["/project/sibling/output.md"]] } },
+          always: [],
+          ruleset: Permission.fromConfig({ read: { "*": "allow", "/project/sibling/*": "deny" } }),
+        }),
+      )
+      expect(err).toBeInstanceOf(PermissionV1.DeniedError)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - preserves a restrictive relative allowlist with absolute aliases",
+  () =>
+    Effect.gen(function* () {
+      yield* ask({
+        sessionID: SessionID.make("session_test"),
+        permission: "read",
+        patterns: ["src/index.ts"],
+        metadata: { permissionAliases: { "src/index.ts": [["/project/src/index.ts"]] } },
+        always: [],
+        ruleset: Permission.fromConfig({ read: { "*": "deny", "src/*": "allow" } }),
+      })
+      expect(yield* list()).toHaveLength(0)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - an absolute allow does not override a relative deny for a relative request",
+  () =>
+    Effect.gen(function* () {
+      const err = yield* fail(
+        ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "read",
+          patterns: ["src/index.ts"],
+          metadata: { permissionAliases: { "src/index.ts": [["/project/src/index.ts"]] } },
+          always: [],
+          ruleset: Permission.fromConfig({ read: { "src/*": "deny", "/project/src/*": "allow" } }),
+        }),
+      )
+      expect(err).toBeInstanceOf(PermissionV1.DeniedError)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - allow rules never match alias spellings",
+  () =>
+    Effect.gen(function* () {
+      const fiber = yield* ask({
+        id: PermissionV1.ID.make("per_alias_allow_only"),
+        sessionID: SessionID.make("session_test"),
+        permission: "read",
+        patterns: ["private.txt"],
+        metadata: { permissionAliases: { "private.txt": [["/repo/public/project/private.txt"]] } },
+        always: [],
+        ruleset: Permission.fromConfig({ read: { "*": "deny", "*/public/*": "allow" } }),
+      }).pipe(Effect.forkScoped)
+      const err = yield* Fiber.await(fiber)
+      expect(String(err)).toContain("DeniedError")
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - later relative deny overrides an earlier absolute allow",
+  () =>
+    Effect.gen(function* () {
+      const err = yield* fail(
+        ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "read",
+          patterns: ["src/index.ts"],
+          metadata: { permissionAliases: { "src/index.ts": [["/project/src/index.ts"]] } },
+          always: [],
+          ruleset: Permission.fromConfig({ read: { "/project/src/*": "allow", "src/*": "deny" } }),
+        }),
+      )
+      expect(err).toBeInstanceOf(PermissionV1.DeniedError)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - keeps aliases scoped to their own command",
+  () =>
+    Effect.gen(function* () {
+      const err = yield* fail(
+        ask({
+          sessionID: SessionID.make("session_test"),
+          permission: "bash",
+          patterns: ["cat public.md", "cat private.md"],
+          metadata: {
+            permissionAliases: {
+              "cat public.md": [["cat /project/public.md"]],
+              "cat private.md": [["cat /project/private.md"]],
+            },
+          },
+          always: [],
+          ruleset: Permission.fromConfig({ bash: { "*": "deny", "cat /project/public.md": "allow" } }),
+        }),
+      )
+      expect(err).toBeInstanceOf(PermissionV1.DeniedError)
+    }),
+  { git: true },
+)
+
+it.instance(
   "ask - resolves immediately when action is allow",
   () =>
     Effect.gen(function* () {
@@ -726,6 +894,39 @@ it.instance(
 )
 
 // reply tests
+
+it.instance(
+  "reply - always approval does not resolve pending requests that only match through an alias",
+  () =>
+    Effect.gen(function* () {
+      const first = yield* ask({
+        id: PermissionV1.ID.make("per_alias_first"),
+        sessionID: SessionID.make("session_alias"),
+        permission: "bash",
+        patterns: ["cat ./notes.md"],
+        metadata: { permissionAliases: { "cat ./notes.md": [["cat /project/notes.md"]] } },
+        always: ["cat ./notes.md"],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+      const second = yield* ask({
+        id: PermissionV1.ID.make("per_alias_second"),
+        sessionID: SessionID.make("session_alias"),
+        permission: "bash",
+        patterns: ["cat notes.md"],
+        metadata: { permissionAliases: { "cat notes.md": [["cat /project/notes.md"]] } },
+        always: [],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(2)
+      yield* reply({ requestID: PermissionV1.ID.make("per_alias_first"), reply: "always" })
+      yield* Fiber.join(first)
+      expect(yield* list()).toHaveLength(1)
+      yield* reply({ requestID: PermissionV1.ID.make("per_alias_second"), reply: "reject" })
+      yield* Fiber.await(second)
+    }),
+  { git: true },
+)
 
 it.instance(
   "reply - once resolves the pending ask",
