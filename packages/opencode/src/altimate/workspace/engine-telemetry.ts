@@ -86,21 +86,24 @@ export function attachEvent(
 }
 
 /** Track the attach when the session's outcome changed (not on every turn boundary). */
-/** What an attach row is deduped on: the directory's workspace and the outcome's signature, so the
- * same-shaped attach to another workspace after a relink is a change. */
-export function attachKey(outcome: Outcome, workspaceId?: number): string {
-  return `${workspaceId ?? ""}|${attachSignature(outcome)}`
+/** What an attach row is deduped on: the directory's workspace identity (the credential scope plus the
+ * tenant-local id, as the overlay keys it, so the same id under another account is another workspace)
+ * and the outcome's signature; the same-shaped attach to another workspace after a relink is a change. */
+export function attachKey(outcome: Outcome, workspaceIdentity?: string): string {
+  return `${workspaceIdentity ?? ""}|${attachSignature(outcome)}`
 }
 
 /** Track a session's attach when its key differs from the last one reported for the session. */
 export function trackAttach(
   outcome: Outcome,
   previousKey: string | undefined,
-  extra: { engineVersion?: string | null; workspaceId?: number } = {},
+  extra: { engineVersion?: string | null; workspaceId?: number; workspaceIdentity?: string } = {},
   sessionID?: string,
 ): boolean {
   try {
-    if (previousKey !== undefined && previousKey === attachKey(outcome, extra.workspaceId)) return false
+    const identity =
+      extra.workspaceIdentity ?? (extra.workspaceId !== undefined ? String(extra.workspaceId) : undefined)
+    if (previousKey !== undefined && previousKey === attachKey(outcome, identity)) return false
     Telemetry.track(attachEvent(outcome, extra, sessionID))
     return true
   } catch {
