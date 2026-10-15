@@ -315,21 +315,15 @@ describe("answer_commit numeric safety", () => {
     await rejects(tool.execute(payload, context), /rows.*values.*safe.*string/i)
   })
 
-  test.each([NaN, Infinity, -Infinity])(
-    "rejects nonfinite number %s in fields and rows",
-    async (value) => {
-      const tool = await initTool(AnswerCommit.AnswerCommitTool)
-      for (const shape of [
-        { fields: [{ name: "", value }] },
-        { rows: { columns: ["Value"], values: [[value]] } },
-      ]) {
-        const payload = { basis: recordBasis, ...shape }
-        const error = /fields.*value|rows.*values/i
-        expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
-        await rejects(tool.execute(payload, context), error)
-      }
-    },
-  )
+  test.each([NaN, Infinity, -Infinity])("rejects nonfinite number %s in fields and rows", async (value) => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    for (const shape of [{ fields: [{ name: "", value }] }, { rows: { columns: ["Value"], values: [[value]] } }]) {
+      const payload = { basis: recordBasis, ...shape }
+      const error = /fields.*value|rows.*values/i
+      expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
+      await rejects(tool.execute(payload, context), error)
+    }
+  })
 
   test.each([
     999999999999999,
@@ -349,21 +343,18 @@ describe("answer_commit numeric safety", () => {
     "-9007199254740993",
     "1234567890123456.7",
     "9007199254740991.1",
-  ])(
-    "preserves safe numbers and numeric strings: %s",
-    async (value) => {
-      const tool = await initTool(AnswerCommit.AnswerCommitTool)
-      const fields = { basis: recordBasis, fields: [{ name: "", value }] }
-      const rows = { basis: recordBasis, rows: { columns: ["Count"], values: [[value]] } }
-      const renderedRow = value === -3.5e-7 ? "-0.00000035" : String(value)
-      expect(AnswerCommit.renderAnswer(fields)).toBe(`${recordBasis}\n\n**Answer:** ${value}`)
-      expect((await tool.execute(fields, context)).output).toBe(`${recordBasis}\n\n**Answer:** ${value}`)
-      expect(AnswerCommit.renderAnswer(rows)).toBe(`${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| ${renderedRow} |`)
-      expect((await tool.execute(rows, context)).output).toBe(
-        `${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| ${renderedRow} |`,
-      )
-    },
-  )
+  ])("preserves safe numbers and numeric strings: %s", async (value) => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    const fields = { basis: recordBasis, fields: [{ name: "", value }] }
+    const rows = { basis: recordBasis, rows: { columns: ["Count"], values: [[value]] } }
+    const renderedRow = value === -3.5e-7 ? "-0.00000035" : String(value)
+    expect(AnswerCommit.renderAnswer(fields)).toBe(`${recordBasis}\n\n**Answer:** ${value}`)
+    expect((await tool.execute(fields, context)).output).toBe(`${recordBasis}\n\n**Answer:** ${value}`)
+    expect(AnswerCommit.renderAnswer(rows)).toBe(`${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| ${renderedRow} |`)
+    expect((await tool.execute(rows, context)).output).toBe(
+      `${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| ${renderedRow} |`,
+    )
+  })
 })
 
 describe("answer_commit display precision", () => {
@@ -396,7 +387,8 @@ describe("answer_commit display precision", () => {
         ],
       },
     }
-    const expected = "| Average | Rate | Count |\n|---|---|---|\n| 5.00 | 2.000 | 3 |\n| 4.18 | 1.234 | 4 |\n| 001.2000 | null | 5.00 |"
+    const expected =
+      "| Average | Rate | Count |\n|---|---|---|\n| 5.00 | 2.000 | 3 |\n| 4.18 | 1.234 | 4 |\n| 001.2000 | null | 5.00 |"
     expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
     const tool = await initTool(AnswerCommit.AnswerCommitTool)
     expect((await tool.execute(payload, context)).output).toBe(expected)
@@ -408,7 +400,10 @@ describe("answer_commit display precision", () => {
       answer_only: true,
       rows: {
         columns: ["Average", "Rate"],
-        values: [[5, 2], [4.18, 1.234]],
+        values: [
+          [5, 2],
+          [4.18, 1.234],
+        ],
         precision: { Average: 1 },
       },
     }
@@ -428,6 +423,17 @@ describe("answer_commit display precision", () => {
     expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
     const tool = await initTool(AnswerCommit.AnswerCommitTool)
     expect((await tool.execute(payload, context)).output).toBe(expected)
+  })
+
+  test("a genuine long decimal is not treated as float noise next to a short one", () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Value"], values: [[1234567.8901234], [1.2]] },
+    }
+    expect(AnswerCommit.renderAnswer(payload)).toBe(
+      "| Value |\n|---|\n| 1234567.8901234 | \n| 1.2000000 |".replace(" | \n", " |\n"),
+    )
   })
 
   test("a column of only float-noise cells renders each in its own form", () => {
@@ -598,7 +604,13 @@ describe("answer_commit display precision", () => {
     const payload = {
       basis: recordBasis,
       answer_only: true,
-      rows: { columns: ["Amount", "Amount"], values: [[5, 1.234], [4.18, 2]] },
+      rows: {
+        columns: ["Amount", "Amount"],
+        values: [
+          [5, 1.234],
+          [4.18, 2],
+        ],
+      },
     }
     const expected = "| Amount | Amount |\n|---|---|\n| 5.00 | 1.234 |\n| 4.18 | 2.000 |"
     expect(AnswerCommit.renderAnswer(payload)).toBe(expected)

@@ -24,10 +24,12 @@ function optional<T extends z.ZodType>(schema: T) {
     })
 }
 
-const number = z.number().refine(
-  (value) => !Number.isInteger(value) || Number.isSafeInteger(value),
-  "Numeric integers must be safe; pass the exact value as a string",
-)
+const number = z
+  .number()
+  .refine(
+    (value) => !Number.isInteger(value) || Number.isSafeInteger(value),
+    "Numeric integers must be safe; pass the exact value as a string",
+  )
 
 const precisionRange = "precision must be an integer from 0 to 10 (inclusive)"
 const precision = z.number({ error: precisionRange }).int(precisionRange).min(0, precisionRange).max(10, precisionRange)
@@ -212,16 +214,20 @@ export function renderAnswer(payload: unknown): string {
   if (args.rows) {
     // altimate_change start - render the requested format before applying the shared size cap
     const { columns, values, precision, format = "markdown" } = args.rows
-    // Float noise: more than 6 decimals, yet within float32-level relative error of a value with at most 6 decimals (0.30000000000000004, 18.440000534057617). Genuine long decimals differ from their 6-decimal rounding by far more.
+    // Float noise: more than 6 decimals, yet either a double-precision artifact of, or the exact float32 widening of, a value with at most 6 decimals (0.30000000000000004, 18.440000534057617). Genuine long decimals (1234567.8901234) are not.
     const isNoise = (value: number) => {
       const decimal = new Decimal(value)
       if (decimal.decimalPlaces() <= 6) return false
-      return decimal.minus(decimal.toDecimalPlaces(6)).abs().lte(decimal.abs().times("1e-7"))
+      const rounded = decimal.toDecimalPlaces(6)
+      // Only a double-precision artifact or the exact float32 widening of the rounded value qualifies.
+      return Math.fround(rounded.toNumber()) === value || decimal.minus(rounded).abs().lte(decimal.abs().times("1e-15"))
     }
     const scales = columns.map((_, index) =>
       values.reduce((scale, cells) => {
         const value = cells[index]
-        return typeof value === "number" && !isNoise(value) ? Math.max(scale, new Decimal(value).decimalPlaces()) : scale
+        return typeof value === "number" && !isNoise(value)
+          ? Math.max(scale, new Decimal(value).decimalPlaces())
+          : scale
       }, 0),
     )
     const inferred = (value: number, index: number) => {
