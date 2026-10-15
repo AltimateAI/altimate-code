@@ -27,6 +27,7 @@ type MqlCommand =
   | "find"
   | "aggregate"
   | "countDocuments"
+  | "estimatedDocumentCount"
   | "distinct"
   | "insertOne"
   | "insertMany"
@@ -38,6 +39,7 @@ type MqlCommand =
   | "dropCollection"
   | "createIndex"
   | "listIndexes"
+  | "listCollections"
   | "ping"
 
 // The native wire shape names the collection by the command key: `{"find": "orders", …}`,
@@ -49,6 +51,7 @@ const NATIVE_COMMAND_KEYS: Record<string, MqlCommand> = {
   aggregate: "aggregate",
   count: "countDocuments",
   countDocuments: "countDocuments",
+  estimatedDocumentCount: "estimatedDocumentCount",
   distinct: "distinct",
 }
 
@@ -75,12 +78,32 @@ function validateMqlBounds(parsed: Record<string, unknown>): void {
   }
 }
 
-/** Accept the native `{"<command>": "<collection>"}` shape alongside `{command, collection}`. */
+/** Accept native commands and `{collection, find: filter}` / `{collection, aggregate: pipeline}`. */
 export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T): T & MqlQuery {
   if (!parsed || typeof parsed !== "object") return parsed as T & MqlQuery
   if (typeof parsed["command"] === "string") {
     validateMqlBounds(parsed)
     return parsed as T & MqlQuery
+  }
+  if (parsed["listCollections"] === 1) {
+    const { listCollections: _, ...rest } = parsed
+    return { ...rest, command: "listCollections" } as T & MqlQuery
+  }
+  if (typeof parsed["collection"] === "string" && parsed["collection"]) {
+    const find = parsed["find"]
+    const aggregate = parsed["aggregate"]
+    if (find && typeof find === "object" && !Array.isArray(find)) {
+      const { find: _, ...rest } = parsed
+      const normalized = { ...rest, command: "find", filter: parsed["filter"] ?? find }
+      validateMqlBounds(normalized)
+      return normalized as T & MqlQuery
+    }
+    if (Array.isArray(aggregate)) {
+      const { aggregate: _, ...rest } = parsed
+      const normalized = { ...rest, command: "aggregate", pipeline: parsed["pipeline"] ?? aggregate }
+      validateMqlBounds(normalized)
+      return normalized as T & MqlQuery
+    }
   }
   for (const [key, command] of Object.entries(NATIVE_COMMAND_KEYS)) {
     const value = parsed[key]
@@ -102,6 +125,9 @@ export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T
 }
 
 const MONGO_WRITE_STAGES = new Set(["$out", "$merge"])
+const MONGO_COLLECTION_READS = new Set([
+  "find", "aggregate", "countDocuments", "estimatedDocumentCount", "distinct", "listIndexes",
+])
 
 /** Detect write stages in this pipeline, nested pipeline arrays, and $facet branches. */
 export function hasMongoWriteStage(pipeline: unknown[]): boolean {
@@ -236,6 +262,45 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   let client: any
   const explicitDb = config.database as string | undefined
+  const collectionCache = new Map<string, Promise<Array<{ name: string; type: string }>>>()
+  let databaseNames: Promise<string[]> | undefined
+
+  function clearMetadata() {
+    collectionCache.clear()
+    databaseNames = undefined
+  }
+
+  async function readCollections(db: any, maxTimeMS: number | undefined): Promise<Array<{ name: string; type: string }>> {
+    const name = db.databaseName as string
+    const pending: Promise<Array<{ name: string; type: string }>> = collectionCache.get(name)
+      ?? db.listCollections({}, { nameOnly: true, authorizedCollections: true, ...withMaxTime(maxTimeMS) }).toArray()
+    collectionCache.set(name, pending)
+    let collections: Array<{ name: string; type: string }>
+    try {
+      collections = await pending
+    } catch (error) {
+      collectionCache.delete(name)
+      throw error
+    }
+    // Visible collections prove the database exists without requiring database-listing privileges.
+    if (collections.length === 0) {
+      const pendingNames: Promise<string[]> = databaseNames ?? client.db().admin()
+        .listDatabases({ nameOnly: true, authorizedDatabases: true, ...withMaxTime(maxTimeMS) })
+        .then((result: { databases: Array<{ name: string }> }) => result.databases.map((db) => db.name).sort())
+        .catch((error: unknown) => {
+          databaseNames = undefined
+          throw error
+        })
+      databaseNames = pendingNames
+      const names = await pendingNames
+      if (!names.includes(name)) {
+        throw new Error(
+          `MongoDB database "${name}" does not exist or is not accessible. Available databases: ${names.join(", ") || "(none)"}`,
+        )
+      }
+    }
+    return collections
+  }
 
   /** Resolve which database to use: query-specified, config-specified, or URI default. */
   function resolveDb(queryDb?: string): any {
@@ -347,6 +412,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
       client = new MongoClient(uri, connectOptions)
       await client.connect()
+      clearMetadata()
     },
 
     async execute(query: string, limit?: number, _binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
@@ -404,9 +470,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       } catch (e) {
         throw new Error(`Invalid MQL query — must be valid JSON. Error: ${(e as Error).message}`)
       }
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        throw new Error("MQL query must be a JSON command object")
+      }
       const parsed = normalizeMqlCommand(raw)
 
-      if (!parsed.command) {
+      if (typeof parsed.command !== "string" || !parsed.command) {
         throw new Error("MQL query must include a 'command' field")
       }
 
@@ -414,7 +483,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       const effectiveLimit = limit ?? 1000
       const cmd = parsed.command
       // altimate_change start — only cursor-based extraction and scalar counts support a byte bound
-      if (maxResultBytes !== undefined && !["find", "aggregate", "countDocuments"].includes(cmd)) {
+      if (maxResultBytes !== undefined && !["find", "aggregate", "countDocuments", "estimatedDocumentCount"].includes(cmd)) {
         throw new Error(`Command '${cmd}' does not support maxResultBytes`)
       }
       // altimate_change end
@@ -424,6 +493,20 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         const result = await db.command({ ping: 1 })
         return { columns: ["ok"], rows: [[result.ok]], row_count: 1, truncated: false }
       }
+
+      if (cmd === "listCollections") {
+        const collections = await readCollections(db, maxTimeMS)
+        const matches = parsed.filter
+          ? await db.listCollections(parsed.filter, {
+            nameOnly: true, authorizedCollections: true, ...withMaxTime(maxTimeMS),
+          }).toArray()
+          : collections
+        const rows = matches.slice(0, effectiveLimit)
+          .map((collection: { name: string; type: string }) => [collection.name, collection.type])
+        return { columns: ["name", "type"], rows, row_count: rows.length, truncated: matches.length > effectiveLimit }
+      }
+
+      if (!MONGO_COLLECTION_READS.has(cmd)) clearMetadata()
 
       if (cmd === "createCollection") {
         const name = parsed.name ?? parsed.collection
@@ -459,6 +542,16 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
       if (!parsed.collection) {
         throw new Error(`Command '${cmd}' requires a 'collection' field`)
+      }
+
+      if (MONGO_COLLECTION_READS.has(cmd)) {
+        const collections = await readCollections(db, maxTimeMS)
+        if (!collections.some((collection) => collection.name === parsed.collection)) {
+          const names = collections.map((collection) => collection.name).sort()
+          throw new Error(
+            `MongoDB collection "${parsed.collection}" does not exist or is not accessible in database "${db.databaseName}". Available collections: ${names.join(", ") || "(none)"}`,
+          )
+        }
       }
 
       const coll = db.collection(parsed.collection)
@@ -552,12 +645,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           return { columns, rows, row_count: limited.length, truncated }
         }
 
-        case "countDocuments": {
-          const count = await coll.countDocuments(parsed.filter ?? {}, {
-            ...withMaxTime(maxTimeMS),
-            ...(parsed.limit === undefined ? {} : { limit: parsed.limit }),
-            ...(parsed.skip === undefined ? {} : { skip: parsed.skip }),
-          })
+        case "countDocuments":
+        case "estimatedDocumentCount": {
+          const count = cmd === "estimatedDocumentCount"
+            ? await coll.estimatedDocumentCount(withMaxTime(maxTimeMS))
+            : await coll.countDocuments(parsed.filter ?? {}, {
+              ...withMaxTime(maxTimeMS),
+              ...(parsed.limit === undefined ? {} : { limit: parsed.limit }),
+              ...(parsed.skip === undefined ? {} : { skip: parsed.skip }),
+            })
           // altimate_change start
           createResultByteBudget(maxResultBytes)([count])
           // altimate_change end
@@ -796,6 +892,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         await client.close()
         client = null
       }
+      clearMetadata()
     },
   }
   return connector

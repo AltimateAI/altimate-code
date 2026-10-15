@@ -38,6 +38,29 @@ afterAll(() => {
 })
 
 describe("sql_execute writes to scratch", () => {
+  test("a scratch write batch returns its final read without write permission", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const asked: any[] = []
+    const result = await tool.execute(
+      {
+        query: "CREATE TABLE items AS SELECT 1 AS value; INSERT INTO items VALUES (2); SELECT sum(value) AS total FROM items",
+        warehouse: "scratch",
+        limit: 10,
+      },
+      {
+        ...ctx,
+        ask: async (req: any) => {
+          asked.push(req)
+          throw new Error("write denied by test")
+        },
+      },
+    )
+    expect(result.metadata?.error).toBeUndefined()
+    expect(result.output).toContain("total")
+    expect(result.output).toMatch(/\b3\b/)
+    expect(asked).toHaveLength(0)
+  })
+
   test("DDL and DML in scratch run without asking for write permission", async () => {
     const tool = await initTool(SqlExecuteTool)
     const asked: any[] = []

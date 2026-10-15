@@ -48,6 +48,59 @@ afterEach(() => {
 })
 
 describe("sql_execute parser read boundary", () => {
+  test("reports parser failures before requesting write permission", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
+    try {
+      await expect(tool.execute({ query: "SELECT (" }, ctx)).rejects.toThrowErrorMatchingInlineSnapshot(
+        `"Could not prove this SQL is read-only: Parse error at line 1, column 9: Unexpected token: LParen. Rewrite or split the statement."`,
+      )
+      expect(ask).not.toHaveBeenCalled()
+      expect(dispatch).not.toHaveBeenCalled()
+      expect(precedence).not.toHaveBeenCalled()
+    } finally {
+      ask.mockRestore()
+    }
+  })
+
+  test.each([
+    ["duckdb", "SELECT 9 // 2"],
+    ["sqlite", "SELECT 'article' NOT GLOB 'a*'"],
+    ["duckdb", "SELECT TIMESTAMPTZ '2024-02-03 00:00:00+00'"],
+    ["duckdb", "SELECT * FROM items match"],
+  ])("explains unsupported %s read syntax: %s", async (type, query) => {
+    const config = spyOn(Registry, "getConfig").mockReturnValue({ type })
+    const tool = await initTool(SqlExecuteTool)
+    const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
+    try {
+      await expect(tool.execute({ query, warehouse: "source" }, ctx)).rejects.toThrow(/read-only: Parse error.*Rewrite or split/)
+      expect(ask).not.toHaveBeenCalled()
+      expect(dispatch).not.toHaveBeenCalled()
+    } finally {
+      ask.mockRestore()
+      config.mockRestore()
+    }
+  })
+
+  test.each([
+    "SELECT 'unclosed",
+    "/* unclosed",
+    "EXPLAIN ANALYZE DELETE FROM victim",
+    "SELECT $tag$'--$tag$ AS a; DELETE FROM victim",
+    String.raw`SELECT E'\'--' AS a) x) y; DELETE FROM victim; SELECT * FROM (SELECT * FROM (SELECT ''`,
+  ])("refuses parser-rejected statements before permission or execution: %s", async (query) => {
+    const tool = await initTool(SqlExecuteTool)
+    const ask = spyOn(ctx, "ask")
+    try {
+      await expect(tool.execute({ query }, ctx)).rejects.toThrow(/Could not prove this SQL is read-only/)
+      expect(ask).not.toHaveBeenCalled()
+      expect(dispatch).not.toHaveBeenCalled()
+      expect(precedence).not.toHaveBeenCalled()
+    } finally {
+      ask.mockRestore()
+    }
+  })
+
   for (const type of ["postgres", "postgresql", "sqlite"]) {
     test(`enforces read-only execution for ${type} reads without restricting approved writes`, async () => {
       dispatch.mockRestore()
@@ -157,12 +210,8 @@ describe("sql_execute parser read boundary", () => {
     "WITH removed AS (DELETE FROM victim RETURNING *) SELECT * FROM removed",
     "SELECT 1 INTO victim",
     String.raw`SELECT E'\'--' AS a; DELETE FROM victim`,
-    String.raw`SELECT E'\'--' AS a) x) y; DELETE FROM victim; SELECT * FROM (SELECT * FROM (SELECT ''`,
-    "SELECT $tag$'--$tag$ AS a; DELETE FROM victim",
     "SELECT $$--$$ AS a; DELETE FROM victim",
-    "EXPLAIN ANALYZE DELETE FROM victim",
     "SELECT 1; CHECKPOINT",
-    "SELECT 'unclosed",
   ]) {
     test(`requires write permission for query-shaped writes: ${query}`, async () => {
       const tool = await initTool(SqlExecuteTool)
@@ -207,6 +256,60 @@ describe("sql_execute parser read boundary", () => {
     await expect(tool.execute({ query: "SELECT 1; SELECT 2" }, ctx)).rejects.toThrow(/multi-statement reads.*not supported/i)
     expect(dispatch).not.toHaveBeenCalled()
     expect(precedence).not.toHaveBeenCalled()
+  })
+})
+
+describe("sql_execute MongoDB commands", () => {
+  test.each([
+    "SELECT 1",
+    "{not json",
+    "[]",
+    "{}",
+    '{"collection":"articles","find":3}',
+    '{"command":"fin","collection":"articles"}',
+  ])(
+    "reports a MongoDB shape error before permissions: %s",
+    async (query) => {
+      const config = spyOn(Registry, "getConfig").mockReturnValue({ type: "mongodb" })
+      const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
+      try {
+        const tool = await initTool(SqlExecuteTool)
+        await expect(tool.execute({ query, warehouse: "source" }, ctx)).rejects.toThrow(/MongoDB.*JSON command/)
+        expect(ask).not.toHaveBeenCalled()
+        expect(dispatch).not.toHaveBeenCalled()
+        expect(precedence).not.toHaveBeenCalled()
+      } finally {
+        ask.mockRestore()
+        config.mockRestore()
+      }
+    },
+  )
+
+  test.each([
+    [
+      { collection: "articles", find: { published: true } },
+      { command: "find", collection: "articles", filter: { published: true } },
+    ],
+    [
+      { collection: "articles", aggregate: [{ $match: { published: true } }] },
+      { command: "aggregate", collection: "articles", pipeline: [{ $match: { published: true } }] },
+    ],
+    [{ listCollections: 1 }, { command: "listCollections" }],
+    [{ estimatedDocumentCount: "articles" }, { command: "estimatedDocumentCount", collection: "articles" }],
+  ])("dispatches MongoDB reads in normalized form: %j", async (query, normalized) => {
+    const config = spyOn(Registry, "getConfig").mockReturnValue({ type: "mongodb" })
+    const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
+    try {
+      const tool = await initTool(SqlExecuteTool)
+      await tool.execute({ query: JSON.stringify(query), warehouse: "source" }, ctx)
+      expect(ask).not.toHaveBeenCalled()
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(dispatch.mock.calls[0][0]).toBe("sql.execute")
+      expect(JSON.parse((dispatch.mock.calls[0][1] as { sql: string }).sql)).toEqual(normalized)
+    } finally {
+      ask.mockRestore()
+      config.mockRestore()
+    }
   })
 })
 

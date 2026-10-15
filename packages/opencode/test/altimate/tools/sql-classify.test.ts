@@ -124,7 +124,7 @@ describe("classifyMulti", () => {
     test(`dollar-delimited writes fail closed for ${dialect ?? "omitted"} dialect`, () => {
       const sql = "SELECT $x$; DELETE FROM t; $x$"
       expect(classifyMulti(sql, dialect)).toBe("write")
-      expect(classifyAndCheck(sql, dialect)).toEqual({ queryType: "write", blocked: false })
+      expect(classifyAndCheck(sql, dialect)).toMatchObject({ queryType: "write", blocked: false })
       const statements = statementsOf(sql, dialect)
       expect(statements).toHaveLength(3)
       expect(statements.map((statement) => classify(statement, dialect))).toContain("write")

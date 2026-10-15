@@ -5,19 +5,47 @@ import { normalizeMqlCommand } from "../src/mongodb"
 // Use the driver's BSON package directly so the MongoDB client mock cannot replace Binary.
 const { Binary } = createRequire(import.meta.resolve("mongodb"))("bson")
 
-async function fakeMongo(docs: Record<string, unknown>[] = []) {
+async function fakeMongo(
+  docs: Record<string, unknown>[] = [],
+  metadata: { collections?: Record<string, string[]>; error?: Error } = {},
+) {
   const finds: unknown[] = []
   const pipelines: Record<string, unknown>[][] = []
   const aggregateOptions: unknown[] = []
   const counts: { filter: unknown; options: unknown }[] = []
   const distincts: { field: string; filter: unknown; options: unknown }[] = []
+  const collections = metadata.collections ?? { test: ["articles", "orders"], archive: [] }
+  const collectionLists: { database: string; options: unknown }[] = []
+  const databaseLists: unknown[] = []
+  const estimates: unknown[] = []
   mock.module("mongodb", () => ({
     default: {
       MongoClient: class {
         async connect() {}
         async close() {}
-        db() {
+        db(database = "test") {
           return {
+            databaseName: database,
+            admin: () => ({
+              listDatabases: async (options: unknown) => {
+                databaseLists.push(options)
+                if (metadata.error) throw metadata.error
+                return { databases: Object.keys(collections).map((name) => ({ name })) }
+              },
+            }),
+            listCollections: (filter: { name?: string }, options: unknown) => ({
+              toArray: async () => {
+                collectionLists.push({ database, options })
+                if (metadata.error) throw metadata.error
+                return (collections[database] ?? [])
+                  .filter((name) => !filter.name || name === filter.name)
+                  .map((name) => ({ name, type: "collection" }))
+              },
+            }),
+            createCollection: async (name: string) => {
+              collections[database] ??= []
+              collections[database].push(name)
+            },
             collection: () => ({
               find: (filter: unknown) => {
                 finds.push(filter)
@@ -31,6 +59,10 @@ async function fakeMongo(docs: Record<string, unknown>[] = []) {
               countDocuments: async (filter: unknown, options: unknown) => {
                 counts.push({ filter, options })
                 return 11
+              },
+              estimatedDocumentCount: async (options: unknown) => {
+                estimates.push(options)
+                return 13
               },
               distinct: async (field: string, filter: unknown, options: unknown) => {
                 distincts.push({ field, filter, options })
@@ -46,8 +78,115 @@ async function fakeMongo(docs: Record<string, unknown>[] = []) {
   const connector = await connect({ type: "mongodb", database: "test" })
   await connector.connect()
   const query = (command: string, extra: object = {}) => JSON.stringify({ collection: "articles", command, ...extra })
-  return { connector, query, finds, pipelines, aggregateOptions, counts, distincts }
+  return { connector, query, finds, pipelines, aggregateOptions, counts, distincts, collectionLists, databaseLists, estimates }
 }
+
+describe("MongoDB read command shapes", () => {
+  test.each([null, [], 1, "find"].map((value) => ({ value })))("rejects a non-object query: $value", async ({ value }) => {
+    const { connector } = await fakeMongo()
+    await expect(connector.execute(JSON.stringify(value))).rejects.toThrow("MQL query must be a JSON command object")
+  })
+
+  test("collection and find filter execute like the explicit command", async () => {
+    const { connector, query, finds } = await fakeMongo([{ a: 1 }])
+    const filter = { a: 1 }
+    const expected = await connector.execute(query("find", { filter }))
+    expect(await connector.execute(JSON.stringify({ collection: "articles", find: filter }))).toEqual(expected)
+    expect(finds).toEqual([filter, filter])
+  })
+
+  test("collection and aggregate pipeline execute like the explicit command", async () => {
+    const { connector, query, pipelines } = await fakeMongo([{ a: 1 }])
+    const pipeline = [{ $match: { a: 1 } }]
+    const expected = await connector.execute(query("aggregate", { pipeline }))
+    expect(await connector.execute(JSON.stringify({ collection: "articles", aggregate: pipeline }))).toEqual(expected)
+    expect(pipelines[0]).toEqual(pipelines[1])
+  })
+
+  test.each(["listCollections", "estimatedDocumentCount"])("executes native and explicit %s", async (command) => {
+    const { connector, estimates } = await fakeMongo()
+    const native = command === "listCollections" ? { listCollections: 1 } : { estimatedDocumentCount: "articles" }
+    const explicit = { command, ...(command === "listCollections" ? {} : { collection: "articles" }) }
+    const expected = await connector.execute(JSON.stringify(explicit), 10, undefined, { queryTimeoutMs: 250 })
+    expect(await connector.execute(JSON.stringify(native), 10, undefined, { queryTimeoutMs: 250 })).toEqual(expected)
+    expect(expected.rows).toEqual(command === "listCollections" ? [["articles", "collection"], ["orders", "collection"]] : [[13]])
+    if (command === "estimatedDocumentCount") expect(estimates).toEqual([{ maxTimeMS: 250 }, { maxTimeMS: 250 }])
+  })
+
+  test("listCollections honors its filter and row cap", async () => {
+    const { connector } = await fakeMongo()
+    expect(await connector.execute(JSON.stringify({ listCollections: 1 }), 1)).toMatchObject({
+      rows: [["articles", "collection"]], row_count: 1, truncated: true,
+    })
+    expect(await connector.execute(JSON.stringify({ listCollections: 1, filter: { name: "orders" } }), 1)).toMatchObject({
+      rows: [["orders", "collection"]], row_count: 1, truncated: false,
+    })
+  })
+})
+
+describe("MongoDB read namespace validation", () => {
+  test("wrong database lists available databases before opening a cursor", async () => {
+    const { connector, query, finds } = await fakeMongo()
+    await expect(connector.execute(query("find", { database: "missing" }))).rejects.toThrow(
+      'MongoDB database "missing" does not exist or is not accessible. Available databases: archive, test',
+    )
+    expect(finds).toEqual([])
+  })
+
+  test("wrong collection lists available collections before opening a cursor", async () => {
+    const { connector, query, finds } = await fakeMongo()
+    await expect(connector.execute(query("find", { collection: "missing" }))).rejects.toThrow(
+      'MongoDB collection "missing" does not exist or is not accessible in database "test". Available collections: articles, orders',
+    )
+    expect(finds).toEqual([])
+  })
+
+  test("existing empty collections still return a legitimate empty result", async () => {
+    const { connector, query } = await fakeMongo()
+    expect(await connector.execute(query("find"))).toEqual({ columns: [], rows: [], row_count: 0, truncated: false })
+  })
+
+  test("caches authorized collection metadata without requiring database listing for populated databases", async () => {
+    const { connector, query, collectionLists, databaseLists } = await fakeMongo()
+    await connector.execute(query("find"), undefined, undefined, { queryTimeoutMs: 250 })
+    await connector.execute(query("countDocuments"))
+    expect(collectionLists).toEqual([{
+      database: "test", options: { nameOnly: true, authorizedCollections: true, maxTimeMS: 250 },
+    }])
+    expect(databaseLists).toEqual([])
+  })
+
+  test("an existing empty database can list its collections", async () => {
+    const { connector, databaseLists } = await fakeMongo()
+    expect(await connector.execute(JSON.stringify({ command: "listCollections", database: "archive" }))).toEqual({
+      columns: ["name", "type"], rows: [], row_count: 0, truncated: false,
+    })
+    expect(databaseLists).toEqual([{ nameOnly: true, authorizedDatabases: true, maxTimeMS: 120_000 }])
+  })
+
+  test("metadata failures cannot become an empty read", async () => {
+    const { connector, query, finds } = await fakeMongo([], { error: new Error("metadata unavailable") })
+    await expect(connector.execute(query("find"))).rejects.toThrow("metadata unavailable")
+    expect(finds).toEqual([])
+  })
+
+  test("writes invalidate cached names and may create a collection", async () => {
+    const { connector, query, collectionLists } = await fakeMongo()
+    await connector.execute(query("find"))
+    await connector.execute(query("createCollection", { collection: "new_items" }))
+    await connector.execute(query("find", { collection: "new_items" }))
+    expect(collectionLists).toHaveLength(2)
+  })
+
+  test("reconnecting clears cached metadata", async () => {
+    const { connector, query, collectionLists } = await fakeMongo()
+    await connector.execute(query("find"))
+    await connector.close()
+    await connector.connect()
+    await connector.execute(query("find"))
+    expect(collectionLists).toHaveLength(2)
+  })
+})
 
 describe("normalizeMqlCommand bounds", () => {
   const forms = [

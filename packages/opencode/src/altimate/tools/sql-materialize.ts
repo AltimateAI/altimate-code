@@ -176,9 +176,14 @@ function assertReadOnlySource(warehouse: string, sql: string): { mongo: boolean;
         'A MongoDB source query must be a JSON command, e.g. {"command":"find","collection":"c"}.',
       )
     }
-    // Accept the native `{"find": "coll"}` shape as well as `{command, collection}`.
+    // Normalize supported command shapes before applying the read allowlist.
     cmd = cmd && typeof cmd === "object" ? normalizeMqlCommand(cmd) : cmd
-    if (!cmd || !MONGO_READ_COMMANDS.has(cmd.command)) {
+    if (!cmd || typeof cmd.command !== "string" || !cmd.command.trim()) {
+      throw new MaterializeError(
+        'A MongoDB source query must be a JSON command, e.g. {"command":"find","collection":"c"}.',
+      )
+    }
+    if (!MONGO_READ_COMMANDS.has(cmd.command)) {
       throw new MaterializeError(
         `sql_materialize only reads from the source. MongoDB command "${cmd?.command}" is not allowed; use one of: ${[...MONGO_READ_COMMANDS].join(", ")}.`,
       )

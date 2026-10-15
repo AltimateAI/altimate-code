@@ -87,12 +87,24 @@ export const SqlExecuteTool = Tool.define(
             const dialect = args.warehouse
               ? (Registry.canonicalType(Registry.getConfig(args.warehouse)?.type) ?? undefined)
               : undefined
-            const mongo = isMongoWarehouse(warehouse) ? classifyMongoCommand(args.query) : null
-            const { queryType, blocked } = mongo ?? classifyAndCheck(args.query, dialect)
+            const mongoWarehouse = isMongoWarehouse(warehouse)
+            const mongo = mongoWarehouse ? classifyMongoCommand(args.query) : null
+            if (mongoWarehouse && !mongo) {
+              throw new Error(
+                'A MongoDB query must be a JSON command, e.g. {"command":"find","collection":"c","filter":{}}. SQL text is not supported.',
+              )
+            }
+            const classification = mongo ?? classifyAndCheck(args.query, dialect)
+            const { queryType, blocked } = classification
             const query = mongo?.normalized ?? args.query
             if (blocked) {
               throw new Error(
                 "DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety. This cannot be overridden.",
+              )
+            }
+            if ("parseError" in classification && classification.parseError) {
+              throw new Error(
+                `Could not prove this SQL is read-only: ${classification.parseError}. Rewrite or split the statement.`,
               )
             }
             if (!mongo && queryType === "read") {
