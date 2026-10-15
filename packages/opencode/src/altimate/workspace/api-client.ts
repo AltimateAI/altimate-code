@@ -635,17 +635,19 @@ export namespace WorkspaceApi {
     name: string
     description?: string
   }): Promise<{ id: number; name: string }> {
-    const data = await req<{ id: number }>("POST", "/", {
-      base: "/datamates",
-      body: {
-        name: input.name,
-        description: input.description ?? null,
-        integrations: [],
-        memory_enabled: true,
-        knowledge_engine_enabled: true,
-        privacy: "private",
-      },
-    })
+    const data = await linkAttempt("create_unbound", undefined, () =>
+      req<{ id: number }>("POST", "/", {
+        base: "/datamates",
+        body: {
+          name: input.name,
+          description: input.description ?? null,
+          integrations: [],
+          memory_enabled: true,
+          knowledge_engine_enabled: true,
+          privacy: "private",
+        },
+      }),
+    )
     // `typeof` FIRST, before any arithmetic. `Number()` coerces, so the
     // previous `Number.isSafeInteger(Number(data?.id))` accepted `true` as 1,
     // `"7"` as 7 and `[5]` as 5 — a malformed body would have rebound the
@@ -659,6 +661,15 @@ export namespace WorkspaceApi {
         `Workspace was created but the server returned no usable id (${JSON.stringify(id) ?? "undefined"}).`,
       )
     }
+    // The create-then-rebind path for an already-linked project: the workspace exists
+    // from here; the rebind that follows reports the switch and the link.
+    Telemetry.track({
+      type: "workspace_created",
+      timestamp: Date.now(),
+      session_id: Telemetry.getContext().sessionId,
+      workspace_id: id,
+      how: "create_unbound",
+    })
     return { id, name: input.name }
   }
 

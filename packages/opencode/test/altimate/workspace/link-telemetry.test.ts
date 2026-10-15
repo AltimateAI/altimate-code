@@ -95,6 +95,25 @@ describe("workspace link telemetry", () => {
     )
   })
 
+  test("an unbound create (the create-then-rebind path) reports workspace_created with how create_unbound", async () => {
+    replies = [{ status: 200, body: { id: 13 } }]
+    await WorkspaceApi.createWorkspaceUnbound({ name: "ws-13" })
+    expect(of("workspace_created")).toEqual([expect.objectContaining({ workspace_id: 13, how: "create_unbound" })])
+    expect(of("workspace_linked")).toHaveLength(0) // the rebind that follows reports the link
+
+    events = []
+    replies = [{ status: 200, body: { id: "7" } }] // malformed id: refused, and not reported as created
+    await expect(WorkspaceApi.createWorkspaceUnbound({ name: "x" })).rejects.toThrow(/no usable id/)
+    expect(of("workspace_created")).toHaveLength(0)
+
+    events = []
+    replies = [{ status: 409, body: { detail: { message: "name taken" } } }]
+    await expect(WorkspaceApi.createWorkspaceUnbound({ name: "x" })).rejects.toBeInstanceOf(ConflictError)
+    expect(of("workspace_link_failed")).toEqual([
+      expect.objectContaining({ how: "create_unbound", reason: "conflict" }),
+    ])
+  })
+
   test("a rebind reports workspace_switched with both ids, then workspace_linked", async () => {
     replies = [{ status: 200, body: binding(9) }]
     await WorkspaceApi.rebindByRemote({ remote: "git@x:y.git", targetDatamateId: 9, expectedCurrentDatamateId: 4 })
