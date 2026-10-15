@@ -591,7 +591,8 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         endpoint: string
-        status_class: "4xx" | "5xx" | "network" | "timeout"
+        /** `response`: the server answered 2xx with an empty, unparseable or oversized body. */
+        status_class: "4xx" | "5xx" | "network" | "timeout" | "response"
         status?: number
         workspace_id?: number
       }

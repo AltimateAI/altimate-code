@@ -141,6 +141,8 @@ describe("buildCliContext", () => {
       const idPath = path.join(dir.path, "machine-id")
       fs.writeFileSync(idPath, VALID_UUID, "utf8")
       const savedCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      const savedOpencodeOptOut = process.env.OPENCODE_DISABLE_TELEMETRY
+      delete process.env.OPENCODE_DISABLE_TELEMETRY
       process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
         "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
       const home = spyOn(os, "homedir").mockImplementation(() => dir.path)
@@ -159,6 +161,8 @@ describe("buildCliContext", () => {
         home.mockRestore()
         if (savedCs === undefined) delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
         else process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = savedCs
+        if (savedOpencodeOptOut === undefined) delete process.env.OPENCODE_DISABLE_TELEMETRY
+        else process.env.OPENCODE_DISABLE_TELEMETRY = savedOpencodeOptOut
       }
     })
 

@@ -15,7 +15,7 @@ writeFileSync(
   JSON.stringify({ altimateUrl: API_URL, altimateInstanceName: "acme", altimateApiKey: "test-key" }),
 )
 
-const { WorkspaceApi, linkFailureReason, WorkspaceApiError, NotFoundError, ForbiddenError, ConflictError } =
+const { WorkspaceApi, linkFailureReason, endpointOf, WorkspaceApiError, NotFoundError, ForbiddenError, ConflictError } =
   await import("../../../src/altimate/workspace/api-client")
 const { Telemetry } = await import("../../../src/altimate/telemetry")
 
@@ -204,6 +204,23 @@ describe("workspace link telemetry", () => {
     await expect(r).rejects.toThrow(/timed out/)
     expect(of("workspace_api_error")[0]).toEqual(expect.objectContaining({ status_class: "timeout" }))
   }, 40_000)
+
+  test("endpoints mask every dynamic segment, and a bad 2xx body is its own class", async () => {
+    expect(endpointOf("GET", "/datamate-project-bindings", "/by-remote")).toBe(
+      "GET /datamate-project-bindings/by-remote",
+    )
+    expect(endpointOf("GET", "/datamates", "/123/memory/8f2c0a1e-9b7d-4e11-a0c2-5d6e7f8a9b0c")).toBe(
+      "GET /datamates/:id/memory/:id",
+    )
+    expect(endpointOf("POST", "/datamates", "/42/skills/pub_Ab12Cd/attach")).toBe(
+      "POST /datamates/:id/skills/:id/attach",
+    )
+    expect(endpointOf("GET", "/dbt", "/v3/validate-credentials")).toBe("GET /dbt/v3/validate-credentials")
+
+    replies = [{ status: 200 }] // 2xx with an empty body where JSON was required
+    await expect(WorkspaceApi.listDatamates()).rejects.toThrow(/Empty 200 body/)
+    expect(of("workspace_api_error")).toEqual([expect.objectContaining({ status_class: "response", status: 200 })])
+  })
 
   test("linkFailureReason classifies every error the client throws", () => {
     expect(linkFailureReason(new ForbiddenError("f"))).toBe("auth")
