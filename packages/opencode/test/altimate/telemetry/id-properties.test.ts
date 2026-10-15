@@ -10,10 +10,19 @@ describe("numeric ids are envelope properties, not measurements", () => {
   let fetchSpy: ReturnType<typeof spyOn>
   let homedirSpy: ReturnType<typeof spyOn>
   let savedCs: string | undefined
+  // Either disable flag wins over the connection string, so a developer or CI environment that
+  // sets one would fail the envelope assertions; cleared here and restored after.
+  const DISABLE_FLAGS = ["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY"] as const
+  let savedFlags: Record<string, string | undefined>
 
   beforeEach(() => {
     home = mkdtempSync(path.join(os.tmpdir(), "telemetry-ids-"))
     savedCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    savedFlags = {}
+    for (const flag of DISABLE_FLAGS) {
+      savedFlags[flag] = process.env[flag]
+      delete process.env[flag]
+    }
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
       "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
     homedirSpy = spyOn(os, "homedir").mockImplementation(() => home)
@@ -31,6 +40,10 @@ describe("numeric ids are envelope properties, not measurements", () => {
     homedirSpy.mockRestore()
     if (savedCs === undefined) delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
     else process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = savedCs
+    for (const flag of DISABLE_FLAGS) {
+      if (savedFlags[flag] === undefined) delete process.env[flag]
+      else process.env[flag] = savedFlags[flag]
+    }
     rmSync(home, { recursive: true, force: true })
   })
 
