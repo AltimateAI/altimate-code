@@ -252,6 +252,8 @@ export namespace Telemetry {
     // altimate_change end
     | {
         type: "session_end"
+        /** altimate_change — the turn's own workspace, set by the prompt loop's end-of-turn rows */
+        workspace_id?: number
         timestamp: number
         session_id: string
         total_cost: number
@@ -519,6 +521,8 @@ export namespace Telemetry {
       }
     | {
         type: "agent_outcome"
+        /** altimate_change — the turn's own workspace, set by the prompt loop's end-of-turn rows */
+        workspace_id?: number
         timestamp: number
         session_id: string
         agent: string
@@ -955,6 +959,8 @@ export namespace Telemetry {
     // implicit quality signal for task outcome intelligence
     | {
         type: "task_outcome_signal"
+        /** altimate_change — the turn's own workspace, set by the prompt loop's end-of-turn rows */
+        workspace_id?: number
         timestamp: number
         session_id: string
         /** Behavioral signal derived from session outcome patterns */
@@ -1032,6 +1038,8 @@ export namespace Telemetry {
     // error pattern fingerprint — hashed error grouping with recovery data
     | {
         type: "error_fingerprint"
+        /** altimate_change — the turn's own workspace, set by the prompt loop's end-of-turn rows */
+        workspace_id?: number
         timestamp: number
         session_id: string
         /** SHA256 hash of normalized (masked) error message for grouping */
@@ -1052,6 +1060,8 @@ export namespace Telemetry {
     // tool chain effectiveness — aggregated tool sequence + outcome at session end
     | {
         type: "tool_chain_outcome"
+        /** altimate_change — the turn's own workspace, set by the prompt loop's end-of-turn rows */
+        workspace_id?: number
         timestamp: number
         session_id: string
         /** JSON-encoded ordered tool names (capped at 50) */
