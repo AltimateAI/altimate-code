@@ -408,10 +408,13 @@ describe("altimate features: telemetry fail-safe init", () => {
     expect(src).toContain("ALTIMATE_TELEMETRY_DISABLED")
   })
 
-  test("telemetry/index.ts awaits Account.active() (now async after bridge)", async () => {
+  test("telemetry/index.ts no longer reads the account; identity comes from the stored credential", async () => {
     const src = await readSrc("altimate", "telemetry", "index.ts")
-    // bridge merge note: Account.active() became async in v1.4.0
-    expect(src).toMatch(/await Account\.active\(\)/)
+    // The hashed account email left with the user-identity change: events carry the backend
+    // user uuid and tenant resolved by TelemetryIdentity, so there is no Account.active() caller
+    // here any more (it used to be awaited; Account.active() became async in v1.4.0).
+    expect(src).not.toMatch(/Account\.active/)
+    expect(src).toMatch(/TelemetryIdentity\.resolve\(/)
   })
 })
 
