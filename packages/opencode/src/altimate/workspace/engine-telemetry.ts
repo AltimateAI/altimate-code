@@ -158,9 +158,13 @@ export function precedenceSignature(
 
 export function precedenceEvent(
   p: Pick<Precedence, "enabled" | "disabledReason" | "shadowed" | "extensions" | "workspaceId">,
-  opts: { escapeHatch: boolean; connections: number; types: number; sessionID?: string },
+  opts: { escapeHatch: boolean; connections: number; types: number; sessionID?: string; workspaceId?: number },
 ): Telemetry.Event {
-  const id = Number(p.workspaceId)
+  // The snapshot's own workspace, else the directory's linked one passed by refresh(): a disabled
+  // snapshot (escape hatch, unattributed) names no workspace itself, and the row must not be left
+  // to the process context.
+  const own = Number(p.workspaceId)
+  const id = Number.isInteger(own) && own > 0 ? own : opts.workspaceId
   return {
     type: "workspace_engine_precedence",
     timestamp: Date.now(),
@@ -173,7 +177,7 @@ export function precedenceEvent(
     shadowed_connections: opts.connections,
     extensions: p.extensions?.length ?? 0,
     escape_hatch: opts.escapeHatch,
-    ...(Number.isInteger(id) && id > 0 ? { workspace_id: id } : {}),
+    ...(id !== undefined && Number.isInteger(id) && id > 0 ? { workspace_id: id } : {}),
   }
 }
 
@@ -185,7 +189,7 @@ const MAX_SEEN_SESSIONS = 256
 export function trackPrecedence(
   sessionID: string,
   p: Pick<Precedence, "enabled" | "disabledReason" | "shadowed" | "extensions" | "workspaceId">,
-  opts: { escapeHatch: boolean; connections: number; types: number; identity?: string },
+  opts: { escapeHatch: boolean; connections: number; types: number; identity?: string; workspaceId?: number },
 ): boolean {
   try {
     // The local connections shadowed and the escape hatch are part of what is reported, so a change

@@ -66,6 +66,7 @@ import {
   settledOutcome,
   type EntryLike,
   type Outcome,
+  linkedWorkspace,
   linkedWorkspaceKey,
 } from "./engine-overlay"
 import { readLocalBindingScopedStrict, resolvePinnedBindingForRouting } from "./state"
@@ -547,6 +548,8 @@ export async function refresh(
     // Types the session can route through the engine, as the inventory line counts them.
     types: result.enabled ? servedInventory(result).length : 0,
     identity: linkedWorkspaceKey(),
+    // Named explicitly for disabled snapshots that carry no binding of their own.
+    workspaceId: Number(linkedWorkspace()?.id) || undefined,
   })
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
   // thing this design does not allow, but repeating it every turn would be noise.
