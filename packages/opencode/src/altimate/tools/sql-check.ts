@@ -131,6 +131,10 @@ export function readSql(sql: string, dialect?: string): string {
     /\bREPLACE\b(?!\s*\()/i.test(body) ||
     /\b(nextval|setval|set_config|load_extension|writefile|dblink_exec|lo_import|lo_export|lo_create|lo_unlink|lo_put|pg_write_file|pg_append_file|pg_file_write|pg_file_rename|pg_file_unlink|pg_advisory_lock|pg_advisory_xact_lock)\s*\(/i.test(
       functions,
+    ) ||
+    // Session-state, backend-signalling and replication functions are callable from a plain SELECT.
+    /\b(pg_try_advisory\w*|pg_advisory_unlock\w*|pg_advisory_lock\w*|pg_advisory_xact\w*|pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_rotate_logfile|pg_promote|pg_switch_wal|pg_logical_emit_message|pg_create_\w*_replication_slot|pg_drop_replication_slot|pg_replication_slot_advance|pg_replication_origin_\w+)\s*\(/i.test(
+      functions,
     )
   ) {
     throw new Error(

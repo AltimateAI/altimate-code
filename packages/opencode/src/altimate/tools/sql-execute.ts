@@ -54,7 +54,7 @@ function generatedRead(sql: string, warehouse: string, stage: "source" | "result
 }
 
 const parameters = z.object({
-  query: z.string().optional().describe("SQL query to execute; omit when using query_from"),
+  query: z.string().nullish().describe("SQL query to execute; omit when using query_from"),
   query_from: z
     .object({
       warehouse: z.string().describe("Warehouse containing the SQL generator or saved SQL"),
@@ -220,7 +220,16 @@ export const SqlExecuteTool = Tool.define(
             // authorised is the write — not which connection carries it.
             const precedence = { ...(await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)) }
             if (precedence.redirect) {
-              return sourcePrecedence ? Precedence.annotate(sourcePrecedence, precedence.redirect) : precedence.redirect
+              // The workspace tool needs the SQL; a generated statement exists only in this
+              // frame, so hand it to the caller or the redirect cannot be followed.
+              const redirect = queryFrom
+                ? {
+                    ...precedence.redirect,
+                    output: `${precedence.redirect.output}\n\nSQL to run:\n${sql}`,
+                    metadata: { ...precedence.redirect.metadata, generated_sql: true },
+                  }
+                : precedence.redirect
+              return sourcePrecedence ? Precedence.annotate(sourcePrecedence, redirect) : redirect
             }
             if (sourcePrecedence?.notice) {
               precedence.notice = [sourcePrecedence.notice, precedence.notice].filter(Boolean).join("\n")
@@ -333,7 +342,7 @@ export const SqlExecuteTool = Tool.define(
               // altimate_change — carries the fail-open notice when the target could not be
               // attributed to the workspace; a no-op otherwise.
               const response = Precedence.annotate(precedence, {
-                title: `SQL: ${sql.slice(0, 60)}${sql.length > 60 ? "..." : ""}`,
+                title: queryFrom ? "SQL: generated read" : `SQL: ${sql.slice(0, 60)}${sql.length > 60 ? "..." : ""}`,
                 metadata: { ...formatted.metadata, ...(lint && { lint_rules: lint.rules }) },
                 output,
               })

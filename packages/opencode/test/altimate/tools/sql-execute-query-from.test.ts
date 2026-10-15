@@ -99,6 +99,33 @@ describe("sql_execute generated reads", () => {
     })
   }
 
+  test("accepts a null query placeholder and titles the result without the generated SQL", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: null, query_from: source, warehouse: "analytics" }, ctx)
+    expect(output.title).toBe("SQL: generated read")
+    expect(output.title).not.toContain("sum(amount)")
+  })
+
+  test("carries the generated SQL in a target redirect", async () => {
+    precedence.mockResolvedValueOnce({}).mockResolvedValueOnce({
+      redirect: { title: "Routed", metadata: { redirected: true }, output: "Call `ws_sql` instead." },
+    } as never)
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query_from: source, warehouse: "analytics" }, ctx)
+    expect(output.output).toContain("Call `ws_sql` instead.")
+    expect(output.output).toContain(generated)
+    expect(dispatch).toHaveBeenCalledTimes(1)
+  })
+
+  for (const fn of ["pg_try_advisory_lock(1)", "pg_advisory_unlock_all()", "pg_terminate_backend(1)", "pg_reload_conf()"]) {
+    test(`rejects generated SQL calling ${fn}`, async () => {
+      dispatch.mockReset().mockResolvedValueOnce(generatedResult(`SELECT ${fn}`) as never)
+      const tool = await initTool(SqlExecuteTool)
+      await expect(tool.execute({ query_from: source, warehouse: "analytics" }, ctx)).rejects.toThrow("read-only")
+      expect(dispatch).toHaveBeenCalledTimes(1)
+    })
+  }
+
   test("rejects a half-filled query_from", async () => {
     const tool = await initTool(SqlExecuteTool)
     await expect(
@@ -276,7 +303,9 @@ describe("sql_execute generated reads", () => {
       if (stage === "target") precedence.mockResolvedValueOnce({})
       precedence.mockResolvedValue({ redirect })
       const tool = await initTool(SqlExecuteTool)
-      expect(await tool.execute({ query_from: source, warehouse: "analytics" }, ctx)).toMatchObject(redirect)
+      const out = await tool.execute({ query_from: source, warehouse: "analytics" }, ctx)
+      if (stage === "source") expect(out).toMatchObject(redirect)
+      else expect(out.output).toBe(`${redirect.output}\n\nSQL to run:\n${generated}`)
       expect(dispatch).toHaveBeenCalledTimes(stage === "source" ? 0 : 1)
     })
   }
