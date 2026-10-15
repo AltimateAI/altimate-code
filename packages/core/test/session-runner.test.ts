@@ -62,6 +62,8 @@ import { Agent } from "@opencode/core/agent"
 import { Config } from "@opencode/core/config"
 import { Document, Info } from "@opencode/schema/config"
 import { ConfigCompaction } from "@opencode/schema/config/compaction"
+// ALT-P01: Exercise configurable finish continuation limits through the real config service.
+import { ConfigExperimental } from "@opencode/schema/config/experimental"
 import { Tool } from "@opencode/core/tool"
 import type { Info as ToolInfo } from "@opencode/schema/tool"
 import { InstructionStateTable, SessionInboxTable, SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
@@ -494,6 +496,9 @@ const layer = Layer.unwrap(
         Model.node.replace(promptModels),
         SessionExecution.node.replace(execution),
       ],
+    ).pipe(
+      // ALT-P01: Share the existing replaceable config with finish-hook scenarios.
+      Layer.provideMerge(config),
     )
   }),
 ).pipe(Layer.provideMerge(Layer.sync(RunnerState, makeRunnerState)), Layer.provideMerge(testLLM))
@@ -979,6 +984,201 @@ const watchRename = Effect.fnUntraced(function* (sessionID: Session.ID) {
 })
 
 describe("SessionRunnerLLM", () => {
+  // ALT-P01: Finish decisions run before completion and remain bounded per promoted prompt.
+  scenario("finish hook waits for the decision and reloads a synthetic follow-up before completion", function* (s) {
+    const hooks = yield* PluginHooks.Service
+    const deciding = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    const completed = yield* Deferred.make<void>()
+    const decisions: number[] = []
+    yield* hooks.register("session", "finish", (event) =>
+      Effect.gen(function* () {
+        decisions.push(event.continuations)
+        expect(event).toMatchObject({
+          sessionID,
+          agent: "build",
+          model: { providerID: "fake", id: "fake-model" },
+          maxContinuations: 3,
+          message: { type: "assistant", finish: "stop" },
+          decision: { continue: false },
+        })
+        if (event.continuations > 0) return
+        expect(event.message.content).toMatchObject([Expected.text("Draft")])
+        yield* Deferred.succeed(deciding, undefined)
+        yield* Deferred.await(release)
+        event.decision = { continue: true, text: "Validate the result before finishing." }
+      }),
+    )
+    yield* s.admit("Produce a result")
+    yield* s.llm.push(TestLLM.text("Draft", "draft"), TestLLM.text("Validated", "validated"))
+    const run = yield* s.resume.pipe(Effect.andThen(Deferred.succeed(completed, undefined)), Effect.forkChild)
+    yield* Deferred.await(deciding)
+    expect(yield* Deferred.isDone(completed)).toBe(false)
+    expect(s.requests).toHaveLength(1)
+    yield* Deferred.succeed(release, undefined)
+    yield* Fiber.join(run)
+
+    expect(yield* Deferred.isDone(completed)).toBe(true)
+    expect(decisions).toEqual([0, 1])
+    expect(s.requests).toHaveLength(2)
+    expect(userTexts(s.requests[1])).toEqual(["Produce a result", "Validate the result before finishing."])
+    expect(yield* s.context).toMatchObject([
+      Expected.user("Produce a result"),
+      Expected.assistant({ finish: "stop" }, [Expected.text("Draft")]),
+      { type: "synthetic", text: "Validate the result before finishing." },
+      Expected.assistant({ finish: "stop" }, [Expected.text("Validated")]),
+    ])
+  })
+
+  for (const max of [undefined, 1, 0]) {
+    scenario(`finish hook fails repeated rejection at the ${max ?? "default"} continuation limit`, function* (s) {
+      const hooks = yield* PluginHooks.Service
+      const config = yield* Config.Test
+      if (max !== undefined)
+        yield* config.setEntries([
+          new Document({
+            type: "document",
+            info: new Info({ experimental: new ConfigExperimental.Info({ finish_continuations: max }) }),
+          }),
+        ])
+      const decisions: number[] = []
+      yield* hooks.register("session", "finish", (event) =>
+        Effect.sync(() => {
+          decisions.push(event.continuations)
+          expect(event.maxContinuations).toBe(max ?? 3)
+          event.decision = { continue: true, text: "Still incomplete." }
+        }),
+      )
+      yield* s.llm.always(TestLLM.stop())
+
+      expect(yield* s.runPrompt("Never satisfy the validator").pipe(Effect.flip)).toMatchObject({
+        _tag: "Session.StepFailedError",
+        error: { type: "finish-limit" },
+      })
+      expect(decisions).toEqual(Array.from({ length: (max ?? 3) + 1 }, (_, index) => index))
+      expect(s.requests).toHaveLength((max ?? 3) + 1)
+      expect((yield* s.context).filter((message) => message.type === "synthetic")).toHaveLength(max ?? 3)
+    })
+  }
+
+  scenario("finish hook allows completion at the limit and resets after queued input promotes", function* (s) {
+    const hooks = yield* PluginHooks.Service
+    const config = yield* Config.Test
+    yield* config.setEntries([
+      new Document({
+        type: "document",
+        info: new Info({ experimental: new ConfigExperimental.Info({ finish_continuations: 1 }) }),
+      }),
+    ])
+    const decisions: number[] = []
+    yield* hooks.register("session", "finish", (event) =>
+      Effect.sync(() => {
+        decisions.push(event.continuations)
+        if (event.continuations === 0) event.decision = { continue: true, text: "Check this prompt." }
+      }),
+    )
+    yield* s.admit("First prompt")
+    yield* s.session.prompt({ sessionID, text: "Second prompt", delivery: "queue", resume: false })
+    yield* s.llm.always(TestLLM.stop())
+    yield* s.resume
+
+    expect(decisions).toEqual([0, 1, 0, 1])
+    expect(s.requests).toHaveLength(4)
+    expect(userTexts(s.requests[3])).toEqual([
+      "First prompt",
+      "Check this prompt.",
+      "Second prompt",
+      "Check this prompt.",
+    ])
+  })
+
+  scenario("finish hook preserves its continuation allowance across a Location move", function* (s) {
+    const hooks = yield* PluginHooks.Service
+    const config = yield* Config.Test
+    const runner = yield* SessionRunner.Service
+    yield* config.setEntries([
+      new Document({
+        type: "document",
+        info: new Info({ experimental: new ConfigExperimental.Info({ finish_continuations: 1 }) }),
+      }),
+    ])
+    const decisions: number[] = []
+    yield* hooks.register("session", "finish", (event) =>
+      Effect.gen(function* () {
+        decisions.push(event.continuations)
+        event.decision = { continue: true, text: "Validate after moving." }
+        if (event.continuations > 0) return
+        yield* s.sessionInbox
+          .admit({
+            id: SessionMessage.ID.create(),
+            sessionID,
+            item: {
+              type: "move",
+              payload: {
+                location: Location.Ref.make({ directory: AbsolutePath.make("/project") }),
+                projectID: Project.ID.global,
+              },
+              delivery: "steer",
+            },
+          })
+          .pipe(Effect.orDie)
+      }),
+    )
+    yield* s.admit("Finish after moving")
+    yield* s.llm.push(TestLLM.stop(), TestLLM.stop())
+
+    const moved = yield* runner.drain({ sessionID, force: false })
+    expect(moved).toEqual(SessionRunner.DrainResult.Moved({ continuation: { step: 2, finishContinuations: 1 } }))
+    if (moved._tag !== "Moved") throw new Error("Expected a Location handoff")
+    expect(
+      yield* runner.drain({ sessionID, force: false, continuation: moved.continuation }).pipe(Effect.flip),
+    ).toMatchObject({ _tag: "Session.StepFailedError", error: { type: "finish-limit" } })
+    expect(decisions).toEqual([0, 1])
+    expect(s.requests).toHaveLength(2)
+    expect((yield* s.context).filter((message) => message.type === "synthetic")).toHaveLength(1)
+  })
+
+  scenario("finish hook cannot continue beyond the agent step allowance", function* (s) {
+    const hooks = yield* PluginHooks.Service
+    const agents = yield* Agent.Service
+    yield* agents.transform((editor) =>
+      editor.update(Agent.ID.make("build"), (agent) => {
+        agent.steps = 1
+      }),
+    )
+    yield* hooks.register("session", "finish", (event) =>
+      Effect.sync(() => {
+        event.decision = { continue: true, text: "More work." }
+      }),
+    )
+    yield* s.llm.push(TestLLM.stop())
+
+    expect(yield* s.runPrompt("Finish in one step").pipe(Effect.flip)).toMatchObject({
+      _tag: "Session.StepFailedError",
+      error: { type: "finish-limit", message: expect.stringContaining("maximum agent steps") },
+    })
+    expect(s.requests).toHaveLength(1)
+    expect((yield* s.context).filter((message) => message.type === "synthetic")).toHaveLength(0)
+  })
+
+  scenario("finish hook skips tool continuations and filtered finishes", function* (s) {
+    const hooks = yield* PluginHooks.Service
+    const decisions: SessionMessage.ID[] = []
+    yield* hooks.register("session", "finish", (event) =>
+      Effect.sync(() => {
+        decisions.push(event.message.id)
+      }),
+    )
+    yield* s.llm.push(TestLLM.tool("finish-echo", "echo", { text: "hello" }), TestLLM.stop())
+    yield* s.runPrompt("Use a tool")
+    expect(decisions).toHaveLength(1)
+    expect(s.requests).toHaveLength(2)
+
+    yield* s.llm.push(TestLLM.complete({ reason: { normalized: "content-filter" } }))
+    expect((yield* s.runPrompt("Filtered input").pipe(Effect.flip)).message).toBe("Provider blocked the response")
+    expect(decisions).toHaveLength(1)
+  })
+
   scenario("generates the title while the first model step is still running", function* (s) {
     yield* prepareTitleGeneration
 

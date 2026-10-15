@@ -31,6 +31,9 @@ import { SessionStep } from "./step.js"
 import { ToolOutput } from "../../tool-output.js"
 import { Plugin } from "../../plugin.js"
 import { MAX_STEPS_PROMPT } from "./max-steps.js"
+// ALT-P01
+import { Config } from "../../config.js"
+import { PluginHooks } from "../../plugin/hooks.js"
 
 const CONTINUE_AFTER_INCOMPLETE_STREAM =
   "The previous response was interrupted. Continue from where you left off without repeating completed content."
@@ -49,6 +52,9 @@ const layer = Layer.effect(
     const db = (yield* Database.Service).db
     const compaction = yield* SessionCompaction.Service
     const plugins = yield* Plugin.Service
+    // ALT-P01
+    const hooks = yield* PluginHooks.Service
+    const config = yield* Config.Service
     const title = yield* SessionTitle.Service
     const steps = yield* SessionStep.make
     // Title generation starts once input is visible and must not delay model execution.
@@ -59,6 +65,9 @@ const layer = Layer.effect(
       let force = input.force
       let continuing = input.continuation !== undefined
       let step = input.continuation?.step ?? 1
+      // ALT-P01: Synthetic finish feedback does not replenish the prompt's allowance.
+      const finish = { count: input.continuation?.finishContinuations ?? 0 }
+      const continuation = () => ({ step, ...(finish.count > 0 ? { finishContinuations: finish.count } : {}) })
       let entering = true
       const promotable = input.promotable ?? "input"
       if (!force && !continuing) {
@@ -77,7 +86,8 @@ const layer = Layer.effect(
             while (true) {
               if (lifecycle.isClosed()) {
                 yield* restore(modelTransport.close(sessionID))
-                return DrainResult.Reloaded({ force, continuation: continuing ? { step } : undefined })
+                // ALT-P01
+                return DrainResult.Reloaded({ force, continuation: continuing ? continuation() : undefined })
               }
               // Location entry and idle boundaries allow queued controls, not necessarily queued prompts.
               const pending = yield* SessionInbox.serialized(
@@ -111,7 +121,8 @@ const layer = Layer.effect(
                 step = 1
               }
               if (pending?.type === "move")
-                return DrainResult.Moved({ continuation: continuing ? { step } : undefined })
+                // ALT-P01
+                return DrainResult.Moved({ continuation: continuing ? continuation() : undefined })
               if (pending?.type === "compaction") {
                 const compacted = yield* restore(
                   Effect.gen(function* () {
@@ -178,7 +189,11 @@ const layer = Layer.effect(
                     yield* FiberMap.run(titles, sessionID, title.generate(sessionID), {
                       onlyIfMissing: true,
                     })
-                  if (promoted > 0) step = 1
+                  // ALT-P01: New input starts a fresh step and finish allowance.
+                  if (promoted > 0) {
+                    step = 1
+                    finish.count = 0
+                  }
                   return { _tag: "Ready" as const, context: yield* context.load(selected) }
                 }),
               )
@@ -191,7 +206,8 @@ const layer = Layer.effect(
       while (true) {
         const next = yield* advanceToStep()
         if (next._tag !== "Ready") return next
-        continuing = yield* runStep(next.context, step)
+        // ALT-P01
+        continuing = yield* runStep(next.context, step, finish)
         step++
         force = false
         entering = false
@@ -206,7 +222,12 @@ const layer = Layer.effect(
     })
 
     /** Owns logical Step policy; each attempt owns its streaming, tools, and durable settlement. */
-    const runStep = Effect.fn("SessionRunner.runStep")(function* (first: SessionContext.Loaded, step: number) {
+    // ALT-P01
+    const runStep = Effect.fn("SessionRunner.runStep")(function* (
+      first: SessionContext.Loaded,
+      step: number,
+      finish: { count: number },
+    ) {
       const sessionID = first.session.id
       let assistantMessageID = SessionMessage.ID.create()
       const retry = yield* SessionRunnerRetry.make(bus, sessionID)
@@ -271,7 +292,36 @@ const layer = Layer.effect(
           ),
         })
         const completed = yield* SessionStep.Outcome.$match(outcome, {
-          Completed: (outcome) => Effect.succeed(outcome.needsContinuation),
+          // ALT-P01: A settled Step is visible to validators before execution can succeed.
+          Completed: Effect.fnUntraced(function* (outcome) {
+            if (outcome.needsContinuation) return true
+            if (!(yield* hooks.has("session", "finish", loaded.model.ref.providerID))) return false
+            const completed = yield* store.message(assistantMessageID)
+            if (completed?.message.type !== "assistant" || completed.message.finish !== "stop") return false
+            const maxContinuations = Config.latest(yield* config.entries(), "experimental")?.finish_continuations ?? 3
+            const event = yield* hooks.trigger("session", "finish", {
+              sessionID,
+              agent: loaded.agent.id,
+              model: loaded.model.ref,
+              message: completed.message,
+              continuations: finish.count,
+              maxContinuations,
+              decision: { continue: false },
+            })
+            if (!event.decision.continue) return false
+            if (finish.count >= maxContinuations || stepLimitReached)
+              return yield* new StepFailedError({
+                error: {
+                  type: "finish-limit",
+                  message: stepLimitReached
+                    ? "Finish hook requested continuation after the maximum agent steps"
+                    : `Finish hook exceeded ${maxContinuations} continuations for this prompt`,
+                },
+              })
+            yield* bus.publish(SessionEvent.Synthetic, { sessionID, text: event.decision.text })
+            finish.count++
+            return true
+          }),
           Retry: (outcome) =>
             retry.wait({
               decision: outcome.decision,
@@ -400,6 +450,9 @@ export const node = makeLocationNode({
     SessionStore.node,
     SessionCompaction.node,
     Plugin.node,
+    // ALT-P01
+    PluginHooks.node,
+    Config.node,
     SessionTitle.node,
     Snapshot.node,
     ToolOutput.node,

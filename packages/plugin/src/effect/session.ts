@@ -135,7 +135,22 @@ export interface SessionRetry {
   decision: SessionRetryDecision
 }
 
+// ALT-P01: Decide whether a clean model stop may finish the current prompt.
+export type SessionFinishDecision = { continue: false } | { continue: true; text: string }
+
+export interface SessionFinish {
+  readonly sessionID: Session.ID
+  readonly agent: Agent.ID
+  readonly model: Model.Ref
+  readonly message: SessionMessage.Assistant
+  readonly continuations: number
+  readonly maxContinuations: number
+  /** A continuation becomes a synthetic user message; exceeding the limit fails execution. */
+  decision: SessionFinishDecision
+}
+
 export interface SessionHooks {
+  readonly finish: SessionFinish
   readonly prompt: SessionPrompt
   readonly context: SessionContext
   readonly compaction: SessionCompaction

@@ -511,6 +511,20 @@ describe("ConfigNormalize", () => {
     })
   })
 
+  // ALT-P01: The finish allowance must survive the same boundary as file-backed config.
+  test("preserves valid finish continuation limits and diagnoses invalid values", () => {
+    for (const value of [0, 1, 3]) {
+      const result = normalized({ experimental: { finish_continuations: value } })
+      expect(result.encoded).toEqual({ experimental: { finish_continuations: value } })
+      expect(result.diagnostics).toEqual([])
+    }
+    for (const value of [-1, 1.5, "3"]) {
+      const result = normalized({ experimental: { finish_continuations: value } })
+      expect(result.encoded.experimental).toBeUndefined()
+      expect(result.diagnostics.map((item) => item.path)).toEqual([["experimental", "finish_continuations"]])
+    }
+  })
+
   test("never emits experimental policies", () => {
     expect(
       normalized({ experimental: { policies: [{ action: "provider.use", resource: "*", effect: "deny" }] } }).encoded,

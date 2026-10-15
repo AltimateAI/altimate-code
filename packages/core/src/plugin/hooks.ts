@@ -12,6 +12,7 @@ import { State } from "../state.js"
 
 export interface Domains {
   readonly aisdk: AISDKHooks
+  // ALT-P01: Includes the pre-completion finish decision for both plugin runtimes.
   readonly session: SessionHooks
   readonly permission: PermissionHooks
   readonly shell: ShellHooks

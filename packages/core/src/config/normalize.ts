@@ -457,6 +457,16 @@ function normalizeExperimental(
         )
         if (value !== undefined) result.subagent_depth = value
       }
+      // ALT-P01: Preserve the validated finish allowance from user configuration.
+      if (own(experimental, "finish_continuations")) {
+        const value = decodeEncoded(
+          ConfigExperimental.Info.fields.finish_continuations,
+          experimental.finish_continuations,
+          ["experimental", "finish_continuations"],
+          diagnostics,
+        )
+        if (value !== undefined) result.finish_continuations = value
+      }
     }
   }
   if (Object.keys(result).length || (isRecord(input.experimental) && !Object.keys(input.experimental).length))

@@ -1,0 +1,36 @@
+Negative control: removed repeating-validator finish registration.
+Command: bun test test/s6-finish.test.ts -t "continuation limit fails"
+Expected exit: nonzero
+Actual exit: 1
+
+bun test v1.4.2 (744846f84)
+
+test/s6-finish.test.ts:
+57 |   })
+58 |   await using host = await createHost({ directory: fixture.path, altimate: false, plugins: [validator] })
+59 |   const session = await host.createSession()
+60 |   const steps = Array.from({ length: 5 }, () => ({ text: "Proposed completion." }))
+61 |   const first = await host.run(session.id, steps)
+62 |   expect(counts).toEqual([0, 1, 2, 3])
+                      ^
+error: expect(received).toEqual(expected)
+
+- [
+-   0,
+-   1,
+-   2,
+-   3,
+- ]
++ []
+
+- Expected  - 6
++ Received  + 1
+
+      at <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/s6-finish.test.ts:62:18)
+(fail) S6 validator continuation limit fails execution and resets for a new prompt [254.11ms]
+
+ 0 pass
+ 2 filtered out
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [827.00ms]

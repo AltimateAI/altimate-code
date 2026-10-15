@@ -18,7 +18,8 @@ export type RunError =
   | Instructions.InitializationBlocked
   | FileSystem.DirectoryNotFoundError
 
-export type Continuation = { readonly step: number }
+// ALT-P01: Preserve the prompt's finish allowance across Location handoffs.
+export type Continuation = { readonly step: number; readonly finishContinuations?: number }
 
 export type DrainResult = Data.TaggedEnum<{
   Complete: {}
