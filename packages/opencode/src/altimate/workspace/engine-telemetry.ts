@@ -140,22 +140,19 @@ export function precedenceSignature(
 
 export function precedenceEvent(
   p: Pick<Precedence, "enabled" | "disabledReason" | "shadowed" | "extensions" | "workspaceId">,
-  escapeHatch: boolean,
-  sessionID?: string,
+  opts: { escapeHatch: boolean; connections: number; sessionID?: string },
 ): Telemetry.Event {
   const id = Number(p.workspaceId)
-  let connections = 0
-  for (const caps of p.shadowed.values()) connections += caps.size
   return {
     type: "workspace_engine_precedence",
     timestamp: Date.now(),
-    session_id: sessionID ?? sessionId(),
+    session_id: opts.sessionID ?? sessionId(),
     enabled: p.enabled,
     ...(p.disabledReason ? { reason: p.disabledReason } : {}),
     shadowed_types: p.shadowed.size,
-    shadowed_connections: connections,
+    shadowed_connections: opts.connections,
     extensions: p.extensions?.length ?? 0,
-    escape_hatch: escapeHatch,
+    escape_hatch: opts.escapeHatch,
     ...(Number.isInteger(id) && id > 0 ? { workspace_id: id } : {}),
   }
 }
@@ -168,14 +165,16 @@ const MAX_SEEN_SESSIONS = 256
 export function trackPrecedence(
   sessionID: string,
   p: Pick<Precedence, "enabled" | "disabledReason" | "shadowed" | "extensions" | "workspaceId">,
-  escapeHatch: boolean,
+  opts: { escapeHatch: boolean; connections: number },
 ): boolean {
   try {
-    const signature = precedenceSignature(p)
+    // The local connections shadowed are part of what is reported, so a registry change that
+    // moves the count re-reports the same snapshot.
+    const signature = `${precedenceSignature(p)}|c=${opts.connections}`
     if (precedenceSeen.get(sessionID) === signature) return false
     precedenceSeen.set(sessionID, signature)
     if (precedenceSeen.size > MAX_SEEN_SESSIONS) precedenceSeen.delete(precedenceSeen.keys().next().value!)
-    Telemetry.track(precedenceEvent(p, escapeHatch, sessionID))
+    Telemetry.track(precedenceEvent(p, { ...opts, sessionID }))
     return true
   } catch {
     return false

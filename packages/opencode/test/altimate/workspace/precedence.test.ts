@@ -1418,7 +1418,9 @@ describe("telemetry — the precedence snapshot", () => {
       expect(snapshots()).toEqual([
         expect.objectContaining({ enabled: true, shadowed_types: 1, escape_hatch: false, workspace_id: 42 }),
       ])
-      expect(snapshots()[0].shadowed_connections).toBeGreaterThan(0)
+      // One local snowflake connection in the fixture registry is shadowed; the four served
+      // capabilities are not what is counted.
+      expect(snapshots()[0].shadowed_connections).toBe(1)
       await refresh(SESSION, {})
       expect(snapshots().at(-1)).toEqual(
         expect.objectContaining({ enabled: false, reason: "nothing-materialised", shadowed_types: 0 }),

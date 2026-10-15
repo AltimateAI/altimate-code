@@ -108,22 +108,23 @@ describe("workspace engine telemetry builders", () => {
       ["dbt", new Map([["dbt_run", {} as any]])],
     ])
     const on: any = { enabled: true, shadowed, extensions: [{ integration: "x", tools: [] }], workspaceId: "7" }
-    expect(precedenceEvent(on, false)).toEqual(
+    expect(precedenceEvent(on, { escapeHatch: false, connections: 1 })).toEqual(
       expect.objectContaining({
         type: "workspace_engine_precedence",
         enabled: true,
         shadowed_types: 2,
-        shadowed_connections: 3,
+        shadowed_connections: 1,
         extensions: 1,
         escape_hatch: false,
         workspace_id: 7,
       }),
     )
-    expect(trackPrecedence("s1", on, false)).toBe(true)
-    expect(trackPrecedence("s1", on, false)).toBe(false) // unchanged
-    expect(trackPrecedence("s2", on, false)).toBe(true) // another session
+    expect(trackPrecedence("s1", on, { escapeHatch: false, connections: 1 })).toBe(true)
+    expect(trackPrecedence("s1", on, { escapeHatch: false, connections: 1 })).toBe(false) // unchanged
+    expect(trackPrecedence("s1", on, { escapeHatch: false, connections: 2 })).toBe(true) // a connection was added locally
+    expect(trackPrecedence("s2", on, { escapeHatch: false, connections: 2 })).toBe(true) // another session
     const off: any = { enabled: false, disabledReason: "escape-hatch" as const, shadowed: new Map(), workspaceId: "7" }
-    expect(trackPrecedence("s1", off, true)).toBe(true)
+    expect(trackPrecedence("s1", off, { escapeHatch: true, connections: 0 })).toBe(true)
     expect(events.at(-1)).toEqual(
       expect.objectContaining({ enabled: false, reason: "escape-hatch", shadowed_types: 0, escape_hatch: true }),
     )

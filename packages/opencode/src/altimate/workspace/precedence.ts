@@ -538,7 +538,8 @@ export async function refresh(
   }
   if (ruleset) result.ruleset = ruleset
   remember(sessionID, result)
-  trackPrecedence(sessionID, result, escapeHatchOn()) // telemetry: only when the snapshot changed
+  // telemetry: only when the snapshot (or the local connections it shadows) changed
+  trackPrecedence(sessionID, result, { escapeHatch: escapeHatchOn(), connections: countShadowedConnections(result) })
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
   // thing this design does not allow, but repeating it every turn would be noise.
   // A session that never had routing is told nothing — there is nothing to say. But a
@@ -1145,7 +1146,7 @@ export function inventoryLine(precedence: Precedence): string {
   return `Workspace integrations — ${parts.join("; ")}. ${shadowedCount} local connection${shadowedCount === 1 ? "" : "s"} shadowed.`
 }
 
-function countShadowedConnections(precedence: Precedence): number {
+export function countShadowedConnections(precedence: Precedence): number {
   try {
     return Registry.list().warehouses.filter((w) => {
       const type = canonicalType(w.type)
