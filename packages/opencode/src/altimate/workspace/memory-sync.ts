@@ -829,7 +829,7 @@ async function push(
     const others = copies.filter((r) => r.id !== match).map((r) => r.id)
     await archiveDuplicates(others, block, metadata, "archiving a second live record of one block")
     await recordIndexEntry(key, { memoryId: match, contentHash: hash, syncedAt: Date.now() })
-    if (binding) trackContributed(binding, sessionID)
+    if (block.scope === "project" && binding) trackContributed(binding, sessionID)
     return "stored"
   }
 
@@ -862,7 +862,7 @@ async function push(
   // leaves the block unindexed, and the next save finds the extras by identity.
   await archiveDuplicates(extras, block, metadata, "archiving an extra record produced by one create")
   await recordIndexEntry(key, { memoryId: primary, contentHash: hash, syncedAt: Date.now() })
-  if (binding) trackContributed(binding, sessionID)
+  if (block.scope === "project" && binding) trackContributed(binding, sessionID)
   return "stored"
 }
 
@@ -881,7 +881,9 @@ async function archiveDuplicates(
   }
 }
 
-// altimate_change start — a successful write-back is the workspace getting something back
+// altimate_change start — a successful write-back of a project block is the workspace getting something
+// back; a global block is the account's (the live mirror resolves a binding for it too, to consult the
+// memory setting), so it is not reported.
 function trackContributed(binding: CachedBinding, sessionID?: string) {
   try {
     Telemetry.track({

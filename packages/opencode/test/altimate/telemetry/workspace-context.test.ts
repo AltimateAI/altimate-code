@@ -73,6 +73,11 @@ describe("workspace id on the telemetry context", () => {
     Telemetry.noteWorkspaceUse("", "skills") // no session: ignored
     Telemetry.noteWorkspaceUse("s9", "skills", 0) // nothing to count
     expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 1, memory: 3, integrations: 2 })
+    // Memory is injected on every step of a turn: "max" keeps the largest injection, not a sum.
+    Telemetry.noteWorkspaceUse("s9", "memory", 2, "max")
+    Telemetry.noteWorkspaceUse("s9", "memory", 5, "max")
+    Telemetry.noteWorkspaceUse("s9", "memory", 4, "max")
+    expect(Telemetry.workspaceUseOf("s9").memory).toBe(5)
     expect(Telemetry.workspaceUseOf("other")).toEqual({ skills: 0, memory: 0, integrations: 0 })
     Telemetry.clearWorkspaceUse("s9")
     expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 0, memory: 0, integrations: 0 })

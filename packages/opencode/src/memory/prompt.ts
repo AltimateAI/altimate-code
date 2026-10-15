@@ -303,7 +303,8 @@ export namespace MemoryPrompt {
       Telemetry.track({
         type: "memory_injection",
         timestamp: Date.now(),
-        session_id: Telemetry.getContext().sessionId,
+        // altimate_change — the injecting session, not the process context (another turn's in serve)
+        session_id: ctx?.sessionID ?? Telemetry.getContext().sessionId,
         block_count: injectedCount,
         total_chars: used,
         budget,
@@ -311,7 +312,8 @@ export namespace MemoryPrompt {
         // altimate_change start — workspace memory use, for memory_injection and the session's summary rows
         ...(workspaceBlocks > 0 && { workspace_blocks: workspaceBlocks }),
       })
-      if (workspaceBlocks > 0 && ctx?.sessionID) Telemetry.noteWorkspaceUse(ctx.sessionID, "memory", workspaceBlocks)
+      // The turn injects on every step: the count is the most blocks any step injected, not a sum.
+      if (workspaceBlocks > 0 && ctx?.sessionID) Telemetry.noteWorkspaceUse(ctx.sessionID, "memory", workspaceBlocks, "max")
       // altimate_change end
     }
 
