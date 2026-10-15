@@ -49,6 +49,12 @@ const IntegrationSummary = z.object({
   // extension-type integrations have no meaning on the CLI surface.
   type: z.string().optional(),
   // altimate_change end
+  // altimate_change start — connection picker: the connection fields the engine checks a
+  // connection against. Left unparsed here so a field shape this schema does not know
+  // cannot fail the whole catalog; `connection-choice.ts` reads them.
+  config: z.unknown().optional(),
+  additionalConfigVariants: z.unknown().optional(),
+  // altimate_change end
   description: z.string().nullable().optional(),
   tools: z
     .array(
@@ -60,6 +66,15 @@ const IntegrationSummary = z.object({
     )
     .optional(),
 })
+
+// altimate_change start — connection picker: one of the caller's connections
+const RemoteConnection = z.object({
+  id: z.coerce.string(),
+  name: z.string(),
+  integration_id: z.coerce.string(),
+  config: z.record(z.string(), z.unknown()).nullable().optional(),
+})
+// altimate_change end
 
 export namespace AltimateApi {
   export function credentialsPath(): string {
@@ -355,6 +370,29 @@ export namespace AltimateApi {
     const list = Array.isArray(data) ? data : (data.integrations ?? data.data ?? [])
     return list.map((d: unknown) => IntegrationSummary.parse(d)) as z.infer<typeof IntegrationSummary>[]
   }
+
+  // altimate_change start — connection picker: custom integrations and the user's connections
+  /** The tenant's custom integrations (api, mcp and code types), first page, as the engine reads them. */
+  export async function listCustomIntegrations() {
+    const creds = await getCredentials()
+    const data = await request(creds, "GET", "/datamate_integrations/custom?page=1&size=100")
+    const list = Array.isArray(data) ? data : (data.items ?? [])
+    return list.map((d: unknown) => IntegrationSummary.parse(d)) as z.infer<typeof IntegrationSummary>[]
+  }
+
+  /** The caller's own connections, every integration. Configs arrive decrypted: the
+   * caller keeps only what it needs and never logs them. An entry this schema does
+   * not read is left out, not a failure of the list. */
+  export async function listConnections() {
+    const creds = await getCredentials()
+    const data = await request(creds, "GET", "/connections/")
+    const list: unknown[] = Array.isArray(data?.connections) ? data.connections : []
+    return list.flatMap((d) => {
+      const parsed = RemoteConnection.safeParse(d)
+      return parsed.success ? [parsed.data] : []
+    })
+  }
+  // altimate_change end
 
   /** Resolve integration IDs to full integration objects with all tools enabled (matching frontend behavior). */
   export async function resolveIntegrations(

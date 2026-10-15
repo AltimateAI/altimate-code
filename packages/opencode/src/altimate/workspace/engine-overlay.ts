@@ -33,6 +33,7 @@ import { Config } from "@/config/config"
 import { Global } from "@/global"
 import { Instance } from "@/project/instance"
 import { displayWorkspaceName } from "./workspace-name"
+import { choiceFingerprint } from "./connection-choice"
 import {
   currentDirectory,
   isEnabled,
@@ -152,6 +153,9 @@ type Overlay = {
   refusal: Extract<Outcome, { kind: "engine-missing" | "engine-too-old" }> | null
   /** The probed engine version when the engine ran; null when it is missing. */
   version: string | null
+  /** The workspace's connection choices (`choiceFingerprint`) as an engine
+   * started from this overlay read them; null when unknown. */
+  choices: string | null
 }
 
 /** Per-directory state. Config and MCP state are per project instance, and one
@@ -207,6 +211,10 @@ function stateFor(directory: string): DirectoryState {
  * read under plus the tenant-local id. */
 function workspaceKey(binding: ScopedBinding): string {
   return workspaceIdentity(binding.scope, binding.datamateId)
+}
+
+function choicesOf(workspaceId: string): string | null {
+  return syncInternals.choices ? syncInternals.choices(workspaceId) : choiceFingerprint(workspaceId)
 }
 
 function sameEntry(a: LocalMcpConfig | null, b: LocalMcpConfig | null): boolean {
@@ -272,7 +280,14 @@ export async function overlay(
       const entry = engineEntry(workspace.id)
       config.mcp ??= {}
       config.mcp[DATAMATE_KEY] = entry
-      state.current = { directory, workspace, entry, refusal: null, version: probe.version }
+      state.current = {
+        directory,
+        workspace,
+        entry,
+        refusal: null,
+        version: probe.version,
+        choices: choicesOf(workspace.id),
+      }
       log.info("workspace engine overlay applied", { workspaceId: workspace.id, version: probe.version })
       return
     }
@@ -287,6 +302,7 @@ export async function overlay(
       entry: null,
       refusal: probe.kind === "missing" ? { kind: "engine-missing" } : { kind: "engine-too-old", found: probe.found },
       version: probe.kind === "missing" ? null : probe.found,
+      choices: null,
     }
     log.info("workspace engine overlay refused", { workspaceId: workspace.id, reason: probe.kind })
   } catch (err) {
@@ -754,20 +770,34 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
 
   // Bring MCP in line with the overlay: start or replace the engine when the
   // derived entry changed, drop it when there is none any more.
+  let applied = overlayNow
   if (overlayNow.entry) {
     // The argv is the same for the same id in another tenant; the engine
     // reads its credentials when it starts, so it is replaced on identity, not
     // only on argv.
     const replaced =
       !sameEntry(state.applied?.entry ?? null, overlayNow.entry) || state.applied?.workspace.key !== workspace.key
-    if (replaced) await mcp().add(DATAMATE_KEY, overlayNow.entry)
+    // A changed connection choice for this workspace (from `/integrations` or
+    // the IDE) starts the engine again too: it fetches connections only when it
+    // starts, and never says its tools changed. The running engine's choices
+    // are the ones it started with; unknown on either side is not a change.
+    const choices = choicesOf(workspace.id)
+    const started = replaced ? null : (state.applied?.choices ?? null)
+    const rechosen = started !== null && choices !== null && choices !== started
+    if (replaced || rechosen) {
+      if (rechosen) log.info("workspace connection choices changed; restarting the engine", { workspaceId: workspace.id })
+      await mcp().add(DATAMATE_KEY, overlayNow.entry)
+      applied = { ...overlayNow, choices }
+    } else {
+      applied = { ...overlayNow, choices: started ?? choices }
+    }
   } else if (state.applied?.entry || DATAMATE_KEY in (await mcp().status())) {
     // Ours to drop — or a client that predates the link, which MCP bootstrapped
     // from an IDE or hosted entry while the directory was unbound. With the
     // overlay refusing, nothing may serve the workspace under the key.
     await mcp().remove(DATAMATE_KEY)
   }
-  state.applied = overlayNow
+  state.applied = applied
   state.droppedForeign = false
 
   if (!overlayNow.entry) {
