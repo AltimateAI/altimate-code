@@ -11,10 +11,18 @@ describe("workspace id on the telemetry context", () => {
   let homedirSpy: ReturnType<typeof spyOn>
   let savedCs: string | undefined
   let savedHome: string | undefined
+  // Either disable flag wins over the connection string; cleared for the real init below and restored.
+  const DISABLE_FLAGS = ["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY"] as const
+  let savedFlags: Record<string, string | undefined>
 
   beforeEach(() => {
     home = mkdtempSync(path.join(os.tmpdir(), "telemetry-ws-"))
     savedCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    savedFlags = {}
+    for (const flag of DISABLE_FLAGS) {
+      savedFlags[flag] = process.env[flag]
+      delete process.env[flag]
+    }
     savedHome = process.env.OPENCODE_TEST_HOME
     process.env.OPENCODE_TEST_HOME = home
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
@@ -36,6 +44,10 @@ describe("workspace id on the telemetry context", () => {
     else process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = savedCs
     if (savedHome === undefined) delete process.env.OPENCODE_TEST_HOME
     else process.env.OPENCODE_TEST_HOME = savedHome
+    for (const flag of DISABLE_FLAGS) {
+      if (savedFlags[flag] === undefined) delete process.env[flag]
+      else process.env[flag] = savedFlags[flag]
+    }
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -80,16 +92,28 @@ describe("workspace id on the telemetry context", () => {
       workspace_id: 7,
       how: "bind_existing",
     })
-    // Another session's turn moves the context before the batch is serialised (a serve process):
-    // the rows above keep the workspace they were tracked under.
+    // Another session's turn moves the context (a serve process) before the batch is serialised, and
+    // before s1 tracks its next rows: every row still carries the workspace of its own session.
     Telemetry.setContext({ sessionId: "s2", projectId: "p1" })
     Telemetry.track(startup("unbound"))
+    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s1" })
+    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s2" })
+    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s3" }) // never set the context
+    Telemetry.setContext({ sessionId: "s4", projectId: "p1", workspaceId: 9 })
+    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s2" })
     await Telemetry.flush()
     const bound = envelopes().find((e) => e.data.baseData.properties.command === "bound")
     expect(bound.data.baseData.properties.workspace_id).toBe("42")
     expect(bound.data.baseData.properties.client).toBe("altimate-code")
     const linked = envelopes().find((e) => e.data.baseData.name === "workspace_linked")
     expect(linked.data.baseData.properties.workspace_id).toBe("7") // the row's own id, not the context's
+    const unlinked = envelopes().filter((e) => e.data.baseData.name === "workspace_unlinked")
+    expect(unlinked.map((e) => [e.tags["ai.session.id"], e.data.baseData.properties.workspace_id])).toEqual([
+      ["s1", "42"],
+      ["s2", undefined],
+      ["s3", undefined],
+      ["s2", undefined],
+    ])
     const unbound = envelopes().find((e) => e.data.baseData.properties.command === "unbound")
     expect("workspace_id" in unbound.data.baseData.properties).toBe(false)
   })
