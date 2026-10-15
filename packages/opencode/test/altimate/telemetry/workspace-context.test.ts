@@ -63,19 +63,19 @@ describe("workspace id on the telemetry context", () => {
       timestamp: Date.now(),
     }) as const
 
-  test("workspace use is counted per session and cleared on read-out", () => {
+  test("workspace use is counted per session and cleared explicitly", () => {
     Telemetry.clearWorkspaceUse("s9")
-    expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 0, documents: 0, memory: 0, integrations: 0 })
+    expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 0, memory: 0, integrations: 0 })
     Telemetry.noteWorkspaceUse("s9", "skills")
     Telemetry.noteWorkspaceUse("s9", "memory", 3)
     Telemetry.noteWorkspaceUse("s9", "integrations")
     Telemetry.noteWorkspaceUse("s9", "integrations")
     Telemetry.noteWorkspaceUse("", "skills") // no session: ignored
-    Telemetry.noteWorkspaceUse("s9", "documents", 0) // nothing to count
-    expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 1, documents: 0, memory: 3, integrations: 2 })
-    expect(Telemetry.workspaceUseOf("other")).toEqual({ skills: 0, documents: 0, memory: 0, integrations: 0 })
+    Telemetry.noteWorkspaceUse("s9", "skills", 0) // nothing to count
+    expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 1, memory: 3, integrations: 2 })
+    expect(Telemetry.workspaceUseOf("other")).toEqual({ skills: 0, memory: 0, integrations: 0 })
     Telemetry.clearWorkspaceUse("s9")
-    expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 0, documents: 0, memory: 0, integrations: 0 })
+    expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 0, memory: 0, integrations: 0 })
   })
 
   test("every event of a bound session carries the workspace id; an event's own id wins; unbound sessions carry none", async () => {
@@ -114,7 +114,26 @@ describe("workspace id on the telemetry context", () => {
       ["s3", undefined],
       ["s2", undefined],
     ])
+
     const unbound = envelopes().find((e) => e.data.baseData.properties.command === "unbound")
     expect("workspace_id" in unbound.data.baseData.properties).toBe(false)
+
+    // One session's turn ending (endSession, and the shutdown the loop runs after it) leaves the
+    // other sessions' entries alone; the ended session's later rows gain no key.
+    posts = []
+    Telemetry.endSession("s1")
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(Telemetry.workspaceOf("s4")).toBe(9)
+    expect(Telemetry.workspaceOf("s1")).toBeUndefined()
+    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s4" })
+    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s1" })
+    await Telemetry.flush()
+    const later = envelopes().filter((e) => e.data.baseData.name === "workspace_unlinked")
+    expect(later.map((e) => [e.tags["ai.session.id"], e.data.baseData.properties.workspace_id])).toEqual([
+      ["s4", "9"],
+      ["s1", undefined],
+    ])
+    Telemetry.endSession("s4")
   })
 })

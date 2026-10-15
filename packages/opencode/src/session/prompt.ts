@@ -122,13 +122,12 @@ import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_chan
 // altimate_change start — the session's bound workspace rides on every telemetry row
 import { readLocalBinding } from "@/altimate/workspace/state"
 
-/** The session's workspace use, as session_end fields; counts are cleared with the read. */
+/** The session's workspace use, as session_end fields; the read ends the session's telemetry entries. */
 function workspaceUseFields(sessionID: string) {
   const use = Telemetry.workspaceUseOf(sessionID)
-  Telemetry.clearWorkspaceUse(sessionID)
+  Telemetry.endSession(sessionID)
   return {
     workspace_skills_used: use.skills,
-    workspace_documents_used: use.documents,
     workspace_memory_blocks: use.memory,
     workspace_integration_calls: use.integrations,
   }
@@ -2565,7 +2564,7 @@ export namespace SessionPrompt {
       step_count: step,
       duration_ms: Date.now() - sessionStartTime,
       last_tool_category: lastToolCategory || "none",
-      // altimate_change — whether workspace skills, memory, documents or integrations were in play
+      // altimate_change — whether workspace skills, memory or integrations were in play
       workspace_context_used: Object.values(Telemetry.workspaceUseOf(sessionID)).some((n) => n > 0),
     })
     // Tool chain effectiveness — aggregated tool sequence + outcome

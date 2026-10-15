@@ -118,7 +118,7 @@ describe("wrapStarter", () => {
 })
 
 describe("starter_shown telemetry", () => {
-  test("reports what the workspace provides as counts, and unknowns as zero", () => {
+  test("reports what the workspace provides as counts, and leaves unknowns out", () => {
     const events: any[] = []
     const spy = spyOn(Telemetry, "track").mockImplementation((e) => {
       events.push(e)
@@ -129,23 +129,16 @@ describe("starter_shown telemetry", () => {
         expect.objectContaining({
           type: "starter_shown",
           workspace_id: 5,
-          skills: Array.isArray(full.skills) ? full.skills.length : 0,
-          integrations: Array.isArray(full.integrations) ? full.integrations.length : 0,
+          skills: Array.isArray(full.skills) ? full.skills.length : undefined,
+          integrations: Array.isArray(full.integrations) ? full.integrations.length : undefined,
           knowledge: full.knowledge?.kind ?? "unknown",
           memory_enabled: full.memoryEnabled === true,
         }),
       ])
       events.length = 0
       trackStarterShown(6, { skills: "unknown", integrations: null, memoryEnabled: null, knowledge: null })
-      expect(events[0]).toEqual(
-        expect.objectContaining({
-          workspace_id: 6,
-          skills: 0,
-          integrations: 0,
-          knowledge: "unknown",
-          memory_enabled: false,
-        }),
-      )
+      expect(events[0]).toEqual(expect.objectContaining({ workspace_id: 6, knowledge: "unknown" }))
+      for (const key of ["skills", "integrations", "memory_enabled"]) expect(key in events[0]).toBe(false)
     } finally {
       spy.mockRestore()
     }

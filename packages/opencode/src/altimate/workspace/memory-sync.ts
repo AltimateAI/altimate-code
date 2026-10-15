@@ -36,7 +36,8 @@ import {
 } from "./state"
 import { indexKey, readIndex, readIndexEntry, recordIndexEntry } from "./memory-index"
 import { projectIdentity, projectIdentityKey, sameProjectIdentity, type ProjectIdentity } from "./remote-identity"
-import { WorkspaceApi } from "./api-client"
+import { WorkspaceApi, WorkspaceApiError } from "./api-client"
+import { redact } from "@/altimate/debug/report" // altimate_change — failure text in the sync record
 import { AltimateApi } from "@/altimate/api/client"
 import {
   LIST_LIMIT,
@@ -311,6 +312,16 @@ async function memoryEnabled(binding: CachedBinding): Promise<boolean> {
 /** A failed read says what failed, so the sync record can classify it. */
 type MemoryStatusOutcome = "enabled" | "disabled" | { status: "error"; error: string }
 
+// altimate_change start — what failed, for the persisted sync record: the HTTP status when the API
+// answered one (so the reason class sees it whatever the detail says), redacted of secrets, URLs
+// and the user's identity before it is written.
+function failureText(err: unknown): string {
+  const status = err instanceof WorkspaceApiError ? err.status : undefined
+  const base = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+  return redact(status !== undefined ? `HTTP ${status} ${base}` : base)
+}
+// altimate_change end
+
 /** Three-way, because a read that cannot reach the service must not be reported
  * as "this workspace has no memory" — that reads as success while destroying
  * whatever the session already had. */
@@ -366,7 +377,7 @@ async function memoryStatus(
     log.warn("could not confirm workspace memory setting", { err: String(err) })
     // Not cached either way: a transient failure should neither disable the
     // mirror for a minute nor keep it enabled.
-    return { status: "error", error: String(err) }
+    return { status: "error", error: failureText(err) }
   }
 }
 
@@ -723,6 +734,8 @@ async function push(
   binding: CachedBinding | null,
   known?: KnownRecords,
   directory?: string,
+  /** The session that wrote the block, captured before the queue; the context's when absent. */
+  sessionID?: string,
 ): Promise<PushOutcome> {
   const key = indexKey({
     scope: block.scope,
@@ -816,7 +829,7 @@ async function push(
     const others = copies.filter((r) => r.id !== match).map((r) => r.id)
     await archiveDuplicates(others, block, metadata, "archiving a second live record of one block")
     await recordIndexEntry(key, { memoryId: match, contentHash: hash, syncedAt: Date.now() })
-    if (binding) trackContributed(binding)
+    if (binding) trackContributed(binding, sessionID)
     return "stored"
   }
 
@@ -849,7 +862,7 @@ async function push(
   // leaves the block unindexed, and the next save finds the extras by identity.
   await archiveDuplicates(extras, block, metadata, "archiving an extra record produced by one create")
   await recordIndexEntry(key, { memoryId: primary, contentHash: hash, syncedAt: Date.now() })
-  if (binding) trackContributed(binding)
+  if (binding) trackContributed(binding, sessionID)
   return "stored"
 }
 
@@ -869,12 +882,12 @@ async function archiveDuplicates(
 }
 
 // altimate_change start — a successful write-back is the workspace getting something back
-function trackContributed(binding: CachedBinding) {
+function trackContributed(binding: CachedBinding, sessionID?: string) {
   try {
     Telemetry.track({
       type: "workspace_memory_contributed",
       timestamp: Date.now(),
-      session_id: Telemetry.getContext().sessionId,
+      session_id: sessionID ?? Telemetry.getContext().sessionId,
       workspace_id: binding.datamateId,
       block_count: 1,
     })
@@ -978,6 +991,9 @@ export async function flushPendingMirrors(timeoutMs = 30_000): Promise<void> {
  * disabled. */
 export async function mirrorBlock(block: MemoryBlock, directory?: string): Promise<void> {
   if (!isEnabled()) return
+  // altimate_change — the writer's session, read before the queue: the context can be another
+  // session's by the time the mirror lands.
+  const sessionID = Telemetry.getContext().sessionId
   // Queued BEFORE the binding lookup, not after. Both are async, so resolving
   // them first let two operations on one block reach `serialize` in the
   // opposite order to the writes that triggered them.
@@ -1002,7 +1018,7 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
       return
     }
     if (memory !== "enabled") return
-    await push(block, binding, undefined, directory)
+    await push(block, binding, undefined, directory, sessionID)
   })
   return tracked(task)
 }
@@ -1637,7 +1653,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     log.warn("workspace memory load failed", { err: String(err) })
     // Stamped like any other outcome: without an epoch the session would reload (and make
     // the prompt wait) on every turn for as long as the service is down.
-    return { status: "error", error: String(err), epoch: vouched, dir, datamateId: resolved, ...stamp }
+    return { status: "error", error: failureText(err), epoch: vouched, dir, datamateId: resolved, ...stamp }
   }
 }
 

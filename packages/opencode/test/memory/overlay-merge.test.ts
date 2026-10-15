@@ -143,9 +143,18 @@ describe("the memory refresh tool", () => {
 
   test("a block from the bound workspace's memory is injected under the workspace scope and counted", async () => {
     const { Telemetry } = await import("../../src/altimate/telemetry")
-    listResponse = [remote("ws/one", "WORKSPACE BLOCK")]
+    // A project-scope block is the workspace's; a global cloud block is the account's and is
+    // injected too, but not counted as workspace memory.
+    listResponse = [
+      remote("ws/one", "WORKSPACE BLOCK", { block_scope: "project", datamate_id: "7" }),
+      remote("acct/one", "GLOBAL BLOCK"),
+    ]
     await hydrate(SES)
-    expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["ws/one"])
+    expect(
+      overlayBlocks(SES)
+        .map((b) => b.id)
+        .sort(),
+    ).toEqual(["acct/one", "ws/one"])
     const events: any[] = []
     const spy = spyOn(Telemetry, "track").mockImplementation((e) => {
       events.push(e)
@@ -154,9 +163,11 @@ describe("the memory refresh tool", () => {
       Telemetry.clearWorkspaceUse(SES)
       const injected = await MemoryPrompt.inject(8000, { sessionID: SES })
       expect(injected).toContain("WORKSPACE BLOCK")
+      expect(injected).toContain("GLOBAL BLOCK")
       const injection = events.find((e) => e.type === "memory_injection")
       expect(injection).toBeDefined()
       expect(injection.scopes_used).toContain("workspace")
+      expect(injection.scopes_used).toContain("global")
       expect(injection.workspace_blocks).toBe(1)
       expect(Telemetry.workspaceUseOf(SES).memory).toBe(1)
     } finally {
