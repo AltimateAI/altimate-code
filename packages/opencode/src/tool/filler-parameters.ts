@@ -1,5 +1,5 @@
 import type { JSONSchema7 } from "@ai-sdk/provider"
-import { Schema, SchemaGetter } from "effect"
+import { Result, Schema, SchemaGetter } from "effect"
 
 const normalized = new WeakSet<Schema.Top>()
 
@@ -7,6 +7,7 @@ const normalized = new WeakSet<Schema.Top>()
 export function fillerSafeParameters<T>(parameters: Schema.Decoder<T>, jsonSchema: JSONSchema7): Schema.Decoder<T> {
   // Legacy tools may publish a simpler wire schema than their validation schema.
   if (normalized.has(parameters)) return parameters
+  const decodeResult = Schema.decodeUnknownResult(parameters)
   const stripped = Schema.Unknown.pipe(
     Schema.decodeTo(parameters, {
       decode: SchemaGetter.transform((input) => {
@@ -37,14 +38,18 @@ export function fillerSafeParameters<T>(parameters: Schema.Decoder<T>, jsonSchem
           }
         }
         collect(jsonSchema)
-        return Object.fromEntries(
-          Object.entries(args).filter(
-            ([key, value]) =>
-              !properties.has(key) ||
-              required.has(key) ||
-              !(value === null || value === "" || value === 0 || (Array.isArray(value) && value.length === 0)),
-          ),
+        const isFiller = (key: string, value: unknown) =>
+          properties.has(key) &&
+          !required.has(key) &&
+          (value === null || value === "" || value === 0 || (Array.isArray(value) && value.length === 0))
+        const base = Object.fromEntries(Object.entries(args).filter(([key, value]) => !isFiller(key, value)))
+        // Keep each filler that is valid on its own so intentional siblings survive an unrelated filler.
+        const valid = (candidate: Record<string, unknown>) => Result.isSuccess(decodeResult(candidate))
+        const kept = Object.entries(args).filter(
+          ([key, value]) => isFiller(key, value) && valid({ ...base, [key]: value }),
         )
+        const merged = { ...base, ...Object.fromEntries(kept) }
+        return kept.length > 0 && valid(merged) ? merged : base
       }),
       encode: SchemaGetter.transform((value) => value),
     }),

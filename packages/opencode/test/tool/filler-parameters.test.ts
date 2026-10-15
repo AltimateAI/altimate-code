@@ -124,53 +124,55 @@ function context(): Tool.Context {
 }
 
 describe("optional tool parameter fillers", () => {
-  it.instance("every registered schema accepts optional fillers, either preserved as valid values or treated as omission", () =>
-    Effect.gen(function* () {
-      const registry = yield* ToolRegistry.Service
-      const instance = yield* requireInstance
-      const bridge = yield* EffectBridge.make()
-      const infos = yield* registry.allInfos()
-      expect(infos.some((info) => info.id === "optional_array_plugin")).toBe(true)
-      expect(infos.some((info) => info.id === "sql_execute")).toBe(true)
-      expect(infos.some((info) => info.id === "read")).toBe(true)
-      const failures: string[] = []
-      let checked = 0
-      for (const info of infos) {
-        const tool = yield* Effect.promise(() => Instance.restore(instance, () => bridge.promise(info.init())))
-        const schema = ToolJsonSchema.fromTool({ ...tool, id: info.id })
-        const decode = Schema.decodeUnknownResult(tool.parameters)
-        for (const [index, branch] of branches(schema).entries()) {
-          const input = fixture(branch, schema) as Record<string, unknown>
-          const omitted = decode(input)
-          if (Result.isFailure(omitted)) {
-            failures.push(`${info.id}[${index}] invalid omission fixture: ${String(omitted.failure)}`)
-            continue
-          }
-          const optional = Object.keys(branch.properties ?? {}).filter((name) => !branch.required?.includes(name))
-          for (const filler of fillers) {
-            for (const name of optional) {
-              const filled = decode({ ...input, [name]: filler })
-              checked++
-              if (Result.isFailure(filled)) {
-                failures.push(`${info.id}[${index}].${name} rejects ${JSON.stringify(filler)}`)
-              } else if (
-                JSON.stringify(filled.success) !== JSON.stringify(omitted.success) &&
-                (filled.success as Record<string, unknown>)?.[name] !== filler &&
-                JSON.stringify((filled.success as Record<string, unknown>)?.[name]) !== JSON.stringify(filler)
-              ) {
-                failures.push(`${info.id}[${index}].${name} changes omission behavior for ${JSON.stringify(filler)}`)
-              }
+  it.instance(
+    "every registered schema accepts optional fillers, either preserved as valid values or treated as omission",
+    () =>
+      Effect.gen(function* () {
+        const registry = yield* ToolRegistry.Service
+        const instance = yield* requireInstance
+        const bridge = yield* EffectBridge.make()
+        const infos = yield* registry.allInfos()
+        expect(infos.some((info) => info.id === "optional_array_plugin")).toBe(true)
+        expect(infos.some((info) => info.id === "sql_execute")).toBe(true)
+        expect(infos.some((info) => info.id === "read")).toBe(true)
+        const failures: string[] = []
+        let checked = 0
+        for (const info of infos) {
+          const tool = yield* Effect.promise(() => Instance.restore(instance, () => bridge.promise(info.init())))
+          const schema = ToolJsonSchema.fromTool({ ...tool, id: info.id })
+          const decode = Schema.decodeUnknownResult(tool.parameters)
+          for (const [index, branch] of branches(schema).entries()) {
+            const input = fixture(branch, schema) as Record<string, unknown>
+            const omitted = decode(input)
+            if (Result.isFailure(omitted)) {
+              failures.push(`${info.id}[${index}] invalid omission fixture: ${String(omitted.failure)}`)
+              continue
             }
-            const filled = decode({ ...input, ...Object.fromEntries(optional.map((name) => [name, filler])) })
-            if (Result.isFailure(filled)) {
-              failures.push(`${info.id}[${index}] rejects all optionals set to ${JSON.stringify(filler)}`)
+            const optional = Object.keys(branch.properties ?? {}).filter((name) => !branch.required?.includes(name))
+            for (const filler of fillers) {
+              for (const name of optional) {
+                const filled = decode({ ...input, [name]: filler })
+                checked++
+                if (Result.isFailure(filled)) {
+                  failures.push(`${info.id}[${index}].${name} rejects ${JSON.stringify(filler)}`)
+                } else if (
+                  JSON.stringify(filled.success) !== JSON.stringify(omitted.success) &&
+                  (filled.success as Record<string, unknown>)?.[name] !== filler &&
+                  JSON.stringify((filled.success as Record<string, unknown>)?.[name]) !== JSON.stringify(filler)
+                ) {
+                  failures.push(`${info.id}[${index}].${name} changes omission behavior for ${JSON.stringify(filler)}`)
+                }
+              }
+              const filled = decode({ ...input, ...Object.fromEntries(optional.map((name) => [name, filler])) })
+              if (Result.isFailure(filled)) {
+                failures.push(`${info.id}[${index}] rejects all optionals set to ${JSON.stringify(filler)}`)
+              }
             }
           }
         }
-      }
-      expect(checked).toBeGreaterThan(0)
-      expect(failures).toEqual([])
-    }),
+        expect(checked).toBeGreaterThan(0)
+        expect(failures).toEqual([])
+      }),
   )
 
   it.instance("legacy and native execution preserve defaults for fillers without relaxing required arrays", () =>
@@ -219,14 +221,11 @@ describe("optional tool parameter fillers", () => {
         const execute = tool.execute as (args: unknown, ctx: Tool.Context) => ReturnType<typeof tool.execute>
         for (const filler of fillers) {
           const input = { required: ["kept"], text: "", labels: filler, limit: filler, enabled: filler }
-          expect(Schema.decodeUnknownSync(tool.parameters)(input)).toEqual({
-            required: ["kept"],
-            text: "",
-            limit: 3,
-            enabled: true,
-          })
+          // A numeric zero is a valid `limit` on its own, so it is kept; other fillers fall back to defaults.
+          const expected = { required: ["kept"], text: "", limit: filler === 0 ? 0 : 3, enabled: true }
+          expect(Schema.decodeUnknownSync(tool.parameters)(input)).toEqual(expected)
           yield* execute(input, context())
-          expect(calls.at(-1)).toEqual({ required: ["kept"], text: "", limit: 3, enabled: true })
+          expect(calls.at(-1)).toEqual(expected)
           expect(Result.isFailure(Schema.decodeUnknownResult(tool.parameters)({ required: filler, text: "" }))).toBe(
             true,
           )
@@ -251,9 +250,11 @@ describe("optional tool parameter fillers", () => {
       const decode = Schema.decodeUnknownSync(tool.parameters)
       for (const filler of fillers) {
         const input = { labels: filler, limit: filler }
-        expect(decode(input)).toEqual({ limit: 3 })
+        // Zero is a valid `limit` for this plugin, so it is kept; other fillers fall back to the default.
+        const expected = { limit: filler === 0 ? 0 : 3 }
+        expect(decode(input)).toEqual(expected)
         yield* tool.execute(input, context())
-        expect(pluginCalls.at(-1)).toEqual({ limit: 3 })
+        expect(pluginCalls.at(-1)).toEqual(expected)
       }
     }),
   )
@@ -338,11 +339,12 @@ describe("optional tool parameter fillers", () => {
           description: "",
           integration_ids: [],
         })
-        // Invalid as sent (labels: []): retried with fillers removed, so defaults apply.
+        // Invalid as sent (labels: []): only the rejected filler is removed.
         const retried = decode({ max_entries: 0, description: "", integration_ids: [], labels: [] })
-        expect(retried.max_entries).toBe(20)
-        expect(retried).not.toHaveProperty("description")
-        expect(retried).not.toHaveProperty("integration_ids")
+        expect(retried.max_entries).toBe(0)
+        // Fillers that are valid on their own are kept; only the rejected one is dropped.
+        expect(retried.description).toBe("")
+        expect(retried.integration_ids).toEqual([])
         expect(retried).not.toHaveProperty("labels")
       }
       // A filler the schema itself rejects (limit: 0) falls back to the default.
