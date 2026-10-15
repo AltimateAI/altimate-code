@@ -7,6 +7,7 @@
 // the detail here from disk and PATH rather than from the overlay's memory.
 // Offer, never install on the flow's own account — `installEngine` only ever
 // runs from an explicit "Install now".
+import { trackInstallPrompt } from "./engine-telemetry"
 import { execFile, type ChildProcess } from "node:child_process"
 import launch from "cross-spawn"
 import { Process } from "@/util/process"
@@ -320,11 +321,24 @@ export function toolsNeed(declared: number | undefined): string {
 /** Offer via the dialog surface when there is one; otherwise print (headless)
  * or toast (bus unavailable). Exactly one of these happens. */
 export async function offerOrNotify(offer: EngineOffer, toast: Toast, sessionID: string): Promise<void> {
+  // Telemetry: the offer was shown, on which surface, and whether Node was there to install with.
+  const shown = (surface: "headless" | "dialog" | "bus" | "toast") =>
+    void nodeMajor()
+      .catch(() => null)
+      .then((major) => trackInstallPrompt("shown", offer, { surface, nodeMajor: major }, sessionID))
   if (isHeadless()) {
     printLine(describeOfferLine(offer))
+    shown("headless")
     return
   }
-  if (offerInstall(offer)) return
-  if (await publishOffer(sessionID)) return
+  if (offerInstall(offer)) {
+    shown("dialog")
+    return
+  }
+  if (await publishOffer(sessionID)) {
+    shown("bus")
+    return
+  }
   await notify(toast)
+  shown("toast")
 }

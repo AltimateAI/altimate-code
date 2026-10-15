@@ -639,6 +639,64 @@ export namespace Telemetry {
         kind: "skills" | "memory"
         reason: "auth" | "not_found" | "network" | "other"
       }
+    // Workspace engine (see workspace/engine-telemetry.ts)
+    | {
+        /** A session's engine attach settled at a new outcome. */
+        type: "workspace_engine_attach"
+        timestamp: number
+        session_id: string
+        outcome: "attached" | "engine_missing" | "engine_too_old" | "connect_failed" | "disabled" | "unbound"
+        available?: number
+        declared?: number
+        missing?: number
+        extensions?: number
+        engine_version?: string
+        found_version?: string
+        error_class?: "link_unreadable" | "probe_failed" | "not_connected" | "other"
+      }
+    | {
+        type: "workspace_engine_install_prompt"
+        timestamp: number
+        session_id: string
+        action: "shown" | "accepted" | "installed" | "install_failed" | "copied" | "declined"
+        reason: "engine-missing" | "engine-too-old"
+        workspace_id?: number
+        declared?: number
+        found_version?: string
+        surface?: "headless" | "dialog" | "bus" | "toast"
+        node_detected?: boolean
+        node_major?: number
+      }
+    | {
+        /** A session's precedence snapshot settled at a new state. */
+        type: "workspace_engine_precedence"
+        timestamp: number
+        session_id: string
+        enabled: boolean
+        reason?: string
+        shadowed_types: number
+        shadowed_connections: number
+        extensions: number
+        escape_hatch: boolean
+        workspace_id?: number
+      }
+    | {
+        /** A datamate tool call refused because the engine is off for that workspace. */
+        type: "workspace_engine_redirect"
+        timestamp: number
+        session_id: string
+        tool: string
+        operation: string
+        outcome: "refused"
+        workspace_id?: number
+      }
+    | {
+        type: "workspace_engine_error"
+        timestamp: number
+        session_id: string
+        stage: "attach" | "install" | "precedence"
+        message: string
+      }
     // altimate_change end
     | {
         type: "mcp_server_census"

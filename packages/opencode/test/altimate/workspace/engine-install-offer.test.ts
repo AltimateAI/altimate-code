@@ -24,6 +24,7 @@ import {
 } from "../../../src/altimate/workspace/engine-overlay"
 import { OFFER_RECHECK_MS, OFFER_SKIP_TTL_MS } from "../../../src/altimate/workspace/engine-offer"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
+import { Telemetry } from "../../../src/altimate/telemetry"
 
 const DIR = "/tmp/analytics"
 const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
@@ -458,5 +459,52 @@ describe("install success is verified, not assumed", () => {
   test("a non-zero exit reports npm's last lines", async () => {
     syncInternals.runInstall = async () => ({ code: 1, timedOut: false, stderr: "boom\nEACCES denied" })
     expect(await installEngine()).toEqual({ ok: false, error: "boom EACCES denied" })
+  })
+})
+
+describe("telemetry — the install prompt", () => {
+  const rows: Array<Record<string, unknown>> = []
+  let spy: ReturnType<typeof spyOn>
+  beforeEach(() => {
+    rows.length = 0
+    spy = spyOn(Telemetry, "track").mockImplementation((e) => {
+      rows.push(e as Record<string, unknown>)
+    })
+  })
+  afterEach(() => spy.mockRestore())
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+  const prompts = () => rows.filter((r) => r.type === "workspace_engine_install_prompt")
+
+  test("headless: shown once per session, naming the surface and the node that could install", async () => {
+    install({ headless: true })
+    syncInternals.nodeMajor = async () => 22
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    await settle()
+    expect(prompts()).toEqual([
+      expect.objectContaining({
+        session_id: "s1",
+        action: "shown",
+        reason: "engine-missing",
+        workspace_id: 42,
+        declared: 2,
+        surface: "headless",
+        node_detected: true,
+        node_major: 22,
+      }),
+    ])
+    // The missing engine is the attach outcome behind the prompt, reported once as well.
+    expect(rows.filter((r) => r.type === "workspace_engine_attach")).toEqual([
+      expect.objectContaining({ outcome: "engine_missing", declared: 2 }),
+    ])
+  })
+
+  test("the bus surface reports itself, and no node on PATH is said rather than guessed", async () => {
+    install({})
+    await beforeTurn("s1")
+    await settle()
+    expect(prompts()).toHaveLength(1)
+    expect(prompts()[0]).toEqual(expect.objectContaining({ surface: "bus", node_detected: false }))
+    expect("node_major" in prompts()[0]).toBe(false)
   })
 })

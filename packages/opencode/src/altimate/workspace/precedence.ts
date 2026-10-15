@@ -48,6 +48,7 @@
 // that cache sooner, so it makes the next re-derivation see the change earlier — but the
 // per-turn re-derivation is the mechanism, not the notification.
 import { Config } from "@/config/config"
+import { resetEngineTelemetryForTests, trackEngineError, trackPrecedence } from "./engine-telemetry"
 import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
@@ -532,10 +533,12 @@ export async function refresh(
     result = await derive(sessionID, tools)
   } catch (err) {
     log.warn("precedence could not be derived; running locally with a notice", { sessionID, err: String(err) })
+    trackEngineError("precedence", String(err))
     result = EMPTY("derive-failed")
   }
   if (ruleset) result.ruleset = ruleset
   remember(sessionID, result)
+  trackPrecedence(sessionID, result, escapeHatchOn()) // telemetry: only when the snapshot changed
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
   // thing this design does not allow, but repeating it every turn would be noise.
   // A session that never had routing is told nothing — there is nothing to say. But a
@@ -689,6 +692,7 @@ export function announcedSessionCount(): number {
 }
 
 export function resetForTests(): void {
+  resetEngineTelemetryForTests()
   bySession.clear()
   incarnations.clear()
   announced.clear()
