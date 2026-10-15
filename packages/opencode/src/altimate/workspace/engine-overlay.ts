@@ -44,7 +44,7 @@ import {
 } from "./engine-seams"
 import { declaredBounded, fingerprint, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
 import { OFFER_RECHECK_MS, OFFER_SKIP_TTL_MS, installCommand, offerOrNotify, type EngineOffer } from "./engine-offer"
-import { trackAttach, trackEngineError } from "./engine-telemetry"
+import { attachKey, trackAttach, trackEngineError } from "./engine-telemetry"
 import {
   ENGINE_BINARY,
   INSTALL_HELPS,
@@ -360,8 +360,9 @@ type SessionRecord = {
   /** The workspace the directory was linked to when the boundary settled this
    * outcome. */
   linked?: { id: string; name: string } | null
-  /** The last outcome reported to telemetry; a transient record carries the previous one. */
-  tracked?: Outcome
+  /** The key of the last attach reported to telemetry (workspace and outcome); a transient record
+   * carries the previous one. */
+  tracked?: string
 }
 const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
@@ -374,13 +375,12 @@ function record(
   extra: { engineVersion?: string | null; transient?: boolean } = {},
 ): SessionRecord {
   const previous = sessions.get(sessionID)
-  // telemetry: a settled outcome, when it changed, named for the directory's workspace. A transient
-  // record (the retry sentinel) reports nothing and keeps the last reported outcome for the next
+  // telemetry: a settled outcome, when it or the workspace it settled for changed. A transient
+  // record (the retry sentinel) reports nothing and keeps the last reported key for the next
   // comparison.
-  const tracked = extra.transient ? previous?.tracked : outcome
-  if (!extra.transient) {
-    trackAttach(outcome, previous?.tracked, { ...extra, workspaceId: Number(linkedWorkspace()?.id) }, sessionID)
-  }
+  const workspaceId = Number(linkedWorkspace()?.id) || undefined
+  const tracked = extra.transient ? previous?.tracked : attachKey(outcome, workspaceId)
+  if (!extra.transient) trackAttach(outcome, previous?.tracked, { ...extra, workspaceId }, sessionID)
   sessions.delete(sessionID)
   const next: SessionRecord = {
     outcome,

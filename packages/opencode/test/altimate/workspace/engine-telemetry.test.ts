@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { Telemetry } from "../../../src/altimate/telemetry"
 import {
   attachEvent,
+  attachKey,
   attachSignature,
   connectErrorClass,
   installPromptEvent,
@@ -59,10 +60,13 @@ describe("workspace engine telemetry builders", () => {
   test("an attach is tracked when the outcome changed, not on every turn boundary", () => {
     const attached = { kind: "attached", available: 2 } as const
     expect(trackAttach(attached, undefined)).toBe(true)
-    expect(trackAttach(attached, attached)).toBe(false)
-    expect(trackAttach({ kind: "attached", available: 3 }, attached)).toBe(true)
-    expect(trackAttach({ kind: "engine-missing" }, { kind: "attached", available: 3 })).toBe(true)
-    expect(events.map((e) => e.outcome)).toEqual(["attached", "attached", "engine_missing"])
+    expect(trackAttach(attached, attachKey(attached))).toBe(false)
+    expect(trackAttach({ kind: "attached", available: 3 }, attachKey(attached))).toBe(true)
+    expect(trackAttach({ kind: "engine-missing" }, attachKey({ kind: "attached", available: 3 }))).toBe(true)
+    // The same-shaped attach to another workspace (a relink) is a change.
+    expect(trackAttach(attached, attachKey(attached, 42), { workspaceId: 42 })).toBe(false)
+    expect(trackAttach(attached, attachKey(attached, 42), { workspaceId: 7 })).toBe(true)
+    expect(events.map((e) => e.outcome)).toEqual(["attached", "attached", "engine_missing", "attached"])
     expect(attachSignature({ kind: "connect-failed", error: "a" })).toBe(
       attachSignature({ kind: "connect-failed", error: "b" }),
     )
