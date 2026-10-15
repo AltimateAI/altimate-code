@@ -113,6 +113,8 @@ describe("workspace link telemetry", () => {
     replies = [{ status: 200, body: { id: "7" } }] // malformed id: refused, and not reported as created
     await expect(WorkspaceApi.createWorkspaceUnbound({ name: "x" })).rejects.toThrow(/no usable id/)
     expect(of("workspace_created")).toHaveLength(0)
+    // ...but it is a failed link step: the answer was unusable, which is not a network failure.
+    expect(of("workspace_link_failed")).toEqual([expect.objectContaining({ how: "create_unbound", reason: "other" })])
 
     events = []
     replies = [{ status: 409, body: { detail: { message: "name taken" } } }]
@@ -259,7 +261,11 @@ describe("workspace link telemetry", () => {
         }),
         { status: 500 },
       )) as typeof globalThis.fetch
-    await expect(altimateRequest("GET", "/x", { base: "/datamates", timeoutMs: 200 })).rejects.toThrow(/timed out/)
+    const stalled: any = await altimateRequest("GET", "/x", { base: "/datamates", timeoutMs: 200 }).catch((e) => e)
+    expect(stalled).toBeInstanceOf(WorkspaceApiError)
+    expect(stalled.message).toMatch(/timed out/)
+    expect(stalled.status).toBe(500) // the answer's status rides on the error
+    expect(linkFailureReason(stalled)).toBe("other") // answered: not a network failure
     expect(of("workspace_api_error")).toEqual([expect.objectContaining({ status_class: "5xx", status: 500 })])
 
     events = []

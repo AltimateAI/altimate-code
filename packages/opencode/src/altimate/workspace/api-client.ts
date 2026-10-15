@@ -154,6 +154,9 @@ export class WorkspaceApiError extends Error {
   constructor(
     msg: string,
     public readonly status?: number,
+    /** Where it failed: on the wire before any answer, or in an answer the server gave (its
+     * status, when known, is `status`). A statusless error is transport unless said otherwise. */
+    public readonly failure: "transport" | "response" = status === undefined ? "transport" : "response",
   ) {
     super(msg)
     this.name = "WorkspaceApiError"
@@ -263,7 +266,7 @@ export function linkFailureReason(err: unknown): "auth" | "not_found" | "network
   if (err instanceof ConflictError || err instanceof PreconditionFailedError) return "conflict"
   if (err instanceof WorkspaceApiError) {
     if (err.status === 401) return "auth"
-    if (err.status === undefined) return "network" // unreachable or timed out: req() sets no status
+    if (err.status === undefined && err.failure === "transport") return "network" // unreachable or timed out
   }
   return "other"
 }
@@ -415,7 +418,9 @@ async function req<T>(
         kind: answered === undefined ? "timeout" : answered >= 500 ? "5xx" : answered >= 400 ? "4xx" : "timeout",
         workspaceId: bodyWorkspaceId,
       })
-      throw new WorkspaceApiError(`Request to ${target} timed out after ${Math.round(timeoutMs / 1000)}s`)
+      // The answer's status rides on the error too, so a link failure after an answer is not
+      // classified as a network failure.
+      throw new WorkspaceApiError(`Request to ${target} timed out after ${Math.round(timeoutMs / 1000)}s`, answered)
     }
     // The server answered and the body failed afterwards (readBounded's cap, a cut stream):
     // classify by the status it answered with, so an oversized 500 is still a 5xx row; only a
@@ -431,6 +436,7 @@ async function req<T>(
       reportApiError({ endpoint, kind: "network", workspaceId: bodyWorkspaceId })
     }
     const msg = err instanceof Error ? err.message : String(err)
+    if (answered !== undefined) throw new WorkspaceApiError(`Response from ${target} failed: ${msg}`, answered)
     throw new WorkspaceApiError(`Cannot reach ${target}: ${msg}`)
   } finally {
     clearTimeout(timeout)
@@ -695,8 +701,10 @@ export namespace WorkspaceApi {
     name: string
     description?: string
   }): Promise<{ id: number; name: string }> {
-    const data = await linkAttempt("create_unbound", undefined, () =>
-      req<{ id: number }>("POST", "/", {
+    // The id check sits inside the reported attempt: a create whose answer is unusable is a
+    // failed link step, not a created workspace.
+    const id = await linkAttempt("create_unbound", undefined, async () => {
+      const data = await req<{ id: number }>("POST", "/", {
         base: "/datamates",
         body: {
           name: input.name,
@@ -706,21 +714,24 @@ export namespace WorkspaceApi {
           knowledge_engine_enabled: true,
           privacy: "private",
         },
-      }),
-    )
-    // `typeof` FIRST, before any arithmetic. `Number()` coerces, so the
-    // previous `Number.isSafeInteger(Number(data?.id))` accepted `true` as 1,
-    // `"7"` as 7 and `[5]` as 5 — a malformed body would have rebound the
-    // project to whatever those coerced to (workspace 1, in the boolean case)
-    // instead of failing. The server's `CreateDatamateResponse` is `{id: int}`
-    // and FastAPI enforces it, so anything else here is a contract break worth
-    // refusing loudly rather than guessing at.
-    const id: unknown = (data as { id?: unknown } | null | undefined)?.id
-    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
-      throw new WorkspaceApiError(
-        `Workspace was created but the server returned no usable id (${JSON.stringify(id) ?? "undefined"}).`,
-      )
-    }
+      })
+      // `typeof` FIRST, before any arithmetic. `Number()` coerces, so the
+      // previous `Number.isSafeInteger(Number(data?.id))` accepted `true` as 1,
+      // `"7"` as 7 and `[5]` as 5 — a malformed body would have rebound the
+      // project to whatever those coerced to (workspace 1, in the boolean case)
+      // instead of failing. The server's `CreateDatamateResponse` is `{id: int}`
+      // and FastAPI enforces it, so anything else here is a contract break worth
+      // refusing loudly rather than guessing at.
+      const id: unknown = (data as { id?: unknown } | null | undefined)?.id
+      if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+        throw new WorkspaceApiError(
+          `Workspace was created but the server returned no usable id (${JSON.stringify(id) ?? "undefined"}).`,
+          undefined,
+          "response",
+        )
+      }
+      return id
+    })
     // The create-then-rebind path for an already-linked project: the workspace exists
     // from here; the rebind that follows reports the switch and the link.
     Telemetry.track({
