@@ -268,6 +268,28 @@ describe("telemetry identity", () => {
     await new Promise((r) => setTimeout(r, 30))
     expect(meCalls().length).toBe(after) // backoff: no retry within the window
 
+    // A different credential appearing during the backoff is picked up at once.
+    meStatus = 200
+    await new Promise((r) => setTimeout(r, 15))
+    writeCreds("key-B-longer-so-the-size-differs-too")
+    await Telemetry.flush()
+    const gotB = await (async () => {
+      const until = Date.now() + 2000
+      while (Date.now() < until) {
+        if (Telemetry.identityForTest()?.user_id === UUID_B) return true
+        await new Promise((r) => setTimeout(r, 20))
+      }
+      return false
+    })()
+    expect(gotB).toBe(true)
+
+    // And the unchanged credential is retried once the backoff has elapsed.
+    await new Promise((r) => setTimeout(r, 15))
+    writeCreds("key-A")
+    meStatus = 503
+    await Telemetry.flush()
+    await new Promise((r) => setTimeout(r, 60))
+    expect(Telemetry.identityForTest()).toBeUndefined()
     meStatus = 200
     Telemetry.retryIdentityNowForTest()
     await Telemetry.flush()

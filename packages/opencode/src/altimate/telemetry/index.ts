@@ -1865,10 +1865,11 @@ export namespace Telemetry {
   // one flush interval instead of at the next process start.
   let identityStamp = ""
   // altimate_change — a resolution that failed while a credential exists (backend down, timeout)
-  // must be tried again, but not on every 5 s flush: the stamp is reset so the next flush after
-  // this time re-resolves.
+  // is tried again at the first flush after this time, not on every 5 s flush. The stamp of the
+  // failed credential is kept, so a different credential appearing in the meantime is noticed at
+  // once by the stamp comparison; the backoff only throttles retries of the unchanged one.
   const IDENTITY_RETRY_MS = 60_000
-  let identityRetryAt = 0
+  let identityRetryAt = 0 // 0: no retry pending
   let machineId = ""
   let sessionId = ""
   let projectId = ""
@@ -2141,16 +2142,14 @@ export namespace Telemetry {
   function resolveIdentity(opts: { refresh?: boolean } = {}): Promise<void> {
     const generation = ++identityGeneration
     identityStamp = TelemetryIdentity.credentialStamp()
+    identityRetryAt = 0
     return TelemetryIdentity.resolve(opts)
       .then(async (resolved) => {
         if (generation !== identityGeneration) return
         identity = resolved
         if (resolved === undefined && (await TelemetryIdentity.hasCredential())) {
           // Signed in but unresolved: a transient failure. Retry at a later flush.
-          if (generation === identityGeneration) {
-            identityStamp = ""
-            identityRetryAt = Date.now() + IDENTITY_RETRY_MS
-          }
+          if (generation === identityGeneration) identityRetryAt = Date.now() + IDENTITY_RETRY_MS
         }
       })
       .catch(() => {})
@@ -2170,9 +2169,9 @@ export namespace Telemetry {
     return identity
   }
 
-  /** Test seam: end the retry backoff so the next flush re-resolves. */
+  /** Test seam: end a pending retry backoff so the next flush re-resolves. */
   export function retryIdentityNowForTest() {
-    identityRetryAt = 0
+    if (identityRetryAt !== 0) identityRetryAt = 1
   }
   // altimate_change end
 
@@ -2372,9 +2371,10 @@ export namespace Telemetry {
     // change on disk and re-resolve (cheap: two stats, and the cache answers unless the key changed).
     const who = identity
     const mid = machineId
-    if (enabled && Date.now() >= identityRetryAt) {
+    if (enabled) {
       const stamp = TelemetryIdentity.credentialStamp()
-      if (stamp !== identityStamp) {
+      const retryDue = identityRetryAt !== 0 && Date.now() >= identityRetryAt
+      if (stamp !== identityStamp || retryDue) {
         identity = undefined
         void resolveIdentity()
       }
