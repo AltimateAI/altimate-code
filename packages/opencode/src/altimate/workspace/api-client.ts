@@ -178,8 +178,15 @@ async function creds(): Promise<{ url: string; instance: string; apiKey: string 
 // `workspace_api_error` (or `workspace_auth_expired` on 401/403) with the endpoint masked of
 // ids; the link lifecycle functions below report linked / created / switched / unlinked on the
 // success response and `workspace_link_failed` with a reason class otherwise.
-function endpointOf(method: string, basePath: string, subpath: string): string {
-  return `${method} ${basePath}${subpath}`.replace(/\/\d+(?=\/|$)/g, "/:id")
+/** "METHOD /base/path" with every dynamic segment replaced by ":id". Route words are lowercase
+ * letters with hyphens or underscores (or a version like v3); anything else — numeric ids,
+ * uuids, memory and skill public ids — is an identifier and must not reach telemetry. */
+export function endpointOf(method: string, basePath: string, subpath: string): string {
+  const masked = `${basePath}${subpath}`
+    .split("/")
+    .map((seg) => (seg === "" || /^(v\d+|[a-z][a-z_-]*)$/.test(seg) ? seg : ":id"))
+    .join("/")
+  return `${method} ${masked}`
 }
 
 function workspaceIdIn(body: unknown): number | undefined {
@@ -192,7 +199,7 @@ function workspaceIdIn(body: unknown): number | undefined {
 function reportApiError(input: {
   endpoint: string
   status?: number
-  kind: "4xx" | "5xx" | "network" | "timeout"
+  kind: "4xx" | "5xx" | "network" | "timeout" | "response"
   workspaceId?: number
 }) {
   const session_id = Telemetry.getContext().sessionId
@@ -372,7 +379,13 @@ async function req<T>(
         `Request to ${target} timed out after ${Math.round(timeoutMs / 1000)}s`,
       )
     }
-    reportApiError({ endpoint, kind: "network", workspaceId: bodyWorkspaceId })
+    // A WorkspaceApiError here came from readBounded(): the server answered, the body was
+    // over the cap. Everything else is transport.
+    reportApiError({
+      endpoint,
+      kind: err instanceof WorkspaceApiError ? "response" : "network",
+      workspaceId: bodyWorkspaceId,
+    })
     const msg = err instanceof Error ? err.message : String(err)
     throw new WorkspaceApiError(`Cannot reach ${target}: ${msg}`)
   } finally {
@@ -427,6 +440,7 @@ async function req<T>(
   // is treated as an empty body too — otherwise ``null as T`` reaches callers
   // and .foo throws in a way the typed switches can't classify. (m7 + CR)
   if (json == null && !opts.allowEmptyBody) {
+    reportApiError({ endpoint, status: res.status, kind: "response", workspaceId: bodyWorkspaceId })
     throw new WorkspaceApiError(
       `Empty ${res.status} body from ${target} — expected JSON payload`,
       res.status,
