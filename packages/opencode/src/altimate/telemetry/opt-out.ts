@@ -1,6 +1,7 @@
 import fs from "fs"
 import path from "path"
 import { Global } from "../../global"
+import { readExistingMachineId } from "@/altimate/util/machine-id"
 
 /**
  * The marker that says this machine already sent its final ``telemetry_opted_out`` event.
@@ -16,8 +17,6 @@ import { Global } from "../../global"
  * id lives in.
  */
 export namespace OptOutMarker {
-  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-
   function dir(): string {
     return path.join(Global.Path.home, ".altimate")
   }
@@ -27,14 +26,9 @@ export namespace OptOutMarker {
   }
 
   /** The machine id minted by an earlier telemetry-enabled run, if any. Never mints one: a machine
-   * that never sent telemetry has nothing to mark. */
+   * that never sent telemetry has nothing to mark. Bounded and symlink-safe, like the minting read. */
   export function readMachineId(): string | undefined {
-    try {
-      const raw = fs.readFileSync(path.join(dir(), "machine-id"), "utf8").trim()
-      return UUID.test(raw) ? raw : undefined
-    } catch {
-      return undefined
-    }
+    return readExistingMachineId(path.join(dir(), "machine-id")) || undefined
   }
 
   export function exists(): boolean {

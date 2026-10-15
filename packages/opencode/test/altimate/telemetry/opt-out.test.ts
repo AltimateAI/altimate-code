@@ -138,6 +138,17 @@ describe("telemetry opt-out marker", () => {
     expect(existsSync(path.join(home, ".altimate", "machine-id"))).toBe(false)
   })
 
+  test("a corrupt or oversized machine-id file sends nothing", async () => {
+    mkdirSync(path.join(home, ".altimate"), { recursive: true })
+    writeFileSync(path.join(home, ".altimate", "machine-id"), "not-a-uuid\n" + "x".repeat(4096))
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    await new Promise((r) => setTimeout(r, 150))
+    expect(trackPosts()).toHaveLength(0)
+    expect(OptOutMarker.exists()).toBe(false)
+  })
+
   test("the marker is written only once the sink accepted the event", async () => {
     writeMachineId()
     process.env.OPENCODE_DISABLE_TELEMETRY = "true"

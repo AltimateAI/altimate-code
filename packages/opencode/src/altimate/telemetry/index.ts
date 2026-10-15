@@ -2221,14 +2221,11 @@ export namespace Telemetry {
       const explicit = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
       const cfg = parseConnectionString(explicit ?? DEFAULT_CONNECTION_STRING)
       if (!cfg) return
-      machineId = id
-      identity = await TelemetryIdentity.cached()
       const envelopes = toAppInsightsEnvelopes(
         [{ type: "telemetry_opted_out", timestamp: Date.now(), opt_out_source: source }],
         cfg,
+        { machineId: id, identity: await TelemetryIdentity.cached() },
       )
-      machineId = ""
-      identity = undefined
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), OPT_OUT_TIMEOUT_MS)
       try {
@@ -2244,8 +2241,6 @@ export namespace Telemetry {
       }
     } catch {
       // The opt-out path never surfaces: a missed marker only means one more attempt next launch.
-      machineId = ""
-      identity = undefined
     }
   }
   // altimate_change end
