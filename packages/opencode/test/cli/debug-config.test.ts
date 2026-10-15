@@ -51,7 +51,7 @@ describe("debug config redaction", () => {
       },
       mcp: {
         remote: { oauth: { clientSecret: "***", clientId: "public" }, headers: { "x-custom": "***" } },
-        local: { environment: { SERVICE_TOKEN: "***", PATH: "/usr/bin" } },
+        local: { environment: { SERVICE_TOKEN: "***", PATH: "***" } },
       },
       url: "***",
       normal: config.normal,
@@ -232,7 +232,7 @@ describe("debug config redaction", () => {
         [key]: "public-value",
         query: `https://example.com/path?${key}=public-value`,
         fragment: `https://example.com/path#${key}=public-value`,
-        command: ["example", `--${key}=public-value`, `-${key}=public-value`, `--${key}`, "public-value"],
+        argv: ["example", `--${key}=public-value`, `-${key}=public-value`, `--${key}`, "public-value"],
       }
       expect(redactConfig(input)).toEqual({
         ...input,
@@ -297,12 +297,12 @@ describe("debug config redaction", () => {
     "connectionString",
   ])("masks inline and following values for secret argv flag %s", (flag) => {
     const input = {
-      command: ["example", `--${flag}=inline-secret`, `-${flag}=inline-secret`, `--${flag}`, "next-secret"],
+      argv: ["example", `--${flag}=inline-secret`, `-${flag}=inline-secret`, `--${flag}`, "next-secret"],
       nested: [[`-${flag}`, "next-secret", "public"]],
     }
     const before = structuredClone(input)
     expect(redactConfig(input)).toEqual({
-      command: ["example", "***", "***", `--${flag}`, "***"],
+      argv: ["example", "***", "***", `--${flag}`, "***"],
       nested: [[`-${flag}`, "***", "public"]],
     })
     expect(input).toEqual(before)
@@ -311,12 +311,12 @@ describe("debug config redaction", () => {
   test("preserves non-string argv values and limits bare flags to the following element", () => {
     expect(
       redactConfig({
-        command: ["example", "--token", 1200, "public", "--password", false, "public", "--api-key", null, "public"],
+        argv: ["example", "--token", 1200, "public", "--password", false, "public", "--api-key", null, "public"],
         settings: ["--token", "secret", "public", "--password"],
         consecutive: ["--token", "--password", "secret", "public"],
       }),
     ).toEqual({
-      command: ["example", "--token", 1200, "public", "--password", false, "public", "--api-key", null, "public"],
+      argv: ["example", "--token", 1200, "public", "--password", false, "public", "--api-key", null, "public"],
       settings: ["--token", "***", "public", "--password"],
       consecutive: ["--token", "***", "***", "public"],
     })
@@ -333,6 +333,65 @@ describe("debug config redaction", () => {
       token: ["***"],
       credentials: { value: "***", nested: { deeper: "***" } },
       model: { name: "public" },
+    })
+  })
+
+  test.each(["command", "headersCommand", "args"])(
+    "keeps only the first element, bare flags, and non-string values in %s",
+    (key) => {
+      expect(
+        redactConfig({
+          [key]: ["example", "--max_tokens=1200", "public", "--token", "--verbose", "-v", 1200, false, null],
+        }),
+      ).toEqual({
+        [key]: ["example", "***", "***", "--token", "--verbose", "-v", 1200, false, null],
+      })
+    },
+  )
+
+  test.each(["environment", "env"])("masks nested strings under %s while preserving non-string values", (key) => {
+    expect(
+      redactConfig({
+        [key]: { nested: ["debug", 1200, true, null], command: ["example", "--verbose"] },
+      }),
+    ).toEqual({
+      [key]: { nested: ["***", 1200, true, null], command: ["***", "***"] },
+    })
+  })
+
+  test("masks every MCP environment value and keeps only executable and bare flags in argv", () => {
+    expect(
+      redactConfig({
+        mcp: {
+          db: {
+            type: "local",
+            command: ["env", "API_TOKEN=secret", "curl", "--header", "Authorization: Bearer secret", "--verbose"],
+            environment: {
+              DATABASE_URL: "jdbc:sqlserver://db;user=sa;password=Secret123",
+              ORACLE: "jdbc:oracle:thin:scott/tiger@db:1521/orcl",
+              KEY_PASSPHRASE: "also-secret",
+              DB_PWD: "hunter2",
+              LOG_LEVEL: "debug",
+            },
+          },
+        },
+        other: { KEY_PASSPHRASE: "x", DB_PWD: "y", password_hint_url: "https://example.com/help" },
+      }),
+    ).toEqual({
+      mcp: {
+        db: {
+          type: "local",
+          command: ["env", "***", "***", "--header", "***", "--verbose"],
+          environment: {
+            DATABASE_URL: "***",
+            ORACLE: "***",
+            KEY_PASSPHRASE: "***",
+            DB_PWD: "***",
+            LOG_LEVEL: "***",
+          },
+        },
+      },
+      other: { KEY_PASSPHRASE: "***", DB_PWD: "***", password_hint_url: "***" },
     })
   })
 })
