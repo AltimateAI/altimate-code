@@ -37,7 +37,9 @@ async function withEnv(env: Partial<Record<(typeof ENV_KEYS)[number], string>>, 
     saved.set(key, process.env[key])
     delete process.env[key]
   }
-  const homeKeys = ["HOME", "USERPROFILE"] as const
+  // OPENCODE_TEST_HOME: Global.Path.home honours it, and Bun's os.homedir() does not follow a
+  // changed HOME, so without it code keyed on Global.Path.home would read the real home.
+  const homeKeys = ["HOME", "USERPROFILE", "OPENCODE_TEST_HOME"] as const
   for (const key of homeKeys) saved.set(key, process.env[key])
   const home = await mkdtemp(path.join(tmpdir(), "telemetry-home-"))
   for (const key of homeKeys) process.env[key] = home

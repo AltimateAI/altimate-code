@@ -6,6 +6,7 @@ import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "@/altimate/util/machine-id"
 import { TelemetryIdentity } from "./identity"
+import { OptOutMarker } from "./opt-out"
 import { createHash, randomUUID } from "crypto"
 // altimate_change — first-run health: the event-loop stall monitor labels which thread stalled
 import { isMainThread } from "node:worker_threads"
@@ -65,9 +66,17 @@ const log = Log.create({ service: "telemetry" })
  */
 function isAutomatedRun(): boolean {
   if (process.env.ALTIMATE_TELEMETRY_FORCE === "true") return false
+  return underTestRunner()
+}
+
+// altimate_change start — the raw test-runner check, without the force flag. The opt-out marker
+// reads and writes files in the real home directory, so under a test runner it stays inert unless
+// a suite opts in through Telemetry.allowOptOutUnderTestRunner(); the force flag must not reach it.
+function underTestRunner(): boolean {
   if (process.env.NODE_ENV === "test") return true
   return Boolean(process.env.BUN_TEST || process.env.VITEST || process.env.JEST_WORKER_ID)
 }
+// altimate_change end
 
 // altimate_change start — composed path-masking rules (shared fragments)
 // R: one path-run character — anything but whitespace/separators/quotes,
@@ -668,6 +677,14 @@ export namespace Telemetry {
     // The 0.11.0 first-run freeze (an in-process @npmcli/arborist install blocking the loop for minutes)
     // was invisible for two months: nothing timed startup or registration, and a blocked loop cannot
     // flush, so a killed process left only `session_start`. These events close that gap.
+    | {
+        /** The last event an opted-out machine sends; nothing follows it until telemetry is
+         * turned back on. Built directly in recordOptOut(), never through track(). */
+        type: "telemetry_opted_out"
+        timestamp: number
+        /** Where the opt-out was set: an environment variable or the user config. */
+        opt_out_source: "env" | "config"
+      }
     | {
         type: "startup_ready"
         timestamp: number
@@ -2068,6 +2085,7 @@ export namespace Telemetry {
       // (previously only wired in test fixtures, silent no-op in product).
       if (Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")) {
         buffer = []
+        void recordOptOut("env")
         return
       }
       // Config.get() may throw outside Instance context (e.g. CLI middleware
@@ -2077,6 +2095,7 @@ export namespace Telemetry {
         const userConfig = (await Config.get()) as any
         if (userConfig.telemetry?.disabled) {
           buffer = []
+          void recordOptOut("config")
           return
         }
       } catch {
@@ -2112,6 +2131,9 @@ export namespace Telemetry {
       // logs + returns ""). No try/catch needed — all paths are handled inside.
       machineId = getOrCreateMachineId()
       enabled = true
+      // altimate_change — telemetry is on: forget the opt-out marker, so turning it off again is
+      // recorded again.
+      OptOutMarker.clear()
       log.info("telemetry initialized", { mode: "appinsights" })
       // altimate_change — clear any existing interval before installing a new one. doInit() can
       // run more than once per process (init/shutdown cycles per session in prompt.ts), and
@@ -2172,6 +2194,59 @@ export namespace Telemetry {
   /** Test seam: end a pending retry backoff so the next flush re-resolves. */
   export function retryIdentityNowForTest() {
     if (identityRetryAt !== 0) identityRetryAt = 1
+  }
+  // altimate_change end
+
+  // altimate_change start — the final event of an opted-out machine. Sent once, only from a
+  // machine that has sent telemetry before (a machine id exists; none is minted here), under the
+  // same sink rules as doInit(), with the identity cached by an earlier signed-in run (no request
+  // to resolve it). The marker is written only once the ingest endpoint accepted the event, so an
+  // offline launch tries again next time; after the marker, nothing is sent until telemetry is
+  // re-enabled. Not awaited: an opted-out launch must not wait on the network.
+  const OPT_OUT_TIMEOUT_MS = 3_000
+  let optOutUnderTestRunner = false
+  /** Test seam: let a suite that redirects the home directory exercise recordOptOut(). */
+  export function allowOptOutUnderTestRunner(on: boolean) {
+    optOutUnderTestRunner = on
+  }
+  async function recordOptOut(source: "env" | "config"): Promise<void> {
+    try {
+      if (underTestRunner() && !optOutUnderTestRunner) return
+      // The force flag is a developer knob for running telemetry under a test runner; the opt-out
+      // marker is about real users, and "disabled" must keep winning over "force" to the letter.
+      if (process.env.ALTIMATE_TELEMETRY_FORCE === "true") return
+      if (OptOutMarker.exists()) return
+      const id = OptOutMarker.readMachineId()
+      if (!id) return
+      const explicit = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      const cfg = parseConnectionString(explicit ?? DEFAULT_CONNECTION_STRING)
+      if (!cfg) return
+      machineId = id
+      identity = await TelemetryIdentity.cached()
+      const envelopes = toAppInsightsEnvelopes(
+        [{ type: "telemetry_opted_out", timestamp: Date.now(), opt_out_source: source }],
+        cfg,
+      )
+      machineId = ""
+      identity = undefined
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), OPT_OUT_TIMEOUT_MS)
+      try {
+        const res = await fetch(cfg.endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(envelopes),
+          signal: controller.signal,
+        })
+        if (res.ok) OptOutMarker.write()
+      } finally {
+        clearTimeout(timeout)
+      }
+    } catch {
+      // The opt-out path never surfaces: a missed marker only means one more attempt next launch.
+      machineId = ""
+      identity = undefined
+    }
   }
   // altimate_change end
 
