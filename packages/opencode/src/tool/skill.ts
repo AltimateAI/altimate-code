@@ -271,7 +271,10 @@ export const SkillTool = Tool.define("skill", async (ctx) => {
       // altimate_change start — classify origin once, reused for telemetry and the source badge
       const skillOrigin = classifySkillSource(skill.location, Instance.directory)
       // altimate_change start — count workspace skill use for the session's summary rows
-      if (skillOrigin === "workspace") Telemetry.noteWorkspaceUse(ctx.sessionID, "skills", 1, "add", ctx.turn)
+      // Only a bound turn's use counts: a stale `_workspace` folder in an unbound project is not the workspace's.
+      if (skillOrigin === "workspace" && ctx.workspaceId !== undefined) {
+        Telemetry.noteWorkspaceUse(ctx.sessionID, "skills", 1, "add", ctx.turn)
+      }
       // altimate_change end
       // altimate_change end
 

@@ -2909,6 +2909,8 @@ export namespace SessionPrompt {
                 const model = await Provider.getModel(info.model.providerID, info.model.modelID)
                 const readCtx: Tool.Context = {
                   sessionID: input.sessionID,
+                  // altimate_change — the project's binding, so the attachment read's tool rows name the workspace
+                  workspaceId: (await readLocalBinding(Instance.directory).catch(() => null))?.datamateId,
                   abort: new AbortController().signal,
                   agent: input.agent!,
                   messageID: info.id,
