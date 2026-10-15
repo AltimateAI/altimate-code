@@ -688,13 +688,28 @@ export function getUpstreamFiles(config: MergeConfig): Set<string> {
   if (_upstreamFilesCache?.ref === ref) return _upstreamFilesCache.files
   const { execFileSync } = require("child_process")
   const root = repoRoot()
-  try {
-    const output = execFileSync("git", ["ls-tree", "-r", "--name-only", ref], {
+  const readFiles = () =>
+    execFileSync("git", ["ls-tree", "-r", "--name-only", ref], {
       cwd: root,
       encoding: "utf-8",
       maxBuffer: 10 * 1024 * 1024,
       stdio: ["ignore", "pipe", "pipe"],
     })
+  try {
+    let output: string
+    try {
+      output = readFiles()
+    } catch {
+      try {
+        execFileSync("git", ["fetch", config.upstreamRemote, `refs/tags/${ref}:refs/tags/${ref}`, "--no-tags", "--quiet"], {
+          cwd: root,
+          stdio: "ignore",
+        })
+      } catch {
+        // Retry the local ref even when the best-effort fetch fails.
+      }
+      output = readFiles()
+    }
     _upstreamFilesCache = { ref, files: new Set(output.trim().split("\n").filter(Boolean)) }
   } catch {
     console.warn(

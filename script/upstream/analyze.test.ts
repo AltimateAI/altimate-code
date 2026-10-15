@@ -50,9 +50,36 @@ describe("upstream baseline ownership", () => {
     }
   })
 
-  test("missing baseline warns with fetch instructions and falls back to the directory heuristic", () => {
+  test("missing baseline is fetched once and used for ownership checks", () => {
+    const config = { ...loadConfig(), upstreamBaseline: "v1.99.998", upstreamRemote: "baseline-upstream" }
+    const exec = spyOn(childProcess, "execFileSync")
+      .mockImplementationOnce(() => {
+        throw new Error("Not a valid object name")
+      })
+      .mockReturnValueOnce("")
+      .mockReturnValueOnce(`${file}\n`)
+    const warn = spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      expect(getUpstreamFiles(config).has(file)).toBe(true)
+      expect(isUpstreamShared(file, config)).toBe(true)
+      expect(isUpstreamShared("packages/opencode/src/fork-only.ts", config)).toBe(false)
+      expect(exec.mock.calls.map((call) => call[1])).toEqual([
+        ["ls-tree", "-r", "--name-only", config.upstreamBaseline],
+        ["fetch", config.upstreamRemote, "refs/tags/v1.99.998:refs/tags/v1.99.998", "--no-tags", "--quiet"],
+        ["ls-tree", "-r", "--name-only", config.upstreamBaseline],
+      ])
+      expect(exec.mock.calls[1][0]).toBe("git")
+      expect(exec.mock.calls[1][2]).toEqual({ cwd: repoRoot(), stdio: "ignore" })
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      exec.mockRestore()
+      warn.mockRestore()
+    }
+  })
+
+  test("failed baseline fetch warns with fetch instructions and falls back to the directory heuristic", () => {
     const config = { ...loadConfig(), upstreamBaseline: "v1.99.999" }
-    const lsTree = spyOn(childProcess, "execFileSync").mockImplementation(() => {
+    const exec = spyOn(childProcess, "execFileSync").mockImplementation(() => {
       throw new Error("Not a valid object name")
     })
     const warn = spyOn(console, "warn").mockImplementation(() => {})
@@ -61,13 +88,17 @@ describe("upstream baseline ownership", () => {
       expect(isUpstreamShared(file, config)).toBe(true)
       expect(isUpstreamShared("packages/opencode/src/altimate/custom.ts", config)).toBe(false)
       expect(isUpstreamShared("packages/other/src/custom.ts", config)).toBe(false)
-      expect(lsTree).toHaveBeenCalledTimes(1)
+      expect(exec.mock.calls.map((call) => call[1])).toEqual([
+        ["ls-tree", "-r", "--name-only", config.upstreamBaseline],
+        ["fetch", config.upstreamRemote, "refs/tags/v1.99.999:refs/tags/v1.99.999", "--no-tags", "--quiet"],
+        ["ls-tree", "-r", "--name-only", config.upstreamBaseline],
+      ])
       expect(warn).toHaveBeenCalledTimes(1)
       expect(warn.mock.calls[0][0]).toContain("upstream baseline 'v1.99.999' is unavailable")
       expect(warn.mock.calls[0][0]).toContain("git fetch upstream refs/tags/v1.99.999:refs/tags/v1.99.999 --no-tags")
       expect(warn.mock.calls[0][0]).toContain("Falling back to directory-based ownership checks")
     } finally {
-      lsTree.mockRestore()
+      exec.mockRestore()
       warn.mockRestore()
     }
   })
