@@ -99,7 +99,7 @@ import {
   OFFER_SKIP_TTL_MS,
   type EngineOffer,
 } from "@/altimate/workspace/engine-offer"
-import { useClipboard } from "@opencode-ai/tui/context/clipboard"
+import { useClipboard, type ClipboardService } from "@opencode-ai/tui/context/clipboard"
 import { AltimateApi } from "@/altimate/api/client"
 import { Log } from "@/altimate/util/log"
 
@@ -1911,21 +1911,12 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   const copyCommand = () => {
     const cmd = command()
     void (async () => {
-      try {
-        await clipboard.write?.(cmd)
-        // A resolved write is NOT proof of a copy. The host's writer picks
-        // xclip/xsel on Linux and otherwise falls back to clipboardy, and it
-        // swallows backend failures (`.catch(() => undefined)`), so on the many
-        // Linux/WSL boxes with neither tool installed the write silently does
-        // nothing. Read back and compare before claiming success. (Caught by
-        // E2E: the toast said "Copied:" while the clipboard was untouched.)
-        const back = await clipboard.read?.()
-        if (back?.data.trim() === cmd) {
-          props.api.ui.toast({ variant: "info", message: `Copied: ${cmd}` })
-          return
-        }
-      } catch {
-        // Unreadable or unwritable clipboard — fall through and show it.
+      if (await confirmedCopy(clipboard, cmd)) {
+        // `copied` only once the read-back confirms the clipboard holds the command: the
+        // selection itself proves nothing (an unconfirmed copy tracks no row).
+        trackInstallPrompt("copied", props.offer)
+        props.api.ui.toast({ variant: "info", message: `Copied: ${cmd}` })
+        return
       }
       props.api.ui.toast({
         variant: "warning",
@@ -1977,7 +1968,6 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
           return
         }
         if (option.value === "copy") {
-          trackInstallPrompt("copied", props.offer)
           copyCommand()
           props.api.ui.dialog.clear()
           return
@@ -1990,6 +1980,23 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
       }}
     />
   )
+}
+
+/** Write `text` to the clipboard and read it back: true only when the clipboard then holds it.
+ *
+ * A resolved write is NOT proof of a copy. The host's writer picks xclip/xsel on Linux and
+ * otherwise falls back to clipboardy, and it swallows backend failures (`.catch(() => undefined)`),
+ * so on the many Linux/WSL boxes with neither tool installed the write silently does nothing.
+ * (Caught by E2E: the toast said "Copied:" while the clipboard was untouched.) An unreadable or
+ * unwritable clipboard is the same unconfirmed outcome. */
+export async function confirmedCopy(clipboard: Pick<ClipboardService, "write" | "read">, text: string) {
+  try {
+    await clipboard.write?.(text)
+    const back = await clipboard.read?.()
+    return back?.data.trim() === text
+  } catch {
+    return false
+  }
 }
 
 /** Show the offer unless the 7-day latch suppresses it.
