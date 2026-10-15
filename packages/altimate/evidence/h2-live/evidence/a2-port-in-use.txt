@@ -1,0 +1,27 @@
+# dummy listener on 57242
+dummy pid 77172
+COMMAND     PID       USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+python3.9 77172 anandgupta    3u  IPv4 0x45b877658b9e0789      0t0  TCP 127.0.0.1:57242 (LISTEN)
+# brand service start with port occupied
+Error: Server process exited with code 1
+Error: Managed service port 57242 on 127.0.0.1 is already in use by another process. Configure another port with `altimate-code service set port <port>` and start the service again.
+    at <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-host-live/packages/cli/src/server-process.ts:176:15) {
+  [cause]: ServeError: 
+      at onError (/Users/anandgupta/codebase/altimate-code-v2-host-live/node_modules/.bun/@effect+platform-node@4.0.1+7968a5796f38bf11/node_modules/@effect/platform-node/dist/NodeHttpServer.js:76:30)
+      at applyHandlers (node:events:64:20)
+      at emitError (node:events:44:27)
+      at emitListenErrorNextTick (node:_http_server:134:12)
+      at processTicksAndRejections (unknown:7:39) {
+    [cause]: Error: Failed to start server. Is port 57242 in use?
+        at serve (unknown)
+        at <anonymous> (node:_http_server:359:39)
+        at <anonymous> (node:_http_server:332:33)
+        at <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-host-live/node_modules/.bun/@effect+platform-node@4.0.1+7968a5796f38bf11/node_modules/@effect/platform-node/dist/NodeHttpServer.js:81:12)
+  }
+}
+    at map (unknown:1:11)
+    at reap (/Users/anandgupta/codebase/altimate-code-v2-host-live/packages/client/src/service-contender.ts:94:28)
+    at <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-host-live/packages/client/src/effect/service.ts:108:25)
+    at service.ensure (/Users/anandgupta/codebase/altimate-code-v2-host-live/packages/cli/src/commands/handlers/service/start.ts:11:38)
+# brand service status
+stopped

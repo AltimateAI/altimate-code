@@ -13,6 +13,8 @@ export type Descriptor = {
   readonly title: { readonly home: string; readonly prefix: string }
   // altimate: ALT-F02 - module path relative to the descriptor, resolved only by the build host.
   readonly hostPlugins?: string
+  // altimate: ALT-F05 - optional distribution-owned artifact packaging hook.
+  readonly buildPlugin?: string
 }
 
 export const defaults: Descriptor = {
@@ -41,6 +43,9 @@ export function resolveIdentity(input: unknown): Descriptor {
   // altimate: ALT-F02
   if (value.hostPlugins !== undefined && (typeof value.hostPlugins !== "string" || !value.hostPlugins))
     throw new Error("Identity.hostPlugins must be a nonempty module path")
+  // altimate: ALT-F05
+  if (value.buildPlugin !== undefined && (typeof value.buildPlugin !== "string" || !value.buildPlugin))
+    throw new Error("Identity.buildPlugin must be a nonempty module path")
   for (const key of ["app", "displayName", "userAgent", "serviceName"]) {
     if (typeof value[key] !== "string" || value[key] === "") throw new Error(`Identity.${key} must be nonempty`)
   }

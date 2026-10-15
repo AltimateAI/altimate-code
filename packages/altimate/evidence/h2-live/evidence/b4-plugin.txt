@@ -1,0 +1,10 @@
+$ altimate-code plugin list --builtin
+ID        VERSION  SOURCE
+altimate  -        builtin (tui)
+exit=0
+
+$ altimate-code plugin list
+No plugins found
+$ altimate-code plugin remove altimate
+Plugin "altimate" is a protected host builtin and cannot be removed
+exit=0

@@ -1,0 +1,12 @@
+$ service stop
+$ service start
+http://127.0.0.1:57242
+{"version":"local","pid":18515,"urls":["http://127.0.0.1:57242"],"paths":{"tmp":"/private/tmp/claude-501/-Users-anandgup
+# COLD plugin list --builtin (head -4) immediately after restart
+ID        VERSION  SOURCE
+altimate  -        builtin (tui)
+# WARM again
+ID                                       VERSION  SOURCE
+altimate                                 -        builtin
+altimate                                 -        builtin (tui)
+opencode.agent                           -        builtin

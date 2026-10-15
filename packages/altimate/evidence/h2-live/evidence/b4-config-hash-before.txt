@@ -1,0 +1,2 @@
+e4abce7029869fe66c872adc3d1f61c47cbaef67  /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h2live/b1/xdg/config/altimate-code/altimate-code.json
+47222608d7b22f143256b5b2bc927afde52ce6c5  /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h2live/b1/xdg/config/altimate-code/service-local.json

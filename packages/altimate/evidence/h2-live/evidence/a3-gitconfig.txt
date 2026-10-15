@@ -1,0 +1,1 @@
+snapshot gitconfig: R/xdg/data/altimate-code/snapshot/1b0377966657874721e9eab338ac0f69fe488bb9/c6f7ad89b148c521df9043798c81965ea318de5b/altimate-code.gitconfig

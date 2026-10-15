@@ -1,0 +1,3 @@
+{"n":15,"tools":["edit","glob","grep","question","read","schema_inspect","shell","skill","sql_execute","subagent","warehouse_add","webfetch","websearch","write","execute"],"toolMsgs":0,"lastUser":"\"SQLONLY NAME=demo\""}
+{"n":15,"tools":["edit","glob","grep","question","read","schema_inspect","shell","skill","sql_execute","subagent","warehouse_add","webfetch","websearch","write","execute"],"toolMsgs":1,"lastUser":"\"SQLONLY NAME=demo\""}
+{"n":15,"tools":["edit","glob","grep","question","read","schema_inspect","shell","skill","sql_execute","subagent","warehouse_add","webfetch","websearch","write","execute"],"toolMsgs":0,"lastUser":"\"hello\""}

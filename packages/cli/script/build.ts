@@ -28,6 +28,11 @@ const hostPlugins =
     ? [hostContributionsPlugin(path.resolve(identityFile), identity.hostPlugins)]
     : []
 const binary = identity.app
+// altimate: ALT-F05 - load distribution build glue before changing cwd.
+const buildPluginFile =
+  identityFile && identity.buildPlugin
+    ? path.resolve(path.dirname(path.resolve(identityFile)), identity.buildPlugin)
+    : undefined
 const outdir = path.resolve(
   dir,
   process.argv.find((arg) => arg.startsWith("--outdir="))?.slice("--outdir=".length) ?? "dist",
@@ -164,6 +169,12 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
   const target = targetName(item)
   // altimate: ALT-F01
   const name = target.replace(binary, binary === "opencode" ? "cli" : binary)
+  // altimate: ALT-F05
+  const distributionPlugins: BunPlugin[] = []
+  if (buildPluginFile) {
+    const { distributionPlugin } = await import(buildPluginFile)
+    distributionPlugins.push(await distributionPlugin({ ...item, outdir: path.join(outdir, name) }))
+  }
   const executablePath = await compileExecutable(item)
   console.log(`building ${name}`)
   const result = await Bun.build({
@@ -172,6 +183,8 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
     plugins: [
       // altimate: ALT-F02
       ...hostPlugins,
+      // altimate: ALT-F05
+      ...distributionPlugins,
       appAssetsPlugin,
       solidPlugin,
       parcelWatcherPlugin,

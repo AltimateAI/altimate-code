@@ -1,0 +1,22 @@
+bun test v1.4.2 (744846f84)
+
+test/h2-host.test.ts:
+(pass) H2 host composition: fresh [1294.97ms]
+(pass) H2 host composition: duplicate [1197.79ms]
+(pass) H2 host composition: config-duplicate [1248.48ms]
+(pass) H2 host composition: collision [1163.42ms]
+(pass) H2 host composition: exact [1181.44ms]
+(pass) H2 host composition: wildcard [1296.70ms]
+(pass) H2 host composition: lifecycle [1578.58ms]
+(pass) H2 host composition: throw [1061.70ms]
+(pass) H2 host composition: stock [1106.00ms]
+
+test/host-identity.test.ts:
+(pass) host defaults preserve upstream service discovery, ports, logo and titles [291.19ms]
+(pass) branded source host and its spawned command share identity and independent service discovery [890.52ms]
+(pass) Bun compile-time identity define reaches the production logo module without a preload [119.66ms]
+
+ 12 pass
+ 0 fail
+ 42 expect() calls
+Ran 12 tests across 2 files. [13.32s]

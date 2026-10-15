@@ -1,0 +1,1 @@
+{"version":"local","pid":80106,"urls":["http://127.0.0.1:57242"],"paths":{"tmp":"/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h2live/b1/tmp/altimate-code"},"capabilities":{"persistentPty":true}}

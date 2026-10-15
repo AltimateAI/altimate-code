@@ -1,6 +1,7 @@
 {
   "app": "altimate-code",
   "hostPlugins": "./host.ts",
+  "buildPlugin": "./script/build-plugin.ts",
   "displayName": "Altimate Code",
   "userAgent": "altimate-code",
   "envPrefixes": ["ALTIMATE_CLI_", "OPENCODE_"],

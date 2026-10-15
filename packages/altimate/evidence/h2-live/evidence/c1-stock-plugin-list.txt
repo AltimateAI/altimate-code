@@ -1,0 +1,13 @@
+# stock plugin list --builtin, repeated (cwd packages/cli)
+ID                                       VERSION  SOURCE
+opencode.agent                           -        builtin
+opencode.browser                         -        builtin
+--
+ID                                       VERSION  SOURCE
+opencode.agent                           -        builtin
+opencode.browser                         -        builtin
+--
+ID                                       VERSION  SOURCE
+opencode.agent                           -        builtin
+opencode.browser                         -        builtin
+--

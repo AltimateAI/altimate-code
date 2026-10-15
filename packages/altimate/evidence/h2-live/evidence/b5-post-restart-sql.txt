@@ -1,0 +1,3 @@
+# new proj1 session after restart; SQLONLY NAME=demo => sql_execute against restored warehouse
+ses_ebf114efeffezpoB5eXXpYDYLN
+sql_execute completed [{"type": "text", "text": "answer\n------\n42\n\n(1 rows)"}]

@@ -1,0 +1,1 @@
+$ tsgo --noEmit --project "/private/tmp/altimate-h5/tsconfig-scripts.json"

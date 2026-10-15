@@ -1,0 +1,40 @@
+   stock                         +
+
+  ┃                                                                                                 stock
+  ┃  SCRIPT NAME=x
+  ┃                                                                                                 Context
+                                                                                                    2 tokens
+     ok                                                                                             0% used
+
+     Build · Fake 1 · 36ms · 71.4 tok/s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃ No matching commands                                                                       ┃
+  ┃
+  ┃  /warehouse
+  ┃
+  ┃  Build · Fake 1 Fake
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /…/-Use…/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h2live/proj2  2 (0%)  ctrl+p commands    /…/a3ba8813-c…/scratchpad/h2live/proj2
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments

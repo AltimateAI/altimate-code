@@ -1,0 +1,40 @@
+   second                        +
+
+  ┃                                                                    Warehouses
+  ┃  SCRIPT NAME=second2
+  ┃                                                                    second2 (duckdb)
+
+     ✓ warehouse_add [name=second2, path=:memory:]                     Last query result
+
+     ✓ sql_execute [warehouse=second2, sql=select 42 as answer,        second2 · 1 row
+       'duck' as animal, null as nothing]                              answer | animal | nothing
+                                                                       42 | duck | NULL
+     Done.
+
+     Build · Fake 1 · 126ms · 125.0 tok/s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Fake 1 Fake
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /…/a3ba8813-c4f4…/scratchpad/h2live/proj2  2 (0%)  ctrl+p commands   r refresh · f full screen · esc close
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments

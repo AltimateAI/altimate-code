@@ -29,6 +29,16 @@ import { randomUUID } from "node:crypto"
 // altimate: ALT-F02
 import { Env } from "@opencode/util/env"
 
+// altimate: ALT-F05 - only branded compiled builds resolve their shipped DuckDB sidecar.
+declare global {
+  var __ALTIMATE_DRIVER_ARTIFACT__: boolean | undefined
+}
+
+function artifactDriverRoot() {
+  if (!globalThis.__ALTIMATE_DRIVER_ARTIFACT__) return undefined
+  return path.resolve(path.dirname(fs.realpathSync(process.execPath)), "../lib/altimate/drivers/node_modules")
+}
+
 /**
  * Quote a path for a copy-pasteable shell command on the current platform.
  *
@@ -385,6 +395,9 @@ export function driverSearchRoots(): string[] {
     if (isDirectory(resolved) && !roots.includes(resolved)) roots.push(resolved)
   }
 
+  // altimate: ALT-F05 - distribution-owned dependencies precede external installations.
+  push(artifactDriverRoot())
+
   // 1. Drivers this CLI installed on demand.
   push(path.join(driverInstallDir(), "node_modules"))
 
@@ -626,6 +639,7 @@ async function loadFromLocation(resolved: string, importer: (spec: string) => Pr
 /**
  * Import an optional warehouse SDK.
  *
+ * Branded artifacts pin DuckDB to the sidecar shipped with the executable.
  * Tries the ambient resolver first so development, the monorepo, and any
  * already-working install behave exactly as before, then falls back to
  * searching real directories.
@@ -637,6 +651,17 @@ export async function loadOptionalDriver(
   specifier: string,
   importer: (spec: string) => Promise<any> = (spec) => import(/* @vite-ignore */ spec),
 ): Promise<any> {
+  // altimate: ALT-F05 - never conceal a missing/broken shipped driver with a checkout or managed copy.
+  const artifact = artifactDriverRoot()
+  if (artifact && specifier === "@duckdb/node-api") {
+    const resolved = resolveOptionalPackage(specifier, [artifact])
+    if (!resolved)
+      throw new Error(`DuckDB artifact dependency is missing from ${artifact}; restore the complete distribution`)
+    return loadFromLocation(resolved, importer).catch((error: unknown) => {
+      throw loadFailure(driver, resolved, error)
+    })
+  }
+
   try {
     return await importer(specifier)
   } catch (ambientError) {
@@ -795,6 +820,9 @@ export async function loadOptionalPackage(specifier: string): Promise<any | unde
 
 /** True when `driver`'s packages are all resolvable right now. */
 export function isDriverInstalled(driver: DriverName, roots = driverSearchRoots()): boolean {
+  // altimate: ALT-F05 - readiness must agree with the artifact-only DuckDB loader.
+  const artifact = artifactDriverRoot()
+  if (artifact && driver === "duckdb") return resolveOptionalPackage("@duckdb/node-api", [artifact]) !== undefined
   return DRIVER_PACKAGES[driver].every((pkg) => resolveOptionalPackage(pkg, roots) !== undefined)
 }
 

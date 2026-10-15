@@ -1,0 +1,26 @@
+# A1 brand --version
+altimate-code vlocal
+# A1 brand --help (head)
+DESCRIPTION
+  Altimate Code command line interface
+
+USAGE
+  altimate-code <subcommand> [flags] [<directory>]
+
+ARGUMENTS
+  directory string    Directory to start Altimate Code in (optional)
+
+FLAGS
+  --standalone            Run with a private server instead of the background service
+  --server string         Connect to a server URL instead of the background service
+  --auto                  Auto-approve permissions that are not explicitly denied
+  --continue, -c          Continue the last session
+  --session, -s string    Session ID to continue, or to create if it does not exist
+# stock --version
+opencode vlocal
+# stock --help (head)
+DESCRIPTION
+  OpenCode command line interface
+
+USAGE
+  opencode <subcommand> [flags] [<directory>]

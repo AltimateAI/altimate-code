@@ -1,0 +1,1 @@
+{"provider":{"fake":{"npm":"@ai-sdk/openai-compatible","name":"Fake","options":{"baseURL":"http://127.0.0.1:57390/v1","apiKey":"x"},"models":{"fake-1":{"name":"Fake 1","tool_call":true,"limit":{"context":100000,"output":4000}}}}},"model":"fake/fake-1"}

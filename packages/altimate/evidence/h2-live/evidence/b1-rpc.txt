@@ -1,0 +1,5 @@
+# RPC listWarehouses proj1
+{"output":[{"name":"demo","path":":memory:","type":"duckdb"}]}
+
+# RPC lastResult proj1
+{"output":{"warehouse":"demo","columns":["answer","animal","nothing"],"rows":[[42,"duck",null]],"row_count":1,"truncated":false}}

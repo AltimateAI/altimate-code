@@ -1,0 +1,8 @@
+R/xdg/config/altimate-code/altimate-code.json
+R/xdg/config/altimate-code/service-local.json
+R/xdg/data/altimate-code/altimate-code-local.db
+R/xdg/data/altimate-code/altimate-code-local.db-shm
+R/xdg/data/altimate-code/altimate-code-local.db-wal
+R/xdg/data/altimate-code/log/altimate-code-local.log
+R/xdg/state/altimate-code/local/tui/tabs.json
+R/xdg/state/altimate-code/service-local.json

@@ -1,0 +1,95 @@
+{
+  "root": "/private/tmp/altimate-h5-isolated-bdbl7sqt",
+  "files": {
+    "package.json": 247,
+    "bin/altimate-code": 187635570,
+    "lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/libduckdb.dylib": 52599536,
+    "lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/LICENSE": 1072,
+    "lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/package.json": 253,
+    "lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node": 392792,
+    "lib/altimate/drivers/node_modules/@duckdb/node-api/LICENSE": 1072,
+    "lib/altimate/drivers/node_modules/@duckdb/node-api/package.json": 304,
+    "lib/altimate/drivers/node_modules/@duckdb/node-api/lib/index.js": 146113,
+    "lib/altimate/drivers/node_modules/@duckdb/node-bindings/LICENSE": 1072,
+    "lib/altimate/drivers/node_modules/@duckdb/node-bindings/duckdb.js": 1231,
+    "lib/altimate/drivers/node_modules/@duckdb/node-bindings/package.json": 535
+  },
+  "total": 240779797,
+  "ratio_to_stock": 1.2846991007594921,
+  "sha256": {
+    "bin/altimate-code": "623b9a9530241a0826b2236c48f0b3f42725bf18a986f8c6bec61e092999f43a",
+    "lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node": "ef8970b8c646b58239deb59c04cfa36f9b3a20ca40c1285f5a1464bec40aae80",
+    "lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/libduckdb.dylib": "2ab6a0eba16e77912d4933ac1901e6c1071083e34f9a150b8b3b8736fa68de7b"
+  },
+  "version_runs": [
+    {
+      "seconds": 1.772520709,
+      "exit": 0,
+      "stdout": "altimate-code v0.0.0-spike\n",
+      "stderr_file": "/private/tmp/altimate-h5/version.stderr",
+      "duckdb_trace": []
+    },
+    {
+      "seconds": 0.05219741599999983,
+      "exit": 0,
+      "stdout": "altimate-code v0.0.0-spike\n",
+      "stderr_file": "/private/tmp/altimate-h5/version.stderr",
+      "duckdb_trace": []
+    },
+    {
+      "seconds": 0.04762291699999999,
+      "exit": 0,
+      "stdout": "altimate-code v0.0.0-spike\n",
+      "stderr_file": "/private/tmp/altimate-h5/version.stderr",
+      "duckdb_trace": []
+    },
+    {
+      "seconds": 0.047485624999999754,
+      "exit": 0,
+      "stdout": "altimate-code v0.0.0-spike\n",
+      "stderr_file": "/private/tmp/altimate-h5/version.stderr",
+      "duckdb_trace": []
+    },
+    {
+      "seconds": 0.04788524999999977,
+      "exit": 0,
+      "stdout": "altimate-code v0.0.0-spike\n",
+      "stderr_file": "/private/tmp/altimate-h5/version.stderr",
+      "duckdb_trace": []
+    }
+  ],
+  "warm_version_median": 0.04775408349999988,
+  "positive": {
+    "seconds": 0.9262539580000002,
+    "exit": 0,
+    "stdout": "{\"builtin\":\"altimate\",\"firstRequestTools\":[\"sql_execute\",\"warehouse_add\"],\"rows\":[[42]],\"rpc\":true,\"listening\":false,\"nativeModules\":[\"/private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node\"],\"driverModules\":[\"/private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-api/lib/index.js\",\"/private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-bindings/duckdb.js\",\"/private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node\"],\"elapsedMs\":812}\n",
+    "stderr_file": "/private/tmp/altimate-h5/positive.stderr",
+    "duckdb_trace": [
+      "dyld[60718]: <8F592CA5-4DC4-3CDB-A049-3F69BA8D62F1> /private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node",
+      "dyld[60718]: <4B395A4F-CEC2-3399-939A-1FEAA576F011> /private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/libduckdb.dylib"
+    ]
+  },
+  "missing_native": {
+    "seconds": 0.3508279999999999,
+    "exit": 1,
+    "stdout": "",
+    "stderr_file": "/private/tmp/altimate-h5/missing-native.stderr",
+    "duckdb_trace": []
+  },
+  "missing_api_with_checkout_node_path": {
+    "seconds": 0.632668958,
+    "exit": 1,
+    "stdout": "",
+    "stderr_file": "/private/tmp/altimate-h5/missing-api.stderr",
+    "duckdb_trace": []
+  },
+  "restored": {
+    "seconds": 0.7150474580000008,
+    "exit": 0,
+    "stdout": "{\"builtin\":\"altimate\",\"firstRequestTools\":[\"sql_execute\",\"warehouse_add\"],\"rows\":[[42]],\"rpc\":true,\"listening\":false,\"nativeModules\":[\"/private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node\"],\"driverModules\":[\"/private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-api/lib/index.js\",\"/private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-bindings/duckdb.js\",\"/private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node\"],\"elapsedMs\":596}\n",
+    "stderr_file": "/private/tmp/altimate-h5/restored.stderr",
+    "duckdb_trace": []
+  },
+  "otool": "/private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node:\n\t@rpath/libduckdb.dylib (compatibility version 0.0.0, current version 0.0.0)\n\t/usr/lib/libc++.1.dylib (compatibility version 1.0.0, current version 1900.180.0)\n\t/usr/lib/libSystem.B.dylib (compatibility version 1.0.0, current version 1351.0.0)\n",
+  "dylib_arch": "Non-fat file: /private/tmp/altimate-h5-isolated-bdbl7sqt/artifact/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/libduckdb.dylib is architecture: arm64\n"
+}

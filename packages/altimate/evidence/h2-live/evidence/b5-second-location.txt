@@ -1,0 +1,24 @@
+# after restart: RPC proj1 (persisted) 
+{"output":[{"name":"demo","path":":memory:","type":"duckdb"}]}
+
+# RPC proj2 (second location, before any use)
+{"output":[]}
+
+# session in proj2 + plain prompt (tool list seen by model)
+ses_ebf11eae2ffey79UYXF4uOSspD
+# RPC proj2 after proj2 scripted run
+{"output":[{"name":"second2","path":":memory:","type":"duckdb"}]}
+
+# RPC proj1 (must still only have demo)
+{"output":[{"name":"demo","path":":memory:","type":"duckdb"}]}
+
+# lastResult proj2
+{"output":{"warehouse":"second2","columns":["answer","animal","nothing"],"rows":[[42,"duck",null]],"row_count":1,"truncated":false}}
+
+# proj1 session again after restart: sql_execute on demo via existing session? prompt NAME=demo
+sql_execute completed [{"type": "text", "text": "answer | animal | nothing\n-------+--------+--------\n42 | duck | NULL\n\n(1 rows)"}]
+# fake log tool lists
+0 True True "SCRIPT NAME=second2"
+1 True True "SCRIPT NAME=second2"
+2 True True "SCRIPT NAME=second2"
+2 True True "SCRIPT NAME=demo"

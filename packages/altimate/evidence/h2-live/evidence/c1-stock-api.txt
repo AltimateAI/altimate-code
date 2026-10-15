@@ -1,0 +1,17 @@
+# stock control
+# model default
+{"location":{"directory":"/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h2live/s1/home"},"data":{"id":"fake-1","modelID":"fake-1","pr
+
+# plugin list --builtin (warm?)
+No plugins found
+0
+# api plugin has altimate?
+1
+# RPC altimate listWarehouses
+{"_tag":"RpcError","type":"rpc.unavailable","message":"RPC is unavailable: altimate"}
+HTTP 400 Bad Request
+
+# stock: exact altimate plugin id in server inventory?
+0
+# stock tool list seen by model
+0 ['edit', 'glob', 'grep', 'question', 'read', 'shell', 'skill', 'subagent', 'webfetch', 'websearch', 'write', 'execute']

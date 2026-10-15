@@ -1,0 +1,12 @@
+bun test v1.4.2 (744846f84)
+
+test/identity.test.ts:
+(pass) host identity > unmodified source retains upstream defaults [0.69ms]
+(pass) host identity > validates the descriptor at the build boundary [0.36ms]
+(pass) host identity > upstream initializes actual roots, tmp and user agent before use [75.28ms]
+(pass) host identity > Altimate initializes actual roots, tmp and user agent before use [83.97ms]
+
+ 4 pass
+ 0 fail
+ 36 expect() calls
+Ran 4 tests across 1 file. [166.00ms]

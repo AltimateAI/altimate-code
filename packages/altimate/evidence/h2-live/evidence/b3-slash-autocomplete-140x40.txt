@@ -1,0 +1,40 @@
+   warehouse demo                +
+
+  ┃                                                                                                 warehouse demo
+  ┃  SCRIPT run the demo
+  ┃                                                                                                 Context
+                                                                                                    2 tokens
+     ✓ warehouse_add [name=demo, path=:memory:]                                                     0% used
+
+     ✓ sql_execute [warehouse=demo, sql=select 42 as answer, 'duck' as animal, null as nothing]
+
+     Done.
+
+     Build · Fake 1 · 6.8s · 44.1 tok/s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃ /warehouse   Open warehouses                                                               ┃
+  ┃
+  ┃  /warehouse
+  ┃
+  ┃  Build · Fake 1 Fake
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /…/-Use…/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h2live/proj1  2 (0%)  ctrl+p commands    /…/a3ba8813-c…/scratchpad/h2live/proj1
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments

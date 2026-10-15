@@ -1,0 +1,39 @@
+{
+  "files": {
+    "package.json": 247,
+    "bin/opencode": 187420914
+  },
+  "total": 187421161,
+  "version_runs": [
+    {
+      "seconds": 4.989142625,
+      "exit": 0,
+      "stdout": "opencode v0.0.0-spike\n",
+      "stderr": ""
+    },
+    {
+      "seconds": 0.04517633299999968,
+      "exit": 0,
+      "stdout": "opencode v0.0.0-spike\n",
+      "stderr": ""
+    },
+    {
+      "seconds": 0.04391795899999984,
+      "exit": 0,
+      "stdout": "opencode v0.0.0-spike\n",
+      "stderr": ""
+    },
+    {
+      "seconds": 0.04646825000000021,
+      "exit": 0,
+      "stdout": "opencode v0.0.0-spike\n",
+      "stderr": ""
+    },
+    {
+      "seconds": 0.04681104199999986,
+      "exit": 0,
+      "stdout": "opencode v0.0.0-spike\n",
+      "stderr": ""
+    }
+  ]
+}
