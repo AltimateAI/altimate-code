@@ -4,6 +4,7 @@ import * as Precedence from "../workspace/precedence"
 import * as Registry from "../native/connections/registry"
 import { classifyAndCheck, isSingleQuery } from "./sql-classify"
 import { maskSql, tokenizeSql } from "./sql-tokenize"
+import { executeQuery, type QueryContext } from "../native/query-execution"
 
 const column = z
   .string()
@@ -146,7 +147,13 @@ function result(check: string, metadata: Row, lines: string[]): { title: string;
 }
 
 /** Counts run in the warehouse; only aggregate rows and at most five samples per side leave it. */
-export async function checkSql(input: SqlCheckPublicInput) {
+export function checkSql(input: SqlCheckPublicInput, context?: QueryContext) {
+  return executeQuery(Registry.getConfig(input.warehouse), { queryTimeoutMs: input.query_timeout_ms }, context,
+    (options) => checkWithinDeadline(input, { ...context, signal: options.signal }))
+}
+
+async function checkWithinDeadline(input: SqlCheckPublicInput, context: QueryContext) {
+  context?.signal?.throwIfAborted()
   const args = parameters.parse(dropEmpty(input))
   if ([args.left_warehouse, args.right_warehouse].some((w) => w !== undefined && w !== args.warehouse)) {
     throw new Error("sql_check runs in one warehouse; use sql_materialize to put both sides in scratch first.")
@@ -168,11 +175,11 @@ export async function checkSql(input: SqlCheckPublicInput) {
   }
   const connector = await Registry.get(args.warehouse)
   async function run(query: string): Promise<Row[]> {
-    const response = await connector.execute(query, undefined, undefined, {
+    const response = await executeQuery(Registry.getConfig(args.warehouse), {
       noLimit: true,
       queryTimeoutMs: args.query_timeout_ms,
       ...(dialect === "postgres" ? { readOnly: true } : {}),
-    })
+    }, context, (options) => connector.execute(query, undefined, undefined, options))
     if (response.truncated) throw new Error("sql_check received truncated aggregates; no verdict is available")
     return response.rows.map((row) => Object.fromEntries(response.columns.map((col, i) => [col, row[i]])))
   }
@@ -412,7 +419,7 @@ export const SqlCheckTool = Tool.define("sql_check", {
       const precedence = await Precedence.check(ctx.sessionID, "sql_execute", input.warehouse)
       if (precedence.redirect) return precedence.redirect
       // altimate_change end
-      return Precedence.annotate(precedence, await checkSql(args))
+      return Precedence.annotate(precedence, await checkSql(args, { signal: ctx.abort, sessionID: ctx.sessionID }))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       return {

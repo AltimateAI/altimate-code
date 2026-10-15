@@ -924,12 +924,13 @@ describe("sql_materialize", () => {
     }
   })
 
-  test("a fake source fetch observes the sentinel bound and omitted common deadline", async () => {
+  test("a fake source fetch observes the sentinel bound and resolved common deadline", async () => {
     const source = await Registry.get("ordersdb")
     let fetched = 0
     const execute = spyOn(source, "execute").mockImplementation(async (sql, limit, _binds, options) => {
       expect(options?.noLimit).not.toBe(true)
-      expect(options).toHaveProperty("queryTimeoutMs", undefined)
+      expect(options).toHaveProperty("queryTimeoutMs", 120_000)
+      expect(options?.signal).toBeInstanceOf(AbortSignal)
       if (/^SELECT count\(\*\)/i.test(sql)) {
         return { columns: ["count"], rows: [[3]], row_count: 1, truncated: false }
       }

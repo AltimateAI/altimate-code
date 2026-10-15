@@ -35,8 +35,8 @@ import type {
   DataDiffResult,
 } from "../types"
 import type { ConnectionConfig, SchemaColumn } from "@altimateai/drivers"
-import { QueryTimeoutError, isQueryTimeoutError } from "@altimateai/drivers/types"
-import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
+import { isQueryTimeoutError } from "@altimateai/drivers/types"
+import { executeQuery, type QueryContext } from "../query-execution"
 import { Telemetry } from "../../../telemetry"
 
 // ---------------------------------------------------------------------------
@@ -196,45 +196,6 @@ async function adapterTypeFromManifest(): Promise<string | undefined> {
 }
 // altimate_change end
 
-/** Extra time the driver gets to report its own deadline before the outer bound fires. */
-const HARD_DEADLINE_GRACE_MS = 5_000
-/** Connector kinds backed by a supervised local helper process (see drivers/local-engine.ts). */
-const LOCAL_ENGINE_TYPES: ReadonlySet<string> = new Set(["sqlite", "duckdb"])
-
-/**
- * Bound a call that may not cancel itself. Signal an optional controller so
- * PostgreSQL can abandon queued acquisition or session setup before SQL starts.
- * Report `cancelled: false` conservatively because work already running may
- * continue, and always clear the timer.
- */
-async function withHardDeadline<T>(
-  work: Promise<T>,
-  ms: number | undefined,
-  engine: string,
-  reportedMs: number | undefined = ms,
-  controller?: AbortController,
-): Promise<T> {
-  if (ms === undefined) return work
-  work = Promise.resolve(work)
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          const error = new QueryTimeoutError({ engine, timeoutMs: reportedMs ?? ms, cancelled: false })
-          controller?.abort(error)
-          reject(error)
-        }, ms)
-      }),
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-    // The abandoned call may still reject later; that must not surface as unhandled.
-    work.catch(() => {})
-  }
-}
-
 /**
  * Try to execute SQL via dbt's adapter (which uses profiles.yml for connection).
  * Returns null if dbt is not available or not configured — caller should fall back
@@ -247,18 +208,17 @@ async function tryExecuteViaDbt(
   sql: string,
   limit?: number,
   timeoutMs?: number,
+  context?: QueryContext,
 ): Promise<SqlExecuteResult | null> {
-  // altimate_change start — share the single-flight creation path with resolveDefaultTarget;
-  // execute on the adapter this call was handed, not on a global a reset may have moved.
-  const adapter = await ensureDbtAdapter()
-  if (!adapter) return null
-  // altimate_change end
-
   try {
-    const dbtCall = limit
-      ? adapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
-      : adapter.immediatelyExecuteSQL(sql, "")
-    const raw = await withHardDeadline<any>(dbtCall, timeoutMs, "dbt")
+    const raw = await executeQuery<any>({ type: "dbt" }, { queryTimeoutMs: timeoutMs }, context, async (options) => {
+      const adapter = await ensureDbtAdapter()
+      options.signal?.throwIfAborted()
+      if (!adapter) return null
+      return limit
+        ? adapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
+        : adapter.immediatelyExecuteSQL(sql, "")
+    })
 
     // QueryExecutionResult has: { columnNames, columnTypes, data, rawSql, compiledSql }
     // where data is Record<string, unknown>[] (array of row objects)
@@ -303,9 +263,9 @@ async function tryExecuteViaDbt(
 
     return null // Unknown result format — fall back to native
   } catch (e) {
-    // A deadline is not "dbt unavailable": the query may still be running, and
+    // A deadline or abort is not "dbt unavailable": the query may still be running, and
     // re-running it on the native driver would double the work and the wait.
-    if (isQueryTimeoutError(e)) throw e
+    if (isQueryTimeoutError(e) || context?.signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw e
     // dbt execution failed — fall back to native driver silently
     return null
   }
@@ -542,7 +502,7 @@ function isMissingSchemaObject(error: unknown): boolean {
 export function registerAll(): void {
 
 // --- sql.execute ---
-register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResult> => {
+register("sql.execute", async (params: SqlExecuteParams, context): Promise<SqlExecuteResult> => {
   const startTime = Date.now()
   const warehouseType = getWarehouseType(params.warehouse)
   try {
@@ -569,7 +529,8 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
       const dbtResult = await tryExecuteViaDbt(
         params.sql,
         params.limit,
-        resolveQueryTimeout(undefined, { queryTimeoutMs: params.query_timeout_ms }).ms,
+        params.query_timeout_ms,
+        context,
       )
       if (dbtResult) return dbtResult
     }
@@ -594,26 +555,18 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
       )
     }
     // altimate_change end
-    const connector = await Registry.get(fallbackName)
-    const deadline = resolveQueryTimeout(Registry.getConfig(fallbackName), { queryTimeoutMs: params.query_timeout_ms })
-    // The local engines time execution only (not time queued behind another
-    // call) and kill their helper to stop it, so their deadline is authoritative.
-    // An outer bound measured from here would include queue time and could
-    // abandon a call that then still runs once it reaches the front of the queue.
-    const engineOwnsDeadline = LOCAL_ENGINE_TYPES.has(Registry.canonicalType(Registry.getConfig(fallbackName)?.type) ?? "")
-    const controller = fallbackType === "postgres" ? new AbortController() : undefined
-    const result: SqlExecuteResult = await withHardDeadline(
-      connector.execute(params.sql, params.limit, undefined, {
+    const result: SqlExecuteResult = await executeQuery(
+      Registry.getConfig(fallbackName),
+      {
         queryTimeoutMs: params.query_timeout_ms,
-        ...(controller ? { signal: controller.signal } : {}),
         ...(fallbackType === "postgres" && params.read_only ? { readOnly: true } : {}),
-      }),
-      // The driver enforces the deadline and cancels the work itself; this outer
-      // bound only covers engines that cannot, after allowing the driver to win.
-      deadline.ms === undefined || engineOwnsDeadline ? undefined : deadline.ms + HARD_DEADLINE_GRACE_MS,
-      "database",
-      deadline.ms,
-      controller,
+      },
+      context,
+      async (options) => {
+        const connector = await Registry.get(fallbackName)
+        options.signal?.throwIfAborted()
+        return connector.execute(params.sql, params.limit, undefined, options)
+      },
     )
     try {
       Telemetry.track({
@@ -662,7 +615,7 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
 })
 
 // --- sql.explain ---
-register("sql.explain", async (params: SqlExplainParams): Promise<SqlExplainResult> => {
+register("sql.explain", async (params: SqlExplainParams, context?: QueryContext): Promise<SqlExplainResult> => {
   let warehouseName: string | undefined
   let warehouseType: string | undefined
   try {
@@ -697,11 +650,11 @@ register("sql.explain", async (params: SqlExplainParams): Promise<SqlExplainResu
       }
     }
 
-    const result = await connector.execute(
-      `${plan.prefix} ${params.sql}`,
-      10000,
-      undefined,
-      Registry.canonicalType(warehouseType) === "postgres" ? { readOnly: true } : undefined,
+    const result = await executeQuery(
+      warehouseName ? Registry.getConfig(warehouseName) : undefined,
+      Registry.canonicalType(warehouseType) === "postgres" ? { readOnly: true } : {},
+      context,
+      (options) => connector.execute(`${plan.prefix} ${params.sql}`, 10000, undefined, options),
     )
 
     const planText = result.rows.map((r) => String(r[0])).join("\n")

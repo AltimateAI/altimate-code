@@ -6,8 +6,8 @@
  *   2. `config.query_timeout_ms`        per connection
  *   3. `ALTIMATE_SQL_QUERY_TIMEOUT_MS`  per machine
  *   4. DEFAULT_QUERY_TIMEOUT_MS
- * A value of `0` (or `null` on the connection) means "no deadline" so
- * deliberately long warehouse jobs stay possible. Unusable values (negative,
+ * Per-call or environment `0` uses the next configured/default deadline.
+ * Only connection `0`/`null` disables the deadline. Unusable values (negative,
  * NaN, non-numeric) are ignored and fall through to the next source.
  *
  * This is the interactive execution budget only. Connection, open and
@@ -37,7 +37,7 @@ function parse(value: unknown, allowNull: boolean): Parsed {
   if (value === undefined || value === "" || typeof value === "boolean") return undefined
   const n = typeof value === "number" ? value : Number(value)
   if (!Number.isFinite(n) || n < 0) return undefined
-  if (n === 0) return { disabled: true }
+  if (n === 0) return allowNull ? { disabled: true } : undefined
   return { ms: Math.min(Math.round(n), MAX_TIMER_MS) }
 }
 

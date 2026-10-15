@@ -166,8 +166,10 @@ describe.each(["sqlite", "duckdb"] as const)("%s query deadline", (engine) => {
     expect(hit.error?.code).toBe("QUERY_TIMEOUT")
     expect(hit.error?.message).toContain("400ms")
     expect(hit.ms).toBeLessThan(3000)
-    // per-call 0 disables the connection's deadline
-    const ok = await c.execute(MEDIUM[engine], 10, undefined, { queryTimeoutMs: 0 })
+    const zero = await timed(() => c.execute(FOREVER[engine], 10, undefined, { queryTimeoutMs: 0 }))
+    expect(zero.error?.code).toBe("QUERY_TIMEOUT")
+    expect(zero.error?.timeoutMs).toBe(400)
+    const ok = await c.execute(MEDIUM[engine], 10, undefined, { queryTimeoutMs: 5000 })
     expect(Number(ok.rows[0]![0])).toBeGreaterThan(0)
   })
 

@@ -29,13 +29,13 @@ export interface ExecuteOptions {
   /** PostgreSQL only: execute in a READ ONLY transaction and roll it back before releasing the client. */
   readOnly?: boolean
   // altimate_change end
-  /** PostgreSQL only: abandon pool acquisition and prevent SQL from starting after cancellation. */
+  /** Cancel pending or active execution when the driver supports cancellation. */
   signal?: AbortSignal
   /** Skip the default LIMIT injection and post-truncation. Use when the caller
    *  needs the complete, untruncated result set (e.g. data-diff pipelines). */
   noLimit?: boolean
-  /** Execution deadline for this call, in milliseconds. `0` disables the
-   *  deadline. When omitted the driver resolves one from the connection's
+  /** Execution deadline for this call, in milliseconds. `0` uses the default.
+   *  When omitted the driver resolves one from the connection's
    *  `query_timeout_ms`, then `ALTIMATE_SQL_QUERY_TIMEOUT_MS`, then the
    *  120 s default (see `query-timeout.ts`). */
   queryTimeoutMs?: number
@@ -74,7 +74,7 @@ export class QueryTimeoutError extends Error {
         (cancelled ? "and was cancelled. " : "and was abandoned; it may still be running on the server. ") +
         (opts.detail ? `${opts.detail} ` : "") +
         "Narrow the query (filters, a smaller sample, pre-aggregation) or set query_timeout_ms on the connection " +
-        "(0 disables the deadline) / ALTIMATE_SQL_QUERY_TIMEOUT_MS to allow longer runs.",
+        "or ALTIMATE_SQL_QUERY_TIMEOUT_MS to allow longer runs.",
     )
     this.name = "QueryTimeoutError"
     this.timeoutMs = opts.timeoutMs
