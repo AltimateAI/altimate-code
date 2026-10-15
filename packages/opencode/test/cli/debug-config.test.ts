@@ -90,4 +90,182 @@ describe("debug config redaction", () => {
       settings: [null, 1200, true, "demo"],
     })
   })
+
+  test.each(["postgresql", "mysql", "mongodb+srv", "snowflake", "redis", "https", "custom+db"])(
+    "masks %s URLs with username-only, password-only, or combined userinfo",
+    (scheme) => {
+      expect(
+        redactConfig({
+          withUser: `${scheme}://user@example.com/database`,
+          withPass: `${scheme}://:pass@example.com/database`,
+          withBoth: `${scheme}://user:pass@example.com/database`,
+          public: `${scheme}://example.com/database?model=demo#section`,
+        }),
+      ).toEqual({
+        withUser: "***",
+        withPass: "***",
+        withBoth: "***",
+        public: `${scheme}://example.com/database?model=demo#section`,
+      })
+    },
+  )
+
+  test("masks JDBC URL credentials and opaque URL secret parameters", () => {
+    expect(
+      redactConfig({
+        jdbcUser: "jdbc:postgresql://user@example.com/database",
+        jdbcPass: "jdbc:mysql://:pass@example.com/database",
+        jdbcBoth: "jdbc:postgresql://user:pass@example.com/database",
+        jdbcQuery: "jdbc:postgresql://example.com/database?password=secret",
+        jdbcFragment: "jdbc:mysql://example.com/database#access_token=secret",
+        opaqueQuery: "custom:database?api_key=secret",
+        opaqueFragment: "custom:database#session_token=secret",
+        publicJdbc: "jdbc:postgresql://example.com/database?model=demo#section",
+        publicOpaque: "custom:database?model=demo#section",
+      }),
+    ).toEqual({
+      jdbcUser: "***",
+      jdbcPass: "***",
+      jdbcBoth: "***",
+      jdbcQuery: "***",
+      jdbcFragment: "***",
+      opaqueQuery: "***",
+      opaqueFragment: "***",
+      publicJdbc: "jdbc:postgresql://example.com/database?model=demo#section",
+      publicOpaque: "custom:database?model=demo#section",
+    })
+  })
+
+  test.each([
+    "postgresql://user:pass@[invalid/database",
+    "mysql://user:pass@example.com:invalid/database",
+    "mongodb+srv://user:pass@[invalid/database",
+    "snowflake://user:pass@[invalid/database",
+    "redis://user:pass@[invalid/database",
+    "https://user:pass@[invalid/path",
+    "custom+db://user:pass@[invalid/database",
+    "jdbc:postgresql://user:pass@[invalid/database",
+  ])("masks userinfo in malformed URL %s", (url) => {
+    expect(redactConfig({ endpoint: url })).toEqual({ endpoint: "***" })
+  })
+
+  test("preserves public URLs with @ outside the authority", () => {
+    const input = {
+      path: "https://example.com/users/@public",
+      query: "mysql://example.com/database?email=public@example.com",
+      fragment: "custom://example.com/database#email=public@example.com",
+      jdbc: "jdbc:postgresql://example.com/database?email=public@example.com",
+      malformed: "custom://[invalid/path@public",
+    }
+    expect(redactConfig(input)).toEqual(input)
+  })
+
+  test.each([
+    "access_key",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "passwd",
+    "bearer",
+    "auth",
+    "auth_config",
+    "DOCKER_AUTH_CONFIG",
+    "NPM_AUTH",
+    "session_token",
+    "client_secret",
+    "dsn",
+    "connection_string",
+    "connectionString",
+  ])("masks %s string keys and URL parameters while keeping non-string values", (key) => {
+    expect(redactConfig({ [key]: "secret" })).toEqual({ [key]: "***" })
+    expect(redactConfig({ [key]: 1200 })).toEqual({ [key]: 1200 })
+    expect(redactConfig({ [key]: true })).toEqual({ [key]: true })
+    expect(
+      redactConfig({
+        query: `mysql://example.com/database?model=demo&${key}=secret`,
+        fragment: `https://example.com/path#state=demo&${key}=secret`,
+      }),
+    ).toEqual({ query: "***", fragment: "***" })
+  })
+
+  test.each(["max_tokens", "maxTokens", "context_tokens", "tokenizer", "author", "authorize_url"])(
+    "preserves non-secret %s strings in keys, URL parameters, and argv",
+    (key) => {
+      const input = {
+        [key]: "public-value",
+        query: `https://example.com/path?${key}=public-value`,
+        fragment: `https://example.com/path#${key}=public-value`,
+        command: ["example", `--${key}=public-value`, `-${key}=public-value`, `--${key}`, "public-value"],
+      }
+      expect(redactConfig(input)).toEqual(input)
+    },
+  )
+
+  test("checks strings in arrays and nested arrays without mutating resolved values", () => {
+    const input = {
+      endpoints: [
+        "postgresql://user:pass@example.com/database",
+        "redis://example.com/0?password=secret",
+        "https://example.com/path#access_token=secret",
+        "mysql://user:pass@[invalid/database",
+        "jdbc:postgresql://user:pass@example.com/database",
+        ["snowflake://user@example.com/database", "https://example.com/public"],
+        null,
+        1200,
+        false,
+        "demo",
+      ],
+      headers: { custom: ["header-secret", 1200, true, null] },
+    }
+    const before = structuredClone(input)
+    expect(redactConfig(input)).toEqual({
+      endpoints: ["***", "***", "***", "***", "***", ["***", "https://example.com/public"], null, 1200, false, "demo"],
+      headers: { custom: ["***", 1200, true, null] },
+    })
+    expect(input).toEqual(before)
+    expect(redactConfig(["https://user:pass@example.com/path", "public"])).toEqual(["***", "public"])
+  })
+
+  test.each([
+    "token",
+    "password",
+    "api-key",
+    "access_key",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "passwd",
+    "bearer",
+    "auth",
+    "DOCKER_AUTH_CONFIG",
+    "NPM_AUTH",
+    "session_token",
+    "client_secret",
+    "dsn",
+    "connection_string",
+    "connectionString",
+  ])("masks inline and following values for secret argv flag %s", (flag) => {
+    const input = {
+      command: ["example", `--${flag}=inline-secret`, `-${flag}=inline-secret`, `--${flag}`, "next-secret"],
+      nested: [[`-${flag}`, "next-secret", "public"]],
+    }
+    const before = structuredClone(input)
+    expect(redactConfig(input)).toEqual({
+      command: ["example", "***", "***", `--${flag}`, "***"],
+      nested: [[`-${flag}`, "***", "public"]],
+    })
+    expect(input).toEqual(before)
+  })
+
+  test("preserves non-string argv values and limits bare flags to the following element", () => {
+    expect(
+      redactConfig({
+        command: ["example", "--token", 1200, "public", "--password", false, "public", "--api-key", null, "public"],
+        settings: ["--token", "secret", "public", "--password"],
+        consecutive: ["--token", "--password", "secret", "public"],
+      }),
+    ).toEqual({
+      command: ["example", "--token", 1200, "public", "--password", false, "public", "--api-key", null, "public"],
+      settings: ["--token", "***", "public", "--password"],
+      consecutive: ["--token", "***", "***", "public"],
+    })
+  })
 })
