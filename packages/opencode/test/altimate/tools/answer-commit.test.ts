@@ -297,7 +297,7 @@ describe("answer_commit numeric safety", () => {
   test("description explains numeric precision and exact decimal strings", async () => {
     const tool = await initTool(AnswerCommit.AnswerCommitTool)
     expect(tool.description).toContain(
-      "Numbers are accepted up to 15 significant digits; any decimal that must be reproduced exactly (more digits, trailing zeros, or currency strings) must be passed as a string.",
+      "Numbers use JavaScript precision; integers must be safe. Pass exact decimal values, trailing zeros, or currency strings as strings.",
     )
   })
 
@@ -315,17 +315,16 @@ describe("answer_commit numeric safety", () => {
     await rejects(tool.execute(payload, context), /rows.*values.*safe.*string/i)
   })
 
-  test.each(["1234567890123456.7", "9007199254740991.1", "-1234567890123456.7", "0.1234567890123456"])(
-    "rejects precision-losing parsed number %s in fields and rows",
-    async (literal) => {
-      const value = JSON.parse(literal)
+  test.each([NaN, Infinity, -Infinity])(
+    "rejects nonfinite number %s in fields and rows",
+    async (value) => {
       const tool = await initTool(AnswerCommit.AnswerCommitTool)
       for (const shape of [
         { fields: [{ name: "", value }] },
         { rows: { columns: ["Value"], values: [[value]] } },
       ]) {
         const payload = { basis: recordBasis, ...shape }
-        const error = /15 significant digits.*exact value as a string/i
+        const error = /fields.*value|rows.*values/i
         expect(() => AnswerCommit.renderAnswer(payload)).toThrow(error)
         await rejects(tool.execute(payload, context), error)
       }
@@ -335,6 +334,12 @@ describe("answer_commit numeric safety", () => {
   test.each([
     999999999999999,
     -999999999999999,
+    Number.MAX_SAFE_INTEGER,
+    Number.MIN_SAFE_INTEGER,
+    1234567890123456.7,
+    -1234567890123456.7,
+    0.1234567890123456,
+    18.440000534057617,
     46919.15,
     12,
     0.1,
@@ -350,17 +355,96 @@ describe("answer_commit numeric safety", () => {
       const tool = await initTool(AnswerCommit.AnswerCommitTool)
       const fields = { basis: recordBasis, fields: [{ name: "", value }] }
       const rows = { basis: recordBasis, rows: { columns: ["Count"], values: [[value]] } }
+      const renderedRow = value === -3.5e-7 ? "-0.00000035" : String(value)
       expect(AnswerCommit.renderAnswer(fields)).toBe(`${recordBasis}\n\n**Answer:** ${value}`)
       expect((await tool.execute(fields, context)).output).toBe(`${recordBasis}\n\n**Answer:** ${value}`)
-      expect(AnswerCommit.renderAnswer(rows)).toBe(`${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| ${value} |`)
+      expect(AnswerCommit.renderAnswer(rows)).toBe(`${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| ${renderedRow} |`)
       expect((await tool.execute(rows, context)).output).toBe(
-        `${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| ${value} |`,
+        `${recordBasis}\n\n**Answer:**\n| Count |\n|---|\n| ${renderedRow} |`,
       )
     },
   )
 })
 
 describe("answer_commit display precision", () => {
+  test.each([
+    ["markdown", "| Average |\n|---|\n| 5.00 |\n| 4.18 |"],
+    ["csv", "Average\n5.00\n4.18"],
+    ["tsv", "Average\n5.00\n4.18"],
+    ["lines", "5.00\n4.18"],
+  ])("%s infers a shared numeric column scale", async (format, expected) => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { format, columns: ["Average"], values: [[5], [4.18]] },
+    }
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
+  })
+
+  test("infers column scales independently while preserving strings and nulls", async () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: {
+        columns: ["Average", "Rate", "Count"],
+        values: [
+          [5, 2, 3],
+          [4.18, 1.234, 4],
+          ["001.2000", null, "5.00"],
+        ],
+      },
+    }
+    const expected = "| Average | Rate | Count |\n|---|---|---|\n| 5.00 | 2.000 | 3 |\n| 4.18 | 1.234 | 4 |\n| 001.2000 | null | 5.00 |"
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
+  })
+
+  test("explicit column precision overrides inference without changing other columns", async () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: {
+        columns: ["Average", "Rate"],
+        values: [[5, 2], [4.18, 1.234]],
+        precision: { Average: 1 },
+      },
+    }
+    const expected = "| Average | Rate |\n|---|---|\n| 5.0 | 2.000 |\n| 4.2 | 1.234 |"
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
+  })
+
+  test("inferred decimal scale supports small scientific values", async () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Value"], values: [[1e-101], [0]] },
+    }
+    const expected = `| Value |\n|---|\n| 0.${"0".repeat(100)}1 |\n| 0.${"0".repeat(101)} |`
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
+  })
+
+  test.each([
+    [18.440000534057617, "18.44"],
+    [1.005, "1.00"],
+  ])("explicit precision rounds %s consistently in fields and rows", async (value, expected) => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    for (const shape of [
+      { fields: [{ name: "", value, precision: 2 }] },
+      { rows: { columns: ["Value"], values: [[value]], precision: { Value: 2 }, format: "lines" } },
+    ]) {
+      const payload = { basis: recordBasis, answer_only: true, ...shape }
+      expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+      expect((await tool.execute(payload, context)).output).toBe(expected)
+    }
+  })
+
   test("description and field and row schemas state the allowed precision range", async () => {
     const tool = await initTool(AnswerCommit.AnswerCommitTool)
     const range = /integer from 0 to 10 \(inclusive\)/i
@@ -471,13 +555,13 @@ describe("answer_commit display precision", () => {
     await rejects(tool.execute(payload, context), error)
   })
 
-  test("duplicate row column labels render unchanged without precision", async () => {
+  test("duplicate row column labels infer scale independently by position", async () => {
     const payload = {
       basis: recordBasis,
       answer_only: true,
-      rows: { columns: ["Amount", "Amount"], values: [[5, 1.234]] },
+      rows: { columns: ["Amount", "Amount"], values: [[5, 1.234], [4.18, 2]] },
     }
-    const expected = "| Amount | Amount |\n|---|---|\n| 5 | 1.234 |"
+    const expected = "| Amount | Amount |\n|---|---|\n| 5.00 | 1.234 |\n| 4.18 | 2.000 |"
     expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
     const tool = await initTool(AnswerCommit.AnswerCommitTool)
     expect((await tool.execute(payload, context)).output).toBe(expected)
