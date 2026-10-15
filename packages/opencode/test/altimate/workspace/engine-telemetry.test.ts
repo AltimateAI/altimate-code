@@ -146,6 +146,10 @@ describe("workspace engine telemetry builders", () => {
       expect.objectContaining({ enabled: false, reason: "escape-hatch", shadowed_types: 0, escape_hatch: true }),
     )
     expect(trackPrecedence("s1", off, { escapeHatch: false, connections: 0 })).toBe(true) // the hatch toggled
+    // The same id under another account is another workspace: reported again.
+    expect(trackPrecedence("s3", on, { escapeHatch: false, connections: 1, identity: "acme|7" })).toBe(true)
+    expect(trackPrecedence("s3", on, { escapeHatch: false, connections: 1, identity: "acme|7" })).toBe(false)
+    expect(trackPrecedence("s3", on, { escapeHatch: false, connections: 1, identity: "other|7" })).toBe(true)
     expect((events.at(-1) as any).escape_hatch).toBe(false)
   })
 

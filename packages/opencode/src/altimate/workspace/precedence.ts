@@ -66,6 +66,7 @@ import {
   settledOutcome,
   type EntryLike,
   type Outcome,
+  linkedWorkspaceKey,
 } from "./engine-overlay"
 import { readLocalBindingScopedStrict, resolvePinnedBindingForRouting } from "./state"
 import { liveBridge } from "./engine-probes"
@@ -543,6 +544,7 @@ export async function refresh(
     escapeHatch: escapeHatchOn(),
     // The registry is read only when something can be shadowed: a disabled snapshot shadows nothing.
     connections: result.enabled ? countShadowedConnections(result) : 0,
+    identity: linkedWorkspaceKey(),
   })
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
   // thing this design does not allow, but repeating it every turn would be noise.
