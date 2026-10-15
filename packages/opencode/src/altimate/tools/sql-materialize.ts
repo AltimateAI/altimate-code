@@ -344,7 +344,9 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
 
   // Remote sources are read and buffered before taking the destination's transaction lock. A scratch
   // source is read inside the lock so a derivation sees and replaces consistent state.
-  const prepared = isScratch(input.source_warehouse) ? undefined : await withBufferBudget(maxBytes, () => prepare(source))
+  const prepared = isScratch(input.source_warehouse)
+    ? undefined
+    : await withBufferBudget(maxBytes, () => prepare(source))
   const warnings: string[] = []
   return withScratchConnection(async (scratch, directory) => {
     const { result, names, types } = prepared ?? (await prepare(scratch))
