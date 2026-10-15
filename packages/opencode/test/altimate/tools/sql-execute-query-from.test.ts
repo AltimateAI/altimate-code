@@ -117,7 +117,7 @@ describe("sql_execute generated reads", () => {
     expect(dispatch).toHaveBeenCalledTimes(1)
   })
 
-  for (const fn of ["pg_try_advisory_lock(1)", "pg_advisory_unlock_all()", "pg_terminate_backend(1)", "pg_reload_conf()", "dblink('h', 'DELETE FROM t')", "pg_notify('c', 'x')", "pg_log_backend_memory_contexts(1)", "pg_stat_reset()", "pg_wal_replay_pause()", 'U&"pg_notif\\0079"(\'c\', \'x\')', "lo_from_bytea(0, 'x')"]) {
+  for (const fn of ["pg_try_advisory_lock(1)", "pg_advisory_unlock_all()", "pg_terminate_backend(1)", "pg_reload_conf()", "dblink('h', 'DELETE FROM t')", "pg_notify('c', 'x')", "pg_log_backend_memory_contexts(1)", "pg_stat_reset()", "pg_wal_replay_pause()", "pg_logical_slot_get_changes('s', NULL, NULL)", "get_lock('x', 1)", "SYSTEM$CANCEL_ALL_QUERIES(1)", 'U&"pg_notif\\0079"(\'c\', \'x\')', "lo_from_bytea(0, 'x')"]) {
     test(`rejects generated SQL calling ${fn}`, async () => {
       dispatch.mockReset().mockResolvedValueOnce(generatedResult(`SELECT ${fn}`) as never)
       const tool = await initTool(SqlExecuteTool)
