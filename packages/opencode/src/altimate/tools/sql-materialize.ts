@@ -344,104 +344,106 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
 
   // Remote sources are read and buffered before taking the destination's transaction lock. A scratch
   // source is read inside the lock so a derivation sees and replaces consistent state.
-  const prepared = isScratch(input.source_warehouse)
-    ? undefined
-    : await withBufferBudget(maxBytes, () => prepare(source))
-  const warnings: string[] = []
-  return withScratchConnection(async (scratch, directory) => {
-    const { result, names, types } = prepared ?? (await prepare(scratch))
-    const run = (sql: string) => scratch.execute(sql, undefined, undefined, { noLimit: true })
-    const scratchRows = async (sql: string) => (await run(sql)).rows
-    const q = quoteIdent(table)
-    const existing = await scratchRows(
-      `SELECT column_name, data_type FROM information_schema.columns WHERE table_catalog = '${SCRATCH_NAME}' AND table_schema = 'main' AND table_name = ${quoteString(table)} ORDER BY ordinal_position`,
-    )
-    const exists = existing.length > 0
-
-    if (mode === "create" && exists) {
-      throw new MaterializeError(
-        `${SCRATCH_NAME}.${table} already exists. Use mode "replace" to overwrite it or "append" to add rows.`,
+  // The buffer reservation spans the destination write too: the buffered rows stay live until then.
+  const writeToScratch = async (prepared?: Awaited<ReturnType<typeof prepare>>) => {
+    const warnings: string[] = []
+    return withScratchConnection(async (scratch, directory) => {
+      const { result, names, types } = prepared ?? (await prepare(scratch))
+      const run = (sql: string) => scratch.execute(sql, undefined, undefined, { noLimit: true })
+      const scratchRows = async (sql: string) => (await run(sql)).rows
+      const q = quoteIdent(table)
+      const existing = await scratchRows(
+        `SELECT column_name, data_type FROM information_schema.columns WHERE table_catalog = '${SCRATCH_NAME}' AND table_schema = 'main' AND table_name = ${quoteString(table)} ORDER BY ordinal_position`,
       )
-    }
+      const exists = existing.length > 0
 
-    if (names.length === 0) {
-      let total = 0
-      if (mode === "replace") {
-        await run(`DROP TABLE IF EXISTS ${q}`)
-        warnings.push(`replaced with an empty result: ${SCRATCH_NAME}.${table} was dropped`)
-      } else if (mode === "append" && exists) {
-        total = Number((await scratchRows(`SELECT count(*) FROM ${q}`))[0]?.[0] ?? 0)
-      }
-      return { table, mode, rows: 0, total_rows: total, columns: [], materialized: false, warnings }
-    }
-
-    let insertNames = names
-    let finalColumns = names.map((n, i) => ({ name: n, type: types[i] as string }))
-    if (mode === "append" && exists) {
-      const have = new Map(
-        existing.map((r) => [String(r[0]).toLowerCase(), { name: String(r[0]), type: String(r[1]) }]),
-      )
-      const missing = names.filter((n) => !have.has(n.toLowerCase()))
-      if (missing.length) {
+      if (mode === "create" && exists) {
         throw new MaterializeError(
-          `Cannot append to ${SCRATCH_NAME}.${table}: it has no column(s) ${missing.join(", ")}. Existing columns: ${[...have.values()].map((c) => c.name).join(", ")}.`,
+          `${SCRATCH_NAME}.${table} already exists. Use mode "replace" to overwrite it or "append" to add rows.`,
         )
       }
-      insertNames = names.map((n) => have.get(n.toLowerCase())!.name)
-      finalColumns = existing.map((r) => ({ name: String(r[0]), type: String(r[1]) }))
-    }
 
-    let began = false
-    let loadDir: string | undefined
-    try {
-      let select: string | undefined
-      if (result.rows.length) {
-        loadDir = await fs.mkdtemp(path.join(directory, "materialize-"))
-        if (process.platform !== "win32") await fs.chmod(loadDir, 0o700)
-        const file = path.join(loadDir, "rows.jsonl")
-        const maxObjectSize = await writeJsonRows(file, result.rows, types)
-        const columns = types.map((t, c) => `'c${c}': '${t === "BLOB" ? "VARCHAR" : t}'`).join(", ")
-        const values = types.map((t, c) => (t === "BLOB" ? `from_hex(c${c})` : `c${c}`)).join(", ")
-        select = `SELECT ${values} FROM read_json(${quoteString(file)}, format = 'newline_delimited', columns = {${columns}}, maximum_object_size = ${maxObjectSize})`
+      if (names.length === 0) {
+        let total = 0
+        if (mode === "replace") {
+          await run(`DROP TABLE IF EXISTS ${q}`)
+          warnings.push(`replaced with an empty result: ${SCRATCH_NAME}.${table} was dropped`)
+        } else if (mode === "append" && exists) {
+          total = Number((await scratchRows(`SELECT count(*) FROM ${q}`))[0]?.[0] ?? 0)
+        }
+        return { table, mode, rows: 0, total_rows: total, columns: [], materialized: false, warnings }
       }
-      await run("BEGIN TRANSACTION")
-      began = true
-      if (!(mode === "append" && exists)) {
-        const defs = names.map((n, i) => `${quoteIdent(n)} ${types[i]}`).join(", ")
-        await run(`CREATE ${mode === "replace" ? "OR REPLACE " : ""}TABLE ${q} (${defs})`)
+
+      let insertNames = names
+      let finalColumns = names.map((n, i) => ({ name: n, type: types[i] as string }))
+      if (mode === "append" && exists) {
+        const have = new Map(
+          existing.map((r) => [String(r[0]).toLowerCase(), { name: String(r[0]), type: String(r[1]) }]),
+        )
+        const missing = names.filter((n) => !have.has(n.toLowerCase()))
+        if (missing.length) {
+          throw new MaterializeError(
+            `Cannot append to ${SCRATCH_NAME}.${table}: it has no column(s) ${missing.join(", ")}. Existing columns: ${[...have.values()].map((c) => c.name).join(", ")}.`,
+          )
+        }
+        insertNames = names.map((n) => have.get(n.toLowerCase())!.name)
+        finalColumns = existing.map((r) => ({ name: String(r[0]), type: String(r[1]) }))
       }
-      const colList = insertNames.map(quoteIdent).join(", ")
-      if (select) await run(`INSERT INTO ${q} (${colList}) ${select}`)
-      await run("COMMIT")
-      began = false
-    } catch (e) {
+
+      let began = false
+      let loadDir: string | undefined
       try {
-        if (began) await run("ROLLBACK")
-      } catch {
-        // the transaction may already be gone
+        let select: string | undefined
+        if (result.rows.length) {
+          loadDir = await fs.mkdtemp(path.join(directory, "materialize-"))
+          if (process.platform !== "win32") await fs.chmod(loadDir, 0o700)
+          const file = path.join(loadDir, "rows.jsonl")
+          const maxObjectSize = await writeJsonRows(file, result.rows, types)
+          const columns = types.map((t, c) => `'c${c}': '${t === "BLOB" ? "VARCHAR" : t}'`).join(", ")
+          const values = types.map((t, c) => (t === "BLOB" ? `from_hex(c${c})` : `c${c}`)).join(", ")
+          select = `SELECT ${values} FROM read_json(${quoteString(file)}, format = 'newline_delimited', columns = {${columns}}, maximum_object_size = ${maxObjectSize})`
+        }
+        await run("BEGIN TRANSACTION")
+        began = true
+        if (!(mode === "append" && exists)) {
+          const defs = names.map((n, i) => `${quoteIdent(n)} ${types[i]}`).join(", ")
+          await run(`CREATE ${mode === "replace" ? "OR REPLACE " : ""}TABLE ${q} (${defs})`)
+        }
+        const colList = insertNames.map(quoteIdent).join(", ")
+        if (select) await run(`INSERT INTO ${q} (${colList}) ${select}`)
+        await run("COMMIT")
+        began = false
+      } catch (e) {
+        try {
+          if (began) await run("ROLLBACK")
+        } catch {
+          // the transaction may already be gone
+        }
+        const message = e instanceof Error ? e.message : String(e)
+        const detail = loadDir
+          ? message.replaceAll(loadDir.replaceAll("'", "''"), "[materialize]").replaceAll(loadDir, "[materialize]")
+          : message
+        throw new MaterializeError(
+          `Failed to write ${SCRATCH_NAME}.${table}: ${detail}${mode === "append" ? " (the append was rolled back)" : ""}`,
+        )
+      } finally {
+        if (loadDir) await fs.rm(loadDir, { recursive: true, force: true }).catch(() => {})
       }
-      const message = e instanceof Error ? e.message : String(e)
-      const detail = loadDir
-        ? message.replaceAll(loadDir.replaceAll("'", "''"), "[materialize]").replaceAll(loadDir, "[materialize]")
-        : message
-      throw new MaterializeError(
-        `Failed to write ${SCRATCH_NAME}.${table}: ${detail}${mode === "append" ? " (the append was rolled back)" : ""}`,
-      )
-    } finally {
-      if (loadDir) await fs.rm(loadDir, { recursive: true, force: true }).catch(() => {})
-    }
 
-    const total = Number((await scratchRows(`SELECT count(*) FROM ${q}`))[0]?.[0] ?? result.rows.length)
-    return {
-      table,
-      mode,
-      rows: result.rows.length,
-      total_rows: total,
-      columns: finalColumns,
-      materialized: true,
-      warnings,
-    }
-  })
+      const total = Number((await scratchRows(`SELECT count(*) FROM ${q}`))[0]?.[0] ?? result.rows.length)
+      return {
+        table,
+        mode,
+        rows: result.rows.length,
+        total_rows: total,
+        columns: finalColumns,
+        materialized: true,
+        warnings,
+      }
+    })
+  }
+  if (isScratch(input.source_warehouse)) return writeToScratch()
+  return withBufferBudget(maxBytes, async () => writeToScratch(await prepare(source)))
 }
 
 export const SqlMaterializeTool = Tool.define("sql_materialize", {

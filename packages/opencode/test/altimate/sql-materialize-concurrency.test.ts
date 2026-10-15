@@ -4,7 +4,7 @@ import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Effect, Layer } from "effect"
 import * as Registry from "../../src/altimate/native/connections/registry"
 import { registerAll } from "../../src/altimate/native/connections/register"
-import { closeScratch, getScratch } from "../../src/altimate/native/connections/scratch"
+import { closeScratch, getScratch, withScratchConnection } from "../../src/altimate/native/connections/scratch"
 import { SqlExecuteTool } from "../../src/altimate/tools/sql-execute"
 import { SqlMaterializeTool } from "../../src/altimate/tools/sql-materialize"
 import { MessageID, SessionID } from "../../src/session/schema"
@@ -261,9 +261,11 @@ it.instance("overlapping remote reads share a bounded buffer budget", () =>
           { source_warehouse: name, sql: "SELECT id FROM records", target_table: table, max_bytes: big },
           context(id as SessionID),
         )
-      const pending = [run("left_source", "left_t", first.id), run("right_source", "right_t", second.id)]
+      const pending: Array<ReturnType<typeof run>> = []
       try {
+        pending.push(run("left_source", "left_t", first.id))
         await within(left.entered.promise, 5_000, "The first read did not start")
+        pending.push(run("right_source", "right_t", second.id))
         await new Promise((resolve) => setTimeout(resolve, 200))
         let rightStarted = false
         void right.entered.promise.then(() => (rightStarted = true))
@@ -272,6 +274,55 @@ it.instance("overlapping remote reads share a bounded buffer budget", () =>
       } finally {
         left.release.open()
         right.release.open()
+        const results = await Promise.all(pending)
+        registry.mockRestore()
+        for (const result of results) expect(result.metadata.error).toBeUndefined()
+      }
+    })
+  }),
+)
+
+it.instance("a buffered remote result keeps its budget reservation until the scratch write finishes", () =>
+  Effect.gen(function* () {
+    const sessions = yield* Session.Service
+    const root = yield* sessions.create({})
+    const first = yield* sessions.create({ parentID: root.id })
+    const second = yield* sessions.create({ parentID: root.id })
+    yield* Effect.promise(async () => {
+      await getScratch(root.id)
+      const materialize = await initTool(SqlMaterializeTool)
+      const left = slowSource(1)
+      const right = slowSource(2)
+      const registry = sources({ left_source: left.connector, right_source: right.connector })
+      const big = 384 * 1024 * 1024
+      const run = (name: string, table: string, id: string) =>
+        materialize.execute(
+          { source_warehouse: name, sql: "SELECT id FROM records", target_table: table, max_bytes: big },
+          context(id as SessionID),
+        )
+      // Hold the scratch connection so the first read finishes buffering but cannot write yet.
+      const hold = gate()
+      const held = gate()
+      const holder = withScratchConnection(async () => {
+        held.open()
+        await hold.promise
+      }, root.id)
+      await held.promise
+      const pending: Array<ReturnType<typeof run>> = []
+      try {
+        pending.push(run("left_source", "left_t", first.id))
+        await within(left.entered.promise, 5_000, "The first read did not start")
+        left.release.open()
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        pending.push(run("right_source", "right_t", second.id))
+        let rightStarted = false
+        void right.entered.promise.then(() => (rightStarted = true))
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        expect(rightStarted).toBe(false)
+      } finally {
+        hold.open()
+        right.release.open()
+        await holder
         const results = await Promise.all(pending)
         registry.mockRestore()
         for (const result of results) expect(result.metadata.error).toBeUndefined()
