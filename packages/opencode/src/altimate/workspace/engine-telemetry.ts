@@ -158,7 +158,7 @@ export function precedenceSignature(
 
 export function precedenceEvent(
   p: Pick<Precedence, "enabled" | "disabledReason" | "shadowed" | "extensions" | "workspaceId">,
-  opts: { escapeHatch: boolean; connections: number; sessionID?: string },
+  opts: { escapeHatch: boolean; connections: number; types: number; sessionID?: string },
 ): Telemetry.Event {
   const id = Number(p.workspaceId)
   return {
@@ -167,7 +167,9 @@ export function precedenceEvent(
     session_id: opts.sessionID ?? sessionId(),
     enabled: p.enabled,
     ...(p.disabledReason ? { reason: p.disabledReason } : {}),
-    shadowed_types: p.shadowed.size,
+    // Types the session can route through the engine (the inventory line's count), not every
+    // materialised type: a session whose rules deny the engine keys shadows nothing.
+    shadowed_types: opts.types,
     shadowed_connections: opts.connections,
     extensions: p.extensions?.length ?? 0,
     escape_hatch: opts.escapeHatch,
@@ -183,13 +185,13 @@ const MAX_SEEN_SESSIONS = 256
 export function trackPrecedence(
   sessionID: string,
   p: Pick<Precedence, "enabled" | "disabledReason" | "shadowed" | "extensions" | "workspaceId">,
-  opts: { escapeHatch: boolean; connections: number; identity?: string },
+  opts: { escapeHatch: boolean; connections: number; types: number; identity?: string },
 ): boolean {
   try {
     // The local connections shadowed and the escape hatch are part of what is reported, so a change
     // in either re-reports the same snapshot; the account-scoped identity (credential scope plus
     // id) tells the same id under another account apart.
-    const signature = `${precedenceSignature(p)}|c=${opts.connections}|e=${opts.escapeHatch}|w=${opts.identity ?? ""}`
+    const signature = `${precedenceSignature(p)}|c=${opts.connections}|t=${opts.types}|e=${opts.escapeHatch}|w=${opts.identity ?? ""}`
     if (precedenceSeen.get(sessionID) === signature) return false
     precedenceSeen.set(sessionID, signature)
     if (precedenceSeen.size > MAX_SEEN_SESSIONS) precedenceSeen.delete(precedenceSeen.keys().next().value!)

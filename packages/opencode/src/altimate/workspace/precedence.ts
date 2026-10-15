@@ -544,6 +544,8 @@ export async function refresh(
     escapeHatch: escapeHatchOn(),
     // The registry is read only when something can be shadowed: a disabled snapshot shadows nothing.
     connections: result.enabled ? countShadowedConnections(result) : 0,
+    // Types the session can route through the engine, as the inventory line counts them.
+    types: result.enabled ? servedInventory(result).length : 0,
     identity: linkedWorkspaceKey(),
   })
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
