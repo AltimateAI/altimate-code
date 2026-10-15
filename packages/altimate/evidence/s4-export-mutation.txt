@@ -1,0 +1,20 @@
+bun test v1.4.2 (744846f84)
+
+test/s4-telemetry.test.ts:
+113 | }, 30_000)
+114 | 
+115 | async function until(ready: () => boolean) {
+116 |   const deadline = Date.now() + 3000
+117 |   while (!ready()) {
+118 |     if (Date.now() >= deadline) throw new Error("Telemetry exporter did not receive its expected records")
+                                                ^
+error: Telemetry exporter did not receive its expected records
+      at until (/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/s4-telemetry.test.ts:118:43)
+      at async <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/s4-telemetry.test.ts:56:9)
+(fail) S4.1. exports two complete model steps and completed/interrupted tools in one session [3422.72ms]
+
+ 0 pass
+ 1 fail
+Ran 1 test across 1 file. [3.68s]
+
+Exit code: 1

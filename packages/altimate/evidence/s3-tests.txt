@@ -1,0 +1,36 @@
+bun test v1.4.2 (744846f84)
+
+test/s3-mcp.test.ts:
+[09:58:25.696] INFO (#634): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-gSkNl1",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+(pass) S3.1. a new session advertises and executes workspace MCP on its first model request [664.07ms]
+[09:58:26.205] INFO (#1978): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-DcVJnc",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+(pass) S3.2. SDK removal suppresses a plugin MCP server even after its transform reloads [2551.50ms]
+[09:58:29.273] INFO (#3484): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-Yf3re5",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+(pass) S3.4. readiness deadline bounds a transform waiting for a slow MCP catalog [2159.09ms]
+[09:58:31.267] INFO (#4750): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-S2KFoR",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+(pass) S3.3. a missing required tool hits the readiness deadline before any model request [963.90ms]
+
+ 4 pass
+ 0 fail
+ 19 expect() calls
+Ran 4 tests across 1 file. [6.61s]

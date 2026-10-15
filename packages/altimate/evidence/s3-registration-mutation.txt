@@ -1,0 +1,28 @@
+Mutation: remove the prompt hook, including MCP registration and readiness wait.
+Expected: S3.1 must fail.
+
+bun test v1.4.2 (744846f84)
+
+test/s3-mcp.test.ts:
+32 |   })
+33 |   const session = await host.createSession()
+34 |   expect((await host.opencode.mcp.list({ location: { directory: fixture.path } })).data).toEqual([])
+35 |   const events = await host.run(session.id, [{ tool, id: "workspace-first", input: { value: "first-request-ready" } }])
+36 |   expect(host.model.calls).toHaveLength(2)
+37 |   expect(host.model.calls[0].tools?.some((entry) => entry.name === tool)).toBe(true)
+                                                                               ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+
+      at <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/s3-mcp.test.ts:37:75)
+(fail) S3.1. a new session advertises and executes workspace MCP on its first model request [270.51ms]
+
+ 0 pass
+ 3 filtered out
+ 1 fail
+ 3 expect() calls
+Ran 1 test across 1 file. [561.00ms]
+
+Exit code: 1

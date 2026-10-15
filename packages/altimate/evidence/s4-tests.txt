@@ -1,0 +1,10 @@
+bun test v1.4.2 (744846f84)
+
+test/s4-telemetry.test.ts:
+(pass) S4.1. exports two complete model steps and completed/interrupted tools in one session [543.35ms]
+(pass) S4.2. nested Code Mode hooks retain the outer execute identity and duration [191.59ms]
+
+ 2 pass
+ 0 fail
+ 25 expect() calls
+Ran 2 tests across 1 file. [1137.00ms]

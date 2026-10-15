@@ -1,7 +1,10 @@
 import type { LanguageModelV3, LanguageModelV3CallOptions, LanguageModelV3StreamPart } from "@ai-sdk/provider"
 import { Model, Plugin, Provider } from "@opencode/plugin"
 
-export type ScriptedStep = { tool: string; input: Record<string, unknown>; id?: string } | { text: string }
+export type ScriptedStep = ({ tool: string; input: Record<string, unknown>; id?: string } | { text: string }) & {
+  usage?: Extract<LanguageModelV3StreamPart, { type: "finish" }>["usage"]
+  delayMs?: number
+}
 
 export function createScriptedModel(initial: readonly ScriptedStep[] = []) {
   const steps = [...initial]
@@ -16,6 +19,7 @@ export function createScriptedModel(initial: readonly ScriptedStep[] = []) {
       calls.push(options)
       const step = steps.shift()
       if (!step) throw new Error("Scripted model response queue is empty")
+      if (step.delayMs) await Bun.sleep(step.delayMs)
       const parts: LanguageModelV3StreamPart[] = [{ type: "stream-start", warnings: [] }]
       if ("tool" in step) {
         const id = step.id ?? `call_${calls.length}`
@@ -37,7 +41,7 @@ export function createScriptedModel(initial: readonly ScriptedStep[] = []) {
       parts.push({
         type: "finish",
         finishReason: { unified: "tool" in step ? "tool-calls" : "stop", raw: "tool" in step ? "tool_calls" : "stop" },
-        usage: {
+        usage: step.usage ?? {
           inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
           outputTokens: { total: 1, text: 1, reasoning: 0 },
         },
@@ -77,6 +81,7 @@ export function createScriptedModel(initial: readonly ScriptedStep[] = []) {
   })
   return {
     plugin,
+    language,
     calls,
     push(...next: ScriptedStep[]) {
       steps.push(...next)

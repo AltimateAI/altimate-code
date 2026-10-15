@@ -1,0 +1,29 @@
+bun test v1.4.2 (744846f84)
+
+test/s3-mcp.test.ts:
+[09:57:57.907] INFO (#633): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-LDARmK",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+ 97 |     ],
+ 98 |   })
+ 99 |   const session = await host.createSession()
+100 |   const started = performance.now()
+101 |   await expect(host.opencode.sessions.prompt({ sessionID: session.id, text: "The slow catalog must not block admission forever" })).rejects.toThrow()
+102 |   expect(performance.now() - started).toBeLessThan(1_000)
+                                            ^
+error: expect(received).toBeLessThan(expected)
+
+Expected: < 1000
+Received: 1764.2364579999999
+
+      at <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/s3-mcp.test.ts:102:39)
+(fail) S3.4. readiness deadline bounds a transform waiting for a slow MCP catalog [1843.74ms]
+
+ 0 pass
+ 3 filtered out
+ 1 fail
+ 2 expect() calls
+Ran 1 test across 1 file. [2.11s]

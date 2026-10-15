@@ -1,0 +1,16 @@
+bun test v1.4.2 (744846f84)
+
+test/s2-gateway.test.ts:
+(pass) S2.1. default Altimate setup registers the tenant gateway and key method [342.78ms]
+(pass) S2.2. v1 credential file with environment substitution supplies models, tenant and request URL [120.02ms]
+(pass) S2.3. key integration persists a credential and enables a streamed gateway completion [103.06ms]
+(pass) S2.4. explicit environment credentials provide the gateway URL and tenant [117.87ms]
+(pass) S2.5. matching Altimate Base credential enables its model with bearer auth and no tenant [75.88ms]
+(pass) S2.6. Altimate Base expired credentials do not enable its model [57.46ms]
+(pass) S2.6. Altimate Base rejected credentials do not enable its model [64.83ms]
+(pass) S2.6. Altimate Base different gateway credentials do not enable its model [67.38ms]
+
+ 8 pass
+ 0 fail
+ 27 expect() calls
+Ran 8 tests across 1 file. [1284.00ms]

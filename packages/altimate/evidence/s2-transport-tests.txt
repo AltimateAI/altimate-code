@@ -1,0 +1,12 @@
+bun test v1.4.2 (744846f84)
+
+test/s2-transport.test.ts:
+(pass) S2.http.1. actual AI SDK HTTP request uses a custom endpoint connected after setup [276.49ms]
+(pass) S2.http.2. cached AI SDK language uses updated file endpoint and tenant on the next request [94.43ms]
+
+ 2 pass
+ 0 fail
+ 9 expect() calls
+Ran 2 tests across 1 file. [645.00ms]
+
+Exit code: 0

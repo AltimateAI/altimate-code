@@ -1,0 +1,25 @@
+bun test v1.4.2 (744846f84)
+
+test/s2-gateway.test.ts:
+ 9 |   await using fixture = await createFixture()
+10 |   await using host = await createHost({ directory: fixture.path })
+11 |   await host.createSession()
+12 |   const location = { directory: fixture.path }
+13 |   const integrations = (await host.opencode.integration.list({ location })).data
+14 |   expect(integrations.find((integration) => integration.id === "altimate-backend")?.methods).toEqual(
+                                                                                                  ^
+error: expect(received).toEqual(expected)
+
+Expected: ExpectArrayContaining {}
+Received: undefined
+
+      at <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/s2-gateway.test.ts:14:94)
+(fail) S2.1. default Altimate setup registers the tenant gateway and key method [210.21ms]
+
+ 0 pass
+ 4 filtered out
+ 1 fail
+ 1 expect() calls
+Ran 1 test across 1 file. [488.00ms]
+
+Exit code: 1

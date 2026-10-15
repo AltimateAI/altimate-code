@@ -1,0 +1,36 @@
+bun test v1.4.2 (744846f84)
+
+test/s4-telemetry.test.ts:
+146 |   }])
+147 |   expect(calls).toEqual(["telemetry_inner_first", "telemetry_inner_second"])
+148 |   expect(log.some((event) => event.type === "session.tool.success" && event.data.id === "outer")).toBe(true)
+149 |   await until(() => exporter.records.filter((record) => record.type === "tool_call").length === 1)
+150 |   const record = exporter.records.find((record) => record.type === "tool_call")
+151 |   expect(record).toMatchObject({ tool_name: "execute", tool_call_id: "outer", status: "success", after_hook: "completed" })
+                       ^
+error: expect(received).toMatchObject(expected)
+
+  {
+    "after_hook": "completed",
++   "duration_ms": 32,
++   "message_id": "msg_13f0295b1001vcvtZa1c2eJxRw",
++   "session_id": "ses_ec0fd6b01ffem7f5rqZ6jgTLIx",
+    "status": "success",
++   "timestamp": 1792058496515,
+    "tool_call_id": "outer",
+-   "tool_name": "execute",
++   "tool_name": "telemetry_inner_second",
++   "type": "tool_call",
+  }
+
+- Expected  - 1
++ Received  + 6
+
+      at <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/s4-telemetry.test.ts:151:18)
+(fail) S4.2. nested Code Mode hooks retain the outer execute identity and duration [329.83ms]
+
+ 0 pass
+ 1 filtered out
+ 1 fail
+ 3 expect() calls
+Ran 1 test across 1 file. [681.00ms]

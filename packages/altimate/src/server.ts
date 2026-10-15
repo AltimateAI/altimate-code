@@ -4,6 +4,7 @@ import { Schema } from "effect"
 import path from "node:path"
 import { classifyAndCheck } from "./sql-classify"
 import { ClaudeInstructions } from "./instructions"
+import { Gateway } from "./gateway"
 
 const Warehouse = Schema.Struct({
   name: Schema.String,
@@ -23,6 +24,7 @@ export const Altimate = Plugin.define({
   id: "altimate",
   async setup(ctx) {
     await ClaudeInstructions.setup(ctx)
+    await Gateway.setup(ctx)
     const storageKey = `warehouses:${ctx.location.project.id}:${encodeURIComponent(ctx.location.directory)}:${ctx.location.workspaceID ?? "local"}`
     const warehouses = new Map(
       Schema.decodeUnknownSync(Schema.Array(Warehouse))((await ctx.storage.get(storageKey)) ?? []).map((warehouse) => [

@@ -1,0 +1,26 @@
+Negative control: remove only tenant http.request registration; model.request remains active.
+bun test v1.4.2 (744846f84)
+
+test/s2-transport.test.ts:
+20 |     key: "https://connected.example.invalid/root::key_team::transport-key",
+21 |   })
+22 |   await host.opencode.sessions.switchModel({ sessionID: session.id, model: { providerID: "altimate-backend", id: "altimate-default" } })
+23 |   const events = await host.run(session.id, [])
+24 |   expect(transport.requests).toHaveLength(1)
+25 |   expect(transport.requests[0].url).toBe("https://connected.example.invalid/root/agents/v1/chat/completions")
+                                         ^
+error: expect(received).toBe(expected)
+
+Expected: "https://connected.example.invalid/root/agents/v1/chat/completions"
+Received: "https://api.myaltimate.com/agents/v1/chat/completions"
+
+      at <anonymous> (/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/s2-transport.test.ts:25:37)
+(fail) S2.http.1. actual AI SDK HTTP request uses a custom endpoint connected after setup [266.68ms]
+
+ 0 pass
+ 1 filtered out
+ 1 fail
+ 2 expect() calls
+Ran 1 test across 1 file. [545.00ms]
+
+Exit code: 1
