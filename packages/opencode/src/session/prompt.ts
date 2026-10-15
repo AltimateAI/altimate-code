@@ -113,8 +113,8 @@ import { readLocalBinding } from "@/altimate/workspace/state"
 /** The session's workspace use, as session_end fields. Read only: the row is tracked first, then the
  * turn ends its telemetry entries (`Telemetry.endSession`), so the row itself still carries the
  * workspace. */
-function workspaceUseFields(sessionID: string) {
-  const use = Telemetry.workspaceUseOf(sessionID)
+function workspaceUseFields(sessionID: string, turn: number) {
+  const use = Telemetry.workspaceUseOf(sessionID, turn)
   return {
     workspace_skills_used: use.skills,
     workspace_memory_blocks: use.memory,
@@ -827,7 +827,7 @@ export namespace SessionPrompt {
         tool_call_count: toolCallCount,
         duration_ms: Date.now() - sessionStartTime,
         // altimate_change start — what of the bound workspace this session used
-        ...workspaceUseFields(sessionID),
+        ...workspaceUseFields(sessionID, telemetryTurn),
         // altimate_change end
       })
       Telemetry.endSession(sessionID, telemetryTurn) // altimate_change — after the row, this turn only
@@ -2143,7 +2143,7 @@ export namespace SessionPrompt {
       duration_ms: Date.now() - sessionStartTime,
       last_tool_category: lastToolCategory || "none",
       // altimate_change — whether workspace skills, memory or integrations were in play
-      workspace_context_used: Object.values(Telemetry.workspaceUseOf(sessionID)).some((n) => n > 0),
+      workspace_context_used: Object.values(Telemetry.workspaceUseOf(sessionID, telemetryTurn)).some((n) => n > 0),
     })
     // Tool chain effectiveness — aggregated tool sequence + outcome
     if (toolChain.length > 0) {
@@ -2236,7 +2236,7 @@ export namespace SessionPrompt {
         tool_call_count: toolCallCount,
         duration_ms: Date.now() - sessionStartTime,
         // altimate_change start — what of the bound workspace this session used
-        ...workspaceUseFields(sessionID),
+        ...workspaceUseFields(sessionID, telemetryTurn),
         // altimate_change end
       })
       Telemetry.endSession(sessionID, telemetryTurn) // altimate_change — after the row, this turn only

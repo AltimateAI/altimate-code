@@ -88,8 +88,12 @@ describe("workspace id on the telemetry context", () => {
     const second = Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 42 })
     expect(second).toBeGreaterThan(first)
     Telemetry.noteWorkspaceUse("s7", "memory", 2)
+    // Counts are per turn: the cancelled turn's rows read its own, the replacement's its own.
+    expect(Telemetry.workspaceUseOf("s7", first)).toEqual({ skills: 1, memory: 0, integrations: 0 })
+    expect(Telemetry.workspaceUseOf("s7", second)).toEqual({ skills: 0, memory: 2, integrations: 0 })
     Telemetry.endSession("s7", first) // the old generation, after the replacement started
     expect(Telemetry.workspaceOf("s7")).toBe(42)
+    expect(Telemetry.workspaceUseOf("s7", first)).toEqual({ skills: 0, memory: 0, integrations: 0 })
     expect(Telemetry.workspaceUseOf("s7").memory).toBe(2)
     // A use landing with a stale turn does not count toward the replacement.
     Telemetry.noteWorkspaceUse("s7", "integrations", 1, "add", first)
