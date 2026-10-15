@@ -22,6 +22,15 @@ import {
   type AttachSnapshot,
 } from "./attach-snapshot"
 import { reasonPhrase, type Unfulfilled } from "./engine-types"
+import {
+  choiceFor,
+  readChoices,
+  readLocalConnections,
+  takesChoice,
+  type CatalogIntegration,
+  type ConnectionChoice,
+  type RawConnection,
+} from "./connection-choice"
 import { currentScope, scopeStringOf } from "./state"
 
 export { statusHeadline } from "./attach-snapshot"
@@ -52,6 +61,9 @@ export interface IntegrationRow {
   /** Declared keys the engine neither served nor reported: it dropped them
    * without saying why. */
   unreported: string[]
+  /** The connection it uses, for an integration that uses one chosen
+   * connection; absent for the others, and when connections could not be read. */
+  connection?: ConnectionChoice
 }
 
 export interface StatusView extends Omit<AttachCounts, "callable"> {
@@ -65,6 +77,9 @@ export interface StatusView extends Omit<AttachCounts, "callable"> {
   /** The workspace's selection now differs from the one this attach was
    * measured against; the rows describe the attach. */
   selectionChanged: boolean
+  /** Why the connections in use could not be read; absent when they were, or
+   * when no read was attempted. */
+  connectionsError?: string
 }
 
 interface SelectionIntegration {
@@ -81,11 +96,18 @@ interface CatalogEntry {
  * be missing on its own: without the catalog, rows carry the names recorded at
  * attach time; without the selection, a change since the attach cannot be told.
  * A key the engine reported for an integration the declaration does not list
- * still gets a row, named by its id, so a report is never silently dropped. */
+ * still gets a row, named by its id, so a report is never silently dropped.
+ * `choices`, by integration id, are the connections in use; a string says why
+ * they could not be read. */
 export function buildStatusView(
   snapshot: AttachSnapshot,
-  live: { selection: SelectionIntegration[] | null; catalog: CatalogEntry[] | null } | null,
+  live: {
+    selection: SelectionIntegration[] | null
+    catalog: CatalogEntry[] | null
+    choices?: Map<string, ConnectionChoice> | string
+  } | null,
 ): StatusView {
+  const choices = live?.choices instanceof Map ? live.choices : undefined
   const names = new Map((live?.catalog ?? []).map((c) => [String(c.id), c.name]))
   const present = new Set(snapshot.present)
   const reportedKeys = new Set((snapshot.unfulfilled ?? []).map((u) => u.key))
@@ -130,6 +152,7 @@ export function buildStatusView(
       gaps,
       unreported,
       state: rowState({ declared: integration.keys, served, gaps, extension: integration.extension }),
+      ...(choices?.has(integration.id) ? { connection: choices.get(integration.id) } : {}),
     })
   }
   // Reported for an integration the declaration does not carry: keep it visible.
@@ -166,6 +189,7 @@ export function buildStatusView(
       !!snapshot.declared?.integrations &&
       !snapshot.declared.partial &&
       !sameSelection(declaredIntegrations, live.selection),
+    ...(typeof live?.choices === "string" ? { connectionsError: live.choices } : {}),
   }
 }
 
@@ -220,6 +244,32 @@ export function rowLine(row: IntegrationRow): string {
   return `${counts} · ${phrases.join("; ")}${details.length > 0 ? ` (${details.join("; ")})` : ""}`
 }
 
+/** The line under an integration that uses one chosen connection: which one,
+ * how it came to be used, and that Enter changes it. Short: the dialog cuts a
+ * description at about 38 columns; the picker says the rest. */
+export function connectionLine(choice: ConnectionChoice): { title: string; note: string } {
+  const where = (remote: boolean) => (remote ? "Remote" : "Local")
+  switch (choice.inUse.kind) {
+    case "chosen":
+      return {
+        title: choice.inUse.connection.name,
+        note: `chosen · ${where(choice.inUse.connection.remote)} · Enter to change`,
+      }
+    case "default":
+      return {
+        title: choice.inUse.connection.name,
+        note: `default · ${where(choice.inUse.connection.remote)} · Enter to change`,
+      }
+    case "off":
+      return {
+        title: choice.inUse.name ?? `connection ${choice.inUse.id}`,
+        note: `${choice.inUse.name ? "incomplete" : "deleted"} · tools off · Enter to fix`,
+      }
+    case "none":
+      return { title: "no usable connection", note: "add one on the web" }
+  }
+}
+
 /** The `/workspace` menu's Status row: the headline, or why there is none. */
 export function menuStatusLine(snapshot: AttachSnapshot | undefined): string {
   if (!snapshot) return "No session has attached yet — send a message first."
@@ -271,17 +321,49 @@ export async function loadStatusView(
   if (!snapshot) return null
   // Read independently: a catalog outage must not hide a changed selection, nor
   // the other way round.
-  const [workspace, catalog] = await Promise.allSettled([
+  const [workspace, catalog, custom, connections] = await Promise.allSettled([
     AltimateApi.getDatamate(snapshot.workspace.id),
     AltimateApi.listIntegrations(),
+    AltimateApi.listCustomIntegrations(),
+    AltimateApi.listConnections(),
   ])
-  for (const r of [workspace, catalog])
+  for (const r of [workspace, catalog, custom, connections])
     if (r.status === "rejected") log.warn("status view: an API read failed", { err: String(r.reason) })
+  // Custom integrations are named and checked like the rest; without them, only
+  // they go unnamed and without a connection.
+  const integrations =
+    catalog.status === "fulfilled" ? [...catalog.value, ...(custom.status === "fulfilled" ? custom.value : [])] : null
   return buildStatusView(snapshot, {
     selection: workspace.status === "fulfilled" ? selectionOf(workspace.value.integrations) : null,
-    catalog:
-      catalog.status === "fulfilled"
-        ? catalog.value.map((c) => ({ id: String(c.id), name: c.name ?? `Integration ${c.id}`, type: c.type }))
-        : null,
+    catalog: integrations?.map((c) => ({ id: String(c.id), name: c.name ?? `Integration ${c.id}`, type: c.type })) ?? null,
+    choices:
+      integrations && connections.status === "fulfilled"
+        ? choicesFor(snapshot.workspace.id, integrations, connections.value)
+        : "the connections could not be read from Altimate",
   })
+}
+
+/** The connection each catalog integration that takes one uses, from the
+ * account's connections, this machine's and the recorded choices; a string
+ * when the choices file cannot be read. Connection configs stay in here. */
+function choicesFor(
+  workspaceId: string,
+  catalog: CatalogIntegration[],
+  remote: { id: string; name: string; integration_id: string; config?: Record<string, unknown> | null }[],
+): Map<string, ConnectionChoice> | string {
+  let chosen: Record<string, unknown>
+  try {
+    chosen = readChoices(workspaceId)
+  } catch (err) {
+    log.warn("status view: the connection choices could not be read", { err: String(err) })
+    return "~/.altimate/settings.json could not be read"
+  }
+  const connections: RawConnection[] = [
+    ...remote.map((c) => ({ id: c.id, name: c.name, integrationId: c.integration_id, config: c.config ?? {}, remote: true })),
+    ...readLocalConnections(),
+  ]
+  const choices = new Map<string, ConnectionChoice>()
+  for (const integration of catalog)
+    if (takesChoice(integration)) choices.set(integration.id, choiceFor(integration, connections, chosen[integration.id]))
+  return choices
 }

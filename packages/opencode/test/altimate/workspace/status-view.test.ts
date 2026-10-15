@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { mkdtempSync, rmSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import type { AttachSnapshot } from "../../../src/altimate/workspace/attach-snapshot"
@@ -10,9 +10,14 @@ const SANDBOX = mkdtempSync(path.join(tmpdir(), "status-view-"))
 // when the preload first imports it, so overriding that here would be too late.
 const ORIGINAL_STATE_HOME = process.env.OPENCODE_TEST_STATE_HOME
 process.env.OPENCODE_TEST_STATE_HOME = path.join(SANDBOX, "state")
+// And `Global.Path.home` this, for the connection choices in `~/.altimate`.
+const ORIGINAL_HOME = process.env.OPENCODE_TEST_HOME
+process.env.OPENCODE_TEST_HOME = path.join(SANDBOX, "home")
 afterAll(() => {
   if (ORIGINAL_STATE_HOME === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
   else process.env.OPENCODE_TEST_STATE_HOME = ORIGINAL_STATE_HOME
+  if (ORIGINAL_HOME === undefined) delete process.env.OPENCODE_TEST_HOME
+  else process.env.OPENCODE_TEST_HOME = ORIGINAL_HOME
   rmSync(SANDBOX, { recursive: true, force: true })
 })
 
@@ -20,6 +25,7 @@ const {
   accountScope,
   boundAttachSnapshot,
   buildStatusView,
+  connectionLine,
   loadStatusView,
   menuStatusLine,
   rowLine,
@@ -31,6 +37,8 @@ const { snapshotDir, workspaceIdentity, writeAttachSnapshot } = await import(
   "../../../src/altimate/workspace/attach-snapshot"
 )
 const { AltimateApi } = await import("../../../src/altimate/api/client")
+const { chooseConnection, settingsPath } = await import("../../../src/altimate/workspace/connection-choice")
+type ConnectionChoice = import("../../../src/altimate/workspace/connection-choice").ConnectionChoice
 
 const SCOPE = "acme|https://api.example.com"
 const integrations: DeclaredIntegration[] = [
@@ -87,6 +95,24 @@ describe("buildStatusView", () => {
     const renamed = buildStatusView(snapshot(), { selection, catalog: [{ id: "jira", name: "Jira Cloud" }] })
     expect(renamed.rows.find((r) => r.id === "jira")!.name).toBe("Jira Cloud")
     expect(renamed.rows.find((r) => r.id === "altimate")!.name).toBe("Altimate")
+  })
+
+  test("an integration that uses a chosen connection carries it; the others carry none", () => {
+    const jiraChoice: ConnectionChoice = {
+      integrationId: "jira",
+      options: [{ id: "9", name: "Jira prod", remote: true, usable: true }],
+      inUse: { kind: "default", connection: { id: "9", name: "Jira prod", remote: true, usable: true } },
+    }
+    const view = buildStatusView(snapshot(), { selection, catalog, choices: new Map([["jira", jiraChoice]]) })
+    expect(view.rows.find((r) => r.id === "jira")!.connection).toEqual(jiraChoice)
+    expect(view.rows.filter((r) => r.connection).map((r) => r.id)).toEqual(["jira"])
+    expect(view.connectionsError).toBeUndefined()
+  })
+
+  test("connections that could not be read say why, and no row claims a connection", () => {
+    const view = buildStatusView(snapshot(), { selection, catalog, choices: "the connections could not be read" })
+    expect(view.connectionsError).toBe("the connections could not be read")
+    expect(view.rows.some((r) => r.connection)).toBe(false)
   })
 
   test("with the API unreachable the view is still whole: rows, counts and names from the attach", () => {
@@ -252,20 +278,61 @@ describe("the menu row and the sidebar line", () => {
   })
 })
 
+describe("connectionLine", () => {
+  const prod = { id: "9", name: "Jira prod", remote: true, usable: true }
+  const mine = { id: "a1", name: "Jira mine", remote: false, usable: true }
+  const line = (inUse: ConnectionChoice["inUse"]) => connectionLine({ integrationId: "jira", options: [], inUse })
+  test.each([
+    ["chosen", { kind: "chosen", connection: prod }, { title: "Jira prod", note: "chosen · Remote · Enter to change" }],
+    ["default", { kind: "default", connection: mine }, { title: "Jira mine", note: "default · Local · Enter to change" }],
+    [
+      "chosen, incomplete",
+      { kind: "off", id: "2", name: "Jira old" },
+      { title: "Jira old", note: "incomplete · tools off · Enter to fix" },
+    ],
+    ["chosen, deleted", { kind: "off", id: "77" }, { title: "connection 77", note: "deleted · tools off · Enter to fix" }],
+    ["none", { kind: "none" }, { title: "no usable connection", note: "add one on the web" }],
+  ])("%s", (_, inUse, expected) => {
+    expect(line(inUse as ConnectionChoice["inUse"])).toEqual(expected)
+    // The dialog cuts a description at about 38 columns.
+    expect(expected.note.length).toBeLessThanOrEqual(38)
+  })
+})
+
 describe("loadStatusView", () => {
   const DIR = "/proj/status"
   const bound = { scope: SCOPE, datamateId: 6 }
   let getDatamate: ReturnType<typeof spyOn>
   let listIntegrations: ReturnType<typeof spyOn>
+  let listCustomIntegrations: ReturnType<typeof spyOn>
+  let listConnections: ReturnType<typeof spyOn>
+  const jiraFields = [
+    { key: "url", required: true },
+    { key: "token", required: true },
+  ]
+  const remote = [
+    { id: "12", name: "Jira staging", integration_id: "jira", config: { url: "u", token: "t" } },
+    { id: "9", name: "Jira prod", integration_id: "jira", config: { url: "u", token: "t" } },
+    { id: "3", name: "Snowflake", integration_id: "snowflake", config: { account: "a" } },
+  ]
 
   beforeEach(() => {
     rmSync(snapshotDir(), { recursive: true, force: true })
+    rmSync(path.dirname(settingsPath()), { recursive: true, force: true })
     getDatamate = spyOn(AltimateApi, "getDatamate").mockResolvedValue({ integrations: selection } as never)
-    listIntegrations = spyOn(AltimateApi, "listIntegrations").mockResolvedValue(catalog as never)
+    listIntegrations = spyOn(AltimateApi, "listIntegrations").mockResolvedValue(
+      catalog.map((c) => (c.id === "jira" ? { ...c, config: jiraFields } : c)) as never,
+    )
+    listCustomIntegrations = spyOn(AltimateApi, "listCustomIntegrations").mockResolvedValue([
+      { id: "1", name: "Demo MCP", type: "mcp" },
+    ] as never)
+    listConnections = spyOn(AltimateApi, "listConnections").mockResolvedValue(remote as never)
   })
   afterEach(() => {
     getDatamate.mockRestore()
     listIntegrations.mockRestore()
+    listCustomIntegrations.mockRestore()
+    listConnections.mockRestore()
   })
 
   test("returns null before any request when no attach matches the bound workspace", async () => {
@@ -299,6 +366,36 @@ describe("loadStatusView", () => {
       getDatamate.mockResolvedValue(answer as never)
       expect((await loadStatusView(DIR, bound))?.selectionChanged).toBe(false)
     }
+  })
+
+  test("the connection in use: the lowest id by default, then the one chosen, as the engine reads it", async () => {
+    writeAttachSnapshot(DIR, snapshot())
+    const before = await loadStatusView(DIR, bound)
+    const jira = before?.rows.find((r) => r.id === "jira")?.connection
+    expect(jira?.options.map((o) => o.name)).toEqual(["Jira prod", "Jira staging"])
+    expect(jira?.inUse).toEqual({ kind: "default", connection: { id: "9", name: "Jira prod", remote: true, usable: true } })
+    chooseConnection("6", "jira", "12")
+    const after = await loadStatusView(DIR, bound)
+    expect(after?.rows.find((r) => r.id === "jira")?.connection?.inUse.kind).toBe("chosen")
+    // Only the integrations that use one chosen connection carry one.
+    expect(after?.rows.filter((r) => r.connection).map((r) => r.id)).toEqual(["jira"])
+  })
+
+  test("custom integrations are named from their own catalog", async () => {
+    writeAttachSnapshot(DIR, snapshot())
+    expect((await loadStatusView(DIR, bound))?.rows.find((r) => r.id === "1")?.name).toBe("Demo MCP")
+  })
+
+  test("connections or choices that cannot be read leave the rows whole and say why", async () => {
+    writeAttachSnapshot(DIR, snapshot())
+    listConnections.mockRejectedValue(new Error("offline"))
+    const offline = await loadStatusView(DIR, bound)
+    expect(offline?.connectionsError).toBe("the connections could not be read from Altimate")
+    expect(offline?.rows).toHaveLength(4)
+    listConnections.mockResolvedValue(remote as never)
+    mkdirSync(path.dirname(settingsPath()), { recursive: true })
+    writeFileSync(settingsPath(), "{ not json")
+    expect((await loadStatusView(DIR, bound))?.connectionsError).toBe("~/.altimate/settings.json could not be read")
   })
 
   test("falls back to the attach alone when the API fails", async () => {
