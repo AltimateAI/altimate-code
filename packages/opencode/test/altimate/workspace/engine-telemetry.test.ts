@@ -66,6 +66,11 @@ describe("workspace engine telemetry builders", () => {
     expect(attachSignature({ kind: "connect-failed", error: "a" })).toBe(
       attachSignature({ kind: "connect-failed", error: "b" }),
     )
+    expect(attachSignature({ kind: "attached", available: 2, extensions: [{ integration: "x" } as any] })).not.toBe(
+      attachSignature({ kind: "attached", available: 2 }),
+    )
+    expect((attachEvent({ kind: "attached", available: 1 }, { workspaceId: 42 }) as any).workspace_id).toBe(42)
+    expect("workspace_id" in (attachEvent({ kind: "unbound" }, { workspaceId: 42 }) as any)).toBe(false)
   })
 
   test("the install prompt event carries the offer, the surface and node detection", () => {
@@ -128,6 +133,8 @@ describe("workspace engine telemetry builders", () => {
     expect(events.at(-1)).toEqual(
       expect.objectContaining({ enabled: false, reason: "escape-hatch", shadowed_types: 0, escape_hatch: true }),
     )
+    expect(trackPrecedence("s1", off, { escapeHatch: false, connections: 0 })).toBe(true) // the hatch toggled
+    expect((events.at(-1) as any).escape_hatch).toBe(false)
   })
 
   test("errors are masked and bounded; a refusal names the operation and workspace", () => {

@@ -374,10 +374,13 @@ function record(
   extra: { engineVersion?: string | null; transient?: boolean } = {},
 ): SessionRecord {
   const previous = sessions.get(sessionID)
-  // telemetry: a settled outcome, when it changed. A transient record (the retry sentinel) reports
-  // nothing and keeps the last reported outcome for the next comparison.
+  // telemetry: a settled outcome, when it changed, named for the directory's workspace. A transient
+  // record (the retry sentinel) reports nothing and keeps the last reported outcome for the next
+  // comparison.
   const tracked = extra.transient ? previous?.tracked : outcome
-  if (!extra.transient) trackAttach(outcome, previous?.tracked, extra, sessionID)
+  if (!extra.transient) {
+    trackAttach(outcome, previous?.tracked, { ...extra, workspaceId: Number(linkedWorkspace()?.id) }, sessionID)
+  }
   sessions.delete(sessionID)
   const next: SessionRecord = {
     outcome,
@@ -503,6 +506,7 @@ export async function atTurnStart<T>(sessionID: string, body: () => Promise<T>):
       await reconcile(sessionID, directory, state)
     } catch (err) {
       log.warn("workspace engine turn hook failed", { sessionID, err: String(err) })
+      trackEngineError("attach", String(err), sessionID)
     }
     // Kept with the outcome, under the lock: the directory's link moves with any
     // later config load, and a turn's notice must name the workspace its own
@@ -847,8 +851,14 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
       sessionID,
       status: status?.status,
     })
-    await mcp().add(DATAMATE_KEY, overlayNow.entry)
-    status = (await mcp().status())[DATAMATE_KEY]
+    try {
+      await mcp().add(DATAMATE_KEY, overlayNow.entry)
+      status = (await mcp().status())[DATAMATE_KEY]
+    } catch (err) {
+      // A retry that throws settles as a failure for this session, rather than leaving the turn
+      // hook to swallow it with no outcome recorded.
+      status = { status: "failed", error: String(err) }
+    }
   }
   if (status?.status !== "connected") {
     const outcome: Outcome = {
