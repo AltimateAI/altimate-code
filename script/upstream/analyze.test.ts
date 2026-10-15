@@ -1,5 +1,7 @@
-import { describe, test, expect } from "bun:test"
-import { parseDiffForMarkerWarnings, computeMarkedLines } from "./analyze"
+import { describe, test, expect, spyOn } from "bun:test"
+import childProcess from "child_process"
+import { parseDiffForMarkerWarnings, computeMarkedLines, getUpstreamFiles, isUpstreamShared } from "./analyze"
+import { loadConfig, repoRoot } from "./utils/config"
 
 // Helper to create a unified diff string from lines
 function makeDiff(hunks: string): string {
@@ -9,6 +11,77 @@ index abc1234..def5678 100644
 +++ b/file.ts
 ${hunks}`
 }
+
+describe("upstream baseline ownership", () => {
+  const file = "packages/opencode/src/session/prompt.ts"
+
+  test("uses the baseline tag, never moving dev/main branches, and flags unmarked code", () => {
+    const config = loadConfig()
+    const lsTree = spyOn(childProcess, "execFileSync").mockReturnValue(`${file}\n`)
+    try {
+      expect(getUpstreamFiles(config).has(file)).toBe(true)
+      expect(lsTree).toHaveBeenCalledWith(
+        "git",
+        ["ls-tree", "-r", "--name-only", config.upstreamBaseline],
+        expect.objectContaining({ cwd: repoRoot() }),
+      )
+      expect(isUpstreamShared(file, config)).toBe(true)
+      expect(isUpstreamShared("packages/opencode/src/fork-only.ts", config)).toBe(false)
+      expect(lsTree).toHaveBeenCalledTimes(1)
+      const diff = makeDiff("@@ -1,1 +1,2 @@\n const existing = true\n+const unmarked = true")
+      expect(parseDiffForMarkerWarnings(file, diff)).toEqual([
+        expect.objectContaining({ file, line: 2, context: "const unmarked = true" }),
+      ])
+    } finally {
+      lsTree.mockRestore()
+    }
+  })
+
+  test("changing the baseline refreshes the cached file list", () => {
+    const config = { ...loadConfig(), upstreamBaseline: "v1.18.34" }
+    const lsTree = spyOn(childProcess, "execFileSync").mockReturnValue("packages/opencode/src/new.ts\n")
+    try {
+      expect(getUpstreamFiles(config).has(file)).toBe(false)
+      expect(isUpstreamShared("packages/opencode/src/new.ts", config)).toBe(true)
+      expect(lsTree).toHaveBeenCalledTimes(1)
+      expect(lsTree.mock.calls[0][1]).toEqual(["ls-tree", "-r", "--name-only", "v1.18.34"])
+    } finally {
+      lsTree.mockRestore()
+    }
+  })
+
+  test("missing baseline warns with fetch instructions and falls back to the directory heuristic", () => {
+    const config = { ...loadConfig(), upstreamBaseline: "v1.99.999" }
+    const lsTree = spyOn(childProcess, "execFileSync").mockImplementation(() => {
+      throw new Error("Not a valid object name")
+    })
+    const warn = spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      expect(getUpstreamFiles(config).size).toBe(0)
+      expect(isUpstreamShared(file, config)).toBe(true)
+      expect(isUpstreamShared("packages/opencode/src/altimate/custom.ts", config)).toBe(false)
+      expect(isUpstreamShared("packages/other/src/custom.ts", config)).toBe(false)
+      expect(lsTree).toHaveBeenCalledTimes(1)
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0][0]).toContain("upstream baseline 'v1.99.999' is unavailable")
+      expect(warn.mock.calls[0][0]).toContain("git fetch upstream refs/tags/v1.99.999:refs/tags/v1.99.999 --no-tags")
+      expect(warn.mock.calls[0][0]).toContain("Falling back to directory-based ownership checks")
+    } finally {
+      lsTree.mockRestore()
+      warn.mockRestore()
+    }
+  })
+
+  test("--print-baseline prints only the tag", () => {
+    const result = childProcess.spawnSync(process.execPath, ["run", "script/upstream/analyze.ts", "--print-baseline"], {
+      cwd: repoRoot(),
+      encoding: "utf-8",
+    })
+    expect(result.status).toBe(0)
+    expect(result.stdout).toBe(`${loadConfig().upstreamBaseline}\n`)
+    expect(result.stderr).toBe("")
+  })
+})
 
 describe("parseDiffForMarkerWarnings", () => {
   test("returns no warnings for empty diff", () => {
