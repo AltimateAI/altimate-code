@@ -12,6 +12,7 @@
 // session loop.
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import * as OnboardingTelemetry from "../telemetry/onboarding"
+import { Telemetry } from "@/altimate/telemetry"
 // altimate_change start — AI-8398 workspaces trigger. Reaches into the same
 // EventV2 bridge the server/routes/tui.ts uses to publish TuiEvent.CommandExecute
 // so the workspace TuiPlugin (packages/opencode/src/plugin/tui/altimate/workspace.tsx)
@@ -261,7 +262,12 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
         OnboardingTelemetry.isSelectedJob(input.sessionID, job) &&
         OnboardingTelemetry.claimFirstJobCompleted(input.sessionID)
       ) {
-        void OnboardingTelemetry.emit({ type: "first_job_completed", job }, input.sessionID)
+        // altimate_change — the current turn's workspace, asked for explicitly (this hook runs inside
+        // the turn whose tool just finished); nothing is stamped from the context.
+        void OnboardingTelemetry.emit(
+          { type: "first_job_completed", job, workspace_id: Telemetry.turnWorkspaceOf(input.sessionID) },
+          input.sessionID,
+        )
       }
     },
   }

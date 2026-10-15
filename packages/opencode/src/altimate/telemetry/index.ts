@@ -238,6 +238,8 @@ export namespace Telemetry {
     // altimate_change start — add os/arch/node_version for environment segmentation
     | {
         type: "session_start"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         model_id: string
@@ -668,6 +670,8 @@ export namespace Telemetry {
       }
     | {
         type: "memory_injection"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         block_count: number
@@ -740,6 +744,8 @@ export namespace Telemetry {
       }
     | {
         type: "skill_used"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         message_id: string
@@ -851,6 +857,8 @@ export namespace Telemetry {
     // altimate_change start — plan refinement telemetry event
     | {
         type: "plan_revision"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         revision_number: number
@@ -879,6 +887,8 @@ export namespace Telemetry {
     // altimate_change end
     | {
         type: "core_failure"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         tool_name: string
@@ -933,6 +943,8 @@ export namespace Telemetry {
     // altimate_change start — sql quality telemetry for issue prevention metrics
     | {
         type: "sql_quality"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         tool_name: string
@@ -967,6 +979,8 @@ export namespace Telemetry {
     // task intent classification for understanding DE problem distribution
     | {
         type: "task_classified"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         /** Classified intent category */
@@ -1253,6 +1267,8 @@ export namespace Telemetry {
     | {
         /** derived — see activation_job_selected */
         type: "first_job_completed"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
         job: "sample_duck_db" | "breaks_downstream" | "sql_review" | "cost" | "something_else"
@@ -1275,6 +1291,8 @@ export namespace Telemetry {
       }
     | {
         type: "first_prompt_sent"
+        /** altimate_change — the turn's workspace, named by the emitter */
+        workspace_id?: number
         timestamp: number
         session_id: string
       }
@@ -1968,21 +1986,18 @@ export namespace Telemetry {
   let sessionId = ""
   let projectId = ""
   // altimate_change — the workspace the current session's project is linked to (the backend
-  // datamate id), set per prompt turn from the local binding cache; stamped on every envelope so
-  // the session, first-use, skill, memory, tool and outcome rows join the workspace without each
-  // emit site knowing about it.
+  // datamate id), set per prompt turn from the local binding cache and read back through
+  // `getContext()` by callers that ask for it; nothing is stamped from it (see `track`).
   let workspaceId: number | undefined
-  // altimate_change start — the workspace of every session that set the context, by session: a serve
-  // process runs sessions side by side, so the singleton above can belong to another session's turn
-  // when an event is tracked. An entry lives from the session's turn start to its end (endSession);
-  // the insertion-ordered cap only matters past that many sessions mid-turn at once.
-  const sessionWorkspaces = new Map<string, number | undefined>()
-  const MAX_SESSION_WORKSPACES = 1024
-  /** The current turn token per session: `setContext` issues one, `endSession` ends only its own, so a
-   * cancelled turn unwinding late cannot end the replacement's entries. Tokens come from one
-   * process-wide counter, so an entry evicted and re-created never reuses a token a stale turn holds. */
+  // altimate_change start — the current turn token per session: `setContext` issues one, `endSession`
+  // ends only its own, so a cancelled turn unwinding late cannot end the replacement's counters.
+  // Tokens come from one process-wide counter, so a token is never reused. The map holds sessions
+  // mid-turn; an entry goes at the turn's end.
   const sessionTurns = new Map<string, number>()
   let nextTurn = 0
+  /** The workspace of each session's current turn, for an emitter that runs inside the turn but
+   * outside the loop (a plugin hook) and asks for it explicitly; nothing is stamped from it. */
+  const turnWorkspaces = new Map<string, number | undefined>()
   // altimate_change end
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
@@ -2281,22 +2296,19 @@ export namespace Telemetry {
   export function clearWorkspaceUse(sessionId: string, turn?: number) {
     workspaceUse.delete(useKey(sessionId, turn))
   }
-  /** The workspace a session's turn bound, or undefined when unbound or unknown. */
-  export function workspaceOf(sessionId: string): number | undefined {
-    return sessionWorkspaces.get(sessionId)
-  }
-  /** A session's turn ended: its use counts are read out and its `session_end` tracked by then, and
-   * its workspace entry goes. With `turn` (from `setContext`), a turn that is no longer the session's
-   * current one ends nothing: the replacement's entries are the replacement's. */
+  /** A session's turn ended: its use counts are read out and its `session_end` tracked by then. With
+   * `turn` (from `setContext`), a turn that is no longer the session's current one ends only its own
+   * counts: the replacement's are the replacement's. */
   export function endSession(sessionId: string, turn?: number) {
-    if (turn !== undefined && sessionTurns.get(sessionId) !== turn) {
-      // A turn that was replaced ends only its own counts; the replacement's entries stay.
-      workspaceUse.delete(useKey(sessionId, turn))
-      return
-    }
     workspaceUse.delete(useKey(sessionId, turn))
-    sessionWorkspaces.delete(sessionId)
+    if (turn !== undefined && sessionTurns.get(sessionId) !== turn) return
     sessionTurns.delete(sessionId)
+    turnWorkspaces.delete(sessionId)
+  }
+  /** The workspace of the session's current turn, for an emitter inside that turn; undefined when
+   * unbound or when no turn is running. An explicit lookup, never a stamp. */
+  export function turnWorkspaceOf(sessionId: string): number | undefined {
+    return turnWorkspaces.get(sessionId)
   }
   // altimate_change end
 
@@ -2305,15 +2317,9 @@ export namespace Telemetry {
     sessionId = opts.sessionId
     projectId = opts.projectId
     workspaceId = opts.workspaceId
-    // altimate_change start — remembered per session for the stamping in track()
+    // altimate_change start — a turn token for the session's counters and its end
     if (!opts.sessionId) return 0
-    sessionWorkspaces.delete(opts.sessionId)
-    sessionWorkspaces.set(opts.sessionId, opts.workspaceId)
-    if (sessionWorkspaces.size > MAX_SESSION_WORKSPACES) {
-      const oldest = sessionWorkspaces.keys().next().value!
-      sessionWorkspaces.delete(oldest)
-      sessionTurns.delete(oldest)
-    }
+    turnWorkspaces.set(opts.sessionId, opts.workspaceId)
     const turn = ++nextTurn
     sessionTurns.set(opts.sessionId, turn)
     return turn
@@ -2471,16 +2477,10 @@ export namespace Telemetry {
     const operationId = typeof eventSession === "string" ? TraceContext.activeTraceId(eventSession) : undefined
     if (operationId) (event as any)._operation_id = operationId
     // altimate_change end
-    // altimate_change start — the bound workspace is read now, not at flush, and for the event's own
-    // session: a serve process runs sessions side by side, so the process-wide context can belong to
-    // another session's turn. A row with no session takes the current context; a row naming a session
-    // that never set the context gains no key rather than another session's.
-    if (!("workspace_id" in event)) {
-      const own =
-        typeof eventSession === "string" && eventSession !== "" ? sessionWorkspaces.get(eventSession) : workspaceId
-      if (own !== undefined) (event as any).workspace_id = own
-    }
-    // altimate_change end
+    // altimate_change — no ambient workspace stamping: a row names its workspace itself (the prompt
+    // loop's rows, tool rows and memory rows carry the turn's; workspace rows carry their own) or it
+    // carries none. A process-wide or per-session fallback kept attributing cancelled turns' rows to
+    // their replacements.
     buffer.push(event)
     if (buffer.length > MAX_BUFFER_SIZE) {
       buffer.shift()
