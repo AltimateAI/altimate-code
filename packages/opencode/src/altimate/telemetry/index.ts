@@ -1914,6 +1914,11 @@ export namespace Telemetry {
   let machineId = ""
   let sessionId = ""
   let projectId = ""
+  // altimate_change — the workspace the current session's project is linked to (the backend
+  // datamate id), set per prompt turn from the local binding cache; stamped on every envelope so
+  // the session, first-use, skill, memory, tool and outcome rows join the workspace without each
+  // emit site knowing about it.
+  let workspaceId: number | undefined
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
   let initPromise: Promise<void> | undefined
@@ -1998,6 +2003,7 @@ export namespace Telemetry {
         // still says how this CLI was launched (cli, tui, serve, datamates).
         client: "altimate-code",
         source: clientSource,
+        ...(workspaceId !== undefined && !("workspace_id" in fields) && { workspace_id: String(workspaceId) }),
         project_id: fields.project_id ?? projectId,
         ...(machineId && { machine_id: machineId }),
         // altimate_change — groups every event from one process launch. The onboarding funnel
@@ -2177,13 +2183,14 @@ export namespace Telemetry {
     }
   }
 
-  export function setContext(opts: { sessionId: string; projectId: string }) {
+  export function setContext(opts: { sessionId: string; projectId: string; workspaceId?: number }) {
     sessionId = opts.sessionId
     projectId = opts.projectId
+    workspaceId = opts.workspaceId
   }
 
-  export function getContext() {
-    return { sessionId, projectId }
+  export function getContext(): { sessionId: string; projectId: string; workspaceId?: number } {
+    return { sessionId, projectId, ...(workspaceId !== undefined ? { workspaceId } : {}) }
   }
 
   /** Returns true only after init() has completed and telemetry is enabled. */
@@ -2529,6 +2536,7 @@ export namespace Telemetry {
     droppedEvents = 0
     sessionId = ""
     projectId = ""
+    workspaceId = undefined
     machineId = ""
     // doInit() only assigns userEmail when Account.active() returns one, so without this a
     // logout followed by a re-init in the same process kept hashing the previous account into
