@@ -152,3 +152,42 @@ test("keeps the previous snapshot readable until replacement metadata is collect
   expect(cache.search("orders").tables).toHaveLength(0)
   expect(cache.search("customers").tables).toHaveLength(1)
 })
+
+function abortedAfterFirstTable() {
+  const source = connector()
+  const controller = new AbortController()
+  source.listTables = async () => ["first", "second"].map((name) => ({ name, type: "table" }))
+  source.describeTable = mock(async (_schema: string, table: string) => {
+    if (table === "second") {
+      controller.abort()
+      return new Promise<never>(() => {})
+    }
+    return [{ name: "id", data_type: "INTEGER", nullable: false }]
+  })
+  return { source, signal: controller.signal }
+}
+
+test("a partial run never replaces an existing complete cache", async () => {
+  const cache = createCache()
+  const full = connector()
+  full.listTables = async () => ["first", "second", "third"].map((name) => ({ name, type: "table" }))
+  const complete = await cache.indexWarehouse("warehouse", "other", full)
+  expect(complete.partial).toBeUndefined()
+  const before = cache.cacheStatus().warehouses[0].last_indexed
+
+  const { source, signal } = abortedAfterFirstTable()
+  const result = await cache.indexWarehouse("warehouse", "other", source, { signal })
+  expect(result.partial).toBe(true)
+  expect(cache.cacheStatus().total_tables).toBe(3)
+  expect(cache.cacheStatus().warehouses[0].last_indexed).toBe(before)
+})
+
+test("a partial first index is saved but recorded as stale", async () => {
+  const cache = createCache()
+  const { source, signal } = abortedAfterFirstTable()
+  const result = await cache.indexWarehouse("warehouse", "other", source, { signal })
+  expect(result.partial).toBe(true)
+  expect(cache.cacheStatus().total_tables).toBe(1)
+  const indexed = cache.cacheStatus().warehouses[0].last_indexed!
+  expect(Date.now() - new Date(indexed).getTime()).toBeGreaterThan(365 * 24 * 3600 * 1000)
+})

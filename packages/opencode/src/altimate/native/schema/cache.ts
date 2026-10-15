@@ -205,8 +205,10 @@ export class SchemaCache {
 
       let totalColumns = 0
       // Gather metadata outside SQLite, then replace the snapshot in one transaction.
-      // A cancelled refresh with no completed tables leaves the previous cache intact.
-      if (!note || tables.size > 0) {
+      // A partial run never replaces an existing snapshot. With no prior snapshot it is saved
+      // with an epoch timestamp so every freshness check treats it as stale and re-indexes.
+      const hasPrior = Boolean(this.db.prepare("SELECT 1 FROM warehouses WHERE name = ?").get(warehouseName))
+      if (!note || (tables.size > 0 && !hasPrior)) {
         const insertTable = this.db.prepare(
           `INSERT INTO tables_cache
            (warehouse, database_name, schema_name, table_name, table_type, search_text)
@@ -238,10 +240,10 @@ export class SchemaCache {
             `INSERT OR REPLACE INTO warehouses
              (name, type, last_indexed, databases_count, schemas_count, tables_count, columns_count)
              VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          ).run(warehouseName, warehouseType, now, 0, schemas.size, tables.size, totalColumns)
+          ).run(warehouseName, warehouseType, note ? new Date(0).toISOString() : now, 0, schemas.size, tables.size, totalColumns)
         })()
       } else {
-        note += " No cached metadata was replaced."
+        note += hasPrior ? " The previous cached metadata was kept." : " No cached metadata was replaced."
       }
 
       return {
