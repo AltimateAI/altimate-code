@@ -63,6 +63,16 @@ continues under core's own MCP timeout/lifecycle. Host cleanup can consequently
 outlast the prompt deadline; the slow-catalog test's complete duration includes
 that cleanup. No detached polling loop continues after the deadline.
 
+## Correction (re-verification, 2026-10-15)
+
+Re-running the suite three times, S3.4 exceeded its 1 s bound in 2 of 3 runs (1.76 s and 2.53 s with
+a 200 ms plugin deadline and a 1.5 s catalog). The adapter's timer race does reject, but the
+`sessions.prompt` call does not return until core MCP reconciliation for the slow server settles
+(`packages/core/src/state.ts:123`, `packages/core/src/mcp/index.ts:518`, `:572`). **A plugin cannot
+bound prompt admission against a slow MCP server.** Classification: **U** — needs a cancellable
+`ctx.mcp.reload({ signal })` / non-blocking registration. The test now asserts the invariants that hold
+(rejection, no model request) and documents the measured latency instead of claiming a 1 s bound.
+
 ## User removal: measured gap
 
 **A user/client can remove the plugin-provided server.** The exact SDK call is:
