@@ -1,5 +1,15 @@
 import { describe, test, expect, beforeAll } from "bun:test"
-import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "fs"
 import { tmpdir } from "os"
 import { dirname, join } from "path"
 import { $ } from "bun"
@@ -102,7 +112,8 @@ describe("build integrity", () => {
           .quiet()
           .nothrow()
 
-        const script = join(installed, "dist", "node_python_bridge.py")
+        // Node loads the bundle by its real path; on macOS `tmpdir()` is under the `/var` symlink.
+        const script = join(realpathSync(installed), "dist", "node_python_bridge.py")
         const runs = readFileSync(argvLog, "utf8").split("\n")
         expect(runs).toContain(script)
         expect(existsSync(script)).toBe(true)
