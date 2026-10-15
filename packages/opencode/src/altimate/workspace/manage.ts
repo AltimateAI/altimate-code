@@ -432,7 +432,7 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
       identifier = { projectPath: detected.projectPath }
     }
   }
-  const removedServerSide = await WorkspaceApi.unbindProject(identifier)
+  const removedServerSide = await WorkspaceApi.unbindProject(identifier, was?.datamateId)
 
   // Only the row unlink started from. A relink that completed while the DELETE
   // was in flight recorded a new row, and removing that — then memoizing the

@@ -5,6 +5,8 @@ import path from "path"
 import { buildAuthorizeUrl, buildCliContext } from "../../src/altimate/plugin/altimate"
 import { getOrCreateMachineId } from "../../src/altimate/util/machine-id"
 import { Config } from "../../src/config/config"
+import { Telemetry } from "../../src/altimate/telemetry"
+import os from "os"
 import { tmpdir } from "../fixture/fixture"
 
 const VALID_UUID = "550e8400-e29b-41d4-a716-446655440000"
@@ -112,7 +114,7 @@ describe("buildCliContext", () => {
       expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
     })
 
-    test("omits machine_id when Config.get() throws (fails CLOSED in the worker)", async () => {
+    test("omits machine_id when Config.get() throws and telemetry is off", async () => {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
       cfg.mockImplementation((async () => {
         throw new Error("InstanceRef not provided")
@@ -120,12 +122,44 @@ describe("buildCliContext", () => {
       await using dir = await tmpdir()
       const idPath = path.join(dir.path, "machine-id")
       fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      await Telemetry.shutdown() // under the runner the production sink is withheld: telemetry stays off
 
       const encoded = await buildCliContext(idPath)
       const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
 
-      // Config unreadable → must NOT transmit the durable id.
+      // Config unreadable → the context follows the telemetry module, which is off here.
+      expect(Telemetry.isEnabled()).toBe(false)
       expect(Object.prototype.hasOwnProperty.call(ctx, "machine_id")).toBe(false)
+    })
+
+    test("includes machine_id when Config.get() throws but telemetry is on", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      cfg.mockImplementation((async () => {
+        throw new Error("InstanceRef not provided")
+      }) as never)
+      await using dir = await tmpdir()
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      const savedCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+      const home = spyOn(os, "homedir").mockImplementation(() => dir.path)
+      const net = spyOn(globalThis, "fetch").mockImplementation((async () => new Response("", { status: 200 })) as any)
+      try {
+        await Telemetry.shutdown()
+        await Telemetry.init()
+        expect(Telemetry.isEnabled()).toBe(true)
+
+        const encoded = await buildCliContext(idPath)
+        const ctx = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
+        expect(ctx["machine_id"]).toBe(VALID_UUID)
+      } finally {
+        await Telemetry.shutdown()
+        net.mockRestore()
+        home.mockRestore()
+        if (savedCs === undefined) delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+        else process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = savedCs
+      }
     })
 
     test("includes machine_id when telemetry is enabled", async () => {
