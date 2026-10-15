@@ -246,8 +246,9 @@ export namespace MemoryPrompt {
         injectedCount++
         injectedTraining.push(item.block)
         scopesSeen.add(item.block.scope)
-        // altimate_change start — a block from the bound workspace's cloud memory counts as workspace scope
-        if (isRemote(item.block)) {
+        // altimate_change start — a project-scope block from the bound workspace's cloud memory counts as
+        // workspace scope; a global cloud block is the account's and applies everywhere
+        if (isRemote(item.block) && item.block.scope === "project") {
           scopesSeen.add("workspace")
           workspaceBlocks++
         }
@@ -272,7 +273,7 @@ export namespace MemoryPrompt {
           injectedCount++
           scopesSeen.add(item.block.scope)
           // altimate_change start — as above, for memory blocks
-          if (isRemote(item.block)) {
+          if (isRemote(item.block) && item.block.scope === "project") {
             scopesSeen.add("workspace")
             workspaceBlocks++
           }
@@ -310,9 +311,7 @@ export namespace MemoryPrompt {
         // altimate_change start — workspace memory use, for memory_injection and the session's summary rows
         ...(workspaceBlocks > 0 && { workspace_blocks: workspaceBlocks }),
       })
-      if (workspaceBlocks > 0) {
-        Telemetry.noteWorkspaceUse(ctx?.sessionID ?? Telemetry.getContext().sessionId, "memory", workspaceBlocks)
-      }
+      if (workspaceBlocks > 0 && ctx?.sessionID) Telemetry.noteWorkspaceUse(ctx.sessionID, "memory", workspaceBlocks)
       // altimate_change end
     }
 

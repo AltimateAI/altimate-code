@@ -260,7 +260,6 @@ export namespace Telemetry {
         duration_ms: number
         // altimate_change — what of the bound workspace this session used (see noteWorkspaceUse)
         workspace_skills_used?: number
-        workspace_documents_used?: number
         workspace_memory_blocks?: number
         workspace_integration_calls?: number
       }
@@ -609,10 +608,11 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         workspace_id: number
-        skills: number
-        integrations: number
+        /** Absent when the starter could not tell (unsynced, unreadable, timed out). */
+        skills?: number
+        integrations?: number
         knowledge: string
-        memory_enabled: boolean
+        memory_enabled?: boolean
       }
     | {
         /** A memory block was written back to the bound workspace's cloud memory. */
@@ -953,7 +953,7 @@ export namespace Telemetry {
         duration_ms: number
         /** Last tool category the agent used (or "none") */
         last_tool_category: string
-        // altimate_change — true when the session had used workspace skills, memory, documents or integrations
+        // altimate_change — true when the session had used workspace skills, memory or integrations
         workspace_context_used?: boolean
       }
     // task intent classification for understanding DE problem distribution
@@ -1962,9 +1962,10 @@ export namespace Telemetry {
   let workspaceId: number | undefined
   // altimate_change start — the workspace of every session that set the context, by session: a serve
   // process runs sessions side by side, so the singleton above can belong to another session's turn
-  // when an event is tracked. Insertion-ordered; the oldest entry goes past the cap.
+  // when an event is tracked. An entry lives from the session's turn start to its end (endSession);
+  // the insertion-ordered cap only matters past that many sessions mid-turn at once.
   const sessionWorkspaces = new Map<string, number | undefined>()
-  const MAX_SESSION_WORKSPACES = 256
+  const MAX_SESSION_WORKSPACES = 1024
   // altimate_change end
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
@@ -2233,19 +2234,28 @@ export namespace Telemetry {
   // emit sites note what they used; session_end reports the counts and task_outcome_signal
   // whether any workspace context was in play. Keyed by session so a serve process with several
   // sessions keeps them apart; cleared when the session ends.
-  export type WorkspaceUse = { skills: number; documents: number; memory: number; integrations: number }
+  export type WorkspaceUse = { skills: number; memory: number; integrations: number }
   const workspaceUse = new Map<string, WorkspaceUse>()
   export function noteWorkspaceUse(sessionId: string, kind: keyof WorkspaceUse, n = 1) {
     if (!sessionId || n <= 0) return
-    const use = workspaceUse.get(sessionId) ?? { skills: 0, documents: 0, memory: 0, integrations: 0 }
+    const use = workspaceUse.get(sessionId) ?? { skills: 0, memory: 0, integrations: 0 }
     use[kind] += n
     workspaceUse.set(sessionId, use)
   }
   export function workspaceUseOf(sessionId: string): WorkspaceUse {
-    return { skills: 0, documents: 0, memory: 0, integrations: 0, ...workspaceUse.get(sessionId) }
+    return { skills: 0, memory: 0, integrations: 0, ...workspaceUse.get(sessionId) }
   }
   export function clearWorkspaceUse(sessionId: string) {
     workspaceUse.delete(sessionId)
+  }
+  /** The workspace a session's turn bound, or undefined when unbound or unknown. */
+  export function workspaceOf(sessionId: string): number | undefined {
+    return sessionWorkspaces.get(sessionId)
+  }
+  /** A session's turn ended: its use counts are read out by then, and its workspace entry goes. */
+  export function endSession(sessionId: string) {
+    workspaceUse.delete(sessionId)
+    sessionWorkspaces.delete(sessionId)
   }
   // altimate_change end
 
@@ -2622,7 +2632,6 @@ export namespace Telemetry {
     sessionId = ""
     projectId = ""
     workspaceId = undefined
-    sessionWorkspaces.clear() // altimate_change
     machineId = ""
     // doInit() only assigns userEmail when Account.active() returns one, so without this a
     // logout followed by a re-init in the same process kept hashing the previous account into

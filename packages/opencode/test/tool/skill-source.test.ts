@@ -23,6 +23,12 @@ describe("classifySkillSource", () => {
     expect(classifySkillSource("C:\\work\\repo\\.altimate-code\\skill\\_workspace\\x\\SKILL.md")).toBe("workspace")
     // a project skill that merely mentions the word is still the project's
     expect(classifySkillSource("/work/repo/.altimate-code/skill/_workspace-notes/SKILL.md")).toBe("project")
+    // With the project root known, only this project's managed folder is the workspace's.
+    expect(classifySkillSource("/work/repo/.altimate-code/skill/_workspace/x/SKILL.md", "/work/repo")).toBe("workspace")
+    expect(classifySkillSource("/work/repo/.altimate-code/skill/_workspace/x/SKILL.md", "/work/repo/")).toBe(
+      "workspace",
+    )
+    expect(classifySkillSource("/work/other/.altimate-code/skill/_workspace/x/SKILL.md", "/work/repo")).toBe("project")
   })
 
   test("a third-party skill under some other node_modules is NOT tagged Altimate", () => {

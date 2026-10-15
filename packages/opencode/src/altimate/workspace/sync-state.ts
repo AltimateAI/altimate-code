@@ -279,7 +279,7 @@ function chain(file: string, work: () => Promise<void>, kind: SyncKind): Promise
 /** The reason class of a sync error message, for workspace_sync_failed. */
 export function syncFailureReason(error: string | undefined): "auth" | "not_found" | "network" | "other" {
   const e = (error ?? "").toLowerCase()
-  if (/\b(401|403)\b|unauthori[sz]ed|forbidden|sign(ed)? in|credential/.test(e)) return "auth"
+  if (/\b(401|403)\b|unauthori[sz]ed|forbidden|\bsign(ed)? in\b|credential/.test(e)) return "auth"
   if (/\b404\b|not found|no longer exists|unknown workspace/.test(e)) return "not_found"
   if (/timed? ?out|cannot reach|unreachable|econn|enotfound|network|socket/.test(e)) return "network"
   return "other"

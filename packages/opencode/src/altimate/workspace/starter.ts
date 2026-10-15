@@ -154,10 +154,11 @@ export function trackStarterShown(workspaceId: number, contents: WorkspaceConten
       timestamp: Date.now(),
       session_id: Telemetry.getContext().sessionId,
       workspace_id: workspaceId,
-      skills: Array.isArray(contents.skills) ? contents.skills.length : 0,
-      integrations: Array.isArray(contents.integrations) ? contents.integrations.length : 0,
+      // Unknown is left out, not reported as none: the starter's own rule.
+      ...(Array.isArray(contents.skills) ? { skills: contents.skills.length } : {}),
+      ...(Array.isArray(contents.integrations) ? { integrations: contents.integrations.length } : {}),
       knowledge: contents.knowledge?.kind ?? "unknown",
-      memory_enabled: contents.memoryEnabled === true,
+      ...(typeof contents.memoryEnabled === "boolean" ? { memory_enabled: contents.memoryEnabled } : {}),
     })
   } catch {
     // telemetry never blocks the starter
