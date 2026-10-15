@@ -120,6 +120,18 @@ import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
 // altimate_change start — the session's bound workspace rides on every telemetry row
 import { readLocalBinding } from "@/altimate/workspace/state"
+
+/** The session's workspace use, as session_end fields; counts are cleared with the read. */
+function workspaceUseFields(sessionID: string) {
+  const use = Telemetry.workspaceUseOf(sessionID)
+  Telemetry.clearWorkspaceUse(sessionID)
+  return {
+    workspace_skills_used: use.skills,
+    workspace_documents_used: use.documents,
+    workspace_memory_blocks: use.memory,
+    workspace_integration_calls: use.integrations,
+  }
+}
 // altimate_change end
 import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
@@ -844,6 +856,9 @@ export namespace SessionPrompt {
         total_tokens: sessionTotalTokens,
         tool_call_count: toolCallCount,
         duration_ms: Date.now() - sessionStartTime,
+        // altimate_change start — what of the bound workspace this session used
+        ...workspaceUseFields(sessionID),
+        // altimate_change end
       })
     }
     process.once("beforeExit", emergencySessionEnd)
@@ -2549,6 +2564,8 @@ export namespace SessionPrompt {
       step_count: step,
       duration_ms: Date.now() - sessionStartTime,
       last_tool_category: lastToolCategory || "none",
+      // altimate_change — whether workspace skills, memory, documents or integrations were in play
+      workspace_context_used: Object.values(Telemetry.workspaceUseOf(sessionID)).some((n) => n > 0),
     })
     // Tool chain effectiveness — aggregated tool sequence + outcome
     if (toolChain.length > 0) {
@@ -2626,6 +2643,9 @@ export namespace SessionPrompt {
         total_tokens: sessionTotalTokens,
         tool_call_count: toolCallCount,
         duration_ms: Date.now() - sessionStartTime,
+        // altimate_change start — what of the bound workspace this session used
+        ...workspaceUseFields(sessionID),
+        // altimate_change end
       })
     }
     await Telemetry.shutdown()

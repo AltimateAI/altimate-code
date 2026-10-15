@@ -25,6 +25,7 @@
 // run in its server worker. A refresh run on the TUI main thread, or by a separate CLI
 // process, publishes to no `/event` subscriber — the file is still written, and the TUI
 // sidebar and the status route read it from there.
+import { Telemetry } from "@/altimate/telemetry"
 import { createHash, randomBytes } from "node:crypto"
 import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
@@ -275,6 +276,15 @@ function chain(file: string, work: () => Promise<void>, kind: SyncKind): Promise
   return settled
 }
 
+/** The reason class of a sync error message, for workspace_sync_failed. */
+export function syncFailureReason(error: string | undefined): "auth" | "not_found" | "network" | "other" {
+  const e = (error ?? "").toLowerCase()
+  if (/\b(401|403)\b|unauthori[sz]ed|forbidden|sign(ed)? in|credential/.test(e)) return "auth"
+  if (/\b404\b|not found|no longer exists|unknown workspace/.test(e)) return "not_found"
+  if (/timed? ?out|cannot reach|unreachable|econn|enotfound|network|socket/.test(e)) return "network"
+  return "other"
+}
+
 async function apply(
   directory: string,
   datamateId: number,
@@ -330,6 +340,23 @@ async function apply(
   }
   const file: StoredFile = { version: 2, directory: canon, scope, datamateId, entity: next }
   writePrivate(filePath(directory, kind), file)
+  // altimate_change start — a kind flipping to error is a blocker the dashboard counts; a repeat
+  // while already in error is not.
+  if (next.status === "error" && previous?.status !== "error") {
+    try {
+      Telemetry.track({
+        type: "workspace_sync_failed",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        workspace_id: datamateId,
+        kind,
+        reason: syncFailureReason(outcome.error),
+      })
+    } catch {
+      // telemetry never blocks the record
+    }
+  }
+  // altimate_change end
 
   const errorChanged = (previous?.status ?? "ok") !== next.status || previous?.error !== next.error
   if (!changes && !errorChanged) return

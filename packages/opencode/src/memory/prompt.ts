@@ -206,6 +206,8 @@ export namespace MemoryPrompt {
     let injectedCount = 0
     const injectedTraining: MemoryBlock[] = []
     const scopesSeen = new Set<string>()
+    // altimate_change — blocks injected from the bound workspace's cloud memory
+    let workspaceBlocks = 0
 
     // Group training blocks by kind for structured display
     const byKind = new Map<TrainingKind, typeof trainingBlocks>()
@@ -244,6 +246,12 @@ export namespace MemoryPrompt {
         injectedCount++
         injectedTraining.push(item.block)
         scopesSeen.add(item.block.scope)
+        // altimate_change start — a block from the bound workspace's cloud memory counts as workspace scope
+        if (isRemote(item.block)) {
+          scopesSeen.add("workspace")
+          workspaceBlocks++
+        }
+        // altimate_change end
       }
     }
 
@@ -263,6 +271,12 @@ export namespace MemoryPrompt {
           used += needed
           injectedCount++
           scopesSeen.add(item.block.scope)
+          // altimate_change start — as above, for memory blocks
+          if (isRemote(item.block)) {
+            scopesSeen.add("workspace")
+            workspaceBlocks++
+          }
+          // altimate_change end
         }
       }
     }
@@ -293,7 +307,13 @@ export namespace MemoryPrompt {
         total_chars: used,
         budget,
         scopes_used: [...scopesSeen],
+        // altimate_change start — workspace memory use, for memory_injection and the session's summary rows
+        ...(workspaceBlocks > 0 && { workspace_blocks: workspaceBlocks }),
       })
+      if (workspaceBlocks > 0) {
+        Telemetry.noteWorkspaceUse(ctx?.sessionID ?? Telemetry.getContext().sessionId, "memory", workspaceBlocks)
+      }
+      // altimate_change end
     }
 
     return injectedCount > 0 ? result : ""

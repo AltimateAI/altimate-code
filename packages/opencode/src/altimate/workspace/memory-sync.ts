@@ -16,6 +16,7 @@
 // Nothing is written to disk: local files are the source of truth, and a cloud
 // record can have been edited elsewhere by a client that does not preserve this
 // CLI's metadata.
+import { Telemetry } from "@/altimate/telemetry"
 import { createHash } from "node:crypto"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Flag } from "@/flag/flag"
@@ -379,11 +380,7 @@ function stripTrainingMeta(content: string): string {
 /** Fingerprint of everything about a block that reaches the store. Tags and
  * expiry are included because both are mirrored. */
 function contentHash(block: MemoryBlock): string {
-  const payload = JSON.stringify([
-    stripTrainingMeta(block.content),
-    [...block.tags].sort(),
-    block.expires ?? "",
-  ])
+  const payload = JSON.stringify([stripTrainingMeta(block.content), [...block.tags].sort(), block.expires ?? ""])
   // sha-256, not a 32-bit non-cryptographic hash. This value is the single
   // gate deciding whether a save is sent at all: on a collision ``push``
   // returns "unchanged" and a real edit is silently never mirrored, with no
@@ -702,7 +699,9 @@ async function reapArchivedBlocks(
     try {
       const gone = syncInternals.removeBlock
         ? await syncInternals.removeBlock(scope, blockId, directory ?? undefined, block.updated)
-        : await (await import("@/memory/store")).MemoryStore.remove(scope, blockId, directory ?? undefined, {
+        : await (
+            await import("@/memory/store")
+          ).MemoryStore.remove(scope, blockId, directory ?? undefined, {
             expectUpdated: block.updated,
           })
       if (gone) {
@@ -770,9 +769,7 @@ async function push(
   // user recreated under an old id gets a fresh record instead of un-archiving
   // the old one (`MemoryApi.update` replaces metadata wholesale, which would
   // drop the archived marker).
-  const indexed = existing?.memoryId
-    ? view.records.find((r) => r.id === existing.memoryId)
-    : undefined
+  const indexed = existing?.memoryId ? view.records.find((r) => r.id === existing.memoryId) : undefined
   // A record the index names but a COMPLETE record set does not hold is gone —
   // deleted in the web app, by another client, or by a wipe. Absence used to
   // read as "still ours", so `match` stayed pointing at a dead id and every
@@ -816,6 +813,7 @@ async function push(
     const others = copies.filter((r) => r.id !== match).map((r) => r.id)
     await archiveDuplicates(others, block, metadata, "archiving a second live record of one block")
     await recordIndexEntry(key, { memoryId: match, contentHash: hash, syncedAt: Date.now() })
+    if (binding) trackContributed(binding)
     return "stored"
   }
 
@@ -848,6 +846,7 @@ async function push(
   // leaves the block unindexed, and the next save finds the extras by identity.
   await archiveDuplicates(extras, block, metadata, "archiving an extra record produced by one create")
   await recordIndexEntry(key, { memoryId: primary, contentHash: hash, syncedAt: Date.now() })
+  if (binding) trackContributed(binding)
   return "stored"
 }
 
@@ -865,6 +864,22 @@ async function archiveDuplicates(
     await MemoryApi.update(id, "", { ...metadata, archived: "true", archived_at: new Date().toISOString() })
   }
 }
+
+// altimate_change start — a successful write-back is the workspace getting something back
+function trackContributed(binding: CachedBinding) {
+  try {
+    Telemetry.track({
+      type: "workspace_memory_contributed",
+      timestamp: Date.now(),
+      session_id: Telemetry.getContext().sessionId,
+      workspace_id: binding.datamateId,
+      block_count: 1,
+    })
+  } catch {
+    // telemetry never blocks a mirror
+  }
+}
+// altimate_change end
 
 /** Cloud operations for one logical block, run one at a time.
  *
@@ -992,11 +1007,7 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
 /** Archive a block's cloud record rather than deleting it, so the workspace
  * keeps the history. Only this client filters the marker — other readers do
  * not — so an archived record stays visible elsewhere. */
-export async function archiveBlock(
-  scope: "global" | "project",
-  blockId: string,
-  directory?: string,
-): Promise<void> {
+export async function archiveBlock(scope: "global" | "project", blockId: string, directory?: string): Promise<void> {
   if (!isEnabled()) return
   // Queued behind any in-flight mirror for the same block, so a delete cannot
   // run before the create it is meant to undo. The binding lookup happens
@@ -1015,11 +1026,7 @@ export async function archiveBlock(
   )
 }
 
-async function archiveNow(
-  scope: "global" | "project",
-  blockId: string,
-  binding: CachedBinding,
-): Promise<void> {
+async function archiveNow(scope: "global" | "project", blockId: string, binding: CachedBinding): Promise<void> {
   const key = indexKey({
     scope,
     blockId,
@@ -1193,9 +1200,7 @@ async function pollMemoKey(binding: CachedBinding): Promise<string> {
  *
  * An "unknown" is never memoized: the next tick should ask again rather than
  * inherit a network blip. */
-export async function memoryEnabledForPoller(
-  binding: CachedBinding,
-): Promise<"enabled" | "disabled" | "unknown"> {
+export async function memoryEnabledForPoller(binding: CachedBinding): Promise<"enabled" | "disabled" | "unknown"> {
   // The scoped memo is the poller's only cache. `memoryEnabledCache` is keyed by
   // bare workspace id — right for the write path, which is tenant-bound by its
   // credentials — but consulting it here reopened a 60s cross-tenant window the
@@ -1204,8 +1209,7 @@ export async function memoryEnabledForPoller(
   // minutes per tenant is the price, and `memoryStatus` still warms both.
   const key = await pollMemoKey(binding)
   const memo = pollMemo.get(key)
-  if (memo && Date.now() - memo.at < (memo.status === "unknown" ? POLL_UNKNOWN_TTL_MS : POLL_TTL_MS))
-    return memo.status
+  if (memo && Date.now() - memo.at < (memo.status === "unknown" ? POLL_UNKNOWN_TTL_MS : POLL_TTL_MS)) return memo.status
   // The in-flight ask is memoized too, not only the settled answer. Two
   // refreshes overlapping on a cold memo — a remount while a slow one is
   // still out — both saw it empty and both put a request on the wire.
@@ -1340,7 +1344,8 @@ export async function backfill(
   // ``gated`` says the sweep never ran, as opposed to running and storing
   // nothing. A caller recording "this binding is seeded" must be able to tell
   // those apart: memory being off is not a completed seed.
-  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0, declined: 0, deferred: 0, gated: true, gateReason: "local-off" }
+  if (!isEnabled())
+    return { ok: 0, failed: 0, skipped: 0, declined: 0, deferred: 0, gated: true, gateReason: "local-off" }
   // The bind path passes the binding it just recorded; there is no ambient
   // instance to resolve one from on the `link` subcommand.
   const binding = explicitBinding ?? (await currentBinding())
@@ -1370,10 +1375,7 @@ export async function backfill(
   log.info("workspace memory backfill starting", { pending: pending.length, skipped })
   const result = await runQueue(
     pending,
-    (item) =>
-      serialize(item.block.scope, item.block.id, () =>
-        push(item.block, item.binding, known, sweepDirectory),
-      ),
+    (item) => serialize(item.block.scope, item.block.id, () => push(item.block, item.binding, known, sweepDirectory)),
     BACKFILL_CONCURRENCY,
   )
   // `skipped` combines blocks filtered before the queue (already synced, or
@@ -1388,7 +1390,10 @@ export async function backfill(
 function originLabel(meta: Record<string, unknown>): string | undefined {
   const remote = typeof meta.repo_remote === "string" ? meta.repo_remote : undefined
   if (remote) {
-    const trimmed = remote.replace(/[/]+$/, "").replace(/\.git$/, "").replace(/[/]+$/, "")
+    const trimmed = remote
+      .replace(/[/]+$/, "")
+      .replace(/\.git$/, "")
+      .replace(/[/]+$/, "")
     const last = trimmed.split(/[/:]/).pop()
     if (last) return last
   }
@@ -1484,10 +1489,7 @@ export async function hydrate(sessionID: string): Promise<void> {
 
 /** Wait for a session's in-flight hydration, capped. Resolves immediately once
  * the fetch has settled, so only the first injection of a session pays. */
-export async function whenHydrated(
-  sessionID: string,
-  timeoutMs: number = HYDRATION_WAIT_MS,
-): Promise<void> {
+export async function whenHydrated(sessionID: string, timeoutMs: number = HYDRATION_WAIT_MS): Promise<void> {
   const state = sessions.get(sessionID)
   const pending = state?.hydration
   if (!pending || !state) return

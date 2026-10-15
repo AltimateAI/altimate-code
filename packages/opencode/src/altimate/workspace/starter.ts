@@ -5,6 +5,7 @@
 // `GET /altimate/workspace/starter`. Fixed in format and built from the same data as the prompt's
 // "What this Altimate Workspace provides" section, so it costs no model call (none of the user's
 // tokens) and reads the same every time. Anything not known is left out, never shown as "none".
+import { Telemetry } from "@/altimate/telemetry"
 import { displayWorkspaceName } from "./workspace-name"
 import { workspaceContents, type WorkspaceContents } from "./contents"
 
@@ -33,10 +34,14 @@ function list(names: string[], max: number): string {
 }
 
 function skillsLine(skills: WorkspaceContents["skills"]): string | null {
-  if (skills === null) return "Skills: not synced to this project yet; run `altimate-code workspace refresh` to fetch them."
+  if (skills === null)
+    return "Skills: not synced to this project yet; run `altimate-code workspace refresh` to fetch them."
   if (skills === "unknown") return null
   if (skills.length === 0) return "Skills: none yet. Add them in the workspace and they sync here."
-  return `Skills (${skills.length}): ${list(skills.map((s) => s.name), MAX_LISTED_SKILLS)}`
+  return `Skills (${skills.length}): ${list(
+    skills.map((s) => s.name),
+    MAX_LISTED_SKILLS,
+  )}`
 }
 
 function knowledgeLine(k: WorkspaceContents["knowledge"]): string | null {
@@ -86,7 +91,9 @@ function summaryOf(contents: WorkspaceContents): string {
   else if (k?.kind === "selected") parts.push(plural(k.names?.length ?? k.selected, "knowledge document"))
   else if (k?.kind === "off") parts.push("knowledge off")
   if (contents.integrations !== null)
-    parts.push(contents.integrations.length === 0 ? "no integrations" : `integrations: ${contents.integrations.join(", ")}`)
+    parts.push(
+      contents.integrations.length === 0 ? "no integrations" : `integrations: ${contents.integrations.join(", ")}`,
+    )
   if (contents.memoryEnabled !== null) parts.push(contents.memoryEnabled ? "memory on" : "memory off")
   return parts.join(" · ")
 }
@@ -138,10 +145,33 @@ export function wrapStarter(text: string, width: number): string {
 }
 
 /** The starter for a linked project. `directory` is the project key the link was recorded under. */
+// altimate_change start — the starter is the first thing a user sees of the workspace in a tool
+/** `starter_shown`, with what the workspace provides as counts. Never throws. */
+export function trackStarterShown(workspaceId: number, contents: WorkspaceContents): void {
+  try {
+    Telemetry.track({
+      type: "starter_shown",
+      timestamp: Date.now(),
+      session_id: Telemetry.getContext().sessionId,
+      workspace_id: workspaceId,
+      skills: Array.isArray(contents.skills) ? contents.skills.length : 0,
+      integrations: Array.isArray(contents.integrations) ? contents.integrations.length : 0,
+      knowledge: contents.knowledge?.kind ?? "unknown",
+      memory_enabled: contents.memoryEnabled === true,
+    })
+  } catch {
+    // telemetry never blocks the starter
+  }
+}
+// altimate_change end
+
 export async function starterFor(
   directory: string,
   binding: { datamateId: number; datamateName: string },
   waitMs = STARTER_WAIT_MS,
 ): Promise<Starter> {
-  return renderStarter(binding.datamateName, await workspaceContents(directory, binding.datamateId, waitMs))
+  const contents = await workspaceContents(directory, binding.datamateId, waitMs)
+  const starter = renderStarter(binding.datamateName, contents)
+  trackStarterShown(binding.datamateId, contents)
+  return starter
 }
