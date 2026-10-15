@@ -1949,6 +1949,10 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
           trackInstallPrompt("accepted", props.offer)
           void runInstall().catch((err) => {
             const message = err instanceof Error ? err.message : String(err)
+            // A rejection (a throw past installEngine's own result) is the same failure to the
+            // funnel as a reported one.
+            trackInstallPrompt("install_failed", props.offer)
+            trackEngineError("install", message)
             installing = false
             if (!mounted) {
               // Same as a reported failure after dismissal: the rows are gone,
