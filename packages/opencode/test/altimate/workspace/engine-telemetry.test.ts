@@ -125,6 +125,14 @@ describe("workspace engine telemetry builders", () => {
       ["dbt", new Map([["dbt_run", {} as any]])],
     ])
     const on: any = { enabled: true, shadowed, extensions: [{ integration: "x", tools: [] }], workspaceId: "7" }
+    // A disabled snapshot carries no binding; the directory's linked workspace names the row.
+    const offSnap: any = { enabled: false, disabledReason: "escape-hatch" as const, shadowed: new Map() }
+    expect(
+      (precedenceEvent(offSnap, { escapeHatch: true, connections: 0, types: 0, workspaceId: 7 }) as any).workspace_id,
+    ).toBe(7)
+    expect("workspace_id" in (precedenceEvent(offSnap, { escapeHatch: true, connections: 0, types: 0 }) as any)).toBe(
+      false,
+    )
     expect(precedenceEvent(on, { escapeHatch: false, connections: 1, types: 2 })).toEqual(
       expect.objectContaining({
         type: "workspace_engine_precedence",
