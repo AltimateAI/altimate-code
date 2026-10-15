@@ -50,7 +50,7 @@ export const MemoryExtractTool = Tool.define("altimate_memory_extract", {
           updated: now,
           citations: fact.citations,
           content: fact.content,
-        })
+        }, { sessionID: ctx.sessionID }) // altimate_change — the writer's session, for the workspace row
 
         const action = existing ? "Updated" : "Created"
         results.push(`  ✓ ${action} "${fact.id}" (${fact.scope})`)

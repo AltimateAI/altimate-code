@@ -862,6 +862,8 @@ async function push(
   // leaves the block unindexed, and the next save finds the extras by identity.
   await archiveDuplicates(extras, block, metadata, "archiving an extra record produced by one create")
   await recordIndexEntry(key, { memoryId: primary, contentHash: hash, syncedAt: Date.now() })
+  // The write-back is durable once indexed: reported here, so a failed archive above leaves the block
+  // unindexed and the retry that indexes it reports it, once.
   if (block.scope === "project" && binding) trackContributed(binding, sessionID)
   return "stored"
 }
@@ -991,11 +993,11 @@ export async function flushPendingMirrors(timeoutMs = 30_000): Promise<void> {
 /** Mirror one block. Safe to call unconditionally — returns immediately when
  * workspaces are disabled, the project is unbound, or the workspace has memory
  * disabled. */
-export async function mirrorBlock(block: MemoryBlock, directory?: string): Promise<void> {
+export async function mirrorBlock(block: MemoryBlock, directory?: string, sessionID?: string): Promise<void> {
   if (!isEnabled()) return
-  // altimate_change — the writer's session, read before the queue: the context can be another
-  // session's by the time the mirror lands.
-  const sessionID = Telemetry.getContext().sessionId
+  // altimate_change — the writer's session: the one the memory tool passed, else the context's read
+  // before the queue (the context can be another session's by the time the mirror lands).
+  const writer = sessionID ?? Telemetry.getContext().sessionId
   // Queued BEFORE the binding lookup, not after. Both are async, so resolving
   // them first let two operations on one block reach `serialize` in the
   // opposite order to the writes that triggered them.
@@ -1020,7 +1022,7 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
       return
     }
     if (memory !== "enabled") return
-    await push(block, binding, undefined, directory, sessionID)
+    await push(block, binding, undefined, directory, writer)
   })
   return tracked(task)
 }

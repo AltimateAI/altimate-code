@@ -2271,8 +2271,17 @@ export namespace Telemetry {
   const workspaceUse = new Map<string, WorkspaceUse>()
   /** `add` accumulates; `max` records the largest value seen in the turn (memory is injected on every
    * step of a turn, so a sum would multiply the blocks by the step count). */
-  export function noteWorkspaceUse(sessionId: string, kind: keyof WorkspaceUse, n = 1, mode: "add" | "max" = "add") {
+  export function noteWorkspaceUse(
+    sessionId: string,
+    kind: keyof WorkspaceUse,
+    n = 1,
+    mode: "add" | "max" = "add",
+    /** The turn the use belongs to (from `setContext`): a use landing after its turn was replaced
+     * does not count toward the replacement. */
+    turn?: number,
+  ) {
     if (!sessionId || n <= 0) return
+    if (turn !== undefined && sessionTurns.get(sessionId) !== turn) return
     const use = workspaceUse.get(sessionId) ?? { skills: 0, memory: 0, integrations: 0 }
     use[kind] = mode === "max" ? Math.max(use[kind], n) : use[kind] + n
     workspaceUse.set(sessionId, use)

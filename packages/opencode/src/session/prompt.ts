@@ -1758,6 +1758,7 @@ export namespace SessionPrompt {
               // altimate_change start — file rules append only to this tool result
               lessons,
               workspaceId: boundWorkspace?.datamateId,
+              turn: telemetryTurn,
               // altimate_change end
             }),
           { step, agent: agent.name },
@@ -2762,8 +2763,10 @@ export namespace SessionPrompt {
     messages: MessageV2.WithParts[]
     // altimate_change start — optional for callers outside the main prompt loop
     lessons?: LessonDelivery
-    /** The workspace the calling turn resolved, for the rows its MCP calls emit. */
+    /** The workspace the calling turn resolved, for the rows its MCP calls emit, and the turn itself,
+     * so a call landing after the turn was replaced does not count toward the replacement. */
     workspaceId?: number
+    turn?: number
     // altimate_change end
   }) {
     using _ = log.time("resolveTools")
@@ -2982,6 +2985,7 @@ export namespace SessionPrompt {
             sessionID: ctx.sessionID,
             messageID: ctx.messageID,
             workspaceId: input.workspaceId,
+            turn: input.turn,
             startedAt,
             outcome: (result as { isError?: boolean }).isError === true ? "error" : "success",
           })
