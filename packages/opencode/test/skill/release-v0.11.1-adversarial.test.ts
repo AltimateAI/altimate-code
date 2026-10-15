@@ -465,6 +465,8 @@ describe("track — anchor events before init", () => {
           timestamp: Date.now(),
           session_id: "pre-init",
           command: "run",
+          surface: "run",
+          client: "",
           duration_ms: 1,
           fresh_install: false,
         })

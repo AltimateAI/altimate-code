@@ -312,6 +312,14 @@ export namespace Server {
         // altimate_change end
         return basicAuth({ username, password })(c, next)
       })
+      // altimate_change start — telemetry: first authenticated event-stream subscription = a client is really attached
+      .use(async (c, next) => {
+        if (c.req.method === "GET" && (c.req.path === "/event" || c.req.path === "/global/event")) {
+          void import("../altimate/telemetry").then((m) => m.Telemetry.clientConnected()).catch(() => {})
+        }
+        return next()
+      })
+      // altimate_change end
       .use(async (c, next) => {
         const skipLogging = c.req.path === "/log"
         if (!skipLogging) {

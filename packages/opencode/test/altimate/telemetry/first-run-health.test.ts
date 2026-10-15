@@ -47,6 +47,55 @@ describe("first-run health telemetry", () => {
     }
   })
 
+  test("startup_ready carries surface and client as top-level properties", () => {
+    const events: Telemetry.Event[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((event) => {
+      events.push(event)
+    })
+    const saved = process.env.ALTIMATE_CLI_CLIENT
+    process.env.ALTIMATE_CLI_CLIENT = "datamates"
+    try {
+      Telemetry.startupReady("serve")
+      const event = events.find((e) => e.type === "startup_ready") as Extract<
+        Telemetry.Event,
+        { type: "startup_ready" }
+      >
+      expect(event.surface).toBe("serve")
+      expect(event.client).toBe("datamates")
+    } finally {
+      if (saved === undefined) delete process.env.ALTIMATE_CLI_CLIENT
+      else process.env.ALTIMATE_CLI_CLIENT = saved
+      spy.mockRestore()
+    }
+  })
+
+  test("client_connected is emitted exactly once per process with surface and client", () => {
+    const events: Telemetry.Event[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((event) => {
+      events.push(event)
+    })
+    const saved = process.env.ALTIMATE_CLI_CLIENT
+    process.env.ALTIMATE_CLI_CLIENT = "datamates"
+    try {
+      Telemetry.setCommand("serve")
+      Telemetry.clientConnected()
+      Telemetry.clientConnected()
+      Telemetry.clientConnected()
+      const connected = events.filter((e) => e.type === "client_connected") as Extract<
+        Telemetry.Event,
+        { type: "client_connected" }
+      >[]
+      expect(connected).toHaveLength(1)
+      expect(connected[0].surface).toBe("serve")
+      expect(connected[0].client).toBe("datamates")
+      expect(connected[0].since_start_ms).toBeGreaterThan(0)
+    } finally {
+      if (saved === undefined) delete process.env.ALTIMATE_CLI_CLIENT
+      else process.env.ALTIMATE_CLI_CLIENT = saved
+      spy.mockRestore()
+    }
+  })
+
   test("loopStallFor reports only lags beyond the threshold", () => {
     expect(Telemetry.loopStallFor(1_000, 900, 500, "main")).toBeUndefined()
     const stall = Telemetry.loopStallFor(2_000, 500, 1_000, "worker")
