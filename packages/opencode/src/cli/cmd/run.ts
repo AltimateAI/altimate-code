@@ -1985,7 +1985,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (!emit("silent_turn", { failure: lastToolFailure ?? null, message: line })) {
             process.stdout.write(line + EOL)
           }
-          if (args.output) outputParts.note(line)
+          // altimate_change start — retain partial findings when bounded finalization cannot answer
+          if (args.output) outputParts.note(line, { preserveLastText: finalizationLimit !== undefined })
+          // altimate_change end
           if (finalizationLimit === undefined) accounting.onSessionError("SilentTurn", line)
         }
         // altimate_change start — no repeated silent replies or repeated finalizations

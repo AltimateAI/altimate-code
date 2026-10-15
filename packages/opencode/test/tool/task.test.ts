@@ -15,6 +15,7 @@ import type { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
+import { interruptedTaskOutput } from "@/session/task-output"
 
 import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
 import { Truncate } from "@/tool/truncate"
@@ -588,6 +589,170 @@ describe("tool.task", () => {
         .pipe(Effect.exit)
 
       expect(Exit.isFailure(exit)).toBe(true)
+    }),
+  )
+
+  for (const rejects of [true, false]) {
+    it.instance(`returns partial child findings when an aborted prompt ${rejects ? "rejects" : "returns empty text"}`, () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const controller = new AbortController()
+        const ready = yield* Deferred.make<void>()
+        const cancelled = yield* Deferred.make<void>()
+        const promptOps: TaskPromptOps = {
+          ...stubOps(),
+          cancel: () => Deferred.succeed(cancelled, undefined).pipe(Effect.asVoid),
+          prompt: (input) =>
+            Effect.gen(function* () {
+              const message = {
+                ...assistant,
+                id: MessageID.ascending(),
+                sessionID: input.sessionID,
+                parentID: input.messageID!,
+              }
+              yield* sessions.updateMessage(message)
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                messageID: message.id,
+                sessionID: input.sessionID,
+                type: "text",
+                text: "The archive contains three matching records.",
+              })
+              yield* sessions.updateMessage({ ...message, id: MessageID.ascending() })
+              yield* Deferred.succeed(ready, undefined)
+              yield* Deferred.await(cancelled)
+              if (rejects) return yield* Effect.die(new DOMException("Task cancelled", "AbortError"))
+              return reply(input, "")
+            }),
+        }
+
+        const fiber = yield* def
+          .execute(
+            { description: "inspect archive", prompt: "count matching records", subagent_type: "general" },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: controller.signal,
+              extra: { promptOps },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.forkChild)
+
+        yield* Deferred.await(ready).pipe(Effect.timeout("2 seconds"))
+        controller.abort()
+        const result = yield* Fiber.join(fiber).pipe(Effect.timeout("2 seconds"))
+        expect(result.output).toContain("The archive contains three matching records.")
+        expect(result.output).toContain("interrupted")
+        expect(result.metadata.interrupted).toBe(true)
+      }),
+    )
+  }
+
+  it.instance("partial task recovery excludes findings from an earlier prompt", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: assistant.id,
+        sessionID: chat.id,
+        type: "text",
+        text: "Earlier request findings.",
+      })
+      const nextUserID = MessageID.ascending()
+      expect(yield* Effect.promise(() => interruptedTaskOutput(chat.id, nextUserID))).toBeUndefined()
+      yield* sessions.updateMessage({
+        id: nextUserID,
+        role: "user",
+        sessionID: chat.id,
+        agent: "build",
+        model: coreRef,
+        time: { created: Date.now() },
+      })
+      yield* sessions.updateMessage({ ...assistant, id: MessageID.ascending(), parentID: nextUserID })
+      expect(yield* Effect.promise(() => interruptedTaskOutput(chat.id))).toBeUndefined()
+    }),
+  )
+
+  it.instance("publishes the child session and prompt identity for interruption recovery", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const published = yield* Deferred.make<Record<string, unknown>>()
+      let promptInput: SessionPrompt.PromptInput | undefined
+      let metadataPublished = false
+      const result = yield* def.execute(
+        { description: "inspect archive", prompt: "count matching records", subagent_type: "general" },
+        {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: {
+            promptOps: stubOps({
+              onPrompt: (input) => {
+                expect(metadataPublished).toBe(true)
+                promptInput = input
+              },
+            }),
+          },
+          messages: [],
+          metadata: (input) =>
+            Effect.gen(function* () {
+              if (!input.metadata) throw new Error("Child task metadata was not published")
+              // Simulate asynchronous metadata persistence before the child produces output.
+              yield* Effect.sleep("20 millis")
+              metadataPublished = true
+              yield* Deferred.succeed(published, input.metadata)
+            }),
+          ask: () => Effect.void,
+        },
+      )
+      const metadata = yield* Deferred.await(published).pipe(Effect.timeout("2 seconds"))
+      if (!promptInput?.messageID) throw new Error("Child prompt was not started")
+      expect(metadata.sessionId).toBe(result.metadata.sessionId)
+      expect(metadata.messageID).toBe(promptInput.messageID)
+    }),
+  )
+
+  it.instance("does not start a child prompt cancelled during metadata publication", () =>
+    Effect.gen(function* () {
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const controller = new AbortController()
+      let started = false
+      const result = yield* def
+        .execute(
+          { description: "inspect archive", prompt: "count matching records", subagent_type: "general" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: controller.signal,
+            extra: {
+              promptOps: stubOps({
+                onPrompt: () => {
+                  started = true
+                },
+              }),
+            },
+            messages: [],
+            metadata: () => Effect.sync(() => controller.abort()),
+            ask: () => Effect.void,
+          },
+        )
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+      expect(started).toBe(false)
     }),
   )
 

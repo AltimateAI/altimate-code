@@ -28,7 +28,12 @@ function toEffectContext(ctx: LegacyContext, callID: string): Tool.Context {
     // altimate_change start — preserve search result permissions in nested batch tools
     permissions: ctx.permissions,
     // altimate_change end
-    metadata: (input) => Effect.sync(() => ctx.metadata(input)),
+    // altimate_change start — upstream_fix: preserve asynchronous metadata publication through legacy tool contexts.
+    metadata: (input) =>
+      Effect.promise(async () => {
+        await ctx.metadata(input)
+      }),
+    // altimate_change end
     ask: (input) => Effect.promise(() => ctx.ask(input)),
   }
 }

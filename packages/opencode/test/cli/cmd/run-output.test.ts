@@ -77,6 +77,24 @@ describe("run --output collector", () => {
     expect(out.content()).toBe("No answer was produced: the turn ended after `sql_execute` failed.")
   })
 
+  test("a failed budget finalization preserves the last assistant text as an unfinished response", () => {
+    const out = new OutputCollector()
+    out.stepStart()
+    out.text("I will inspect the available records.")
+    out.stepStart()
+    out.text("The first group contains 12 records.")
+    out.text("The remaining groups have not been verified.")
+    out.stepStart(true)
+    out.text("Internal conversation summary.", { compaction: true })
+    out.stepStart()
+    out.note("No final answer was produced: the work budget was exhausted.", { preserveLastText: true })
+    expect(out.content()).toBe(
+      "No final answer was produced: the work budget was exhausted.\n\n" +
+        "Partial assistant response (not finalized):\n\n" +
+        "The first group contains 12 records.\n\nThe remaining groups have not been verified.",
+    )
+  })
+
   test("falls back to everything said when there is neither a reply nor a note", () => {
     const out = new OutputCollector()
     out.stepStart()

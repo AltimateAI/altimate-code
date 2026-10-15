@@ -22,6 +22,9 @@ import { TraceContext } from "@/altimate/observability/trace-context"
 // re-brand core (ModelV2/ProviderV2) IDs to the provider/schema brands SessionPrompt expects
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect } from "effect"
+// altimate_change start — upstream_fix: recover committed child findings when cancellation interrupts a task.
+import { interruptedTaskOutput } from "../session/task-output"
+// altimate_change end
 const log = Log.create({ service: "tool.task" })
 
 /**
@@ -181,15 +184,18 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         providerID: msg.info.providerID,
       }
 
-      ctx.metadata({
+      // altimate_change start — upstream_fix: bind partial findings to this child prompt during parent cancellation.
+      const messageID = MessageID.ascending()
+      await ctx.metadata({
         title: params.description,
         metadata: {
           sessionId: session.id,
+          messageID,
           model,
         },
       })
+      // altimate_change end
 
-      const messageID = MessageID.ascending()
       // altimate_change start — the subagent's turn belongs to the parent turn's client trace (the
       // parent assistant message's user message); none when that turn is untraced
       TraceContext.inherit(messageID, msg.info.parentID)
@@ -210,6 +216,9 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       const promptParts = promptOps
         ? await Effect.runPromise(promptOps.resolvePromptParts(params.prompt))
         : await SessionPrompt.resolvePromptParts(params.prompt)
+      // altimate_change start — upstream_fix: cancellation during task preparation must not start new child work.
+      ctx.abort.throwIfAborted()
+      // altimate_change end
 
       const promptInput: SessionPrompt.PromptInput = {
         messageID,
@@ -224,25 +233,39 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         agent: agent.name,
         parts: promptParts,
       }
-      const result = promptOps
-        ? await Effect.runPromise(promptOps.prompt(promptInput))
-        : await SessionPrompt.prompt(promptInput)
+      // altimate_change start — upstream_fix: return partial child findings after cancellation, even if its last turn is empty.
+      let partialOutput: string | undefined
+      const result = await (promptOps
+        ? Effect.runPromise(promptOps.prompt(promptInput))
+        : SessionPrompt.prompt(promptInput)
+      ).catch(async (error) => {
+        if (!ctx.abort.aborted) throw error
+        partialOutput = await interruptedTaskOutput(session.id, messageID)
+        if (!partialOutput) throw error
+        return undefined
+      })
+      if (ctx.abort.aborted) partialOutput ??= await interruptedTaskOutput(session.id, messageID)
 
-      const text = result.parts.findLast((x) => x.type === "text")?.text ?? ""
+      const text = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
 
-      const output = [
+      const output = partialOutput ?? [
         `task_id: ${session.id} (for resuming to continue this task if needed)`,
         "",
         "<task_result>",
+        ...(ctx.abort.aborted ? ["Task interrupted. Findings may be incomplete."] : []),
         text,
         "</task_result>",
       ].join("\n")
+      // altimate_change end
 
       return {
         title: params.description,
         metadata: {
           sessionId: session.id,
           model,
+          // altimate_change start — upstream_fix: distinguish partial task findings from completed work.
+          ...(ctx.abort.aborted ? { interrupted: true } : {}),
+          // altimate_change end
         },
         output,
       }

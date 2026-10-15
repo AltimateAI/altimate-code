@@ -45,6 +45,42 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Context, Effect, Layer } from "effect"
 import { isDeepStrictEqual } from "node:util"
 // altimate_change end
+// altimate_change start — upstream_fix: cancel stalled provider reads independently of transport events
+import { abortableStream } from "./abortable-stream"
+// altimate_change end
+// altimate_change start — upstream_fix: preserve child findings even when parent cancellation wins the tool-result race
+import { interruptedTaskOutput } from "./task-output"
+
+async function interruptedToolPart(part: MessageV2.ToolPart, capTokens: number): Promise<MessageV2.ToolPart> {
+  const state = part.state
+  if (state.status !== "running" && state.status !== "pending") return part
+  const metadata = state.status === "running"
+    ? ToolResultCap.capInterruptedMetadata(state.metadata, capTokens)
+    : { interrupted: true }
+  const time = { start: state.status === "running" ? state.time.start : Date.now(), end: Date.now() }
+  if (
+    part.tool === "task" && state.status === "running" &&
+    typeof state.metadata?.sessionId === "string" && typeof state.metadata.messageID === "string"
+  ) {
+    const output = await interruptedTaskOutput(
+      state.metadata.sessionId as SessionID,
+      state.metadata.messageID as MessageID,
+    )
+    if (output) return {
+      ...part,
+      state: {
+        status: "completed",
+        input: state.input,
+        title: state.title ?? part.tool,
+        output: ToolResultCap.apply(output, capTokens).content,
+        metadata,
+        time,
+      },
+    }
+  }
+  return { ...part, state: { ...state, status: "error", error: "Tool execution aborted", metadata, time } }
+}
+// altimate_change end
 
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
@@ -462,13 +498,15 @@ export namespace SessionProcessor {
               interruptRequested = true
               interruptRequest()
             }))
-            const stream = await LLM.stream({
-              ...effectiveStreamInput,
-              abort: AbortSignal.any([effectiveStreamInput.abort, requestController.signal]),
-            })
-            // altimate_change end
+            // upstream_fix: cancellation must also end a stalled stream open or read
+            const signal = AbortSignal.any([input.abort, effectiveStreamInput.abort, requestController.signal])
+            const stream = abortableStream(
+              async () => (await LLM.stream({ ...effectiveStreamInput, abort: signal })).fullStream,
+              signal,
+            )
 
-            for await (const value of stream.fullStream) {
+            for await (const value of stream) {
+              // altimate_change end
               input.abort.throwIfAborted()
               // altimate_change start — content belongs to this step, not a prior step or retry
               if (value.type === "start-step") stepHasContent = false
@@ -1333,8 +1371,8 @@ export namespace SessionProcessor {
                     context: "streaming",
                   })
                 // altimate_change end
-                // altimate_change start — SessionStatus.set became async; await so idle state flushes before exit
-                await SessionStatus.set(input.sessionID, { type: "idle" })
+                // altimate_change start — upstream_fix: requested aborts publish idle after partial results are committed
+                if (!input.abort.aborted) await SessionStatus.set(input.sessionID, { type: "idle" })
                 // altimate_change end
               }
             // altimate_change start — end ordinary provider/session error handling
@@ -1342,8 +1380,8 @@ export namespace SessionProcessor {
             // altimate_change end
           }
           // altimate_change start — retain and close unfinished emitted parts before continuing with the nudge
-          if (requestController.signal.aborted && !input.abort.aborted) {
-            input.assistantMessage.finish = undefined
+          if (requestController.signal.aborted || input.abort.aborted) {
+            if (!input.abort.aborted) input.assistantMessage.finish = undefined
             const end = Date.now()
             if (currentText) {
               currentText.time = { start: currentText.time?.start ?? end, end }
@@ -1372,33 +1410,16 @@ export namespace SessionProcessor {
           const p = await MessageV2.parts(input.assistantMessage.id)
           for (const part of p) {
             if (part.type === "tool" && part.state.status !== "completed" && part.state.status !== "error") {
-              // altimate_change start — upstream_fix: mark aborted tools so partial output is replayed correctly.
-              const metadata =
-                part.state.status === "running"
-                  ? ToolResultCap.capInterruptedMetadata(part.state.metadata, toolResultCapTokens)
-                  : { interrupted: true }
+              // altimate_change start — upstream_fix: retain interrupted child results before closing the parent generation
+              await Session.updatePart(await interruptedToolPart(part, toolResultCapTokens))
               // altimate_change end
-              await Session.updatePart({
-                ...part,
-                state: {
-                  ...part.state,
-                  status: "error",
-                  error: "Tool execution aborted",
-                  // altimate_change start — upstream_fix: preserve running tool metadata, including shell partial output.
-                  metadata,
-                  // altimate_change end
-                  time: {
-                    // altimate_change start — upstream_fix: keep the original running start time on abort.
-                    start: part.state.status === "running" ? part.state.time.start : Date.now(),
-                    // altimate_change end
-                    end: Date.now(),
-                  },
-                },
-              })
             }
           }
           input.assistantMessage.time.completed = Date.now()
           await Session.updateMessage(input.assistantMessage)
+          // altimate_change start — upstream_fix: flush interrupted text and child findings before CLI finalization starts
+          if (input.abort.aborted) await SessionStatus.set(input.sessionID, { type: "idle" })
+          // altimate_change end
           // altimate_change start — explicit model DONE is the PRIMARY
           // termination path. A turn that finished with "stop", has no error, and
           // asserts completion (trailing DONE token per the SessionTermination

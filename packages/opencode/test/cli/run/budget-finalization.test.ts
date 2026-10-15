@@ -474,7 +474,8 @@ for (const finalAnswer of ["The available evidence supports this limited answer.
         const outputPath = path.join(home, "answer.md")
         const config = testProviderConfig(llm.url)
         const model = config.provider.test.models["test-model"]
-        yield* llm.push(reply().reason("Still considering the evidence.").hang())
+        const partialAnswer = "The first group contains 12 records; the rest remain unverified."
+        yield* llm.push(reply().text(partialAnswer).reason("Still considering the evidence.").hang())
         yield* llm.textMatch(({ body }) => isFinalization(body), finalAnswer)
         yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().reason("More analysis.").hang())
         const result = yield* opencode.run("Give the best supported answer.", {
@@ -517,6 +518,8 @@ for (const finalAnswer of ["The available evidence supports this limited answer.
           expect(result.stderr).toMatch(/warn|time.*budget|budget.*time/i)
         } else {
           expect(output).toContain("No final answer was produced")
+          expect(output).toContain("Partial assistant response (not finalized):")
+          expect(output).toContain(partialAnswer)
         }
         const events = opencode.parseJsonEvents(result.stdout)
         expect(events.filter((event) => event.type === "budget_exhausted")).toHaveLength(1)
