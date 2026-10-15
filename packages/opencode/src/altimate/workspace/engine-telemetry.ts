@@ -51,13 +51,14 @@ export function attachEvent(
   sessionID?: string,
 ): Telemetry.Event {
   // The boundary's own workspace, named on the row rather than left to the process context; an
-  // unbound or disabled outcome has none.
+  // unbound or disabled outcome has none, and says so with an explicit undefined so the session's
+  // entry is not stamped onto it either (the envelope drops an undefined value).
   const settledFor = outcome.kind !== "unbound" && outcome.kind !== "disabled" ? extra.workspaceId : undefined
   const base = {
     type: "workspace_engine_attach" as const,
     timestamp: Date.now(),
     session_id: sessionID ?? sessionId(),
-    ...(settledFor !== undefined && Number.isInteger(settledFor) && settledFor > 0 ? { workspace_id: settledFor } : {}),
+    workspace_id: settledFor !== undefined && Number.isInteger(settledFor) && settledFor > 0 ? settledFor : undefined,
   }
   switch (outcome.kind) {
     case "attached":
