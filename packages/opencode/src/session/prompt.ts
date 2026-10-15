@@ -1039,6 +1039,10 @@ export namespace SessionPrompt {
           sessionID: sessionID,
           abort,
           callID: part.callID,
+          // altimate_change start — the turn's workspace and token, for the task's own rows
+          workspaceId: boundWorkspace?.datamateId,
+          turn: telemetryTurn,
+          // altimate_change end
           extra: { bypassAgentCheck: true },
           // altimate_change start — fork MessageV2.WithParts ≡ core SessionV1.WithParts at the Tool.Context boundary
           messages: msgs as unknown as Tool.Context["messages"],
