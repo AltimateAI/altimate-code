@@ -178,13 +178,21 @@ async function creds(): Promise<{ url: string; instance: string; apiKey: string 
 // `workspace_api_error` (or `workspace_auth_expired` on 401/403) with the endpoint masked of
 // ids; the link lifecycle functions below report linked / created / switched / unlinked on the
 // success response and `workspace_link_failed` with a reason class otherwise.
-/** "METHOD /base/path" with every dynamic segment replaced by ":id". Route words are lowercase
- * letters with hyphens or underscores (or a version like v3); anything else — numeric ids,
- * uuids, memory and skill public ids — is an identifier and must not reach telemetry. */
+/** The static segments of the routes the workspace clients call. Anything not in this list —
+ * numeric ids, uuids, memory ids, skill public ids however they are spelled — is replaced by
+ * ":id" in telemetry. A new static word that is missing here is masked too, which only costs
+ * detail; the list must never be widened with a dynamic value. */
+const ROUTE_WORDS = new Set([
+  "datamate-project-bindings", "bind", "by-remote", "by-path", "datamates", "users", "me",
+  "memory", "blocks", "skills", "files", "list", "attach", "publish", "sync", "status", "search",
+  "versions", "lessons", "learned-lessons", "content", "download",
+])
+
+/** "METHOD /base/path" with every dynamic segment replaced by ":id" (see ROUTE_WORDS). */
 export function endpointOf(method: string, basePath: string, subpath: string): string {
   const masked = `${basePath}${subpath}`
     .split("/")
-    .map((seg) => (seg === "" || /^(v\d+|[a-z][a-z_-]*)$/.test(seg) ? seg : ":id"))
+    .map((seg) => (seg === "" || ROUTE_WORDS.has(seg) ? seg : ":id"))
     .join("/")
   return `${method} ${masked}`
 }
@@ -334,6 +342,7 @@ async function req<T>(
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   let res: Response
   let text: string
+  let answered: number | undefined // the status once the server answered, for the catch below
   try {
     res = await fetch(target, {
       method,
@@ -345,6 +354,7 @@ async function req<T>(
       signal: controller.signal,
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
     })
+    answered = res.status
     // Keep the AbortController timeout ACTIVE while we read the response body.
     // ``fetch()`` resolves after headers arrive; a server can send headers then
     // stall the body stream indefinitely, so pulling the body inside the same
@@ -379,13 +389,19 @@ async function req<T>(
         `Request to ${target} timed out after ${Math.round(timeoutMs / 1000)}s`,
       )
     }
-    // A WorkspaceApiError here came from readBounded(): the server answered, the body was
-    // over the cap. Everything else is transport.
-    reportApiError({
-      endpoint,
-      kind: err instanceof WorkspaceApiError ? "response" : "network",
-      workspaceId: bodyWorkspaceId,
-    })
+    // The server answered and the body failed afterwards (readBounded's cap, a cut stream):
+    // classify by the status it answered with, so an oversized 500 is still a 5xx row; only a
+    // usable status with a bad body is "response". Before any answer it is transport.
+    if (answered !== undefined) {
+      reportApiError({
+        endpoint,
+        status: answered,
+        kind: answered >= 500 ? "5xx" : answered >= 400 ? "4xx" : "response",
+        workspaceId: bodyWorkspaceId,
+      })
+    } else {
+      reportApiError({ endpoint, kind: "network", workspaceId: bodyWorkspaceId })
+    }
     const msg = err instanceof Error ? err.message : String(err)
     throw new WorkspaceApiError(`Cannot reach ${target}: ${msg}`)
   } finally {
