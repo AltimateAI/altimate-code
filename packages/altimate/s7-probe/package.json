@@ -1,0 +1,7 @@
+{
+  "name": "@altimateai/v2-spike-probe",
+  "version": "0.0.1",
+  "type": "module",
+  "exports": { "./server": "./dist/server.js" },
+  "dependencies": { "@duckdb/node-api": "1.4.4-r.1" }
+}

@@ -1,0 +1,12 @@
+storage: /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/s7/registry/storage
+uplinks:
+  npmjs:
+    url: https://registry.npmjs.org/
+packages:
+  '@altimateai/*':
+    access: $all
+    publish: $all
+  '**':
+    access: $all
+    proxy: npmjs
+log: { type: stdout, format: pretty, level: warn }
