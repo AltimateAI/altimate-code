@@ -62,7 +62,7 @@ import { SessionTermination } from "../../session/termination"
 // altimate_change start — upstream_fix: type-only import for the tracing-config cast (see tracer setup below)
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 // altimate_change - render the workspace engine offer in an attached run
-import { OFFER_COMMAND, installCommand } from "@/altimate/workspace/engine-offer"
+import { OFFER_COMMAND, installCommand, trackPrintedOffer } from "@/altimate/workspace/engine-offer"
 // altimate_change end
 
 // When a tool's parameters can't be statically inferred (legacy fork tools whose
@@ -998,6 +998,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
               `This workspace's integration tools need the local engine on the server. Install it there with: ${installCommand()}` +
                 EOL,
             )
+            // This process is the surface that showed the offer, so it reports `shown` (surface
+            // `bus`) from the fields the event carried; the server's publish is not a display.
+            if (sessionID) trackPrintedOffer((event.properties as { arguments?: unknown }).arguments, sessionID)
             continue
           }
           // altimate_change end

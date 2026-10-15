@@ -42,6 +42,7 @@ import {
   type Namesakes,
 } from "@/altimate/workspace/workspace-name"
 import { currentAttachSnapshot } from "@/altimate/workspace/attach-snapshot"
+import { trackEngineError, trackInstallPrompt } from "@/altimate/workspace/engine-telemetry"
 import {
   accountScope,
   loadStatusView,
@@ -97,7 +98,7 @@ import {
   OFFER_SKIP_TTL_MS,
   type EngineOffer,
 } from "@/altimate/workspace/engine-offer"
-import { useClipboard } from "@opencode-ai/tui/context/clipboard"
+import { useClipboard, type ClipboardService } from "@opencode-ai/tui/context/clipboard"
 import { AltimateApi } from "@/altimate/api/client"
 import { Log } from "@/altimate/util/log"
 
@@ -1779,6 +1780,8 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   // opened in our place. So completion reports through a toast when we are
   // gone, and only touches the dialog while we still own it.
   let mounted = true
+  // The offer was shown: reported from the surface that rendered it, not from the dispatch.
+  onMount(() => trackInstallPrompt("shown", props.offer, { surface: "dialog", nodeMajor: props.nodeMajor }))
   onCleanup(() => {
     mounted = false
     // Release the single-offer latch however this dialog goes away — chosen,
@@ -1865,6 +1868,8 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   const performInstall = async () => {
     const result = await installEngine()
     if (!result.ok) {
+      trackInstallPrompt("install_failed", props.offer)
+      trackEngineError("install", result.error)
       installing = false
       if (!mounted) {
         // Dismissed mid-install: the failed-phase rows have nowhere to render,
@@ -1880,6 +1885,7 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
       setPhase("failed")
       return
     }
+    trackInstallPrompt("installed", props.offer)
     // Only clear a dialog we still own — by now the user may have opened
     // another, and clearing the stack would take theirs down instead.
     if (mounted) props.api.ui.dialog.clear()
@@ -1900,21 +1906,12 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   const copyCommand = () => {
     const cmd = command()
     void (async () => {
-      try {
-        await clipboard.write?.(cmd)
-        // A resolved write is NOT proof of a copy. The host's writer picks
-        // xclip/xsel on Linux and otherwise falls back to clipboardy, and it
-        // swallows backend failures (`.catch(() => undefined)`), so on the many
-        // Linux/WSL boxes with neither tool installed the write silently does
-        // nothing. Read back and compare before claiming success. (Caught by
-        // E2E: the toast said "Copied:" while the clipboard was untouched.)
-        const back = await clipboard.read?.()
-        if (back?.data.trim() === cmd) {
-          props.api.ui.toast({ variant: "info", message: `Copied: ${cmd}` })
-          return
-        }
-      } catch {
-        // Unreadable or unwritable clipboard — fall through and show it.
+      if (await confirmedCopy(clipboard, cmd)) {
+        // `copied` only once the read-back confirms the clipboard holds the command: the
+        // selection itself proves nothing (an unconfirmed copy tracks no row).
+        trackInstallPrompt("copied", props.offer)
+        props.api.ui.toast({ variant: "info", message: `Copied: ${cmd}` })
+        return
       }
       props.api.ui.toast({
         variant: "warning",
@@ -1942,8 +1939,13 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
         if (option.value === "install") {
           if (installing) return
           installing = true
+          trackInstallPrompt("accepted", props.offer)
           void runInstall().catch((err) => {
             const message = err instanceof Error ? err.message : String(err)
+            // A rejection (a throw past installEngine's own result) is the same failure to the
+            // funnel as a reported one.
+            trackInstallPrompt("install_failed", props.offer)
+            trackEngineError("install", message)
             installing = false
             if (!mounted) {
               // Same as a reported failure after dismissal: the rows are gone,
@@ -1966,12 +1968,32 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
           return
         }
         if (option.value === "skip") {
+          trackInstallPrompt("declined", props.offer)
           recordEngineSkip(props.api, props.offer.workspaceId, props.latchScope, Date.now())
         }
         props.api.ui.dialog.clear()
       }}
     />
   )
+}
+
+/** Write `text` to the clipboard and read it back: true only when the clipboard then holds it.
+ *
+ * A resolved write is NOT proof of a copy. The host's writer picks xclip/xsel on Linux and
+ * otherwise falls back to clipboardy, and it swallows backend failures (`.catch(() => undefined)`),
+ * so on the many Linux/WSL boxes with neither tool installed the write silently does nothing.
+ * (Caught by E2E: the toast said "Copied:" while the clipboard was untouched.) An unreadable or
+ * unwritable clipboard is the same unconfirmed outcome. */
+export async function confirmedCopy(clipboard: Pick<ClipboardService, "write" | "read">, text: string) {
+  // No writer means nothing was copied, whatever the clipboard happens to hold.
+  if (!clipboard.write) return false
+  try {
+    await clipboard.write(text)
+    const back = await clipboard.read?.()
+    return back?.data.trim() === text
+  } catch {
+    return false
+  }
 }
 
 /** Show the offer unless the 7-day latch suppresses it.

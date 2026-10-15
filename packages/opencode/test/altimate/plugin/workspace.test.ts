@@ -35,6 +35,7 @@ const {
   recordEngineSkip,
   awaitKvReady,
   canInstallWith,
+  confirmedCopy,
   engineOfferInternals,
   showEngineInstallOffer,
   linkDialogInternals,
@@ -1247,5 +1248,42 @@ describe("/integrations", () => {
     await runIntegrations(tui, os.tmpdir())
     expect(h.selects.map((s) => s.title)).toEqual(["Integrations", "Workspace status"])
     expect(h.selects[1]!.options[0]!.description).toContain("No session has attached yet")
+  })
+})
+
+describe("confirmedCopy", () => {
+  const cmd = "npm i -g @altimateai/altimate-code-engine"
+  test("true only when the read-back holds the command", async () => {
+    let held = ""
+    const clipboard = {
+      write: async (data: string) => {
+        held = data
+      },
+      read: async () => ({ data: `${held}\n`, mime: "text/plain" }),
+    }
+    expect(await confirmedCopy(clipboard, cmd)).toBe(true)
+  })
+  test("false when the writer silently did nothing", async () => {
+    const clipboard = {
+      write: async () => {},
+      read: async () => ({ data: "something else", mime: "text/plain" }),
+    }
+    expect(await confirmedCopy(clipboard, cmd)).toBe(false)
+  })
+  test("false when the clipboard throws or cannot be read", async () => {
+    expect(
+      await confirmedCopy(
+        {
+          write: async () => {
+            throw new Error("no backend")
+          },
+          read: async () => ({ data: cmd, mime: "text/plain" }),
+        },
+        cmd,
+      ),
+    ).toBe(false)
+    expect(await confirmedCopy({ write: async () => {}, read: undefined }, cmd)).toBe(false)
+    // No writer: the clipboard holding the command already is not a copy.
+    expect(await confirmedCopy({ write: undefined, read: async () => ({ data: cmd, mime: "text/plain" }) }, cmd)).toBe(false)
   })
 })
