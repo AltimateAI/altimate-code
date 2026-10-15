@@ -496,12 +496,12 @@ async function handleAdd(
 
 async function handleCreate(
   args: {
-  name?: string
-  description?: string
-  integration_ids?: string[]
-  memory_enabled?: boolean
-  privacy?: string
-  scope?: "project" | "global"
+    name?: string
+    description?: string
+    integration_ids?: string[]
+    memory_enabled?: boolean
+    privacy?: string
+    scope?: "project" | "global"
   },
   sessionID?: string,
 ) {
@@ -540,6 +540,7 @@ async function handleCreate(
     const added = await handleAdd(
       { datamate_id: created.id, name: `datamate-${slugify(args.name)}`, scope: args.scope },
       "create",
+      sessionID,
     )
     if (!("managedBy" in added.metadata)) return added
     const rolledBack = await AltimateApi.deleteDatamate(created.id, creds).then(

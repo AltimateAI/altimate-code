@@ -1321,6 +1321,18 @@ describe("telemetry — the attach", () => {
     expect(attaches().map((r) => r.outcome)).toEqual(["connect_failed"])
   })
 
+  test("a relink to another workspace reports the attach again, named for the new workspace", async () => {
+    const h = install({})
+    await beforeTurn("s1")
+    h.binding = bound(7, "growth")
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    expect(attaches().map((r) => [r.outcome, r.workspace_id])).toEqual([
+      ["attached", 42],
+      ["attached", 7],
+    ])
+  })
+
   test("an engine below the floor reports the version it found", async () => {
     install({ version: "0.1.0" })
     await beforeTurn("s1")
