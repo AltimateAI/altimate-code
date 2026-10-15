@@ -31,7 +31,7 @@ const parameters = z
     right_col: column.optional().describe("Right output column for keys"),
     left_warehouse: z.string().optional().describe("Optional assertion: must equal warehouse"),
     right_warehouse: z.string().optional().describe("Optional assertion: must equal warehouse"),
-    query_timeout_ms: z.number().int().min(0).max(3_600_000).optional(),
+    query_timeout_ms: z.number().int().min(1).max(3_600_000).optional(),
   })
   .strict()
 
@@ -64,7 +64,7 @@ const publicParameters = z
     query_timeout_ms: z
       .number()
       .int()
-      .min(0)
+      .min(1)
       .max(3_600_000)
       .optional()
       .describe("Query deadline in ms; omitted or 0 uses the common connection policy"),

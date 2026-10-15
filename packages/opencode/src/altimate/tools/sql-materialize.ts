@@ -550,7 +550,7 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
     query_timeout_ms: z
       .number()
       .int()
-      .min(0)
+      .min(1)
       .max(3_600_000)
       .optional()
       .describe("Source query deadline in ms; omitted or 0 uses the common connection policy"),

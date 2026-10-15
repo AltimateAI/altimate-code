@@ -57,7 +57,7 @@ const parameters = z.object({
   query_timeout_ms: z
     .number()
     .int()
-    .min(0)
+    .min(1)
     .max(3_600_000)
     .optional()
     .describe(

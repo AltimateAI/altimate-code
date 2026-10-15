@@ -3,11 +3,11 @@ import { Schema, SchemaGetter } from "effect"
 
 const normalized = new WeakSet<Schema.Top>()
 
-/** Normalize only optional tool arguments; required values and nested payloads retain their meaning. */
+/** Retry a rejected call with optional fillers removed; required values and nested payloads retain their meaning. */
 export function fillerSafeParameters<T>(parameters: Schema.Decoder<T>, jsonSchema: JSONSchema7): Schema.Decoder<T> {
   // Legacy tools may publish a simpler wire schema than their validation schema.
   if (normalized.has(parameters)) return parameters
-  const result = Schema.Unknown.pipe(
+  const stripped = Schema.Unknown.pipe(
     Schema.decodeTo(parameters, {
       decode: SchemaGetter.transform((input) => {
         if (!input || typeof input !== "object" || Array.isArray(input)) return input
@@ -49,6 +49,9 @@ export function fillerSafeParameters<T>(parameters: Schema.Decoder<T>, jsonSchem
       encode: SchemaGetter.transform((value) => value),
     }),
   )
+  // Validate the arguments as sent first so intentional zero/empty values survive; only a call the
+  // schema rejects is retried with optional fillers removed.
+  const result = Schema.Union([parameters, stripped]) as unknown as Schema.Decoder<T>
   normalized.add(result)
   return result
 }

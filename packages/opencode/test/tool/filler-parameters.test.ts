@@ -124,7 +124,7 @@ function context(): Tool.Context {
 }
 
 describe("optional tool parameter fillers", () => {
-  it.instance("every registered schema decodes optional fillers exactly like omission", () =>
+  it.instance("every registered schema accepts optional fillers, either preserved as valid values or treated as omission", () =>
     Effect.gen(function* () {
       const registry = yield* ToolRegistry.Service
       const instance = yield* requireInstance
@@ -153,15 +153,17 @@ describe("optional tool parameter fillers", () => {
               checked++
               if (Result.isFailure(filled)) {
                 failures.push(`${info.id}[${index}].${name} rejects ${JSON.stringify(filler)}`)
-              } else if (JSON.stringify(filled.success) !== JSON.stringify(omitted.success)) {
+              } else if (
+                JSON.stringify(filled.success) !== JSON.stringify(omitted.success) &&
+                (filled.success as Record<string, unknown>)?.[name] !== filler &&
+                JSON.stringify((filled.success as Record<string, unknown>)?.[name]) !== JSON.stringify(filler)
+              ) {
                 failures.push(`${info.id}[${index}].${name} changes omission behavior for ${JSON.stringify(filler)}`)
               }
             }
             const filled = decode({ ...input, ...Object.fromEntries(optional.map((name) => [name, filler])) })
-            if (Result.isFailure(filled) || JSON.stringify(filled.success) !== JSON.stringify(omitted.success)) {
-              failures.push(
-                `${info.id}[${index}] changes omission behavior with all optionals set to ${JSON.stringify(filler)}`,
-              )
+            if (Result.isFailure(filled)) {
+              failures.push(`${info.id}[${index}] rejects all optionals set to ${JSON.stringify(filler)}`)
             }
           }
         }
@@ -299,6 +301,53 @@ describe("optional tool parameter fillers", () => {
         })
       }
       expect(failures).toEqual([])
+    }),
+  )
+  it.instance("schema-valid empty and zero values are preserved; fillers are stripped only when validation fails", () =>
+    Effect.gen(function* () {
+      const legacy = yield* Tool.define("optional_valid_legacy", {
+        description: "Synthetic intentional values",
+        parameters: z.object({
+          max_entries: z.number().min(0).optional().default(20),
+          description: z.string().optional(),
+          integration_ids: z.array(z.string()).optional(),
+          labels: z.array(z.string()).min(1).optional(),
+          limit: z.number().min(1).optional().default(3),
+        }),
+        execute: async () => ({ title: "ok", output: "ok", metadata: { truncated: false } }),
+      })
+      const native = yield* Tool.define(
+        "optional_valid_native",
+        Effect.succeed({
+          description: "Synthetic intentional values",
+          parameters: Schema.Struct({
+            max_entries: Schema.Number.pipe(Schema.optional, Schema.withDecodingDefaultType(Effect.succeed(20))),
+            description: Schema.optional(Schema.String),
+            integration_ids: Schema.optional(Schema.Array(Schema.String)),
+            labels: Schema.optional(Schema.NonEmptyArray(Schema.String)),
+          }),
+          execute: () => Effect.succeed({ title: "ok", output: "ok", metadata: { truncated: false } }),
+        }),
+      )
+      for (const info of [legacy, native]) {
+        const tool = yield* info.init()
+        const decode = Schema.decodeUnknownSync(tool.parameters) as (input: unknown) => Record<string, unknown>
+        // Valid as sent: intentional values survive.
+        expect(decode({ max_entries: 0, description: "", integration_ids: [] })).toMatchObject({
+          max_entries: 0,
+          description: "",
+          integration_ids: [],
+        })
+        // Invalid as sent (labels: []): retried with fillers removed, so defaults apply.
+        const retried = decode({ max_entries: 0, description: "", integration_ids: [], labels: [] })
+        expect(retried.max_entries).toBe(20)
+        expect(retried).not.toHaveProperty("description")
+        expect(retried).not.toHaveProperty("integration_ids")
+        expect(retried).not.toHaveProperty("labels")
+      }
+      // A filler the schema itself rejects (limit: 0) falls back to the default.
+      const legacyTool = yield* legacy.init()
+      expect(Schema.decodeUnknownSync(legacyTool.parameters)({ limit: 0 })).toMatchObject({ limit: 3 })
     }),
   )
 })
