@@ -439,6 +439,15 @@ describe("answer_commit display precision", () => {
     expect(AnswerCommit.renderAnswer(payload)).toBe("0.30000000000000004\n7")
   })
 
+  test("genuine long decimals are preserved beside clean cells", () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Value"], values: [[4.18], [0.123456789012], [0.1234567890123]], format: "lines" as const },
+    }
+    expect(AnswerCommit.renderAnswer(payload)).toBe("4.1800000000000\n0.1234567890120\n0.1234567890123")
+  })
+
   test("genuine short high-scale values still set the column scale", () => {
     const payload = {
       basis: recordBasis,

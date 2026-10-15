@@ -212,10 +212,11 @@ export function renderAnswer(payload: unknown): string {
   if (args.rows) {
     // altimate_change start - render the requested format before applying the shared size cap
     const { columns, values, precision, format = "markdown" } = args.rows
-    // Cells with float noise (more than 6 decimals that do not survive 12-significant-digit rounding) must not widen the column scale.
+    // Float noise: more than 6 decimals, yet within float32-level relative error of a value with at most 6 decimals (0.30000000000000004, 18.440000534057617). Genuine long decimals differ from their 6-decimal rounding by far more.
     const isNoise = (value: number) => {
       const decimal = new Decimal(value)
-      return decimal.decimalPlaces() > 6 && !decimal.equals(decimal.toSignificantDigits(12))
+      if (decimal.decimalPlaces() <= 6) return false
+      return decimal.minus(decimal.toDecimalPlaces(6)).abs().lte(decimal.abs().times("1e-7"))
     }
     const scales = columns.map((_, index) =>
       values.reduce((scale, cells) => {
