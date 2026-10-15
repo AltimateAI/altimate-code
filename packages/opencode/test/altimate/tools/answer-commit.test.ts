@@ -1213,3 +1213,21 @@ test("answer_commit refuses direct execution by another agent", async () => {
     tool.execute({ basis: recordBasis, fields: [{ name: "", value: 2 }] }, { ...context, agent: "builder" }),
   ).rejects.toThrow(/only.*analyst/i)
 })
+
+test("answer_commit guidance requires every named item as its own field because basis is hidden", async () => {
+  const tool = await initTool(AnswerCommit.AnswerCommitTool)
+  expect(tool.description).toContain("must be its own field")
+  expect(tool.description).toContain("not shown when the request asks for only the answer")
+  const payload = {
+    answer_only: true,
+    basis: "Entity repo-a; the related file src/a.swift was copied 23 times.",
+    fields: [{ name: "repository", value: "repo-a" }],
+  }
+  expect(AnswerCommit.renderAnswer(payload)).toBe("repo-a")
+  expect(
+    AnswerCommit.renderAnswer({
+      ...payload,
+      fields: [...payload.fields, { name: "file", value: "src/a.swift" }, { name: "copies", value: 23 }],
+    }),
+  ).toBe("repo-a; src/a.swift; 23")
+})
