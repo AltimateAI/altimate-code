@@ -19,6 +19,24 @@ export const HARD_MAX_ROWS = 20_000_000
 /** Serialized row data, enforced while drivers consume rows (plus one row/client chunk in flight). */
 export const DEFAULT_MAX_BYTES = 256 * 1024 * 1024
 export const HARD_MAX_BYTES = 2 * 1024 * 1024 * 1024
+/** Process-wide cap on bytes buffered by overlapping remote reads; a larger single read runs alone. */
+export const BUFFER_BUDGET_BYTES = 512 * 1024 * 1024
+
+let reservedBytes = 0
+const budgetWaiters: Array<() => void> = []
+
+async function withBufferBudget<T>(bytes: number, work: () => Promise<T>): Promise<T> {
+  while (reservedBytes > 0 && reservedBytes + bytes > BUFFER_BUDGET_BYTES) {
+    await new Promise<void>((resolve) => budgetWaiters.push(resolve))
+  }
+  reservedBytes += bytes
+  try {
+    return await work()
+  } finally {
+    reservedBytes -= bytes
+    for (const wake of budgetWaiters.splice(0)) wake()
+  }
+}
 const JSONL_BUFFER_CHARS = 1_000_000
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
@@ -326,7 +344,7 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
 
   // Remote sources are read and buffered before taking the destination's transaction lock. A scratch
   // source is read inside the lock so a derivation sees and replaces consistent state.
-  const prepared = isScratch(input.source_warehouse) ? undefined : await prepare(source)
+  const prepared = isScratch(input.source_warehouse) ? undefined : await withBufferBudget(maxBytes, () => prepare(source))
   const warnings: string[] = []
   return withScratchConnection(async (scratch, directory) => {
     const { result, names, types } = prepared ?? (await prepare(scratch))

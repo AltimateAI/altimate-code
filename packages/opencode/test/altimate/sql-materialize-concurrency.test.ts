@@ -241,3 +241,41 @@ it.instance("concurrent scratch-to-scratch derivations from one table lose no up
     })
   }),
 )
+
+it.instance("overlapping remote reads share a bounded buffer budget", () =>
+  Effect.gen(function* () {
+    const sessions = yield* Session.Service
+    const root = yield* sessions.create({})
+    const first = yield* sessions.create({ parentID: root.id })
+    const second = yield* sessions.create({ parentID: root.id })
+    yield* Effect.promise(async () => {
+      await getScratch(root.id)
+      const materialize = await initTool(SqlMaterializeTool)
+      const left = slowSource(1)
+      const right = slowSource(2)
+      const registry = sources({ left_source: left.connector, right_source: right.connector })
+      // Each read reserves 384 MiB; two together exceed the 512 MiB budget and must not overlap.
+      const big = 384 * 1024 * 1024
+      const run = (name: string, table: string, id: string) =>
+        materialize.execute(
+          { source_warehouse: name, sql: "SELECT id FROM records", target_table: table, max_bytes: big },
+          context(id as SessionID),
+        )
+      const pending = [run("left_source", "left_t", first.id), run("right_source", "right_t", second.id)]
+      try {
+        await within(left.entered.promise, 5_000, "The first read did not start")
+        await new Promise((resolve) => setTimeout(resolve, 200))
+        let rightStarted = false
+        void right.entered.promise.then(() => (rightStarted = true))
+        await new Promise((resolve) => setTimeout(resolve, 100))
+        expect(rightStarted).toBe(false)
+      } finally {
+        left.release.open()
+        right.release.open()
+        const results = await Promise.all(pending)
+        registry.mockRestore()
+        for (const result of results) expect(result.metadata.error).toBeUndefined()
+      }
+    })
+  }),
+)
