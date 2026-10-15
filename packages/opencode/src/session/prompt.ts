@@ -751,6 +751,9 @@ export namespace SessionPrompt {
       projectId: Instance.project?.id ?? "",
       workspaceId: boundWorkspace?.datamateId,
     })
+    // The turn's own workspace, named on the rows this loop emits at its end: a cancelled turn
+    // unwinding after its replacement started must not take the replacement's entry.
+    const turnWorkspace = boundWorkspace?.datamateId !== undefined ? { workspace_id: boundWorkspace.datamateId } : {}
     // altimate_change end
     // altimate_change start — the learn kill switch disables new delivery, while retaining trusted note cleanup.
     // An unused project pays only an existence check; do not load stores, migrate,
@@ -814,6 +817,7 @@ export namespace SessionPrompt {
       emergencySessionEndFired = true
       Telemetry.track({
         type: "session_end",
+        ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
         timestamp: Date.now(),
         session_id: sessionID,
         total_cost: sessionTotalCost,
@@ -2126,6 +2130,7 @@ export namespace SessionPrompt {
     // altimate_change start — emit quality signal, tool chain, and error fingerprint events
     Telemetry.track({
       type: "task_outcome_signal",
+      ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
       timestamp: Date.now(),
       session_id: sessionID,
       signal: Telemetry.deriveQualitySignal(outcome),
@@ -2140,6 +2145,7 @@ export namespace SessionPrompt {
     if (toolChain.length > 0) {
       Telemetry.track({
         type: "tool_chain_outcome",
+        ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
         timestamp: Date.now(),
         session_id: sessionID,
         chain: JSON.stringify(toolChain),
@@ -2159,6 +2165,7 @@ export namespace SessionPrompt {
     for (const err of errorRecords.slice(0, 20)) {
       Telemetry.track({
         type: "error_fingerprint",
+        ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
         timestamp: Date.now(),
         session_id: sessionID,
         error_hash: err.errorHash,
@@ -2191,6 +2198,7 @@ export namespace SessionPrompt {
     // altimate_change end
     Telemetry.track({
       type: "agent_outcome",
+      ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
       timestamp: Date.now(),
       session_id: sessionID,
       // altimate_change start — route through normalizeAgentName (shared with
@@ -2216,6 +2224,7 @@ export namespace SessionPrompt {
       process.off("exit", emergencySessionEnd)
       Telemetry.track({
         type: "session_end",
+        ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
         timestamp: Date.now(),
         session_id: sessionID,
         total_cost: sessionTotalCost,
