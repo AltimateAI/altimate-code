@@ -5,20 +5,7 @@ import path from "node:path"
 import { classifyAndCheck } from "./sql-classify"
 import { ClaudeInstructions } from "./instructions"
 import { Gateway } from "./gateway"
-
-const Warehouse = Schema.Struct({
-  name: Schema.String,
-  path: Schema.String,
-  type: Schema.Literal("duckdb"),
-})
-
-const QueryResult = Schema.Struct({
-  warehouse: Schema.String,
-  columns: Schema.Array(Schema.String),
-  rows: Schema.Array(Schema.Array(Schema.Json)),
-  row_count: Schema.Number,
-  truncated: Schema.Boolean,
-})
+import { AltimateRpc, QueryResult, Warehouse } from "./rpc"
 
 export const Altimate = Plugin.define({
   id: "altimate",
@@ -32,6 +19,13 @@ export const Altimate = Plugin.define({
         warehouse,
       ]),
     )
+    await ctx.rpc.register(AltimateRpc, {
+      listWarehouses: async () => Array.from(warehouses.values()),
+      lastResult: async ({ sessionID }) =>
+        Schema.decodeUnknownSync(Schema.NullOr(QueryResult))(
+          (await ctx.storage.get(`${storageKey}:lastResult:${sessionID}`)) ?? null,
+        ),
+    })
     // Plugin setup is Location-scoped, so each map belongs to this Location.
     const connections = new Map<string, Promise<Connector>>()
 
@@ -122,6 +116,7 @@ export const Altimate = Plugin.define({
             ...result,
             rows: result.rows.map((row) => row.map(jsonValue)),
           }
+          await ctx.storage.set(`${storageKey}:lastResult:${context.sessionID}`, output)
           return { output, metadata: output, content: formatResult(output) }
         },
       })

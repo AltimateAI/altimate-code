@@ -1,0 +1,16 @@
+bun test v1.4.2 (744846f84)
+
+test/s8-rpc.test.ts:
+(pass) S8. RPC returns location warehouses and the session's last successful query through the SDK HTTP client [372.98ms]
+(pass) S8. RPC reads persisted warehouses and last result after host restart [159.55ms]
+
+test/s8-tui.test.tsx:
+(pass) S8. /warehouse opens its panel and the production component renders SDK RPC rows at narrow and wide widths [136.32ms]
+(pass) S8. /warehouse explains that a session is required when the panel cannot open [0.12ms]
+
+ 4 pass
+ 0 fail
+ 27 expect() calls
+Ran 4 tests across 2 files. [1176.00ms]
+
+Exit code: 0

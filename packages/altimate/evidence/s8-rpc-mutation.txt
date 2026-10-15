@@ -1,0 +1,16 @@
+bun test v1.4.2 (744846f84)
+
+test/s8-rpc.test.ts:
+error: RPC is unavailable: altimate
+{
+  type: "rpc.unavailable",
+  message: "RPC is unavailable: altimate",
+}
+(fail) S8. RPC returns location warehouses and the session's last successful query through the SDK HTTP client [214.01ms]
+
+ 0 pass
+ 1 filtered out
+ 1 fail
+Ran 1 test across 1 file. [644.00ms]
+
+Exit code: 1

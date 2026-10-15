@@ -1,0 +1,110 @@
+bun test v1.4.2 (744846f84)
+[10:20:00.718] INFO (#13671): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-3ws8n2",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+[10:20:01.197] INFO (#15029): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-OpDJt7",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+[10:20:04.154] INFO (#16548): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-I41eJk",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+[10:20:06.125] INFO (#17828): spawning process {
+  command: "/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/bun142/bun-darwin-aarch64/bun",
+  args: [ "/Users/anandgupta/codebase/altimate-code-v2-spike/packages/altimate/test/lib/mcp-stub.ts" ],
+  cwd: "/var/folders/gf/7xvmxq_94q5__51sc5trr6bw0000gn/T/altimate-s1-b6itKM",
+}
+Client.listPrompts() called but server does not advertise prompts capability - returning empty list
+
+test/sql-classification.test.ts:
+(pass) sql_execute applies the requested row limit and reports truncation [400.56ms]
+(pass) a read followed by a write is denied before executing the SQL batch [159.14ms]
+(pass) EXPLAIN ANALYZE cannot bypass write permission [166.05ms]
+(pass) comment-looking string cannot bypass write permission [162.36ms]
+
+test/s8-rpc.test.ts:
+(pass) S8. RPC returns location warehouses and the session's last successful query through the SDK HTTP client [254.73ms]
+(pass) S8. RPC reads persisted warehouses and last result after host restart [193.43ms]
+
+test/s2-live.test.ts:
+(skip) S2.live. real Altimate gateway streams a completion
+
+test/s2-transport.test.ts:
+(pass) S2.http.1. actual AI SDK HTTP request uses a custom endpoint connected after setup [212.77ms]
+(pass) S2.http.2. cached AI SDK language uses updated file endpoint and tenant on the next request [129.70ms]
+
+test/s3-mcp.test.ts:
+(pass) S3.1. a new session advertises and executes workspace MCP on its first model request [554.86ms]
+(pass) S3.2. SDK removal suppresses a plugin MCP server even after its transform reloads [2543.91ms]
+(pass) S3.4. readiness deadline bounds a transform waiting for a slow MCP catalog [2054.63ms]
+(pass) S3.3. a missing required tool hits the readiness deadline before any model request [915.54ms]
+
+test/s1-data-tools.test.ts:
+(pass) a. sql_execute SELECT returns structured rows and a text table [104.16ms]
+(pass) b1. configured deny prevents write execution [113.19ms]
+(pass) b2. plain reject ends the step and prevents write execution [145.49ms]
+(pass) b3. reject with feedback returns a tool failure and prevents write execution [152.34ms]
+(pass) b4. once approval executes the write and the table can be read [154.30ms]
+(pass) c. native DuckDB cancellation prevents a running query from committing [477.68ms]
+(pass) d. schema_inspect lists the created table and its columns [131.71ms]
+(pass) e. warehouse definitions persist across hosts sharing DB and storage [197.04ms]
+
+test/s5-instructions.test.ts:
+(pass) S5.1. default Altimate injects project-root CLAUDE.md [185.40ms]
+(pass) S5.2. core AGENTS.md wins over CLAUDE.md without duplicate injection [206.89ms]
+(pass) S5.3. nested CLAUDE.md precedes project-root CLAUDE.md [181.23ms]
+(pass) S5.4. root AGENTS.md suppresses nested CLAUDE.md across the entire walk [155.28ms]
+(pass) S5.5. global CLAUDE.md fallback precedes project CLAUDE.md [177.18ms]
+(pass) S5.6. global config AGENTS.md suppresses home fallback but permits project CLAUDE.md [172.84ms]
+(pass) S5.7. disabling the home Claude prompt preserves project CLAUDE.md [177.59ms]
+(pass) S5.8. disabling project discovery preserves the global fallback [159.71ms]
+(pass) S5.9. home fallback precedes core project AGENTS while project CLAUDE stays suppressed [184.86ms]
+(pass) S5.10. empty root AGENTS.md still suppresses nested CLAUDE.md [155.21ms]
+
+test/s6-finish.test.ts:
+(pass) S6 validator decides before execution success and continues with synthetic user feedback [75.23ms]
+(pass) S6 validator continuation limit fails execution and resets for a new prompt [132.61ms]
+(pass) S6 reads the finish continuation limit from a real config file [78.16ms]
+
+test/s4-telemetry.test.ts:
+(pass) S4.1. exports two complete model steps and completed/interrupted tools in one session [307.00ms]
+(pass) S4.2. nested Code Mode hooks retain the outer execute identity and duration [149.36ms]
+
+test/s8-tui.test.tsx:
+(pass) S8. /warehouse opens its panel and the production component renders SDK RPC rows at narrow and wide widths [140.42ms]
+(pass) S8. /warehouse explains that a session is required when the panel cannot open [0.12ms]
+
+test/duckdb-cancellation.test.ts:
+(pass) aborting a queued DuckDB write leaves the active query running and never executes the write [578.42ms]
+(pass) an already-aborted DuckDB signal rejects before executing SQL [7.94ms]
+(pass) DuckDB preserves Date and byte binds, empty result columns, and noLimit [5.19ms]
+
+test/s2-gateway.test.ts:
+(pass) S2.1. default Altimate setup registers the tenant gateway and key method [71.94ms]
+(pass) S2.2. v1 credential file with environment substitution supplies models, tenant and request URL [84.06ms]
+(pass) S2.3. key integration persists a credential and enables a streamed gateway completion [81.22ms]
+(pass) S2.4. explicit environment credentials provide the gateway URL and tenant [87.44ms]
+(pass) S2.5. matching Altimate Base credential enables its model with bearer auth and no tenant [77.85ms]
+(pass) S2.6. Altimate Base expired credentials do not enable its model [66.15ms]
+(pass) S2.6. Altimate Base rejected credentials do not enable its model [69.19ms]
+(pass) S2.6. Altimate Base different gateway credentials do not enable its model [72.69ms]
+(pass) S2.9. malformed legacy credentials disable gateways without failing plugin setup [75.51ms]
+
+1 tests skipped:
+(skip) S2.live. real Altimate gateway streams a completion
+
+ 49 pass
+ 1 skip
+ 0 fail
+ 241 expect() calls
+Ran 50 tests across 12 files. [13.92s]
+
+Exit code: 0

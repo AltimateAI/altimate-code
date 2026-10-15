@@ -1,0 +1,3 @@
+$ tsgo --noEmit
+
+Exit code: 0
