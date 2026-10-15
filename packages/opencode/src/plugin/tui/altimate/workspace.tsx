@@ -1985,8 +1985,10 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
  * (Caught by E2E: the toast said "Copied:" while the clipboard was untouched.) An unreadable or
  * unwritable clipboard is the same unconfirmed outcome. */
 export async function confirmedCopy(clipboard: Pick<ClipboardService, "write" | "read">, text: string) {
+  // No writer means nothing was copied, whatever the clipboard happens to hold.
+  if (!clipboard.write) return false
   try {
-    await clipboard.write?.(text)
+    await clipboard.write(text)
     const back = await clipboard.read?.()
     return back?.data.trim() === text
   } catch {

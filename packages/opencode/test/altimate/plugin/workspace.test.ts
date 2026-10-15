@@ -1283,5 +1283,7 @@ describe("confirmedCopy", () => {
       ),
     ).toBe(false)
     expect(await confirmedCopy({ write: async () => {}, read: undefined }, cmd)).toBe(false)
+    // No writer: the clipboard holding the command already is not a copy.
+    expect(await confirmedCopy({ write: undefined, read: async () => ({ data: cmd, mime: "text/plain" }) }, cmd)).toBe(false)
   })
 })
