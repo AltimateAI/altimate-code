@@ -1995,9 +1995,6 @@ export namespace Telemetry {
   // mid-turn; an entry goes at the turn's end.
   const sessionTurns = new Map<string, number>()
   let nextTurn = 0
-  /** The workspace of each session's current turn, for an emitter that runs inside the turn but
-   * outside the loop (a plugin hook) and asks for it explicitly; nothing is stamped from it. */
-  const turnWorkspaces = new Map<string, number | undefined>()
   // altimate_change end
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
@@ -2303,12 +2300,6 @@ export namespace Telemetry {
     workspaceUse.delete(useKey(sessionId, turn))
     if (turn !== undefined && sessionTurns.get(sessionId) !== turn) return
     sessionTurns.delete(sessionId)
-    turnWorkspaces.delete(sessionId)
-  }
-  /** The workspace of the session's current turn, for an emitter inside that turn; undefined when
-   * unbound or when no turn is running. An explicit lookup, never a stamp. */
-  export function turnWorkspaceOf(sessionId: string): number | undefined {
-    return turnWorkspaces.get(sessionId)
   }
   // altimate_change end
 
@@ -2319,7 +2310,6 @@ export namespace Telemetry {
     workspaceId = opts.workspaceId
     // altimate_change start — a turn token for the session's counters and its end
     if (!opts.sessionId) return 0
-    turnWorkspaces.set(opts.sessionId, opts.workspaceId)
     const turn = ++nextTurn
     sessionTurns.set(opts.sessionId, turn)
     return turn

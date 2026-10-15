@@ -90,7 +90,6 @@ describe("workspace id on the telemetry context", () => {
     Telemetry.noteWorkspaceUse("s7", "memory", 2)
     // Counts are per turn: the cancelled turn's rows read its own, the replacement's its own.
     expect(Telemetry.workspaceUseOf("s7", first)).toEqual({ skills: 1, memory: 0, integrations: 0 })
-    expect(Telemetry.turnWorkspaceOf("s7")).toBe(42) // an explicit lookup for in-turn emitters
     expect(Telemetry.workspaceUseOf("s7", second)).toEqual({ skills: 0, memory: 2, integrations: 0 })
     Telemetry.endSession("s7", first) // the old generation, after the replacement started
     expect(Telemetry.workspaceUseOf("s7", first)).toEqual({ skills: 0, memory: 0, integrations: 0 })
@@ -102,7 +101,6 @@ describe("workspace id on the telemetry context", () => {
     expect(Telemetry.workspaceUseOf("s7").integrations).toBe(1)
     Telemetry.endSession("s7", second)
     expect(Telemetry.workspaceUseOf("s7")).toEqual({ skills: 0, memory: 0, integrations: 0 })
-    expect(Telemetry.turnWorkspaceOf("s7")).toBeUndefined()
     // Tokens never repeat, so a stale end can never hit a later turn.
     const stale = Telemetry.setContext({ sessionId: "s8", projectId: "p1", workspaceId: 5 })
     Telemetry.endSession("s8", stale)

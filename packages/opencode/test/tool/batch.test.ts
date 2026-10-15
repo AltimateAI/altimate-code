@@ -66,6 +66,36 @@ describe("BatchTool: file lessons", () => {
   })
 })
 
+describe("BatchTool: inner tool context", () => {
+  test("carries the turn's workspace and token to the inner tools", async () => {
+    const tool = await getToolInfo()
+    let seen: { workspaceId?: number; turn?: number } | undefined
+    const registry = spyOn(ToolRegistry, "tools").mockResolvedValue([{
+      id: "probe",
+      registrySource: undefined,
+      description: "captures its context",
+      parameters: Schema.Unknown,
+      execute: (_args: unknown, ctx: { workspaceId?: number; turn?: number }) => {
+        seen = { workspaceId: ctx.workspaceId, turn: ctx.turn }
+        return Effect.succeed({ title: "ok", output: "ok", metadata: {} })
+      },
+    }] as any)
+    const updatePart = Object.assign(async (part: Parameters<typeof Session.updatePart>[0]) => part, Session.updatePart)
+    const updates = spyOn(Session, "updatePart").mockImplementation(updatePart)
+    try {
+      const result = await tool.execute({ tool_calls: [{ tool: "probe", parameters: {} }] }, {
+        sessionID: SessionID.make("ses_batch_ctx"), messageID: MessageID.make("msg_batch_ctx"), agent: "build",
+        abort: AbortSignal.any([]), messages: [], extra: {}, workspaceId: 7, turn: 3,
+      } as any)
+      expect(result.metadata.successful).toBe(1)
+      expect(seen).toEqual({ workspaceId: 7, turn: 3 })
+    } finally {
+      updates.mockRestore()
+      registry.mockRestore()
+    }
+  })
+})
+
 describe("BatchTool: schema validation", () => {
   test("rejects empty tool_calls array", async () => {
     const tool = await getToolInfo()

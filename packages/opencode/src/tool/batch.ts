@@ -23,6 +23,9 @@ function toEffectContext(ctx: LegacyContext, callID: string): Tool.Context {
     agent: ctx.agent,
     abort: ctx.abort,
     callID,
+    // the turn's workspace and token, so the inner tools' rows name it
+    workspaceId: ctx.workspaceId,
+    turn: ctx.turn,
     extra: ctx.extra,
     messages: ctx.messages,
     metadata: (input) => Effect.sync(() => ctx.metadata(input)),
