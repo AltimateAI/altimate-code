@@ -53,8 +53,8 @@ export async function hiddenToolIds(): Promise<ReadonlySet<string>> {
 
 /** What `datamate_manager` answers in a linked project, whatever the operation.
  * Nothing is looked up or written before it. */
-export function refusal(operation: string, workspace: { id: string; name: string }) {
-  trackRedirect("datamate", operation, Number(workspace.id)) // telemetry: the engine is off for this workspace
+export function refusal(operation: string, workspace: { id: string; name: string }, sessionID?: string) {
+  trackRedirect("datamate", operation, Number(workspace.id), sessionID) // telemetry: the engine is off for this workspace
   return {
     title: `Datamate ${operation}: off in a project linked to a workspace`,
     metadata: { operation, managedBy: workspace.id },

@@ -646,6 +646,8 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         outcome: "attached" | "engine_missing" | "engine_too_old" | "connect_failed" | "disabled" | "unbound"
+        /** The workspace the boundary settled for; absent for unbound and disabled. */
+        workspace_id?: number
         available?: number
         declared?: number
         missing?: number

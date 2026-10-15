@@ -331,14 +331,10 @@ export async function offerOrNotify(offer: EngineOffer, toast: Toast, sessionID:
     shown("headless")
     return
   }
-  if (offerInstall(offer)) {
-    shown("dialog")
-    return
-  }
-  if (await publishOffer(sessionID)) {
-    shown("bus")
-    return
-  }
-  await notify(toast)
-  shown("toast")
+  // A dialog, whether taken here or over the bus, reports `shown` itself when it renders: the TUI
+  // may hold the offer back (its 7-day latch), so dispatch is not display. The toast reports here
+  // only when it was shown.
+  if (offerInstall(offer)) return
+  if (await publishOffer(sessionID)) return
+  if (await notify(toast)) shown("toast")
 }

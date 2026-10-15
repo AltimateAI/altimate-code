@@ -825,7 +825,7 @@ describe("telemetry — the refusal", () => {
       rows.push(e as Record<string, unknown>)
     })
     try {
-      const out = refusal("status", { id: "42", name: "analytics" })
+      const out = refusal("status", { id: "42", name: "analytics" }, "ses_r")
       expect(out.metadata).toEqual({ operation: "status", managedBy: "42" })
       expect(rows).toEqual([
         expect.objectContaining({
@@ -834,6 +834,7 @@ describe("telemetry — the refusal", () => {
           operation: "status",
           outcome: "refused",
           workspace_id: 42,
+          session_id: "ses_r",
         }),
       ])
     } finally {

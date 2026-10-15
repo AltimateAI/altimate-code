@@ -1785,6 +1785,8 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   // opened in our place. So completion reports through a toast when we are
   // gone, and only touches the dialog while we still own it.
   let mounted = true
+  // The offer was shown: reported from the surface that rendered it, not from the dispatch.
+  onMount(() => trackInstallPrompt("shown", props.offer, { surface: "dialog", nodeMajor: props.nodeMajor }))
   onCleanup(() => {
     mounted = false
     // Release the single-offer latch however this dialog goes away — chosen,

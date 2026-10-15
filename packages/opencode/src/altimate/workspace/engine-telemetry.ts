@@ -33,7 +33,7 @@ export function connectErrorClass(error: string): "link_unreadable" | "probe_fai
 export function attachSignature(outcome: Outcome): string {
   switch (outcome.kind) {
     case "attached":
-      return `attached:${outcome.available}:${outcome.declared ?? ""}:${outcome.missing?.length ?? ""}`
+      return `attached:${outcome.available}:${outcome.declared ?? ""}:${outcome.missing?.length ?? ""}:${outcome.extensions?.length ?? 0}`
     case "engine-missing":
       return `engine-missing:${outcome.declared ?? ""}`
     case "engine-too-old":
@@ -47,10 +47,18 @@ export function attachSignature(outcome: Outcome): string {
 
 export function attachEvent(
   outcome: Outcome,
-  extra: { engineVersion?: string | null } = {},
+  extra: { engineVersion?: string | null; workspaceId?: number } = {},
   sessionID?: string,
 ): Telemetry.Event {
-  const base = { type: "workspace_engine_attach" as const, timestamp: Date.now(), session_id: sessionID ?? sessionId() }
+  // The boundary's own workspace, named on the row rather than left to the process context; an
+  // unbound or disabled outcome has none.
+  const settledFor = outcome.kind !== "unbound" && outcome.kind !== "disabled" ? extra.workspaceId : undefined
+  const base = {
+    type: "workspace_engine_attach" as const,
+    timestamp: Date.now(),
+    session_id: sessionID ?? sessionId(),
+    ...(settledFor !== undefined && Number.isInteger(settledFor) && settledFor > 0 ? { workspace_id: settledFor } : {}),
+  }
   switch (outcome.kind) {
     case "attached":
       return {
@@ -81,7 +89,7 @@ export function attachEvent(
 export function trackAttach(
   outcome: Outcome,
   previous: Outcome | undefined,
-  extra: { engineVersion?: string | null } = {},
+  extra: { engineVersion?: string | null; workspaceId?: number } = {},
   sessionID?: string,
 ): boolean {
   try {
@@ -170,7 +178,7 @@ export function trackPrecedence(
   try {
     // The local connections shadowed are part of what is reported, so a registry change that
     // moves the count re-reports the same snapshot.
-    const signature = `${precedenceSignature(p)}|c=${opts.connections}`
+    const signature = `${precedenceSignature(p)}|c=${opts.connections}|e=${opts.escapeHatch}`
     if (precedenceSeen.get(sessionID) === signature) return false
     precedenceSeen.set(sessionID, signature)
     if (precedenceSeen.size > MAX_SEEN_SESSIONS) precedenceSeen.delete(precedenceSeen.keys().next().value!)
@@ -200,12 +208,12 @@ export function trackEngineError(stage: EngineStage, message: string, sessionID?
 }
 
 /** A datamate tool call refused because the engine is off for that workspace. */
-export function trackRedirect(tool: string, operation: string, workspaceId: number): void {
+export function trackRedirect(tool: string, operation: string, workspaceId: number, sessionID?: string): void {
   try {
     Telemetry.track({
       type: "workspace_engine_redirect",
       timestamp: Date.now(),
-      session_id: sessionId(),
+      session_id: sessionID ?? sessionId(),
       tool,
       operation,
       outcome: "refused",

@@ -1284,6 +1284,7 @@ describe("telemetry — the attach", () => {
     expect(attaches()).toEqual([
       expect.objectContaining({
         session_id: "s1",
+        workspace_id: 42,
         outcome: "attached",
         available: 2,
         declared: 3,
@@ -1308,6 +1309,15 @@ describe("telemetry — the attach", () => {
     install({ status: "failed", statusError: "Connection closed" })
     await beforeTurn("s2")
     await beforeTurn("s2")
+    expect(attaches().map((r) => r.outcome)).toEqual(["connect_failed"])
+    // A retry whose add throws settles as a failure too, rather than vanishing into the turn hook.
+    rows.length = 0
+    const g = install({ status: "failed" })
+    g.onAdd = () => {
+      throw new Error("spawn failed")
+    }
+    await beforeTurn("s3")
+    expect(settledOutcome("s3")?.kind).toBe("connect-failed")
     expect(attaches().map((r) => r.outcome)).toEqual(["connect_failed"])
   })
 

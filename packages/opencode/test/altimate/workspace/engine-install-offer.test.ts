@@ -499,12 +499,19 @@ describe("telemetry — the install prompt", () => {
     ])
   })
 
-  test("the bus surface reports itself, and no node on PATH is said rather than guessed", async () => {
+  test("a dialog reports shown itself when it renders, so dispatch over the bus reports nothing here", async () => {
     install({})
     await beforeTurn("s1")
     await settle()
+    expect(prompts()).toHaveLength(0)
+  })
+
+  test("the toast reports shown once shown, and no node on PATH is said rather than guessed", async () => {
+    install({ bus: false })
+    await beforeTurn("s1")
+    await settle()
     expect(prompts()).toHaveLength(1)
-    expect(prompts()[0]).toEqual(expect.objectContaining({ surface: "bus", node_detected: false }))
+    expect(prompts()[0]).toEqual(expect.objectContaining({ surface: "toast", node_detected: false }))
     expect("node_major" in prompts()[0]).toBe(false)
   })
 })

@@ -539,7 +539,11 @@ export async function refresh(
   if (ruleset) result.ruleset = ruleset
   remember(sessionID, result)
   // telemetry: only when the snapshot (or the local connections it shadows) changed
-  trackPrecedence(sessionID, result, { escapeHatch: escapeHatchOn(), connections: countShadowedConnections(result) })
+  trackPrecedence(sessionID, result, {
+    escapeHatch: escapeHatchOn(),
+    // The registry is read only when something can be shadowed: a disabled snapshot shadows nothing.
+    connections: result.enabled ? countShadowedConnections(result) : 0,
+  })
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
   // thing this design does not allow, but repeating it every turn would be noise.
   // A session that never had routing is told nothing — there is nothing to say. But a
