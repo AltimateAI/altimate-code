@@ -178,35 +178,45 @@ async function creds(): Promise<{ url: string; instance: string; apiKey: string 
 // `workspace_api_error` (or `workspace_auth_expired` on 401/403) with the endpoint masked of
 // ids; the link lifecycle functions below report linked / created / switched / unlinked on the
 // success response and `workspace_link_failed` with a reason class otherwise.
-/** Endpoint labels mask by ROUTE POSITION, not by spelling. The routers whose subpaths start
- * with a static word are listed here; on every other base (``/skills``, ``/datamates/memory``)
- * the first subpath segment is an identifier and is masked whatever it is spelled like — a
- * public id equal to a route word must not reach telemetry. Segments after that, and the
- * segments of the base itself, are kept only when they are known static words; an unknown
- * static word is masked too, which only costs detail. A new router with a static first segment
- * is added here; a new identifier-first router needs nothing. */
-const STATIC_FIRST_SEGMENT_BASES = new Set(["/datamate-project-bindings", "/datamates", "/users"])
-const ROUTE_WORDS = new Set([
-  "datamate-project-bindings", "bind", "by-remote", "by-path", "datamates", "users", "me",
-  "memory", "blocks", "skills", "files", "list", "attach", "publish", "sync", "status", "search",
-  "versions", "lessons", "learned-lessons", "content", "download",
-])
+/** Endpoint labels come from a ROUTE TABLE, never from how a segment is spelled: an identifier,
+ * a memory id or a file path equal to a route word must not reach telemetry. Each router the
+ * workspace clients call lists the shapes of its subpaths as regular expressions with the label
+ * they map to; a subpath that matches no shape, or a router not listed, is labelled with every
+ * segment masked. Identifiers and file paths therefore cannot leak whatever they contain; an
+ * unlisted new route only costs detail until it is added here. */
+const ROUTES: Record<string, Array<[RegExp, string]>> = {
+  "/datamate-project-bindings": [
+    [/^\/?$/, "/"],
+    [/^\/bind$/, "/bind"],
+    [/^\/by-remote$/, "/by-remote"],
+    [/^\/by-path$/, "/by-path"],
+  ],
+  "/datamates": [[/^\/?$/, "/"]],
+  "/users": [[/^\/me$/, "/me"]],
+  "/skills": [
+    [/^\/[^/]+$/, "/:id"],
+    [/^\/[^/]+\/datamates$/, "/:id/datamates"],
+    [/^\/[^/]+\/files(\/.*)?$/, "/:id/files/:path"],
+  ],
+  "/datamates/memory": [
+    [/^\/?$/, "/"],
+    [/^\/list$/, "/list"],
+    [/^\/[^/]+$/, "/:id"],
+  ],
+}
 
-/** "METHOD /base/path" with every dynamic segment replaced by ":id" (see the note above). */
+/** "METHOD /base/path" with every dynamic segment replaced from the route table above. */
 export function endpointOf(method: string, basePath: string, subpath: string): string {
-  const word = (seg: string) => (seg === "" || ROUTE_WORDS.has(seg) ? seg : ":id")
-  const base = basePath.split("/").map(word).join("/")
-  let first = true
-  const sub = subpath
-    .split("/")
-    .map((seg) => {
-      if (seg === "") return seg
-      const idPosition = first && !STATIC_FIRST_SEGMENT_BASES.has(basePath)
-      first = false
-      return idPosition ? ":id" : word(seg)
-    })
-    .join("/")
-  return `${method} ${base}${sub}`
+  const shapes = ROUTES[basePath]
+  const maskAll = (p: string) =>
+    p
+      .split("/")
+      .map((seg) => (seg === "" ? seg : ":id"))
+      .join("/")
+  if (!shapes) return `${method} ${maskAll(basePath)}${maskAll(subpath)}`
+  const query = subpath.split("?")[0]
+  for (const [shape, label] of shapes) if (shape.test(query)) return `${method} ${basePath}${label}`
+  return `${method} ${basePath}${maskAll(query)}`
 }
 
 function workspaceIdIn(body: unknown): number | undefined {
@@ -253,7 +263,7 @@ export function linkFailureReason(err: unknown): "auth" | "not_found" | "network
   if (err instanceof ConflictError || err instanceof PreconditionFailedError) return "conflict"
   if (err instanceof WorkspaceApiError) {
     if (err.status === 401) return "auth"
-    if (err.status === undefined) return "network"   // unreachable or timed out: req() sets no status
+    if (err.status === undefined) return "network" // unreachable or timed out: req() sets no status
   }
   return "other"
 }
@@ -405,9 +415,7 @@ async function req<T>(
         kind: answered === undefined ? "timeout" : answered >= 500 ? "5xx" : answered >= 400 ? "4xx" : "timeout",
         workspaceId: bodyWorkspaceId,
       })
-      throw new WorkspaceApiError(
-        `Request to ${target} timed out after ${Math.round(timeoutMs / 1000)}s`,
-      )
+      throw new WorkspaceApiError(`Request to ${target} timed out after ${Math.round(timeoutMs / 1000)}s`)
     }
     // The server answered and the body failed afterwards (readBounded's cap, a cut stream):
     // classify by the status it answered with, so an oversized 500 is still a 5xx row; only a
@@ -477,10 +485,7 @@ async function req<T>(
   // and .foo throws in a way the typed switches can't classify. (m7 + CR)
   if (json == null && !opts.allowEmptyBody) {
     reportApiError({ endpoint, status: res.status, kind: "response", workspaceId: bodyWorkspaceId })
-    throw new WorkspaceApiError(
-      `Empty ${res.status} body from ${target} — expected JSON payload`,
-      res.status,
-    )
+    throw new WorkspaceApiError(`Empty ${res.status} body from ${target} — expected JSON payload`, res.status)
   }
   return json as T
 }
@@ -507,9 +512,7 @@ async function readBounded(res: Response, target: string): Promise<string> {
   if (!res.body) {
     const whole = await res.text()
     if (Buffer.byteLength(whole, "utf8") > MAX_RESPONSE_BYTES) {
-      throw new WorkspaceApiError(
-        `Response from ${target} exceeded the ${MAX_RESPONSE_BYTES} byte limit`,
-      )
+      throw new WorkspaceApiError(`Response from ${target} exceeded the ${MAX_RESPONSE_BYTES} byte limit`)
     }
     return whole
   }
@@ -523,9 +526,7 @@ async function readBounded(res: Response, target: string): Promise<string> {
       if (!value) continue
       total += value.byteLength
       if (total > MAX_RESPONSE_BYTES) {
-        throw new WorkspaceApiError(
-          `Response from ${target} exceeded the ${MAX_RESPONSE_BYTES} byte limit`,
-        )
+        throw new WorkspaceApiError(`Response from ${target} exceeded the ${MAX_RESPONSE_BYTES} byte limit`)
       }
       chunks.push(value)
     }
@@ -541,7 +542,10 @@ export namespace WorkspaceApi {
   /** Server-authoritative pre-check by git remote. Returns null on 404. */
   export async function getBindingForRemote(remote: string, actAs?: ActAs): Promise<GetBindingResponse | null> {
     try {
-      return await req<GetBindingResponse>("GET", "/by-remote", { query: { repo_remote: remote }, ...(actAs ? { actAs } : {}) })
+      return await req<GetBindingResponse>("GET", "/by-remote", {
+        query: { repo_remote: remote },
+        ...(actAs ? { actAs } : {}),
+      })
     } catch (err) {
       if (err instanceof NotFoundError) return null
       throw err
@@ -552,7 +556,10 @@ export namespace WorkspaceApi {
    * without a git remote). Returns null on 404. */
   export async function getBindingForPath(projectPath: string, actAs?: ActAs): Promise<GetBindingResponse | null> {
     try {
-      return await req<GetBindingResponse>("GET", "/by-path", { query: { project_path: projectPath }, ...(actAs ? { actAs } : {}) })
+      return await req<GetBindingResponse>("GET", "/by-path", {
+        query: { project_path: projectPath },
+        ...(actAs ? { actAs } : {}),
+      })
     } catch (err) {
       if (err instanceof NotFoundError) return null
       throw err
@@ -564,7 +571,10 @@ export namespace WorkspaceApi {
    * picks the right endpoint even if the current identifier's remote has
    * changed since the binding was created (M3). Both fields on the
    * identifier are optional but at least one must be present. */
-  export async function getBindingForProject(id: ProjectIdentifier, actAs?: ActAs): Promise<ProjectBindingLookup | null> {
+  export async function getBindingForProject(
+    id: ProjectIdentifier,
+    actAs?: ActAs,
+  ): Promise<ProjectBindingLookup | null> {
     if (id.repoRemote) {
       const hit = await getBindingForRemote(id.repoRemote, actAs)
       if (hit) return { ...hit, matchedBy: "remote" }
@@ -824,11 +834,7 @@ export namespace WorkspaceApi {
       // ``datamates`` or ``data`` value (object / string / null) would
       // otherwise slip through and throw on ``.map`` below, taking the
       // picker down before it renders. (cubic round 4.)
-      rows = Array.isArray(body.datamates)
-        ? body.datamates
-        : Array.isArray(body.data)
-          ? body.data
-          : []
+      rows = Array.isArray(body.datamates) ? body.datamates : Array.isArray(body.data) ? body.data : []
     } else {
       rows = []
     }

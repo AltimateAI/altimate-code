@@ -217,23 +217,29 @@ describe("workspace link telemetry", () => {
     expect(endpointOf("GET", "/datamate-project-bindings", "/by-remote")).toBe(
       "GET /datamate-project-bindings/by-remote",
     )
+    // The datamates router only lists its root here: any other shape is masked whole.
     expect(endpointOf("GET", "/datamates", "/123/memory/8f2c0a1e-9b7d-4e11-a0c2-5d6e7f8a9b0c")).toBe(
-      "GET /datamates/:id/memory/:id",
+      "GET /datamates/:id/:id/:id",
     )
     expect(endpointOf("POST", "/datamates", "/42/skills/pub_Ab12Cd/attach")).toBe(
-      "POST /datamates/:id/skills/:id/attach",
+      "POST /datamates/:id/:id/:id/:id",
     )
-    // Position, not spelling: on an identifier-first router the first segment is an id whatever
-    // it looks like, including a public id that equals a route word.
+    // A route table, not spelling: ids and file paths are masked whatever they contain, including
+    // a public id or a file named after a route word.
     expect(endpointOf("GET", "/skills", "/pub-many")).toBe("GET /skills/:id")
     expect(endpointOf("GET", "/skills", "/status")).toBe("GET /skills/:id")
     expect(endpointOf("PUT", "/skills", "/status/datamates")).toBe("PUT /skills/:id/datamates")
-    expect(endpointOf("PATCH", "/datamates/memory", "/list")).toBe("PATCH /datamates/memory/:id")
+    expect(endpointOf("GET", "/skills", "/pub_x/files/status")).toBe("GET /skills/:id/files/:path")
+    expect(endpointOf("GET", "/skills", "/pub_x/files/docs/readme.md")).toBe("GET /skills/:id/files/:path")
+    expect(endpointOf("GET", "/skills", "/pub_x/unexpected/route")).toBe("GET /skills/:id/:id/:id")
+    expect(endpointOf("PATCH", "/datamates/memory", "/list")).toBe("PATCH /datamates/memory/list")
+    expect(endpointOf("PATCH", "/datamates/memory", "/mem_status")).toBe("PATCH /datamates/memory/:id")
     expect(endpointOf("POST", "/datamate-project-bindings", "/bind")).toBe("POST /datamate-project-bindings/bind")
+    expect(endpointOf("DELETE", "/datamate-project-bindings", "/")).toBe("DELETE /datamate-project-bindings/")
     expect(endpointOf("GET", "/users", "/me")).toBe("GET /users/me")
     expect(endpointOf("GET", "/unknown-router", "/anything/else")).toBe("GET /:id/:id/:id")
     expect(endpointOf("GET", "/datamates", "/42/skills/pub_Ab12Cd/files/readme.md")).toBe(
-      "GET /datamates/:id/skills/:id/files/:id",
+      "GET /datamates/:id/:id/:id/:id/:id",
     )
 
     replies = [{ status: 200 }] // 2xx with an empty body where JSON was required
