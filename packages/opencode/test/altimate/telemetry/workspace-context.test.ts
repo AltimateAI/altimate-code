@@ -83,7 +83,7 @@ describe("workspace id on the telemetry context", () => {
     expect(Telemetry.workspaceUseOf("s9")).toEqual({ skills: 0, memory: 0, integrations: 0 })
   })
 
-  test("a turn ends only its own entries: a cancelled turn unwinding late leaves the replacement's", () => {
+  test("a turn ends only its own counters; a stale turn's use does not count", () => {
     const first = Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 42 })
     Telemetry.noteWorkspaceUse("s7", "skills")
     const second = Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 42 })
@@ -91,9 +91,9 @@ describe("workspace id on the telemetry context", () => {
     Telemetry.noteWorkspaceUse("s7", "memory", 2)
     // Counts are per turn: the cancelled turn's rows read its own, the replacement's its own.
     expect(Telemetry.workspaceUseOf("s7", first)).toEqual({ skills: 1, memory: 0, integrations: 0 })
+    expect(Telemetry.turnWorkspaceOf("s7")).toBe(42) // an explicit lookup for in-turn emitters
     expect(Telemetry.workspaceUseOf("s7", second)).toEqual({ skills: 0, memory: 2, integrations: 0 })
     Telemetry.endSession("s7", first) // the old generation, after the replacement started
-    expect(Telemetry.workspaceOf("s7")).toBe(42)
     expect(Telemetry.workspaceUseOf("s7", first)).toEqual({ skills: 0, memory: 0, integrations: 0 })
     expect(Telemetry.workspaceUseOf("s7").memory).toBe(2)
     // A use landing with a stale turn does not count toward the replacement.
@@ -102,32 +102,27 @@ describe("workspace id on the telemetry context", () => {
     Telemetry.noteWorkspaceUse("s7", "integrations", 1, "add", second)
     expect(Telemetry.workspaceUseOf("s7").integrations).toBe(1)
     Telemetry.endSession("s7", second)
-    expect(Telemetry.workspaceOf("s7")).toBeUndefined()
     expect(Telemetry.workspaceUseOf("s7")).toEqual({ skills: 0, memory: 0, integrations: 0 })
-    // Without a turn, the end is unconditional (tests and shutdown paths).
-    Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 9 })
-    Telemetry.endSession("s7")
-    expect(Telemetry.workspaceOf("s7")).toBeUndefined()
-    // Evicted and re-created entries never reuse a token a stale turn still holds.
+    expect(Telemetry.turnWorkspaceOf("s7")).toBeUndefined()
+    // Tokens never repeat, so a stale end can never hit a later turn.
     const stale = Telemetry.setContext({ sessionId: "s8", projectId: "p1", workspaceId: 5 })
-    for (let i = 0; i < 1100; i++) Telemetry.setContext({ sessionId: `evict-${i}`, projectId: "p1" })
-    expect(Telemetry.workspaceOf("s8")).toBeUndefined() // evicted
+    Telemetry.endSession("s8", stale)
     const fresh = Telemetry.setContext({ sessionId: "s8", projectId: "p1", workspaceId: 6 })
     expect(fresh).toBeGreaterThan(stale)
+    Telemetry.noteWorkspaceUse("s8", "skills")
     Telemetry.endSession("s8", stale)
-    expect(Telemetry.workspaceOf("s8")).toBe(6)
+    expect(Telemetry.workspaceUseOf("s8", fresh).skills).toBe(1)
     Telemetry.endSession("s8", fresh)
-    for (let i = 0; i < 1100; i++) Telemetry.endSession(`evict-${i}`)
     Telemetry.setContext({ sessionId: "", projectId: "" })
   })
 
-  test("every event of a bound session carries the workspace id; an event's own id wins; unbound sessions carry none", async () => {
+  test("a row carries the workspace it names and nothing is stamped from the context", async () => {
     await Telemetry.shutdown()
     await Telemetry.init()
     Telemetry.setContext({ sessionId: "s1", projectId: "p1", workspaceId: 42 })
     expect(Telemetry.getContext().workspaceId).toBe(42)
 
-    Telemetry.track(startup("bound"))
+    Telemetry.track(startup("bound")) // names none: carries none, whatever the context holds
     Telemetry.track({
       type: "workspace_linked",
       timestamp: Date.now(),
@@ -135,48 +130,16 @@ describe("workspace id on the telemetry context", () => {
       workspace_id: 7,
       how: "bind_existing",
     })
-    // Another session's turn moves the context (a serve process) before the batch is serialised, and
-    // before s1 tracks its next rows: every row still carries the workspace of its own session.
-    Telemetry.setContext({ sessionId: "s2", projectId: "p1" })
-    Telemetry.track(startup("unbound"))
     Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s1" })
-    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s2" })
-    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s3" }) // never set the context
-    Telemetry.setContext({ sessionId: "s4", projectId: "p1", workspaceId: 9 })
-    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s2" })
+    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s1", workspace_id: undefined })
     await Telemetry.flush()
     const bound = envelopes().find((e) => e.data.baseData.properties.command === "bound")
-    expect(bound.data.baseData.properties.workspace_id).toBe("42")
+    expect("workspace_id" in bound.data.baseData.properties).toBe(false)
     expect(bound.data.baseData.properties.client).toBe("altimate-code")
     const linked = envelopes().find((e) => e.data.baseData.name === "workspace_linked")
-    expect(linked.data.baseData.properties.workspace_id).toBe("7") // the row's own id, not the context's
+    expect(linked.data.baseData.properties.workspace_id).toBe("7")
     const unlinked = envelopes().filter((e) => e.data.baseData.name === "workspace_unlinked")
-    expect(unlinked.map((e) => [e.tags["ai.session.id"], e.data.baseData.properties.workspace_id])).toEqual([
-      ["s1", "42"],
-      ["s2", undefined],
-      ["s3", undefined],
-      ["s2", undefined],
-    ])
-
-    const unbound = envelopes().find((e) => e.data.baseData.properties.command === "unbound")
-    expect("workspace_id" in unbound.data.baseData.properties).toBe(false)
-
-    // One session's turn ending (endSession, and the shutdown the loop runs after it) leaves the
-    // other sessions' entries alone; the ended session's later rows gain no key.
-    posts = []
+    expect(unlinked.map((e) => e.data.baseData.properties.workspace_id)).toEqual([undefined, undefined])
     Telemetry.endSession("s1")
-    await Telemetry.shutdown()
-    await Telemetry.init()
-    expect(Telemetry.workspaceOf("s4")).toBe(9)
-    expect(Telemetry.workspaceOf("s1")).toBeUndefined()
-    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s4" })
-    Telemetry.track({ type: "workspace_unlinked", timestamp: Date.now(), session_id: "s1" })
-    await Telemetry.flush()
-    const later = envelopes().filter((e) => e.data.baseData.name === "workspace_unlinked")
-    expect(later.map((e) => [e.tags["ai.session.id"], e.data.baseData.properties.workspace_id])).toEqual([
-      ["s4", "9"],
-      ["s1", undefined],
-    ])
-    Telemetry.endSession("s4")
   })
 })

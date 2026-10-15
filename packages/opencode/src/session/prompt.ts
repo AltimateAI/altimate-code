@@ -1593,6 +1593,7 @@ export namespace SessionPrompt {
             // Cap reached — track and inject a synthetic hint so the LLM informs the user
             Telemetry.track({
               type: "plan_revision",
+              ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
               timestamp: Date.now(),
               session_id: sessionID,
               revision_number: planRevisionCount,
@@ -1677,6 +1678,7 @@ export namespace SessionPrompt {
             const action = isRejection ? "reject" : isApproval ? "approve" : "refine"
             Telemetry.track({
               type: "plan_revision",
+              ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
               timestamp: Date.now(),
               session_id: sessionID,
               revision_number: planRevisionCount,
@@ -1821,6 +1823,7 @@ export namespace SessionPrompt {
         // "build" sessions). See the helper at the top of this namespace.
         Telemetry.track({
           type: "session_start",
+          ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
           timestamp: Date.now(),
           session_id: sessionID,
           model_id: model.id,
@@ -1872,6 +1875,7 @@ export namespace SessionPrompt {
               ) ?? "unknown"
             Telemetry.track({
               type: "task_classified",
+              ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
               timestamp: Date.now(),
               session_id: sessionID,
               intent: intent as any,
@@ -1905,7 +1909,7 @@ export namespace SessionPrompt {
           OnboardingTelemetry.isOnboardingSession(sessionID) &&
           OnboardingTelemetry.claimFirstPrompt(sessionID)
         ) {
-          void OnboardingTelemetry.emit({ type: "first_prompt_sent" }, sessionID)
+          void OnboardingTelemetry.emit({ type: "first_prompt_sent", ...turnWorkspace }, sessionID)
         }
         // altimate_change end
         // altimate_change end — session start telemetry
@@ -1947,6 +1951,9 @@ export namespace SessionPrompt {
             agent: agent.name,
             disableTraining: Flag.ALTIMATE_DISABLE_TRAINING,
             sessionID,
+            // altimate_change — the turn's workspace and token, for the injection row and its count
+            turn: telemetryTurn,
+            workspaceId: boundWorkspace?.datamateId,
           })
       // altimate_change end
       // altimate_change start — workspace identity.
@@ -2402,6 +2409,7 @@ export namespace SessionPrompt {
             // (verdict enums, counters, model names) passes through.
             Telemetry.track({
               type: "validator_check",
+              ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
               timestamp: Date.now(),
               session_id: sessionID,
               validator_name: validator.name,
@@ -2468,6 +2476,7 @@ export namespace SessionPrompt {
             })
             Telemetry.track({
               type: "validator_retries_exhausted",
+              ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
               timestamp: Date.now(),
               session_id: sessionID,
               step,
@@ -2780,6 +2789,10 @@ export namespace SessionPrompt {
         abort: options.abortSignal!,
         messageID: input.processor.message.id,
         callID: options.toolCallId,
+        // altimate_change start — the turn's workspace and token, for the rows the tool emits
+        workspaceId: input.workspaceId,
+        turn: input.turn,
+        // altimate_change end
         // altimate_change start — batch inner calls reuse the prompt's lesson delivery state
         extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, lessons: input.lessons },
         // altimate_change end
