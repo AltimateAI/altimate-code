@@ -321,4 +321,18 @@ describe("debug config redaction", () => {
       consecutive: ["--token", "***", "***", "public"],
     })
   })
+
+  test("redacts every string nested under a secret-named key", () => {
+    expect(
+      redactConfig({
+        token: ["opaque-secret"],
+        credentials: { value: "opaque-secret", nested: { deeper: "opaque-secret" } },
+        model: { name: "public" },
+      }),
+    ).toEqual({
+      token: ["***"],
+      credentials: { value: "***", nested: { deeper: "***" } },
+      model: { name: "public" },
+    })
+  })
 })

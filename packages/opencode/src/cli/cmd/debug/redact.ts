@@ -40,7 +40,7 @@ export function redactConfig(value: unknown, headers = false): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => {
       if (typeof item === "string" && (headers || secretName.test(key))) return [key, "***"]
-      return [key, redactConfig(item, headers || key.toLowerCase() === "headers")]
+      return [key, redactConfig(item, headers || key.toLowerCase() === "headers" || secretName.test(key))]
     }),
   )
 }
