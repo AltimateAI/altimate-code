@@ -2011,7 +2011,9 @@ export namespace Telemetry {
 
       for (const [k, v] of Object.entries(fields)) {
         if (k === "session_id" || k === "project_id" || k === "_retried" || k === "_operation_id") continue
-        if (typeof v === "number") {
+        // altimate_change — an id is a dimension, not a quantity: numeric *_id fields (workspace ids)
+        // go to properties as strings so the dashboards join on customDimensions like every other key.
+        if (typeof v === "number" && !k.endsWith("_id")) {
           measurements[k] = v
         } else if (v !== undefined && v !== null) {
           properties[k] = typeof v === "object" ? JSON.stringify(v) : String(v)
