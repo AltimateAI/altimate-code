@@ -122,10 +122,11 @@ import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_chan
 // altimate_change start — the session's bound workspace rides on every telemetry row
 import { readLocalBinding } from "@/altimate/workspace/state"
 
-/** The session's workspace use, as session_end fields; the read ends the session's telemetry entries. */
+/** The session's workspace use, as session_end fields. Read only: the row is tracked first, then the
+ * turn ends its telemetry entries (`Telemetry.endSession`), so the row itself still carries the
+ * workspace. */
 function workspaceUseFields(sessionID: string) {
   const use = Telemetry.workspaceUseOf(sessionID)
-  Telemetry.endSession(sessionID)
   return {
     workspace_skills_used: use.skills,
     workspace_memory_blocks: use.memory,
@@ -781,7 +782,7 @@ export namespace SessionPrompt {
     // altimate_change start — the workspace this project is linked to (local binding cache, no
     // network) goes on the telemetry context, so every row of the turn carries workspace_id.
     const boundWorkspace = await readLocalBinding(Instance.directory).catch(() => null)
-    Telemetry.setContext({
+    const telemetryTurn = Telemetry.setContext({
       sessionId: sessionID,
       projectId: Instance.project?.id ?? "",
       workspaceId: boundWorkspace?.datamateId,
@@ -860,6 +861,7 @@ export namespace SessionPrompt {
         ...workspaceUseFields(sessionID),
         // altimate_change end
       })
+      Telemetry.endSession(sessionID, telemetryTurn) // altimate_change — after the row, this turn only
     }
     process.once("beforeExit", emergencySessionEnd)
     process.once("exit", emergencySessionEnd)
@@ -2647,6 +2649,7 @@ export namespace SessionPrompt {
         ...workspaceUseFields(sessionID),
         // altimate_change end
       })
+      Telemetry.endSession(sessionID, telemetryTurn) // altimate_change — after the row, this turn only
     }
     await Telemetry.shutdown()
     // altimate_change end

@@ -1982,6 +1982,9 @@ export namespace Telemetry {
   // the insertion-ordered cap only matters past that many sessions mid-turn at once.
   const sessionWorkspaces = new Map<string, number | undefined>()
   const MAX_SESSION_WORKSPACES = 1024
+  /** The turn generation per session: `setContext` starts one, `endSession` ends only its own, so a
+   * cancelled turn unwinding late cannot end the replacement's entries. */
+  const sessionTurns = new Map<string, number>()
   // altimate_change end
   let appInsights: AppInsightsConfig | undefined
   let droppedEvents = 0
@@ -2270,25 +2273,34 @@ export namespace Telemetry {
   export function workspaceOf(sessionId: string): number | undefined {
     return sessionWorkspaces.get(sessionId)
   }
-  /** A session's turn ended: its use counts are read out by then, and its workspace entry goes. */
-  export function endSession(sessionId: string) {
+  /** A session's turn ended: its use counts are read out and its `session_end` tracked by then, and
+   * its workspace entry goes. With `turn` (from `setContext`), a turn that is no longer the session's
+   * current one ends nothing: the replacement's entries are the replacement's. */
+  export function endSession(sessionId: string, turn?: number) {
+    if (turn !== undefined && sessionTurns.get(sessionId) !== turn) return
     workspaceUse.delete(sessionId)
     sessionWorkspaces.delete(sessionId)
+    sessionTurns.delete(sessionId)
   }
   // altimate_change end
 
-  export function setContext(opts: { sessionId: string; projectId: string; workspaceId?: number }) {
+  /** Returns the turn generation for the session; pass it to `endSession` so only this turn ends it. */
+  export function setContext(opts: { sessionId: string; projectId: string; workspaceId?: number }): number {
     sessionId = opts.sessionId
     projectId = opts.projectId
     workspaceId = opts.workspaceId
     // altimate_change start — remembered per session for the stamping in track()
-    if (opts.sessionId) {
-      sessionWorkspaces.delete(opts.sessionId)
-      sessionWorkspaces.set(opts.sessionId, opts.workspaceId)
-      if (sessionWorkspaces.size > MAX_SESSION_WORKSPACES) {
-        sessionWorkspaces.delete(sessionWorkspaces.keys().next().value!)
-      }
+    if (!opts.sessionId) return 0
+    sessionWorkspaces.delete(opts.sessionId)
+    sessionWorkspaces.set(opts.sessionId, opts.workspaceId)
+    if (sessionWorkspaces.size > MAX_SESSION_WORKSPACES) {
+      const oldest = sessionWorkspaces.keys().next().value!
+      sessionWorkspaces.delete(oldest)
+      sessionTurns.delete(oldest)
     }
+    const turn = (sessionTurns.get(opts.sessionId) ?? 0) + 1
+    sessionTurns.set(opts.sessionId, turn)
+    return turn
     // altimate_change end
   }
 
