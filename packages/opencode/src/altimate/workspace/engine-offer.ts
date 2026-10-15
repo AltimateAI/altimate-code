@@ -273,20 +273,17 @@ export async function installEngine(): Promise<InstallResult> {
   return { ok: false, error: detail || `npm exited with code ${run.code ?? "unknown"}` }
 }
 
-/** What the bus carries with the offer command: the offer's telemetry fields plus the server's
- * node major (the install happens where the server runs), so the surface that prints the offer in
- * another process (an attached run) reports `shown` with them. */
-export type OfferDetail = Pick<EngineOffer, "reason" | "workspaceId" | "declared" | "found"> & {
-  nodeMajor: number | null
-}
+/** What the bus carries with the offer command: the offer's telemetry fields, so the surface that
+ * prints the offer in another process (an attached run) reports `shown` with them. No node probe
+ * rides along: it would sit on the dispatch path, ahead of the turn boundary. */
+export type OfferDetail = Pick<EngineOffer, "reason" | "workspaceId" | "declared" | "found">
 
-export function encodeOfferDetail(offer: EngineOffer, nodeMajor: number | null): string {
+export function encodeOfferDetail(offer: EngineOffer): string {
   const detail: OfferDetail = {
     reason: offer.reason,
     workspaceId: offer.workspaceId,
     declared: offer.declared,
     found: offer.found,
-    nodeMajor,
   }
   return JSON.stringify(detail)
 }
@@ -300,11 +297,10 @@ export function decodeOfferDetail(raw: unknown): OfferDetail | undefined {
     const workspaceId = typeof v.workspaceId === "string" ? v.workspaceId : undefined
     const declared = typeof v.declared === "number" ? v.declared : v.declared === undefined ? undefined : NaN
     const found = typeof v.found === "string" ? v.found : v.found === undefined ? undefined : ""
-    const nodeMajor = v.nodeMajor === null ? null : typeof v.nodeMajor === "number" ? v.nodeMajor : undefined
-    if (!reason || workspaceId === undefined || Number.isNaN(declared) || found === "" || nodeMajor === undefined) {
+    if (!reason || workspaceId === undefined || Number.isNaN(declared) || found === "") {
       return undefined
     }
-    return { reason, workspaceId, declared, found, nodeMajor }
+    return { reason, workspaceId, declared, found }
   } catch {
     return undefined
   }
@@ -316,7 +312,7 @@ export function decodeOfferDetail(raw: unknown): OfferDetail | undefined {
 export function trackPrintedOffer(raw: unknown, sessionID: string): boolean {
   const detail = decodeOfferDetail(raw)
   if (!detail) return false
-  trackInstallPrompt("shown", detail, { surface: "bus", nodeMajor: detail.nodeMajor }, sessionID)
+  trackInstallPrompt("shown", detail, { surface: "bus" }, sessionID)
   return true
 }
 
@@ -326,7 +322,7 @@ export function trackPrintedOffer(raw: unknown, sessionID: string): boolean {
  * ride along so that run reports `shown` from them (the TUI dialog re-derives
  * the offer and reports its own). */
 async function publishOffer(offer: EngineOffer, sessionID: string): Promise<boolean> {
-  const detail = encodeOfferDetail(offer, await nodeMajor().catch(() => null))
+  const detail = encodeOfferDetail(offer)
   if (syncInternals.publishOffer) return syncInternals.publishOffer(sessionID, detail)
   try {
     await AppRuntime.runPromise(

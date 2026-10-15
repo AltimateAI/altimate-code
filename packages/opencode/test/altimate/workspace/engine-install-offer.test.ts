@@ -176,14 +176,12 @@ describe("offer routing — engine missing", () => {
   })
   test("the published offer carries its fields, and the surface that prints them reports shown", async () => {
     const h = install({})
-    syncInternals.nodeMajor = async () => 22
     await beforeTurn("s1")
     expect(decodeOfferDetail(h.publishedDetail[0])).toEqual({
       reason: "engine-missing",
       workspaceId: "42",
       declared: 2,
       found: undefined,
-      nodeMajor: 22,
     })
     const rows: Record<string, unknown>[] = []
     const spy = spyOn(Telemetry, "track").mockImplementation((e) => {
@@ -194,10 +192,8 @@ describe("offer routing — engine missing", () => {
       expect(trackPrintedOffer(h.publishedDetail[0], "s1")).toBe(true)
       expect(trackPrintedOffer(undefined, "s1")).toBe(false)
       expect(trackPrintedOffer("not json", "s1")).toBe(false)
-      expect(trackPrintedOffer(JSON.stringify({ reason: "other", workspaceId: "42", nodeMajor: null }), "s1")).toBe(
-        false,
-      )
-      expect(trackPrintedOffer(JSON.stringify({ reason: "engine-missing", workspaceId: "42" }), "s1")).toBe(false)
+      expect(trackPrintedOffer(JSON.stringify({ reason: "other", workspaceId: "42" }), "s1")).toBe(false)
+      expect(trackPrintedOffer(JSON.stringify({ reason: "engine-missing", declared: "2" }), "s1")).toBe(false)
     } finally {
       spy.mockRestore()
     }
@@ -210,10 +206,10 @@ describe("offer routing — engine missing", () => {
         workspace_id: 42,
         reason: "engine-missing",
         declared: 2,
-        node_detected: true,
-        node_major: 22,
       }),
     ])
+    // No node fields: the probe stays off the dispatch path, so the event carries none.
+    expect("node_detected" in rows[0]!).toBe(false)
   })
   test("falls back to the toast only when the bus is unavailable", async () => {
     const h = install({ bus: false })
