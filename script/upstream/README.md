@@ -287,14 +287,14 @@ script/upstream/
 
 The **Marker Guard** CI job (in `.github/workflows/ci.yml`) runs automatically on every PR. It checks whether any upstream-shared files (such as `packages/opencode/src/`) have new code without `altimate_change` markers. Ownership is determined from the pinned `upstreamBaseline` tag in `utils/config.ts`, so moving upstream branches to a new major version does not disable checks on v1 files. This prevents accidental overwrites during future upstream merges.
 
-After installing the merge tooling dependencies, CI fetches the upstream remote and then explicitly fetches the baseline tag:
+After installing the merge tooling dependencies, CI fetches the upstream remote and then explicitly fetches the baseline tag into the dedicated `refs/upstream-baseline/` namespace. The analyzer reads this full ref to avoid collisions with same-named fork tags or local branches:
 
 ```bash
 baseline=$(bun run script/upstream/analyze.ts --print-baseline)
-git fetch upstream "refs/tags/${baseline}:refs/tags/${baseline}" --no-tags
+git fetch upstream "refs/tags/${baseline}:refs/upstream-baseline/${baseline}" --no-tags
 ```
 
-If the baseline ref is missing locally, the analyzer warns on stderr with the tag and fetch command, then falls back to directory-based ownership checks. Fetch the tag to restore the baseline-based check.
+If the namespaced baseline ref is missing locally, the analyzer attempts this fetch once and retries the check. If the ref is still unavailable, it warns on stderr with the tag and fetch command, then falls back to directory-based ownership checks. Fetch the tag into this namespace to restore the baseline-based check.
 
 ```bash
 # What CI runs:

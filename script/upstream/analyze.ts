@@ -684,7 +684,9 @@ function getChangedFiles(base?: string): string[] {
 let _upstreamFilesCache: { ref: string; files: Set<string> } | null = null
 
 export function getUpstreamFiles(config: MergeConfig): Set<string> {
-  const ref = config.upstreamBaseline
+  const tag = config.upstreamBaseline
+  // Fork releases can use the same tag or branch name as the upstream baseline.
+  const ref = `refs/upstream-baseline/${tag}`
   if (_upstreamFilesCache?.ref === ref) return _upstreamFilesCache.files
   const { execFileSync } = require("child_process")
   const root = repoRoot()
@@ -701,7 +703,7 @@ export function getUpstreamFiles(config: MergeConfig): Set<string> {
       output = readFiles()
     } catch {
       try {
-        execFileSync("git", ["fetch", config.upstreamRemote, `refs/tags/${ref}:refs/tags/${ref}`, "--no-tags", "--quiet"], {
+        execFileSync("git", ["fetch", config.upstreamRemote, `refs/tags/${tag}:${ref}`, "--no-tags", "--quiet"], {
           cwd: root,
           stdio: "ignore",
         })
@@ -713,7 +715,7 @@ export function getUpstreamFiles(config: MergeConfig): Set<string> {
     _upstreamFilesCache = { ref, files: new Set(output.trim().split("\n").filter(Boolean)) }
   } catch {
     console.warn(
-      `Warning: upstream baseline '${ref}' is unavailable. Fetch it with: git fetch ${config.upstreamRemote} refs/tags/${ref}:refs/tags/${ref} --no-tags. Falling back to directory-based ownership checks.`,
+      `Warning: upstream baseline '${tag}' is unavailable. Fetch it with: git fetch ${config.upstreamRemote} refs/tags/${tag}:${ref} --no-tags --quiet. Falling back to directory-based ownership checks.`,
     )
     _upstreamFilesCache = { ref, files: new Set() }
   }

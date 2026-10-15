@@ -14,6 +14,7 @@ describe("upstream merge entry-point guards", () => {
     test(`${entryPoint} rejects a major upgrade without changing the repository`, () => {
       const head = gitOutput("rev-parse", "HEAD")
       const status = gitOutput("status", "--porcelain")
+      const refs = gitOutput("for-each-ref")
 
       const result = Bun.spawnSync(
         [process.execPath, "run", `script/upstream/${entryPoint}`, "--version", "v2.0.0", "--dry-run"],
@@ -22,6 +23,7 @@ describe("upstream merge entry-point guards", () => {
 
       expect(gitOutput("rev-parse", "HEAD")).toBe(head)
       expect(gitOutput("status", "--porcelain")).toBe(status)
+      expect(gitOutput("for-each-ref")).toBe(refs)
       expect(result.exitCode).not.toBe(0)
       expect(result.stdout.toString() + result.stderr.toString()).toContain("re-port, not a merge")
     })

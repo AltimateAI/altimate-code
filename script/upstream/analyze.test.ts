@@ -15,14 +15,14 @@ ${hunks}`
 describe("upstream baseline ownership", () => {
   const file = "packages/opencode/src/session/prompt.ts"
 
-  test("uses the baseline tag, never moving dev/main branches, and flags unmarked code", () => {
+  test("uses the dedicated baseline ref, never moving dev/main branches, and flags unmarked code", () => {
     const config = loadConfig()
     const lsTree = spyOn(childProcess, "execFileSync").mockReturnValue(`${file}\n`)
     try {
       expect(getUpstreamFiles(config).has(file)).toBe(true)
       expect(lsTree).toHaveBeenCalledWith(
         "git",
-        ["ls-tree", "-r", "--name-only", config.upstreamBaseline],
+        ["ls-tree", "-r", "--name-only", `refs/upstream-baseline/${config.upstreamBaseline}`],
         expect.objectContaining({ cwd: repoRoot() }),
       )
       expect(isUpstreamShared(file, config)).toBe(true)
@@ -44,7 +44,7 @@ describe("upstream baseline ownership", () => {
       expect(getUpstreamFiles(config).has(file)).toBe(false)
       expect(isUpstreamShared("packages/opencode/src/new.ts", config)).toBe(true)
       expect(lsTree).toHaveBeenCalledTimes(1)
-      expect(lsTree.mock.calls[0][1]).toEqual(["ls-tree", "-r", "--name-only", "v1.18.34"])
+      expect(lsTree.mock.calls[0][1]).toEqual(["ls-tree", "-r", "--name-only", "refs/upstream-baseline/v1.18.34"])
     } finally {
       lsTree.mockRestore()
     }
@@ -64,9 +64,9 @@ describe("upstream baseline ownership", () => {
       expect(isUpstreamShared(file, config)).toBe(true)
       expect(isUpstreamShared("packages/opencode/src/fork-only.ts", config)).toBe(false)
       expect(exec.mock.calls.map((call) => call[1])).toEqual([
-        ["ls-tree", "-r", "--name-only", config.upstreamBaseline],
-        ["fetch", config.upstreamRemote, "refs/tags/v1.99.998:refs/tags/v1.99.998", "--no-tags", "--quiet"],
-        ["ls-tree", "-r", "--name-only", config.upstreamBaseline],
+        ["ls-tree", "-r", "--name-only", "refs/upstream-baseline/v1.99.998"],
+        ["fetch", config.upstreamRemote, "refs/tags/v1.99.998:refs/upstream-baseline/v1.99.998", "--no-tags", "--quiet"],
+        ["ls-tree", "-r", "--name-only", "refs/upstream-baseline/v1.99.998"],
       ])
       expect(exec.mock.calls[1][0]).toBe("git")
       expect(exec.mock.calls[1][2]).toEqual({ cwd: repoRoot(), stdio: "ignore" })
@@ -89,17 +89,53 @@ describe("upstream baseline ownership", () => {
       expect(isUpstreamShared("packages/opencode/src/altimate/custom.ts", config)).toBe(false)
       expect(isUpstreamShared("packages/other/src/custom.ts", config)).toBe(false)
       expect(exec.mock.calls.map((call) => call[1])).toEqual([
-        ["ls-tree", "-r", "--name-only", config.upstreamBaseline],
-        ["fetch", config.upstreamRemote, "refs/tags/v1.99.999:refs/tags/v1.99.999", "--no-tags", "--quiet"],
-        ["ls-tree", "-r", "--name-only", config.upstreamBaseline],
+        ["ls-tree", "-r", "--name-only", "refs/upstream-baseline/v1.99.999"],
+        ["fetch", config.upstreamRemote, "refs/tags/v1.99.999:refs/upstream-baseline/v1.99.999", "--no-tags", "--quiet"],
+        ["ls-tree", "-r", "--name-only", "refs/upstream-baseline/v1.99.999"],
       ])
       expect(warn).toHaveBeenCalledTimes(1)
       expect(warn.mock.calls[0][0]).toContain("upstream baseline 'v1.99.999' is unavailable")
-      expect(warn.mock.calls[0][0]).toContain("git fetch upstream refs/tags/v1.99.999:refs/tags/v1.99.999 --no-tags")
+      expect(warn.mock.calls[0][0]).toContain("git fetch upstream refs/tags/v1.99.999:refs/upstream-baseline/v1.99.999 --no-tags")
       expect(warn.mock.calls[0][0]).toContain("Falling back to directory-based ownership checks")
     } finally {
       exec.mockRestore()
       warn.mockRestore()
+    }
+  })
+
+  test.each([true, false])("ignores same-named fork tags and branches (baseline ref present: %s)", (present) => {
+    const config = { ...loadConfig(), upstreamBaseline: present ? "v1.99.996" : "v1.99.997" }
+    const tag = config.upstreamBaseline
+    const ref = `refs/upstream-baseline/${tag}`
+    const forkFile = "packages/opencode/src/fork-only.ts"
+    const refs = new Map([
+      [tag, `${forkFile}\n`],
+      [`refs/tags/${tag}`, `${forkFile}\n`],
+      [`refs/heads/${tag}`, `${forkFile}\n`],
+    ])
+    if (present) refs.set(ref, `${file}\n`)
+    const exec = spyOn(childProcess, "execFileSync").mockImplementation((_command, args) => {
+      if (args?.[0] === "fetch") {
+        refs.set(ref, `${file}\n`)
+        return ""
+      }
+      const output = refs.get(args?.[3] ?? "")
+      if (output === undefined) throw new Error("Not a valid object name")
+      return output
+    })
+    try {
+      expect(getUpstreamFiles(config)).toEqual(new Set([file]))
+      expect(isUpstreamShared(forkFile, config)).toBe(false)
+      expect(exec.mock.calls.filter((call) => call[1]?.[0] === "ls-tree").map((call) => call[1])).toEqual(
+        Array.from({ length: present ? 1 : 2 }, () => ["ls-tree", "-r", "--name-only", ref]),
+      )
+      expect(exec.mock.calls.filter((call) => call[1]?.[0] === "fetch").map((call) => call[1])).toEqual(
+        present ? [] : [["fetch", config.upstreamRemote, `refs/tags/${tag}:${ref}`, "--no-tags", "--quiet"]],
+      )
+      expect(refs.get(`refs/tags/${tag}`)).toBe(`${forkFile}\n`)
+      expect(refs.get(`refs/heads/${tag}`)).toBe(`${forkFile}\n`)
+    } finally {
+      exec.mockRestore()
     }
   })
 

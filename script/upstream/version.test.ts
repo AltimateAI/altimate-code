@@ -11,7 +11,7 @@ describe("upstream version major", () => {
     expect(compareVersionMajor("v2.0.29", "v1.17.9")).toBeGreaterThan(0)
     expect(compareVersionMajor("v1.17.9", "v2.0.29")).toBeLessThan(0)
     expect(() => assertSameMajor("v2.0.29", "v1.17.9")).toThrow("re-port, not a merge")
-    expect(() => assertSameMajor("v2.0.29", "v1.17.9")).toThrow("re-port, not a merge")
+    expect(() => assertSameMajor("v1.17.9", "v2.0.29")).toThrow("re-port, not a merge")
     expect(() => assertSameMajor("v0.1.0", "v1.17.9")).toThrow("major differs")
   })
 
