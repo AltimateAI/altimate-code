@@ -265,7 +265,11 @@ export function linkFailureReason(err: unknown): "auth" | "not_found" | "network
   if (err instanceof NotFoundError) return "not_found"
   if (err instanceof ConflictError || err instanceof PreconditionFailedError) return "conflict"
   if (err instanceof WorkspaceApiError) {
-    if (err.status === 401) return "auth"
+    // An answer whose body failed carries its status here rather than as a typed error: the same
+    // status classes as a readable answer.
+    if (err.status === 401 || err.status === 403) return "auth"
+    if (err.status === 404) return "not_found"
+    if (err.status === 409 || err.status === 412) return "conflict"
     if (err.status === undefined && err.failure === "transport") return "network" // unreachable or timed out
   }
   return "other"

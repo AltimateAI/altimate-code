@@ -266,6 +266,13 @@ describe("workspace link telemetry", () => {
     expect(stalled.message).toMatch(/timed out/)
     expect(stalled.status).toBe(500) // the answer's status rides on the error
     expect(linkFailureReason(stalled)).toBe("other") // answered: not a network failure
+    // A known status whose body failed classifies like a readable answer with that status.
+    expect(linkFailureReason(new WorkspaceApiError("stalled", 404))).toBe("not_found")
+    expect(linkFailureReason(new WorkspaceApiError("stalled", 403))).toBe("auth")
+    expect(linkFailureReason(new WorkspaceApiError("stalled", 409))).toBe("conflict")
+    expect(linkFailureReason(new WorkspaceApiError("stalled", 412))).toBe("conflict")
+    expect(linkFailureReason(new WorkspaceApiError("cannot reach"))).toBe("network")
+    expect(linkFailureReason(new WorkspaceApiError("no usable id", undefined, "response"))).toBe("other")
     expect(of("workspace_api_error")).toEqual([expect.objectContaining({ status_class: "5xx", status: 500 })])
 
     events = []
