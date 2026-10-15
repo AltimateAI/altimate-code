@@ -117,7 +117,7 @@ describe("sql_execute generated reads", () => {
     expect(dispatch).toHaveBeenCalledTimes(1)
   })
 
-  for (const fn of ["pg_try_advisory_lock(1)", "pg_advisory_unlock_all()", "pg_terminate_backend(1)", "pg_reload_conf()"]) {
+  for (const fn of ["pg_try_advisory_lock(1)", "pg_advisory_unlock_all()", "pg_terminate_backend(1)", "pg_reload_conf()", "dblink('h', 'DELETE FROM t')", "pg_notify('c', 'x')", "pg_log_backend_memory_contexts(1)", "pg_stat_reset()", "lo_from_bytea(0, 'x')"]) {
     test(`rejects generated SQL calling ${fn}`, async () => {
       dispatch.mockReset().mockResolvedValueOnce(generatedResult(`SELECT ${fn}`) as never)
       const tool = await initTool(SqlExecuteTool)
