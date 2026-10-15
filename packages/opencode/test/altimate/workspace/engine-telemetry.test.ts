@@ -125,7 +125,7 @@ describe("workspace engine telemetry builders", () => {
       ["dbt", new Map([["dbt_run", {} as any]])],
     ])
     const on: any = { enabled: true, shadowed, extensions: [{ integration: "x", tools: [] }], workspaceId: "7" }
-    expect(precedenceEvent(on, { escapeHatch: false, connections: 1 })).toEqual(
+    expect(precedenceEvent(on, { escapeHatch: false, connections: 1, types: 2 })).toEqual(
       expect.objectContaining({
         type: "workspace_engine_precedence",
         enabled: true,
@@ -136,20 +136,20 @@ describe("workspace engine telemetry builders", () => {
         workspace_id: 7,
       }),
     )
-    expect(trackPrecedence("s1", on, { escapeHatch: false, connections: 1 })).toBe(true)
-    expect(trackPrecedence("s1", on, { escapeHatch: false, connections: 1 })).toBe(false) // unchanged
-    expect(trackPrecedence("s1", on, { escapeHatch: false, connections: 2 })).toBe(true) // a connection was added locally
-    expect(trackPrecedence("s2", on, { escapeHatch: false, connections: 2 })).toBe(true) // another session
+    expect(trackPrecedence("s1", on, { escapeHatch: false, connections: 1, types: 2 })).toBe(true)
+    expect(trackPrecedence("s1", on, { escapeHatch: false, connections: 1, types: 2 })).toBe(false) // unchanged
+    expect(trackPrecedence("s1", on, { escapeHatch: false, connections: 2, types: 2 })).toBe(true) // a connection was added locally
+    expect(trackPrecedence("s2", on, { escapeHatch: false, connections: 2, types: 2 })).toBe(true) // another session
     const off: any = { enabled: false, disabledReason: "escape-hatch" as const, shadowed: new Map(), workspaceId: "7" }
-    expect(trackPrecedence("s1", off, { escapeHatch: true, connections: 0 })).toBe(true)
+    expect(trackPrecedence("s1", off, { escapeHatch: true, connections: 0, types: 0 })).toBe(true)
     expect(events.at(-1)).toEqual(
       expect.objectContaining({ enabled: false, reason: "escape-hatch", shadowed_types: 0, escape_hatch: true }),
     )
-    expect(trackPrecedence("s1", off, { escapeHatch: false, connections: 0 })).toBe(true) // the hatch toggled
+    expect(trackPrecedence("s1", off, { escapeHatch: false, connections: 0, types: 0 })).toBe(true) // the hatch toggled
     // The same id under another account is another workspace: reported again.
-    expect(trackPrecedence("s3", on, { escapeHatch: false, connections: 1, identity: "acme|7" })).toBe(true)
-    expect(trackPrecedence("s3", on, { escapeHatch: false, connections: 1, identity: "acme|7" })).toBe(false)
-    expect(trackPrecedence("s3", on, { escapeHatch: false, connections: 1, identity: "other|7" })).toBe(true)
+    expect(trackPrecedence("s3", on, { escapeHatch: false, connections: 1, types: 2, identity: "acme|7" })).toBe(true)
+    expect(trackPrecedence("s3", on, { escapeHatch: false, connections: 1, types: 2, identity: "acme|7" })).toBe(false)
+    expect(trackPrecedence("s3", on, { escapeHatch: false, connections: 1, types: 2, identity: "other|7" })).toBe(true)
     expect((events.at(-1) as any).escape_hatch).toBe(false)
   })
 
