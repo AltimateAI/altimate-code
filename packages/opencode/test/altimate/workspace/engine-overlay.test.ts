@@ -892,6 +892,20 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(h.added).toHaveLength(1)
   })
 
+  test("a config reload before the first boundary does not hide a changed choice from the bootstrapped engine", async () => {
+    // The reload re-derives the overlay with the new choices; the engine MCP
+    // started from the first load still has the old ones. (codex r2)
+    const h = install({})
+    await syncInternals.config!.get()
+    h.choices = '[["jira","9"]]'
+    await syncInternals.config!.invalidate()
+    await syncInternals.config!.get()
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(1)
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(1)
+  })
+
   test("a config reload between turns does not hide a changed choice from the running engine", async () => {
     // Any consumer can reload config, re-deriving the overlay with the new
     // choices while the engine that started with the old ones keeps running.

@@ -190,6 +190,10 @@ type DirectoryState = {
   droppedForeign?: boolean
   /** The key is set by organisation-managed config: nothing here claims it. */
   managed?: boolean
+  /** The connection choices as the first config load read them: the ones the
+   * engine MCP bootstrapped from that load started with. A reload before the
+   * first turn boundary re-derives `current`, not the engine. */
+  bootChoices?: string | null
   /** The workspace the directory's binding last read as, while workspace routing
    * applies to it: set whenever the overlay or a turn boundary reads the binding,
    * whatever happens to the engine afterwards. Null when unlinked, when the read
@@ -280,14 +284,9 @@ export async function overlay(
       const entry = engineEntry(workspace.id)
       config.mcp ??= {}
       config.mcp[DATAMATE_KEY] = entry
-      state.current = {
-        directory,
-        workspace,
-        entry,
-        refusal: null,
-        version: probe.version,
-        choices: choicesOf(workspace.id),
-      }
+      const choices = choicesOf(workspace.id)
+      if (state.applied === undefined && state.bootChoices === undefined) state.bootChoices = choices
+      state.current = { directory, workspace, entry, refusal: null, version: probe.version, choices }
       log.info("workspace engine overlay applied", { workspaceId: workspace.id, version: probe.version })
       return
     }
@@ -681,7 +680,9 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   await config().get()
   // First turn boundary: MCP bootstrapped from the config as loaded, i.e. from
   // the overlay as it stands now.
-  if (state.applied === undefined) state.applied = state.current
+  if (state.applied === undefined)
+    state.applied =
+      state.current && state.bootChoices !== undefined ? { ...state.current, choices: state.bootChoices } : state.current
 
   // Organisation-managed config owns the key: the feature is off for this
   // directory, whatever the binding says. Nothing to reload per turn.
