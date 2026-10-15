@@ -1,4 +1,3 @@
-import { Account } from "@/account"
 import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -6,6 +5,7 @@ import { Log } from "@/altimate/util/log"
 import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "@/altimate/util/machine-id"
+import { TelemetryIdentity } from "./identity"
 import { createHash, randomUUID } from "crypto"
 // altimate_change — first-run health: the event-loop stall monitor labels which thread stalled
 import { isMainThread } from "node:worker_threads"
@@ -1851,7 +1851,9 @@ export namespace Telemetry {
   let enabled = false
   let buffer: Event[] = []
   let flushTimer: ReturnType<typeof setInterval> | undefined
-  let userEmail = ""
+  // altimate_change — who the machine is signed in as (backend user uuid + tenant), for the
+  // funnel join with web events. Resolved off the stored credential in doInit(); see identity.ts.
+  let identity: TelemetryIdentity.Identity | undefined
   let machineId = ""
   let sessionId = ""
   let projectId = ""
@@ -1938,6 +1940,9 @@ export namespace Telemetry {
         source: clientSource,
         project_id: fields.project_id ?? projectId,
         ...(machineId && { machine_id: machineId }),
+        // altimate_change — the backend user uuid and tenant when signed in to Altimate, so a CLI
+        // row joins the PostHog person and the backend record for the same account.
+        ...(identity && { user_id: identity.user_id, tenant: identity.tenant }),
         // altimate_change — groups every event from one process launch. The onboarding funnel
         // spans the TUI main thread and the server worker, and most of it runs before any chat
         // session exists, so `session_id` is empty for the first half and real for the second —
@@ -1962,12 +1967,10 @@ export namespace Telemetry {
         iKey: cfg.iKey,
         tags: {
           "ai.session.id": sid || "startup",
-          // altimate_change start — use machine_id as fallback for anonymous user identification
-          // This IMPROVES privacy: previously all anonymous users shared ai.user.id=""
-          // which made them appear as one mega-user in analytics. Using the random UUID
-          // (already sent as a custom property) gives each machine a distinct identity
-          // without any PII. machine_id is a crypto.randomUUID() stored locally.
-          "ai.user.id": userEmail || machineId || "",
+          // altimate_change start — the backend user uuid when signed in, else the machine id.
+          // Anonymous machines each keep a distinct identity (the random machine UUID, already a
+          // custom property) instead of sharing ai.user.id="". No email, hashed or not, is sent.
+          "ai.user.id": identity?.user_id || machineId || "",
           // altimate_change end
           "ai.cloud.role": "altimate",
           "ai.application.ver": InstallationVersion,
@@ -2073,16 +2076,16 @@ export namespace Telemetry {
         return
       }
       appInsights = cfg
-      try {
-        // altimate_change start — bridge merge: Account.active() became async in v1.4.0
-        const account = await Account.active()
-        if (account?.email) {
-          userEmail = createHash("sha256").update(account.email.toLowerCase().trim()).digest("hex")
-        }
-        // altimate_change end
-      } catch {
-        // Account unavailable — proceed without user ID
-      }
+      // altimate_change start — identity for the funnel join: the backend user uuid and tenant from
+      // the stored Altimate credential, cached per credential so this costs no network unless the
+      // credential changed. Replaces the hashed account email. Not awaited: events flushed before it
+      // resolves carry only the machine id, and telemetry never waits on the backend.
+      void TelemetryIdentity.resolve()
+        .then((resolved) => {
+          identity = resolved
+        })
+        .catch(() => {})
+      // altimate_change end
       // altimate_change — use shared getOrCreateMachineId() from util/machine-id.ts.
       // Returns "" on all error conditions (ENOENT: mints new UUID; EACCES/corrupt/oversized:
       // logs + returns ""). No try/catch needed — all paths are handled inside.
@@ -2112,6 +2115,19 @@ export namespace Telemetry {
       // altimate_change end
     }
   }
+
+  // altimate_change start — re-resolve the signed-in user after a sign-in or sign-out in this
+  // process (the browser login flow saves the credential while telemetry is already running).
+  /** Re-resolve who the machine is signed in as; clears it when no credential is stored. */
+  export async function refreshIdentity(): Promise<void> {
+    identity = await TelemetryIdentity.resolve({ refresh: true })
+  }
+
+  /** Test seam. */
+  export function identityForTest(): TelemetryIdentity.Identity | undefined {
+    return identity
+  }
+  // altimate_change end
 
   export function setContext(opts: { sessionId: string; projectId: string }) {
     sessionId = opts.sessionId
@@ -2466,10 +2482,9 @@ export namespace Telemetry {
     sessionId = ""
     projectId = ""
     machineId = ""
-    // doInit() only assigns userEmail when Account.active() returns one, so without this a
-    // logout followed by a re-init in the same process kept hashing the previous account into
-    // ai.user.id.
-    userEmail = ""
+    // Cleared so a sign-out followed by a re-init in the same process does not keep stamping the
+    // previous account on events; doInit() resolves it again from whatever credential is on disk.
+    identity = undefined
     // NOTE: cachedLaunchId is deliberately NOT cleared here. session/prompt.ts shuts telemetry
     // down at the end of every session, so clearing it would mint a fresh launch_id per prompt in
     // a long-lived `serve` process and shatter the per-launch correlation it exists to provide.
