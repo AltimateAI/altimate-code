@@ -2,7 +2,7 @@ import z from "zod"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { normalizeMqlCommand, type Connector } from "@altimateai/drivers"
-import { isQueryTimeoutError, QueryTimeoutError } from "@altimateai/drivers/types"
+import { QueryTimeoutError } from "@altimateai/drivers/types"
 import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
 import { isResultByteLimitError, rowBytes } from "@altimateai/drivers/result-byte-limit"
 import { Tool } from "../../tool/tool"
@@ -19,8 +19,6 @@ export const HARD_MAX_ROWS = 20_000_000
 /** Serialized row data, enforced while drivers consume rows (plus one row/client chunk in flight). */
 export const DEFAULT_MAX_BYTES = 256 * 1024 * 1024
 export const HARD_MAX_BYTES = 2 * 1024 * 1024 * 1024
-const FALLBACK_MAX_ROWS = 200_000
-const SAMPLE_ROWS = 1000
 const JSONL_BUFFER_CHARS = 1_000_000
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
@@ -216,34 +214,14 @@ function boundedMongo(sql: string, limit: number): string {
   return JSON.stringify({ ...cmd, pipeline: [...cmd.pipeline, { $limit: limit }] })
 }
 
-function mongoPreflightQueries(sql: string, maxRows: number) {
-  const cmd = JSON.parse(sql)
-  if (cmd.command === "find") {
-    const limit = typeof cmd.limit === "number" && cmd.limit > 0 ? cmd.limit : Infinity
-    return {
-      count: JSON.stringify({ ...cmd, command: "countDocuments", limit: Math.min(limit, maxRows + 1) }),
-      sample: JSON.stringify({ ...cmd, limit: Math.min(limit, SAMPLE_ROWS) }),
-      emptyCountIsZero: false,
-    }
-  }
-  if (cmd.command === "aggregate" && Array.isArray(cmd.pipeline)) {
-    return {
-      count: JSON.stringify({ ...cmd, pipeline: [...cmd.pipeline, { $limit: maxRows + 1 }, { $count: "n" }] }),
-      sample: JSON.stringify({ ...cmd, pipeline: [...cmd.pipeline, { $limit: SAMPLE_ROWS }] }),
-      // MongoDB's $count returns no document for an empty input.
-      emptyCountIsZero: true,
-    }
-  }
-  throw new Error(`Pre-flight count is unsupported for MongoDB command "${cmd.command}"`)
-}
-
 async function executeSource(source: Connector, input: MaterializeInput, sql: string, limit: number, maxBytes: number) {
   const config = Registry.getConfig(input.source_warehouse)
   const type = Registry.canonicalType(config?.type)
+  const controller = type === "postgres" ? new AbortController() : undefined
   const options = {
     queryTimeoutMs: input.query_timeout_ms,
     maxResultBytes: maxBytes,
-    ...(type === "postgres" ? { readOnly: true } : {}),
+    ...(controller ? { readOnly: true, signal: controller.signal } : {}),
   }
   const work = source.execute(sql, limit, undefined, options)
   // Local engines own queue admission and cancellation. An outer timer would abandon
@@ -255,89 +233,16 @@ async function executeSource(source: Connector, input: MaterializeInput, sql: st
     return await Promise.race([
       work,
       new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new QueryTimeoutError({ engine: type ?? "database", timeoutMs: deadline, cancelled: false })),
-          deadline + 5_000,
-        )
+        timer = setTimeout(() => {
+          const error = new QueryTimeoutError({ engine: type ?? "database", timeoutMs: deadline, cancelled: false })
+          controller?.abort(error)
+          reject(error)
+        }, deadline)
       }),
     ])
   } finally {
     if (timer) clearTimeout(timer)
   }
-}
-
-async function preflight(
-  source: Connector,
-  input: MaterializeInput,
-  sql: string,
-  maxRows: number,
-  maxBytes: number,
-  mongo: boolean,
-) {
-  const type = Registry.canonicalType(Registry.getConfig(input.source_warehouse)?.type)
-  let count: number | undefined
-  let estimatedBytes: number | undefined
-  try {
-    const probes = mongo ? mongoPreflightQueries(sql, maxRows) : undefined
-    const alias = type === "oracle" ? "" : "AS "
-    const from = `FROM (\n${sql}\n) ${alias}__m`
-    const boundedCount =
-      type === "sqlserver"
-        ? `SELECT TOP (${maxRows + 1}) 1 AS __one ${from}`
-        : type === "oracle"
-          ? `SELECT 1 AS __one ${from} WHERE ROWNUM <= ${maxRows + 1}`
-          : `SELECT 1 AS __one ${from} LIMIT ${maxRows + 1}`
-    const result = await executeSource(
-      source,
-      input,
-      probes?.count ?? `SELECT count(*) FROM (${boundedCount}) ${alias}__c`,
-      // MongoDB caps pipeline stages against this limit before running $count.
-      mongo ? maxRows + 1 : 1,
-      maxBytes,
-    )
-    const emptyCount = probes?.emptyCountIsZero && result.rows.length === 0
-    const value = emptyCount ? 0 : result.rows[0]?.[0]
-    const n =
-      typeof value === "number" || typeof value === "bigint" || (typeof value === "string" && value.trim())
-        ? Number(value)
-        : NaN
-    if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0 || result.truncated || (!emptyCount && result.rows.length !== 1)) {
-      throw new Error("The count query did not return a valid row count")
-    }
-    count = n
-    if (count <= maxRows) {
-      const sample = await executeSource(
-        source,
-        input,
-        probes?.sample ?? boundedSql(sql, type, SAMPLE_ROWS),
-        SAMPLE_ROWS,
-        maxBytes,
-      )
-      if (count > 0 && sample.rows.length === 0) throw new Error("The sample query returned no rows")
-      estimatedBytes = sample.rows.length
-        ? count * (sample.rows.reduce((sum, row) => sum + rowBytes(row), 0) / sample.rows.length)
-        : 0
-    }
-  } catch (e) {
-    if (isQueryTimeoutError(e) || isResultByteLimitError(e)) throw e
-    const cap = Math.min(maxRows, FALLBACK_MAX_ROWS)
-    return {
-      maxRows: cap,
-      warnings: [
-        `Pre-flight estimate unavailable (${e instanceof Error ? e.message : String(e)}); extraction row cap clamped to ${cap.toLocaleString("en-US")} rows. The byte cap is enforced during transfer.`,
-      ],
-    }
-  }
-  if (count !== undefined && (count > maxRows || (estimatedBytes ?? 0) > maxBytes)) {
-    const rows = count > maxRows ? `more than ${maxRows.toLocaleString("en-US")}` : `about ${count.toLocaleString("en-US")}`
-    const size = estimatedBytes === undefined ? "" : ` ≈ ${sizeLabel(estimatedBytes)}`
-    const cap = count > maxRows ? `row cap of ${maxRows.toLocaleString("en-US")} rows` : `${sizeLabel(maxBytes)} bound`
-    throw new MaterializeError(
-      `The source query has ${rows} rows${size}, above the ${cap}; nothing was materialized. ` +
-        `Aggregate or filter in the source query, select fewer columns, or raise max_rows (hard limit ${HARD_MAX_ROWS.toLocaleString("en-US")}) / max_bytes (hard limit 2 GiB).`,
-    )
-  }
-  return { maxRows, warnings: [] }
 }
 
 export async function materialize(input: MaterializeInput): Promise<MaterializeResult> {
@@ -349,7 +254,7 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
     )
   }
   // Strict-schema callers send 0 for "not specified"; a zero cap would refuse every result.
-  let maxRows = Math.min(Math.max(Math.floor(input.max_rows || DEFAULT_MAX_ROWS), 1), HARD_MAX_ROWS)
+  const maxRows = Math.min(Math.max(Math.floor(input.max_rows || DEFAULT_MAX_ROWS), 1), HARD_MAX_ROWS)
   const requestedBytes = input.max_bytes || Number(process.env["ALTIMATE_SCRATCH_MAX_BYTES"] || DEFAULT_MAX_BYTES)
   const maxBytes = Math.min(
     Math.max(Math.floor(Number.isFinite(requestedBytes) ? requestedBytes : DEFAULT_MAX_BYTES), 1),
@@ -358,7 +263,7 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
 
   const { mongo, sql } = assertReadOnlySource(input.source_warehouse, input.sql)
   // Keep structural guards on all sources. PostgreSQL additionally executes each
-  // source probe in a pinned READ ONLY transaction and rolls it back, so writing
+  // source read in a pinned READ ONLY transaction and rolls it back, so writing
   // UDFs fail at the database boundary and pg_notify cannot deliver notifications.
   // Resolve first so a configured warehouse using the reserved name fails explicitly.
   const source = await Registry.get(input.source_warehouse)
@@ -369,24 +274,57 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
     )
   }
   await Registry.get(SCRATCH_NAME)
-  const warnings: string[] = []
-  return withScratchConnection(async (scratch, directory) => {
-    const connection = isScratch(input.source_warehouse) ? scratch : source
-    const guard = await preflight(connection, input, sql, maxRows, maxBytes, mongo)
-    maxRows = guard.maxRows
-    warnings.push(...guard.warnings)
-    const type = Registry.canonicalType(Registry.getConfig(input.source_warehouse)?.type)
-    const query = mongo ? boundedMongo(sql, maxRows + 1) : boundedSql(sql, type, maxRows + 1)
-    const result = await executeSource(connection, input, query, maxRows + 1, maxBytes)
-
-    if (result.rows.length > maxRows || result.truncated) {
+  const type = Registry.canonicalType(Registry.getConfig(input.source_warehouse)?.type)
+  const query = mongo ? boundedMongo(sql, maxRows + 1) : boundedSql(sql, type, maxRows + 1)
+  // Buffer one bounded source read before taking the destination's transaction lock.
+  // For a scratch source, its managed connector serializes this read on its own.
+  const result = await executeSource(source, input, query, maxRows + 1, maxBytes).catch((e) => {
+    if (isResultByteLimitError(e)) {
       throw new MaterializeError(
-        `The source query returned more than the row cap of ${maxRows.toLocaleString("en-US")} rows; nothing was materialized. ` +
-          "Aggregate or filter in the source query, or raise max_rows (hard limit " +
-          `${HARD_MAX_ROWS.toLocaleString("en-US")}).`,
+        `The source result is above the ${sizeLabel(maxBytes)} bound; transfer stopped and nothing was materialized. ` +
+          "Select fewer columns, filter/aggregate in the source query, or raise max_bytes (hard limit 2 GiB).",
       )
     }
+    throw e
+  })
+  if (result.rows.length > maxRows || result.truncated) {
+    throw new MaterializeError(
+      `The source query returned more than the row cap of ${maxRows.toLocaleString("en-US")} rows; nothing was materialized. ` +
+        "Aggregate or filter in the source query, or raise max_rows (hard limit " +
+        `${HARD_MAX_ROWS.toLocaleString("en-US")}).`,
+    )
+  }
 
+  const names = uniqueColumnNames(result.columns)
+  let bytes = 0
+  for (const row of result.rows) {
+    bytes += rowBytes(row)
+    if (bytes > maxBytes) {
+      throw new MaterializeError(
+        `The source result is about ${sizeLabel(bytes)}, above the ${sizeLabel(maxBytes)} bound; nothing was materialized. ` +
+          "Select fewer columns, filter/aggregate in the source query, or raise max_bytes (hard limit 2 GiB).",
+      )
+    }
+  }
+
+  // Type inference (the drivers expose no column metadata, only names, so the type comes from the values:
+  // integers stay BIGINT, any fractional value widens to DOUBLE, mixed kinds fall back to VARCHAR, an
+  // all-NULL column is VARCHAR).
+  const types: ScratchType[] = []
+  for (let c = 0; c < names.length; c++) {
+    let t: ScratchType | null = null
+    for (const row of result.rows) {
+      const v = row[c]
+      if (t !== "VARCHAR") {
+        const k = kindOf(v)
+        if (k !== null) t = widen(t, k === "JSON" ? "VARCHAR" : k)
+      }
+    }
+    types.push(t ?? "VARCHAR")
+  }
+
+  const warnings: string[] = []
+  return withScratchConnection(async (scratch, directory) => {
     const run = (sql: string) => scratch.execute(sql, undefined, undefined, { noLimit: true })
     const scratchRows = async (sql: string) => (await run(sql)).rows
     const q = quoteIdent(table)
@@ -401,7 +339,6 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
       )
     }
 
-    const names = uniqueColumnNames(result.columns)
     if (names.length === 0) {
       let total = 0
       if (mode === "replace") {
@@ -411,33 +348,6 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
         total = Number((await scratchRows(`SELECT count(*) FROM ${q}`))[0]?.[0] ?? 0)
       }
       return { table, mode, rows: 0, total_rows: total, columns: [], materialized: false, warnings }
-    }
-
-    let bytes = 0
-    for (const row of result.rows) {
-      bytes += rowBytes(row)
-      if (bytes > maxBytes) {
-        throw new MaterializeError(
-          `The source result is about ${sizeLabel(bytes)}, above the ${sizeLabel(maxBytes)} bound; nothing was materialized. ` +
-            "Select fewer columns, filter/aggregate in the source query, or raise max_bytes (hard limit 2 GiB).",
-        )
-      }
-    }
-
-    // Type inference (the drivers expose no column metadata, only names, so the type comes from the values:
-    // integers stay BIGINT, any fractional value widens to DOUBLE, mixed kinds fall back to VARCHAR, an
-    // all-NULL column is VARCHAR).
-    const types: ScratchType[] = []
-    for (let c = 0; c < names.length; c++) {
-      let t: ScratchType | null = null
-      for (const row of result.rows) {
-        const v = row[c]
-        if (t !== "VARCHAR") {
-          const k = kindOf(v)
-          if (k !== null) t = widen(t, k === "JSON" ? "VARCHAR" : k)
-        }
-      }
-      types.push(t ?? "VARCHAR")
     }
 
     let insertNames = names
@@ -506,15 +416,6 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
       materialized: true,
       warnings,
     }
-  }).catch((e) => {
-    if (isResultByteLimitError(e)) {
-      throw new MaterializeError(
-        `The source result is above the ${sizeLabel(maxBytes)} bound; transfer stopped and nothing was materialized. ` +
-          "Select fewer columns, filter/aggregate in the source query, or raise max_bytes (hard limit 2 GiB).",
-      )
-    }
-    if (!warnings.length || isQueryTimeoutError(e)) throw e
-    throw new MaterializeError(`${warnings.join("\n")}\n${e instanceof Error ? e.message : String(e)}`)
   })
 }
 
