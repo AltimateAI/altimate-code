@@ -411,6 +411,9 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
   // a blocking git call — is reached only for a project with no local row, which
   // is the case unlink exists to repair.
   let identifier: ProjectIdentifier
+  // The workspace being unlinked, for telemetry: the local row's id, else the one the
+  // server lookup below finds (the no-local-row recovery path).
+  let unlinkingId: number | undefined = was?.datamateId
   if (was?.repoRemote) identifier = { repoRemote: was.repoRemote }
   else if (was?.projectPath) identifier = { projectPath: was.projectPath }
   else {
@@ -431,8 +434,9 @@ export async function unlink(directory: string): Promise<UnlinkReport> {
     if (hit?.matchedBy === "path" && detected.projectPath) {
       identifier = { projectPath: detected.projectPath }
     }
+    unlinkingId ??= hit?.binding?.datamate_id
   }
-  const removedServerSide = await WorkspaceApi.unbindProject(identifier, was?.datamateId)
+  const removedServerSide = await WorkspaceApi.unbindProject(identifier, unlinkingId)
 
   // Only the row unlink started from. A relink that completed while the DELETE
   // was in flight recorded a new row, and removing that — then memoizing the
