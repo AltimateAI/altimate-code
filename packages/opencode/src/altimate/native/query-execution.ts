@@ -50,3 +50,5 @@ export async function executeQuery<T>(
     for (const signal of parents) signal.removeEventListener("abort", abort)
   }
 }
+
+export * as QueryExecution from "./query-execution"
