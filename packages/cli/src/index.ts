@@ -1,5 +1,7 @@
 #!/usr/bin/env bun
 
+// altimate: ALT-F01
+import { Env } from "@opencode/util/env"
 import { ensurePluginRuntime } from "@opencode/plugin/runtime"
 import { NodeRuntime, NodeServices } from "@effect/platform-node"
 import { Cause, Effect } from "effect"
@@ -120,7 +122,8 @@ Effect.gen(function* () {
     LayerNode.compile(LayerNode.group([Global.node, AppProcess.node, Npm.node, EffectFlock.node]), {
       replacements: [
         Global.node.replace(
-          Global.layerWith(process.env.OPENCODE_CONFIG_DIR ? { config: process.env.OPENCODE_CONFIG_DIR } : {}),
+          // altimate: ALT-F01
+          Global.layerWith(Env.get("OPENCODE_CONFIG_DIR") ? { config: Env.get("OPENCODE_CONFIG_DIR") } : {}),
         ),
       ],
     }),
@@ -129,7 +132,8 @@ Effect.gen(function* () {
     Observability.layer({
       endpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
       headers: process.env.OTEL_EXPORTER_OTLP_HEADERS,
-      client: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT,
+      // altimate: ALT-F01
+      client: Env.get("OPENCODE_CLIENT") ?? OPENCODE_ARTIFACT,
       version: OPENCODE_VERSION,
       channel: OPENCODE_CHANNEL,
     }),

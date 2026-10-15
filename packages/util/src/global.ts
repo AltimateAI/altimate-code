@@ -8,13 +8,18 @@ import { Context, Effect, Layer } from "effect"
 import { roots } from "#global-roots"
 import { Flock } from "./flock.js"
 import { makeGlobalNode } from "./effect/app-node.js"
+// altimate: ALT-F01
+import { Identity } from "./identity.js"
+import { Env } from "./env.js"
 
-const app = "opencode"
+// altimate: ALT-F01
+const app = Identity.app
 const { data, cache, config, state, tmp } = roots(app)
 
 const paths = {
   get home() {
-    return process.env.OPENCODE_TEST_HOME ?? os.homedir()
+    // altimate: ALT-F01
+    return Env.get("OPENCODE_TEST_HOME") ?? os.homedir()
   },
   data,
   bin: path.join(cache, "bin"),
@@ -76,7 +81,8 @@ const acquire = (input: Partial<Interface>) =>
 
 const layer = Layer.effect(
   Service,
-  Effect.suspend(() => acquire({ config: process.env.OPENCODE_CONFIG_DIR ?? Path.config })),
+  // altimate: ALT-F01
+  Effect.suspend(() => acquire({ config: Env.get("OPENCODE_CONFIG_DIR") ?? Path.config })),
 )
 
 export const node = makeGlobalNode({ service: Service, layer: layer, deps: [] })

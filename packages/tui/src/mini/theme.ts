@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { Env } from "@opencode/util/env"
 import { RGBA, SyntaxStyle, type CliRenderer, type ColorInput, type TerminalColors } from "@opentui/core"
 import { generateSyntax, resolveThemeDocument, themeModes, type ResolvedTheme } from "@opencode/theme/tui"
 import { allThemes, getOpenCodeTheme, isThemeSource, parseTheme, type ThemeDocumentSource } from "../theme"
@@ -310,7 +312,8 @@ async function themeSource(
   if (name === "system" && colors) return generateSystem(colors, mode)
   const { Global } = await import("@opencode/util/global")
   const custom = await discoverThemes(
-    configDirectories(process.env.OPENCODE_CONFIG_DIR ?? Global.Path.config, process.cwd()),
+    // altimate: ALT-F01
+    configDirectories(Env.get("OPENCODE_CONFIG_DIR") ?? Global.Path.config, process.cwd()),
   )
   const source = custom[name] ?? allThemes()[name] ?? getOpenCodeTheme()
   return isThemeSource(source) ? source : getOpenCodeTheme()

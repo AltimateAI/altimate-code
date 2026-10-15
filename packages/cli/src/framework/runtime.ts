@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { Env } from "@opencode/util/env"
 import { Effect, FileSystem, Scope } from "effect"
 import { Command } from "effect/cli"
 import { PrintLogs } from "../commands/commands"
@@ -95,7 +97,8 @@ function provide(node: Spec.Any, handlers: ReadonlyArray<LazyHandler>): Provided
     ? node.spec.pipe(
         Command.withHandler((input) =>
           Effect.gen(function* () {
-            if (yield* PrintLogs) process.env.OPENCODE_PRINT_LOGS = "1"
+            // altimate: ALT-F01
+            if (yield* PrintLogs) process.env[Env.keys("OPENCODE_PRINT_LOGS")[0]] = "1"
             const module = yield* Effect.promise(handler.load)
             return yield* module.default(input)
           }),

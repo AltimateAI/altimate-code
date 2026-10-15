@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { Env } from "@opencode/util/env"
 import { Global } from "@opencode/util/global"
 import { AppProcess } from "@opencode/util/process"
 import { EffectFlock } from "@opencode/util/effect-flock"
@@ -198,7 +200,9 @@ const make = Effect.gen(function* () {
   // On Windows a bare `bash` may be the WSL launcher, which cannot run the installer against Windows paths.
   const installerBash = Effect.fnUntraced(function* () {
     if (process.platform !== "win32") return "bash"
-    if (process.env.OPENCODE_GIT_BASH_PATH) return process.env.OPENCODE_GIT_BASH_PATH
+    // altimate: ALT-F01
+    const gitbash = Env.get("OPENCODE_GIT_BASH_PATH")
+    if (gitbash) return gitbash
     const git = yield* exec(["git", "--exec-path"]).pipe(Effect.orElseSucceed(() => undefined))
     const bash = git?.code === 0 ? path.resolve(git.stdout.trim(), "..", "..", "..", "bin", "bash.exe") : undefined
     if (bash && (yield* fs.exists(bash).pipe(Effect.orElseSucceed(() => false)))) return bash
@@ -531,7 +535,8 @@ const make = Effect.gen(function* () {
   })
 
   const inspect = Effect.fnUntraced(function* () {
-    if (OPENCODE_LOCAL || ["1", "true"].includes(process.env.OPENCODE_DISABLE_AUTOUPDATE?.toLowerCase() ?? "")) {
+    // altimate: ALT-F01
+    if (OPENCODE_LOCAL || ["1", "true"].includes(Env.get("OPENCODE_DISABLE_AUTOUPDATE")?.toLowerCase() ?? "")) {
       yield* Effect.logInfo("update check skipped", {
         reason: OPENCODE_LOCAL ? "local-install" : "disabled",
         version: OPENCODE_VERSION,

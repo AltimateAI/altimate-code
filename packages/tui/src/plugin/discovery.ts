@@ -1,13 +1,16 @@
 import { readdir, stat } from "node:fs/promises"
 import path from "node:path"
 import { localSource } from "@opencode/plugin/source"
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import { isMissingPath, localProjectDirectory, projectConfigDirectories } from "../util/config-directories"
 
 export { localSource }
 
 export async function localPluginDirectories(cwd: string, configDirectory: string) {
   const projectDirectory = await localProjectDirectory(cwd)
-  const projectConfig = path.join(projectDirectory, ".opencode")
+  // altimate: ALT-F01
+  const projectConfig = path.join(projectDirectory, `.${Identity.configBasenames[0]}`)
   const directories = [configDirectory, ...projectConfigDirectories(projectDirectory, cwd)]
   const exists = await Promise.all(
     directories.map(async (directory) => {

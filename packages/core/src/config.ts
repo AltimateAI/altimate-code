@@ -206,9 +206,13 @@ export const layer = (options?: Options) =>
         return info ? [new Document({ type: "document", path: plist, info })] : []
       })
 
-      const loadDirectory = Effect.fnUntraced(function* (directory: AbsolutePath) {
+      // altimate: ALT-F01
+      const loadDirectory = Effect.fnUntraced(function* (
+        directory: AbsolutePath,
+        names: readonly string[] = ConfigDiscovery.names,
+      ) {
         return [
-          ...(yield* Effect.forEach(ConfigDiscovery.names, (file) => loadFile(path.join(directory, file))).pipe(
+          ...(yield* Effect.forEach(names, (file) => loadFile(path.join(directory, file))).pipe(
             Effect.map((configs) => configs.filter((config): config is Document => config !== undefined)),
           )),
           new Directory({ type: "directory", path: directory }),
@@ -246,7 +250,10 @@ export const layer = (options?: Options) =>
         // in reverse load order, so managed policies split off and load first
         // to keep final file-based authority.
         const managed = [
-          ...(sources.system?.present ? yield* loadDirectory(sources.system.path).pipe(Effect.orDie) : []),
+          // altimate: ALT-F01
+          ...(sources.system?.present
+            ? yield* loadDirectory(sources.system.path, ConfigDiscovery.directoryNames).pipe(Effect.orDie)
+            : []),
           ...(sources.preferences ? yield* loadPreferences(sources.preferences).pipe(Effect.orDie) : []),
         ]
         const managedPolicies = managed
@@ -271,7 +278,8 @@ export const layer = (options?: Options) =>
         const globalSupplementary = sources.global ? yield* loadDirectory(sources.global).pipe(Effect.orDie) : []
         const projectSupplementary = yield* Effect.forEach(
           sources.project.filter((root) => root.present),
-          (root) => loadDirectory(root.path),
+          // altimate: ALT-F01
+          (root) => loadDirectory(root.path, ConfigDiscovery.directoryNames),
         ).pipe(
           Effect.orDie,
           Effect.map((entries) => entries.flat()),
@@ -381,8 +389,8 @@ export const layer = (options?: Options) =>
         function* (patch: Patch) {
           const directory = initial.global ?? AbsolutePath.make(globalService.config)
           const candidates = ConfigDiscovery.names.map((name) => path.join(directory, name))
-          const filepath =
-            (yield* Effect.filter(candidates, fs.isFile)).at(-1) ?? path.join(directory, "opencode.jsonc")
+          // altimate: ALT-F01
+          const filepath = (yield* Effect.filter(candidates, fs.isFile)).at(-1) ?? candidates.at(-1)!
           const text = (yield* fs.readFileStringSafe(filepath)) ?? "{}\n"
           const updated = yield* Effect.try({
             try: () =>

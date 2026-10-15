@@ -1,5 +1,9 @@
 import path from "node:path"
+// altimate: ALT-F01
+import { existsSync } from "node:fs"
 
+// altimate: ALT-F01
+const startupDirectory = process.cwd()
 const entrypoint = process.argv[1] ? path.resolve(process.argv[1]) : undefined
 
 export function selfCommand() {
@@ -7,7 +11,22 @@ export function selfCommand() {
   if (runtime !== "bun" && runtime !== "node" && runtime !== "nodejs") return [process.execPath]
   if (!entrypoint) throw new Error("Failed to resolve CLI entrypoint")
   if (runtime === "node" || runtime === "nodejs") return [process.execPath, ...nodeFlags(), entrypoint]
-  return [process.execPath, entrypoint]
+  // altimate: ALT-F01
+  const preloads =
+    typeof globalThis.__OPENCODE_IDENTITY__ === "undefined"
+      ? []
+      : process.execArgv.flatMap((arg, index, args) => {
+          const file =
+            arg === "--preload"
+              ? args[index + 1]
+              : arg.startsWith("--preload=")
+                ? arg.slice("--preload=".length)
+                : undefined
+          if (!file) return []
+          const resolved = path.resolve(startupDirectory, file)
+          return ["--preload", file.startsWith(".") || existsSync(resolved) ? resolved : file]
+        })
+  return [process.execPath, ...preloads, entrypoint]
 }
 
 function nodeFlags() {

@@ -4,6 +4,8 @@ import { readFile, stat, writeFile } from "node:fs/promises"
 import { Effect, Option } from "effect"
 import { applyEdits, modify } from "jsonc-parser"
 import { Global } from "@opencode/util/global"
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import { Commands } from "../../commands"
 import { Runtime } from "../../../framework/runtime"
 
@@ -38,12 +40,11 @@ export default Runtime.handler(
 )
 
 export async function resolveConfigPath(directory: string) {
-  const candidates = [
-    path.join(directory, "opencode.json"),
-    path.join(directory, "opencode.jsonc"),
-    path.join(directory, ".opencode", "opencode.json"),
-    path.join(directory, ".opencode", "opencode.jsonc"),
-  ]
+  // altimate: ALT-F01
+  const candidates = [directory, ...Identity.configBasenames.map((name) => path.join(directory, `.${name}`))].flatMap(
+    (root) =>
+      Identity.configBasenames.flatMap((name) => [path.join(root, `${name}.json`), path.join(root, `${name}.jsonc`)]),
+  )
   for (const candidate of candidates) {
     if (
       await stat(candidate).then(

@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import type { DiscoverOptions, Endpoint, Info } from "./service.js"
@@ -37,7 +39,8 @@ function fail(message: string) {
 
 /** The default registration file. */
 export function fallback() {
-  return join(process.env["XDG_STATE_HOME"] ?? join(homedir(), ".local", "state"), "opencode", "service.json")
+  // altimate: ALT-F01
+  return join(process.env["XDG_STATE_HOME"] ?? join(homedir(), ".local", "state"), Identity.serviceName, "service.json")
 }
 
 /** Whether two registrations describe the same service instance. */

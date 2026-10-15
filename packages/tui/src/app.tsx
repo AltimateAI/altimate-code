@@ -6,6 +6,8 @@ import { Effect, Latch } from "effect"
 import { Service, type Endpoint } from "@opencode/client/effect/service"
 import { OpenCode, type SessionInfo } from "@opencode/client"
 import { Global } from "@opencode/util/global"
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import { ClipboardProvider, useClipboard } from "./context/clipboard"
 import { LogProvider, type LogSink } from "./context/log"
 import { ExitProvider, useExit } from "./context/exit"
@@ -607,23 +609,27 @@ function App() {
     if (!terminalTitleEnabled()) return
 
     if (route.data.type === "home") {
-      renderer.setTerminalTitle("OpenCode")
+      // altimate: ALT-F01
+      renderer.setTerminalTitle(Identity.title.home)
       return
     }
 
     if (route.data.type === "session") {
       const title = session?.title
       if (!title || isFallbackTitle(title)) {
-        renderer.setTerminalTitle("OpenCode")
+        // altimate: ALT-F01
+        renderer.setTerminalTitle(Identity.title.home)
         return
       }
 
-      renderer.setTerminalTitle(`OC | ${title.length > 40 ? title.slice(0, 37) + "…" : title}`)
+      // altimate: ALT-F01
+      renderer.setTerminalTitle(`${Identity.title.prefix} | ${title.length > 40 ? title.slice(0, 37) + "…" : title}`)
       return
     }
 
     if (route.data.type === "plugin") {
-      renderer.setTerminalTitle(`OC | ${route.data.name}`)
+      // altimate: ALT-F01
+      renderer.setTerminalTitle(`${Identity.title.prefix} | ${route.data.name}`)
     }
   })
 

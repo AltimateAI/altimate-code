@@ -1,9 +1,5 @@
-export const logo = {
-  left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
-  right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
-}
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 
-export const go = {
-  left: ["    ", "█▀▀▀", "█_^█", "▀▀▀▀"],
-  right: ["    ", "█▀▀█", "█__█", "▀▀▀▀"],
-}
+export const logo = Identity.logo
+export const go = Identity.narrowLogo

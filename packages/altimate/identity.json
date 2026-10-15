@@ -1,0 +1,26 @@
+{
+  "app": "altimate-code",
+  "displayName": "Altimate Code",
+  "userAgent": "altimate-code",
+  "envPrefixes": ["ALTIMATE_CLI_", "OPENCODE_"],
+  "configBasenames": ["altimate-code", "opencode"],
+  "servicePort": 41342,
+  "serviceName": "altimate-code",
+  "logo": {
+    "left": [
+      "                                ",
+      "▄▀█ █   ▀█▀ █ █▀▄▀█ ▄▀█ ▀█▀ █▀▀",
+      "█▀█ █▄▄  █  █ █ ▀ █ █▀█  █  ██▄",
+      "                                "
+    ],
+    "right": ["                 ", "█▀▀ █▀█ █▀▄ █▀▀", "█▄▄ █▄█ █▄▀ ██▄", "                 "]
+  },
+  "narrowLogo": {
+    "left": ["   ", "▄▀█", "█▀█", "   "],
+    "right": ["   ", "▄▀█", "█▀█", "   "]
+  },
+  "title": {
+    "home": "Altimate Code",
+    "prefix": "Altimate Code"
+  }
+}

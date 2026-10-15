@@ -34,6 +34,7 @@
   },
   "dependencies": {
     "@opencode/schema": "workspace:*",
+    "@opencode/util": "workspace:*",
     "@opencode/protocol": "workspace:*"
   },
   "peerDependencies": {

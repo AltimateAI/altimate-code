@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { get } from "@opencode/util/env"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
 import { run } from "@opencode/tui"
@@ -95,9 +97,11 @@ export default Runtime.handler(Commands, (input) =>
     const service = server.service
     yield* run({
       app: {
-        name: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT,
+        // altimate: ALT-F01
+        name: get("OPENCODE_CLIENT") ?? OPENCODE_ARTIFACT,
         version: OPENCODE_VERSION,
-        channel: process.env.OPENCODE_TUI_CHANNEL ?? OPENCODE_CHANNEL,
+        // altimate: ALT-F01
+        channel: get("OPENCODE_TUI_CHANNEL") ?? OPENCODE_CHANNEL,
         highlights: OPENCODE_HIGHLIGHTS,
       },
       server: {

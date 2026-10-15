@@ -1,4 +1,6 @@
 import { Global } from "@opencode/util/global"
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import { OPENCODE_CHANNEL, OPENCODE_VERSION } from "../version"
 import { Hash } from "@opencode/util/hash"
 import { Service } from "@opencode/client/effect/service"
@@ -44,9 +46,11 @@ export function filename(channel = OPENCODE_CHANNEL) {
 }
 
 export function defaultPort(channel = OPENCODE_CHANNEL) {
-  if (channel === "latest" || channel === "dev" || channel === "beta" || channel === "next") return 0xc0de
-  if (channel === "local") return 0xc0df
-  return 10_000 + (Number.parseInt(Hash.fast(channel).slice(0, 8), 16) % 50_000)
+  // altimate: ALT-F01
+  if (channel === "latest" || channel === "dev" || channel === "beta" || channel === "next") return Identity.servicePort
+  if (channel === "local") return Identity.servicePort + 1
+  const seed = Identity.serviceName === "opencode" ? channel : `${Identity.serviceName}:${channel}`
+  return 10_000 + (Number.parseInt(Hash.fast(seed).slice(0, 8), 16) % 50_000)
 }
 
 export function legacyFilename(channel = OPENCODE_CHANNEL) {

@@ -1,5 +1,7 @@
 export * as V1Migration from "./v1-migration.js"
 
+// altimate: ALT-F01
+import { Env } from "@opencode/util/env"
 import { Cause, Effect, Layer, Option, Schema, Semaphore } from "effect"
 import { Database } from "./database.js"
 import { SessionMessageTable, SessionTable } from "../session/sql.js"
@@ -701,7 +703,8 @@ export function run(options: Options = {}): Effect.Effect<RunResult, never, Data
 
 function nextPath(options: Options, data: string) {
   if (options.nextDatabasePath) return options.nextDatabasePath
-  if (process.env.OPENCODE_DB === ":memory:") return undefined
+  // altimate: ALT-F01
+  if (Env.get("OPENCODE_DB") === ":memory:") return undefined
   return path.join(data, "opencode-next.db")
 }
 

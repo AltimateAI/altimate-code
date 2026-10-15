@@ -2,6 +2,8 @@ export * as App from "./app.js"
 
 import { Context, Layer } from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 
 export interface Info {
   readonly name: string
@@ -15,14 +17,16 @@ export const Metadata = Context.Reference<Info>("@opencode/App", {
 
 export function make(input: Partial<Info> = {}): Info {
   return {
-    name: input.name ?? "opencode",
+    // altimate: ALT-F01
+    name: input.name ?? Identity.app,
     version: input.version ?? "unknown",
     channel: input.channel ?? "unknown",
   }
 }
 
 export function useragent(app: Info) {
-  return `opencode/${app.channel}/${app.version}/${app.name}`
+  // altimate: ALT-F01
+  return `${Identity.userAgent}/${app.channel}/${app.version}/${app.name}`
 }
 
 export const layer = (input?: Partial<Info>) => Layer.succeed(Metadata, make(input))

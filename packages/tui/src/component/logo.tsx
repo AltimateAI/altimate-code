@@ -49,13 +49,16 @@ export function Logo() {
     })
   }
 
+  // altimate: ALT-F01
+  const leftWidth = Math.max(...logo.left.map((line) => line.length))
+  const rightWidth = Math.max(...logo.right.map((line) => line.length))
   return (
     <box>
-      {dimensions().height < 12 ? null : dimensions().width < 22 ? (
+      {dimensions().height < 12 ? null : dimensions().width < Math.max(22, leftWidth, rightWidth) ? (
         <For each={go.right.slice(1)}>
           {(line) => <box flexDirection="row">{renderLine(line, theme.text.base, true)}</box>}
         </For>
-      ) : dimensions().width < 44 ? (
+      ) : dimensions().width < Math.max(44, leftWidth + rightWidth + 1) ? (
         <>
           <For each={logo.left.slice(1)}>
             {(line) => <box flexDirection="row">{renderLine(line, theme.text.muted, false)}</box>}

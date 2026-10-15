@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { Env } from "@opencode/util/env"
 import { MessageTooLargeError, ndJsonStream } from "@agentclientprotocol/sdk"
 import { OpenCode } from "@opencode/client/effect"
 import { Service } from "@opencode/client/effect/service"
@@ -23,7 +25,8 @@ export default Runtime.handler(
         standalone: false,
       })
     }
-    process.env.OPENCODE_CLIENT = "acp"
+    // altimate: ALT-F01
+    process.env[Env.keys("OPENCODE_CLIENT")[0]] = "acp"
     const endpoint = yield* Standalone.start()
     const client = yield* OpenCode.make({ baseUrl: endpoint.url }).pipe(
       Effect.provideServiceEffect(

@@ -4,6 +4,8 @@ import { NodeServices } from "@effect/platform-node"
 import { Service } from "@opencode/client/effect/service"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Global } from "@opencode/util/global"
+// altimate: ALT-F01
+import { get, keys } from "@opencode/util/env"
 import { OPENCODE_ARTIFACT, OPENCODE_CHANNEL, OPENCODE_VERSION } from "./version"
 import { AppProcess } from "@opencode/util/process"
 import { randomBytes, randomUUID } from "node:crypto"
@@ -35,7 +37,8 @@ export const run = Effect.fnUntraced(function* (options: Options) {
       LayerNode.compile(LayerNode.group([Global.node, AppProcess.node]), {
         replacements: [
           Global.node.replace(
-            Global.layerWith(process.env.OPENCODE_CONFIG_DIR ? { config: process.env.OPENCODE_CONFIG_DIR } : {}),
+            // altimate: ALT-F01
+            Global.layerWith(get("OPENCODE_CONFIG_DIR") ? { config: get("OPENCODE_CONFIG_DIR") } : {}),
           ),
         ],
       }),
@@ -78,8 +81,8 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
       const environmentPassword = yield* Env.password
       // Keep the lease credential out of the environment inherited by tools.
       if (options.mode === "stdio") {
-        delete process.env.OPENCODE_PASSWORD
-        delete process.env.OPENCODE_SERVER_PASSWORD
+        // altimate: ALT-F01
+        keys("OPENCODE_PASSWORD").concat(keys("OPENCODE_SERVER_PASSWORD")).forEach((key) => delete process.env[key])
       }
       const password =
         options.mode === "service"
@@ -93,8 +96,9 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
       const remote = { urls: [] as ReadonlyArray<string> }
       const launch = start(
         {
+          // altimate: ALT-F01
           app: {
-            name: process.env.OPENCODE_CLIENT ?? OPENCODE_ARTIFACT,
+            name: get("OPENCODE_CLIENT") ?? OPENCODE_ARTIFACT,
             version: OPENCODE_VERSION,
             channel: OPENCODE_CHANNEL,
           },
@@ -103,32 +107,34 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
           cors: options.cors ?? config.cors,
           password,
           pty: { handoff },
-          simulation: truthy(process.env.OPENCODE_SIMULATE),
+          // altimate: ALT-F01
+          simulation: truthy(get("OPENCODE_SIMULATE")),
           database: {
             path: databasePath(global.data),
           },
+          // altimate: ALT-F01
           models: {
-            url: process.env.OPENCODE_MODELS_URL,
-            file: process.env.OPENCODE_MODELS_PATH,
-            fetch: !truthy(process.env.OPENCODE_DISABLE_MODELS_FETCH),
+            url: get("OPENCODE_MODELS_URL"),
+            file: get("OPENCODE_MODELS_PATH"),
+            fetch: !truthy(get("OPENCODE_DISABLE_MODELS_FETCH")),
           },
+          // altimate: ALT-F01
           config: {
-            directory: process.env.OPENCODE_CONFIG_DIR,
-            project: !truthy(
-              process.env.OPENCODE_CONFIG_PROJECT_DISABLE ?? process.env.OPENCODE_DISABLE_PROJECT_CONFIG,
-            ),
-            file: process.env.OPENCODE_CONFIG,
-            content: process.env.OPENCODE_CONFIG_CONTENT,
+            directory: get("OPENCODE_CONFIG_DIR"),
+            project: !truthy(get("OPENCODE_CONFIG_PROJECT_DISABLE") ?? get("OPENCODE_DISABLE_PROJECT_CONFIG")),
+            file: get("OPENCODE_CONFIG"),
+            content: get("OPENCODE_CONFIG_CONTENT"),
           },
+          // altimate: ALT-F01
           windows: {
-            gitbash: process.env.OPENCODE_GIT_BASH_PATH,
+            gitbash: get("OPENCODE_GIT_BASH_PATH"),
           },
           fs: {
-            filewatcher: !truthy(process.env.OPENCODE_FILEWATCHER_DISABLE ?? process.env.OPENCODE_DISABLE_FILEWATCHER),
+            filewatcher: !truthy(get("OPENCODE_FILEWATCHER_DISABLE") ?? get("OPENCODE_DISABLE_FILEWATCHER")),
             fff:
-              process.env.OPENCODE_DISABLE_FFF === undefined
+              get("OPENCODE_DISABLE_FFF") === undefined
                 ? process.platform !== "win32"
-                : !truthy(process.env.OPENCODE_DISABLE_FFF),
+                : !truthy(get("OPENCODE_DISABLE_FFF")),
           },
         },
         serviceOptions === undefined

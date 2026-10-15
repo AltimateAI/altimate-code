@@ -13,9 +13,14 @@ import { buildAppArchive } from "./app-assets"
 import { verifyArtifact, verifySimulationGraph } from "./verify-artifact"
 import { resolveOpencodePty } from "./opencode-pty"
 import { NativeArch } from "../../../script/native-arch"
+// altimate: ALT-F01
+import { defaults, Identity, resolveIdentity } from "@opencode/util/identity"
 
 const dir = path.resolve(import.meta.dirname, "..")
-const binary = "opencode"
+// altimate: ALT-F01
+const identityFile = process.argv.find((arg) => arg.startsWith("--identity="))?.slice("--identity=".length)
+const identity = identityFile ? resolveIdentity(await Bun.file(path.resolve(identityFile)).json()) : Identity
+const binary = identity.app
 const outdir = path.resolve(
   dir,
   process.argv.find((arg) => arg.startsWith("--outdir="))?.slice("--outdir=".length) ?? "dist",
@@ -150,7 +155,8 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
     },
   }
   const target = targetName(item)
-  const name = target.replace(binary, "cli")
+  // altimate: ALT-F01
+  const name = target.replace(binary, binary === "opencode" ? "cli" : binary)
   const executablePath = await compileExecutable(item)
   console.log(`building ${name}`)
   const result = await Bun.build({
@@ -180,7 +186,8 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
       outfile: path.join(outdir, name, "bin", binary),
       execArgv: [
         "--smol",
-        `--user-agent=opencode/${Script.channel}/${Script.version}/cli`,
+        // altimate: ALT-F01
+        `--user-agent=${identity.userAgent}/${Script.channel}/${Script.version}/cli`,
         "--use-system-ca",
         "--no-warnings",
         "--",
@@ -189,7 +196,9 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
     },
     define: {
       OPENCODE_VERSION: `'${Script.version}'`,
-      OPENCODE_CLI_NAME: "'opencode'",
+      // altimate: ALT-F01
+      OPENCODE_CLI_NAME: JSON.stringify(binary),
+      ...(identityFile || Identity !== defaults ? { "globalThis.__OPENCODE_IDENTITY__": JSON.stringify(identity) } : {}),
       OPENCODE_CHANNEL: `'${Script.channel}'`,
       OPENCODE_ARTIFACT: `'cli'`,
       ...(highlights ? { OPENCODE_RELEASE_HIGHLIGHTS: JSON.stringify(highlights) } : {}),
@@ -211,7 +220,8 @@ export default { path: file, version: ${JSON.stringify(opencodePty.version)}, sh
     path.join(outdir, name, "package.json"),
     JSON.stringify(
       {
-        name: `@opencode/${name}`,
+        // altimate: ALT-F01
+        name: binary === "opencode" ? `@opencode/${name}` : name,
         version: Script.version,
         license: "MIT",
         repository: { type: "git", url: "git+https://github.com/anomalyco/opencode.git" },

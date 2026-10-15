@@ -2,6 +2,8 @@ import type { OpenCodeClient } from "@opencode/client/effect"
 import { SessionsCursor } from "@opencode/protocol/groups/session"
 import { AbsolutePath } from "@opencode/schema/schema"
 import { FSUtil } from "@opencode/util/fs-util"
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import { DateTime, Effect, Ref, Schema } from "effect"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
 import type {
@@ -126,7 +128,8 @@ export function make(input: {
           _meta: { [ACPCapabilities.ChildSessionUpdates]: true },
         },
         authMethods: [authMethod],
-        agentInfo: { name: "OpenCode", version: OPENCODE_VERSION },
+        // altimate: ALT-F01
+        agentInfo: { name: Identity.displayName, version: OPENCODE_VERSION },
       }
     }),
     authenticate: Effect.fnUntraced(function* (params) {

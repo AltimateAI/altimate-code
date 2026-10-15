@@ -2,6 +2,8 @@ export * as Config from "./config"
 
 import { Global } from "@opencode/util/global"
 import { Flock } from "@opencode/util/flock"
+// altimate: ALT-F01
+import { Env } from "@opencode/util/env"
 import { Context, Effect, FileSystem, Layer, Option, Schema } from "effect"
 import { produce, type Draft } from "immer"
 import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
@@ -29,9 +31,9 @@ export const layer = Layer.effect(
     const fs = yield* FileSystem.FileSystem
     const global = yield* Global.Service
     const file = path.join(global.config, "cli.json")
-    const content = process.env.OPENCODE_CLI_CONFIG_CONTENT
-      ? Option.getOrUndefined(decode(parseRecord(process.env.OPENCODE_CLI_CONFIG_CONTENT)))
-      : undefined
+    // altimate: ALT-F01
+    const inline = Env.get("OPENCODE_CLI_CONFIG_CONTENT")
+    const content = inline ? Option.getOrUndefined(decode(parseRecord(inline))) : undefined
 
     const readJson = Effect.fnUntraced(function* () {
       const text = yield* fs.readFileString(file).pipe(Effect.orElseSucceed(() => undefined))

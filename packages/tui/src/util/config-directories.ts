@@ -1,15 +1,28 @@
 import path from "node:path"
 import { stat } from "node:fs/promises"
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 
 export function configDirectories(config: string, cwd: string) {
-  return [...new Set([config, ...ancestors(cwd).map((directory) => path.join(directory, ".opencode"))])]
+  // altimate: ALT-F01
+  return [
+    ...new Set([
+      config,
+      ...ancestors(cwd).flatMap((directory) =>
+        Identity.configBasenames.map((name) => path.join(directory, `.${name}`)),
+      ),
+    ]),
+  ]
 }
 
 export function projectConfigDirectories(project: string, cwd: string) {
   const directories = ancestors(cwd)
-  return directories
-    .slice(directories.indexOf(path.resolve(project)))
-    .map((directory) => path.join(directory, ".opencode"))
+  return (
+    directories
+      .slice(directories.indexOf(path.resolve(project)))
+      // altimate: ALT-F01
+      .flatMap((directory) => Identity.configBasenames.map((name) => path.join(directory, `.${name}`)))
+  )
 }
 
 export async function localProjectDirectory(cwd: string) {

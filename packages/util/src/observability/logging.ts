@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { Env } from "@opencode/util/env"
 import { Effect, FileSystem, Formatter, Logger, Option, Schedule, Stream, type LogLevel } from "effect"
 import path from "path"
 import { Global } from "../global.js"
@@ -157,12 +159,14 @@ function lineStart(handle: FileSystem.File, from: number) {
 }
 
 const stderrLogger = Logger.make((options) => {
-  if (process.env.OPENCODE_PRINT_LOGS !== "1") return
+  // altimate: ALT-F01
+  if (Env.get("OPENCODE_PRINT_LOGS") !== "1") return
   process.stderr.write(formatter().log(options) + "\n")
 })
 
 export function minimumLogLevel() {
-  const value = process.env.OPENCODE_LOG_LEVEL?.toUpperCase()
+  // altimate: ALT-F01
+  const value = Env.get("OPENCODE_LOG_LEVEL")?.toUpperCase()
   const levels = {
     DEBUG: "Debug",
     INFO: "Info",
