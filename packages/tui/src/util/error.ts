@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import { isRecord } from "./record"
 
 type ConfigIssue = { message: string; path: string[] }
@@ -24,7 +26,8 @@ export function cliErrorMessage(input: unknown): string | undefined {
     return [
       `Model not found: ${field(model, "providerID")}/${field(model, "modelID")}`,
       ...(suggestions.length ? ["Did you mean: " + suggestions.join(", ")] : []),
-      "Try: `opencode models` to list available models",
+      // altimate: ALT-F01
+      `Try: \`${Identity.app} models\` to list available models`,
       "Or check your config (opencode.json) provider/model names",
     ].join("\n")
   }

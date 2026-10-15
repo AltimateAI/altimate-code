@@ -2,6 +2,8 @@
 //
 // The entry header is a single flex row; the exit banner retains its cell-based
 // logo and resume information. Both become immutable terminal history.
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import {
   BoxRenderable,
   type ColorInput,
@@ -181,7 +183,8 @@ function buildExit(input: SplashWriterInput, ctx: ScrollbackRenderContext): Scro
   const body_left = (mark[0]?.length ?? 0) + 2
   const session = "Session  "
   const label = "Continue "
-  const command = `opencode mini -s ${meta.session_id}`
+  // altimate: ALT-F01
+  const command = `${Identity.app} mini -s ${meta.session_id}`
   const wide = body_left + stringWidth(label + command) <= width
   const commandHeight = wide ? 1 : Math.ceil(stringWidth(command) / width)
 

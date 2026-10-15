@@ -1,5 +1,6 @@
 // altimate: ALT-F01
 import { Env } from "@opencode/util/env"
+import { Identity } from "../identity.js"
 import { Effect, FileSystem, Formatter, Logger, Option, Schedule, Stream, type LogLevel } from "effect"
 import path from "path"
 import { Global } from "../global.js"
@@ -59,8 +60,9 @@ function format(input: unknown) {
 }
 
 export function file(local = true, channel = "local") {
-  if (!local) return path.join(Global.Path.log, "opencode.log")
-  return path.join(Global.Path.log, `opencode-${channel.replace(/[^a-zA-Z0-9._-]/g, "-")}.log`)
+  // altimate: ALT-F01
+  if (!local) return path.join(Global.Path.log, `${Identity.app}.log`)
+  return path.join(Global.Path.log, `${Identity.app}-${channel.replace(/[^a-zA-Z0-9._-]/g, "-")}.log`)
 }
 
 export function fileLogger(target = file(), id: string = runID()) {

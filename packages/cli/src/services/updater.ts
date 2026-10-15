@@ -1,4 +1,6 @@
 // altimate: ALT-F01
+import { cliName } from "../identity"
+// altimate: ALT-F01
 import { Env } from "@opencode/util/env"
 import { Global } from "@opencode/util/global"
 import { AppProcess } from "@opencode/util/process"
@@ -210,7 +212,8 @@ const make = Effect.gen(function* () {
       new UpgradeError({
         title: "Git Bash is required to update OpenCode",
         detail: "The OpenCode installer runs with Git Bash on Windows, and it was not found.",
-        retry: "Install Git for Windows or set OPENCODE_GIT_BASH_PATH, then run opencode upgrade again.",
+        // altimate: ALT-F01
+        retry: `Install Git for Windows or set OPENCODE_GIT_BASH_PATH, then run ${cliName} upgrade again.`,
       }),
     )
   })
@@ -295,7 +298,8 @@ const make = Effect.gen(function* () {
           {
             title: "Could not check for OpenCode updates",
             detail: errorDetail(cause),
-            retry: "Check your network, then run opencode upgrade again.",
+            // altimate: ALT-F01
+            retry: `Check your network, then run ${cliName} upgrade again.`,
           },
           { cause },
         ),
@@ -342,7 +346,8 @@ const make = Effect.gen(function* () {
           title: "Could not check for OpenCode updates",
           detail,
           command: ["winget", "search", ...wingetArgs].join(" "),
-          retry: "Fix the issue above, then run opencode upgrade again.",
+          // altimate: ALT-F01
+          retry: `Fix the issue above, then run ${cliName} upgrade again.`,
         },
         cause === undefined ? undefined : { cause },
       )
@@ -405,7 +410,8 @@ const make = Effect.gen(function* () {
           title: input.title ?? `${installNames[input.method]} could not install OpenCode`,
           detail,
           command: (input.displayCommand ?? input.command).join(" "),
-          retry: input.retry ?? "Fix the issue above, then run opencode upgrade again.",
+          // altimate: ALT-F01
+          retry: input.retry ?? `Fix the issue above, then run ${cliName} upgrade again.`,
         },
         cause === undefined ? undefined : { cause },
       )
@@ -486,14 +492,16 @@ const make = Effect.gen(function* () {
             command: ["curl", "-fsSL", "-o", installer, "https://opencode.ai/v2/install"],
             displayCommand: ["curl", "-fsSL", "https://opencode.ai/v2/install"],
             title: "Could not download the OpenCode installer",
-            retry: "Check your network, then run opencode upgrade again.",
+            // altimate: ALT-F01
+            retry: `Check your network, then run ${cliName} upgrade again.`,
           })
           return yield* retaining(
             method,
             runUpgrade({
               method,
               command: [bash, installer, "--version", version, "--no-modify-path"],
-              displayCommand: ["opencode", "upgrade", version, "--method", "curl"],
+              // altimate: ALT-F01
+              displayCommand: [cliName, "upgrade", version, "--method", "curl"],
               title: "The OpenCode installer failed",
             }),
           )
@@ -525,7 +533,8 @@ const make = Effect.gen(function* () {
               {
                 title: "Could not prepare the OpenCode upgrade",
                 detail: errorDetail(cause),
-                retry: "Fix the issue above, then run opencode upgrade again.",
+                // altimate: ALT-F01
+                retry: `Fix the issue above, then run ${cliName} upgrade again.`,
               },
               { cause },
             ),

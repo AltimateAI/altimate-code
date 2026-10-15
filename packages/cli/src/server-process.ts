@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { cliName } from "./identity"
 export * as ServerProcess from "./server-process"
 
 import { NodeServices } from "@effect/platform-node"
@@ -170,11 +172,8 @@ const processEffect = Effect.fnUntraced(function* (options: Options) {
               if (server !== undefined) return server
             }
             return yield* Effect.fail(
-              new Error(
-                `Managed service port ${port} on ${hostname} is already in use by another process. ` +
-                  "Configure another port with `opencode service set port <port>` and start the service again.",
-                { cause: error },
-              ),
+              // altimate: ALT-F01
+              portInUseError(port, hostname, error),
             )
           })
         }),
@@ -236,4 +235,13 @@ function waitForStdinClose() {
       process.stdin.pause()
     })
   })
+}
+
+// altimate: ALT-F01
+export function portInUseError(port: number | undefined, hostname: string, cause: unknown) {
+  return new Error(
+    `Managed service port ${port} on ${hostname} is already in use by another process. ` +
+      `Configure another port with \`${cliName} service set port <port>\` and start the service again.`,
+    { cause },
+  )
 }

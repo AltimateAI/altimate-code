@@ -1,5 +1,7 @@
 export * as ServerProcess from "./process"
 
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import { NodeHttpServer } from "@effect/platform-node"
 import { Bus } from "@opencode/core/bus"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
@@ -222,7 +224,8 @@ function unavailable(status: Status.State) {
       {
         code: "service_failed",
         message: "The background service could not start.",
-        action: "Run `opencode service restart` after checking the service logs.",
+        // altimate: ALT-F01
+        action: `Run \`${Identity.app} service restart\` after checking the service logs.`,
       },
       { status: 503 },
     )

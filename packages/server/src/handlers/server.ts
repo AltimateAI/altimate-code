@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import { Duration, Effect } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
@@ -37,7 +39,8 @@ export const ServerHandler = HttpApiBuilder.group(Api, "server.server", (handler
           if (token === undefined) {
             if (!browser) return yield* new UnauthorizedError({ message: "Pairing link expired or already used" })
             return HttpServerResponse.text(
-              "This pairing link expired or was already used. Run `opencode pair` to get a new one.",
+              // altimate: ALT-F01
+              `This pairing link expired or was already used. Run \`${Identity.app} pair\` to get a new one.`,
               { status: 401 },
             )
           }

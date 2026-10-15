@@ -1,3 +1,6 @@
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
+import { cliName } from "../identity"
 import { Argument, Flag, GlobalFlag } from "effect/cli"
 import { Schema } from "effect"
 import { Spec } from "../framework/spec"
@@ -10,7 +13,7 @@ export const PrintLogs = GlobalFlag.Setting("print-logs")({
   ),
 })
 
-declare const OPENCODE_CLI_NAME: string | undefined
+// altimate: ALT-F01 - executable selection lives in ../identity.
 
 const ServerParams = {
   standalone: Flag.Boolean("standalone").pipe(
@@ -35,13 +38,15 @@ const PermissionParams = {
   ),
 }
 
-const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME : "opencode", {
-  description: "OpenCode command line interface",
+// altimate: ALT-F01
+const Root = Spec.make(cliName, {
+  description: `${Identity.displayName} command line interface`,
   params: {
     ...ServerParams,
     ...PermissionParams,
     directory: Argument.String("directory").pipe(
-      Argument.withDescription("Directory to start OpenCode in"),
+      // altimate: ALT-F01
+      Argument.withDescription(`Directory to start ${Identity.displayName} in`),
       Argument.optional,
     ),
     continue: Flag.Boolean("continue").pipe(
@@ -58,7 +63,8 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
   },
   commands: [
     Spec.make("upgrade", {
-      description: "Upgrade OpenCode to the latest or a specific version",
+      // altimate: ALT-F01
+      description: `Upgrade ${Identity.displayName} to the latest or a specific version`,
       aliases: ["update"],
       params: {
         target: Argument.String("target").pipe(
@@ -73,7 +79,8 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
       },
     }),
     Spec.make("uninstall", {
-      description: "Uninstall OpenCode, keeping session data, configuration, and state",
+      // altimate: ALT-F01
+      description: `Uninstall ${Identity.displayName}, keeping session data, configuration, and state`,
       params: {
         dryRun: Flag.Boolean("dry-run").pipe(
           Flag.withDescription("Show what would be removed without removing"),
@@ -374,7 +381,8 @@ const Root = Spec.make(typeof OPENCODE_CLI_NAME === "string" ? OPENCODE_CLI_NAME
       },
     }),
     Spec.make("run", {
-      description: "Run OpenCode with a message",
+      // altimate: ALT-F01
+      description: `Run ${Identity.displayName} with a message`,
       params: {
         ...ServerParams,
         message: Argument.String("message").pipe(

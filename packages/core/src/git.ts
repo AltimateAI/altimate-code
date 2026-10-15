@@ -5,6 +5,8 @@ import { Cause, Context, Effect, Exit, Layer, Option, Schedule, Schema } from "e
 import { ChildProcess } from "effect/process"
 import { AbsolutePath, RelativePath } from "./schema.js"
 import { FSUtil } from "@opencode/util/fs-util"
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import { AppProcess } from "@opencode/util/process"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { FileDiff } from "@opencode/schema/file-diff"
@@ -20,7 +22,8 @@ export class Repository extends Schema.Class<Repository>("Git.Repository")({
 
 // Included from $GIT_DIR/config via include.path (git >= 1.7.10); OpenCode owns
 // this file entirely, so updates are plain rewrites with no config parsing.
-const snapshotConfigFile = "opencode.gitconfig"
+// altimate: ALT-F01
+const snapshotConfigFile = `${Identity.app}.gitconfig`
 const snapshotConfigInclude = `[include]
 	path = ${snapshotConfigFile}
 `

@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { cliName } from "../identity"
 import type { OpenCodeClient } from "@opencode/client/effect"
 import { SessionsCursor } from "@opencode/protocol/groups/session"
 import { AbsolutePath } from "@opencode/schema/schema"
@@ -107,17 +109,8 @@ export function make(input: {
   return {
     initialize: Effect.fnUntraced(function* (params) {
       yield* Ref.set(input.capabilities, ACPCapabilities.parse(params.clientCapabilities))
-      const authMethod: AuthMethod = {
-        description: "Run `opencode auth login` in the terminal",
-        name: "Login with opencode",
-        id: AuthMethodID,
-        ...(params.clientCapabilities?.auth?.terminal ? { type: "terminal" as const, args: ["--login"] } : {}),
-      }
-      if (params.clientCapabilities?._meta?.["terminal-auth"] === true) {
-        authMethod._meta = {
-          "terminal-auth": { command: "opencode", args: ["auth", "login"], label: "OpenCode Login" },
-        }
-      }
+      // altimate: ALT-F01
+      const authMethod = authenticationMethod(params.clientCapabilities)
       return {
         protocolVersion: 1,
         agentCapabilities: {
@@ -256,3 +249,20 @@ const supportedMcpServers = Effect.fnUntraced(function* (servers: readonly McpSe
 })
 
 export * as ACPService from "./service"
+
+// altimate: ALT-F01
+export function authenticationMethod(capabilities: InitializeRequest["clientCapabilities"]): AuthMethod {
+  return {
+    description: `Run \`${cliName} auth login\` in the terminal`,
+    name: `Login with ${cliName}`,
+    id: AuthMethodID,
+    ...(capabilities?.auth?.terminal ? { type: "terminal" as const, args: ["--login"] } : {}),
+    ...(capabilities?._meta?.["terminal-auth"] === true
+      ? {
+          _meta: {
+            "terminal-auth": { command: cliName, args: ["auth", "login"], label: `${Identity.displayName} Login` },
+          },
+        }
+      : {}),
+  }
+}

@@ -29,7 +29,7 @@ test("branded source host and its spawned command share identity and independent
   ])
   const upstream = await inspect(false)
   expect(branded.app).toBe(descriptor.app)
-  expect(branded.ports.slice(0, 5)).toEqual([0xa17e, 0xa17e, 0xa17e, 0xa17e, 0xa17f])
+  expect(branded.ports.slice(0, 5)).toEqual([57241, 57241, 57241, 57241, 57242])
   expect(branded.ports[5]).not.toBe(upstream.ports[5])
   expect(branded.file).toEndWith("/state/altimate-code/service.json")
   expect(branded.logo).toEqual(descriptor.logo)

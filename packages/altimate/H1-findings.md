@@ -35,8 +35,8 @@ The full distributable build was not run here. The offline smoke test used a rea
 | Env prefixes, preferred first | `OPENCODE_` | `ALTIMATE_CLI_`, `OPENCODE_` |
 | Config descriptor basenames, primary first | `opencode` | `altimate-code`, `opencode` |
 | Service discovery directory | `opencode` | `altimate-code` |
-| latest/dev/beta/next port | `0xc0de` (49374) | `0xa17e` (41342) |
-| local channel port | `0xc0df` (49375) | `0xa17f` (41343) |
+| latest/dev/beta/next port | `0xc0de` (49374) | 57241 (updated after live verification; see Live defect fixes) |
+| local channel port | `0xc0df` (49375) | 57242 (updated after live verification; see Live defect fixes) |
 | Named preview port seed | channel | `altimate-code:<channel>` |
 | Session/plugin title prefix | `OC` | `Altimate Code` |
 | Binary / target directory / generated package | `opencode` / `cli-darwin-arm64` / `@opencode/cli-darwin-arm64` | `altimate-code` / `altimate-code-darwin-arm64` / `altimate-code-darwin-arm64` |
@@ -234,3 +234,98 @@ Distribution-owned additions are `packages/altimate/identity.json`, `script/iden
 6. H5 must build and run the actual darwin-arm64 distributable, verify binary/output package names and identity, and measure client dependency/artifact size. H1 only tested define substitution in a small bundle.
 
 The requested work-vault copy could not be written: `/Users/anandgupta/obsidian/altimate/Research/` is outside the session's writable roots and approval is disabled. The canonical copy is this file; intended vault destination is `Research/Branded host spike/H1 identity, paths, env and coexistence.md`.
+
+## Live defect fixes
+
+Follow-up on 2026-10-15 against `b9c220250a` on `spike/v2-branded-host`, after reading `evidence/h1-live/H1-live.md`. This section supersedes the earlier port values and accepted ACP login-name gap. Work stayed offline, used Bun 1.4.2, and leaves changes unstaged without a commit. The default provider/model was not changed.
+
+The CLI now gets its executable name from `Identity.app` and its help description from `Identity.displayName`. The small CLI identity adapter retains `OPENCODE_CLI_NAME` for stock builds; an explicitly selected branded descriptor takes precedence over that define. The same selected name feeds root usage/version, service usage errors, port-conflict recovery, pairing instructions, remote-tunnel retry instructions, upgrade retry/display commands, mini terminal errors, the stats heading, and ACP login hints/terminal-auth command. The MCP authentication hint uses the primary identity config basename. TUI resume/model/pairing hints and server pairing/restart messages use `Identity.app` without depending on CLI runtime code.
+
+Intentionally retained: provider/model IDs and defaults, Basic auth username and ACP auth-method ID, internal package/import/schema/protocol identifiers, upstream installer URLs/package-manager targets and executable detection, SDK default spawn commands, historical migration inputs, and developer comments/story fixtures. Updater prose that describes the upstream installer still names OpenCode because the distribution's installer/update mechanism is outside this fix. General status copy (including the pairing warning's server noun, uninstall/update titles and ACP fallback errors) is outside the command-to-type sweep. Mini's separate `oc mini` visual mark is also outside the command-hint fix. No Protocol or public HttpApi shape changed, so client generation was not needed.
+
+Database contract for H4:
+
+- Release-family channels (`latest`, `dev`, `beta`, `next`, `prod`) use `altimate-code.db`; local uses `altimate-code-local.db`; other channels use `altimate-code-<sanitized-channel>.db`. These basenames are all derived from `Identity.app`. The existing channel-disable option selects the unsuffixed name.
+- Explicit primary/fallback `*_DB` overrides retain their meaning, including absolute paths and `:memory:`. When the new default file already exists, it wins even if an old-name file also exists.
+- If the new file is absent but a same-channel `opencode*.db` or unsuffixed v1 `opencode.db` exists in that branded data directory, path resolution fails with both paths and the primary DB override to use the old file explicitly. It does not silently open a new empty database, rename/copy files, or move SQLite sidecars. Stock path selection is unchanged.
+- H4 must preserve the v1 source and place a consistent SQLite copy of `~/.local/share/altimate-code/opencode.db` at the selected **new** filename before launching v2 (normally `altimate-code.db`; choose `altimate-code-local.db` or an explicit override for local-channel testing). Copying only the old basename will deliberately trigger the diagnostic. Core's v1 transformation operates on the selected database; it does not discover an unsuffixed v1 database for the CLI. Its separate historical `opencode-next.db` import remains unchanged.
+
+Log files now use `altimate-code.log` or `altimate-code-<channel>.log`, and snapshot Git configuration uses `altimate-code.gitconfig`, all via `Identity.app`. Existing old logs/config files are not deleted. Internal Git temporary-index prefixes retain their upstream spelling.
+
+The descriptor now selects **57241** for latest/dev/beta/next and **57242** for local. IANA's dynamic/private range is 49152–65535, so this pair does not claim a registered service assignment. The offline `/etc/services` registry-range notes agree and contain neither port. The pair avoids 41342/41343, the stock 49374/49375 pair, the requested 3000–9999 development range, Ollama 11434, and LM Studio 1234. This is an informed default, not a reservation or proof of availability: other local applications and ephemeral sockets can still occupy these ports, and `service set port` remains the override. No online registry lookup or new live coexistence run was performed; prior live evidence remains unchanged.
+
+Verification completed offline with the supplied Bun 1.4.2. The root `bun run check` exited 0: **37/37 tasks successful**, lint warnings but no lint errors. Astro/Wrangler again reported denied writes to its external log directory without failing its checks. `git diff --check` passed. An independent combined-diff review found no blocking issue, missing upstream hunk marker, new hardcoded branded product literal in production code, or unintended provider/model change.
+
+| Touched suite (run from its package directory) | Result |
+| --- | --- |
+| Altimate `test/host-identity.test.ts` | 3 pass; stock ports unchanged, branded 57241/57242, source child identity and build-define smoke |
+| Util `test/identity.test.ts` | 4 pass |
+| CLI `test/identity-paths.test.ts` | 8 pass, 148 assertions; stock/branded release, prod, local, sanitized preview, legacy/v1/current DB cases, overrides, real WAL/SHM preservation, log names, real snapshot Git config |
+| CLI identity, paths, stats, MCP auth choices, mini-host, pairing consent, updater unit/install | 74 pass, 5 existing skips; includes 4 stock/branded × build-alias cases exercising actual help/version and service usage, port-conflict error/cause, ACP metadata and mini/pairing hints |
+| CLI `test/mini.test.ts` offline selection | 7 pass, 5 filtered |
+| CLI `test/service.test.ts` existing H1 offline selection | 14 pass, 10 filtered |
+| Core `test/git.test.ts test/logging.test.ts` | 18 pass |
+| TUI `test/mini/splash.test.ts test/util/error.test.ts` | 35 pass stock + 35 pass branded; real narrow/wide resume rendering and model-error command hints |
+| Server `test/identity-hints.test.ts` | 1 pass stock + 1 pass branded; actual expired-pairing handler through ServerFetch, without a listener |
+
+The CLI suites use isolated `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_CACHE_HOME`, and `XDG_STATE_HOME` under `/private/tmp/h1-cli-followup`. An initial non-isolated CLI run hit two existing help-test root-permission failures; the isolated rerun passed. An initial broad mini selection reached two listener cases blocked by the sandbox and was interrupted; the explicit offline selection above is the final result. No live listeners, provider prompts, or full distributable build were used for this follow-up.
+
+Additional reproduction commands (the earlier H1 offline service selection remains valid):
+
+```sh
+# packages/cli, with the isolated XDG_* roots above
+bun test test/identity-cli.test.ts test/debug-paths.test.ts test/stats.test.ts test/mcp-auth-choices.test.ts test/mini-host.test.ts test/pair-remote-consent.test.ts src/services/updater.test.ts test/updater-install.test.ts --timeout 30000 --only-failures
+bun test test/identity-paths.test.ts
+bun test test/mini.test.ts --test-name-pattern 'uses piped stdin|re-resolves a managed target|merges non-interactive|parses model variants|is registered|exposes run|uses the shared V2' --only-failures
+
+# packages/core
+bun test test/git.test.ts test/logging.test.ts
+
+# packages/tui
+bun test test/mini/splash.test.ts test/util/error.test.ts
+bun --preload ../altimate/script/identity-preload.ts test test/mini/splash.test.ts test/util/error.test.ts
+
+# packages/server
+bun test test/identity-hints.test.ts
+bun --preload ../altimate/script/identity-preload.ts test test/identity-hints.test.ts
+```
+
+Per-file additions/deletions below are against this follow-up's starting HEAD, `b9c220250a`; untracked files are counted against `/dev/null` without staging. This ledger is separate from the original H1 implementation ledger above. All upstream TypeScript diff hunks carry `// altimate: ALT-F01`; new upstream files carry it at the top. The descriptor is distribution-owned strict JSON.
+
+<!-- live-defect-ledger:start -->
+| File | + | - |
+| --- | ---: | ---: |
+| `packages/altimate/H1-findings.md` | 97 | 2 |
+| `packages/altimate/identity.json` | 1 | 1 |
+| `packages/altimate/test/host-identity.test.ts` | 1 | 1 |
+| `packages/cli/src/acp/service.ts` | 21 | 11 |
+| `packages/cli/src/commands/commands.ts` | 15 | 7 |
+| `packages/cli/src/commands/handlers/acp.ts` | 4 | 1 |
+| `packages/cli/src/commands/handlers/mcp/auth.ts` | 5 | 1 |
+| `packages/cli/src/commands/handlers/pair.ts` | 16 | 6 |
+| `packages/cli/src/commands/handlers/stats.ts` | 4 | 1 |
+| `packages/cli/src/database-path.ts` | 23 | 7 |
+| `packages/cli/src/identity.ts` | 7 | 0 |
+| `packages/cli/src/mini-host.ts` | 4 | 1 |
+| `packages/cli/src/mini.ts` | 4 | 1 |
+| `packages/cli/src/server-process.ts` | 13 | 5 |
+| `packages/cli/src/services/remote-tunnel.ts` | 6 | 1 |
+| `packages/cli/src/services/service-config.ts` | 12 | 5 |
+| `packages/cli/src/services/updater.ts` | 16 | 7 |
+| `packages/cli/test/fixture/identity-cli.ts` | 21 | 0 |
+| `packages/cli/test/fixture/identity-paths.ts` | 75 | 0 |
+| `packages/cli/test/identity-cli.test.ts` | 74 | 0 |
+| `packages/cli/test/identity-paths.test.ts` | 88 | 0 |
+| `packages/core/src/git.ts` | 4 | 1 |
+| `packages/server/src/handlers/server.ts` | 4 | 1 |
+| `packages/server/src/process.ts` | 4 | 1 |
+| `packages/server/test/identity-hints.test.ts` | 25 | 0 |
+| `packages/tui/src/component/dialog-pair.tsx` | 6 | 1 |
+| `packages/tui/src/mini/splash.ts` | 4 | 1 |
+| `packages/tui/src/util/error.ts` | 4 | 1 |
+| `packages/tui/test/mini/splash.test.ts` | 11 | 5 |
+| `packages/tui/test/util/error.test.ts` | 10 | 1 |
+| `packages/util/src/observability/logging.ts` | 4 | 2 |
+<!-- live-defect-ledger:end -->
+
+The updated work-vault copy remains blocked by this session's writable-root restriction; the canonical updated artifact is this file. The intended Obsidian destination remains `Research/Branded host spike/H1 identity, paths, env and coexistence.md` in the work vault.

@@ -1,3 +1,6 @@
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
+import { cliName } from "../../../identity"
 import { confirm, intro, log, outro } from "@clack/prompts"
 import { Effect, Option } from "effect"
 import { OpenCode, type IntegrationInfo, type IntegrationOAuthMethod, type McpServer } from "@opencode/client"
@@ -29,7 +32,8 @@ const authenticate = Effect.fn("cli.mcp.auth.run")(function* (name?: string) {
   if (!name && choices.length === 0) {
     log.warn("No OAuth-capable MCP servers configured")
     log.info(
-      `Remote MCP servers support OAuth by default. Add one with \`opencode mcp add\` or in opencode.json:\n${exampleConfig}`,
+      // altimate: ALT-F01
+      `Remote MCP servers support OAuth by default. Add one with \`${cliName} mcp add\` or in ${Identity.configBasenames[0]}.json:\n${exampleConfig}`,
     )
     outro("Done")
     return

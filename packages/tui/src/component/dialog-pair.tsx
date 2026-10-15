@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
 import { TextAttributes } from "@opentui/core"
 import { useTerminalDimensions } from "@opentui/solid"
 import { createMemo, createResource, createSignal, For, Show } from "solid-js"
@@ -68,7 +70,10 @@ export function DialogPair() {
           </box>
           <Show when={value.loopback}>
             <text fg={theme.text.muted} wrapMode="word">
-              Run `opencode service set hostname 0.0.0.0` to access the service remotely.
+              {
+                // altimate: ALT-F01
+                `Run \`${Identity.app} service set hostname 0.0.0.0\` to access the service remotely.`
+              }
             </text>
           </Show>
         </box>

@@ -5,7 +5,7 @@
   "userAgent": "altimate-code",
   "envPrefixes": ["ALTIMATE_CLI_", "OPENCODE_"],
   "configBasenames": ["altimate-code", "opencode"],
-  "servicePort": 41342,
+  "servicePort": 57241,
   "serviceName": "altimate-code",
   "logo": {
     "left": [

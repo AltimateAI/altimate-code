@@ -1,7 +1,16 @@
 import { describe, expect, test } from "bun:test"
-import { errorFormat, errorMessage } from "../../src/util/error"
+// altimate: ALT-F01
+import { Identity } from "@opencode/util/identity"
+import { cliErrorMessage, errorFormat, errorMessage } from "../../src/util/error"
 
 describe("util.error", () => {
+  // altimate: ALT-F01
+  test("model lookup errors name the selected host command", () => {
+    expect(
+      cliErrorMessage({ _tag: "ProviderModelNotFoundError", providerID: "example", modelID: "missing" }),
+    ).toContain(`Try: \`${Identity.app} models\` to list available models`)
+  })
+
   test("formats native Error instances", () => {
     const err = new Error("boom")
     expect(errorMessage(err)).toBe("boom")

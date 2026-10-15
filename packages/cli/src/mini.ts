@@ -1,3 +1,5 @@
+// altimate: ALT-F01
+import { cliName } from "./identity"
 import { Service, type Endpoint } from "@opencode/client/effect/service"
 import { ClientError, OpenCode, type OpenCodeClient } from "@opencode/client/promise"
 import type { MiniFrontendInput } from "@opencode/tui/mini"
@@ -180,7 +182,8 @@ export async function resolveMiniTarget<A>(input: {
 }
 
 export function validateMiniTerminal() {
-  if (!process.stdout.isTTY) fail("opencode mini requires a TTY stdout")
+  // altimate: ALT-F01
+  if (!process.stdout.isTTY) fail(`${cliName} mini requires a TTY stdout`)
 }
 
 /** @internal Exported for testing. */
