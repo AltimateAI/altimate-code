@@ -120,7 +120,7 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
             Telemetry.track({
               type: "core_failure",
               timestamp: Date.now(),
-              session_id: Telemetry.getContext().sessionId || "unknown-session",
+              session_id: ctx.sessionID,
               workspace_id: ctx.workspaceId,
               tool_name: "warehouse_add",
               tool_category: "warehouse",

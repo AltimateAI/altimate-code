@@ -1305,6 +1305,10 @@ export namespace SessionPrompt {
           sessionID: sessionID,
           abort,
           callID: part.callID,
+          // altimate_change start — the turn's workspace and token, for the task's own rows
+          workspaceId: boundWorkspace?.datamateId,
+          turn: telemetryTurn,
+          // altimate_change end
           extra: { bypassAgentCheck: true },
           // altimate_change start — pass effective permission rules to search result filtering
           permissions: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
