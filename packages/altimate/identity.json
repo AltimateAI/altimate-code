@@ -8,6 +8,17 @@
   "configBasenames": ["altimate-code", "opencode"],
   "servicePort": 57241,
   "serviceName": "altimate-code",
+  "updater": {
+    "releaseUrl": "https://altimate.ai/altimate-code/update/api/{channel}/{artifact}/{distribution}?current={current}",
+    "package": "@altimateai/altimate-code",
+    "installedPackagePattern": "^(?:@altimateai/)?altimate-code$",
+    "policyFiles": ["config.json", "opencode.json", "opencode.jsonc", "altimate-code.json", "altimate-code.jsonc"],
+    "installDirectory": ".altimate-code",
+    "installBinary": "altimate-code",
+    "installerUrl": null,
+    "brew": null,
+    "winget": null
+  },
   "logo": {
     "left": [
       "                                ",

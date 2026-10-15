@@ -1,0 +1,40 @@
+   ok                            +
+
+  ┃                                                                    Warehouses
+  ┃  SCRIPT run the demo
+  ┃                                                                    demo (duckdb)
+
+     ✓ warehouse_add [name=demo, path=:memory:]                        Last query result
+
+     ✓ sql_execute [warehouse=demo, sql=select 42 as answer, 'duck'    demo · 1 row
+       as animal, null as nothing]                                     answer | animal | nothing
+                                                                       42 | duck | NULL
+     Done.
+
+     Build · Fake 1 · 1.2s · 24.4 tok/s
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Fake 1 Fake
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /…/a…/scratchpad/h5live/live/proj:maingit  2 (0%)  ctrl+p commands   r refresh · f full screen · esc close
+

@@ -1,17 +1,28 @@
 #!/usr/bin/env bun
 import { $ } from "bun"
 import pkg from "../package.json"
-import { Script } from "@opencode/script"
 import { fileURLToPath } from "url"
 import { existsSync } from "fs"
 import { chmod, rm, utimes } from "node:fs/promises"
 import path from "node:path"
 import { UpdateArtifact } from "../../../script/update-artifact"
+// altimate: ALT-F03
+import { defaults, Identity, resolveIdentity } from "@opencode/util/identity"
 
 const dir = fileURLToPath(new URL("..", import.meta.url))
 const root = path.resolve(process.env.OPENCODE_CLI_DIST ?? path.join(dir, "dist"))
+// altimate: ALT-F03 - resolve the descriptor before changing cwd; branded publication stays local.
+const identityFile = process.argv.find((arg) => arg.startsWith("--identity="))?.slice("--identity=".length)
+const identity = identityFile ? resolveIdentity(await Bun.file(path.resolve(identityFile)).json()) : Identity
+const packOnly = process.argv.includes("--pack-only")
+if ((identityFile || Identity !== defaults) && !packOnly)
+  throw new Error("Distribution identities require --pack-only; branded release publication is not configured")
+if (packOnly && !process.env.OPENCODE_VERSION) throw new Error("--pack-only requires an explicit OPENCODE_VERSION")
+// altimate: ALT-F03 - avoid Script's remote version discovery in local packaging mode.
+const { Script } = await import("@opencode/script")
 process.chdir(dir)
-const dryRun = process.argv.includes("--dry-run")
+// altimate: ALT-F03
+const dryRun = process.argv.includes("--dry-run") || packOnly
 
 async function published(name: string, version: string) {
   return (await $`npm view ${name}@${version} version`.nothrow()).exitCode === 0
@@ -84,10 +95,13 @@ async function publishDistribution(input: {
 
   await Promise.all(
     Object.entries(binaries).map(([name, version]) =>
-      publish(`${input.root}/${name.replace("@opencode/", "")}`, name, version),
+      // altimate: ALT-F03 - build output directories omit npm scopes.
+      publish(`${input.root}/${name.replace(/^@[^/]+\//, "")}`, name, version),
     ),
   )
   await publish(`${input.root}/${input.name}`, input.name, version)
+  // altimate: ALT-F03 - no registry lookup, upload, artifact registration, or release scripts.
+  if (packOnly) return
   const files = await UpdateArtifact.upload({
     version,
     files: await Promise.all(
@@ -123,16 +137,18 @@ async function publishDistribution(input: {
   await UpdateArtifact.publish(artifact)
 }
 
+// altimate: ALT-F03
 await publishDistribution({
   root,
-  name: pkg.name,
-  command: "opencode",
-  legacyCommand: "opencode2",
-  binary: "opencode",
-  packagePrefix: "@opencode/cli-",
+  name: identity.updater.package.replaceAll("{artifact}", "cli"),
+  command: identity.app,
+  legacyCommand: identity.app === defaults.app ? "opencode2" : undefined,
+  binary: identity.app,
+  packagePrefix: identity.app === defaults.app ? "@opencode/cli-" : `${identity.app}-`,
   artifact: "cli",
 })
-if (Script.channel !== "latest" && existsSync(path.join(root, "node"))) {
+// altimate: ALT-F03 - the branded spike packages only the compiled distribution.
+if (identity === defaults && Script.channel !== "latest" && existsSync(path.join(root, "node"))) {
   await publishDistribution({
     root: path.join(root, "node"),
     name: "@opencode/cli-node",
@@ -147,7 +163,8 @@ if (Script.channel === "latest" && Script.release && !dryRun) {
   await $`docker buildx build --platform linux/amd64,linux/arm64 --tag ghcr.io/anomalyco/opencode:${Script.version} --push .`
 }
 
-if ((Script.channel === "beta" || Script.channel === "latest") && Script.release) {
+// altimate: ALT-F03
+if (!packOnly && (Script.channel === "beta" || Script.channel === "latest") && Script.release) {
   await $`bun ./script/publish-aur.ts ${dryRun ? ["--dry-run"] : []}`.env({ ...process.env, OPENCODE_CLI_DIST: root })
   await $`bun ./script/publish-homebrew.ts ${dryRun ? ["--dry-run"] : []}`.env({
     ...process.env,

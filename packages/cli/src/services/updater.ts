@@ -1,5 +1,7 @@
 // altimate: ALT-F01
 import { cliName } from "../identity"
+// altimate: ALT-F03
+import { Identity, type Descriptor } from "@opencode/util/identity"
 // altimate: ALT-F01
 import { Env } from "@opencode/util/env"
 import { Global } from "@opencode/util/global"
@@ -60,17 +62,7 @@ const installNames: Record<Method, string> = {
   winget: "WinGet",
 }
 
-const wingetPackage = "Anomaly.OpenCode"
-const wingetArgs = [
-  "--id",
-  wingetPackage,
-  "--exact",
-  "--source",
-  "winget",
-  "--accept-source-agreements",
-  "--disable-interactivity",
-]
-
+// altimate: ALT-F03 - WinGet arguments now live inside the identity-scoped service.
 function conciseDetail(input: string) {
   const lines = stripVTControlCharacters(input)
     .trim()
@@ -140,7 +132,34 @@ export function decodePolicy(text: string): Policy | undefined {
   if (input.autoupdate === true) return "auto"
 }
 
-const make = Effect.gen(function* () {
+// altimate: ALT-F03 - injection keeps the production service and offline tests on the same path.
+const make = Effect.fnUntraced(function* (identity: Descriptor, request?: typeof fetch) {
+  const source = identity.updater
+  const wingetPackage = source.winget ?? ""
+  const wingetArgs = [
+    "--id",
+    wingetPackage,
+    "--exact",
+    "--source",
+    "winget",
+    "--accept-source-agreements",
+    "--disable-interactivity",
+  ]
+  const supported = (method?: Method) => {
+    if (
+      (method === "brew" && !source.brew) ||
+      (method === "winget" && !source.winget) ||
+      (method === "curl" && !source.installerUrl)
+    )
+      return Effect.fail(
+        new UpgradeError({
+          title: `Cannot upgrade ${identity.displayName} with ${method}`,
+          detail: `${method === "curl" ? `${identity.displayName} installer` : installNames[method]} updates are not supported for this distribution (${identity.displayName}).`,
+          retry: `Install ${source.package.replaceAll("{artifact}", OPENCODE_ARTIFACT)} with npm instead.`,
+        }),
+      )
+    return Effect.void
+  }
   const fs = yield* FileSystem.FileSystem
   const global = yield* Global.Service
   const appProcess = yield* AppProcess.Service
@@ -154,19 +173,24 @@ const make = Effect.gen(function* () {
       .readFileString(path.join(directory, "package.json"))
       .pipe(Effect.flatMap((text) => Effect.try(() => JSON.parse(text))))
     // Source invocations run inside Bun or Node, which may themselves be npm packages.
-    if (!/^@opencode(?:-ai)?\/cli(?:-node)?$/.test(manifest.name)) return
+    // altimate: ALT-F03
+    if (!new RegExp(source.installedPackagePattern).test(manifest.name)) return
     if (Object.values(manifest.bin ?? {}).some((bin) => path.resolve(directory, bin) === executable))
       return manifest.name
   }).pipe(Effect.orElseSucceed(() => undefined))
-  // "opencode" is Homebrew Core's formula; the others are published to anomalyco/tap.
-  const installedFormula = ["opencode", "opencode-beta", "opencode-v2"].find((name) =>
+  // altimate: ALT-F03
+  const installedFormula = source.brew?.formulas.find((name) =>
     executable.includes(`${path.sep}Cellar${path.sep}${name}${path.sep}`),
   )
   // WinGet extracts portable packages into a directory named after the package identifier.
-  const installedWinget = /[\\/]winget[\\/]packages[\\/]anomaly\.opencode_/i.test(executable)
+  // altimate: ALT-F03
+  const installedWinget =
+    source.winget !== null &&
+    executable.replaceAll("\\", "/").toLowerCase().includes(`/winget/packages/${source.winget.toLowerCase()}_`)
 
   const readPolicy = Effect.fnUntraced(function* () {
-    const values = yield* Effect.forEach(["config.json", "opencode.json", "opencode.jsonc"], (name) =>
+    // altimate: ALT-F03
+    const values = yield* Effect.forEach(source.policyFiles, (name) =>
       fs.readFileString(path.join(global.config, name)).pipe(
         Effect.map(decodePolicy),
         Effect.orElseSucceed(() => undefined),
@@ -193,9 +217,10 @@ const make = Effect.gen(function* () {
 
   const curlPath = path.resolve(
     global.home,
-    ".opencode",
+    // altimate: ALT-F03
+    source.installDirectory,
     "bin",
-    process.platform === "win32" ? "opencode.exe" : "opencode",
+    `${source.installBinary}${process.platform === "win32" ? ".exe" : ""}`,
   )
   const curlBinary = yield* fs.realPath(curlPath).pipe(Effect.orElseSucceed(() => curlPath))
 
@@ -252,7 +277,8 @@ const make = Effect.gen(function* () {
   })
 
   const removalCommand = (method: Method) => {
-    if (method === "winget") return ["winget", "uninstall", ...wingetArgs]
+    // altimate: ALT-F03
+    if (method === "winget") return source.winget ? ["winget", "uninstall", ...wingetArgs] : undefined
     if (method === "curl" || method === "brew" || !installedPackage) return undefined
     const commands = {
       npm: ["npm", "uninstall", "--global", installedPackage],
@@ -280,19 +306,36 @@ const make = Effect.gen(function* () {
   }
 
   const release = Effect.fnUntraced(function* (method?: Method) {
+    // altimate: ALT-F03
+    yield* supported(method)
     const distribution = method === "brew" ? "homebrew" : "npm"
     // Homebrew Core builds its formula on its own schedule, so the tap release does not describe it.
-    const core = method === "brew" && installedFormula === "opencode"
+    // altimate: ALT-F03
+    const brew = source.brew
+    const core = method === "brew" && brew !== null && installedFormula === brew.coreFormula
+    const expectedPackage =
+      method === "brew" && brew
+        ? core
+          ? brew.coreFormula
+          : (brew.channels[channel] ?? brew.package)
+        : source.package.replaceAll("{artifact}", OPENCODE_ARTIFACT)
+    const parameters: Record<string, string> = {
+      channel,
+      artifact: OPENCODE_ARTIFACT,
+      distribution,
+      current: OPENCODE_VERSION,
+    }
+    const url = core
+      ? brew.coreUrl
+      : source.releaseUrl.replace(/\{(channel|artifact|distribution|current)\}/g, (_, key: string) =>
+          encodeURIComponent(parameters[key]),
+        )
     const response = yield* Effect.tryPromise({
       try: (signal) =>
-        fetch(
-          core
-            ? "https://formulae.brew.sh/api/formula/opencode.json"
-            : `https://opencode.ai/update/api/${encodeURIComponent(channel)}/${encodeURIComponent(OPENCODE_ARTIFACT)}/${distribution}?current=${encodeURIComponent(OPENCODE_VERSION)}`,
-          {
-            signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
-          },
-        ),
+        // altimate: ALT-F03
+        (request ?? fetch)(url, {
+          signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+        }),
       catch: (cause) =>
         new UpgradeError(
           {
@@ -326,7 +369,8 @@ const make = Effect.gen(function* () {
           ),
       })
     const version = core ? data.versions?.stable : data.version
-    const packageName = core ? "opencode" : data.metadata?.package
+    // altimate: ALT-F03
+    const packageName = core ? brew.coreFormula : data.metadata?.package
     if (!version || !packageName)
       return yield* Effect.fail(
         new UpgradeError({
@@ -335,11 +379,22 @@ const make = Effect.gen(function* () {
           retry: "Try again in a few minutes.",
         }),
       )
-    return { package: packageName, version }
+    // altimate: ALT-F03 - a release service cannot redirect an installation to another package.
+    if (packageName !== expectedPackage)
+      return yield* Effect.fail(
+        new UpgradeError({
+          title: `Refusing an update for a different ${identity.displayName} package`,
+          detail: `The update service returned package "${packageName}"; expected "${expectedPackage}".`,
+          retry: "Check the distribution update source before trying again.",
+        }),
+      )
+    return { package: expectedPackage, version }
   })
 
   // WinGet moderates every submission, so only its own index knows which release it can install.
   const wingetVersion = Effect.fnUntraced(function* () {
+    // altimate: ALT-F03
+    yield* supported("winget")
     const failure = (detail: string, cause?: unknown) =>
       new UpgradeError(
         {
@@ -434,12 +489,15 @@ const make = Effect.gen(function* () {
 
   const upgrade = Effect.fnUntraced(function* (method: Method, input: string) {
     if (!parseReleaseVersion(input)) return yield* Effect.fail(new Error(`Invalid version: ${input}`))
+    // altimate: ALT-F03
+    yield* supported(method)
     const version = input.trim().replace(/^v/, "")
+    // altimate: ALT-F03
     const packageName =
       method === "winget"
         ? wingetPackage
-        : method === "brew" && installedFormula === "opencode"
-          ? "opencode"
+        : method === "brew" && source.brew && installedFormula === source.brew.coreFormula
+          ? source.brew.coreFormula
           : (yield* release(method)).package
     const target = `${packageName}@${version}`
     if (installedPackage && packageName !== installedPackage && (method === "pnpm" || method === "yarn")) {
@@ -489,8 +547,9 @@ const make = Effect.gen(function* () {
           const installer = path.join(directory, "install")
           yield* runUpgrade({
             method,
-            command: ["curl", "-fsSL", "-o", installer, "https://opencode.ai/v2/install"],
-            displayCommand: ["curl", "-fsSL", "https://opencode.ai/v2/install"],
+            // altimate: ALT-F03 - supported() has already refused a deferred installer.
+            command: ["curl", "-fsSL", "-o", installer, source.installerUrl!],
+            displayCommand: ["curl", "-fsSL", source.installerUrl!],
             title: "Could not download the OpenCode installer",
             // altimate: ALT-F01
             retry: `Check your network, then run ${cliName} upgrade again.`,
@@ -636,7 +695,10 @@ const make = Effect.gen(function* () {
   return Service.of({ run, check, apply, method, latest, upgrade, removal })
 })
 
-export const layer = Layer.effect(Service, make)
+// altimate: ALT-F03
+export const layerWith = (options: { identity?: Descriptor; fetch?: typeof fetch } = {}) =>
+  Layer.effect(Service, make(options.identity ?? Identity, options.fetch))
+export const layer = layerWith()
 
 export * as Updater from "./updater"
 export { action, type Action, type Policy } from "./updater-action"

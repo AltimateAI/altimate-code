@@ -1,0 +1,40 @@
+   ok                            +
+
+  ┃                                                                                                 ok
+  ┃  SCRIPT run the demo
+  ┃                                                                                                 Context
+                                                                                                    2 tokens
+     ✓ warehouse_add [name=demo, path=:memory:]                                                     0% used
+
+     ✓ sql_execute [warehouse=demo, sql=select 42 as answer, 'duck' as animal, null as nothing]
+
+     Done.
+
+     Build · Fake 1 · 1.2s · 24.4 tok/s
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                      ⬖ Getting started                ✕
+
+                                                                                                        OpenCode includes free models so
+                                                                                                        you can start immediately.
+
+                                                                                                        Connect from 75+ providers to
+                                                                                                        use other models, including
+  ┃                                                                                                     Claude, GPT, Gemini etc
+  ┃
+  ┃                                                                                                     Connect provider        /connect
+  ┃  Build · Fake 1 Fake
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /…/a3ba8813-c4f4-4234-9efe-d5c71…/scratchpad/h5live/live/proj:maingit  2 (0%)  ctrl+p commands    /…/scratchpad/h5live/live/proj:maingit
+

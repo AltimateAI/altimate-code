@@ -1,0 +1,12 @@
+Command: TMPDIR=/private/tmp bun run check (repository root)
+Bun: 1.4.2 (744846f84)
+Exit code: 0
+Full output: /private/tmp/altimate-h3/check.txt
+
+Found 1353 warnings and 0 errors.
+ Tasks:    37 successful, 37 total
+Cached:    0 cached, 37 total
+  Time:    19.406s 
+
+Astro/posts and www diagnostics: 0 errors.
+Wrangler reported denied external log writes (EPERM); these did not fail the check.

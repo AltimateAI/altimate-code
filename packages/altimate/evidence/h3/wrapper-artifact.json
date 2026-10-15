@@ -1,0 +1,48 @@
+{
+  "kind": "offline npm wrapper packaging and H5 sidecar acceptance",
+  "version": "0.0.0-spike",
+  "sourceArtifact": "/private/tmp/altimate-h5/branded/altimate-code-darwin-arm64",
+  "proofDirectory": "/private/tmp/altimate-h3-wrapper-7p1bupv8",
+  "packCommand": "OPENCODE_VERSION=0.0.0-spike OPENCODE_CHANNEL=spike OPENCODE_CLI_DIST=/private/tmp/altimate-h3-wrapper-7p1bupv8/dist bun script/publish.ts --pack-only --identity=../altimate/identity.json",
+  "packExit": 0,
+  "tarballs": [
+    {
+      "path": "/private/tmp/altimate-h3-wrapper-7p1bupv8/dist/@altimateai/altimate-code/altimateai-altimate-code-0.0.0-spike.tgz",
+      "bytes": 2977
+    },
+    {
+      "path": "/private/tmp/altimate-h3-wrapper-7p1bupv8/dist/altimate-code-darwin-arm64/altimate-code-darwin-arm64-0.0.0-spike.tgz",
+      "bytes": 101979396
+    }
+  ],
+  "installation": "tar extraction of wrapper and optional platform dependency into isolated installed/node_modules, then production postinstall.mjs",
+  "postinstallExit": 0,
+  "smokeExit": 0,
+  "smoke": {
+    "builtin": "altimate",
+    "firstRequestTools": [
+      "sql_execute",
+      "warehouse_add"
+    ],
+    "rows": [
+      [
+        42
+      ]
+    ],
+    "rpc": true,
+    "listening": false,
+    "nativeModules": [
+      "/private/tmp/altimate-h3-wrapper-7p1bupv8/installed/node_modules/@altimateai/altimate-code/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node"
+    ],
+    "driverModules": [
+      "/private/tmp/altimate-h3-wrapper-7p1bupv8/installed/node_modules/@altimateai/altimate-code/lib/altimate/drivers/node_modules/@duckdb/node-api/lib/index.js",
+      "/private/tmp/altimate-h3-wrapper-7p1bupv8/installed/node_modules/@altimateai/altimate-code/lib/altimate/drivers/node_modules/@duckdb/node-bindings/duckdb.js",
+      "/private/tmp/altimate-h3-wrapper-7p1bupv8/installed/node_modules/@altimateai/altimate-code/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node"
+    ],
+    "elapsedMs": 1189
+  },
+  "limitations": [
+    "H5 binary predates H3 updater changes; this acceptance verifies packaging and native-sidecar delivery only.",
+    "No registry, listener, network publish, TUI update notification, or real updater execution."
+  ]
+}

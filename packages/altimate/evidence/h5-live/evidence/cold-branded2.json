@@ -1,0 +1,13 @@
+{
+ "which": "branded",
+ "run": "2",
+ "t_first_output": 0.23859020799999997,
+ "first_output": "Starting background server...",
+ "t_service_file": 0.33817525,
+ "plugin_polls": 1,
+ "t_plugin_ready": 0.8740751250000001,
+ "t_rpc_ready": 1.205714625,
+ "rpc_out": "{\"output\":[]}",
+ "t_first_paint_home": 1.8746642919999998,
+ "pids": ""
+}

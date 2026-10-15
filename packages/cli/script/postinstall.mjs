@@ -122,6 +122,9 @@ function copyBinary(source) {
     fs.copyFileSync(source, targetBinary)
   }
   fs.chmodSync(targetBinary, 0o755)
+  // altimate: ALT-F03 - hardlinked executables resolve sidecars relative to the wrapper's bin directory.
+  const sidecars = path.resolve(path.dirname(source), "../lib")
+  if (fs.existsSync(sidecars)) fs.cpSync(sidecars, path.join(directory, "lib"), { recursive: true })
 }
 
 function resolveBinary(name) {

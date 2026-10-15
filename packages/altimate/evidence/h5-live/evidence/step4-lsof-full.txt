@@ -1,0 +1,58 @@
+COMMAND    PID       USER   FD     TYPE             DEVICE  SIZE/OFF                NODE NAME
+altimate- 6182 anandgupta  cwd      DIR               1,17        64           471205304 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/home
+altimate- 6182 anandgupta  txt      REG               1,17 187635570           471173462 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/art-branded/bin/altimate-code
+altimate- 6182 anandgupta  txt      REG               1,17     72984           422847584 /Library/Preferences/Logging/.plist-cache.XqRMj0p8
+altimate- 6182 anandgupta  txt      REG               1,17     32768           471205389 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/data/altimate-code/altimate-code-spike.db-shm
+altimate- 6182 anandgupta  txt      REG               1,17    236480           419370912 /private/var/db/timezone/tz/2026d.1.0/icutz/icutz44l.dat
+altimate- 6182 anandgupta  txt      REG               1,17     32768           422848600 /private/var/db/mds/messages/501/se_SecurityMessages
+altimate- 6182 anandgupta  txt      REG               1,17    165130           455201787 /private/var/db/analyticsd/events.allowlist
+altimate- 6182 anandgupta  txt      REG               1,17    342608           471205394 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/tmp/.bun-501-c22f2ef692948d9e.node
+altimate- 6182 anandgupta  txt      REG               1,17   2374000 1152921500312573276 /usr/lib/dyld
+altimate- 6182 anandgupta  txt      REG               1,17  35444880 1152921500312583777 /usr/share/icu/icudt78l.dat
+altimate- 6182 anandgupta  txt      REG               1,17   5560064           471205364 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/tmp/.bun-501-1d98d107b4c544c0.dylib
+altimate- 6182 anandgupta  txt      REG               1,17    392792           471173488 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/art-branded/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node
+altimate- 6182 anandgupta  txt      REG               1,17   9660064           471205395 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/tmp/.bun-501-295fc1275a70d982.dylib
+altimate- 6182 anandgupta  txt      REG               1,17  52599536           471173470 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/art-branded/lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/libduckdb.dylib
+altimate- 6182 anandgupta    0r     CHR                3,2       0t0                 336 /dev/null
+altimate- 6182 anandgupta    1w     CHR                3,2      0t43                 336 /dev/null
+altimate- 6182 anandgupta    2u    unix 0xd3979b45b27cab80       0t0                     ->0x6222dbe00f9b5336
+altimate- 6182 anandgupta    3u  KQUEUE                                                  count=0, state=0x12
+altimate- 6182 anandgupta    4w     CHR                3,2      0t43                 336 /dev/null
+altimate- 6182 anandgupta    5w     REG               1,17     35750           471205374 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/data/altimate-code/log/altimate-code.log
+altimate- 6182 anandgupta    6u    unix 0xd3979b45b27cab80       0t0                     ->0x6222dbe00f9b5336
+altimate- 6182 anandgupta    7u    IPv4 0xf67285525d012fc7       0t0                 TCP localhost:47018 (LISTEN)
+altimate- 6182 anandgupta    8u     REG               1,17   6635520           471205386 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/data/altimate-code/altimate-code-spike.db
+altimate- 6182 anandgupta    9u     REG               1,17    683952           471205388 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/data/altimate-code/altimate-code-spike.db-wal
+altimate- 6182 anandgupta   10u     REG               1,17     32768           471205389 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/data/altimate-code/altimate-code-spike.db-shm
+altimate- 6182 anandgupta   11u    IPv4 0x8fd02558e068d3d7       0t0                 TCP localhost:47018->localhost:65531 (ESTABLISHED)
+altimate- 6182 anandgupta   12u  KQUEUE                                                  count=0, state=0x8
+altimate- 6182 anandgupta   13r     DIR               1,17       128           471205310 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/proj
+altimate- 6182 anandgupta   14r     DIR               1,17       288           471205303 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live
+altimate- 6182 anandgupta   15r     DIR               1,17       448           471173458 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live
+altimate- 6182 anandgupta   16r     DIR               1,17       640           456072099 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad
+altimate- 6182 anandgupta   17r     DIR               1,17       128           456072098 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560
+altimate- 6182 anandgupta   18r     DIR               1,17       160           423868347 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code
+altimate- 6182 anandgupta   19r     DIR               1,17      6880           422981775 /private/tmp/claude-501
+altimate- 6182 anandgupta   20r     DIR               1,17     65024           422847553 /private/tmp
+altimate- 6182 anandgupta   21r     DIR               1,17       192           230353847 /private
+altimate- 6182 anandgupta   22r     DIR               1,17       704 1152921500311879682 /System/Volumes/Data
+altimate- 6182 anandgupta   23r     DIR               1,17       448 1152921500312543605 /System/Volumes
+altimate- 6182 anandgupta   24r     DIR               1,17       320 1152921500311879703 /System
+altimate- 6182 anandgupta   25r     DIR               1,17       288           471205311 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/proj/.git
+altimate- 6182 anandgupta   26r     DIR               1,17       128           471205310 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live/proj
+altimate- 6182 anandgupta   27r     DIR               1,17       288           471205303 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live/live
+altimate- 6182 anandgupta   28r     DIR               1,17       448           471173458 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h5live
+altimate- 6182 anandgupta   29r     DIR               1,17       640           456072099 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad
+altimate- 6182 anandgupta   30r     DIR               1,17       128           456072098 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560
+altimate- 6182 anandgupta   31r     DIR               1,17       160           423868347 /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code
+altimate- 6182 anandgupta   32r     DIR               1,17      6880           422981775 /private/tmp/claude-501
+altimate- 6182 anandgupta   33r     DIR               1,17     65024           422847553 /private/tmp
+altimate- 6182 anandgupta   34r     DIR               1,17       192           230353847 /private
+altimate- 6182 anandgupta   35r     DIR               1,17       704 1152921500311879682 /System/Volumes/Data
+altimate- 6182 anandgupta   36r     DIR               1,17       448 1152921500312543605 /System/Volumes
+altimate- 6182 anandgupta   37r     DIR               1,17       320 1152921500311879703 /System
+altimate- 6182 anandgupta   38u  KQUEUE                                                  count=0, state=0x8
+altimate- 6182 anandgupta   39u  KQUEUE                                                  count=0, state=0x12
+altimate- 6182 anandgupta   40u    unix 0x4b23343631c11549       0t0                     ->0xe60a8e936f02c15e
+altimate- 6182 anandgupta   41u    IPv4 0x760442ba420bc945       0t0                 TCP 192.168.68.53:49162->172.66.173.149:https (ESTABLISHED)
+altimate- 6182 anandgupta   43u    IPv4 0xebf67576de505c04       0t0                 TCP localhost:49166->localhost:11434 (ESTABLISHED)

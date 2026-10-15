@@ -20,6 +20,8 @@ describe("host identity", () => {
       servicePort: 0xc0de,
       serviceName: "opencode",
       title: { home: "OpenCode", prefix: "OC" },
+      // altimate: ALT-F03 - detailed stock update routing is exercised by the updater suite.
+      updater: defaults.updater,
       logo: {
         left: ["                   ", "█▀▀█ █▀▀█ █▀▀█ █▀▀▄", "█__█ █__█ █^^^ █__█", "▀▀▀▀ █▀▀▀ ▀▀▀▀ ▀~~▀"],
         right: ["             ▄     ", "█▀▀▀ █▀▀█ █▀▀█ █▀▀█", "█___ █__█ █__█ █^^^", "▀▀▀▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀▀"],
@@ -39,6 +41,22 @@ describe("host identity", () => {
     // altimate: ALT-F02
     expect(() => resolveIdentity({ ...altimate, hostPlugins: "" })).toThrow("hostPlugins")
     expect(() => resolveIdentity({ ...altimate, hostPlugins: 42 })).toThrow("hostPlugins")
+  })
+
+  // altimate: ALT-F03
+  test("validates update sources and explicit deferred methods", () => {
+    expect(resolveIdentity(defaults)).toBe(defaults)
+    expect(resolveIdentity(altimate).updater.package).toBe("@altimateai/altimate-code")
+    for (const updater of [
+      undefined,
+      {},
+      { ...altimate.updater, policyFiles: [] },
+      { ...altimate.updater, installedPackagePattern: "[" },
+      { ...altimate.updater, installerUrl: "file:///tmp/install" },
+      { ...altimate.updater, winget: "" },
+      { ...altimate.updater, brew: { ...defaults.updater.brew, channels: { beta: 42 } } },
+    ])
+      expect(() => resolveIdentity({ ...altimate, updater })).toThrow()
   })
 
   for (const branded of [false, true]) {

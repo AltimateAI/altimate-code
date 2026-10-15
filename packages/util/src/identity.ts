@@ -11,6 +11,24 @@ export type Descriptor = {
   readonly logo: { readonly left: readonly string[]; readonly right: readonly string[] }
   readonly narrowLogo: { readonly left: readonly string[]; readonly right: readonly string[] }
   readonly title: { readonly home: string; readonly prefix: string }
+  // altimate: ALT-F03 - release templates are expanded by the updater, never by the shell.
+  readonly updater: {
+    readonly releaseUrl: string
+    readonly package: string
+    readonly installedPackagePattern: string
+    readonly policyFiles: readonly string[]
+    readonly installDirectory: string
+    readonly installBinary: string
+    readonly installerUrl: string | null
+    readonly brew: {
+      readonly formulas: readonly string[]
+      readonly coreFormula: string
+      readonly coreUrl: string
+      readonly package: string
+      readonly channels: Readonly<Record<string, string>>
+    } | null
+    readonly winget: string | null
+  }
   // altimate: ALT-F02 - module path relative to the descriptor, resolved only by the build host.
   readonly hostPlugins?: string
   // altimate: ALT-F05 - optional distribution-owned artifact packaging hook.
@@ -34,12 +52,32 @@ export const defaults: Descriptor = {
     right: ["    ", "█▀▀█", "█__█", "▀▀▀▀"],
   },
   title: { home: "OpenCode", prefix: "OC" },
+  // altimate: ALT-F03
+  updater: {
+    releaseUrl: "https://opencode.ai/update/api/{channel}/{artifact}/{distribution}?current={current}",
+    package: "@opencode/{artifact}",
+    installedPackagePattern: "^@opencode(?:-ai)?/cli(?:-node)?$",
+    policyFiles: ["config.json", "opencode.json", "opencode.jsonc"],
+    installDirectory: ".opencode",
+    installBinary: "opencode",
+    installerUrl: "https://opencode.ai/v2/install",
+    brew: {
+      formulas: ["opencode", "opencode-beta", "opencode-v2"],
+      coreFormula: "opencode",
+      coreUrl: "https://formulae.brew.sh/api/formula/opencode.json",
+      package: "anomalyco/tap/opencode-v2",
+      channels: { beta: "anomalyco/tap/opencode-beta" },
+    },
+    winget: "Anomaly.OpenCode",
+  },
 }
 
 /** Validate a complete external descriptor at the build boundary. */
 export function resolveIdentity(input: unknown): Descriptor {
   if (typeof input !== "object" || input === null) throw new Error("Identity must be an object")
   const value = input as Record<string, unknown>
+  // altimate: ALT-F03
+  requireUpdater(value.updater)
   // altimate: ALT-F02
   if (value.hostPlugins !== undefined && (typeof value.hostPlugins !== "string" || !value.hostPlugins))
     throw new Error("Identity.hostPlugins must be a nonempty module path")
@@ -80,6 +118,45 @@ export function resolveIdentity(input: unknown): Descriptor {
   )
     throw new Error("Identity.title must contain home and prefix strings")
   return input as Descriptor
+}
+
+// altimate: ALT-F03 - validate the external descriptor once, before embedding it.
+function requireUpdater(input: unknown) {
+  if (typeof input !== "object" || input === null) throw new Error("Identity.updater must be an object")
+  const value = input as Record<string, unknown>
+  for (const key of ["releaseUrl", "package", "installedPackagePattern", "installDirectory", "installBinary"]) {
+    if (typeof value[key] !== "string" || !value[key]) throw new Error(`Identity.updater.${key} must be nonempty`)
+  }
+  new RegExp(value.installedPackagePattern as string)
+  requireUpdateUrl(value.releaseUrl)
+  if (!strings(value.policyFiles) || !value.policyFiles.length || value.policyFiles.some((name) => !name))
+    throw new Error("Identity.updater.policyFiles must contain nonempty strings")
+  if (value.installerUrl !== null) requireUpdateUrl(value.installerUrl)
+  if (value.winget !== null && (typeof value.winget !== "string" || !value.winget))
+    throw new Error("Identity.updater.winget must be a package identifier or null")
+  if (value.brew === null) return
+  if (typeof value.brew !== "object" || value.brew === null)
+    throw new Error("Identity.updater.brew must be an object or null")
+  const brew = value.brew as Record<string, unknown>
+  if (!strings(brew.formulas) || !brew.formulas.length || brew.formulas.some((name) => !name))
+    throw new Error("Identity.updater.brew.formulas must contain nonempty strings")
+  for (const key of ["coreFormula", "package"]) {
+    if (typeof brew[key] !== "string" || !brew[key]) throw new Error(`Identity.updater.brew.${key} must be nonempty`)
+  }
+  requireUpdateUrl(brew.coreUrl)
+  if (
+    typeof brew.channels !== "object" ||
+    brew.channels === null ||
+    Array.isArray(brew.channels) ||
+    Object.values(brew.channels).some((name) => typeof name !== "string" || !name)
+  )
+    throw new Error("Identity.updater.brew.channels must map channels to package names")
+}
+
+// altimate: ALT-F03 - HTTP is allowed for explicitly selected local test endpoints.
+function requireUpdateUrl(input: unknown) {
+  if (typeof input !== "string" || !["http:", "https:"].includes(new URL(input).protocol))
+    throw new Error("Identity updater URLs must use http or https")
 }
 
 function strings(value: unknown): value is string[] {

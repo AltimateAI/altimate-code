@@ -1,0 +1,101 @@
+bun test v1.4.2 (744846f84)
+
+test/publish.test.ts:
+(pass) pack-only preserves the stock wrapper and skips release publication [135.73ms]
+(pass) branded wrapper packs and installs its binary with H5 sidecars offline [376.42ms]
+(pass) branded wrappers refuse the upstream publication path [117.10ms]
+(pass) pack-only requires a local version before loading release metadata [123.34ms]
+
+test/updater-install.test.ts:
+(pass) npm installs the explicit V2 package version without a leading v [12.92ms]
+(pass) pnpm installs the explicit V2 package version without a leading v [2.78ms]
+(pass) yarn installs the explicit V2 package version without a leading v [2.12ms]
+(pass) vp installs the explicit V2 package version without a leading v [4.65ms]
+(pass) vp force-installs the expected V2 package that replaces the existing binary owner [2.18ms]
+(pass) vp removes the package from its managed global store [1.47ms]
+(pass) bun isolates and removes its install cache after exit 0 [2.62ms]
+(pass) bun isolates and removes its install cache after exit 1 [2.51ms]
+(pass) bun ignores install cache cleanup failures [4.56ms]
+(pass) curl uses the V2 installer and cleans its directory: success [2.55ms]
+(pass) curl uses the V2 installer and cleans its directory: download [6.01ms]
+(pass) curl uses the V2 installer and cleans its directory: install [2.40ms]
+(pass) invalid version targets never execute a command or create a cache [1.61ms]
+(pass) install failures expose stderr and process errors do not report success [3.93ms]
+(pass) method detection identifies npm using the V2 package [3.81ms]
+(pass) method detection identifies pnpm using the V2 package [1.16ms]
+(pass) method detection identifies bun using the V2 package [1.20ms]
+(pass) method detection identifies yarn using the V2 package [1.10ms]
+(pass) method detection identifies vp using the V2 package [1.35ms]
+(pass) method detection identifies an unknown installation using the V2 package [1.97ms]
+(pass) method detection tolerates unavailable package managers [2.80ms]
+(pass) vp detection ignores no-match output that repeats the package name [1.29ms]
+(pass) Homebrew Core installs check and upgrade the Core formula [1.91ms]
+(pass) Homebrew tap installs of opencode-v2 use the published tap formula [1.95ms]
+(pass) Homebrew tap installs of opencode-beta use the published tap formula [1.67ms]
+(pass) WinGet installs check, upgrade, and remove the version in the WinGet index [2.05ms]
+(pass) WinGet update checks report a missing package instead of a version [3.91ms]
+(skip) windows keeps a second link to the running binary in the cache while the installer runs
+(skip) windows releases the link when the installer fails
+(skip) windows keeps the uninstall link in the temporary directory, not the removed cache
+(skip) windows links the curl binary before the installer replaces it
+(pass) curl method detection resolves symlinked home directories [1.34ms]
+(skip) windows leaves a source checkout's runtime alone
+(pass) other platforms never link the running binary [3.10ms]
+(pass) Node distribution honors the compile-time CLI name [394.17ms]
+(pass) Altimate detects npm and installs only its expected package [5.57ms]
+(pass) Altimate detects pnpm and installs only its expected package [1.87ms]
+(pass) Altimate detects bun and installs only its expected package [2.20ms]
+(pass) Altimate detects yarn and installs only its expected package [6.29ms]
+(pass) Altimate detects vp and installs only its expected package [2.06ms]
+(pass) Altimate ignores an installed package named @opencode/cli [1.13ms]
+(pass) Altimate ignores an installed package named @opencode/cli-node [0.93ms]
+(pass) Altimate ignores an installed package named unrelated-package [0.83ms]
+(pass) Altimate recognizes the legacy unscoped v1 package [1.71ms]
+(pass) OpenCode refuses a manifest for the wrong package before installing [2.20ms]
+(pass) Altimate Code refuses a manifest for the wrong package before installing [4.76ms]
+(pass) Altimate rejects deferred brew updates before any request or command [1.38ms]
+(pass) Altimate rejects deferred winget updates before any request or command [1.21ms]
+(pass) Altimate rejects deferred curl updates before any request or command [1.16ms]
+(pass) every URL constructed by the branded updater stays off opencode.ai [8.09ms]
+(pass) Altimate install-location detection and an enabled installer use the descriptor [1.79ms]
+(pass) branded installed builds exercise real TUI update checks and policy precedence offline [574.95ms]
+
+test/upgrade.test.ts:
+(pass) upgrade command > is registered in root help and documents its options [1412.94ms]
+(pass) upgrade command > detects the installation method and resolves the latest version [514.76ms]
+(pass) upgrade command > resolves the latest version for an explicit method without detection [552.46ms]
+(pass) upgrade command > accepts an explicit version and method without detection or a version lookup [516.69ms]
+(pass) upgrade command > accepts the short method flag and an explicit major upgrade [468.78ms]
+(pass) upgrade command > accepts vp as an explicit installation method [489.40ms]
+(pass) upgrade command > skips the already installed version [490.24ms]
+(pass) upgrade command > requires an explicit method when detection fails [859.15ms]
+(pass) upgrade command > rejects unsupported methods before attempting an upgrade [528.36ms]
+(pass) upgrade command > reports version lookup failures without installing [511.62ms]
+(pass) upgrade command > reports installation failures with a nonzero exit code [518.52ms]
+
+src/services/updater.test.ts:
+(pass) updater > reads update policy from JSONC [0.58ms]
+(pass) updater > maps the v1 update policy [0.07ms]
+(pass) updater > reports every available release [0.04ms]
+(pass) updater > automatically installs every available release when enabled
+(pass) updater > skips when updates are disabled
+(pass) updater > reports up-to-date only when versions match
+(pass) updater > reports when latest is lower (rollback)
+(pass) updater > accepts strict release version variants [0.05ms]
+(pass) updater > preserves strict validity [0.04ms]
+(pass) updater > handles numeric limits without losing precision
+(pass) updater > preserves equality for oversized numeric prerelease identifiers [0.01ms]
+(pass) updater > rejects versions longer than semver's limit before trimming [0.01ms]
+
+5 tests skipped:
+(skip) windows keeps a second link to the running binary in the cache while the installer runs
+(skip) windows releases the link when the installer fails
+(skip) windows keeps the uninstall link in the temporary directory, not the removed cache
+(skip) windows links the curl binary before the installer replaces it
+(skip) windows leaves a source checkout's runtime alone
+
+ 74 pass
+ 5 skip
+ 0 fail
+ 353 expect() calls
+Ran 79 tests across 4 files. [9.30s]

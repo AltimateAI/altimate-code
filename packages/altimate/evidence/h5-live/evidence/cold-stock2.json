@@ -1,0 +1,10 @@
+{
+ "which": "stock",
+ "run": "2",
+ "t_first_output": 0.24237358399999998,
+ "first_output": "Starting background server...",
+ "t_service_file": 0.346261334,
+ "plugin_polls": 225,
+ "t_first_paint_home": 1.9021095,
+ "pids": ""
+}
