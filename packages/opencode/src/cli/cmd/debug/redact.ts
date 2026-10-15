@@ -24,13 +24,13 @@ function redactURL(value: string): string {
 }
 
 // Free-form secret carriers: every environment value is masked, and argv keeps only the
-// executable and bare flags (`env TOKEN=x`, `--header "Authorization: ..."`, JDBC strings).
+// executable (`env TOKEN=x`, `--header "Authorization: ..."`, `-pSecret`, JDBC strings).
 const environmentKey = /^(?:environment|env)$/i
 const argvKey = /^(?:command|headersCommand|args)$/i
 
 function redactArgv(argv: unknown[]): unknown[] {
   return argv.map((item, index) =>
-    typeof item !== "string" || index === 0 || /^--?[\w.-]+$/.test(item) ? item : "***",
+    typeof item !== "string" || index === 0 ? item : "***",
   )
 }
 
@@ -52,6 +52,14 @@ export function redactConfig(value: unknown, headers = false): unknown {
     Object.entries(value).map(([key, item]) => {
       if (typeof item === "string" && (headers || secretName.test(key))) return [key, "***"]
       if (Array.isArray(item) && argvKey.test(key) && !headers) return [key, redactArgv(item)]
+      // headersCommand is a record of header name -> argv.
+      if (item && typeof item === "object" && argvKey.test(key) && !headers)
+        return [
+          key,
+          Object.fromEntries(
+            Object.entries(item).map(([name, argv]) => [name, Array.isArray(argv) ? redactArgv(argv) : "***"]),
+          ),
+        ]
       const secretScope = headers || /^headers$/i.test(key) || environmentKey.test(key) || secretName.test(key)
       return [key, redactConfig(item, secretScope)]
     }),

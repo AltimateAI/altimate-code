@@ -337,17 +337,41 @@ describe("debug config redaction", () => {
   })
 
   test.each(["command", "headersCommand", "args"])(
-    "keeps only the first element, bare flags, and non-string values in %s",
+    "keeps only the first element and non-string values in %s",
     (key) => {
       expect(
         redactConfig({
           [key]: ["example", "--max_tokens=1200", "public", "--token", "--verbose", "-v", 1200, false, null],
         }),
       ).toEqual({
-        [key]: ["example", "***", "***", "--token", "--verbose", "-v", 1200, false, null],
+        [key]: ["example", "***", "***", "***", "***", "***", 1200, false, null],
       })
     },
   )
+
+  test("keeps only the executable in headersCommand records and masks non-array values", () => {
+    expect(
+      redactConfig({
+        headersCommand: {
+          "X-Tenant": ["sh", "-c", "printf embedded-secret"],
+          "X-String": "embedded-secret",
+          "X-Number": 1200,
+          "X-Null": null,
+        },
+      }),
+    ).toEqual({
+      headersCommand: {
+        "X-Tenant": ["sh", "***", "***"],
+        "X-String": "***",
+        "X-Number": "***",
+        "X-Null": "***",
+      },
+    })
+  })
+
+  test("masks secrets attached to short command flags", () => {
+    expect(redactConfig({ command: ["mysql", "-pSecret123"] })).toEqual({ command: ["mysql", "***"] })
+  })
 
   test.each(["environment", "env"])("masks nested strings under %s while preserving non-string values", (key) => {
     expect(
@@ -359,7 +383,7 @@ describe("debug config redaction", () => {
     })
   })
 
-  test("masks every MCP environment value and keeps only executable and bare flags in argv", () => {
+  test("masks every MCP environment value and keeps only the executable in command arrays", () => {
     expect(
       redactConfig({
         mcp: {
@@ -381,7 +405,7 @@ describe("debug config redaction", () => {
       mcp: {
         db: {
           type: "local",
-          command: ["env", "***", "***", "--header", "***", "--verbose"],
+          command: ["env", "***", "***", "***", "***", "***"],
           environment: {
             DATABASE_URL: "***",
             ORACLE: "***",

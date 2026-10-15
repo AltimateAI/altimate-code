@@ -131,7 +131,7 @@ export class McpOAuthProvider implements OAuthClientProvider {
     // altimate_change start — upstream_fix: backport 29f07e0c69 restrict MCP authorization URLs to http(s)
     if (authorizationUrl.protocol !== "http:" && authorizationUrl.protocol !== "https:")
       throw new Error(
-        `MCP server "${this.serverUrl}" returned a ${authorizationUrl.protocol} authorization URL; only http and https are supported`,
+        `MCP server "${this.mcpName}" returned a ${authorizationUrl.protocol} authorization URL; only http and https are supported`,
       )
     // altimate_change end
     await this.callbacks.onRedirect(authorizationUrl)

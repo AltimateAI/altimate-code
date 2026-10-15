@@ -52,17 +52,20 @@ describe("McpOAuthProvider.redirectToAuthorization", () => {
     "rejects authorization URL %s before invoking onRedirect",
     async (input) => {
       const seen: string[] = []
+      const mcpName = "test-server"
+      const serverUrl = "https://fixture-user:fixture-password@mcp.example.com/mcp?token=fixture-token"
       const provider = new McpOAuthProvider(
-        "test-server",
-        "https://mcp.example.com/mcp",
+        mcpName,
+        serverUrl,
         {},
         { onRedirect: (url) => void seen.push(url.href) },
         stubAuth,
       )
       const url = new URL(input)
-      await expect(provider.redirectToAuthorization(url)).rejects.toThrow(
-        `returned a ${url.protocol} authorization URL`,
-      )
+      const redirect = provider.redirectToAuthorization(url)
+      await expect(redirect).rejects.toThrow(`returned a ${url.protocol} authorization URL`)
+      await expect(redirect).rejects.toThrow(mcpName)
+      await expect(redirect).rejects.not.toThrow(serverUrl)
       expect(seen).toEqual([])
     },
   )
