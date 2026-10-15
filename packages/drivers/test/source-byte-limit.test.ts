@@ -143,8 +143,10 @@ async function mongo(docs: Record<string, unknown>[]) {
   return { connector, consumed: () => consumed, closed: () => closed, batchSize: () => batchSize }
 }
 
-test.each(["find", "aggregate"])("Mongo %s closes the cursor before fetching past maxResultBytes", async (command) => {
-  const db = await mongo([{ value: "a" }, { value: "x".repeat(100) }, { value: "must not be fetched" }])
+// The mock cursor yields documents one at a time whatever the batch size; `consumed` counts documents the
+// byte budget iterated. The real driver may prefetch up to one reply batch, which the budget never reads.
+test.each(["find", "aggregate"])("Mongo %s stops consuming at maxResultBytes and reads in bounded batches", async (command) => {
+  const db = await mongo([{ value: "a" }, { value: "x".repeat(100) }, { value: "must not be consumed" }])
   try {
     await expect(
       db.connector.execute(JSON.stringify({ command, collection: "source", pipeline: [] }), 100, undefined, {
