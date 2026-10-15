@@ -223,8 +223,15 @@ describe("workspace link telemetry", () => {
     expect(endpointOf("POST", "/datamates", "/42/skills/pub_Ab12Cd/attach")).toBe(
       "POST /datamates/:id/skills/:id/attach",
     )
-    // Spelling is not evidence: a public id that looks like a route word is still an id.
+    // Position, not spelling: on an identifier-first router the first segment is an id whatever
+    // it looks like, including a public id that equals a route word.
     expect(endpointOf("GET", "/skills", "/pub-many")).toBe("GET /skills/:id")
+    expect(endpointOf("GET", "/skills", "/status")).toBe("GET /skills/:id")
+    expect(endpointOf("PUT", "/skills", "/status/datamates")).toBe("PUT /skills/:id/datamates")
+    expect(endpointOf("PATCH", "/datamates/memory", "/list")).toBe("PATCH /datamates/memory/:id")
+    expect(endpointOf("POST", "/datamate-project-bindings", "/bind")).toBe("POST /datamate-project-bindings/bind")
+    expect(endpointOf("GET", "/users", "/me")).toBe("GET /users/me")
+    expect(endpointOf("GET", "/unknown-router", "/anything/else")).toBe("GET /:id/:id/:id")
     expect(endpointOf("GET", "/datamates", "/42/skills/pub_Ab12Cd/files/readme.md")).toBe(
       "GET /datamates/:id/skills/:id/files/:id",
     )
@@ -232,6 +239,37 @@ describe("workspace link telemetry", () => {
     replies = [{ status: 200 }] // 2xx with an empty body where JSON was required
     await expect(WorkspaceApi.listDatamates()).rejects.toThrow(/Empty 200 body/)
     expect(of("workspace_api_error")).toEqual([expect.objectContaining({ status_class: "response", status: 200 })])
+  })
+
+  test("a body that stalls after the server answered keeps the answer's status class", async () => {
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () =>
+              controller.error(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            )
+          },
+        }),
+        { status: 500 },
+      )) as typeof globalThis.fetch
+    await expect(altimateRequest("GET", "/x", { base: "/datamates", timeoutMs: 200 })).rejects.toThrow(/timed out/)
+    expect(of("workspace_api_error")).toEqual([expect.objectContaining({ status_class: "5xx", status: 500 })])
+
+    events = []
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () =>
+              controller.error(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            )
+          },
+        }),
+        { status: 200 },
+      )) as typeof globalThis.fetch
+    await expect(altimateRequest("GET", "/x", { base: "/datamates", timeoutMs: 200 })).rejects.toThrow(/timed out/)
+    expect(of("workspace_api_error")).toEqual([expect.objectContaining({ status_class: "timeout", status: 200 })])
   })
 
   test("a body that fails after the server answered keeps the answer's status class", async () => {
