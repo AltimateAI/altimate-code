@@ -185,12 +185,12 @@ export function resetEngineTelemetryForTests(): void {
   precedenceSeen.clear()
 }
 
-export function trackEngineError(stage: EngineStage, message: string): void {
+export function trackEngineError(stage: EngineStage, message: string, sessionID?: string): void {
   try {
     Telemetry.track({
       type: "workspace_engine_error",
       timestamp: Date.now(),
-      session_id: sessionId(),
+      session_id: sessionID ?? sessionId(),
       stage,
       message: Telemetry.maskString(message).slice(0, 200),
     })
