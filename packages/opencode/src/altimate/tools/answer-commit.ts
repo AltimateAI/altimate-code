@@ -212,12 +212,22 @@ export function renderAnswer(payload: unknown): string {
   if (args.rows) {
     // altimate_change start - render the requested format before applying the shared size cap
     const { columns, values, precision, format = "markdown" } = args.rows
+    // Cells with float noise (more than 6 decimals that do not survive 12-significant-digit rounding) must not widen the column scale.
+    const isNoise = (value: number) => {
+      const decimal = new Decimal(value)
+      return decimal.decimalPlaces() > 6 && !decimal.equals(decimal.toSignificantDigits(12))
+    }
     const scales = columns.map((_, index) =>
       values.reduce((scale, cells) => {
         const value = cells[index]
-        return typeof value === "number" ? Math.max(scale, new Decimal(value).decimalPlaces()) : scale
+        return typeof value === "number" && !isNoise(value) ? Math.max(scale, new Decimal(value).decimalPlaces()) : scale
       }, 0),
     )
+    const inferred = (value: number, index: number) => {
+      const decimal = new Decimal(value)
+      if (!isNoise(value)) return decimal.toFixed(scales[index]!)
+      return scales[index]! > 0 ? decimal.toFixed(scales[index]!) : decimal.toFixed()
+    }
     const row = (cells: (string | number | null)[]) => {
       if (format === "markdown") return `| ${cells.map(tableCell).join(" | ")} |`
       if (format === "lines") return cells.map(String).join(" ")
@@ -238,7 +248,7 @@ export function renderAnswer(payload: unknown): string {
             const places =
               precision && Object.hasOwn(precision, columns[index]!) ? precision[columns[index]!] : undefined
             if (typeof value !== "number") return value
-            return places !== undefined ? value.toFixed(places) : new Decimal(value).toFixed(scales[index]!)
+            return places !== undefined ? value.toFixed(places) : inferred(value, index)
           }),
         ),
       ),

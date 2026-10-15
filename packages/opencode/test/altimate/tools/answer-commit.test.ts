@@ -418,6 +418,36 @@ describe("answer_commit display precision", () => {
     expect((await tool.execute(payload, context)).output).toBe(expected)
   })
 
+  test("float-noise cells do not widen the inferred column scale", async () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Value"], values: [[0.30000000000000004], [5], [4.18], [18.440000534057617]] },
+    }
+    const expected = "| Value |\n|---|\n| 0.30 |\n| 5.00 |\n| 4.18 |\n| 18.44 |"
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
+  })
+
+  test("a column of only float-noise cells renders each in its own form", () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Value"], values: [[0.30000000000000004], [7]], format: "lines" as const },
+    }
+    expect(AnswerCommit.renderAnswer(payload)).toBe("0.30000000000000004\n7")
+  })
+
+  test("genuine short high-scale values still set the column scale", () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Value"], values: [[1.5], [0.1234567]], format: "lines" as const },
+    }
+    expect(AnswerCommit.renderAnswer(payload)).toBe("1.5000000\n0.1234567")
+  })
+
   test("inferred decimal scale supports small scientific values", async () => {
     const payload = {
       basis: recordBasis,
