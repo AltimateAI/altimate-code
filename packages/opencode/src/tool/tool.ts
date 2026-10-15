@@ -131,13 +131,6 @@ export type InferDef<T> =
       : never
 
 // altimate_change start — telemetry helpers (ported from the fork's pre-1.17 Tool.define wrapper)
-// altimate_change start — a tool whose id starts with the datamate prefix is an MCP tool of the bound
-// workspace (mirrors ALTIMATE_MCP_PREFIXES in altimate/tool-source.ts: `datamate`, `datamates`, `datamate-…`).
-function viaWorkspace(id: string): boolean {
-  return /^datamates?([_-]|$)/i.test(id)
-}
-// altimate_change end
-
 function altimateTrackError(id: string, args: unknown, ctx: Context, startTime: number, error: unknown) {
   try {
     const errorMsg = error instanceof Error ? error.message : String(error)
@@ -151,8 +144,6 @@ function altimateTrackError(id: string, args: unknown, ctx: Context, startTime: 
       tool_type: "standard",
       tool_category: Telemetry.categorizeToolName(id, "standard"),
       status: "error",
-      // altimate_change — workspace integration call
-      ...(viaWorkspace(id) && { via_workspace: true }),
       duration_ms: Date.now() - startTime,
       sequence_index: 0,
       previous_tool: null,
@@ -186,9 +177,6 @@ function altimateTrackSuccess(
   try {
     const isSoftFailure = result.metadata?.success === false
     const durationMs = Date.now() - startTime
-    // altimate_change start — count successful calls to the bound workspace's integrations
-    if (!isSoftFailure && viaWorkspace(id)) Telemetry.noteWorkspaceUse(ctx.sessionID, "integrations")
-    // altimate_change end
     const toolCategory = Telemetry.categorizeToolName(id, "standard")
     // Skip success tool_call for high-volume/low-signal file tools; failures still tracked.
     if (isSoftFailure || toolCategory !== "file") {
@@ -201,8 +189,6 @@ function altimateTrackSuccess(
         tool_type: "standard",
         tool_category: toolCategory,
         status: isSoftFailure ? "error" : "success",
-        // altimate_change — workspace integration call
-        ...(viaWorkspace(id) && { via_workspace: true }),
         duration_ms: durationMs,
         sequence_index: 0,
         previous_tool: null,

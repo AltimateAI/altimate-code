@@ -103,6 +103,7 @@ import { Config } from "../config/config"
 import { Tracer } from "../altimate/observability/tracing"
 // altimate_change start — stamp an authoritative tool source + humanized MCP title
 import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-source"
+import { trackWorkspaceToolCall } from "../altimate/workspace/tool-call-telemetry" // altimate_change — workspace integration rows
 // altimate_change end
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
@@ -2515,7 +2516,32 @@ export namespace SessionPrompt {
           )
           // altimate_change end
 
-          const result = await execute(args, opts)
+          // altimate_change start — a workspace integration call is tracked here, where MCP tools run
+          const startedAt = Date.now()
+          let result
+          try {
+            result = await execute(args, opts)
+          } catch (err) {
+            trackWorkspaceToolCall({
+              key,
+              clientName,
+              sessionID: ctx.sessionID,
+              messageID: ctx.messageID,
+              startedAt,
+              outcome: "error",
+              error: err,
+            })
+            throw err
+          }
+          trackWorkspaceToolCall({
+            key,
+            clientName,
+            sessionID: ctx.sessionID,
+            messageID: ctx.messageID,
+            startedAt,
+            outcome: (result as { isError?: boolean }).isError === true ? "error" : "success",
+          })
+          // altimate_change end
 
           await Plugin.trigger(
             "tool.execute.after",
