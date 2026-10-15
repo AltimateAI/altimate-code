@@ -1,0 +1,12 @@
+branded --version: opencode vlocal
+stock --version: opencode vlocal
+branded -v: opencode vlocal
+--- branded --help head
+DESCRIPTION
+  OpenCode command line interface
+
+USAGE
+  opencode <subcommand> [flags] [<directory>]
+
+ARGUMENTS
+  directory string    Directory to start OpenCode in (optional)

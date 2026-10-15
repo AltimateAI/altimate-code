@@ -1,0 +1,88 @@
+# b1 run: files newer than marker, summarised (full list: c1-b1-files-full.txt)
+./xdg/config/altimate-code/service-local.json
+./xdg/data/altimate-code/log/opencode-local.log
+./xdg/data/altimate-code/opencode-local.db
+./xdg/data/altimate-code/opencode-local.db-shm
+./xdg/data/altimate-code/opencode-local.db-wal
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/config
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/description
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/HEAD
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/applypatch-msg.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/commit-msg.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/fsmonitor-watchman.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/post-update.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/pre-applypatch.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/pre-commit.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/pre-merge-commit.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/pre-push.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/pre-rebase.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/pre-receive.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/prepare-commit-msg.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/push-to-checkout.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/sendemail-validate.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/hooks/update.sample
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/info/exclude
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/objects/info/alternates
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/opencode.gitconfig
+./xdg/state/altimate-code/local/tui/tabs.json
+./xdg/state/altimate-code/prompt-history.jsonl
+bun-cache files (bun binary's own XDG_CACHE_HOME/bun transpiler cache): 1035
+repos/ clone files: 2462  roots: Effect-TS
+# top-level entries per root
+/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h1live/b1/home:
+   .config
+/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h1live/b1/xdg/data:
+   altimate-code
+/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h1live/b1/xdg/config:
+   altimate-code
+   opencode
+/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h1live/b1/xdg/state:
+   altimate-code
+/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h1live/b1/xdg/cache:
+   altimate-code
+   bun
+/private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h1live/b1/tmp/:
+   altimate-code
+# path components named opencode (any case) excluding repos/ clone and seeded sentinels
+./home/.config/opencode
+./home/.config/opencode/opencode.json
+./xdg/config/opencode
+./xdg/data/altimate-code/opencode-local.db-wal
+./xdg/data/altimate-code/opencode-local.db-shm
+./xdg/data/altimate-code/opencode-local.db
+./xdg/config/opencode/opencode.json
+./xdg/data/altimate-code/log/opencode-local.log
+./xdg/data/altimate-code/snapshot/faf13d3e2eb7aa9ddd80dc82357926b0126f1f8f/0e3006b13b3137f38c49afcb944176255a630870/opencode.gitconfig
+## stock-root content after run (must equal seeded sentinel only)
+xdg/config/opencode/opencode.json
+{"username":"SENTINEL_STOCK_USER","model":"opencode/cat-jam-free"}
+
+xdg/config/opencode/tui.json
+{"theme":"matrix"}
+
+home/.config/opencode/opencode.json
+{"username":"SENTINEL_STOCK_USER","model":"opencode/cat-jam-free"}
+
+home/.config/opencode/tui.json
+{"theme":"matrix"}
+
+home
+home/.config
+home/.config/opencode
+home/.config/opencode/opencode.json
+home/.config/opencode/tui.json
+## tmp
+tmp
+tmp/altimate-code
+## xdg/cache/altimate-code
+xdg/cache/altimate-code
+xdg/cache/altimate-code/bin
+## mtimes of sentinels vs marker
+(none newer = unmodified)
+## stock-root inventory
+./home/.config/opencode
+./home/.config/opencode/opencode.json
+./home/.config/opencode/tui.json
+./xdg/config/opencode
+./xdg/config/opencode/opencode.json
+./xdg/config/opencode/tui.json

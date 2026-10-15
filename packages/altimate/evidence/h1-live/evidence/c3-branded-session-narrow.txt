@@ -1,0 +1,82 @@
+== branded 40 20x (home?)
+   My named task                 +
+
+  ┃                                                                                                 My named task
+  ┃  from-brand
+  ┃
+
+     Error: OpenCode's free tier can only be used from within OpenCode. Download it at https://
+     opencode.ai and keep building.
+
+     Build · Nemotron 3.5 Super VL Free · 289ms
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Nemotron 3.5 Super VL Free OpenCode
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /…/anandg…/codebase/altimate-code-v2-host-live/packages/cli  shift+tab agents  ctrl+p commands    /…/altimate-code-v2-host…/packages/cli
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments
+== branded 30 14x (home?)
+   My named task                 +
+
+  ┃                                                                                                 My named task
+  ┃  from-brand
+  ┃
+
+     Error: OpenCode's free tier can only be used from within OpenCode. Download it at https://
+     opencode.ai and keep building.
+
+     Build · Nemotron 3.5 Super VL Free · 289ms
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  ┃
+  ┃
+  ┃
+  ┃  Build · Nemotron 3.5 Super VL Free OpenCode
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+  /…/anandg…/codebase/altimate-code-v2-host-live/packages/cli  shift+tab agents  ctrl+p commands    /…/altimate-code-v2-host…/packages/cli
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments

@@ -1,0 +1,28 @@
+# stop branded; stock must stay
+stock info: {"version":"local","pid":83134,"urls":["http://127.0.0.1:49375"],"paths":{"tmp":
+
+brand status: 
+stopped
+(branded client: ) 
+bun       83134 anandgupta    7u  IPv4 0x855f66bcb1a941f3      0t0  TCP 127.0.0.1:49375 (LISTEN)
+# restart branded
+http://127.0.0.1:41350
+brand info: {"version":"local","pid":84902,"urls":["http://127.0.0.1:41350"],"paths":{"tmp":
+
+# stop stock; branded must stay
+brand info: {"version":"local","pid":84902,"urls":["http://127.0.0.1:41350"],"paths":{"tmp":
+
+bun       84902 anandgupta    7u  IPv4 0x3a4b4d920fafeefc      0t0  TCP 127.0.0.1:41350 (LISTEN)
+# restart stock via restart cmd
+http://127.0.0.1:49375
+stock info: {"version":"local","pid":85288,"urls":["http://127.0.0.1:49375"],"paths":{"tmp":
+
+brand info: {"version":"local","pid":84902,"urls":["http://127.0.0.1:41350"],"paths":{"tmp":
+
+# restart branded via restart cmd; stock pid should not change
+stock pid before: "pid":85288
+http://127.0.0.1:41350
+stock pid after: "pid":85288
+brand pid after: "pid":85417
+bun       85288 anandgupta    7u  IPv4 0x95f3b833a70edfbe      0t0  TCP 127.0.0.1:49375 (LISTEN)
+bun       85417 anandgupta    7u  IPv4 0x3a4b4d920fafeefc      0t0  TCP 127.0.0.1:41350 (LISTEN)

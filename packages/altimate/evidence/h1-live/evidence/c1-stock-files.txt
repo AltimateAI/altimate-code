@@ -1,0 +1,11 @@
+  ./xdg/data/opencode/opencode-local.db-wal
+  ./xdg/data/opencode/opencode-local.db-shm
+  ./xdg/data/opencode/opencode-local.db
+  ./xdg/data/opencode/log/opencode-local.log
+  ./xdg/config/opencode/service-local.json
+  ./xdg/config/opencode/cli.json
+xdg/data: opencode 
+xdg/config: opencode 
+xdg/state: opencode 
+xdg/cache: bun opencode 
+tmp: opencode 

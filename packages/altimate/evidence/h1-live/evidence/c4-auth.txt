@@ -1,0 +1,19 @@
+### A: brand serve, ALTIMATE_CLI_SERVER_PASSWORD=x
+no auth -> 401
+opencode:x -> 200
+opencode:wrong -> 401
+### B: brand serve, OPENCODE_SERVER_PASSWORD=y only
+no auth -> 401
+opencode:y -> 200
+opencode:x -> 401
+### C: brand serve, ALTIMATE_CLI_SERVER_PASSWORD=x + OPENCODE_SERVER_PASSWORD=y (primary wins)
+no auth -> 401
+opencode:x -> 200
+opencode:y -> 401
+### C2: brand serve, ALTIMATE_CLI_SERVER_PASSWORD='' (empty) + OPENCODE_SERVER_PASSWORD=y (falls back)
+no auth -> 401
+opencode:y -> 200
+### D: stock serve with ALTIMATE_CLI_SERVER_PASSWORD=x (must be ignored; random pw printed)
+no auth -> 401
+opencode:x -> 401
+1

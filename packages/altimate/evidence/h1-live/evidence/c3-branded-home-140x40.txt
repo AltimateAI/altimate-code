@@ -1,0 +1,40 @@
+
+
+
+
+
+
+
+               ▄▀█ █   ▀█▀ █ █▀▄▀█ ▄▀█ ▀█▀ █▀▀ █▀▀ █▀█ █▀▄ █▀▀
+               █▀█ █▄▄  █  █ █ ▀ █ █▀█  █  ██▄ █▄▄ █▄█ █▄▀ ██▄
+
+
+
+   ┃
+   ┃  Ask anything… "Fix a TODO in the codebase"
+   ┃
+   ┃  Build · Nemotron 3.5 Super VL Free OpenCode
+   ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   /…/altimate-code-v2-host-l…/packages/cli  shift+tab agents  ctrl+p commands
+
+
+
+                                                                         local
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
