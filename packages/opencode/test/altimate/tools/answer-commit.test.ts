@@ -445,13 +445,22 @@ describe("answer_commit display precision", () => {
     expect(AnswerCommit.renderAnswer(payload)).toBe("| Value |\n|---|\n| 1.000000000000001 |\n| 2.100000000000000 |")
   })
 
-  test("a column of only float-noise cells renders each in its own form", () => {
+  test("a column of only float-noise cells uses the scale of their rounded values", () => {
     const payload = {
       basis: recordBasis,
       answer_only: true,
       rows: { columns: ["Value"], values: [[0.30000000000000004], [7]], format: "lines" as const },
     }
-    expect(AnswerCommit.renderAnswer(payload)).toBe("0.30000000000000004\n7")
+    expect(AnswerCommit.renderAnswer(payload)).toBe("0.3\n7.0")
+  })
+
+  test("recognized noise keeps its rounded scale beside coarser cells", () => {
+    const payload = {
+      basis: recordBasis,
+      answer_only: true,
+      rows: { columns: ["Value"], values: [[18.440000534057617], [1.2]], format: "lines" as const },
+    }
+    expect(AnswerCommit.renderAnswer(payload)).toBe("18.44\n1.20")
   })
 
   test("genuine long decimals are preserved beside clean cells", () => {

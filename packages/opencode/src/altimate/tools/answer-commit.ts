@@ -217,29 +217,34 @@ export function renderAnswer(payload: unknown): string {
     // Float noise: more than 6 decimals, yet either a double-precision artifact of, or the exact float32 widening of, a value with at most 6 decimals (0.30000000000000004, 18.440000534057617). Genuine long decimals (1234567.8901234) are not.
     // Two units in the last place of a double: arithmetic artifacts (0.1 + 0.2) sit within it, genuine 15+ digit decimals do not.
     const DOUBLE_ARTIFACT_RELATIVE_ERROR = Number.EPSILON * 2
-    const isNoise = (value: number) => {
+    // Returns the shortest (at most 6 decimal) value the noisy cell is an artifact of, or undefined for genuine values.
+    const artifactOf = (value: number) => {
       const decimal = new Decimal(value)
-      if (decimal.decimalPlaces() <= 6) return false
-      const rounded = decimal.toDecimalPlaces(6)
-      // Only a double-precision artifact or the exact float32 widening of the rounded value qualifies.
-      return (
-        Math.fround(rounded.toNumber()) === value ||
-        decimal.minus(rounded).abs().lte(decimal.abs().times(DOUBLE_ARTIFACT_RELATIVE_ERROR))
-      )
+      if (decimal.decimalPlaces() <= 6) return undefined
+      for (let places = 0; places <= 6; places++) {
+        const rounded = decimal.toDecimalPlaces(places)
+        // Only a double-precision artifact or the exact float32 widening of the rounded value qualifies.
+        if (
+          Math.fround(rounded.toNumber()) === value ||
+          decimal.minus(rounded).abs().lte(decimal.abs().times(DOUBLE_ARTIFACT_RELATIVE_ERROR))
+        )
+          return rounded
+      }
+      return undefined
     }
+    // Noise contributes the scale of the short value it is an artifact of, never its raw digits.
+    const places = (value: number) => (artifactOf(value) ?? new Decimal(value)).decimalPlaces()
+    // A column with no ordinary numeric cell keeps its values as given.
+    const onlyNoise = columns.map((_, index) => {
+      const numbers = values.map((cells) => cells[index]).filter((cell): cell is number => typeof cell === "number")
+      return numbers.length > 0 && numbers.every((cell) => artifactOf(cell) !== undefined)
+    })
     const scales = columns.map((_, index) =>
       values.reduce((scale, cells) => {
         const value = cells[index]
-        return typeof value === "number" && !isNoise(value)
-          ? Math.max(scale, new Decimal(value).decimalPlaces())
-          : scale
+        return typeof value === "number" ? Math.max(scale, places(value)) : scale
       }, 0),
     )
-    const inferred = (value: number, index: number) => {
-      const decimal = new Decimal(value)
-      if (!isNoise(value)) return decimal.toFixed(scales[index]!)
-      return scales[index]! > 0 ? decimal.toFixed(scales[index]!) : decimal.toFixed()
-    }
     const row = (cells: (string | number | null)[]) => {
       if (format === "markdown") return `| ${cells.map(tableCell).join(" | ")} |`
       if (format === "lines") return cells.map(String).join(" ")
@@ -260,7 +265,7 @@ export function renderAnswer(payload: unknown): string {
             const places =
               precision && Object.hasOwn(precision, columns[index]!) ? precision[columns[index]!] : undefined
             if (typeof value !== "number") return value
-            return places !== undefined ? value.toFixed(places) : inferred(value, index)
+            return places !== undefined ? value.toFixed(places) : (onlyNoise[index] ? new Decimal(value).toFixed() : new Decimal(value).toFixed(scales[index]!))
           }),
         ),
       ),
