@@ -1,0 +1,7 @@
+COMMAND     PID       USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+altimate- 56600 anandgupta    7u  IPv4 0xff8ebaa7ebb98041      0t0  TCP 127.0.0.1:47018 (LISTEN)
+altimate- 56600 anandgupta   11u  IPv4 0xebc8700dfcfbc72c      0t0  TCP 127.0.0.1:47018->127.0.0.1:55952 (ESTABLISHED)
+altimate- 56600 anandgupta   13u  IPv4 0xfaa73e01ab9862d8      0t0  TCP 127.0.0.1:56234->127.0.0.1:4875 (ESTABLISHED)
+altimate- 56600 anandgupta   14u  IPv4 0x2c34bef34f31c2fa      0t0  TCP 127.0.0.1:56235->127.0.0.1:4875 (ESTABLISHED)
+altimate- 56600 anandgupta   15u  IPv4 0x5f13342d41dd909e      0t0  TCP 127.0.0.1:56236->127.0.0.1:4875 (ESTABLISHED)
+altimate- 56735 anandgupta    8u  IPv4 0x7d8b02565988f8ba      0t0  TCP 127.0.0.1:55985->127.0.0.1:4875 (ESTABLISHED)

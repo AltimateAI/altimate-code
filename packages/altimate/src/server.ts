@@ -6,6 +6,7 @@ import { classifyAndCheck } from "./sql-classify"
 import { ClaudeInstructions } from "./instructions"
 import { Gateway } from "./gateway"
 import { AltimateRpc, QueryResult, Warehouse } from "./rpc"
+import { readLegacyWarehouses } from "./legacy-warehouses"
 
 export const Altimate = Plugin.define({
   id: "altimate",
@@ -13,12 +14,29 @@ export const Altimate = Plugin.define({
     await ClaudeInstructions.setup(ctx)
     await Gateway.setup(ctx)
     const storageKey = `warehouses:${ctx.location.project.id}:${encodeURIComponent(ctx.location.directory)}:${ctx.location.workspaceID ?? "local"}`
-    const warehouses = new Map(
+    const saved = new Map(
       Schema.decodeUnknownSync(Schema.Array(Warehouse))((await ctx.storage.get(storageKey)) ?? []).map((warehouse) => [
         warehouse.name,
         warehouse,
       ]),
     )
+    // Import once per Location; saved v2 registrations win over legacy names.
+    if (!(await ctx.storage.get(`${storageKey}:legacy-import`))) {
+      const legacy = await readLegacyWarehouses({ directory: ctx.location.directory, env: {} })
+      legacy.warehouses.forEach((warehouse) => {
+        if (!saved.has(warehouse.name)) saved.set(warehouse.name, warehouse)
+      })
+      await ctx.storage.set(storageKey, Array.from(saved.values()))
+      await ctx.storage.set(`${storageKey}:legacy-report`, { version: 1, issues: legacy.issues })
+      if (legacy.sources.length && !legacy.issues.length)
+        await ctx.storage.set(`${storageKey}:legacy-import`, { version: 1 })
+    }
+    const environment = await readLegacyWarehouses({ directory: ctx.location.directory, files: false })
+    const overrides = new Set(environment.inventory.map((entry) => entry.name))
+    const warehouses = new Map([
+      ...Array.from(saved).filter(([name]) => !overrides.has(name)),
+      ...environment.warehouses.map((warehouse) => [warehouse.name, warehouse] as const),
+    ])
     await ctx.rpc.register(AltimateRpc, {
       listWarehouses: async () => Array.from(warehouses.values()),
       lastResult: async ({ sessionID }) =>
@@ -62,13 +80,15 @@ export const Altimate = Plugin.define({
           const existing = connections.get(input.name)
           if (existing) await (await existing).close()
           connections.delete(input.name)
-          warehouses.set(input.name, {
+          const warehouse = {
             name: input.name,
             path: input.path === ":memory:" ? input.path : path.resolve(ctx.location.directory, input.path),
-            type: "duckdb",
-          })
+            type: "duckdb" as const,
+          }
+          saved.set(input.name, warehouse)
+          if (!overrides.has(input.name)) warehouses.set(input.name, warehouse)
           const output = { warehouses: Array.from(warehouses.values()) }
-          await ctx.storage.set(storageKey, output.warehouses)
+          await ctx.storage.set(storageKey, Array.from(saved.values()))
           return { output, metadata: output, content: `Registered DuckDB warehouse "${input.name}".` }
         },
       })

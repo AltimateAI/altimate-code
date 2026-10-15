@@ -1,0 +1,11 @@
+┌  Upgrade
+│
+●  Using method: npm
+│
+●  From 0.0.1-spike → 0.0.2-spike
+[?25l│
+◒  Upgrading[999D[J◐  Upgrading[999D[J◓  Upgrading[999D[J◑  Upgrading[999D[J◒  Upgrading[999D[J◐  Upgrading[999D[J◓  Upgrading[999D[J◑  Upgrading[999D[J◒  Upgrading.[999D[J◐  Upgrading.[999D[J◓  Upgrading.[999D[J◑  Upgrading.[999D[J◒  Upgrading.[999D[J◐  Upgrading.[999D[J◓  Upgrading.[999D[J◑  Upgrading.[999D[J◒  Upgrading..[999D[J◐  Upgrading..[999D[J◓  Upgrading..[999D[J◑  Upgrading..[999D[J◒  Upgrading..[999D[J◐  Upgrading..[999D[J◓  Upgrading..[999D[J◑  Upgrading..[999D[J◒  Upgrading...[999D[J◐  Upgrading...[999D[J◓  Upgrading...[999D[J◑  Upgrading...[999D[J◒  Upgrading...[999D[J◐  Upgrading...[999D[J◓  Upgrading...[999D[J◑  Upgrading...[999D[J◒  Upgrading...[999D[J◐  Upgrading[999D[J◓  Upgrading[999D[J◇  Upgrade complete
+[?25h│
+└  Done
+
+exit=0

@@ -1,0 +1,9 @@
+info <-- 127.0.0.1 requested 'GET /@pnpm/exe.darwin-arm64/12.11.2'
+http <-- 200, user: null(127.0.0.1), req: 'GET /@pnpm/exe.darwin-arm64/12.11.2', bytes: 0/0
+http <-- 403, user: h3(127.0.0.1), req: 'GET /@pnpm/exe.darwin-arm64/12.11.2', error: user h3 is not allowed to access package @pnpm/exe.darwin-arm64
+info <-- 127.0.0.1 requested 'GET /@altimateai%2faltimate-code'
+http <-- 200, user: null(127.0.0.1), req: 'GET /@altimateai%2faltimate-code', bytes: 0/0
+http <-- 304, user: h3(127.0.0.1), req: 'GET /@altimateai%2faltimate-code', bytes: 0/0
+info <-- 127.0.0.1 requested 'GET /altimate-code-darwin-arm64'
+http <-- 200, user: null(127.0.0.1), req: 'GET /altimate-code-darwin-arm64', bytes: 0/0
+http <-- 304, user: h3(127.0.0.1), req: 'GET /altimate-code-darwin-arm64', bytes: 0/0

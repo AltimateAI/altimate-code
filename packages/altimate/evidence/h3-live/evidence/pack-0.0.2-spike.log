@@ -1,0 +1,71 @@
+opencode script {
+  "channel": "spike",
+  "version": "0.0.2-spike",
+  "preview": true,
+  "release": false,
+  "team": [
+    "adamdotdevin",
+    "arvsrn",
+    "Brendonovich",
+    "fwang",
+    "Hona",
+    "iamdavidhill",
+    "jayair",
+    "jlongster",
+    "kitlangton",
+    "kommander",
+    "ludvigrask",
+    "MrMushrooooom",
+    "neriousy",
+    "nexxeln",
+    "R44VC0RP",
+    "rekram1-node",
+    "thdxr",
+    "simonklee",
+    "Slickstef11",
+    "usrnk1",
+    "vimtor",
+    "StarpTech",
+    "actions-user",
+    "opencode",
+    "opencode-agent[bot]"
+  ]
+}
+@altimateai/altimate-code binaries {
+  "altimate-code-darwin-arm64": "0.0.2-spike",
+}
+bun pack v1.4.2 (744846f84)
+
+packed 247B package.json
+packed 0.19GB bin/altimate-code
+packed 1.1KB lib/altimate/drivers/node_modules/@duckdb/node-api/LICENSE
+packed 146.11KB lib/altimate/drivers/node_modules/@duckdb/node-api/lib/index.js
+packed 304B lib/altimate/drivers/node_modules/@duckdb/node-api/package.json
+packed 1.1KB lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/LICENSE
+packed 0.39MB lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/duckdb.node
+packed 52.60MB lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/libduckdb.dylib
+packed 253B lib/altimate/drivers/node_modules/@duckdb/node-bindings-darwin-arm64/package.json
+packed 1.1KB lib/altimate/drivers/node_modules/@duckdb/node-bindings/LICENSE
+packed 1.23KB lib/altimate/drivers/node_modules/@duckdb/node-bindings/duckdb.js
+packed 0.54KB lib/altimate/drivers/node_modules/@duckdb/node-bindings/package.json
+
+altimate-code-darwin-arm64-0.0.2-spike.tgz
+
+Total files: 12
+Shasum: 5a8d2f1385c89afbb8e4f883e6acc2c5db91c6f9
+Integrity: sha512-avVX9YH0jKSKB[...]/viOUlYcFqNZQ==
+Unpacked size: 0.24GB
+Packed size: 101.99MB
+bun pack v1.4.2 (744846f84)
+
+packed 491B package.json
+packed 241B bin/altimate-code.exe
+packed 7.22KB postinstall.mjs
+
+altimateai-altimate-code-0.0.2-spike.tgz
+
+Total files: 3
+Shasum: 43f8cd11f5980f5915b42bf2e2ab455f7ef3a8af
+Integrity: sha512-mSzg5mSjZgcxV[...]05MuCSK7I2UHA==
+Unpacked size: 7.95KB
+Packed size: 2.98KB

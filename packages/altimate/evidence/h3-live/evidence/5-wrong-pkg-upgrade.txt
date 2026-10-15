@@ -1,0 +1,17 @@
+┌  Upgrade
+│
+●  Using method: npm
+│
+●  From 0.0.1-spike → 0.0.2-spike
+[?25l│
+■  Upgrade failed
+[?25h│
+■  Refusing an update for a different Altimate Code package
+│
+│  The update service returned package "@opencode/cli"; expected
+│  "@altimateai/altimate-code".
+│  Retry    Check the distribution update source before trying again.
+│
+└  Failed
+
+exit=1

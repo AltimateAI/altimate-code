@@ -1,0 +1,15 @@
+  34 https://opencode.ai/theme.json
+   7 https://opencode.ai/
+   4 https://opencode.ai
+   3 https://opencode.ai/v2/docs/troubleshooting
+   3 https://opencode.ai/v2/docs/cli/config
+   3 https://opencode.ai/v2/docs/build/plugins
+   3 https://opencode.ai/v2/docs/
+   2 https://opencode.ai/v2/install
+   2 https://opencode.ai/v2/docs/migrate-v1
+   2 https://opencode.ai/v2/docs/config
+   2 https://opencode.ai/v2/docs/cli/keybinds
+   2 https://opencode.ai/v2/docs/cli
+   2 https://opencode.ai/v2/docs/build/sdk
+   2 https://opencode.ai/v2/docs/build/client
+   2 https://opencode.ai/v2/docs/api

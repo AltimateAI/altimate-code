@@ -1,0 +1,58 @@
+warn --- you are using Node.js v22.22.2, Verdaccio recommends Node.js v24 or higher, please consider upgrading your Node.js distribution
+info --- config file  - /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h3live/w/verdaccio.yaml
+info --- plugin @verdaccio/local-storage successfully loaded (storage)
+info --- using htpasswd file: /private/tmp/claude-501/-Users-anandgupta-codebase-altimate-code/a3ba8813-c4f4-4234-9efe-d5c7103ee560/scratchpad/h3live/w/registry-htpasswd
+info --- plugin verdaccio-htpasswd successfully loaded (authentication)
+info --- plugin @verdaccio/ui-theme successfully loaded (theme)
+warn --- http address - http://127.0.0.1:4873/ - verdaccio/6.10.5
+info <-- 127.0.0.1 requested 'GET /-/ping'
+http <-- 200, user: null(127.0.0.1), req: 'GET /-/ping', bytes: 0/3
+http <-- 200, user: null(127.0.0.1), req: 'GET /-/ping', bytes: 0/3
+info <-- 127.0.0.1 requested 'GET /-/ping'
+http <-- 200, user: null(127.0.0.1), req: 'GET /-/ping', bytes: 0/3
+http <-- 200, user: null(127.0.0.1), req: 'GET /-/ping', bytes: 0/3
+info <-- 127.0.0.1 requested 'PUT /-/user/org.couchdb.user:h3'
+http <-- 200, user: null(127.0.0.1), req: 'PUT /-/user/org.couchdb.user:h3', bytes: 75/0
+http <-- 201, user: h3(127.0.0.1), req: 'PUT /-/user/org.couchdb.user:h3', bytes: 75/147
+info <-- 127.0.0.1 requested 'GET /npm'
+http <-- 200, user: null(127.0.0.1), req: 'GET /npm', bytes: 0/0
+http <-- 403, user: h3(127.0.0.1), req: 'GET /npm', error: user h3 is not allowed to access package npm
+info <-- 127.0.0.1 requested 'PUT /altimate-code-darwin-arm64'
+http <-- 200, user: null(127.0.0.1), req: 'PUT /altimate-code-darwin-arm64', bytes: 135982838/0
+http <-- 201, user: h3(127.0.0.1), req: 'PUT /altimate-code-darwin-arm64', bytes: 135982838/53
+info <-- 127.0.0.1 requested 'PUT /@altimateai%2faltimate-code'
+http <-- 200, user: null(127.0.0.1), req: 'PUT /@altimateai%2faltimate-code', bytes: 5713/0
+http <-- 201, user: h3(127.0.0.1), req: 'PUT /@altimateai%2faltimate-code', bytes: 5713/53
+info <-- 127.0.0.1 requested 'PUT /altimate-code-darwin-arm64'
+http <-- 200, user: null(127.0.0.1), req: 'PUT /altimate-code-darwin-arm64', bytes: 135982746/0
+http <-- 201, user: h3(127.0.0.1), req: 'PUT /altimate-code-darwin-arm64', bytes: 135982746/53
+info <-- 127.0.0.1 requested 'PUT /@altimateai%2faltimate-code'
+http <-- 200, user: null(127.0.0.1), req: 'PUT /@altimateai%2faltimate-code', bytes: 5713/0
+http <-- 201, user: h3(127.0.0.1), req: 'PUT /@altimateai%2faltimate-code', bytes: 5713/53
+info <-- 127.0.0.1 requested 'GET /@altimateai%2faltimate-code'
+http <-- 200, user: null(127.0.0.1), req: 'GET /@altimateai%2faltimate-code', bytes: 0/0
+http <-- 200, user: h3(127.0.0.1), req: 'GET /@altimateai%2faltimate-code', bytes: 0/995
+info <-- 127.0.0.1 requested 'GET /altimate-code-darwin-arm64'
+http <-- 200, user: null(127.0.0.1), req: 'GET /altimate-code-darwin-arm64', bytes: 0/0
+http <-- 200, user: h3(127.0.0.1), req: 'GET /altimate-code-darwin-arm64', bytes: 0/887
+info <-- 127.0.0.1 requested 'GET /@altimateai%2faltimate-code'
+http <-- 200, user: null(127.0.0.1), req: 'GET /@altimateai%2faltimate-code', bytes: 0/0
+http <-- 304, user: h3(127.0.0.1), req: 'GET /@altimateai%2faltimate-code', bytes: 0/0
+info <-- 127.0.0.1 requested 'GET /altimate-code-darwin-arm64'
+http <-- 200, user: null(127.0.0.1), req: 'GET /altimate-code-darwin-arm64', bytes: 0/0
+http <-- 304, user: h3(127.0.0.1), req: 'GET /altimate-code-darwin-arm64', bytes: 0/0
+info <-- 127.0.0.1 requested 'GET /@pnpm/exe.darwin-arm64/12.11.2'
+http <-- 200, user: null(127.0.0.1), req: 'GET /@pnpm/exe.darwin-arm64/12.11.2', bytes: 0/0
+http <-- 403, user: h3(127.0.0.1), req: 'GET /@pnpm/exe.darwin-arm64/12.11.2', error: user h3 is not allowed to access package @pnpm/exe.darwin-arm64
+info <-- 127.0.0.1 requested 'GET /@pnpm/exe.darwin-arm64/12.11.2'
+http <-- 200, user: null(127.0.0.1), req: 'GET /@pnpm/exe.darwin-arm64/12.11.2', bytes: 0/0
+http <-- 403, user: h3(127.0.0.1), req: 'GET /@pnpm/exe.darwin-arm64/12.11.2', error: user h3 is not allowed to access package @pnpm/exe.darwin-arm64
+info <-- 127.0.0.1 requested 'GET /@altimateai%2faltimate-code'
+http <-- 200, user: null(127.0.0.1), req: 'GET /@altimateai%2faltimate-code', bytes: 0/0
+http <-- 304, user: h3(127.0.0.1), req: 'GET /@altimateai%2faltimate-code', bytes: 0/0
+info <-- 127.0.0.1 requested 'GET /altimate-code-darwin-arm64'
+http <-- 200, user: null(127.0.0.1), req: 'GET /altimate-code-darwin-arm64', bytes: 0/0
+http <-- 304, user: h3(127.0.0.1), req: 'GET /altimate-code-darwin-arm64', bytes: 0/0
+info <-- 127.0.0.1 requested 'GET /@pnpm/exe.darwin-arm64/12.11.2'
+http <-- 200, user: null(127.0.0.1), req: 'GET /@pnpm/exe.darwin-arm64/12.11.2', bytes: 0/0
+http <-- 403, user: h3(127.0.0.1), req: 'GET /@pnpm/exe.darwin-arm64/12.11.2', error: user h3 is not allowed to access package @pnpm/exe.darwin-arm64

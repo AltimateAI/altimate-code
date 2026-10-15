@@ -1,0 +1,40 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                             ▄▀█ █   ▀█▀ █ █▀▄▀█ ▄▀█ ▀█▀ █▀▀ █▀▀ █▀█ █▀▄ █▀▀
+
+                                          Update available                                     esc
+
+                                          An update is available. After installing, you'll be
+                                 ┃        prompted to restart OpenCode.
+                                 ┃  Ask
+                                 ┃
+                                 ┃  Buil                                             Skip  Update
+                                 ╹▀▀▀▀▀▀                                                            ▀▀▀▀▀▀▀▀
+                                 /…/a3ba8813…/scratchpad/h3live/w/project  shift+tab agents  ctrl+p commands
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                               0.0.1-spike
+
