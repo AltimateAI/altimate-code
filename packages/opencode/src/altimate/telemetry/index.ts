@@ -538,6 +538,64 @@ export namespace Telemetry {
         recovered: boolean
         duration_ms: number
       }
+    // altimate_change start — workspace link lifecycle (shared event contract: one name per fact,
+    // the backend's workspace id on every row, fired on the API success response, a `client`
+    // property stamped on every envelope). The extension emits the same names for its own moments.
+    | {
+        type: "workspace_linked"
+        timestamp: number
+        session_id: string
+        workspace_id: number
+        how: "bind_existing" | "create_and_bind" | "rebind_remote" | "rebind_path"
+      }
+    | {
+        type: "workspace_created"
+        timestamp: number
+        session_id: string
+        workspace_id: number
+        how: "create_and_bind" | "create_unbound"
+      }
+    | {
+        type: "workspace_link_failed"
+        timestamp: number
+        session_id: string
+        how: "bind_existing" | "create_and_bind" | "create_unbound" | "rebind_remote" | "rebind_path"
+        reason: "auth" | "not_found" | "network" | "conflict" | "other"
+        workspace_id?: number
+      }
+    | {
+        type: "workspace_unlinked"
+        timestamp: number
+        session_id: string
+        workspace_id?: number
+      }
+    | {
+        type: "workspace_switched"
+        timestamp: number
+        session_id: string
+        to_workspace_id: number
+        from_workspace_id?: number
+        how: "rebind_remote" | "rebind_path"
+      }
+    | {
+        type: "workspace_auth_expired"
+        timestamp: number
+        session_id: string
+        /** Method and path with ids replaced by ":id", e.g. "POST /datamate-project-bindings/bind". */
+        endpoint: string
+        status: number
+        workspace_id?: number
+      }
+    | {
+        type: "workspace_api_error"
+        timestamp: number
+        session_id: string
+        endpoint: string
+        status_class: "4xx" | "5xx" | "network" | "timeout"
+        status?: number
+        workspace_id?: number
+      }
+    // altimate_change end
     | {
         type: "mcp_server_census"
         timestamp: number
@@ -1935,6 +1993,9 @@ export namespace Telemetry {
 
       const properties: Record<string, string> = {
         cli_version: InstallationVersion,
+        // altimate_change — the emitting client, per the shared event contract; `source` below
+        // still says how this CLI was launched (cli, tui, serve, datamates).
+        client: "altimate-code",
         source: clientSource,
         project_id: fields.project_id ?? projectId,
         ...(machineId && { machine_id: machineId }),
