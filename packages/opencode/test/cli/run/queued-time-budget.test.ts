@@ -1,6 +1,36 @@
 // altimate_change start — exercise the CLI's actual cancellation closure without a listening server
 import { expect, test } from "bun:test"
 import fs from "node:fs/promises"
+import { RunTimeBudget } from "../../../src/cli/cmd/run-time-budget"
+
+test("work deadlines include process startup and do not restart on retries", async () => {
+  const source = await fs.readFile(new URL("../../../src/cli/cmd/run.ts", import.meta.url), "utf8")
+  const elapsedStart = source.indexOf("      const elapsedSeconds =")
+  const elapsedEnd = source.indexOf("\n", elapsedStart)
+  const start = source.indexOf("      const startWorkClock = () => {")
+  const end = source.indexOf("\n      // altimate_change end", start)
+  expect(elapsedStart).toBeGreaterThan(0)
+  expect(start).toBeGreaterThan(0)
+  let now = 7_000
+  const setup = new Function("performance", "process", "setInterval", `
+    let timeStarted, workActive = false, timeBudgetTimer
+    const timeBudget = 10, tracer = undefined
+    const budgetMetadata = () => ({})
+    const checkTimeBudget = () => {}
+    ${source.slice(elapsedStart, elapsedEnd)}
+    ${source.slice(start, end)}
+    return { startWorkClock, elapsedSeconds }
+  `)
+  const clock = setup({ now: () => now }, { uptime: () => now / 1000 }, () => 1)
+  clock.startWorkClock()
+  expect(clock.elapsedSeconds()).toBe(7)
+  expect(RunTimeBudget.deadline(clock.elapsedSeconds(), 10)).toBeUndefined()
+  now = 8_000
+  clock.startWorkClock()
+  expect(RunTimeBudget.deadline(clock.elapsedSeconds(), 10)).toBe("soft")
+  now = 10_000
+  expect(RunTimeBudget.deadline(clock.elapsedSeconds(), 10)).toBe("hard")
+})
 
 test("hard deadline aborts a queued session without a post-subscription busy event", async () => {
   const source = await fs.readFile(new URL("../../../src/cli/cmd/run.ts", import.meta.url), "utf8")

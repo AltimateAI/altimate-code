@@ -209,14 +209,14 @@ export const SqlExecuteTool = Tool.define(
               // altimate_change end
 
               const limits = await bridge.promise(truncate.limits())
-              const suggestion = PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
+              const suggestion = ctx.agent === "analyst" ? null : PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
               const extra =
                 (suggestion ? "\n\n" + suggestion : "") + (precedence.notice ? precedence.notice + "\n\n" : "")
               const formatted = await formatSqlResult(result, {
                 limit: args.limit,
                 // The statement text lets the formatter add the empty/near-empty
                 // result hint when a string-literal filter is present.
-                sql: query,
+                sql: ctx.agent === "analyst" ? undefined : query,
                 maxBytes: Math.max(
                   0,
                   Math.min(SQL_MAX_PREVIEW_BYTES, limits.maxBytes) - Buffer.byteLength(extra, "utf8"),
@@ -261,7 +261,7 @@ export const SqlExecuteTool = Tool.define(
               return Precedence.annotate(precedence, {
                 title: "SQL: ERROR",
                 metadata: { rowCount: 0, truncated: false, error: msg },
-                output: `Failed to execute SQL: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
+                output: `Failed to execute SQL: ${msg}`,
               })
             }
           },

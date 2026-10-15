@@ -91,14 +91,12 @@ export interface TraceSpan {
   kind: "session" | "generation" | "tool" | "text" | "span" | "user-message"
   startTime: number
   endTime?: number
-  status: "ok" | "error"
+  status: "ok" | "error" | "running" | "aborted"
   statusMessage?: string
   /**
-   * True when this span was force-closed by trace reconstruction (worker
-   * restart / cache eviction) rather than by a real error. The span keeps
-   * `status: "error"` so its boundary stays visible, but consumers (the viewer,
-   * error aggregations) should treat it as "incomplete (reconstructed)" — not a
-   * genuine agent/tool failure.
+   * True when recording or execution was interrupted. Reconstructed generation
+   * spans keep `status: "error"`; unfinished tools use `status: "aborted"`.
+   * Consumers should distinguish these from genuine agent/tool failures.
    */
   interrupted?: boolean
 
@@ -138,6 +136,25 @@ export interface RunTraceLineage {
     traceId: string
     taskLinks?: Array<{ sessionId: string; messageId: string; callId: string }>
   }>
+}
+
+function abortOpenTools(spans: TraceSpan[], reason: string, endTime = Date.now()) {
+  for (const span of spans) {
+    if (span.kind !== "tool" || span.endTime !== undefined) continue
+    span.endTime = endTime
+    span.status = "aborted"
+    span.statusMessage = reason
+    span.interrupted = true
+    span.tool = { ...span.tool, durationMs: Math.max(0, endTime - span.startTime) }
+  }
+}
+
+function traceToolInput(input: unknown): unknown {
+  try {
+    return input != null ? JSON.parse(JSON.stringify(input, bigintReplacer)) : undefined
+  } catch {
+    return { _serialization_error: "Input contained circular references or non-serializable data" }
+  }
 }
 
 export interface RunBudgetMetadata {
@@ -578,6 +595,7 @@ export class Trace {
   private generationToolCalls: string[] = []
   private generationsByMessage = new Map<string, { spanId: string; text: string[]; tools: string[] }>()
   private recordedParts = new Set<string>()
+  private runningTools = new Map<string, TraceSpan>()
   private requestSnapshotHashes = new Set<string>()
   private deduplicationKeysEvicted = 0
   private pendingToolResults: Array<{
@@ -855,6 +873,7 @@ export class Trace {
     // `rootSpanId`, silently degrading the trace shape. Marking them
     // interrupted preserves the partial data and makes the boundary visible.
     const now = Date.now()
+    abortOpenTools(this.spans, "Recording resumed before the tool finished", now)
     for (const s of this.spans) {
       if (s.kind === "generation" && s.endTime === undefined) {
         s.endTime = now
@@ -1070,12 +1089,17 @@ export class Trace {
   }
 
   /**
-   * Log a completed or errored tool call.
+   * Record a tool when it starts and update the same span when it finishes.
    */
   logToolCall(part: TracePartIdentity & {
     tool: string
     callID: string
     state:
+      | {
+          status: "running"
+          input: Record<string, unknown>
+          time: { start: number }
+        }
       | {
           status: "completed"
           input: Record<string, unknown>
@@ -1086,18 +1110,46 @@ export class Trace {
           status: "error"
           input: Record<string, unknown>
           error: string
+          metadata?: { interrupted?: boolean }
           time: { start: number; end: number }
         }
   }) {
     if (!this.rootSpanId) return
     try {
-      if (!this.recordPart("tool", part, part?.messageID ? part.callID : undefined)) return
+      const key = `${part.messageID ?? ""}:${part.id ?? part.callID}`
       const state = part.state
+      if (state.status === "running") {
+        if (this.runningTools.has(key)) return
+        if (!this.recordPart("tool-start", part, part?.messageID ? part.callID : undefined)) return
+        const generation = this.generationFor(part)
+        const span: TraceSpan = {
+          spanId: randomUUIDv7(),
+          parentSpanId: generation?.spanId ?? this.rootSpanId,
+          name: part.tool || "unknown",
+          kind: "tool",
+          startTime: state.time.start,
+          status: "running",
+          tool: { callId: part.callID },
+          input: traceToolInput(state.input),
+          attributes: { sessionId: this.sessionId, messageId: part.messageID },
+        }
+        this.runningTools.set(key, span)
+        this.spans.push(span)
+        generation?.tools.push(span.name)
+        this.toolCallCount++
+        this.snapshot()
+        return
+      }
+      if (!this.recordPart("tool", part, part?.messageID ? part.callID : undefined)) return
+      this.recordPart("tool-start", part, part?.messageID ? part.callID : undefined)
+      const running = this.runningTools.get(key)
+      this.runningTools.delete(key)
       const isError = state.status === "error"
+      const interrupted = isError && state.metadata?.interrupted === true
 
       const toolName = part.tool || "unknown"
       const generation = this.generationFor(part)
-      generation?.tools.push(toolName)
+      if (!running) generation?.tools.push(toolName)
 
       const errorStr = isError ? String(state.error ?? "") : ""
       const outputStr = !isError ? String(state.output ?? "") : ""
@@ -1110,25 +1162,20 @@ export class Trace {
       })
 
       const time = state.time ?? { start: Date.now(), end: Date.now() }
-      const durationMs = (time.end ?? 0) - (time.start ?? 0)
+      const durationMs = (time.end ?? 0) - (running?.startTime ?? time.start ?? 0)
 
-      // Safely serialize input — guard against circular references
-      let safeInput: unknown
-      try {
-        safeInput = state.input != null ? JSON.parse(JSON.stringify(state.input, bigintReplacer)) : undefined
-      } catch {
-        safeInput = { _serialization_error: "Input contained circular references or non-serializable data" }
-      }
+      const safeInput = traceToolInput(state.input)
 
-      this.spans.push({
-        spanId: randomUUIDv7(),
-        parentSpanId: generation?.spanId ?? this.rootSpanId,
+      const span: TraceSpan = {
+        spanId: running?.spanId ?? randomUUIDv7(),
+        parentSpanId: running?.parentSpanId ?? generation?.spanId ?? this.rootSpanId,
         name: toolName,
         kind: "tool",
-        startTime: time.start ?? Date.now(),
+        startTime: running?.startTime ?? time.start ?? Date.now(),
         endTime: time.end ?? Date.now(),
-        status: isError ? "error" : "ok",
+        status: interrupted ? "aborted" : isError ? "error" : "ok",
         statusMessage: isError ? errorStr : undefined,
+        ...(interrupted && { interrupted: true }),
         tool: {
           callId: part.callID,
           durationMs: Number.isFinite(durationMs) ? durationMs : 0,
@@ -1136,6 +1183,7 @@ export class Trace {
         input: safeInput,
         output: isError ? { error: errorStr } : outputStr.slice(0, 10000),
         attributes: {
+          ...running?.attributes,
           sessionId: this.sessionId,
           messageId: part.messageID,
           ...(!isError && outputStr.length > 10000 && {
@@ -1147,8 +1195,12 @@ export class Trace {
             },
           }),
         },
-      })
-      this.toolCallCount++
+      }
+      if (running) Object.assign(running, span)
+      else {
+        this.spans.push(span)
+        this.toolCallCount++
+      }
 
       // altimate_change start — trace: loop detection
       try {
@@ -1367,7 +1419,11 @@ export class Trace {
         totalToolCalls: this.toolCallCount,
         totalGenerations: this.generationCount,
         duration: sanitize(endTime - this.startTime),
-        status: error ? "error" : this.currentGenerationSpanId ? "running" : "completed",
+        status: error
+          ? "error"
+          : this.currentGenerationSpanId || this.spans.some((span) => span.kind === "tool" && span.endTime === undefined)
+            ? "running"
+            : "completed",
         ...(error && { error }),
         tokens: {
           input: sanitize(this.tokensBreakdown.input),
@@ -1575,6 +1631,7 @@ export class Trace {
 
     // Force-close any orphaned generation span
     this.currentGenerationSpanId = undefined
+    abortOpenTools(this.spans, error ?? "Session ended before the tool completed")
 
     // Close root span
     const rootSpan = this.spans.find((s) => s.spanId === this.rootSpanId)
@@ -1697,6 +1754,7 @@ export class Trace {
       this.crashed = true
       for (const exp of this.exporters) exp.markCrashed?.(this.sessionId)
       this.currentGenerationSpanId = undefined
+      abortOpenTools(this.spans, "Session ended before the tool completed")
       const rootSpan = this.spans.find((s) => s.spanId === this.rootSpanId)
       if (rootSpan) {
         rootSpan.endTime = Date.now()
@@ -1756,6 +1814,7 @@ export class Trace {
       }
       // altimate_change end
       this.currentGenerationSpanId = undefined
+      abortOpenTools(this.spans, error ?? "Process exited before the tool completed")
       const rootSpan = this.spans.find((s) => s.spanId === this.rootSpanId)
       if (rootSpan) {
         rootSpan.endTime = Date.now()

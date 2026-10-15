@@ -172,9 +172,9 @@ describe("SQL result previews", () => {
 
     expect(formatted.output).toContain('"\\n\\n')
     expect(formatted.output).toContain("…[alias clipped]")
-    expect(formatted.metadata).toMatchObject({ schema_truncated: true, output_truncated: true })
+    expect(formatted.metadata).toMatchObject({ schema_truncated: true, output_truncated: false, truncated: false })
     expect(Buffer.byteLength(formatted.output, "utf8")).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
-    expect(saved.rows()).toEqual([{ columns: [alias], values: [1] }])
+    expect(saved.writes).toHaveLength(0)
   })
 
   test("renders distinct small Buffer cells as base64 without spilling", async () => {
@@ -443,6 +443,19 @@ describe("SQL result previews", () => {
     expect(saved.rows()).toHaveLength(2)
   })
 
+  test("does not attribute a smaller connector cap to the requested tool limit", async () => {
+    const formatted = await formatSqlResult(result([[1], [2]], ["id"], true), {
+      limit: 100,
+      sql: JSON.stringify({ command: "find", collection: "items", limit: 2 }),
+      write: spill().write,
+    })
+
+    expect(formatted.output).toContain("may be row-limited")
+    expect(formatted.output).not.toContain("row limit 100")
+    expect(formatted.metadata.row_limited).toBe(true)
+    expect(formatted.metadata.output_truncated).toBe(false)
+  })
+
   test("previews the first 50 rows and spills all rows even without a backend row limit", async () => {
     const rows = Array.from({ length: 75 }, (_, i) => [`row-${String(i).padStart(3, "0")}`])
     const saved = spill()
@@ -497,8 +510,16 @@ describe("SQL result previews", () => {
     expect(formatted.output).toContain("…[alias clipped]")
     expect(formatted.output).not.toContain("\uFFFD")
     expect(Buffer.byteLength(formatted.output, "utf8")).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
-    expect(formatted.metadata).toMatchObject({ schema_truncated: true, preview_columns: 1, output_truncated: true })
-    expect(saved.rows()).toEqual([{ columns: [alias], values: [42] }])
+    expect(formatted.metadata).toMatchObject({
+      schema_truncated: true,
+      preview_rows: 1,
+      preview_columns: 1,
+      output_truncated: false,
+      truncated: false,
+    })
+    expect(formatted.output).not.toContain("Output truncated: yes")
+    expect(formatted.metadata.result_path).toBeUndefined()
+    expect(saved.writes).toHaveLength(0)
   })
 
   test("caps a 500-column preview and saves the full schema and rows", async () => {

@@ -267,7 +267,7 @@ export class SchemaCache {
 
     const whereClauses = tokens.map(() => "search_text LIKE ?")
     const searchParams = tokens.map((t) => `%${t}%`)
-    const searchCondition = whereClauses.join(" OR ")
+    const searchCondition = `(${whereClauses.join(" OR ")})`
 
     const whFilter = warehouse ? " AND warehouse = ?" : ""
     const whParams = warehouse ? [warehouse] : []

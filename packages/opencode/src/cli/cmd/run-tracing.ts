@@ -252,7 +252,7 @@ export class RunTracing {
     }
     if (part.type === "step-start") trace.logStepStart(part)
     if (part.type === "step-finish") trace.logStepFinish(part)
-    if (part.type === "tool" && ["completed", "error"].includes(part.state?.status)) trace.logToolCall(part)
+    if (part.type === "tool" && ["running", "completed", "error"].includes(part.state?.status)) trace.logToolCall(part)
     if (part.type === "reasoning" && part.time?.end) trace.logReasoning(part)
     if (part.type === "text" && !part.ignored) {
       if (state.users.has(part.messageID)) {
