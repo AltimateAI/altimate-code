@@ -52,6 +52,9 @@ export namespace LLM {
     model: Provider.Model
     agent: Agent.Info
     system: string[]
+    // altimate_change start — upstream_fix: keep ambient context outside the reusable system prefix
+    environment?: string[]
+    // altimate_change end
     abort: AbortSignal
     messages: ModelMessage[]
     small?: boolean
@@ -131,6 +134,10 @@ export namespace LLM {
       system.length = 0
       system.push(header, rest.join("\n"))
     }
+
+    // altimate_change start — upstream_fix: preserve a cache breakpoint before directory and date
+    if (input.environment?.length) system.push(input.environment.join("\n"))
+    // altimate_change end
 
     const variant =
       !input.small && input.model.variants && input.user.variant ? input.model.variants[input.user.variant] : {}
