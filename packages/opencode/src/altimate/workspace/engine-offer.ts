@@ -273,15 +273,65 @@ export async function installEngine(): Promise<InstallResult> {
   return { ok: false, error: detail || `npm exited with code ${run.code ?? "unknown"}` }
 }
 
+/** What the bus carries with the offer command: the offer's telemetry fields plus the server's
+ * node major (the install happens where the server runs), so the surface that prints the offer in
+ * another process (an attached run) reports `shown` with them. */
+export type OfferDetail = Pick<EngineOffer, "reason" | "workspaceId" | "declared" | "found"> & {
+  nodeMajor: number | null
+}
+
+export function encodeOfferDetail(offer: EngineOffer, nodeMajor: number | null): string {
+  const detail: OfferDetail = {
+    reason: offer.reason,
+    workspaceId: offer.workspaceId,
+    declared: offer.declared,
+    found: offer.found,
+    nodeMajor,
+  }
+  return JSON.stringify(detail)
+}
+
+/** The detail back from the bus, or undefined for anything that is not one. */
+export function decodeOfferDetail(raw: unknown): OfferDetail | undefined {
+  if (typeof raw !== "string") return undefined
+  try {
+    const v = JSON.parse(raw) as Partial<Record<keyof OfferDetail, unknown>>
+    const reason = v.reason === "engine-missing" || v.reason === "engine-too-old" ? v.reason : undefined
+    const workspaceId = typeof v.workspaceId === "string" ? v.workspaceId : undefined
+    const declared = typeof v.declared === "number" ? v.declared : v.declared === undefined ? undefined : NaN
+    const found = typeof v.found === "string" ? v.found : v.found === undefined ? undefined : ""
+    const nodeMajor = v.nodeMajor === null ? null : typeof v.nodeMajor === "number" ? v.nodeMajor : undefined
+    if (!reason || workspaceId === undefined || Number.isNaN(declared) || found === "" || nodeMajor === undefined) {
+      return undefined
+    }
+    return { reason, workspaceId, declared, found, nodeMajor }
+  } catch {
+    return undefined
+  }
+}
+
+/** An attached run printed the offer it read off the bus: that process is the surface that showed
+ * it, so it reports `shown` (surface `bus`) from the fields the event carried. False when the
+ * event carried none that decode, and nothing is reported. */
+export function trackPrintedOffer(raw: unknown, sessionID: string): boolean {
+  const detail = decodeOfferDetail(raw)
+  if (!detail) return false
+  trackInstallPrompt("shown", detail, { surface: "bus", nodeMajor: detail.nodeMajor }, sessionID)
+  return true
+}
+
 /** Ask the TUI to raise the offer. False when the bus is unavailable. The
  * session is carried so an attached headless run, which reads the same event
- * stream, prints the offer raised for its own session only. */
-async function publishOffer(sessionID: string): Promise<boolean> {
-  if (syncInternals.publishOffer) return syncInternals.publishOffer(sessionID)
+ * stream, prints the offer raised for its own session only; the offer's fields
+ * ride along so that run reports `shown` from them (the TUI dialog re-derives
+ * the offer and reports its own). */
+async function publishOffer(offer: EngineOffer, sessionID: string): Promise<boolean> {
+  const detail = encodeOfferDetail(offer, await nodeMajor().catch(() => null))
+  if (syncInternals.publishOffer) return syncInternals.publishOffer(sessionID, detail)
   try {
     await AppRuntime.runPromise(
       EventV2Bridge.Service.use((events) =>
-        events.publish(TuiEvent.CommandExecute, { command: OFFER_COMMAND, sessionID }),
+        events.publish(TuiEvent.CommandExecute, { command: OFFER_COMMAND, sessionID, arguments: detail }),
       ),
     )
     return true
@@ -335,6 +385,6 @@ export async function offerOrNotify(offer: EngineOffer, toast: Toast, sessionID:
   // may hold the offer back (its 7-day latch), so dispatch is not display. The toast reports here
   // only when it was shown.
   if (offerInstall(offer)) return
-  if (await publishOffer(sessionID)) return
+  if (await publishOffer(offer, sessionID)) return
   if (await notify(toast)) shown("toast")
 }
