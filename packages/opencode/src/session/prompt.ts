@@ -118,6 +118,9 @@ import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-sourc
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
+// altimate_change start — the session's bound workspace rides on every telemetry row
+import { readLocalBinding } from "@/altimate/workspace/state"
+// altimate_change end
 import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
 // altimate_change start — keyless public Zen predicate (flat module)
@@ -763,7 +766,15 @@ export namespace SessionPrompt {
       throw e
     }
     // altimate_change end
-    Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
+    // altimate_change start — the workspace this project is linked to (local binding cache, no
+    // network) goes on the telemetry context, so every row of the turn carries workspace_id.
+    const boundWorkspace = await readLocalBinding(Instance.directory).catch(() => null)
+    Telemetry.setContext({
+      sessionId: sessionID,
+      projectId: Instance.project?.id ?? "",
+      workspaceId: boundWorkspace?.datamateId,
+    })
+    // altimate_change end
     // altimate_change start — the learn kill switch disables new delivery, while retaining trusted note cleanup.
     // An unused project pays only an existence check; do not load stores, migrate,
     // create state, or even schedule async learning work on that default-off path.
