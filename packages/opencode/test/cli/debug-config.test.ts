@@ -519,6 +519,12 @@ describe("remote server URLs and prose", () => {
     expect(redactConfig({ agent: { review: { prompt } } })).toEqual({ agent: { review: { prompt } } })
   })
 
+  test("masks unparseable endpoint values entirely", () => {
+    expect(redactConfig({ mcp: { remote: { type: "remote", url: "mcp.example.com/mcp/u/path-secret" } } })).toEqual({
+      mcp: { remote: { type: "remote", url: "***" } },
+    })
+  })
+
   test("prints only the origin of provider endpoint URLs", () => {
     expect(
       redactConfig({

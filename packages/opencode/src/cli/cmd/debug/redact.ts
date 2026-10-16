@@ -37,7 +37,8 @@ const endpointKey = /^(?:url|baseURL|api|endpoint)$/i
 
 function redactServerURL(value: string): string {
   const trimmed = value.trim()
-  if (!URL.canParse(trimmed)) return redactURL(value)
+  // Explicit endpoint fields fail closed: a schemeless value can still carry a path token.
+  if (!URL.canParse(trimmed)) return "***"
   const url = new URL(trimmed)
   if (url.username || url.password || url.origin === "null") return "***"
   const rest = url.pathname.replace(/^\/$/, "") + url.search + url.hash
