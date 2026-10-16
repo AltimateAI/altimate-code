@@ -31,10 +31,13 @@ function redactURL(value: string): string {
     .replace(/#(.*)/s, (fragment, params) => (params.includes("=") ? `#${redactParams(params)}` : fragment))
 }
 
-// Remote server URLs can carry credentials in the path (`/mcp/u/<token>/...`), so print only the origin.
+// Endpoint URLs (MCP `url`, provider `api`/`baseURL`) can carry credentials in the path
+// (`/mcp/u/<token>/...`, `/v1/sk-...`), so print only the origin.
+const endpointKey = /^(?:url|baseURL|api|endpoint)$/i
+
 function redactServerURL(value: string): string {
   const trimmed = value.trim()
-  if (!URL.canParse(trimmed)) return "***"
+  if (!URL.canParse(trimmed)) return redactURL(value)
   const url = new URL(trimmed)
   if (url.username || url.password || url.origin === "null") return "***"
   const rest = url.pathname.replace(/^\/$/, "") + url.search + url.hash
@@ -69,7 +72,7 @@ export function redactConfig(value: unknown, headers = false): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => {
       if (typeof item === "string" && (headers || secretName.test(key))) return [key, "***"]
-      if (typeof item === "string" && /^url$/i.test(key) && !headers) return [key, redactServerURL(item)]
+      if (typeof item === "string" && endpointKey.test(key) && !headers) return [key, redactServerURL(item)]
       if (Array.isArray(item) && argvKey.test(key) && !headers) return [key, redactArgv(item)]
       // headersCommand is a record of header name -> argv.
       if (item && typeof item === "object" && /^headersCommand$/i.test(key) && !headers)

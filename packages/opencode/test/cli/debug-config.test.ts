@@ -70,7 +70,7 @@ describe("debug config redaction", () => {
         public: "https://example.com/path?model=demo",
       }),
     ).toEqual({
-      api: "https://example.com/path?api_key=***",
+      api: "https://example.com/***",
       session: "https://example.com/path?token=***",
       browser: "https://example.com/path?cookie=***",
       invalid: "***",
@@ -95,18 +95,18 @@ describe("debug config redaction", () => {
   })
 
   test.each(["key", "sig", "signature", "code"])("masks URL query value for %s", (key) => {
-    expect(redactConfig({ endpoint: `https://example.com/path?${key}=secret` })).toEqual({
-      endpoint: `https://example.com/path?${key}=***`,
+    expect(redactConfig({ link: `https://example.com/path?${key}=secret` })).toEqual({
+      link: `https://example.com/path?${key}=***`,
     })
   })
 
   test("masks every query and fragment value, including repeated and empty values and bare query flags", () => {
     expect(
       redactConfig({
-        endpoint: "https://example.com/path?model=demo&model=other&empty=&flag#state=ready&state=done&empty=",
+        link: "https://example.com/path?model=demo&model=other&empty=&flag#state=ready&state=done&empty=",
       }),
     ).toEqual({
-      endpoint: "https://example.com/path?model=***&model=***&empty=***&flag=***#state=***&state=***&empty=***",
+      link: "https://example.com/path?model=***&model=***&empty=***&flag=***#state=***&state=***&empty=***",
     })
   })
 
@@ -502,8 +502,8 @@ describe("remote server URLs and prose", () => {
   })
 
   test("still redacts a URL whose query contains spaces", () => {
-    expect(redactConfig({ options: { baseURL: "https://example.com/v1?api_key=secret&label=hello world" } })).toEqual({
-      options: { baseURL: "https://example.com/v1?api_key=***&label=***" },
+    expect(redactConfig({ options: { link: "https://example.com/v1?api_key=secret&label=hello world" } })).toEqual({
+      options: { link: "https://example.com/v1?api_key=***&label=***" },
     })
   })
 
@@ -517,6 +517,18 @@ describe("remote server URLs and prose", () => {
   test("keeps prose that starts with a label", () => {
     const prompt = "Review: check {file} carefully, see https://example.com/docs?x=1"
     expect(redactConfig({ agent: { review: { prompt } } })).toEqual({ agent: { review: { prompt } } })
+  })
+
+  test("prints only the origin of provider endpoint URLs", () => {
+    expect(
+      redactConfig({
+        provider: {
+          custom: { api: "https://gateway.example/v1/sk-secret", options: { baseURL: "https://proxy.example.com/path-secret/v1" } },
+        },
+      }),
+    ).toEqual({
+      provider: { custom: { api: "https://gateway.example/***", options: { baseURL: "https://proxy.example.com/***" } } },
+    })
   })
 
   test("keeps prose that mentions a link", () => {
