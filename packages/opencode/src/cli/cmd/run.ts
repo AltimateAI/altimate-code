@@ -787,6 +787,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change end
       // altimate_change start — one clock for all work, including task children and continuation turns
       let timeStarted: number | undefined
+      let queryDeadline: number | undefined
       let timeBudgetTimer: ReturnType<typeof setInterval> | undefined
       const timeBudgetStop = new AbortController()
       let workActive = false
@@ -804,6 +805,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
               ? "soft-no-downgrade"
               : "soft"
         return {
+          ...(!finalizing && queryDeadline !== undefined
+            ? { "x-altimate-run-query-deadline": String(queryDeadline) }
+            : {}),
           "x-altimate-run-budget": finalizing
             ? control === "soft"
               ? "finalization"
@@ -914,6 +918,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // altimate_change start — include process bootstrap in the work deadline
         timeStarted = performance.now() - process.uptime() * 1000
         // altimate_change end
+        // compute the query cutoff once so reminders cannot extend it
+        queryDeadline = RunTimeBudget.queryDeadline(Date.now() - process.uptime() * 1000, timeBudget)
         tracer?.setRunBudget(budgetMetadata())
         // Fixed short ticks avoid the signed-32-bit timeout overflow for large budgets.
         if (timeBudget !== undefined) timeBudgetTimer = setInterval(checkTimeBudget, 25)

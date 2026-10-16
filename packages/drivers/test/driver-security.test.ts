@@ -236,6 +236,7 @@ describe("MongoDB driver", () => {
         collection: () => ({
           aggregate: () => ({
             toArray: async () => [],
+            async *[Symbol.asyncIterator]() {},
           }),
           find: () => ({
             project: function () { return this },
@@ -243,6 +244,7 @@ describe("MongoDB driver", () => {
             skip: function () { return this },
             limit: function () { return this },
             toArray: async () => [],
+            async *[Symbol.asyncIterator]() {},
           }),
         }),
         command: async () => ({ ok: 1 }),

@@ -19,6 +19,9 @@ import { PermissionNext } from "@/permission/next"
 import { Log } from "@/util/log"
 // client trace propagation: a subagent's turn inherits its parent turn's trace
 import { TraceContext } from "@/altimate/observability/trace-context"
+// altimate_change start — task queries share their parent run's remaining budget
+import { RunBudget } from "@/altimate/run-budget"
+// altimate_change end
 // re-brand core (ModelV2/ProviderV2) IDs to the provider/schema brands SessionPrompt expects
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect } from "effect"
@@ -224,6 +227,9 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         agent: agent.name,
         parts: promptParts,
       }
+      // altimate_change start — keep the inherited query cutoff scoped to this child prompt
+      using queryBudget = defer(RunBudget.registerQueryDeadline(session.id, RunBudget.queryDeadline(ctx.sessionID)))
+      // altimate_change end
       const result = promptOps
         ? await Effect.runPromise(promptOps.prompt(promptInput))
         : await SessionPrompt.prompt(promptInput)

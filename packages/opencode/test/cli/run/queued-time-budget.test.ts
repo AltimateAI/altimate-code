@@ -12,8 +12,8 @@ test("work deadlines include process startup and do not restart on retries", asy
   expect(elapsedStart).toBeGreaterThan(0)
   expect(start).toBeGreaterThan(0)
   let now = 7_000
-  const setup = new Function("performance", "process", "setInterval", `
-    let timeStarted, workActive = false, timeBudgetTimer
+  const setup = new Function("performance", "process", "setInterval", "RunTimeBudget", `
+    let timeStarted, workActive = false, timeBudgetTimer, queryDeadline
     const timeBudget = 10, tracer = undefined
     const budgetMetadata = () => ({})
     const checkTimeBudget = () => {}
@@ -21,7 +21,7 @@ test("work deadlines include process startup and do not restart on retries", asy
     ${source.slice(start, end)}
     return { startWorkClock, elapsedSeconds }
   `)
-  const clock = setup({ now: () => now }, { uptime: () => now / 1000 }, () => 1)
+  const clock = setup({ now: () => now }, { uptime: () => now / 1000 }, () => 1, RunTimeBudget)
   clock.startWorkClock()
   expect(clock.elapsedSeconds()).toBe(7)
   expect(RunTimeBudget.deadline(clock.elapsedSeconds(), 10)).toBeUndefined()
