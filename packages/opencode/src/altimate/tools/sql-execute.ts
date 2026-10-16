@@ -132,7 +132,7 @@ export const SqlExecuteTool = Tool.define(
                   ...(Registry.canonicalType(Registry.getConfig(source.warehouse)?.type) === "postgres"
                     ? { read_only: true }
                     : {}),
-                })
+                }, { signal: ctx.abort, sessionID: ctx.sessionID })
                 const error = normalizeError(result.error)
                 if (error !== undefined) {
                   throw new Error(`query_from source failed: ${error.trim() || "SQL execution failed."}`)

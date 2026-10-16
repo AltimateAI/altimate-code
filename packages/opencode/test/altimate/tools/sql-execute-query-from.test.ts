@@ -63,8 +63,8 @@ describe("sql_execute generated reads", () => {
     expect(output.output).toBe("total\n-----\n42\n\n(1 rows)")
     expect(output.output).not.toContain(generated)
     expect(dispatch.mock.calls).toEqual([
-      ["sql.execute", { sql: source.sql, warehouse: "catalog", limit: 2, query_timeout_ms: 2000 }],
-      ["sql.execute", { sql: generated, warehouse: "analytics", limit: 7, query_timeout_ms: 2000 }],
+      ["sql.execute", { sql: source.sql, warehouse: "catalog", limit: 2, query_timeout_ms: 2000 }, { sessionID: ctx.sessionID, signal: ctx.abort }],
+      ["sql.execute", { sql: generated, warehouse: "analytics", limit: 7, query_timeout_ms: 2000 }, { sessionID: ctx.sessionID, signal: ctx.abort }],
     ])
     expect(precedence.mock.calls).toEqual([
       [ctx.sessionID, "sql_execute", "catalog"],
@@ -84,7 +84,7 @@ describe("sql_execute generated reads", () => {
       warehouse: "analytics",
       limit: 100,
       query_timeout_ms: undefined,
-    })
+    }, { sessionID: ctx.sessionID, signal: ctx.abort })
   })
 
   for (const placeholder of [null, { warehouse: "", sql: "" }]) {
@@ -94,7 +94,7 @@ describe("sql_execute generated reads", () => {
       const output = await tool.execute({ query: generated, query_from: placeholder, warehouse: "analytics" }, ctx)
       expect(output.metadata.error).toBeUndefined()
       expect(dispatch.mock.calls).toEqual([
-        ["sql.execute", { sql: generated, warehouse: "analytics", limit: 100, query_timeout_ms: undefined }],
+        ["sql.execute", { sql: generated, warehouse: "analytics", limit: 100, query_timeout_ms: undefined }, { sessionID: ctx.sessionID, signal: ctx.abort }],
       ])
     })
   }
