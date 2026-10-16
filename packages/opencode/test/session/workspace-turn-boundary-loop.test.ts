@@ -121,10 +121,26 @@ const countBoundaries = Effect.acquireRelease(
   (spy) => Effect.sync(() => spy.mockRestore()),
 )
 
+/** A linked project whose engine is missing at the first boundary and running from the second,
+ * as after "Install now": what the linked-project notice is settled from. */
+const engineInstalledAfter = (boundaries: { mock: { calls: unknown[] } }) =>
+  Effect.acquireRelease(
+    Effect.sync(() => [
+      spyOn(WorkspaceEngine, "settledOutcome").mockImplementation(() =>
+        boundaries.mock.calls.length < 2 ? { kind: "engine-missing" } : { kind: "attached", available: 8 },
+      ),
+      spyOn(WorkspaceEngine, "settledWorkspace").mockImplementation(() => ({ id: "5", name: "analytics" })),
+    ]),
+    (spies) => Effect.sync(() => spies.forEach((spy) => spy.mockRestore())),
+  )
+const MISSING = "The engine is not installed on this machine"
+const RUNNING = "The engine is running"
+
 it.live("a message sent while the assistant is busy gets its own turn boundary in the same loop", () =>
   provideTmpdirServerLegacy(
     Effect.fnUntraced(function* ({ llm }) {
       const boundaries = yield* countBoundaries
+      yield* engineInstalledAfter(boundaries)
       const prompt = yield* SessionPrompt.Service
       const sessions = yield* Session.Service
       const session = yield* sessions.create({
@@ -166,6 +182,11 @@ it.live("a message sent while the assistant is busy gets its own turn boundary i
       expect(JSON.stringify(hits[1].body)).toContain("sent while busy")
       // And it got a boundary of its own, so the engine is reconciled and the tools re-pinned for it.
       expect(boundaries).toHaveBeenCalledTimes(2)
+      // The linked-project notice is settled at that boundary too: each request is told the engine
+      // state its own tools came from, not the first request's.
+      expect(JSON.stringify(hits[0].body)).toContain(MISSING)
+      expect(JSON.stringify(hits[1].body)).toContain(RUNNING)
+      expect(JSON.stringify(hits[1].body)).not.toContain(MISSING)
     }),
     { git: true, config: providerCfg },
   ),
