@@ -519,6 +519,12 @@ describe("remote server URLs and prose", () => {
     expect(redactConfig({ agent: { review: { prompt } } })).toEqual({ agent: { review: { prompt } } })
   })
 
+  test("masks backslash-form endpoint URLs", () => {
+    expect(JSON.stringify(redactConfig({ mcp: { remote: { type: "remote", url: "https:localhost\\mcp\\path-secret" } } }))).not.toContain(
+      "path-secret",
+    )
+  })
+
   test("keeps permission actions for tools named like endpoint keys", () => {
     const permission = { skill: { endpoint: "allow" }, api: "deny" }
     expect(redactConfig({ permission })).toEqual({ permission })

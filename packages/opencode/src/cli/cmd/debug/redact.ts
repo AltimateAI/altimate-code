@@ -73,8 +73,8 @@ export function redactConfig(value: unknown, headers = false): unknown {
   return Object.fromEntries(
     Object.entries(value).map(([key, item]) => {
       if (typeof item === "string" && (headers || secretName.test(key))) return [key, "***"]
-      // Only address-like values: a permission entry for a tool named `api` holds `allow`/`deny`.
-      if (typeof item === "string" && endpointKey.test(key) && /[./]/.test(item) && !headers)
+      // Only address-like values (`.`, `/`, `\`, `:`): a permission entry for a tool named `api` holds `allow`/`deny`.
+      if (typeof item === "string" && endpointKey.test(key) && /[./\\:]/.test(item) && !headers)
         return [key, redactServerURL(item)]
       if (Array.isArray(item) && argvKey.test(key) && !headers) return [key, redactArgv(item)]
       // headersCommand is a record of header name -> argv.
