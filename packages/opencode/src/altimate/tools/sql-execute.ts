@@ -42,7 +42,7 @@ import { normalizeError } from "./response-normalization"
 import { readSql } from "./sql-check"
 
 const MAX_SQL_ROWS = 10_000
-const LIMIT_ERROR = `limit must be a finite positive integer between 1 and ${MAX_SQL_ROWS}`
+const LIMIT_ERROR = "limit must be a finite positive integer"
 const MAX_GENERATED_SQL_BYTES = 1024 * 1024
 // Below the default tool-output cap, so a redirect never spills the SQL into a truncated file.
 const MAX_REDIRECT_SQL_BYTES = 40 * 1024
@@ -71,18 +71,18 @@ const parameters = z.object({
     .number({ error: LIMIT_ERROR })
     .int(LIMIT_ERROR)
     .min(1, LIMIT_ERROR)
-    .max(MAX_SQL_ROWS, LIMIT_ERROR)
+    .transform((limit) => Math.min(limit, MAX_SQL_ROWS))
     .optional()
     .default(100)
-    .describe(`Max rows to return (1-${MAX_SQL_ROWS}; default 100)`),
+    .describe(`Max rows to return (default 100; larger values are capped at ${MAX_SQL_ROWS})`),
   query_timeout_ms: z
     .number()
     .int()
-    .min(0)
+    .min(1)
     .max(3_600_000)
     .optional()
     .describe(
-      "Optional per-query execution deadline in ms. Omitted or 0 uses the configured default. Bounded by the remaining run budget.",
+      "Optional per-query execution deadline in ms. Omit or use 0 to use the configured deadline (connection setting or environment), bounded by the remaining run budget. Set a positive value only when a specific query needs a longer or shorter budget.",
     ),
 })
 

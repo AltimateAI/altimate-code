@@ -168,7 +168,7 @@ describe("sql_execute generated reads", () => {
       await tool.execute({ query_from: source, warehouse: "analytics", query_timeout_ms: 0 }, ctx)
       expect(dispatch).toHaveBeenCalledTimes(2)
       for (const [, input] of dispatch.mock.calls) {
-        expect(input).toMatchObject({ query_timeout_ms: 0 })
+        expect(input).toMatchObject({ query_timeout_ms: undefined })
         expect((input as { read_only?: boolean }).read_only).toBe(type === "sqlite" ? undefined : true)
       }
     })

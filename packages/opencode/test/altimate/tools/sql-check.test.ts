@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import path from "path"
 import { tmpdir } from "../../fixture/fixture"
 import { testEffect } from "../../lib/effect"
@@ -81,6 +81,15 @@ function compact(result: Awaited<ReturnType<typeof checkSql>>) {
 const leftSql = "SELECT * FROM orders"
 const rightSql = "SELECT * FROM customers"
 const sevenKeys = Array.from({ length: 7 }, (_, i) => `SELECT ${i + 1} AS id`).join(" UNION ALL ")
+
+test("publishes an object schema while requiring a coverage pattern at validation", async () => {
+  const tool = await initTool(SqlCheckTool)
+  expect(tool.jsonSchema).toMatchObject({ type: "object", properties: { pattern: { type: "string" } } })
+  expect(tool.jsonSchema).not.toHaveProperty("anyOf")
+  const decode = Schema.decodeUnknownSync(tool.parameters)
+  expect(() => decode({ warehouse: "sqlite_fixture", check: "coverage", sql: "SELECT '' AS note", column: "note" })).toThrow()
+  expect(decode({ warehouse: "sqlite_fixture", check: "grain" })).toEqual({ warehouse: "sqlite_fixture", check: "grain" })
+})
 
 testEffect(Agent.defaultLayer).instance(
   "analyst and data-explorer can invoke sql_check while SQL writes remain denied",
@@ -452,6 +461,32 @@ for (const warehouse of ["sqlite_fixture", "scratch"] as const) {
       })
       expect(result.metadata).toMatchObject({ check: "coverage" })
       expect(result.title).not.toContain("ERROR")
+    })
+
+    test("registered coverage checks preserve empty patterns and default filler deadlines", async () => {
+      const source = warehouse === "scratch" ? await getScratch("test-session") : await Registry.get(warehouse)
+      const execute = spyOn(source, "execute")
+      const tool = await initTool(SqlCheckTool)
+      try {
+        for (const query_timeout_ms of [undefined, [], "", 0, null, 4321]) {
+          const result = await tool.execute(
+            { warehouse, check: "coverage", sql: "SELECT '' AS note", column: "note", pattern: "", query_timeout_ms },
+            {
+              sessionID: "test-session",
+              messageID: "test-message",
+              agent: "test",
+              abort: new AbortController().signal,
+              messages: [],
+            },
+          )
+          expect(result.title).not.toContain("ERROR")
+          expect(result.metadata).toMatchObject({ check: "coverage", matching_rows: 1 })
+          expect(execute.mock.calls.at(-1)?.[3]?.queryTimeoutMs).toBe(query_timeout_ms === 4321 ? 4321 : 120_000)
+        }
+        expect(execute).toHaveBeenCalledTimes(6)
+      } finally {
+        execute.mockRestore()
+      }
     })
 
     test("still reports missing required fields after empty values are dropped", async () => {

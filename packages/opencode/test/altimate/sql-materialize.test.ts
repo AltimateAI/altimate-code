@@ -532,26 +532,25 @@ describe("sql_materialize", () => {
     })
   }
 
-  test("the tool rejects max_bytes above the hard 2 GiB ceiling before querying", async () => {
-    const seen: string[] = []
-    const get = fakePostgres(async (sql) => {
-      seen.push(sql)
-      throw new Error("No query should run")
+  test("the tool clamps oversized max_bytes to the hard 2 GiB ceiling for the source read", async () => {
+    const limits: (number | undefined)[] = []
+    const get = fakePostgres(async (_sql, _limit, _binds, options) => {
+      limits.push(options?.maxResultBytes)
+      return { columns: ["n"], rows: [[1]], row_count: 1, truncated: false }
     })
     try {
       const tool = await initTool(SqlMaterializeTool)
-      await expect(
-        tool.execute(
-          {
-            source_warehouse: "pg_source",
-            sql: "SELECT 1 AS n",
-            target_table: "invalid_cap",
-            max_bytes: 2 * 1024 ** 3 + 1,
-          },
-          ctx as any,
-        ),
-      ).rejects.toThrow(/invalid arguments|SchemaError|Expected/i)
-      expect(seen).toHaveLength(0)
+      const result = await tool.execute(
+        {
+          source_warehouse: "pg_source",
+          sql: "SELECT 1 AS n",
+          target_table: "capped_transfer",
+          max_bytes: 4 * 1024 ** 3,
+        },
+        ctx as any,
+      )
+      expect(result.metadata.error).toBeUndefined()
+      expect(limits).toEqual([2 * 1024 ** 3])
     } finally {
       get.mockRestore()
     }
@@ -604,6 +603,42 @@ describe("sql_materialize", () => {
       get.mockRestore()
     }
   })
+
+  for (const [label, query_timeout_ms, expected] of [
+    ["omitted", undefined, undefined],
+    ["zero", 0, undefined],
+    ["empty array", [], undefined],
+    ["empty string", "", undefined],
+    ["null", null, undefined],
+    ["positive", 4321, 4321],
+  ] as const) {
+    test(`the registered tool normalizes ${label} deadlines before running source queries`, async () => {
+      const seen: { sql: string; timeout: number | undefined }[] = []
+      const get = fakePostgres(async (sql, _limit, _binds, options) => {
+        seen.push({ sql, timeout: options?.queryTimeoutMs })
+        return { columns: ["n"], rows: [[1]], row_count: 1, truncated: false }
+      })
+      try {
+        const tool = await initTool(SqlMaterializeTool)
+        const result = await tool.execute(
+          {
+            source_warehouse: "pg_source",
+            sql: "SELECT 1 AS n",
+            target_table: "deadline",
+            query_timeout_ms,
+          },
+          ctx as any,
+        )
+        expect(result.metadata.error).toBeUndefined()
+        expect(result.metadata.rowCount).toBe(1)
+        expect(seen).toHaveLength(1)
+        expect(seen[0].sql).toMatch(/LIMIT 2000001$/)
+        expect(seen[0].timeout).toBe(expected ?? 120_000)
+      } finally {
+        get.mockRestore()
+      }
+    })
+  }
 
   test("a remote source cannot outlast its deadline and later write to scratch", async () => {
     await getScratch()

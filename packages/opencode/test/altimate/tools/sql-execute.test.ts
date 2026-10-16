@@ -211,27 +211,40 @@ describe("sql_execute parser read boundary", () => {
 })
 
 describe("sql_execute limit validation", () => {
-  for (const limit of [0, -1, 1.5, 1e9, NaN, Infinity, -Infinity]) {
+  for (const limit of [-1, 1.5, NaN, Infinity, -Infinity]) {
     test(`rejects ${limit} before querying`, async () => {
       const tool = await initTool(SqlExecuteTool)
       await expect(tool.execute({ query: "SELECT 42", limit }, ctx)).rejects.toThrow(
-        "limit must be a finite positive integer between 1 and 10000",
+        "limit must be a finite positive integer",
       )
       expect(dispatch).not.toHaveBeenCalled()
     })
   }
 
-  test("keeps default 100 and accepts both bounds without extra queries", async () => {
+  test("keeps default 100 for omitted and filler limits and accepts both bounds without extra queries", async () => {
     const tool = await initTool(SqlExecuteTool)
-    for (const limit of [undefined, 1, 10_000]) {
+    for (const limit of [undefined, 0, 1, 10_000]) {
       const output = await tool.execute({ query: "SELECT 42", limit }, ctx)
       expect(output.output).toBe("answer\n------\n42\n\n(1 rows)")
     }
     expect(dispatch.mock.calls).toEqual([
       ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 100 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
+      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 100 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
       ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 1 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
       ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 10_000 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
     ])
+  })
+
+  test("clamps oversized row limits before querying", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    await tool.execute({ query: "SELECT 42", limit: 1e9 }, ctx)
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(dispatch).toHaveBeenCalledWith("sql.execute", {
+      sql: "SELECT 42",
+      warehouse: undefined,
+      limit: 10_000,
+      query_timeout_ms: undefined,
+    }, { signal: ctx.abort, sessionID: ctx.sessionID })
   })
 })
 
@@ -244,9 +257,9 @@ describe("sql_execute query timeout", () => {
     })
   }
 
-  test("passes explicit deadlines and the default sentinel to the native dispatcher", async () => {
+  test("passes positive deadlines to the native dispatcher", async () => {
     const tool = await initTool(SqlExecuteTool)
-    for (const query_timeout_ms of [0, 1, 600_000, 3_600_000]) {
+    for (const query_timeout_ms of [1, 600_000, 3_600_000]) {
       await tool.execute({ query: "SELECT 42", warehouse: "analytics", query_timeout_ms }, ctx)
       expect(dispatch).toHaveBeenLastCalledWith("sql.execute", {
         sql: "SELECT 42",
@@ -255,19 +268,21 @@ describe("sql_execute query timeout", () => {
         query_timeout_ms,
       }, { signal: ctx.abort, sessionID: ctx.sessionID })
     }
-    expect(dispatch).toHaveBeenCalledTimes(4)
+    expect(dispatch).toHaveBeenCalledTimes(3)
   })
 
-  test("leaves an omitted deadline undefined so native defaults still apply", async () => {
+  test("leaves omitted and filler deadlines undefined so native defaults still apply", async () => {
     const tool = await initTool(SqlExecuteTool)
-    await tool.execute({ query: "SELECT 42" }, ctx)
-    expect(dispatch).toHaveBeenCalledTimes(1)
-    expect(dispatch).toHaveBeenCalledWith("sql.execute", {
-      sql: "SELECT 42",
-      warehouse: undefined,
-      limit: 100,
-      query_timeout_ms: undefined,
-    }, { signal: ctx.abort, sessionID: ctx.sessionID })
+    for (const query_timeout_ms of [undefined, 0, [], "", null]) {
+      await tool.execute({ query: "SELECT 42", query_timeout_ms }, ctx)
+      expect(dispatch).toHaveBeenLastCalledWith("sql.execute", {
+        sql: "SELECT 42",
+        warehouse: undefined,
+        limit: 100,
+        query_timeout_ms: undefined,
+      }, { signal: ctx.abort, sessionID: ctx.sessionID })
+    }
+    expect(dispatch).toHaveBeenCalledTimes(5)
   })
 })
 

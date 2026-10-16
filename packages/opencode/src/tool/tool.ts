@@ -23,6 +23,10 @@ import {
 // altimate_change start — humanize tool-call titles at the source
 import { describeToolCall } from "../altimate/tool-label"
 // altimate_change end
+// altimate_change start — upstream_fix: normalize optional strict-schema fillers before validation
+import { fillerSafeParameters } from "./filler-parameters"
+import { ToolJsonSchema } from "./json-schema"
+// altimate_change end
 
 interface Metadata {
   [key: string]: any
@@ -269,9 +273,15 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
     Effect.gen(function* () {
       const toolInfo = typeof init === "function" ? { ...(yield* init(ctx)) } : { ...init }
       // altimate_change end
+      // altimate_change start — upstream_fix: share filler handling across all tool schemas
+      const jsonSchema = ToolJsonSchema.fromTool({ ...toolInfo, id })
+      const parameters = fillerSafeParameters(toolInfo.parameters, jsonSchema)
+      // altimate_change end
       // Compile the parser closure once per tool init; `decodeUnknownEffect`
       // allocates a new closure per call, so hoisting avoids re-closing it.
-      const decode = Schema.decodeUnknownEffect(toolInfo.parameters)
+      // altimate_change start — upstream_fix: validate after optional fillers become omissions
+      const decode = Schema.decodeUnknownEffect(parameters)
+      // altimate_change end
       const execute = toolInfo.execute
       toolInfo.execute = (args, ctx) => {
         const attrs = {
@@ -333,7 +343,9 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           }
         }).pipe(Effect.orDie, Effect.withSpan("Tool.execute", { attributes: attrs }))
       }
-      return toolInfo
+      // altimate_change start — upstream_fix: expose the same decoder to schema and batch callers
+      return { ...toolInfo, parameters, jsonSchema }
+      // altimate_change end
     })
 }
 

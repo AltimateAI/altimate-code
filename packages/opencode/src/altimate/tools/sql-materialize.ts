@@ -465,16 +465,15 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       .number()
       .int()
       .min(0)
-      .max(HARD_MAX_BYTES)
       .optional()
       .describe("Serialized row byte cap enforced during transfer (default 256 MiB, hard limit 2 GiB; 0 = default)"),
     query_timeout_ms: z
       .number()
       .int()
-      .min(0)
+      .min(1)
       .max(3_600_000)
       .optional()
-      .describe("Query deadline in ms; omitted or 0 uses the configured default, bounded by the remaining run budget"),
+      .describe("Source query deadline in ms; omitted or 0 uses the configured default, bounded by the remaining run budget"),
   }),
   async execute(args, ctx): Promise<{ title: string; metadata: Record<string, any>; output: string }> {
     // altimate_change start — validate and authorize source reads before workspace redirects
