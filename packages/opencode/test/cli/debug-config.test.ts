@@ -501,6 +501,12 @@ describe("remote server URLs and prose", () => {
     })
   })
 
+  test("still redacts a URL whose query contains spaces", () => {
+    expect(redactConfig({ options: { baseURL: "https://example.com/v1?api_key=secret&label=hello world" } })).toEqual({
+      options: { baseURL: "https://example.com/v1?api_key=***&label=***" },
+    })
+  })
+
   test("keeps prose that mentions a link", () => {
     const prompt = "See https://example.com/docs before answering."
     expect(redactConfig({ agent: { review: { prompt } } })).toEqual({ agent: { review: { prompt } } })
