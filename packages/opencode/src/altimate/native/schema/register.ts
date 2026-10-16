@@ -4,6 +4,7 @@
 
 import { register } from "../dispatcher"
 import { getCache } from "./cache"
+import { awaitIndex, withIndexSignal } from "./index-control"
 import { detectPii } from "./pii-detector"
 import { getTags, listTags } from "./tags"
 import * as Registry from "../connections/registry"
@@ -28,13 +29,29 @@ export function registerAll(): void {
 // --- schema.index ---
 register("schema.index", async (params: SchemaIndexParams): Promise<SchemaIndexResult> => {
   const startTime = Date.now()
-  const connector = await Registry.get(params.warehouse)
   const config = Registry.getConfig(params.warehouse)
   const warehouseType = config?.type || "unknown"
 
-  const cache = await getCache()
   try {
-    const result = await cache.indexWarehouse(params.warehouse, warehouseType, connector)
+    const result = await withIndexSignal({ signal: params.signal, timeoutMs: params.timeout_ms }, async (signal) => {
+      try {
+        const connector = await awaitIndex(signal, () => Registry.get(params.warehouse))
+        const cache = await awaitIndex(signal, () => getCache())
+        return await cache.indexWarehouse(params.warehouse, warehouseType, connector, { signal, timeoutMs: params.timeout_ms })
+      } catch (error) {
+        if (!signal.aborted) throw error
+        return {
+          warehouse: params.warehouse,
+          type: warehouseType,
+          schemas_indexed: 0,
+          tables_indexed: 0,
+          columns_indexed: 0,
+          timestamp: new Date().toISOString(),
+          partial: true,
+          note: signal.reason instanceof Error ? signal.reason.message : "Schema indexing cancelled.",
+        }
+      }
+    })
     try {
       Telemetry.track({
         type: "warehouse_introspection",
@@ -42,7 +59,7 @@ register("schema.index", async (params: SchemaIndexParams): Promise<SchemaIndexR
         session_id: Telemetry.getContext().sessionId,
         warehouse_type: warehouseType,
         operation: "index_warehouse",
-        success: true,
+        success: !result.partial,
         duration_ms: Date.now() - startTime,
         result_count: result.tables_indexed,
       })
