@@ -68,6 +68,9 @@ export namespace LLM {
     model: Provider.Model
     agent: Agent.Info
     system: string[]
+    // altimate_change start — upstream_fix: keep ambient context outside the reusable system prefix
+    environment?: string[]
+    // altimate_change end
     abort: AbortSignal
     messages: ModelMessage[]
     small?: boolean
@@ -153,6 +156,16 @@ export namespace LLM {
         .join("\n"),
     )
 
+    // altimate_change start — upstream_fix: keep per-session environment last. Providers with explicit
+    // cache breakpoints get it as its own trailing message (after the marked prefix); others keep a
+    // single system message with the environment at the end. Either way plugins still see it.
+    const environment = input.environment?.length ? input.environment.join("\n") : undefined
+    const splitEnvironment = environment !== undefined && ProviderTransform.usesExplicitCacheBreakpoints(input.model)
+    if (environment !== undefined) {
+      if (splitEnvironment) system.push(environment)
+      else system[0] = [system[0], environment].filter((x) => x).join("\n")
+    }
+
     const header = system[0]
     await Plugin.trigger(
       "experimental.chat.system.transform",
@@ -162,9 +175,12 @@ export namespace LLM {
     // rejoin to maintain 2-part structure for caching if header unchanged
     if (system.length > 2 && system[0] === header) {
       const rest = system.slice(1)
+      const at = splitEnvironment ? rest.lastIndexOf(environment!) : -1
+      if (at >= 0) rest.splice(at, 1)
       system.length = 0
-      system.push(header, rest.join("\n"))
+      system.push(header, ...(rest.length ? [rest.join("\n")] : []), ...(at >= 0 ? [environment!] : []))
     }
+    // altimate_change end
 
     const variant =
       !input.small && input.model.variants && input.user.variant ? input.model.variants[input.user.variant] : {}

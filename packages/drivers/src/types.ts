@@ -20,6 +20,11 @@ export interface SchemaColumn {
   nullable: boolean
 }
 
+export interface SchemaMetadata {
+  schemas: string[]
+  tables: Array<{ schema: string; name: string; type: string; columns: SchemaColumn[] }>
+}
+
 export interface ExecuteOptions {
   // altimate_change start — bounded extraction is enforced while consuming source rows
   /** Serialized row byte ceiling. Requires Connector.supportsResultByteLimit. */
@@ -130,5 +135,6 @@ export interface Connector {
   listSchemas(): Promise<string[]>
   listTables(schema: string): Promise<Array<{ name: string; type: string }>>
   describeTable(schema: string, table: string): Promise<SchemaColumn[]>
+  introspectSchema?(signal?: AbortSignal): Promise<SchemaMetadata>
   close(): Promise<void>
 }

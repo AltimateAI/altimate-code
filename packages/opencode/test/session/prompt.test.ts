@@ -573,6 +573,57 @@ for (const downgrade of [true, false]) {
 }
 // altimate_change end
 
+// altimate_change start - ambient environment stays outside the cached prompt prefix
+noLLMServer.instance(
+  "prompt loop separates ambient environment from cached instructions and user content",
+  () => Effect.gen(function* () {
+    const { directory } = yield* TestInstance
+    const captured: Pick<LLM.StreamInput, "system" | "environment" | "messages">[] = []
+    const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+      captured.push({
+        system: [...input.system],
+        environment: input.environment && [...input.environment],
+        messages: structuredClone(input.messages),
+      })
+      const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+      async function* fullStream() {
+        yield { type: "start" }
+        yield { type: "start-step" }
+        yield { type: "text-start", id: "reply" }
+        yield { type: "text-delta", id: "reply", text: "Done." }
+        yield { type: "text-end", id: "reply" }
+        yield { type: "finish-step", finishReason: "stop", usage }
+        yield { type: "finish", finishReason: "stop", totalUsage: usage }
+      }
+      return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+    })
+    try {
+      const { prompt, chat } = yield* boot()
+      const result = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: promptRef,
+        parts: [{ type: "text", text: "Review invoice totals." }],
+      })
+      expect(result.info).not.toHaveProperty("error")
+      expect(captured).toHaveLength(1)
+      const request = captured[0]
+      const environment = request.environment?.join("\n") ?? ""
+      expect(environment).toContain(`<env>\n  Working directory: ${directory}`)
+      expect(environment).toContain(`  Today's date: ${new Date().toDateString()}`)
+      expect(request.system.join("\n")).not.toContain("<env>")
+      expect(request.system.join("\n")).not.toContain(directory)
+      expect(JSON.stringify(request.messages)).not.toContain("<env>")
+      expect(JSON.stringify(request.messages)).not.toContain("Today's date:")
+    } finally {
+      stream.mockRestore()
+    }
+  }),
+  { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
+  30_000,
+)
+// altimate_change end
+
 // altimate_change start - approved lessons are harness-delivered without changing cached prefixes
 for (const change of ["lower budget", "replacement", "disabled config", "disabled env"] as const) {
   noLLMServer.instance(

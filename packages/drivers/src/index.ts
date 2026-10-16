@@ -1,5 +1,5 @@
 // Re-export types
-export type { Connector, ConnectorResult, SchemaColumn, ConnectionConfig } from "./types"
+export type { Connector, ConnectorResult, SchemaColumn, SchemaMetadata, ConnectionConfig } from "./types"
 
 // Re-export config normalization
 export { normalizeConfig, sanitizeConnectionString } from "./normalize"

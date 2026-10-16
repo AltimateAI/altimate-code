@@ -10,7 +10,8 @@ import { Database } from "bun:sqlite"
 import * as path from "path"
 import * as os from "os"
 import * as fs from "fs"
-import type { Connector } from "@altimateai/drivers"
+import type { Connector, SchemaMetadata } from "@altimateai/drivers"
+import { awaitIndex, withIndexSignal } from "./index-control"
 import type {
   SchemaIndexResult,
   SchemaSearchResult,
@@ -146,110 +147,115 @@ export class SchemaCache {
     warehouseName: string,
     warehouseType: string,
     connector: Connector,
+    options: { signal?: AbortSignal; timeoutMs?: number } = {},
   ): Promise<SchemaIndexResult> {
-    const now = new Date().toISOString()
+    return withIndexSignal(options, async (signal) => {
+      const now = new Date().toISOString()
+      const schemas = new Set<string>()
+      const tables = new Map<string, SchemaMetadata["tables"][number]>()
+      let note: string | undefined
+      const includeSchema = (name: string) => name.toUpperCase() !== "INFORMATION_SCHEMA"
 
-    // Clear existing data
-    this.db.prepare("DELETE FROM columns_cache WHERE warehouse = ?").run(warehouseName)
-    this.db.prepare("DELETE FROM tables_cache WHERE warehouse = ?").run(warehouseName)
-
-    let totalSchemas = 0
-    let totalTables = 0
-    let totalColumns = 0
-    const databaseName: string | null = null
-
-    let schemas: string[] = []
-    try {
-      schemas = await connector.listSchemas()
-    } catch {
-      // ignore
-    }
-
-    const insertTable = this.db.prepare(
-      `INSERT OR REPLACE INTO tables_cache
-       (warehouse, database_name, schema_name, table_name, table_type, search_text)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-
-    const insertColumn = this.db.prepare(
-      `INSERT OR REPLACE INTO columns_cache
-       (warehouse, database_name, schema_name, table_name, column_name, data_type, nullable, search_text)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-
-    // Batch inserts per-table inside a transaction to avoid per-statement disk fsyncs.
-    // The async connector calls (listTables, describeTable) run outside the transaction;
-    // only the synchronous SQLite inserts are wrapped.
-    const insertTableBatch = this.db.transaction(
-      (tableArgs: any[], columnArgsBatch: any[][]) => {
-        insertTable.run(...tableArgs)
-        for (const colArgs of columnArgsBatch) {
-          insertColumn.run(...colArgs)
-        }
-      },
-    )
-
-    for (const schemaName of schemas) {
-      if (schemaName.toUpperCase() === "INFORMATION_SCHEMA") continue
-      totalSchemas++
-
-      let tables: Array<{ name: string; type: string }> = []
       try {
-        tables = await connector.listTables(schemaName)
-      } catch {
-        continue
+        if (connector.introspectSchema) {
+          const metadata = await awaitIndex(signal, () => connector.introspectSchema!(signal))
+          for (const schema of metadata.schemas) {
+            if (includeSchema(schema)) schemas.add(schema)
+          }
+          for (const table of metadata.tables) {
+            if (!includeSchema(table.schema)) continue
+            schemas.add(table.schema)
+            tables.set(JSON.stringify([table.schema, table.name]), table)
+          }
+        } else {
+          const names = await awaitIndex(signal, () => connector.listSchemas())
+          for (const schema of new Set(names)) {
+            if (!includeSchema(schema)) continue
+            signal.throwIfAborted()
+            schemas.add(schema)
+            let inventory: Awaited<ReturnType<Connector["listTables"]>>
+            try {
+              inventory = await awaitIndex(signal, () => connector.listTables(schema))
+            } catch {
+              signal.throwIfAborted()
+              note = "Some schema metadata could not be read."
+              continue
+            }
+            for (const table of inventory) {
+              const key = JSON.stringify([schema, table.name])
+              if (tables.has(key)) continue
+              let columns: SchemaMetadata["tables"][number]["columns"] = []
+              try {
+                columns = await awaitIndex(signal, () => connector.describeTable(schema, table.name))
+              } catch {
+                signal.throwIfAborted()
+                note = "Some schema metadata could not be read."
+              }
+              tables.set(key, { ...table, schema, columns })
+            }
+          }
+        }
+      } catch (error) {
+        note = signal.aborted
+          ? signal.reason?.name === "TimeoutError"
+            ? "Schema indexing deadline exceeded."
+            : "Schema indexing aborted."
+          : `Schema metadata could not be read: ${error instanceof Error ? error.message : String(error)}`
       }
 
-      for (const tableInfo of tables) {
-        totalTables++
-        const searchText = makeSearchText(databaseName, schemaName, tableInfo.name, tableInfo.type)
-
-        let columns: Array<{ name: string; data_type: string; nullable: boolean }> = []
-        try {
-          columns = await connector.describeTable(schemaName, tableInfo.name)
-        } catch {
-          // continue with empty columns
-        }
-
-        // Build column insert args
-        const columnArgsBatch: any[][] = []
-        for (const col of columns) {
-          totalColumns++
-          const colSearch = makeSearchText(
-            databaseName, schemaName, tableInfo.name, col.name, col.data_type,
-          )
-          columnArgsBatch.push([
-            warehouseName, databaseName, schemaName, tableInfo.name,
-            col.name, col.data_type, col.nullable ? 1 : 0, colSearch,
-          ])
-        }
-
-        // Insert table + all its columns in a single transaction
-        insertTableBatch(
-          [warehouseName, databaseName, schemaName, tableInfo.name, tableInfo.type, searchText],
-          columnArgsBatch,
+      let totalColumns = 0
+      // Gather metadata outside SQLite, then replace the snapshot in one transaction.
+      // A partial run never replaces an existing snapshot. With no prior snapshot it is saved
+      // with an epoch timestamp so every freshness check treats it as stale and re-indexes.
+      const hasPrior = Boolean(this.db.prepare("SELECT 1 FROM warehouses WHERE name = ?").get(warehouseName))
+      if (!note || (tables.size > 0 && !hasPrior)) {
+        const insertTable = this.db.prepare(
+          `INSERT INTO tables_cache
+           (warehouse, database_name, schema_name, table_name, table_type, search_text)
+           VALUES (?, ?, ?, ?, ?, ?)`,
         )
+        const insertColumn = this.db.prepare(
+          `INSERT INTO columns_cache
+           (warehouse, database_name, schema_name, table_name, column_name, data_type, nullable, search_text)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        this.db.transaction(() => {
+          this.db.prepare("DELETE FROM columns_cache WHERE warehouse = ?").run(warehouseName)
+          this.db.prepare("DELETE FROM tables_cache WHERE warehouse = ?").run(warehouseName)
+          for (const table of tables.values()) {
+            insertTable.run(
+              warehouseName, null, table.schema, table.name, table.type,
+              makeSearchText(table.schema, table.name, table.type),
+            )
+            for (const column of table.columns) {
+              insertColumn.run(
+                warehouseName, null, table.schema, table.name,
+                column.name, column.data_type, column.nullable ? 1 : 0,
+                makeSearchText(table.schema, table.name, column.name, column.data_type),
+              )
+              totalColumns++
+            }
+          }
+          this.db.prepare(
+            `INSERT OR REPLACE INTO warehouses
+             (name, type, last_indexed, databases_count, schemas_count, tables_count, columns_count)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          ).run(warehouseName, warehouseType, note ? new Date(0).toISOString() : now, 0, schemas.size, tables.size, totalColumns)
+        })()
+      } else {
+        note += hasPrior ? " The previous cached metadata was kept." : " No cached metadata was replaced."
       }
-    }
 
-    // Update warehouse summary
-    this.db.prepare(
-      `INSERT OR REPLACE INTO warehouses
-       (name, type, last_indexed, databases_count, schemas_count, tables_count, columns_count)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-    ).run(
-      warehouseName, warehouseType, now,
-      databaseName ? 1 : 0, totalSchemas, totalTables, totalColumns,
-    )
-
-    return {
-      warehouse: warehouseName,
-      type: warehouseType,
-      schemas_indexed: totalSchemas,
-      tables_indexed: totalTables,
-      columns_indexed: totalColumns,
-      timestamp: now,
-    }
+      return {
+        warehouse: warehouseName,
+        type: warehouseType,
+        schemas_indexed: schemas.size,
+        tables_indexed: tables.size,
+        columns_indexed: totalColumns,
+        timestamp: now,
+        ...(note ? { partial: true, note } : {}),
+      }
+    })
   }
 
   /**

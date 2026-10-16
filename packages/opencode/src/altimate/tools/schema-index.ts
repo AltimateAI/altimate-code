@@ -16,11 +16,12 @@ export const SchemaIndexTool = Tool.define("schema_index", {
     try {
       const result = await Dispatcher.call("schema.index", {
         warehouse: args.warehouse,
+        signal: ctx.abort,
       })
 
       // altimate_change start — progressive disclosure suggestions
       let output = formatIndexResult(result)
-      const suggestion = PostConnectSuggestions.getProgressiveSuggestion("schema_index")
+      const suggestion = !result.partial && PostConnectSuggestions.getProgressiveSuggestion("schema_index")
       if (suggestion) {
         output += "\n\n" + suggestion
         PostConnectSuggestions.trackSuggestions({
@@ -31,11 +32,13 @@ export const SchemaIndexTool = Tool.define("schema_index", {
       }
       // altimate_change end
       return {
-        title: `Schema Indexed: ${result.warehouse}`,
+        title: result.partial ? `Schema Index (Partial): ${result.warehouse}` : `Schema Indexed: ${result.warehouse}`,
         metadata: {
           schemas: result.schemas_indexed,
           tables: result.tables_indexed,
           columns: result.columns_indexed,
+          partial: result.partial ?? false,
+          note: result.note,
         },
         output,
       }
@@ -58,7 +61,9 @@ function formatIndexResult(result: SchemaIndexResult): string {
     `Columns indexed: ${result.columns_indexed}`,
     `Timestamp: ${result.timestamp}`,
     "",
-    "Schema cache is now ready. Use schema_search to find tables and columns by name or description.",
+    result.partial
+      ? `Schema indexing is incomplete. ${result.note ?? "Indexing stopped before all metadata was collected."} Cached results may be incomplete.`
+      : "Schema cache is now ready. Use schema_search to find tables and columns by name or description.",
   ]
   return lines.join("\n")
 }

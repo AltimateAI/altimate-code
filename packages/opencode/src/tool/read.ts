@@ -12,6 +12,7 @@ import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
 // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
 import { FileTime } from "../file/time"
 import { Instance } from "../project/instance"
+import { realpath } from "fs/promises"
 // altimate_change end
 
 const DEFAULT_READ_LIMIT = 2000
@@ -235,10 +236,9 @@ export const ReadTool = Tool.define<
       ctx: Tool.Context<Metadata>,
     ) {
       const instance = yield* InstanceState.context
-      let filepath = params.filePath
-      if (!path.isAbsolute(filepath)) {
-        filepath = path.resolve(instance.directory, filepath)
-      }
+      // altimate_change start — upstream_fix: normalize read paths before permission evaluation
+      let filepath = path.resolve(instance.directory, params.filePath)
+      // altimate_change end
       if (process.platform === "win32") {
         filepath = FSUtil.normalizePath(filepath)
       }
@@ -256,11 +256,19 @@ export const ReadTool = Tool.define<
         kind: stat?.type === "Directory" ? "directory" : "file",
       })
 
+      // altimate_change start — upstream_fix: match absolute and symlink-resolved deny rules; allow rules keep the authored spelling
+      const resolved = yield* Effect.promise(() => realpath(filepath).catch(() => filepath))
+      const relative = path.relative(instance.worktree, filepath)
       yield* ctx.ask({
         permission: "read",
-        patterns: [path.relative(instance.worktree, filepath)],
+        patterns: [relative],
         always: ["*"],
-        metadata: {},
+        metadata: {
+          permissionAliases: {
+            [relative]: [Array.from(new Set([filepath, resolved, path.relative(instance.worktree, resolved)]))],
+          },
+        },
+        // altimate_change end
       })
 
       if (!stat) return yield* miss(filepath)

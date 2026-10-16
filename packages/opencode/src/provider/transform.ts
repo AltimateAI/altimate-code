@@ -532,26 +532,28 @@ export namespace ProviderTransform {
   }
   // altimate_change end
 
-  export function message(msgs: ModelMessage[], model: Provider.Model, options: Record<string, unknown>) {
-    msgs = unsupportedParts(msgs, model)
-    msgs = normalizeMessages(msgs, model, options)
-    if (
+  // altimate_change start — upstream_fix: shared with LLM.stream so the environment split only applies where cache breakpoints are explicit
+  export function usesExplicitCacheBreakpoints(model: Provider.Model) {
+    return (
       (model.providerID === "anthropic" ||
-        // altimate_change start — altimate-specific Anthropic provider IDs
         model.providerID === "google-vertex-anthropic" ||
         model.providerID === "altimate-backend" ||
-        // altimate_change end
         model.api.id.includes("anthropic") ||
         model.api.id.includes("claude") ||
         model.id.includes("anthropic") ||
         model.id.includes("claude") ||
         model.api.npm === "@ai-sdk/anthropic" ||
-        // altimate_change start — Alibaba Anthropic-compatible cache-control namespace
         model.api.npm === "@ai-sdk/alibaba"
-        // altimate_change end
       ) &&
       model.api.npm !== "@ai-sdk/gateway"
-    ) {
+    )
+  }
+  // altimate_change end
+
+  export function message(msgs: ModelMessage[], model: Provider.Model, options: Record<string, unknown>) {
+    msgs = unsupportedParts(msgs, model)
+    msgs = normalizeMessages(msgs, model, options)
+    if (usesExplicitCacheBreakpoints(model)) {
       msgs = applyCaching(msgs, model)
     }
 

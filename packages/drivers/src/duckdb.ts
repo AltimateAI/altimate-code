@@ -9,7 +9,7 @@
 import { assertStoreExists, isLocalFilePath, requireStorePath } from "./file-store"
 import * as os from "os"
 import * as path from "path"
-import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn, SchemaMetadata } from "./types"
 import { DRIVER_PACKAGES, DriverNotInstalledError, driverSearchRoots, resolveOptionalPackage } from "./resolve"
 import { LocalEngine } from "./local-engine"
 import { resolveQueryTimeout } from "./query-timeout"
@@ -178,9 +178,20 @@ export async function connect(
   }
   // altimate_change end
 
-  const query = (sql: string): Promise<any[]> => run(sql, undefined, resolveQueryTimeout(config).ms)
+  const query = async (sql: string, signal?: AbortSignal): Promise<any[]> => {
+    signal?.throwIfAborted()
+    return run(sql, undefined, resolveQueryTimeout(config).ms, undefined, undefined, signal)
+  }
   const queryWithParams = (sql: string, params: any[]): Promise<any[]> =>
     run(sql, params, resolveQueryTimeout(config).ms)
+
+  async function schemaNames(signal?: AbortSignal): Promise<string[]> {
+    const rows = await query(
+      "SELECT DISTINCT schema_name FROM information_schema.schemata WHERE catalog_name = current_database() ORDER BY schema_name",
+      signal,
+    )
+    return rows.map((r) => r.schema_name as string)
+  }
 
   function openConnection(): Promise<void> {
     if (closing) return closing.then(openConnection)
@@ -190,7 +201,7 @@ export async function connect(
       // altimate_change start — never conjure an empty store on open
       assertStoreExists(config, dbPath, "DuckDB")
       // altimate_change end
-      // altimate_change start — retry with read-only on lock errors
+      // Retry with read-only on lock errors.
       const tryConnect = async (accessMode?: string): Promise<SharedEngine> => {
         // Anonymous in-memory databases stay private. Never lend an unrestricted
         // helper to a sandboxed connector, or change relative SQL path semantics.
@@ -289,7 +300,6 @@ export async function connect(
           throw err
         }
       }
-      // altimate_change end
       shared.engine.registerSession?.(connectionId)
     })().finally(() => {
       opening = undefined
@@ -342,17 +352,14 @@ export async function connect(
     },
 
     async listSchemas(): Promise<string[]> {
-      const rows = await query(
-        "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name",
-      )
-      return rows.map((r) => r.schema_name as string)
+      return schemaNames()
     },
 
     async listTables(
       schema: string,
     ): Promise<Array<{ name: string; type: string }>> {
       const rows = await queryWithParams(
-        `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name`,
+        `SELECT table_name, table_type FROM information_schema.tables WHERE table_catalog = current_database() AND table_schema = $1 ORDER BY table_name`,
         [schema],
       )
       return rows.map((r) => ({
@@ -366,7 +373,7 @@ export async function connect(
       table: string,
     ): Promise<SchemaColumn[]> {
       const rows = await queryWithParams(
-        `SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position`,
+        `SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_catalog = current_database() AND table_schema = $1 AND table_name = $2 ORDER BY ordinal_position`,
         [schema, table],
       )
       return rows.map((r) => ({
@@ -374,6 +381,43 @@ export async function connect(
         data_type: r.data_type as string,
         nullable: r.is_nullable === "YES",
       }))
+    },
+
+    async introspectSchema(signal?: AbortSignal): Promise<SchemaMetadata> {
+      const schemas = await schemaNames(signal)
+      const rows = await query(
+        `SELECT t.table_schema, t.table_name, t.table_type,
+                c.column_name, c.data_type, c.is_nullable
+         FROM information_schema.tables t
+         LEFT JOIN information_schema.columns c
+           ON c.table_catalog = t.table_catalog
+          AND c.table_schema = t.table_schema
+          AND c.table_name = t.table_name
+         WHERE t.table_catalog = current_database()
+         ORDER BY t.table_schema, t.table_name, c.ordinal_position`,
+        signal,
+      )
+      const tables: SchemaMetadata["tables"] = []
+      let table: SchemaMetadata["tables"][number] | undefined
+      for (const row of rows) {
+        if (!table || table.schema !== row.table_schema || table.name !== row.table_name) {
+          table = {
+            schema: row.table_schema,
+            name: row.table_name,
+            type: row.table_type === "VIEW" ? "view" : "table",
+            columns: [],
+          }
+          tables.push(table)
+        }
+        if (row.column_name !== null) {
+          table.columns.push({
+            name: row.column_name,
+            data_type: row.data_type,
+            nullable: row.is_nullable === "YES",
+          })
+        }
+      }
+      return { schemas, tables }
     },
 
     close() {
