@@ -312,12 +312,21 @@ export namespace Server {
         // altimate_change end
         return basicAuth({ username, password })(c, next)
       })
-      // altimate_change start — telemetry: first authenticated event-stream subscription = a client is really attached
+      // altimate_change start — telemetry: a real external client attached to the event stream.
+      // Emit after next() and only on a 2xx, so a request that fails before the stream is
+      // established doesn't burn the once-per-process latch. Skip the in-process trace consumer
+      // (serve.ts subscribes to /event for observability via x-altimate-trace-consumer): it is not
+      // a real client and would otherwise trip the latch on every `serve` launch before the IDE
+      // attaches.
       .use(async (c, next) => {
-        if (c.req.method === "GET" && (c.req.path === "/event" || c.req.path === "/global/event")) {
+        const isClientEventStream =
+          c.req.method === "GET" &&
+          (c.req.path === "/event" || c.req.path === "/global/event") &&
+          !c.req.header("x-altimate-trace-consumer")
+        await next()
+        if (isClientEventStream && c.res.ok) {
           void import("../altimate/telemetry").then((m) => m.Telemetry.clientConnected()).catch(() => {})
         }
-        return next()
       })
       // altimate_change end
       .use(async (c, next) => {

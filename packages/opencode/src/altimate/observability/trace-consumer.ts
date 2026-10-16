@@ -388,6 +388,9 @@ export function subscribeTraceConsumer(
     (() => {
       const fetchFn = (async (fetchInput: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(fetchInput, init)
+        // Mark this as the in-process observability subscription so the client_connected telemetry
+        // hook in Server.createApp does not count it as a real external client attaching.
+        request.headers.set("x-altimate-trace-consumer", "1")
         const password = Flag.OPENCODE_SERVER_PASSWORD
         if (password) {
           const username = Flag.OPENCODE_SERVER_USERNAME ?? "opencode"
