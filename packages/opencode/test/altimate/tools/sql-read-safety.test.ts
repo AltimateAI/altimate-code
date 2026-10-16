@@ -80,6 +80,13 @@ describe("read-only SQL parser boundary", () => {
     expect(classifyAndCheck("WITH invalid syntax").queryType).toBe("write")
   })
 
+  test("scratch batches never admit reads, whose row cap the driver cannot apply to a batch", () => {
+    expect(isScratchSafeWrite("CREATE TABLE items AS SELECT 1 AS value; SELECT value FROM items")).toBe(false)
+    expect(isScratchSafeWrite("SELECT 1; INSERT INTO items VALUES (2)")).toBe(false)
+    expect(isScratchSafeWrite("INSERT INTO items VALUES (2); SELECT * FROM items")).toBe(false)
+    expect(isScratchSafeWrite("CREATE TABLE items AS SELECT 1 AS value; INSERT INTO items VALUES (2)")).toBe(true)
+  })
+
   test("the scratch write exemption does not admit statements the parser skipped", () => {
     expect(isScratchSafeWrite("DELETE FROM t; CHECKPOINT")).toBe(false)
     expect(isScratchSafeWrite("DELETE FROM t; INSERT INTO t VALUES (1)")).toBe(true)

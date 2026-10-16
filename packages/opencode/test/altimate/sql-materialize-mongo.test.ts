@@ -86,6 +86,19 @@ function expectRead(call: Execution, command: Command, cap: number) {
 
 describe("MongoDB materialization", () => {
   for (const command of [find, aggregate]) {
+    test(`${command.command}: accepts collection with an inline filter or pipeline`, async () => {
+      const { command: name, filter, pipeline, ...options } = command as Command
+      const shorthand = { ...options, [name]: name === "find" ? filter : pipeline }
+      const seen = fakeMongo(() => result([["kept"]]))
+      const materialized = await materialize({ ...input, sql: JSON.stringify(shorthand), max_rows: 10 })
+      expect(materialized.rows).toBe(1)
+      expect(seen).toHaveLength(1)
+      expect(seen[0].command).toEqual(
+        name === "aggregate" ? { ...command, pipeline: [...pipeline, { $limit: 11 }] } : command,
+      )
+      expect((await (await getScratch()).execute("SELECT text FROM articles")).rows).toEqual([["kept"]])
+    })
+
     test(`${command.command}: reads the source once with row, byte and timeout bounds`, async () => {
       const seen = fakeMongo(() => result([["first"], ["second"]]))
       const materialized = await materialize({
@@ -232,6 +245,25 @@ describe("MongoDB materialization", () => {
     await expect(
       materialize({ ...input, sql: JSON.stringify({ distinct: "articles", key: "topic" }) }),
     ).rejects.toThrow(/distinct.*not allowed/)
+    expect(seen).toHaveLength(0)
+  })
+
+  test.each([null, [], {}, { collection: "articles" }, { command: 42 }, { command: "" }].map((command) => ({ command })))(
+    "invalid command shape %j gets JSON command guidance before execution",
+    async ({ command }) => {
+      const seen = fakeMongo(() => result([["unused"]]))
+      await expect(materialize({ ...input, sql: JSON.stringify(command) })).rejects.toThrow(
+        'A MongoDB source query must be a JSON command, e.g. {"command":"find","collection":"c"}.',
+      )
+      expect(seen).toHaveLength(0)
+    },
+  )
+
+  test("SQL input gets MongoDB JSON command guidance before execution", async () => {
+    const seen = fakeMongo(() => result([["unused"]]))
+    await expect(materialize({ ...input, sql: "SELECT text FROM articles" })).rejects.toThrow(
+      'A MongoDB source query must be a JSON command, e.g. {"command":"find","collection":"c"}.',
+    )
     expect(seen).toHaveLength(0)
   })
 

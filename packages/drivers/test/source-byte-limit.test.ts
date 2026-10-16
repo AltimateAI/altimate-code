@@ -126,7 +126,11 @@ async function mongo(docs: Record<string, unknown>[]) {
         async connect() {}
         async close() {}
         db() {
-          return { collection: () => ({ find: () => cursor, aggregate: () => cursor }) }
+          return {
+            databaseName: "test",
+            listCollections: () => ({ toArray: async () => [{ name: "source", type: "collection" }] }),
+            collection: () => ({ find: () => cursor, aggregate: () => cursor }),
+          }
         }
       },
     },

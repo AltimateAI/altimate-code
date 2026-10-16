@@ -240,7 +240,11 @@ describe("MongoDB deadline plumbing", () => {
           async connect() {}
           async close() {}
           db() {
-            return { databaseName: "test", collection: () => coll }
+            return {
+              databaseName: "test",
+              collection: () => coll,
+              listCollections: () => ({ toArray: async () => [{ name: "users", type: "collection" }] }),
+            }
           }
         },
       },

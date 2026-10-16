@@ -233,6 +233,8 @@ describe("MongoDB driver", () => {
       connect: async () => {},
       close: async () => {},
       db: () => ({
+        databaseName: "test",
+        listCollections: () => ({ toArray: async () => [{ name: "users", type: "collection" }] }),
         collection: () => ({
           aggregate: () => ({
             toArray: async () => [],

@@ -169,13 +169,20 @@ export function classifyMulti(sql: string, dialect?: string): "read" | "write" {
  * Single-pass: classify and check for hard-denied statement types.
  * Returns both the overall query type and whether a hard-deny pattern was found.
  */
-export function classifyAndCheck(sql: string, dialect?: string): { queryType: "read" | "write"; blocked: boolean } {
+export function classifyAndCheck(sql: string, dialect?: string): {
+  queryType: "read" | "write"
+  blocked: boolean
+  parseError?: string
+} {
   if (!sql || typeof sql !== "string") return { queryType: "read", blocked: false }
-  if (!getStatementTypes) return classifyFallback(sql, dialect)
+  if (!tokenizeSql(sql, dialect).complete) {
+    return { ...classifyFallback(sql, dialect), parseError: "SQL contains unterminated or unsupported quoted text or comments" }
+  }
+  if (!getStatementTypes) return { ...classifyFallback(sql, dialect), parseError: "SQL parser is unavailable" }
   try {
     const result = getStatementTypes(sql, dialect)
     if (!Array.isArray(result?.statements) || result.statement_count !== result.statements.length) {
-      return classifyFallback(sql, dialect)
+      return { ...classifyFallback(sql, dialect), parseError: "SQL parser returned an invalid statement list" }
     }
 
     // A generic parser can treat MySQL arithmetic (--2) as a comment and omit
@@ -187,19 +194,38 @@ export function classifyAndCheck(sql: string, dialect?: string): { queryType: "r
       )
 
     return { queryType: otherIsReadOnly(sql, result.statements, dialect) ? "read" : "write", blocked }
-  } catch {
-    return classifyFallback(sql, dialect)
+  } catch (error) {
+    return { ...classifyFallback(sql, dialect), parseError: error instanceof Error ? error.message : String(error) }
   }
 }
 
 // MongoDB commands are JSON, not SQL: the SQL classifier reads every one as a write, which denied
 // 52 of 52 Mongo reads for a read-only agent in one evaluation run. Classify them by command.
-const MONGO_READ_COMMANDS = new Set(["find", "aggregate", "countDocuments", "distinct", "listIndexes", "ping"])
+const MONGO_READ_COMMANDS = new Set([
+  "find",
+  "aggregate",
+  "countDocuments",
+  "estimatedDocumentCount",
+  "distinct",
+  "listCollections",
+  "listIndexes",
+  "ping",
+])
+const MONGO_WRITE_COMMANDS = new Set([
+  "insertOne",
+  "insertMany",
+  "updateOne",
+  "updateMany",
+  "deleteOne",
+  "deleteMany",
+  "createCollection",
+  "createIndex",
+])
 const MONGO_BLOCKED_COMMANDS = new Set(["dropDatabase", "dropCollection"])
 
 /**
  * Classify a MongoDB command document (native `{"find": "coll"}` or `{command, collection}` shape).
- * Returns null when the text is not a JSON object, so SQL classification applies instead.
+ * Returns null when the text is not a JSON command document.
  */
 export function classifyMongoCommand(
   query: string,
@@ -213,7 +239,9 @@ export function classifyMongoCommand(
     return null
   }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
-  const command = String(parsed["command"] ?? "")
+  const command = parsed["command"]
+  if (typeof command !== "string" || !command.trim()) return null
+  if (!MONGO_READ_COMMANDS.has(command) && !MONGO_WRITE_COMMANDS.has(command) && !MONGO_BLOCKED_COMMANDS.has(command)) return null
   const pipeline = Array.isArray(parsed["pipeline"]) ? (parsed["pipeline"] as unknown[]) : []
   const writesViaPipeline = hasMongoWriteStage(pipeline)
   const read = MONGO_READ_COMMANDS.has(command) && !writesViaPipeline
@@ -252,6 +280,7 @@ function hasLocalScratchTarget(statement: string): boolean {
 /**
  * True when every statement is a table/view DDL or row DML the scratch database can absorb
  * without side effects outside it. Unparseable or unknown statements are not scratch-safe.
+ * Reads are excluded: the driver caps rows only when the whole text starts with a read.
  */
 export function isScratchSafeWrite(sql: string): boolean {
   const dialect = "duckdb"
@@ -260,10 +289,11 @@ export function isScratchSafeWrite(sql: string): boolean {
   try {
     const result = getStatementTypes(sql, dialect)
     const statements: Array<{ statement_type?: string }> = result?.statements ?? []
-    if (statements.length === 0 || statements.length !== statementsOf(sql, dialect).length) return false
+    const source = statementsOf(sql, dialect)
+    if (statements.length === 0 || statements.length !== source.length) return false
     return (
       statements.every((s) => SCRATCH_WRITE_TYPES.has(String(s.statement_type ?? "").toUpperCase())) &&
-      statementsOf(sql, dialect).every(hasLocalScratchTarget)
+      source.every(hasLocalScratchTarget)
     )
   } catch {
     return false

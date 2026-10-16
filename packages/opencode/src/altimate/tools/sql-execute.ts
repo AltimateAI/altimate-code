@@ -177,14 +177,22 @@ export const SqlExecuteTool = Tool.define(
             const dialect = args.warehouse
               ? (Registry.canonicalType(Registry.getConfig(args.warehouse)?.type) ?? undefined)
               : undefined
-            const mongo = isMongoWarehouse(warehouse) ? classifyMongoCommand(sql) : null
-            const { queryType, blocked } = mongo ?? classifyAndCheck(sql, dialect)
+            const mongoWarehouse = isMongoWarehouse(warehouse)
+            const mongo = mongoWarehouse ? classifyMongoCommand(sql) : null
+            if (mongoWarehouse && !mongo) {
+              throw new Error(
+                'A MongoDB query must be a JSON command, e.g. {"command":"find","collection":"c","filter":{}}. SQL text is not supported.',
+              )
+            }
+            const classification = mongo ?? classifyAndCheck(sql, dialect)
+            const { queryType, blocked } = classification
             const query = mongo?.normalized ?? sql
             if (blocked) {
               throw new Error(
                 "DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety. This cannot be overridden.",
               )
             }
+            const parseError = "parseError" in classification ? classification.parseError : undefined
             if (!mongo && queryType === "read") {
               // classifyAndCheck verifies complete lexical/parser agreement and every
               // statement's read status, including metadata. Unlike check/materialize,
@@ -202,11 +210,12 @@ export const SqlExecuteTool = Tool.define(
             // reach outside the engine (COPY TO, ATTACH, INSTALL/LOAD, EXPORT, SET) still ask, and
             // the hard-deny list above still applies.
             if (queryType === "write" && !(isScratch(args.warehouse) && isScratchSafeWrite(sql))) {
+              // Unprovable SQL still goes through write approval; the prompt carries the parse error.
               await ctx.ask({
                 permission: "sql_execute_write",
                 patterns: [sql.slice(0, 200)],
                 always: ["*"],
-                metadata: { queryType },
+                metadata: { queryType, ...(parseError && { parseError }) },
               })
             }
             // altimate_change end
