@@ -3,7 +3,7 @@
  */
 
 import { assertStoreExists, requireStorePath } from "./file-store"
-import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
+import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn, SchemaMetadata } from "./types"
 import { loadOptionalDriver } from "./resolve"
 
 // altimate_change start — configurable, generous open budget
@@ -101,13 +101,32 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
   }
   // altimate_change end
 
-  function query(sql: string): Promise<any[]> {
+  function query(sql: string, signal?: AbortSignal): Promise<any[]> {
     return new Promise((resolve, reject) => {
-      connection.all(sql, (err: Error | null, rows: any[]) => {
-        if (err) reject(wrapDuckDBError(err))
-        else resolve(rows ?? [])
-      })
+      signal?.throwIfAborted()
+      // The legacy DuckDB SDK's interrupt() is a no-op. Stop waiting and avoid
+      // subsequent work on abort; the native query still finishes in the SDK.
+      const onAbort = () => reject(signal!.reason)
+      signal?.addEventListener("abort", onAbort, { once: true })
+      try {
+        connection.all(sql, (err: Error | null, rows: any[]) => {
+          signal?.removeEventListener("abort", onAbort)
+          if (err) reject(wrapDuckDBError(err))
+          else resolve(rows ?? [])
+        })
+      } catch (err) {
+        signal?.removeEventListener("abort", onAbort)
+        reject(err)
+      }
     })
+  }
+
+  async function schemaNames(signal?: AbortSignal): Promise<string[]> {
+    const rows = await query(
+      "SELECT DISTINCT schema_name FROM information_schema.schemata WHERE catalog_name = current_database() ORDER BY schema_name",
+      signal,
+    )
+    return rows.map((r) => r.schema_name as string)
   }
 
   function queryWithParams(sql: string, params: any[]): Promise<any[]> {
@@ -282,17 +301,14 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     },
 
     async listSchemas(): Promise<string[]> {
-      const rows = await query(
-        "SELECT schema_name FROM information_schema.schemata ORDER BY schema_name",
-      )
-      return rows.map((r) => r.schema_name as string)
+      return schemaNames()
     },
 
     async listTables(
       schema: string,
     ): Promise<Array<{ name: string; type: string }>> {
       const rows = await queryWithParams(
-        `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = $1 ORDER BY table_name`,
+        `SELECT table_name, table_type FROM information_schema.tables WHERE table_catalog = current_database() AND table_schema = $1 ORDER BY table_name`,
         [schema],
       )
       return rows.map((r) => ({
@@ -306,7 +322,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       table: string,
     ): Promise<SchemaColumn[]> {
       const rows = await queryWithParams(
-        `SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = $1 AND table_name = $2 ORDER BY ordinal_position`,
+        `SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_catalog = current_database() AND table_schema = $1 AND table_name = $2 ORDER BY ordinal_position`,
         [schema, table],
       )
       return rows.map((r) => ({
@@ -314,6 +330,43 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         data_type: r.data_type as string,
         nullable: r.is_nullable === "YES",
       }))
+    },
+
+    async introspectSchema(signal?: AbortSignal): Promise<SchemaMetadata> {
+      const schemas = await schemaNames(signal)
+      const rows = await query(
+        `SELECT t.table_schema, t.table_name, t.table_type,
+                c.column_name, c.data_type, c.is_nullable
+         FROM information_schema.tables t
+         LEFT JOIN information_schema.columns c
+           ON c.table_catalog = t.table_catalog
+          AND c.table_schema = t.table_schema
+          AND c.table_name = t.table_name
+         WHERE t.table_catalog = current_database()
+         ORDER BY t.table_schema, t.table_name, c.ordinal_position`,
+        signal,
+      )
+      const tables: SchemaMetadata["tables"] = []
+      let table: SchemaMetadata["tables"][number] | undefined
+      for (const row of rows) {
+        if (!table || table.schema !== row.table_schema || table.name !== row.table_name) {
+          table = {
+            schema: row.table_schema,
+            name: row.table_name,
+            type: row.table_type === "VIEW" ? "view" : "table",
+            columns: [],
+          }
+          tables.push(table)
+        }
+        if (row.column_name !== null) {
+          table.columns.push({
+            name: row.column_name,
+            data_type: row.data_type,
+            nullable: row.is_nullable === "YES",
+          })
+        }
+      }
+      return { schemas, tables }
     },
 
     async close() {

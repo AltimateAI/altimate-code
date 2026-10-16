@@ -5,7 +5,7 @@ import path from "path"
 import { BashTool } from "../../src/tool/bash"
 import { Instance } from "../../src/project/instance"
 import { Filesystem } from "../../src/util/filesystem"
-import { tmpdir, provideTestInstance } from "../fixture/fixture"
+import { tmpdir, provideTestInstance, provideTmpdirInstance } from "../fixture/fixture"
 import type { PermissionNext } from "../../src/permission/next"
 import { Truncate } from "../../src/tool/truncation"
 import { SessionID, MessageID } from "../../src/session/schema"
@@ -15,8 +15,11 @@ import { Agent } from "../../src/agent/agent"
 import { Truncate as TruncateService } from "../../src/tool/truncate"
 import { InstanceRef } from "../../src/effect/instance-ref"
 import { PermissionEvaluate } from "../../src/permission/evaluate"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { testEffect } from "../lib/effect"
 
 const evaluateRequest = PermissionEvaluate.evaluateRequest
+const it = testEffect(CrossSpawnSpawner.defaultLayer)
 
 // The shared tool fixture stubs Truncate with a no-op so most tool tests don't
 // truncate. Truncation tests need the REAL Truncate service, so build the tool
@@ -72,6 +75,59 @@ async function provideInstance<T>(directory: string, fn: () => Promise<T>): Prom
 }
 
 describe("tool.bash", () => {
+  it.live("keeps tool definitions identical across working directories", () =>
+    Effect.gen(function* () {
+      const definitions = []
+      for (let i = 0; i < 2; i++) {
+        definitions.push(
+          yield* provideTmpdirInstance((directory) =>
+            Effect.gen(function* () {
+              const instance = yield* InstanceRef
+              const bash = yield* Effect.promise(() => Instance.restore(instance!, () => initTool(BashTool)))
+              expect(bash.jsonSchema).toBeDefined()
+              return { directory, description: bash.description, parameters: JSON.stringify(bash.jsonSchema) }
+            }),
+          ),
+        )
+      }
+      expect(definitions[0].description).toBe(definitions[1].description)
+      expect(definitions[0].parameters).toBe(definitions[1].parameters)
+      for (const definition of definitions) {
+        expect(definition.description).not.toContain(definition.directory)
+        expect(definition.parameters).not.toContain(definition.directory)
+      }
+    }),
+  )
+
+  test("resolves the default working directory at execution and honors workdir", async () => {
+    await using first = await tmpdir({
+      init: (dir) => Bun.write(path.join(dir, "location.txt"), "first directory"),
+    })
+    await using second = await tmpdir({
+      init: (dir) => Bun.write(path.join(dir, "location.txt"), "second directory"),
+    })
+    for (const [directory, expected] of [
+      [first.path, "first directory"],
+      [second.path, "second directory"],
+    ]) {
+      await provideInstance(directory, async () => {
+        const bash = await initTool(BashTool)
+        const result = await bash.execute({ command: "cat location.txt", description: "Read directory fixture" }, ctx)
+        expect(result.metadata.exit).toBe(0)
+        expect(result.output).toBe(expected)
+      })
+    }
+    await provideInstance(first.path, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute(
+        { command: "cat location.txt", workdir: second.path, description: "Read directory fixture" },
+        ctx,
+      )
+      expect(result.metadata.exit).toBe(0)
+      expect(result.output).toBe("second directory")
+    })
+  })
+
   test("basic", async () => {
     await provideInstance(projectRoot, async () => {
       const bash = await initTool(BashTool)

@@ -20,6 +20,11 @@ export interface SchemaColumn {
   nullable: boolean
 }
 
+export interface SchemaMetadata {
+  schemas: string[]
+  tables: Array<{ schema: string; name: string; type: string; columns: SchemaColumn[] }>
+}
+
 export interface ExecuteOptions {
   /** Skip the default LIMIT injection and post-truncation. Use when the caller
    *  needs the complete, untruncated result set (e.g. data-diff pipelines). */
@@ -32,5 +37,6 @@ export interface Connector {
   listSchemas(): Promise<string[]>
   listTables(schema: string): Promise<Array<{ name: string; type: string }>>
   describeTable(schema: string, table: string): Promise<SchemaColumn[]>
+  introspectSchema?(signal?: AbortSignal): Promise<SchemaMetadata>
   close(): Promise<void>
 }

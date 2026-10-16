@@ -400,6 +400,8 @@ export interface WarehouseDiscoverResult {
 
 export interface SchemaIndexParams {
   warehouse: string
+  signal?: AbortSignal
+  timeout_ms?: number
 }
 
 export interface SchemaIndexResult {
@@ -409,6 +411,8 @@ export interface SchemaIndexResult {
   tables_indexed: number
   columns_indexed: number
   timestamp: string
+  partial?: boolean
+  note?: string
 }
 
 export interface SchemaSearchParams {

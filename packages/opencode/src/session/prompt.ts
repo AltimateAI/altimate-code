@@ -1650,7 +1650,9 @@ export namespace SessionPrompt {
       const workspaceEngineNotice = workspaceNotice.text()
       // altimate_change end
       const system = [
-        ...(await SystemPrompt.environment(model)),
+        // altimate_change start — upstream_fix: environment is a separate trailing system message
+        // Keep directory and date out of the reusable instructions assembled here.
+        // altimate_change end
         // altimate_change start — workspace identity directive. Placed early (not
         // trailing) per the placement finding in session/system.ts: content near the
         // front of a section is treated as binding, trailing content as background.
@@ -1726,6 +1728,9 @@ export namespace SessionPrompt {
         abort,
         sessionID,
         system,
+        // altimate_change start — upstream_fix: append ambient context after the cached instructions
+        environment: await SystemPrompt.environment(model),
+        // altimate_change end
         messages: [
           ...(await MessageV2.toModelMessages(msgs, model)),
           ...(isLastStep
