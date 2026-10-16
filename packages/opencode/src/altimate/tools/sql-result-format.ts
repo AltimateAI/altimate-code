@@ -321,9 +321,11 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     Math.max(0, maxLines - lineCount(schema.text + footer) + 1),
     schema.columns,
   )
-  if (!preview.clipped && !schema.clipped && !result.truncated) {
+  // Clipped column names are lossy; keep the full schema in the saved file instead of an inline preview.
+  if (!preview.clipped && !schema.clipped && schema.columns === result.columns.length && !result.truncated) {
     metadata.preview_rows = preview.rows
     metadata.preview_columns = schema.columns
+    metadata.schema_truncated = schema.clipped
     return { output: bounded(withHint(schema.text + preview.body + footer)), metadata }
   }
 
@@ -337,7 +339,7 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
   const envelope = (rows: number, clipped: boolean) =>
     `Preview: ${rows} of ${result.rows.length} returned rows shown. ` +
     (result.truncated
-      ? `Result may be row-limited (requested row limit ${options.limit}; total unknown). More rows may exist. `
+      ? "Result may be row-limited (connector reported a limit; total unknown). More rows may exist. "
       : "Row-limited: no. ") +
     `Output truncated: ${clipped ? "yes" : "no"}. ${spill}\n`
 
@@ -363,7 +365,7 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
   metadata.preview_rows = preview.rows
   metadata.preview_columns = schema.columns
   metadata.schema_truncated = schema.clipped
-  metadata.output_truncated = preview.clipped || schema.clipped
+  metadata.output_truncated = preview.clipped || schema.columns < result.columns.length
   metadata.truncated = result.truncated || metadata.output_truncated
   return {
     output: bounded(envelope(preview.rows, metadata.output_truncated) + schema.text + preview.body + footer),

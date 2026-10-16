@@ -412,7 +412,7 @@ export const RunCommand = cmd({
         // altimate_change start — wall-clock work budget, with a separate finalization allowance
         .option("time-budget", {
           type: "number",
-          describe: "maximum work time in seconds (env: ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow",
+          describe: "maximum time in seconds including startup (env: ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow",
         })
         // altimate_change end
         // altimate_change end
@@ -915,9 +915,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const startWorkClock = () => {
         workActive = true
         if (timeStarted !== undefined) return
-        timeStarted = performance.now()
+        // altimate_change start — include process bootstrap in the work deadline
+        timeStarted = performance.now() - process.uptime() * 1000
+        // altimate_change end
         // compute the query cutoff once so reminders cannot extend it
-        queryDeadline = RunTimeBudget.queryDeadline(Date.now(), timeBudget)
+        queryDeadline = RunTimeBudget.queryDeadline(Date.now() - process.uptime() * 1000, timeBudget)
         tracer?.setRunBudget(budgetMetadata())
         // Fixed short ticks avoid the signed-32-bit timeout overflow for large budgets.
         if (timeBudget !== undefined) timeBudgetTimer = setInterval(checkTimeBudget, 25)

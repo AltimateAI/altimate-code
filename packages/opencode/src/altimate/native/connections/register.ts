@@ -8,7 +8,7 @@
 
 import { register } from "../dispatcher"
 import * as Registry from "./registry"
-import { defaultInspectionSchema, resolveInspectionTarget } from "./inspection-target"
+import { defaultInspectionSchema, resolveInspectionTable, resolveInspectionTarget } from "./inspection-target"
 import { discoverContainers } from "./docker-discovery"
 import { parseDbtProfiles } from "./dbt-profiles"
 import { runDataDiff } from "./data-diff"
@@ -764,15 +764,22 @@ register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaIn
     const connector = await Registry.get(warehouseName)
     // describeTable accepts only schema/table; params.database remains scoped by
     // the connection configuration until the driver interface supports it.
-    let schemaName = target.schema_name
-    const table = target.table
+    // altimate_change start — normalize schema qualifiers only after warehouse routing
+    const addressed = await resolveInspectionTable(target, connector)
+    let schemaName = addressed.schema_name
+    const table = addressed.table
+    // altimate_change end
     const resolution = target.resolution
 
     let columns: SchemaColumn[] = []
     if (schemaName) {
       columns = await connector.describeTable(schemaName, table)
     } else {
-      const preferred = defaultInspectionSchema(warehouseName) ?? "public"
+      // altimate_change start — MongoDB schemas are databases, not PostgreSQL public
+      const mongo = Registry.canonicalType(Registry.getConfig(warehouseName)?.type) === "mongodb"
+      const preferred = defaultInspectionSchema(warehouseName) ?? (mongo ? (await connector.listSchemas())[0] : "public")
+      if (!preferred) throw new Error("No MongoDB database is available. Pass its database name as schema_name.")
+      // altimate_change end
       let missingError: unknown
       const probe = async (schema: string) => {
         try {

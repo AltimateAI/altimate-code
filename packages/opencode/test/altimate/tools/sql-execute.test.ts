@@ -47,6 +47,45 @@ afterEach(() => {
   precedence.mockRestore()
 })
 
+describe("sql_execute result guidance", () => {
+  test("omits progressive and small-result hints for the analyst", async () => {
+    dispatch.mockResolvedValue({ columns: ["region"], rows: [["North"]], row_count: 1, truncated: false } as never)
+    suggestion.mockReturnValue("Tip: Use sql_analyze to check this query.")
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT region FROM sales WHERE region = 'North'" }, { ...ctx, agent: "analyst" })
+
+    expect(output.output).toBe("region\n------\nNorth\n\n(1 rows)")
+    expect(suggestion).not.toHaveBeenCalled()
+  })
+
+  test("retains progressive and small-result hints for other agents", async () => {
+    dispatch.mockResolvedValue({ columns: ["region"], rows: [["North"]], row_count: 1, truncated: false } as never)
+    suggestion.mockReturnValue("Tip: Use sql_analyze to check this query.")
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT region FROM sales WHERE region = 'North'" }, ctx)
+
+    expect(output.output).toContain("Tip: Use sql_analyze")
+    expect(output.output).toContain("Hint: only 1 row(s).")
+  })
+
+  test("preserves binder errors without dispatcher startup advice", async () => {
+    const error = 'Binder Error: Referenced column "missing" not found'
+    dispatch.mockResolvedValue({ columns: [], rows: [], row_count: 0, truncated: false, error } as never)
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT missing FROM items" }, ctx)
+
+    expect(output.output).toBe(`Failed to execute SQL: ${error}`)
+  })
+
+  test("does not suggest starting a separate dispatcher for native handler errors", async () => {
+    dispatch.mockRejectedValue(new Error("No native handler for sql.execute"))
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT 1" }, ctx)
+
+    expect(output.output).toBe("Failed to execute SQL: No native handler for sql.execute")
+  })
+})
+
 describe("sql_execute parser read boundary", () => {
   for (const type of ["postgres", "postgresql", "sqlite"]) {
     test(`enforces read-only execution for ${type} reads without restricting approved writes`, async () => {
