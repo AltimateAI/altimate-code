@@ -109,14 +109,20 @@ describe("sql_execute parser read boundary", () => {
     ["sqlite", "SELECT 'article' NOT GLOB 'a*'"],
     ["duckdb", "SELECT TIMESTAMPTZ '2024-02-03 00:00:00+00'"],
     ["duckdb", "SELECT * FROM items match"],
-  ])("explains unsupported %s read syntax: %s", async (type, query) => {
+  ])("accepts %s read syntax the parser now supports: %s", async (type, query) => {
     const config = spyOn(Registry, "getConfig").mockReturnValue({ type })
     const tool = await initTool(SqlExecuteTool)
     const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
     try {
-      await expect(tool.execute({ query, warehouse: "source" }, ctx)).rejects.toThrow("write denied by test")
-      expect(ask).toHaveBeenCalledTimes(1)
-      expect(dispatch).not.toHaveBeenCalled()
+      const result = await tool.execute({ query, warehouse: "source" }, ctx)
+      expect(result.metadata.error).toBeUndefined()
+      expect(ask).not.toHaveBeenCalled()
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(dispatch).toHaveBeenCalledWith(
+        "sql.execute",
+        expect.objectContaining({ sql: query, warehouse: "source" }),
+        expect.anything(),
+      )
     } finally {
       ask.mockRestore()
       config.mockRestore()
