@@ -1,4 +1,5 @@
 import z from "zod"
+import { Decimal } from "decimal.js"
 import { Effect, Option, Schema, SchemaIssue } from "effect"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { Tool } from "../../tool/tool"
@@ -26,11 +27,8 @@ function optional<T extends z.ZodType>(schema: T) {
 const number = z
   .number()
   .refine(
-    (value) => {
-      const digits = value.toExponential().split("e")[0]!.replace(/[-.]/g, "").length
-      return digits <= 15 && (!Number.isInteger(value) || Number.isSafeInteger(value))
-    },
-    "Numeric values must have at most 15 significant digits and integers must be safe; pass the exact value as a string",
+    (value) => !Number.isInteger(value) || Number.isSafeInteger(value),
+    "Numeric integers must be safe; pass the exact value as a string",
   )
 
 const precisionRange = "precision must be an integer from 0 to 10 (inclusive)"
@@ -64,7 +62,7 @@ const rows = z
         "Concrete result rows; when the request names N, the row count must equal N, even with a tie at the top-N boundary",
       ),
     precision: optional(z.record(z.string(), precision)).describe(
-      "Display decimal places by column name: integer from 0 to 10 (inclusive). Numeric cells use fixed decimals, including integers; strings and nulls are unchanged. Omitted columns keep their default formatting.",
+      "Display decimal places by column name: integer from 0 to 10 (inclusive). Numeric cells use fixed decimals, including integers; strings and nulls are unchanged. Omitted columns use the maximum decimal scale of their numeric cells.",
     ),
     note: optional(z.string()).describe(
       "Brief result note, including any tie at the top-N boundary; omitted when answer_only is true",
@@ -216,6 +214,37 @@ export function renderAnswer(payload: unknown): string {
   if (args.rows) {
     // altimate_change start - render the requested format before applying the shared size cap
     const { columns, values, precision, format = "markdown" } = args.rows
+    // Float noise: more than 6 decimals, yet either a double-precision artifact of, or the exact float32 widening of, a value with at most 6 decimals (0.30000000000000004, 18.440000534057617). Genuine long decimals (1234567.8901234) are not.
+    // Two units in the last place of a double: arithmetic artifacts (0.1 + 0.2) sit within it, genuine 15+ digit decimals do not.
+    const DOUBLE_ARTIFACT_RELATIVE_ERROR = Number.EPSILON * 2
+    // Returns the shortest (at most 6 decimal) value the noisy cell is an artifact of, or undefined for genuine values.
+    const artifactOf = (value: number) => {
+      const decimal = new Decimal(value)
+      if (decimal.decimalPlaces() <= 6) return undefined
+      for (let places = 0; places <= 6; places++) {
+        const rounded = decimal.toDecimalPlaces(places)
+        // Only a double-precision artifact or the exact float32 widening of the rounded value qualifies.
+        if (
+          Math.fround(rounded.toNumber()) === value ||
+          decimal.minus(rounded).abs().lte(decimal.abs().times(DOUBLE_ARTIFACT_RELATIVE_ERROR))
+        )
+          return rounded
+      }
+      return undefined
+    }
+    // Noise contributes the scale of the short value it is an artifact of, never its raw digits.
+    const places = (value: number) => (artifactOf(value) ?? new Decimal(value)).decimalPlaces()
+    // A column with no ordinary numeric cell keeps its values as given.
+    const onlyNoise = columns.map((_, index) => {
+      const numbers = values.map((cells) => cells[index]).filter((cell): cell is number => typeof cell === "number")
+      return numbers.length > 0 && numbers.every((cell) => artifactOf(cell) !== undefined)
+    })
+    const scales = columns.map((_, index) =>
+      values.reduce((scale, cells) => {
+        const value = cells[index]
+        return typeof value === "number" ? Math.max(scale, places(value)) : scale
+      }, 0),
+    )
     const row = (cells: (string | number | null)[]) => {
       if (format === "markdown") return `| ${cells.map(tableCell).join(" | ")} |`
       if (format === "lines") return cells.map(String).join(" ")
@@ -235,7 +264,8 @@ export function renderAnswer(payload: unknown): string {
           cells.map((value, index) => {
             const places =
               precision && Object.hasOwn(precision, columns[index]!) ? precision[columns[index]!] : undefined
-            return typeof value === "number" && places !== undefined ? value.toFixed(places) : value
+            if (typeof value !== "number") return value
+            return places !== undefined ? value.toFixed(places) : (onlyNoise[index] ? new Decimal(value).toFixed() : new Decimal(value).toFixed(scales[index]!))
           }),
         ),
       ),
@@ -261,7 +291,7 @@ export const AnswerCommitTool = Tool.define(
   "answer_commit",
   Effect.succeed({
     // altimate_change start - expose format selection to the model before the terminal tool call
-    description: `Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Supply one field per item the request asks for, in the order asked: a request for 'the repository and the most copied file' needs two fields (one named for the repository, one for the file); never collapse a compound request into one field, and never add fields the request did not ask for. Numbers are accepted up to 15 significant digits; any decimal that must be reproduced exactly (more digits, trailing zeros, or currency strings) must be passed as a string. For fields.precision and each rows.precision value, use an integer from 0 to 10 (inclusive). Set rows.precision by column name to display numeric cells with fixed decimal places, including integers; strings are never changed. When the request names a tabular format, set rows.format accordingly: markdown (default), csv, tsv, or lines (one row per line with cells separated by a single space, without headers, for single-column or two-column plain lists). CSV/TSV include headers and quote cells containing the delimiter, quotes, or newlines, doubling embedded quotes; null cells are empty. Always supply \`basis\`; it is never shown when the request asks for only the answer. Supply one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in \`basis\` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. ${renderedLengthGuidance} This tool is not available for JSON-schema requests; use StructuredOutput instead.`,
+    description: `Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Supply one field per item the request asks for, in the order asked: a request for 'the repository and the most copied file' needs two fields (one named for the repository, one for the file); never collapse a compound request into one field, and never add fields the request did not ask for. Every named item (an entity AND a related item or count) must be its own field, because basis, notes and prose are not shown when the request asks for only the answer; an element found but kept only there is lost. Numbers use JavaScript precision; integers must be safe. Pass exact decimal values, trailing zeros, or currency strings as strings. For fields.precision and each rows.precision value, use an integer from 0 to 10 (inclusive). Set rows.precision by column name to display numeric cells with fixed decimal places, including integers; strings are never changed. Without explicit precision, each column uses the maximum decimal scale of its numeric cells. When the request names a tabular format, set rows.format accordingly: markdown (default), csv, tsv, or lines (one row per line with cells separated by a single space, without headers, for single-column or two-column plain lists). CSV/TSV include headers and quote cells containing the delimiter, quotes, or newlines, doubling embedded quotes; null cells are empty. Always supply \`basis\`; it is never shown when the request asks for only the answer. Supply one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in \`basis\` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. ${renderedLengthGuidance} This tool is not available for JSON-schema requests; use StructuredOutput instead.`,
     // altimate_change end
     parameters: Parameters,
     formatValidationError: (error: unknown) => (Schema.isSchemaError(error) ? error.message : String(error)),
