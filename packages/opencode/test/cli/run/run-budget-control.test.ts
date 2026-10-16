@@ -22,6 +22,46 @@ describe("run budget control at prompt boundaries", () => {
     else process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE = priorDowngrade
   })
 
+  test("work owns the query cutoff until completion while reminders borrow it", async () => {
+    const sessionID = SessionID.make("ses_budget_control_query_deadline")
+    const finishWork = Promise.withResolvers<void>()
+    const work = withBudgetControl(
+      { sessionID, control: "work", queryDeadline: "10000" },
+      () => finishWork.promise,
+    )
+    try {
+      expect(RunBudget.queryDeadline(sessionID)).toBe(10_000)
+      await withBudgetControl(
+        { sessionID, control: "soft-no-downgrade", noReply: true, queryDeadline: "20000" },
+        async () => expect(RunBudget.queryDeadline(sessionID)).toBe(10_000),
+      )
+      expect(RunBudget.queryDeadline(sessionID)).toBe(10_000)
+    } finally {
+      finishWork.resolve()
+      await work
+    }
+    expect(RunBudget.queryDeadline(sessionID)).toBeUndefined()
+  })
+
+  test("failed work releases its query cutoff and finalization does not acquire one", async () => {
+    const sessionID = SessionID.make("ses_budget_control_query_failure")
+    await expect(withBudgetControl({ sessionID, control: "work", queryDeadline: "10000" }, async () => {
+      expect(RunBudget.queryDeadline(sessionID)).toBe(10_000)
+      throw new Error("work failed")
+    })).rejects.toThrow("work failed")
+    expect(RunBudget.queryDeadline(sessionID)).toBeUndefined()
+    await withBudgetControl({ sessionID, control: "finalization", queryDeadline: "10000" }, async () => {
+      expect(RunBudget.queryDeadline(sessionID)).toBeUndefined()
+    })
+  })
+
+  test.each(["", "0", "-1", "NaN", "Infinity", "invalid"])("ignores invalid query cutoff %p", async (queryDeadline) => {
+    const sessionID = SessionID.make("ses_budget_control_invalid_query")
+    await withBudgetControl({ sessionID, control: "work", queryDeadline }, async () => {
+      expect(RunBudget.queryDeadline(sessionID)).toBeUndefined()
+    })
+  })
+
   for (const control of ["finalization", "finalization-no-downgrade"]) {
     for (const fails of [false, true]) {
       test(`${control} disables tools only until finalization ${fails ? "fails" : "completes"}`, async () => {

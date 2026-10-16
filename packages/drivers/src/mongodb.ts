@@ -297,6 +297,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       limit: number | undefined,
       maxTimeMS: number | undefined,
       maxResultBytes?: number,
+      signal?: AbortSignal,
     ): Promise<ConnectorResult>
     // altimate_change end
   } = {
@@ -352,8 +353,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async execute(query: string, limit?: number, _binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
       const timeoutMs = resolveQueryTimeout(config, options).ms
       try {
+        options?.signal?.throwIfAborted()
         // altimate_change start
-        return await connector.runCommand(query, limit, timeoutMs, options?.maxResultBytes)
+        return await connector.runCommand(query, limit, timeoutMs, options?.maxResultBytes, options?.signal)
         // altimate_change end
       } catch (err: any) {
         // Server error 50 (MaxTimeMSExpired): the server stopped the operation.
@@ -370,22 +372,54 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       limit: number | undefined,
       maxTimeMS: number | undefined,
       maxResultBytes?: number,
+      signal?: AbortSignal,
     ): Promise<ConnectorResult> {
       async function readCursor(cursor: any): Promise<Record<string, unknown>[]> {
-        if (maxResultBytes === undefined) return cursor.toArray()
         const consume = createResultByteBudget(maxResultBytes)
-        const docs: Record<string, unknown>[] = []
+        let stopped = false
+        let failure: unknown
+        let closing: Promise<void> | undefined
+        let timer: ReturnType<typeof setTimeout> | undefined
+        let abort: (() => void) | undefined
+        const close = () => closing ??= Promise.resolve().then(() => cursor.close?.())
         try {
-          for await (const doc of cursor.batchSize(1)) {
-            const serialized = Object.fromEntries(
-              Object.entries(doc).map(([key, value]) => [key, serializeValue(value)]),
-            )
-            consume(Object.values(serialized))
-            docs.push(serialized)
+          const cancelled = new Promise<never>((_resolve, reject) => {
+            const stop = (error: unknown) => {
+              stopped = true
+              failure = error
+              void close().catch(() => {})
+              reject(error)
+            }
+            abort = () => stop(signal!.reason)
+            signal?.addEventListener("abort", abort, { once: true })
+            if (signal?.aborted) abort()
+            if (maxTimeMS !== undefined) {
+              timer = setTimeout(() => stop(new QueryTimeoutError({ engine: "MongoDB", timeoutMs: maxTimeMS, cancelled: false })), maxTimeMS)
+            }
+          })
+          const read = async () => {
+            if (stopped) throw failure
+            if (maxResultBytes === undefined && maxTimeMS === undefined && !signal) return cursor.toArray()
+            const docs: Record<string, unknown>[] = []
+            for await (const doc of maxResultBytes === undefined ? cursor : cursor.batchSize(1)) {
+              if (stopped) throw failure
+              if (maxResultBytes === undefined) {
+                docs.push(doc)
+                continue
+              }
+              const serialized = Object.fromEntries(
+                Object.entries(doc).map(([key, value]) => [key, serializeValue(value)]),
+              )
+              consume(Object.values(serialized))
+              docs.push(serialized)
+            }
+            return docs
           }
-          return docs
+          return await Promise.race([cancelled, read()])
         } finally {
-          await cursor.close()
+          if (timer !== undefined) clearTimeout(timer)
+          if (abort) signal?.removeEventListener("abort", abort)
+          if (!stopped) await close()
         }
       }
 
@@ -697,7 +731,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }
 
         case "listIndexes": {
-          const indexes = await coll.listIndexes(withMaxTime(maxTimeMS)).toArray()
+          const indexes = await readCursor(coll.listIndexes(withMaxTime(maxTimeMS)))
           if (indexes.length === 0) {
             return { columns: [], rows: [], row_count: 0, truncated: false }
           }
