@@ -82,7 +82,7 @@ const parameters = z.object({
     .max(3_600_000)
     .optional()
     .describe(
-      "Optional per-query execution deadline in ms. Omit to use the configured deadline (connection setting or environment). Set only when a specific query needs a longer or shorter budget; 0 disables.",
+      "Optional per-query execution deadline in ms. Omitted or 0 uses the configured default. Bounded by the remaining run budget.",
     ),
 })
 
@@ -262,7 +262,7 @@ export const SqlExecuteTool = Tool.define(
                 limit: args.limit,
                 query_timeout_ms: args.query_timeout_ms,
                 ...(readOnly ? { read_only: true } : {}),
-              })
+              }, { signal: ctx.abort, sessionID: ctx.sessionID })
 
               // altimate_change start — a failure must not be rendered as "(0 rows)".
               // sql.execute never throws: it catches every connection and query error

@@ -110,6 +110,28 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       let readOnlyTransaction = false
       let releasedClient = false
       // altimate_change end
+      const runQuery = async <T>(run: () => Promise<T>): Promise<T> => {
+        const signal = options?.signal
+        if (!signal) return run()
+        signal.throwIfAborted()
+        let abort: (() => void) | undefined
+        try {
+          return await new Promise<T>((resolve, reject) => {
+            abort = () => {
+              discardClient = true
+              if (!releasedClient) {
+                releasedClient = true
+                client.release(true)
+              }
+              reject(signal.reason)
+            }
+            signal.addEventListener("abort", abort, { once: true })
+            Promise.resolve(run()).then(resolve, reject)
+          })
+        } finally {
+          if (abort) signal.removeEventListener("abort", abort)
+        }
+      }
       try {
         options?.signal?.throwIfAborted()
         if (ourMs !== undefined) {
@@ -149,7 +171,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           let existing = existingTimeout.get(client)
           if (existing === undefined) {
             try {
-              const shown = await bounded<any>(() => client.query("SHOW statement_timeout"))
+              const shown = await bounded<any>(() => runQuery(() => client.query("SHOW statement_timeout")))
               existing = parsePgDuration(shown?.rows?.[0]?.statement_timeout) ?? null
             } catch (error) {
               if (discardClient) throw error
@@ -159,7 +181,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           }
           effectiveMs = tighter(existing?.ms, ourMs)
           if (existing?.ms === undefined || ourMs < existing.ms) {
-            await bounded(() => client.query(`SET statement_timeout TO ${ourMs}`))
+            await bounded(() => runQuery(() => client.query(`SET statement_timeout TO ${ourMs}`)))
             timeoutApplied = true
           }
         }
@@ -178,7 +200,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
         // altimate_change start — a derived SELECT can still invoke a writing function
         if (options?.readOnly) {
-          await client.query("BEGIN READ ONLY")
+          await runQuery(() => client.query("BEGIN READ ONLY"))
           readOnlyTransaction = true
         }
         // altimate_change end
@@ -193,14 +215,14 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         if (options?.maxResultBytes !== undefined) {
           const consume = createResultByteBudget(options.maxResultBytes)
           const Query = pg.default?.Query ?? pg.Query
-          return await new Promise<ConnectorResult>((resolve, reject) => {
+          return await runQuery(() => new Promise<ConnectorResult>((resolve, reject) => {
             const stream = new Query({ text: query, rowMode: "array" })
             const rows: unknown[][] = []
             let columns: string[] = []
             let truncated = false
             let stopped = false
             stream.on("row", (row: unknown[], result: { fields: { name: string }[] }) => {
-              if (stopped) return
+              if (stopped || releasedClient) return
               try {
                 if (effectiveLimit > 0 && rows.length >= effectiveLimit) {
                   truncated = true
@@ -228,10 +250,10 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
               resolve({ columns, rows, row_count: rows.length, truncated })
             })
             client.query(stream)
-          })
+          }))
         }
         // altimate_change end
-        const result = await client.query(query)
+        const result = await runQuery<any>(() => client.query(query))
         const columns = result.fields?.map((f: any) => f.name) ?? []
         const truncated = effectiveLimit > 0 && result.rows.length > effectiveLimit
         const rows = truncated
@@ -255,7 +277,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         // altimate_change start — rollback also suppresses transaction-delayed pg_notify calls
         if (readOnlyTransaction && !releasedClient) {
           try {
-            await client.query("ROLLBACK")
+            await runQuery(() => client.query("ROLLBACK"))
           } catch {
             discardClient = true
           }
@@ -267,7 +289,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         // altimate_change start — a byte-limit abort already discarded the connection
         if (timeoutApplied && !releasedClient) {
           try {
-            await client.query("RESET statement_timeout")
+            await runQuery(() => client.query("RESET statement_timeout"))
           } catch {
             discardClient = true
           }

@@ -9,7 +9,7 @@ export interface SqlExecuteParams {
   sql: string
   warehouse?: string
   limit?: number
-  /** Execution deadline in ms; `0` disables it. Omitted: the connection's
+  /** Execution deadline in ms; `0` uses the default. Omitted: the connection's
    *  `query_timeout_ms`, then `ALTIMATE_SQL_QUERY_TIMEOUT_MS`, then 120 s. */
   query_timeout_ms?: number
   /** Run PostgreSQL read probes in a read-only transaction. */

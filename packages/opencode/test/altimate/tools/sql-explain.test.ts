@@ -59,10 +59,27 @@ describe("sql.explain read-only execution", () => {
         const result = await Dispatcher.call("sql.explain", { sql: "SELECT writing_view()", warehouse: "source", analyze: true })
         expect(result.success).toBe(true)
         expect(execute.mock.calls[0]?.[0]).toBe("EXPLAIN (ANALYZE, BUFFERS) SELECT writing_view()")
-        expect(execute.mock.calls[0]?.[3]).toEqual({ readOnly: true })
+        expect(execute.mock.calls[0]?.[3]).toMatchObject({ readOnly: true })
       } finally {
         get.mockRestore()
       }
+    }
+  })
+
+  test("aborted session cancels EXPLAIN before it reaches the connector", async () => {
+    Registry.setConfigs({ source: { type: "postgres" } })
+    const execute = mock<Connector["execute"]>(async () => ({ columns: ["plan"], rows: [["plan"]], row_count: 1, truncated: false }))
+    const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
+    try {
+      const result = await Dispatcher.call(
+        "sql.explain",
+        { sql: "SELECT 1", warehouse: "source", analyze: true },
+        { signal: AbortSignal.abort(new Error("stopped")) },
+      )
+      expect(result.success).toBe(false)
+      expect(execute).not.toHaveBeenCalled()
+    } finally {
+      get.mockRestore()
     }
   })
 
@@ -73,7 +90,7 @@ describe("sql.explain read-only execution", () => {
     try {
       const result = await Dispatcher.call("sql.explain", { sql: "SELECT 1", warehouse: "source", analyze: true })
       expect(result.success).toBe(true)
-      expect(execute.mock.calls[0]?.[3]).toBeUndefined()
+      expect((execute.mock.calls[0]?.[3] as { readOnly?: boolean }).readOnly).toBeUndefined()
     } finally {
       get.mockRestore()
     }
