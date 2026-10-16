@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
+import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { cliIt } from "../lib/cli-process"
 import { redactConfig } from "@/cli/cmd/debug/redact"
 
@@ -77,6 +78,22 @@ describe("debug config redaction", () => {
     })
   })
 
+  test.each([
+    "https://[invalid/mcp?api_key=secret",
+    "https://[invalid/mcp?token=secret",
+    "https://user:pass@[invalid/mcp",
+    "https://user:pass@[invalid/mcp?token=secret",
+    "custom://[invalid/mcp?api_key=secret",
+    "custom://[invalid/mcp?token=secret",
+    "custom://user:pass@[invalid/mcp",
+    "custom://user:pass@[invalid/mcp?token=secret",
+    "//user:pass@[invalid/mcp?api_key=secret",
+  ])("fails closed for malformed URL %s with surrounding whitespace", (url) => {
+    for (const value of [url, ` ${url}`, `${url} `, ` \t${url}\r\n `]) {
+      expect(redactConfig({ endpoint: value })).toEqual({ endpoint: "***" })
+    }
+  })
+
   test.each(["key", "sig", "signature", "code"])("masks URL query value for %s", (key) => {
     expect(redactConfig({ endpoint: `https://example.com/path?${key}=secret` })).toEqual({
       endpoint: `https://example.com/path?${key}=***`,
@@ -104,6 +121,21 @@ describe("debug config redaction", () => {
       opaque: "custom:database#section",
     }
     expect(redactConfig(input)).toEqual(input)
+  })
+
+  test("handles whitespace around valid URLs without changing unrelated strings", () => {
+    const input = {
+      plain: " \thttps://example.com/path\r\n ",
+      query: " \thttps://example.com/path?api_key=secret",
+      jdbc: " \tjdbc:postgresql://user:pass@example.com/database\r\n ",
+      label: " padded text ",
+    }
+    expect(redactConfig(input)).toEqual({
+      plain: input.plain,
+      query: " \thttps://example.com/path?api_key=***",
+      jdbc: "***",
+      label: input.label,
+    })
   })
 
   test("redacts objects inside arrays and nested headers while preserving primitive values", () => {
@@ -191,7 +223,7 @@ describe("debug config redaction", () => {
       query: "mysql://example.com/database?email=***",
       fragment: "custom://example.com/database#email=***",
       jdbc: "jdbc:postgresql://example.com/database?email=***",
-      malformed: input.malformed,
+      malformed: "***",
     })
   })
 
@@ -365,6 +397,36 @@ describe("debug config redaction", () => {
         "X-String": "***",
         "X-Number": "***",
         "X-Null": "***",
+      },
+    })
+  })
+
+  test("redacts schema-valid MCP URLs and headersCommand without changing custom commands", () => {
+    const command = {
+      review: {
+        template: "Review the changes in $ARGUMENTS",
+        model: "test/test-model",
+        agent: "build",
+        description: "Review local changes",
+        subtask: true,
+      },
+    }
+    const input = Schema.decodeUnknownSync(ConfigV1.Info)({
+      command,
+      mcp: {
+        query: {
+          type: "remote",
+          url: " https://[invalid/mcp?api_key=query-secret ",
+          headersCommand: { Authorization: ["sh", "-c", "printf header-secret"] },
+        },
+        userinfo: { type: "remote", url: " custom://user:pass@[invalid/mcp?token=query-secret " },
+      },
+    })
+    expect(redactConfig(input)).toEqual({
+      command,
+      mcp: {
+        query: { type: "remote", url: "***", headersCommand: { Authorization: ["sh", "***", "***"] } },
+        userinfo: { type: "remote", url: "***" },
       },
     })
   })

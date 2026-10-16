@@ -4,11 +4,15 @@ const secretName =
   /(?:api.?key|access.?key|secret|password|passwd|token$|authorization$|cookie$|credential|private.?key|bearer|passphrase|(?:^|[_-])pwd$|(?:^|[_-])auth(?:[_-]|$)|dsn$|connection.?string)/i
 
 function redactURL(value: string): string {
+  const trimmed = value.trim()
   // Also covers malformed authorities and opaque schemes such as jdbc:postgresql://.
-  const authority = /^[^/?#]*:\/\/([^/?#]*)/.exec(value)?.[1]
+  const authority = /^(?:[^/?#]*:)?\/\/([^/?#]*)/.exec(trimmed)?.[1]
   if (authority?.includes("@")) return "***"
-  if (!URL.canParse(value)) return /^https?:\/\//i.test(value) ? "***" : value
-  const url = new URL(value)
+  // Fail closed for URL-like strings that cannot be safely parsed, regardless of scheme.
+  if (!URL.canParse(trimmed)) {
+    return authority !== undefined || /^[a-z][a-z\d+.-]*:/i.test(trimmed) ? "***" : value
+  }
+  const url = new URL(trimmed)
   if (url.username || url.password) return "***"
 
   const redactParams = (params: string) =>
@@ -53,7 +57,7 @@ export function redactConfig(value: unknown, headers = false): unknown {
       if (typeof item === "string" && (headers || secretName.test(key))) return [key, "***"]
       if (Array.isArray(item) && argvKey.test(key) && !headers) return [key, redactArgv(item)]
       // headersCommand is a record of header name -> argv.
-      if (item && typeof item === "object" && argvKey.test(key) && !headers)
+      if (item && typeof item === "object" && /^headersCommand$/i.test(key) && !headers)
         return [
           key,
           Object.fromEntries(
