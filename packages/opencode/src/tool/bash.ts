@@ -8,6 +8,7 @@ import { Instance } from "../project/instance"
 import { lazy } from "@/util/lazy"
 import { Language } from "web-tree-sitter"
 import fs from "fs/promises"
+import { homedir } from "os"
 
 import { Filesystem } from "@/util/filesystem"
 import { fileURLToPath } from "url"
@@ -18,6 +19,152 @@ import { BashArity } from "@/permission/arity"
 import { Truncate } from "./truncation"
 import { Plugin } from "@/plugin"
 import { Global } from "@/global"
+// altimate_change start — upstream_fix: resolve literal shell paths for permission matching
+import type { Node } from "web-tree-sitter"
+
+function shellWords(node: Node, includeNumbers = false) {
+  const types = ["command_name", "word", "string", "raw_string", "concatenation"]
+  // tree-sitter parses a bare numeric argument (`mkdir -m 700`) as `number`.
+  if (includeNumbers) types.push("number")
+  return node.namedChildren.filter((child): child is Node => child !== null && types.includes(child.type))
+}
+
+function literalWord(node: Node | null): string | undefined {
+  if (!node) return
+  if (node.type === "raw_string") return node.text.slice(1, -1)
+  if (node.type === "word" || node.type === "number") {
+    let text = node.text
+    if (text === "~" || text.startsWith("~/")) text = homedir() + text.slice(1)
+    // Backslash-escaped metacharacters are literal; only unescaped ones mean expansion.
+    if (/[~$*?{\[]/.test(text.replace(/\\./gs, ""))) return
+    return text.replace(/\\(.)/gs, "$1")
+  }
+  if (node.type === "string" && node.namedChildren.every((child) => child?.type === "string_content")) {
+    return node.text
+      .slice(1, -1)
+      .replace(/\\\n/g, "")
+      .replace(/\\([$`"\\])/g, "$1")
+  }
+  if (node.type === "command_name" || node.type === "concatenation") {
+    const parts = node.namedChildren.map(literalWord)
+    if (parts.every((part) => part !== undefined)) return parts.join("")
+  }
+}
+
+// Cap on tracked directories so pathological scripts cannot blow up alias generation.
+const MAX_TRACKED_DIRECTORIES = 32
+// Operand-spelling combinations are enumerated in full up to this many operands.
+const MAX_MIXED_OPERANDS = 4
+const MAX_ALIAS_VARIANTS = 4096
+
+// Options that take a separate non-path value; the value must not be read as an operand.
+const VALUE_OPTIONS: Record<string, string[]> = {
+  mkdir: ["-m", "--mode"],
+  cp: ["-S", "--suffix"],
+  mv: ["-S", "--suffix"],
+  touch: ["-d", "--date", "-t"],
+  ls: ["-I", "--ignore", "-w", "--width", "-T", "--tabsize"],
+}
+// Long options whose `=value` is a path operand.
+const PATH_OPTIONS = ["--reference", "--target-directory"]
+const CD_FLAGS = ["-L", "-P", "-e", "-@"]
+
+// cwds that a following command may run in after `cd`. `cd` can fail (`cd missing; cat x`)
+// or sit behind `||`, a conditional or a background marker, so the previous directories
+// stay possible. An unresolvable target (`cd $VAR`, `cd -`) adds nothing: the extra
+// directories only ever add aliases, which can tighten a decision but never relax it.
+function afterCd(cwds: string[], words: Node[]): string[] {
+  const args = words.slice(1).map(literalWord)
+  let i = 0
+  while (i < args.length && args[i] !== undefined && CD_FLAGS.includes(args[i]!)) i++
+  if (args[i] === "--") i++
+  const target = i < args.length ? args[i] : homedir()
+  if (target === undefined || target === "-") return cwds
+  // Newly reachable directories come first so the cap drops the oldest speculative
+  // branches, never the directory a straight-line script actually enters.
+  const fresh = cwds.map((cwd) => path.resolve(cwd, target))
+  return [...new Set([...fresh, ...cwds])].slice(0, MAX_TRACKED_DIRECTORIES)
+}
+
+// Walk commands in source order, tracking every directory a command could run in.
+// Subshells and substitutions keep their directory changes local.
+function* shellCommands(node: Node | null, cwds: string[]): Generator<{ node: Node; cwds: string[] }, string[]> {
+  if (!node) return cwds
+  if (node.type === "command") {
+    yield { node, cwds }
+    for (const child of node.namedChildren) yield* shellCommands(child, cwds)
+    const words = shellWords(node, true)
+    return words[0] && literalWord(words[0]) === "cd" ? afterCd(cwds, words) : cwds
+  }
+  const local = ["subshell", "command_substitution", "pipeline"].includes(node.type)
+  let next = cwds
+  for (const child of node.namedChildren) next = yield* shellCommands(child, next)
+  return local ? cwds : next
+}
+
+interface PathOperand {
+  word: Node
+  arg: string | undefined
+  prefix: string
+}
+
+// Collect path operands, honoring `--`, quoted flags, option values and `--reference=`.
+function pathOperands(name: string, words: Node[]): PathOperand[] {
+  const operands: PathOperand[] = []
+  const valueOptions = VALUE_OPTIONS[name] ?? []
+  let terminated = false
+  let skipNext = false
+  let referenced = false
+  for (const word of words.slice(1)) {
+    const arg = literalWord(word)
+    if (skipNext) {
+      skipNext = false
+      continue
+    }
+    // chmod symbolic modes such as `-w` or `-rwx` are the mode operand, not options.
+    const symbolicMode = name === "chmod" && arg !== undefined && /^-[ugoa]*[rwxXst]+[ugoa,rwxXst=+-]*$/.test(arg)
+    if (!terminated && !symbolicMode && arg?.startsWith("-")) {
+      if (arg === "--") terminated = true
+      else {
+        const option = PATH_OPTIONS.find((candidate) => arg.startsWith(candidate + "="))
+        if (option) {
+          if (option === "--reference") referenced = true
+          operands.push({ word, arg: arg.slice(option.length + 1), prefix: option + "=" })
+        } else if (valueOptions.includes(arg)) skipNext = true
+      }
+      continue
+    }
+    operands.push({ word, arg, prefix: "" })
+  }
+  // chmod/chown take a mode/owner first unless --reference supplies it.
+  if (["chmod", "chown"].includes(name) && !referenced) {
+    const first = operands.findIndex((operand) => !operand.prefix)
+    if (first >= 0) operands.splice(first, 1)
+  }
+  return operands
+}
+
+// Resolve symlinks in the deepest existing parent so a not-yet-created destination
+// behind a symlinked directory still maps to where it will really be written.
+async function realpathThroughParents(target: string): Promise<string> {
+  const missing: string[] = []
+  let current = target
+  while (true) {
+    const resolved = await fs.realpath(current).catch(() => "")
+    if (resolved) return path.join(resolved, ...missing.reverse())
+    const parent = path.dirname(current)
+    if (parent === current) return ""
+    missing.push(path.basename(current))
+    current = parent
+  }
+}
+
+function quoteLike(word: Node, text: string) {
+  if (word.type === "string") return `"${text}"`
+  if (word.type === "raw_string") return `'${text}'`
+  return text
+}
+// altimate_change end
 
 // altimate_change start — run-mode markers must not reach bash child processes.
 // `run` sets ALTIMATE_RUN_MODE on its own process to arm run-mode-only
@@ -64,7 +211,10 @@ const HOST_MARKERS = new Set([
   "ALTIMATE_PINNED_WORKSPACE_NAME",
   "ALTIMATE_PINNED_WORKSPACE_ROOT",
 ])
-export function stripHostMarkers(env: Record<string, string | undefined>, platform: NodeJS.Platform = process.platform) {
+export function stripHostMarkers(
+  env: Record<string, string | undefined>,
+  platform: NodeJS.Platform = process.platform,
+) {
   // Windows environment names are case-insensitive: a child reads `altimate_code_serve`
   // as the marker, so every spelling goes there. POSIX keeps exact matching.
   for (const key of Object.keys(env)) {
@@ -135,7 +285,9 @@ export const BashTool = Tool.define("bash", async () => {
         ),
     }),
     async execute(params, ctx) {
-      const cwd = params.workdir || Instance.directory
+      // altimate_change start — upstream_fix: resolve workdir relative to the active instance
+      const cwd = path.resolve(Instance.directory, params.workdir || ".")
+      // altimate_change end
       if (params.timeout !== undefined && params.timeout < 0) {
         throw new Error(`Invalid timeout value: ${params.timeout}. Timeout must be a positive number.`)
       }
@@ -148,36 +300,38 @@ export const BashTool = Tool.define("bash", async () => {
       if (!Instance.containsPath(cwd)) directories.add(cwd)
       const patterns = new Set<string>()
       const always = new Set<string>()
+      // altimate_change start — upstream_fix: retain raw command rules alongside absolute path rules
+      const permissionAliases = new Map<string, Set<string>>()
 
-      for (const node of tree.rootNode.descendantsOfType("command")) {
-        if (!node) continue
-
+      for (const { node, cwds } of shellCommands(tree.rootNode, [cwd])) {
+        // altimate_change end
         // Get full command text including redirects if present
-        let commandText = node.parent?.type === "redirected_statement" ? node.parent.text : node.text
+        const original = node.parent?.type === "redirected_statement" ? node.parent.text : node.text
 
-        const command = []
-        for (let i = 0; i < node.childCount; i++) {
-          const child = node.child(i)
-          if (!child) continue
-          if (
-            child.type !== "command_name" &&
-            child.type !== "word" &&
-            child.type !== "string" &&
-            child.type !== "raw_string" &&
-            child.type !== "concatenation"
-          ) {
-            continue
-          }
-          command.push(child.text)
-        }
+        // altimate_change start — upstream_fix: normalize static path operands, including directory listings
+        const words = shellWords(node)
+        const operandWords = shellWords(node, true)
+        const command = words.map((word) => word.text)
+        const name = words[0] && literalWord(words[0])
+        const source = node.parent?.type === "redirected_statement" ? node.parent : node
+        const variants = new Set<string>([original])
 
         // not an exhaustive list, but covers most common cases
-        if (["cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat"].includes(command[0])) {
-          for (const arg of command.slice(1)) {
-            if (arg.startsWith("-") || (command[0] === "chmod" && arg.startsWith("+"))) continue
-            const resolved = await fs.realpath(path.resolve(cwd, arg)).catch(() => "")
-            log.info("resolved path", { arg, resolved })
-            if (resolved) {
+        if (name && ["cd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "cat", "ls"].includes(name)) {
+          const operands = name === "cd" ? pathOperands("cat", operandWords) : pathOperands(name, operandWords)
+          for (const commandCwd of cwds) {
+            const targets = operands.flatMap((operand) => {
+              if (operand.arg === undefined || (name === "chmod" && operand.arg.startsWith("+"))) return []
+              return [{ operand, target: path.resolve(commandCwd, operand.arg) }]
+            })
+            const listing = name === "ls" && operands.length === 0
+            if (listing) targets.push({ operand: undefined as never, target: commandCwd })
+            const reals = await Promise.all(targets.map((item) => realpathThroughParents(item.target)))
+            reals.forEach((resolved, index) => {
+              log.info("resolved path", { arg: targets[index].target, resolved })
+            })
+            for (const resolved of reals) {
+              if (!resolved) continue
               const normalized =
                 process.platform === "win32" ? Filesystem.windowsPath(resolved).replace(/\//g, "\\") : resolved
               if (!Instance.containsPath(normalized)) {
@@ -185,12 +339,80 @@ export const BashTool = Tool.define("bash", async () => {
                 directories.add(dir)
               }
             }
+            // Each operand can be written as authored, absolute (keeping its quoting), bare
+            // absolute or symlink-resolved, and the rule may mix them (`cp a /abs/b`).
+            const written = targets.flatMap((item, index) => (item.operand ? [{ item, real: reals[index] }] : []))
+            const choices = written.map(({ item, real }) =>
+              item.operand
+                ? [
+                    item.operand.word.text,
+                    item.operand.prefix + quoteLike(item.operand.word, item.target),
+                    item.operand.prefix + item.target,
+                    item.operand.prefix + (real || item.target),
+                  ].filter((value, i, all) => all.indexOf(value) === i)
+                : [],
+            )
+            const combos: number[][] = []
+            if (written.length <= MAX_MIXED_OPERANDS) {
+              const expand = (prefix: number[]) => {
+                if (prefix.length === choices.length) return void combos.push(prefix)
+                choices[prefix.length].forEach((_, i) => expand([...prefix, i]))
+              }
+              expand([])
+            } else {
+              // Too many operands to enumerate: uniform spellings plus each operand spelled
+              // differently from the rest.
+              for (let i = 0; i < 4; i++) combos.push(choices.map((options) => Math.min(i, options.length - 1)))
+              choices.forEach((options, index) => {
+                options.forEach((_, i) => combos.push(choices.map((_, j) => (j === index ? i : 0))))
+              })
+            }
+            // `cat -- x` and `cat x` read the same file, so also alias the form without `--`.
+            const terminator =
+              name === "cd" ? undefined : operandWords.slice(1).find((word) => literalWord(word) === "--")
+            for (const combo of combos) {
+              for (const dropTerminator of terminator ? [false, true] : [false]) {
+                if (variants.size >= MAX_ALIAS_VARIANTS) break
+                const replacements = written
+                  .map(({ item }, index) => ({
+                    start: item.operand?.word.startIndex ?? 0,
+                    end: item.operand?.word.endIndex ?? 0,
+                    text: choices[index][combo[index]],
+                    skip: !item.operand,
+                  }))
+                  .filter((replacement) => !replacement.skip)
+                if (listing)
+                  replacements.push({ start: node.endIndex, end: node.endIndex, text: ` ${commandCwd}`, skip: false })
+                if (terminator && dropTerminator)
+                  replacements.push({
+                    start: terminator.startIndex - 1,
+                    end: terminator.endIndex,
+                    text: "",
+                    skip: false,
+                  })
+                let text = original
+                for (const replacement of replacements.sort((a, b) => b.start - a.start)) {
+                  const start = replacement.start - source.startIndex
+                  const end = replacement.end - source.startIndex
+                  text = text.slice(0, start) + replacement.text + text.slice(end)
+                }
+                variants.add(text)
+              }
+            }
           }
         }
+        // Insignificant shell whitespace must not let an exact rule miss the command.
+        for (const variant of [...variants]) if (!/["'\\]/.test(variant)) variants.add(variant.replace(/[ \t]+/g, " "))
+        const aliases = permissionAliases.get(original) ?? new Set<string>()
+        for (const variant of variants) aliases.add(variant)
+        permissionAliases.set(original, aliases)
+        // altimate_change end
 
         // cd covered by above check
         if (command.length && command[0] !== "cd") {
-          patterns.add(commandText)
+          // altimate_change start — upstream_fix: rules match the authored command text
+          patterns.add(original)
+          // altimate_change end
           always.add(BashArity.prefix(command).join(" ") + " *")
         }
       }
@@ -214,7 +436,13 @@ export const BashTool = Tool.define("bash", async () => {
           permission: "bash",
           patterns: Array.from(patterns),
           always: Array.from(always),
-          metadata: {},
+          // altimate_change start — upstream_fix: evaluate raw and normalized commands as equivalent spellings
+          metadata: {
+            permissionAliases: Object.fromEntries(
+              Array.from(permissionAliases, ([key, values]) => [key, [...values].map((value) => [value])]),
+            ),
+          },
+          // altimate_change end
         })
       }
 

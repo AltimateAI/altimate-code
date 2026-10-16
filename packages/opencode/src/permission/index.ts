@@ -7,6 +7,9 @@ import os from "os"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
+// altimate_change start — upstream_fix: evaluate normalized aliases without changing rule order
+import { PermissionEvaluate } from "./evaluate"
+// altimate_change end
 // altimate_change start — upstream_fix: load persisted permission approvals
 import { Database, eq } from "@/storage/db"
 import { PermissionTable } from "./permission.sql"
@@ -40,17 +43,9 @@ interface State {
   approved: PermissionV1.Rule[]
 }
 
-export function evaluate(permission: string, pattern: string, ...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule {
-  return (
-    rulesets
-      .flat()
-      .findLast((rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern)) ?? {
-      action: "ask",
-      permission,
-      pattern: "*",
-    }
-  )
-}
+// altimate_change start — upstream_fix: share path-alias evaluation with legacy permissions
+export { evaluate } from "./evaluate"
+// altimate_change end
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Permission") {}
 
@@ -91,7 +86,9 @@ export const layer = Layer.effect(
       let needsAsk = false
 
       for (const pattern of request.patterns) {
-        const rule = evaluate(request.permission, pattern, ruleset, approved)
+        // altimate_change start — upstream_fix: include normalized aliases in permission matching
+        const rule = PermissionEvaluate.evaluateRequest(request, pattern, ruleset, approved)
+        // altimate_change end
         yield* Effect.logInfo("evaluated", { permission: request.permission, pattern, action: rule })
         if (rule.action === "deny") {
           return yield* new PermissionV1.DeniedError({
@@ -174,7 +171,9 @@ export const layer = Layer.effect(
       for (const [id, item] of pending.entries()) {
         if (item.info.sessionID !== existing.info.sessionID) continue
         const ok = item.info.patterns.every(
-          (pattern) => evaluate(item.info.permission, pattern, approved).action === "allow",
+          // altimate_change start — upstream_fix: apply approvals to equivalent path spellings
+          (pattern) => PermissionEvaluate.evaluateRequest(item.info, pattern, approved).action === "allow",
+          // altimate_change end
         )
         if (!ok) continue
         pending.delete(id)
