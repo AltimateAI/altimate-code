@@ -507,6 +507,7 @@ describe("run command request/stream lifecycle contracts", () => {
       const sessionID = "ses_stream", sendMessageID = "msg_stream", agent = "analyst", message = "inspect"
       const files = [], audienceSystem = undefined
       const timeBudgetStop = new AbortController()
+      const beginRequest = () => {}
       const startWorkClock = () => {}
       const budgetHeaders = () => ({ "x-test-budget": "active" })
       const Telemetry = { startupReady() {} }

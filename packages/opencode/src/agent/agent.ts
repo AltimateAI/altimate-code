@@ -328,6 +328,7 @@ export const layer = Layer.effect(
               Permission.fromConfig({
                 "*": "deny",
                 ...readOnlyDataPermission,
+                answer_commit: "allow",
                 webfetch: "allow",
                 websearch: "allow",
                 question: "allow",

@@ -33,6 +33,41 @@ export type Termination = {
 // Timeout classification for why_harness_stopped="timeout" and retry decisions.
 const TIMEOUT_PATTERN = /\btimed?\s*out\b|\bETIMEDOUT\b|TimeoutError/i
 
+/** Request ownership from the ordered message/request event stream. */
+export function createRequestOwnership() {
+  let activeRequestID: string | undefined
+  const users = new Map<string, string | undefined>()
+  const assistants = new Map<string, string | undefined>()
+  const seenRequests = new Set<string>()
+  return {
+    get activeRequestID() {
+      return activeRequestID
+    },
+    beginRequest(messageID: string) {
+      if (seenRequests.has(messageID)) return false
+      seenRequests.add(messageID)
+      users.set(messageID, messageID)
+      activeRequestID = messageID
+      return true
+    },
+    onUserMessage(messageID: string, parentID?: string) {
+      // Internal rows have no parentID in their message schema. The prompt loop
+      // reports their origin separately, before creating the next assistant.
+      // A persisted real request always retains its own boundary.
+      if (seenRequests.has(messageID)) return
+      if (parentID !== undefined) users.set(messageID, users.get(parentID))
+      else if (!users.has(messageID)) users.set(messageID, activeRequestID)
+    },
+    onAssistantMessage(info: { id: string; parentID: string }) {
+      if (assistants.has(info.id)) return
+      assistants.set(info.id, users.get(info.parentID))
+    },
+    ownerOf(messageID: string) {
+      return assistants.get(messageID)
+    },
+  }
+}
+
 /** Holds only overflow errors whose trace status depends on later recovery. */
 export function createRecoverableOverflowTraceErrors() {
   let pending: string[] = []
@@ -57,6 +92,9 @@ export function createRecoverableOverflowTraceErrors() {
 export function create() {
   const summaryMessages = new Set<string>()
   let turnCount = 0
+  // altimate_change start — track the active request's committed echo turn allowance
+  let committedAnswer = false
+  // altimate_change end
   let lastFinishReason: string | undefined
   // altimate_change start — upstream_fix: onText and onStepFinish are
   // independently overwritten by whichever message last emitted a text/finish
@@ -111,6 +149,17 @@ export function create() {
   }
 
   return {
+    // altimate_change start — only a successful commit exempts the request's echo from its turn budget
+    resetCommittedAnswer() {
+      committedAnswer = false
+    },
+    onAnswerCommit(status: "completed" | "error") {
+      committedAnswer = status === "completed"
+    },
+    get committedAnswer() {
+      return committedAnswer
+    },
+    // altimate_change end
     /** Record whether an assistant message is actual compaction machinery. */
     onAssistantMessage(info: { id: string; agent?: string; summary?: boolean }) {
       if (info.summary === true) summaryMessages.add(info.id)

@@ -6,7 +6,9 @@ import fs from "fs/promises"
 import z from "zod"
 import { Filesystem } from "../util/filesystem"
 import { SessionID, MessageID, PartID } from "./schema"
-import { MessageV2 } from "./message-v2"
+// altimate_change start — module-scope echo transport predicate
+import { MessageV2, isEchoTransportError } from "./message-v2"
+// altimate_change end
 import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "."
@@ -24,6 +26,11 @@ import { NudgeArbiter } from "./nudge"
 import { SessionTermination } from "./termination"
 import { Instance } from "../project/instance"
 import { Bus } from "../bus"
+// altimate_change start - distinguish submitted requests from compaction-created user rows in the stream
+import { BusEvent } from "../bus/bus-event"
+import { Database, eq, sql } from "../storage/db"
+import { MessageTable } from "@opencode-ai/core/session/sql"
+// altimate_change end
 import { ProviderTransform } from "../provider/transform"
 import { SystemPrompt } from "./system"
 import { InstructionPrompt } from "./instruction"
@@ -111,6 +118,10 @@ import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altima
 // altimate_change start — keyless public Zen predicate (flat module)
 import { isPublicZen } from "@/provider/public-zen"
 // altimate_change end
+// altimate_change start — distinguish harness deadlines and reuse their committed answer during finalization
+import { RunBudget } from "@/altimate/run-budget"
+import * as RunBudgetEffort from "@/altimate/session/run-budget-effort"
+// altimate_change end
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -124,6 +135,17 @@ IMPORTANT:
 - This tool provides your final answer - no further actions are taken after calling it`
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
+
+// altimate_change start - request identity is independent of compaction message adjacency
+const RequestStarted = BusEvent.define(
+  "session.request.started",
+  z.object({ sessionID: SessionID.zod, messageID: MessageID.zod }),
+)
+const RequestContinued = BusEvent.define(
+  "session.request.continued",
+  z.object({ sessionID: SessionID.zod, messageID: MessageID.zod, parentID: MessageID.zod }),
+)
+// altimate_change end
 
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
@@ -574,7 +596,7 @@ export namespace SessionPrompt {
   }
 
   // altimate_change start — SessionStatus.set became async in v1.4.0; await so idle state actually flushes
-  export async function cancel(sessionID: SessionID) {
+  export async function cancel(sessionID: SessionID, reason?: RunBudget.HarnessDeadline) {
     log.info("cancel", { sessionID })
     const s = state()
     const match = s[sessionID]
@@ -587,7 +609,7 @@ export namespace SessionPrompt {
     // arrive synchronously after cancel() and must start a fresh generation,
     // never queue its callback on the signal that was just aborted.
     match.closing = true
-    match.abort.abort()
+    match.abort.abort(reason)
     if (!match.loopOwned) {
       // shell() also uses start(), but it has no loop disposer when no prompt
       // callbacks are queued. That owner must restore idle directly.
@@ -660,7 +682,7 @@ export namespace SessionPrompt {
     // altimate_change start — client trace: the turns this generation runs. Released when it ends
     // (disposed before the generation's own cleanup, so no newer generation exists yet).
     const tracedTurns = new Set<string>()
-    let currentTurn: string | undefined
+    let currentTurn: MessageID | undefined
     using _traceGeneration = defer(() => TraceContext.release(sessionID, tracedTurns))
     // altimate_change end
 
@@ -819,6 +841,187 @@ export namespace SessionPrompt {
     })
     using _unsubToolsChanged = defer(unsubscribeToolsChanged)
     // altimate_change end
+    // altimate_change start — retain the exact committed text through automatic compaction
+    let committedAnswer: {
+      userID: MessageID
+      output: string
+      assistant: Pick<MessageV2.Assistant, "agent" | "mode" | "modelID" | "providerID" | "variant" | "path">
+    } | undefined
+    const compactionContinuations = new Set<MessageID>()
+    // The legacy message table has no explicit sequence column. Its SQLite rowid
+    // records insertion order and survives updateMessage's data-only upserts.
+    // Read it with the stored timestamp: caller-provided IDs carry no chronology.
+    const readMessageOrder = () => new Map(
+      Database.use((db) => db
+        .select({ id: MessageTable.id, created: MessageTable.time_created, sequence: sql<number>`rowid` })
+        .from(MessageTable)
+        .where(eq(MessageTable.session_id, sessionID))
+        .all()).map((row) => [row.id, row]),
+    )
+    const compareMessageOrder = (order: ReturnType<typeof readMessageOrder>, leftID: MessageID, rightID: MessageID) => {
+      const left = order.get(leftID)
+      const right = order.get(rightID)
+      if (!left || !right) return 0
+      return left.created - right.created || left.sequence - right.sequence
+    }
+    function* orderedMessageStream(order: ReturnType<typeof readMessageOrder>) {
+      // stream() already orders by stored timestamp; repair only tied groups,
+      // retaining lazy history hydration and filterCompacted's summary placement.
+      let tied: MessageV2.WithParts[] = []
+      for (const msg of MessageV2.stream(sessionID)) {
+        if (tied.length && order.get(tied[0].info.id)?.created !== order.get(msg.info.id)?.created) {
+          yield* tied.sort((a, b) => compareMessageOrder(order, b.info.id, a.info.id))
+          tied = []
+        }
+        tied.push(msg)
+      }
+      yield* tied.sort((a, b) => compareMessageOrder(order, b.info.id, a.info.id))
+    }
+    const captureCommittedAnswer = (user: MessageV2.User, assistant: MessageV2.Assistant, parts: MessageV2.Part[]) => {
+      if (assistant.parentID !== user.id || assistant.summary || !parts.some((part) => part.type === "tool")) return
+      const commit = parts.findLast((part) => part.type === "tool" && part.tool === "answer_commit")
+      committedAnswer =
+        user.agent === "analyst" &&
+        (user.format?.type ?? "text") === "text" &&
+        assistant.agent === "analyst" &&
+        commit?.type === "tool" &&
+        commit.state.status === "completed"
+          ? {
+              userID: user.id,
+              assistant: {
+                agent: assistant.agent,
+                mode: assistant.mode,
+                modelID: assistant.modelID,
+                providerID: assistant.providerID,
+                variant: assistant.variant,
+                path: assistant.path,
+              },
+              // Completed-tool metadata retains the full answer through the per-result output cap.
+              output:
+                typeof commit.state.metadata.committed_text === "string"
+                  ? commit.state.metadata.committed_text
+                  : commit.state.output,
+            }
+          : undefined
+    }
+    const publishText = async (parts: MessageV2.TextPart[]) => {
+      for (const part of parts) {
+        await Session.updatePart({ ...part, text: "", time: part.time && { start: part.time.start } })
+        await Session.updatePartDelta({
+          sessionID,
+          messageID: part.messageID,
+          partID: part.id,
+          field: "text",
+          delta: part.text,
+        })
+        await Session.updatePart(part)
+      }
+    }
+    const finishCommittedAnswer = async (
+      message: MessageV2.Assistant,
+      deferredText: MessageV2.TextPart[] = [],
+      error = message.error,
+    ) => {
+      // altimate_change start — a work deadline may publish the answer already committed before cancellation
+      const deadline = abort.reason instanceof RunBudget.HarnessDeadline
+      if (
+        !committedAnswer || (abort.aborted && !deadline) ||
+        compareMessageOrder(readMessageOrder(), message.id, committedAnswer.userID) <= 0
+      ) return false
+      // Keep user aborts and HTTP policy rejections fatal even if a later operation throws another error.
+      if (
+        message.finish === "content-filter" ||
+        [message.error, error].some(
+          (cause) =>
+            (cause?.name === "MessageAbortedError" && !deadline) ||
+            cause?.name === "ContentFilterError" ||
+            (cause &&
+              ["APIError", "UnknownError", "ProviderAuthError"].includes(cause.name) &&
+              !isEchoTransportError(cause)),
+        )
+      )
+        return false
+      // altimate_change end
+      // Once the echo has started, this answer still belongs to the earlier request.
+      // Publish it before the loop continues to any user request queued during generation.
+      const recoveryCause = error ?? message.metadata?.answer_commit_echo_error
+      const cause =
+        recoveryCause ??
+        (message.finish !== "stop" ? { finish: message.finish ?? "unknown" } : undefined)
+      let storedText = MessageV2.parts(message.id).filter((part) => part.type === "text")
+      if (
+        message.summary && message.finish && !message.error &&
+        !message.metadata?.answer_commit_echo_error &&
+        storedText.some((part) => part.text.trim().length > 0)
+      ) {
+        // A successful summary remains the compaction boundary. Deliver the
+        // committed request's answer separately, retaining its original identity.
+        const order = readMessageOrder()
+        let created = Date.now()
+        for (const msg of orderedMessageStream(order)) {
+          if (compareMessageOrder(order, msg.info.id, committedAnswer.userID) <= 0) break
+          if (
+            msg.info.role === "user" &&
+            !msg.parts.some((part) => part.type === "compaction") &&
+            !compactionContinuations.has(msg.info.id)
+          ) {
+            // Walk newest to oldest so the answer precedes the earliest queued request.
+            created = order.get(msg.info.id)!.created - 1
+          }
+        }
+        message = await Session.updateMessage({
+          ...committedAnswer.assistant,
+          id: MessageID.ascending(),
+          parentID: committedAnswer.userID,
+          sessionID,
+          role: "assistant",
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          time: { created },
+        }) as MessageV2.Assistant
+        storedText = []
+        deferredText = []
+      }
+      // Only buffered parts are safe to reuse: stored parts may already have
+      // streamed deltas, and a blank update does not reset client text.
+      const first = deferredText[0]
+      const part: MessageV2.TextPart = {
+        id: first?.id ?? PartID.ascending(),
+        sessionID,
+        messageID: message.id,
+        type: "text",
+        text: committedAnswer.output,
+        time: { start: first?.time?.start ?? message.time.created, end: Date.now() },
+      }
+      for (const old of storedText) {
+        if (old.id !== part.id) await Session.removePart({ sessionID, messageID: message.id, partID: old.id })
+      }
+      if (cause) message.metadata = { ...message.metadata, answer_commit_echo_error: cause }
+      // altimate_change start — reuse delivered commits even when the deadline arrives during publication
+      message.metadata = { ...message.metadata, answer_commit_finalized: true }
+      // altimate_change end
+      delete message.error
+      // A failed summariser becomes the original request's answer, so clients must no longer hide it as compaction machinery.
+      if (message.summary) {
+        delete message.summary
+        message.parentID = committedAnswer.userID
+        message.agent = "analyst"
+        message.mode = "analyst"
+        await Session.updateMessage({ ...message, finish: undefined, time: { created: message.time.created } })
+      }
+      // Persist the authoritative text before making this message terminal on resume.
+      await publishText([part])
+      message.finish = message.finish === "other" && !recoveryCause ? "other" : "stop"
+      message.time.completed = Math.max(message.time.created, Date.now())
+      await Session.updateMessage(message)
+      committedAnswer = undefined
+      return true
+    }
+    // Recovery may finish an earlier request while this generation still has queued work.
+    recovery: while (true) {
+    let loopFailure: { error: unknown } | undefined
+    try {
+    // altimate_change end
     while (true) {
       // altimate_change start — SessionStatus.set became async in v1.4.0; await so busy state flushes before LLM call
       await SessionStatus.set(sessionID, { type: "busy" })
@@ -829,7 +1032,8 @@ export namespace SessionPrompt {
       // compaction marker, hydrate the stream once and pass that unfiltered
       // history to the ledger. Previously filterCompacted read the recent view
       // and process() synchronously hydrated the entire session a second time.
-      const messageStream = MessageV2.stream(sessionID)
+      const messageOrder = readMessageOrder()
+      const messageStream = orderedMessageStream(messageOrder)
       const firstMessage = messageStream.next()
       const newestIsCompaction =
         !firstMessage.done && firstMessage.value.parts.some((part) => part.type === "compaction")
@@ -866,6 +1070,35 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
+      // altimate_change start - only compaction-created continuations belong to the same request
+      const commitRequest = msgs.findLast(
+        (msg) => msg.info.role === "user" && !msg.parts.some((part) => part.type === "compaction"),
+      )
+      if (
+        committedAnswer &&
+        msgs.some(
+          (msg) =>
+            msg.info.role === "user" &&
+            compareMessageOrder(messageOrder, msg.info.id, committedAnswer!.userID) > 0 &&
+            !msg.parts.some((part) => part.type === "compaction") &&
+            !compactionContinuations.has(msg.info.id),
+        )
+      ) {
+        // A request queued after the commit still receives its own response;
+        // publish the completed answer for the earlier request first.
+        // Reload persisted history so the queued request includes the recovered answer.
+        if (lastAssistant && (await finishCommittedAnswer(lastAssistant))) continue
+        committedAnswer = undefined
+      }
+      if (commitRequest?.info.role === "user" && lastAssistant) {
+        // Text-only echoes and compaction summaries retain the commit until delivery or a new request.
+        captureCommittedAnswer(
+          commitRequest.info,
+          lastAssistant,
+          msgs.find((msg) => msg.info.id === lastAssistant.id)?.parts ?? [],
+        )
+      }
+      // altimate_change end
       // altimate_change start — client trace for this step. A user message carrying a compaction
       // part was created by this loop: it continues the turn that triggered it. Any other user
       // message is a turn of its own, traced or not.
@@ -873,8 +1106,10 @@ export namespace SessionPrompt {
       const isCompaction = msgs.some(
         (msg) => msg.info.id === stepUser.id && msg.parts.some((part) => part.type === "compaction"),
       )
-      if (isCompaction && currentTurn && !TraceContext.forMessage(stepUser.id)) {
-        TraceContext.inherit(stepUser.id, currentTurn)
+      if (isCompaction && currentTurn) {
+        // Request ownership must survive even when no client trace is active.
+        await Bus.publish(RequestContinued, { sessionID, messageID: stepUser.id, parentID: currentTurn })
+        if (!TraceContext.forMessage(stepUser.id)) TraceContext.inherit(stepUser.id, currentTurn)
       } else if (!isCompaction) {
         currentTurn = stepUser.id
       }
@@ -883,6 +1118,22 @@ export namespace SessionPrompt {
       // altimate_change end
       // altimate_change start — always track the current agent name so early breaks still report it
       if (lastUser.agent) sessionAgentName = lastUser.agent
+      // altimate_change end
+      // altimate_change start — budget finalization acknowledges a delivered commit without a model turn
+      const finalizationParts = msgs.find((msg) => msg.info.id === lastUser.id)?.parts
+      if (
+        RunBudgetEffort.toolsDisabled(sessionID) &&
+        lastAssistant?.metadata?.answer_commit_finalized === true &&
+        lastAssistant.finish === "stop" && !lastAssistant.error &&
+        lastUser.agent === "analyst" && (lastUser.format?.type ?? "text") === "text" &&
+        finalizationParts?.length === 1 &&
+        finalizationParts[0].type === "text" && finalizationParts[0].synthetic &&
+        finalizationParts[0].text === SessionTermination.REPLY_AFTER_BUDGET &&
+        !msgs.some((msg) =>
+          msg.info.role === "user" && msg.info.id !== lastUser.id &&
+          compareMessageOrder(messageOrder, msg.info.id, lastAssistant!.id) > 0,
+        )
+      ) break
       // altimate_change end
       // altimate_change start — upstream_fix: a provider can finish with
       // "stop" while still emitting tool parts; those tools must be replayed
@@ -900,7 +1151,7 @@ export namespace SessionPrompt {
         lastAssistant?.finish &&
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
         !lastAssistantHasToolParts &&
-        lastUser.id < lastAssistant.id
+        lastAssistant.parentID === lastUser.id
       ) {
         log.info("exiting loop", { sessionID })
         break
@@ -1113,6 +1364,7 @@ export namespace SessionPrompt {
           await Session.updateMessage(summaryUserMsg)
           // altimate_change start — this loop-written message continues the step's turn (client trace)
           TraceContext.inherit(summaryUserMsg.id, lastUser.id)
+          await Bus.publish(RequestContinued, { sessionID, messageID: summaryUserMsg.id, parentID: lastUser.id })
           // altimate_change end
           await Session.updatePart({
             id: PartID.ascending(),
@@ -1135,6 +1387,9 @@ export namespace SessionPrompt {
           return false
         })
         // altimate_change end
+        // altimate_change start — publish the recorded continuation origin before its next assistant
+        let continuationID: MessageID | undefined
+        // altimate_change end
         const result = await SessionCompaction.process({
           messages: msgs,
           parentID: lastUser.id,
@@ -1142,6 +1397,13 @@ export namespace SessionPrompt {
           sessionID,
           auto: task.auto,
           overflow: task.overflow,
+          // altimate_change start - distinguish automatic continuations from user-authored synthetic parts
+          onContinuation: (messageID) => {
+            compactionContinuations.add(messageID)
+            continuationID = messageID
+          },
+          recoverCommittedAnswer: committedAnswer !== undefined,
+          // altimate_change end
           // altimate_change start — keep nudge delivery scoped to this prompt generation
           nudgeGeneration,
           // altimate_change end
@@ -1152,6 +1414,11 @@ export namespace SessionPrompt {
           learnDelivery: learnDelivery ? lessonState : undefined,
           // altimate_change end
         })
+        // altimate_change start — attached run clients cannot read the compactor's in-memory origin
+        if (continuationID) {
+          await Bus.publish(RequestContinued, { sessionID, messageID: continuationID, parentID: lastUser.id })
+        }
+        // altimate_change end
         // altimate_change start — treat any non-"continue" result as stop: an
         // undefined/unknown result must never fall through to `continue`, which
         // re-enters compaction on the same unresolved marker and busy-loops.
@@ -1466,6 +1733,9 @@ export namespace SessionPrompt {
 
       // Inject StructuredOutput tool if JSON schema mode enabled
       if (lastUser.format?.type === "json_schema") {
+        // altimate_change start - schema-mode requests finish through StructuredOutput, never answer_commit
+        delete tools.answer_commit
+        // altimate_change end
         tools["StructuredOutput"] = createStructuredOutputTool({
           schema: lastUser.format.schema,
           onSuccess(output) {
@@ -1593,7 +1863,9 @@ export namespace SessionPrompt {
       // Ephemerally wrap queued user messages with a reminder to stay on track
       if (step > 1 && lastFinished) {
         for (const msg of msgs) {
-          if (msg.info.role !== "user" || msg.info.id <= lastFinished.id) continue
+          // altimate_change start - queued request order is independent of caller-supplied IDs
+          if (msg.info.role !== "user" || compareMessageOrder(messageOrder, msg.info.id, lastFinished.id) <= 0) continue
+          // altimate_change end
           for (const part of msg.parts) {
             if (part.type !== "text" || part.ignored || part.synthetic) continue
             if (!part.text.trim()) continue
@@ -1688,6 +1960,11 @@ export namespace SessionPrompt {
       if (format.type === "json_schema") {
         system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
       }
+      // altimate_change start - every successful commit makes the next generation an echo, including after compaction
+      const echoCommittedAnswer =
+        format.type === "text" && agent.name === "analyst" && committedAnswer !== undefined
+      const deferredText: MessageV2.TextPart[] = []
+      // altimate_change end
 
       // altimate_change start - trace system prompt once per loop() call.
       // The system prompt is functionally identical across steps within a single
@@ -1723,6 +2000,50 @@ export namespace SessionPrompt {
       }
       // altimate_change end
 
+      // altimate_change start - keep past commits as context without letting historical tool stubs re-advertise them in schema mode
+      const modelHistory =
+        format.type === "json_schema"
+          ? msgs.map((msg) => ({
+              ...msg,
+              parts: msg.parts.map((part): MessageV2.Part => {
+                if (part.type !== "tool" || part.tool !== "answer_commit") return part
+                let text = "answer_commit did not complete."
+                if (part.state.status === "error") text = part.state.error
+                if (part.state.status === "completed") {
+                  const mask = part.state.metadata?.observation_mask
+                  text = part.state.time.compacted
+                    ? typeof mask === "string" && mask.length > 0
+                      ? mask
+                      : "[Old tool result content cleared]"
+                    : part.state.output
+                }
+                return { id: part.id, sessionID: part.sessionID, messageID: part.messageID, type: "text", text }
+              }),
+            }))
+          : msgs
+      // altimate_change end
+      // altimate_change start - recheck persisted requests after asynchronous history conversion, before sending an echo
+      const modelMessages = await MessageV2.toModelMessages(modelHistory, model)
+      if (echoCommittedAnswer && committedAnswer) {
+        const order = readMessageOrder()
+        let newerUserRequest = false
+        for (const msg of MessageV2.stream(sessionID)) {
+          if (
+            msg.info.role === "user" &&
+            compareMessageOrder(order, msg.info.id, committedAnswer.userID) > 0 &&
+            !msg.parts.some((part) => part.type === "compaction") &&
+            !compactionContinuations.has(msg.info.id)
+          ) {
+            newerUserRequest = true
+            break
+          }
+        }
+        if (newerUserRequest) {
+          await finishCommittedAnswer(processor.message)
+          continue
+        }
+      }
+      // altimate_change end
       const result = await processor.process({
         user: lastUser,
         // altimate_change start — correlate request-boundary snapshots with this assistant message
@@ -1733,21 +2054,59 @@ export namespace SessionPrompt {
         sessionID,
         system,
         messages: [
-          ...(await MessageV2.toModelMessages(msgs, model)),
-          ...(isLastStep
+          // altimate_change start - use the history converted before the fresh-user check
+          ...modelMessages,
+          // altimate_change end
+          // altimate_change start - a committed answer uses the next normal generation even before the step limit
+          ...(echoCommittedAnswer
             ? [
                 {
-                  role: "assistant" as const,
-                  content: MAX_STEPS,
+                  // A user turn: Bedrock's Converse API rejects a conversation that ends with an
+                  // assistant message ("conversation must end with a user message"), and every
+                  // provider accepts an instruction as the final user turn.
+                  role: "user" as const,
+                  content: "Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else.",
                 },
               ]
-            : []),
+            : isLastStep
+              ? [
+                  {
+                    role: "assistant" as const,
+                    content: MAX_STEPS,
+                  },
+                ]
+              : []),
+          // altimate_change end
         ],
-        tools,
+        // altimate_change start - the final echo cannot spend another step on tools
+        tools: echoCommittedAnswer ? {} : tools,
+        deferText: echoCommittedAnswer ? deferredText : undefined,
+        // altimate_change end
         model,
-        toolChoice: format.type === "json_schema" ? "required" : undefined,
+        // altimate_change start - a user output schema still takes precedence over text finalization
+        toolChoice: echoCommittedAnswer ? "none" : format.type === "json_schema" ? "required" : undefined,
+        // altimate_change end
       })
 
+      // altimate_change start - finalize buffered echoes before publishing any text to clients
+      const stepParts = MessageV2.parts(processor.message.id)
+      // Capture before post-processing can fail or request compaction.
+      captureCommittedAnswer(lastUser, processor.message, stepParts)
+      if (echoCommittedAnswer && result === "compact") {
+        processor.message.metadata = {
+          ...processor.message.metadata,
+          answer_commit_echo_error: processor.message.metadata?.answer_commit_echo_error ?? {
+            result,
+            finish: processor.message.finish ?? "unknown",
+          },
+        }
+      }
+      const echoFinished =
+        echoCommittedAnswer && (await finishCommittedAnswer(processor.message, deferredText))
+      // Abort and content-filter exits retain their original buffered text and timing.
+      if (!echoFinished) await publishText(deferredText)
+      // A finalized echo already has its answer, including when usage requested compaction.
+      // altimate_change end
       // If structured output was captured, save it and exit immediately
       // This takes priority because the StructuredOutput tool was called successfully
       if (structuredOutput !== undefined) {
@@ -1776,7 +2135,6 @@ export namespace SessionPrompt {
       sessionTotalCost += processor.message.cost ?? 0
       const t = processor.message.tokens
       sessionTotalTokens += t.input + t.output + t.reasoning + t.cache.read + t.cache.write
-      const stepParts = await MessageV2.parts(processor.message.id)
       toolCallCount += stepParts.filter((p) => p.type === "tool").length
       if (processor.message.error) sessionHadError = true
       // altimate_change start — capture last message error for agent_outcome reason
@@ -2016,6 +2374,7 @@ export namespace SessionPrompt {
             } as MessageV2.Info)
             // This loop-written message continues the step's turn (client trace).
             TraceContext.inherit(syntheticMessageID, lastUser.id)
+            await Bus.publish(RequestContinued, { sessionID, messageID: syntheticMessageID, parentID: lastUser.id })
 
             // Append the validator body as a text part on the new user message.
             await Session.updatePart({
@@ -2069,6 +2428,9 @@ export namespace SessionPrompt {
       }
       // altimate_change end
 
+      // altimate_change start - use the normal stop check for finished echoes, preserving any newly queued request
+      if (echoFinished) continue
+      // altimate_change end
       if (result === "stop") break
       if (result === "compact") {
         // altimate_change start — track compaction count
@@ -2088,6 +2450,39 @@ export namespace SessionPrompt {
       }
       continue
     }
+    // altimate_change start - one request-exit guard covers compaction stops and failures outside the processor
+    } catch (error) {
+      loopFailure = { error }
+    }
+    let recovered = false
+    const recoveredUserID = committedAnswer?.userID
+    if (committedAnswer) {
+      const exiting = [...orderedMessageStream(readMessageOrder())].find((msg) => msg.info.role === "assistant")
+      if (exiting?.info.role === "assistant") {
+        recovered = await finishCommittedAnswer(
+          exiting.info,
+          [],
+          loopFailure ? MessageV2.fromError(loopFailure.error, { providerID: exiting.info.providerID }) : exiting.info.error,
+        )
+      }
+    }
+    if (loopFailure && !recovered) throw loopFailure.error
+    if (recovered && recoveredUserID) {
+      // Publishing can itself yield to a queued prompt. Re-read persisted order
+      // before resolving this generation's callers with the recovered answer.
+      const order = readMessageOrder()
+      for (const msg of orderedMessageStream(order)) {
+        if (compareMessageOrder(order, msg.info.id, recoveredUserID) <= 0) break
+        if (
+          msg.info.role === "user" &&
+          !msg.parts.some((part) => part.type === "compaction") &&
+          !compactionContinuations.has(msg.info.id)
+        ) continue recovery
+      }
+    }
+    break
+    }
+    // altimate_change end
     // altimate_change start — the generation-scoped disposer publishes the
     // sole normal idle transition after removing this loop from state. Abort
     // and processor-error paths may already be idle; the disposer detects that.
@@ -2203,7 +2598,7 @@ export namespace SessionPrompt {
     await Telemetry.shutdown()
     // altimate_change end
     // altimate_change start — resolve callbacks from this prompt generation only
-    for await (const item of MessageV2.stream(sessionID)) {
+    for (const item of orderedMessageStream(readMessageOrder())) {
       if (item.info.role === "user") continue
       // Resolve only callers queued on THIS loop generation. A cancelled loop
       // may finish unwinding after a replacement generation has already begun;
@@ -3007,6 +3402,9 @@ export namespace SessionPrompt {
     for (const part of parts) {
       await Session.updatePart(part)
     }
+    // altimate_change start - internal compaction continuations do not pass through this request boundary
+    await Bus.publish(RequestStarted, { sessionID: input.sessionID, messageID: info.id })
+    // altimate_change end
 
     return {
       info,

@@ -22,6 +22,7 @@ import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change end
 // altimate_change start — run-scoped request interruption and effort overrides
 import { withBudgetControl } from "@/altimate/session/run-budget-control"
+import { RunBudget } from "@/altimate/run-budget"
 // altimate_change end
 // altimate_change start — upstream_fix: bridge merge wired routes to Effect-TS Permission, but the runtime
 // asks come from PermissionNext. Use PermissionNext here so this deprecated reply route hits the same
@@ -400,7 +401,12 @@ export const SessionRoutes = lazy(() =>
         }),
       ),
       async (c) => {
-        await SessionPrompt.cancel(c.req.valid("param").sessionID)
+        // altimate_change start — carry harness deadline provenance through the SDK abort endpoint
+        await SessionPrompt.cancel(
+          c.req.valid("param").sessionID,
+          c.req.header("x-altimate-run-budget") === "hard-deadline" ? new RunBudget.HarnessDeadline() : undefined,
+        )
+        // altimate_change end
         return c.json(true)
       },
     )

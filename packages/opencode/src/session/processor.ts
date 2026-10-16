@@ -1,4 +1,6 @@
-import { MessageV2 } from "./message-v2"
+// altimate_change start — module-scope echo transport predicate
+import { MessageV2, isEchoTransportError } from "./message-v2"
+// altimate_change end
 import { Log } from "@/util/log"
 // altimate_change start — client trace propagation
 import { TraceContext } from "@/altimate/observability/trace-context"
@@ -296,6 +298,9 @@ export namespace SessionProcessor {
     // altimate_change start — keep nudge delivery scoped to the active prompt generation
     nudgeGeneration?: NudgeArbiter.Generation
     // altimate_change end
+    // altimate_change start - recover summarizer failures only when the prompt retains this request's committed answer
+    recoverCommittedAnswer?: boolean
+    // altimate_change end
   }) {
     // altimate_change start — Map (not plain object) so adversarial ids can
     // never resolve to inherited Object.prototype members.
@@ -373,9 +378,14 @@ export namespace SessionProcessor {
         return id === undefined ? undefined : toolcalls.get(id)
       },
       // altimate_change end
-      async process(streamInput: LLM.StreamInput) {
+      // altimate_change start - opt-in text buffering for committed-answer echoes
+      async process({ deferText, ...streamInput }: LLM.StreamInput & { deferText?: MessageV2.TextPart[] }) {
+        // altimate_change end
         log.info("process")
         needsCompaction = false
+        // altimate_change start - let the prompt's exit guard publish a recovered compaction answer
+        let recoveredCommittedAnswer = false
+        // altimate_change end
         // altimate_change start — resolve breaker config + arm state once per step.
         // ANNOTATE-ONLY by default (mode "annotate"): directives and the hard stop
         // require mode "armed" AND run mode. Skipped entirely for plan/review-class
@@ -1144,7 +1154,9 @@ export namespace SessionProcessor {
                     tokens: usage.tokens,
                     cost: usage.cost,
                   })
-                  await Session.updateMessage(input.assistantMessage)
+                  // altimate_change start - buffered echoes publish authoritative text before a finished message
+                  if (!deferText || input.assistantMessage.error) await Session.updateMessage(input.assistantMessage)
+                  // altimate_change end
                   // altimate_change start — capture the snapshot diff as the generic,
                   // command-agnostic mutation ground truth (also catches bash-mediated
                   // writes like `sed -i`/heredocs, which emit no edit event).
@@ -1227,13 +1239,19 @@ export namespace SessionProcessor {
                     },
                     metadata: value.providerMetadata,
                   }
-                  await Session.updatePart(currentText)
+                  // altimate_change start - retain the live part through text deltas and completion
+                  if (deferText) deferText.push(currentText)
+                  else await Session.updatePart(currentText)
+                  // altimate_change end
                   break
 
                 case "text-delta":
                   if (currentText) {
                     currentText.text += value.text
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata
+                    // altimate_change start - unvalidated echo deltas must not reach clients
+                    if (deferText) break
+                    // altimate_change end
                     await Session.updatePartDelta({
                       sessionID: currentText.sessionID,
                       messageID: currentText.messageID,
@@ -1262,7 +1280,9 @@ export namespace SessionProcessor {
                       end: Date.now(),
                     }
                     if (value.providerMetadata) currentText.metadata = value.providerMetadata
-                    await Session.updatePart(currentText)
+                    // altimate_change start - publish the echo only after finish validation
+                    if (!deferText) await Session.updatePart(currentText)
+                    // altimate_change end
                   }
                   currentText = undefined
                   break
@@ -1300,7 +1320,20 @@ export namespace SessionProcessor {
                 // altimate_change end
               })
               const error = MessageV2.fromError(e, { providerID: input.model.providerID })
-              if (MessageV2.ContextOverflowError.isInstance(error)) {
+              // altimate_change start — committed echoes and summaries retain recoverable causes without a fatal event
+              if (
+                (deferText || (input.recoverCommittedAnswer && input.assistantMessage.summary)) &&
+                !input.abort.aborted &&
+                input.assistantMessage.finish !== "content-filter" &&
+                (isEchoTransportError(error) || MessageV2.ContextOverflowError.isInstance(error))
+              ) {
+                input.assistantMessage.metadata = {
+                  ...input.assistantMessage.metadata,
+                  answer_commit_echo_error: error,
+                }
+                recoveredCommittedAnswer = input.recoverCommittedAnswer === true && input.assistantMessage.summary === true
+              } else if (MessageV2.ContextOverflowError.isInstance(error)) {
+              // altimate_change end
                 if ((await Config.get()).compaction?.auto === false && !input.assistantMessage.summary) {
                   // altimate_change start — upstream_fix: honor
                   // compaction.auto=false on reactive provider overflow.
@@ -1310,7 +1343,8 @@ export namespace SessionProcessor {
                     sessionID: input.sessionID,
                     error,
                   })
-                  await SessionStatus.set(input.sessionID, { type: "idle" })
+                  // The prompt loop publishes idle after flushing deferred text.
+                  if (!deferText) await SessionStatus.set(input.sessionID, { type: "idle" })
                   // altimate_change end
                 } else {
                   needsCompaction = true
@@ -1347,11 +1381,11 @@ export namespace SessionProcessor {
                   })
                 }
                 // altimate_change end
-                input.assistantMessage.error = error
                 // altimate_change start — order terminal error before idle publication
                 // Publish the error before idle. The run harness drains this
                 // generation through idle before opening a challenge stream; an
                 // unawaited publish can otherwise arrive on that fresh stream.
+                input.assistantMessage.error = error
                 await Bus.publish(Session.Event.Error, {
                   sessionID: input.assistantMessage.sessionID,
                   error: input.assistantMessage.error,
@@ -1371,8 +1405,9 @@ export namespace SessionProcessor {
                     context: "streaming",
                   })
                 // altimate_change end
-                // altimate_change start — upstream_fix: requested aborts publish idle after partial results are committed
-                if (!input.abort.aborted) await SessionStatus.set(input.sessionID, { type: "idle" })
+                // altimate_change start — await idle after abort cleanup or prompt-owned deferred text publication
+                // Requested aborts publish idle below; deferred text leaves it to the prompt loop.
+                if (!deferText && !input.abort.aborted) await SessionStatus.set(input.sessionID, { type: "idle" })
                 // altimate_change end
               }
             // altimate_change start — end ordinary provider/session error handling
@@ -1385,7 +1420,7 @@ export namespace SessionProcessor {
             const end = Date.now()
             if (currentText) {
               currentText.time = { start: currentText.time?.start ?? end, end }
-              await Session.updatePart(currentText)
+              if (!deferText) await Session.updatePart(currentText)
             }
             for (const part of Object.values(reasoningMap)) {
               part.time = { ...part.time, end }
@@ -1416,9 +1451,10 @@ export namespace SessionProcessor {
             }
           }
           input.assistantMessage.time.completed = Date.now()
-          await Session.updateMessage(input.assistantMessage)
-          // altimate_change start — upstream_fix: flush interrupted text and child findings before CLI finalization starts
-          if (input.abort.aborted) await SessionStatus.set(input.sessionID, { type: "idle" })
+          // altimate_change start — finalize buffered echoes in the prompt; flush interrupted results before idle
+          if (!deferText || input.assistantMessage.error) await Session.updateMessage(input.assistantMessage)
+          // The prompt loop still commits deferred text on abort and publishes idle after that flush.
+          if (input.abort.aborted && !deferText) await SessionStatus.set(input.sessionID, { type: "idle" })
           // altimate_change end
           // altimate_change start — explicit model DONE is the PRIMARY
           // termination path. A turn that finished with "stop", has no error, and
@@ -1447,6 +1483,7 @@ export namespace SessionProcessor {
           // altimate_change start — the ordering itself lives in the exported
           // `resolveFinishOutcome` so the unit gate can exercise the REAL
           // decision instead of a hand-written copy of it (PR #1171 review).
+          if (recoveredCommittedAnswer) return "stop" as const
           return resolveFinishOutcome({
             needsCompaction,
             explicitDone,

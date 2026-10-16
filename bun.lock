@@ -371,6 +371,7 @@
         "@types/turndown": "5.0.5",
         "@types/yargs": "17.0.33",
         "@typescript/native-preview": "catalog:",
+        "ajv": "8.20.0",
         "drizzle-orm": "catalog:",
         "playwright-core": "1.59.1",
         "prettier": "3.6.2",

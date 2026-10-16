@@ -81,6 +81,7 @@ Options:
                                                                                             [string]"
 `;
 
+// altimate_change start — document the committed-answer echo allowance in run help
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode run --help 1`] = `
 "altimate-code run [message..]
 
@@ -134,14 +135,15 @@ Options:
                                       statement (1-indexed)                                 [number]
       --trace                         enable session tracing (default: true, disable with
                                       --no-trace)                          [boolean] [default: true]
-      --max-turns                     maximum assistant work turns; one best-effort finalization
-                                      generation may follow the limit                       [number]
+      --max-turns                     maximum assistant work turns; allows one committed-answer
+                                      echo, or one best-effort reply after a budget abort   [number]
       --time-budget                   maximum work time in seconds (env:
                                       ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow
                                                                                             [number]
       --dangerously-skip-permissions  auto-approve permissions that are not explicitly denied
                                       (dangerous!)                        [boolean] [default: false]"
 `;
+// altimate_change end
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode debug --help 1`] = `
 "altimate-code debug

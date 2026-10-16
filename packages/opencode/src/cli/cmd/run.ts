@@ -407,7 +407,7 @@ export const RunCommand = cmd({
         // altimate_change start — budget limits for CI/enterprise governance
         .option("max-turns", {
           type: "number",
-          describe: "maximum assistant work turns; one best-effort finalization generation may follow the limit",
+          describe: "maximum assistant work turns; allows one committed-answer echo, or one best-effort reply after a budget abort",
         })
         // altimate_change start — wall-clock work budget, with a separate finalization allowance
         .option("time-budget", {
@@ -729,6 +729,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change start — turn accounting + dual-attribution
       // termination state for this run (see run-accounting.ts).
       const accounting = RunAccounting.create()
+      const requestOwnership = RunAccounting.createRequestOwnership()
+      // A queued request must not revoke the in-flight echo owned by an earlier request.
+      const committedRequests = new Set<string>()
+      const beginRequest = (messageID: string) => {
+        // The persisted request boundary includes requests from other attached clients.
+        // Retries retain their ID; internal synthetic/compaction rows do not emit this event.
+        if (!requestOwnership.beginRequest(messageID)) return
+        accounting.resetCommittedAnswer()
+      }
       // altimate_change end
       // altimate_change start — idle-done fallback state (run-mode-only by
       // construction — this exists only in the run command). Thresholds are
@@ -849,12 +858,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const abortForTimeBudget = () => {
         if (!sessionID || timeAbortRequested) return
         timeAbortRequested = true
-        timeBudgetAbort = sdk.session.abort({ sessionID }, { signal: AbortSignal.timeout(5_000) }).then((result) => {
+        // altimate_change start — distinguish harness deadlines from user cancellation on the server
+        timeBudgetAbort = sdk.session.abort(
+          { sessionID },
+          { signal: AbortSignal.timeout(5_000), headers: { "x-altimate-run-budget": "hard-deadline" } },
+        ).then((result) => {
           if (result.error) throw result.error
         }).catch((e) => {
           accounting.onSessionError("TimeBudgetAbortError", String(e))
           eventAbort.abort()
         })
+        // altimate_change end
       }
       const checkTimeBudget = () => {
         if (!sessionID || !workActive || timeExhausted()) return
@@ -889,12 +903,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // altimate_change start — save the reminder then interrupt only the active model request
         // The server applies the effort override before saving this user turn,
         // and defers interruption until executing tools have kept their results.
+        const messageID = MessageID.ascending()
+        beginRequest(messageID)
         // altimate_change end
         timeBudgetReminder = sdk.session
           // altimate_change start — carries soft control to both local and attached servers
           .prompt(
             {
               sessionID,
+              messageID,
               noReply: true,
               agent,
               model: args.model ? Provider.parseModel(args.model) : undefined,
@@ -955,6 +972,25 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (options?.signal?.aborted) break
           await runTracing?.observe(event)
           if (options?.signal?.aborted) break
+          // altimate_change start — preserve request boundaries and internal continuation ownership on attached streams
+          const requestEvent = event as {
+            type: string
+            properties: { sessionID?: string; messageID?: string; parentID?: string }
+          }
+          if (
+            requestEvent.type === "session.request.started" &&
+            requestEvent.properties.sessionID === sessionID &&
+            requestEvent.properties.messageID
+          )
+            beginRequest(requestEvent.properties.messageID)
+          if (
+            requestEvent.type === "session.request.continued" &&
+            requestEvent.properties.sessionID === sessionID &&
+            requestEvent.properties.messageID &&
+            requestEvent.properties.parentID
+          )
+            requestOwnership.onUserMessage(requestEvent.properties.messageID, requestEvent.properties.parentID)
+          // altimate_change end
           // altimate_change start — shared SDKs omit fork-only run budget events
           const budgetEvent = event as { type: string; properties: { sessionID?: string; timestamp?: number } }
           if (budgetEvent.properties.sessionID === sessionID && typeof budgetEvent.properties.timestamp === "number") {
@@ -974,10 +1010,22 @@ You are speaking to a non-technical business executive. Follow these rules stric
           // its first step-start part streams, so the lookup is populated in time.
           if (
             event.type === "message.updated" &&
+            event.properties.info.role === "user" &&
+            event.properties.info.sessionID === sessionID
+          ) {
+            // This provisional owner is replaced by the persisted request boundary
+            // or the internal continuation's explicit origin before its assistant starts.
+            requestOwnership.onUserMessage(event.properties.info.id)
+          }
+          if (
+            event.type === "message.updated" &&
             event.properties.info.role === "assistant" &&
             event.properties.info.sessionID === sessionID
           ) {
             accounting.onAssistantMessage(event.properties.info)
+            // Keep the request that owned the assistant's creation, even if an older
+            // tool finishes after another attached client persists a new request.
+            requestOwnership.onAssistantMessage(event.properties.info)
             assistantStarted = true
             // Enrich only from this run's assistant, independently of presentation.
             const info = event.properties.info
@@ -1004,12 +1052,29 @@ You are speaking to a non-technical business executive. Follow these rules stric
             toggles.set("start", true)
           }
 
+          // altimate_change start — discarded streamed text must not survive in --output fallbacks
+          if (event.type === "message.part.removed" && event.properties.sessionID === sessionID) {
+            outputParts.remove(event.properties.partID)
+          }
+          // altimate_change end
           if (event.type === "message.part.updated") {
             const part = event.properties.part
             if (part.sessionID !== sessionID) continue
 
             // altimate_change start — tool steps cannot satisfy the final-answer check
             if (part.type === "tool" && !accounting.isCompactionStep(part.messageID)) lastToolStep = step
+            if (
+              part.type === "tool" && part.tool === "answer_commit" &&
+              (part.state.status === "completed" || part.state.status === "error")
+            ) {
+              const requestID = requestOwnership.ownerOf(part.messageID)
+              if (requestID !== undefined) {
+                // Success and failed retries affect only the request that owns this tool.
+                if (part.state.status === "completed") committedRequests.add(requestID)
+                else committedRequests.delete(requestID)
+                if (requestID === requestOwnership.activeRequestID) accounting.onAnswerCommit(part.state.status)
+              }
+            }
             // altimate_change end
 
             // altimate_change start — feed every part event through the
@@ -1063,9 +1128,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // the owning message's agent is resolved via the message.updated lookup
               // above, so compacting models are not differentially charged turns.
               const counted = accounting.onStepStart(part.messageID)
+              const requestID = requestOwnership.ownerOf(part.messageID)
+              const committedAnswer = requestID !== undefined && committedRequests.has(requestID)
               // altimate_change start — the time-budget abort already owns the interrupted work phase
               if (
-                counted && maxTurns && accounting.turnCount > maxTurns && !budgetAborted &&
+                counted && maxTurns && accounting.turnCount > maxTurns && !committedAnswer && !budgetAborted &&
                 (!timeExhausted() || options?.turnLimit !== undefined)
               ) {
                 stopTimeBudget()
@@ -1139,6 +1206,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
               const text = part.text.trim()
               if (args.output && text) {
                 outputParts.text(text, {
+                  partID: part.id,
                   synthetic: part.synthetic === true,
                   compaction: accounting.isCompactionStep(part.messageID),
                 })
@@ -1537,6 +1605,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // server whether that message landed, and only re-send when it did not.
       const sendMessageID = MessageID.ascending()
       const send = () => {
+        beginRequest(sendMessageID)
         // altimate_change start — start once at prompt dispatch, never reset on retry or child work
         startWorkClock()
         // altimate_change end
@@ -1656,6 +1725,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
           })
           let streamFailed = false
           const messageID = MessageID.ascending()
+          beginRequest(messageID)
           const promptPromise = (async (): Promise<SendResult | undefined> => {
             // The previous turn may have published idle just before releasing its
             // session lock. Retry that narrow race, but only after definitive

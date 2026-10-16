@@ -33,6 +33,9 @@ import { WebSearchTool } from "./websearch"
 import { CodeSearchTool } from "./codesearch"
 import { Flag } from "@/flag/flag"
 import { Log } from "@/util/log"
+// altimate_change start — reserved tool IDs must use the permission matcher's platform semantics.
+import { Wildcard } from "@/util/wildcard"
+// altimate_change end
 import { LspTool } from "./lsp"
 // altimate_change start — bridge legacy plugin tools to the Effect Tool API (v1.17.9)
 import { Effect } from "effect"
@@ -63,6 +66,7 @@ import { pathToFileURL } from "url"
 import { SqlExecuteTool } from "../altimate/tools/sql-execute"
 import { SqlMaterializeTool } from "../altimate/tools/sql-materialize"
 import { SqlCheckTool } from "../altimate/tools/sql-check"
+import { AnswerCommit } from "../altimate/tools/answer-commit"
 import { SchemaInspectTool } from "../altimate/tools/schema-inspect"
 import { SqlAnalyzeTool } from "../altimate/tools/sql-analyze"
 import { SqlOptimizeTool } from "../altimate/tools/sql-optimize"
@@ -537,8 +541,9 @@ export namespace ToolRegistry {
     )
     // altimate_change end
     // altimate_change end
-    // altimate_change start — include plugin-provided custom tools
-    return [...resolved, ...custom, ...pluginCustom]
+    // altimate_change start — reserve the finalizer ID from file/plugin tools even when
+    // its native candidate is disabled or this catalogue is used without an analyst.
+    return [...resolved, ...custom, ...pluginCustom].filter((tool) => !Wildcard.match(tool.id, "answer_commit"))
     // altimate_change end
   }
 
@@ -571,6 +576,13 @@ export namespace ToolRegistry {
     // A project linked to a workspace gets its integrations from the workspace's
     // engine only; the older datamate route is not offered there.
     const hidden = await hiddenToolIds()
+    // altimate_change end
+    // altimate_change start — analyst-only finalization is a gated candidate, never a tool_lookup catalogue entry.
+    // A configured agent named analyst intentionally retains access. External tools cannot
+    // use this reserved ID: all() excludes file/plugin collisions and MCP.tools excludes MCP collisions.
+    if (agent?.name === "analyst" && process.env.ALTIMATE_ANSWER_COMMIT !== "0") {
+      tools.push(await AppRuntime.runPromise(AnswerCommit.AnswerCommitTool))
+    }
     // altimate_change end
     const result = await Promise.all(
       tools

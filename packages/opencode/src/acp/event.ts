@@ -40,6 +40,9 @@ export class Subscription {
   private readonly abort = new AbortController()
   private readonly shellSnapshots = new Map<string, string>()
   private readonly toolStarts = new Set<string>()
+  // altimate_change start — ACP chunks cannot retract provisional compaction text
+  private readonly summaryMessages = new Set<string>()
+  // altimate_change end
   private readonly permission: ACPPermission.Handler
   private started = false
 
@@ -67,6 +70,15 @@ export class Subscription {
 
   async handle(event: Event) {
     switch (event.type) {
+      // altimate_change start — recovery clears summary before publishing its authoritative answer
+      case "message.updated": {
+        const message = event.properties.info
+        if (message.role !== "assistant") return
+        if (message.summary) this.summaryMessages.add(message.id)
+        else this.summaryMessages.delete(message.id)
+        return
+      }
+      // altimate_change end
       case "permission.asked":
         this.permission.handle(event)
         return
@@ -169,6 +181,9 @@ export class Subscription {
         : await this.fetchPartMetadata(session.id, session.cwd, props.messageID, props.partID)
     if (metadata?.role !== "assistant") return
     if (metadata.partType === "text" && props.field === "text" && metadata.ignored !== true) {
+      // altimate_change start — internal summaries may be removed or replaced after streaming
+      if (this.summaryMessages.has(props.messageID)) return
+      // altimate_change end
       await this.input.connection.sessionUpdate({
         sessionId: session.id,
         update: {
@@ -218,6 +233,9 @@ export class Subscription {
   }
 
   private async recordFetchedPart(sessionId: string, message: SessionMessageResponse, part: Part) {
+    // altimate_change start — cover subscriptions that join after the initial message update
+    if (message.info.role === "assistant" && message.info.summary) this.summaryMessages.add(message.info.id)
+    // altimate_change end
     return await Effect.runPromise(
       this.input.session.recordPartMetadata({
         sessionId,

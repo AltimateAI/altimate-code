@@ -1,4 +1,4 @@
-// altimate_change — what `altimate-code run --output <file>` writes.
+// altimate_change start — what `altimate-code run --output <file>` writes.
 //
 // The file is the answer, not the transcript. A model often narrates between tool
 // calls ("Mixed time formats. Let me check all formats.") and that text is superseded
@@ -14,10 +14,12 @@ export const NO_TEXT_OUTPUT = "(no text output — tool-only response)"
 // token when the deliverable is already complete; that acknowledgement is not a new reply.
 const ACKNOWLEDGEMENT = new RegExp(`^${DONE_TOKEN}\\.?$`, "i")
 
+type CollectedText = { text: string; partID?: string }
+
 export class OutputCollector {
-  private readonly all: string[] = []
-  private final: string[] = []
-  private previous: string[] = []
+  private all: CollectedText[] = []
+  private final: CollectedText[] = []
+  private previous: CollectedText[] = []
 
   /** A new model step starts; text before it is no longer the reply. Compaction steps do not count. */
   stepStart(compaction = false) {
@@ -27,16 +29,24 @@ export class OutputCollector {
   }
 
   /** Completed assistant text. Synthetic/compaction text is kept for the fallback only. */
-  text(text: string, opts: { synthetic?: boolean; compaction?: boolean } = {}) {
+  text(text: string, opts: { synthetic?: boolean; compaction?: boolean; partID?: string } = {}) {
     const trimmed = text.trim()
     if (!trimmed) return
-    this.all.push(trimmed)
+    const part = { text: trimmed, partID: opts.partID }
+    this.all.push(part)
     if (opts.synthetic || opts.compaction) return
     if (ACKNOWLEDGEMENT.test(trimmed) && this.final.length === 0) {
       this.final = this.previous
       return
     }
-    this.final.push(trimmed)
+    this.final.push(part)
+  }
+
+  /** Removed text must disappear from the reply and every fallback. */
+  remove(partID: string) {
+    this.all = this.all.filter((part) => part.partID !== partID)
+    this.final = this.final.filter((part) => part.partID !== partID)
+    this.previous = this.previous.filter((part) => part.partID !== partID)
   }
 
   private readonly notes: string[] = []
@@ -46,7 +56,7 @@ export class OutputCollector {
     if (!line.trim()) return
     this.notes.push(line.trim())
     if (options.preserveLastText && this.previous.length) {
-      this.notes.push(`Partial assistant response (not finalized):\n\n${this.previous.join("\n\n")}`)
+      this.notes.push(`Partial assistant response (not finalized):\n\n${this.previous.map((part) => part.text).join("\n\n")}`)
     }
   }
 
@@ -55,7 +65,12 @@ export class OutputCollector {
    * explicitly requested; otherwise everything that was said.
    */
   content(): string {
-    const chosen = this.final.length ? this.final : this.notes.length ? this.notes : this.all
+    const chosen = this.final.length
+      ? this.final.map((part) => part.text)
+      : this.notes.length
+        ? this.notes
+        : this.all.map((part) => part.text)
     return chosen.join("\n\n") || NO_TEXT_OUTPUT
   }
 }
+// altimate_change end

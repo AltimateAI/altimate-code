@@ -1288,6 +1288,10 @@ export namespace SessionCompaction {
     abort: AbortSignal
     auto: boolean
     overflow?: boolean
+    // altimate_change start - let the prompt loop retain request-scoped answers across compaction
+    onContinuation?: (messageID: MessageID) => void
+    recoverCommittedAnswer?: boolean
+    // altimate_change end
     // altimate_change start — keep nudge delivery scoped to the active prompt generation
     nudgeGeneration?: NudgeArbiter.Generation
     // altimate_change end
@@ -1441,6 +1445,9 @@ export namespace SessionCompaction {
       // altimate_change start — keep nudge delivery scoped to this prompt generation
       nudgeGeneration: input.nudgeGeneration,
       // altimate_change end
+      // altimate_change start - the prompt owns the current request's committed answer
+      recoverCommittedAnswer: input.recoverCommittedAnswer,
+      // altimate_change end
     })
     // Allow plugins to inject context or replace compaction prompt
     const compacting = await Plugin.trigger(
@@ -1589,7 +1596,8 @@ When constructing the summary, try to stick to this template:
     // A "continue" result was previously committed regardless of whether the
     // summary step produced any text — an empty summary erases history (the
     // post-compaction amnesia signature). Guard the commit: retry ONCE with
-    // identical input, then mark the summary message as errored and stop.
+    // identical input, then stop with a recoverable cause for a committed answer
+    // or mark the summary message as errored when there is no committed answer.
     const summaryHasText = () =>
       MessageV2.get({ sessionID: input.sessionID, messageID: msg.id }).parts.some(
         (part) => part.type === "text" && part.text.trim().length > 0,
@@ -1599,13 +1607,28 @@ When constructing the summary, try to stick to this template:
       log.warn("compaction summary empty, retrying once", { sessionID: input.sessionID })
       result = await processor.process(summarizerInput)
       if (result === "continue" && !summaryHasText()) {
-        processor.message.error = new NamedError.Unknown({
+        const error = new NamedError.Unknown({
           message: "Compaction summarizer produced no summary text after retry",
         }).toObject()
-        processor.message.finish = "error"
+        if (input.recoverCommittedAnswer && !input.abort.aborted) {
+          processor.message.metadata = {
+            ...processor.message.metadata,
+            answer_commit_echo_error: error,
+          }
+        } else {
+          processor.message.error = error
+          processor.message.finish = "error"
+        }
         await Session.updateMessage(processor.message)
         result = "stop"
       }
+    }
+    // altimate_change end
+
+    // altimate_change start - exit without a fatal summary or continuation before the prompt publishes the answer
+    if (input.recoverCommittedAnswer && processor.message.metadata?.answer_commit_echo_error) {
+      compactionAttempts.delete(input.sessionID)
+      return "stop"
     }
     // altimate_change end
 
@@ -1697,6 +1720,9 @@ When constructing the summary, try to stick to this template:
           })
         }
         // altimate_change end
+        // altimate_change start - report the persisted replay's identity, independent of its part flags
+        input.onContinuation?.(replayMsg.id)
+        // altimate_change end
       } else {
         // altimate_change start — the continue message
         // carries the original format/tools/system/variant, exactly as the replay
@@ -1783,6 +1809,9 @@ When constructing the summary, try to stick to this template:
             end: Date.now(),
           },
         })
+        // altimate_change start - report the persisted continuation's identity
+        input.onContinuation?.(continueMsg.id)
+        // altimate_change end
       }
     }
     if (processor.message.error) {

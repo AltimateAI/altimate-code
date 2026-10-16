@@ -980,6 +980,204 @@ it.instance("learn file hooks append glob and anchor matches once and respect th
 
 // Loop semantics
 
+// altimate_change start - an answer committed before the step limit must still be echoed
+for (const mode of [
+  "committed",
+  "failed",
+  "structured",
+  "compacted",
+  "compacted-usage",
+  "compacted-unlimited",
+  "compacted-new-request",
+  "compacted-synthetic-request",
+  "compacted-overflow",
+] as const) {
+  const compacts = mode.startsWith("compacted")
+  const newRequest = mode === "compacted-new-request" || mode === "compacted-synthetic-request"
+  const scenario = {
+    committed: "the exact final echo",
+    failed: "the failed-call limit",
+    structured: "the user output schema",
+    compacted: "the exact rows after automatic compaction",
+    "compacted-usage": "the exact rows after usage-triggered compaction",
+    "compacted-unlimited": "the exact rows after compaction without a step limit",
+    "compacted-new-request": "the newer user request after compaction",
+    "compacted-synthetic-request": "the newer synthetic user request after compaction",
+    "compacted-overflow": "the exact rows after compaction and directly recovers an echo overflow",
+  }[mode]
+  noLLMServer.instance(
+    `answer_commit preserves ${scenario}`,
+    () =>
+      Effect.gen(function* () {
+        const { prompt, chat, sessions } = yield* boot()
+        const requests: Record<string, unknown>[] = []
+        const requestCount = compacts ? 3 : 2
+        const rows = Array.from({ length: 60 }, (_, index) => [`${index}: ${"x".repeat(500)}`])
+        const answer = compacts ? ["| value |", "|---|", ...rows.map(([value]) => `| ${value} |`)].join("\n") : "42"
+        const args =
+          mode === "failed"
+            ? {}
+            : compacts
+              ? {
+                  rows: { columns: ["value"], values: rows },
+                  answer_only: true,
+                  basis: "Selected all records at record grain using records.value.",
+                }
+              : {
+                  fields: [{ name: "", value: 42 }],
+                  answer_only: true,
+                  basis: "Counted all records at record grain using records.id.",
+                }
+        const language = createOpenAICompatible({
+          name: "test",
+          baseURL: "https://unused.invalid/v1",
+          fetch: Object.assign(
+            async (_url: string | URL | Request, init?: RequestInit) => {
+              if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+              const request = JSON.parse(init.body)
+              requests.push(request)
+              if (requests.length > requestCount) throw new Error("answer_commit exceeded its generation budget")
+              if (mode === "compacted-overflow" && requests.length === 3) {
+                return new Response(JSON.stringify({ error: { message: "request entity too large" } }), {
+                  status: 413,
+                  headers: { "Content-Type": "application/json" },
+                })
+              }
+              if (newRequest && requests.length === 2) {
+                const userID = MessageID.ascending()
+                await LegacySession.updateMessage({
+                  id: userID,
+                  sessionID: chat.id,
+                  role: "user",
+                  agent: "analyst",
+                  model: promptRef,
+                  time: { created: Date.now() },
+                })
+                await LegacySession.updatePart({
+                  id: PartID.ascending(),
+                  messageID: userID,
+                  sessionID: chat.id,
+                  type: "text",
+                  synthetic: mode === "compacted-synthetic-request",
+                  text: "A new question arrived during compaction; do not repeat the previous answer.",
+                })
+              }
+              const limited = JSON.stringify(request.messages).includes("CRITICAL - MAXIMUM STEPS REACHED")
+              const response =
+                requests.length === 1
+                  ? reply()
+                      .tool(
+                        mode === "structured" ? "tool_lookup" : "answer_commit",
+                        mode === "structured" ? { tool_name: "__missing_tool" } : args,
+                      )
+                      .usage({ input: mode === "compacted-usage" ? 80_000 : compacts ? 70_000 : 1, output: 1 })
+                      .item()
+                  : compacts && requests.length === 2
+                    ? reply().text("The rows were committed. Continue with the final reply.").stop().item()
+                    : mode === "structured"
+                      ? reply().tool("StructuredOutput", { count: 42 }).item()
+                      : reply()
+                          .text(limited ? "Maximum steps reached." : compacts ? "The rows were compacted away." : answer)
+                          .stop()
+                          .item()
+              if (response.type !== "sse") throw new Error("expected SSE response")
+              return new Response(
+                [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                  "data: [DONE]\n\n",
+                { headers: { "Content-Type": "text/event-stream" } },
+              )
+            },
+            { preconnect: () => undefined },
+          ),
+        }).chatModel("test-model")
+        const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+        try {
+          const result = yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "analyst",
+            model: promptRef,
+            parts: [{ type: "text", text: "How many rows? Reply with only the count." }],
+            ...(mode === "structured"
+              ? {
+                  format: {
+                    type: "json_schema" as const,
+                    retryCount: 0,
+                    schema: {
+                      type: "object",
+                      properties: { count: { type: "number" } },
+                      required: ["count"],
+                      additionalProperties: false,
+                    },
+                  },
+                }
+              : {}),
+          })
+          expect(result.info).not.toHaveProperty("error")
+          expect(requests).toHaveLength(requestCount)
+          const messages = yield* sessions.messages({ sessionID: chat.id })
+          if (mode === "compacted-overflow") {
+            expect(result.info).toHaveProperty("finish", "stop")
+            expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.name", "ContextOverflowError")
+            const persisted = messages.find((message) => message.info.id === result.info.id)
+            expect(persisted?.info).not.toHaveProperty("error")
+            expect(persisted?.info).toHaveProperty("metadata.answer_commit_echo_error.name", "ContextOverflowError")
+            expect(messages.filter((message) => message.info.role === "assistant" && message.info.summary)).toHaveLength(1)
+          }
+          const commit = messages
+            .flatMap((message) => message.parts)
+            .find((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "answer_commit")
+          expect(commit?.state.status).toBe(mode === "structured" ? undefined : mode === "failed" ? "error" : "completed")
+          if (mode === "committed" || (compacts && !newRequest)) {
+            const finalRequest = requests.at(-1)!
+            expect(JSON.stringify(finalRequest.messages)).not.toContain("CRITICAL - MAXIMUM STEPS REACHED")
+            expect(finalRequest.tools ?? []).toHaveLength(0)
+            expect(requestText(requestMessages(finalRequest).at(-1)!.content)).toBe(
+              "Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else.",
+            )
+            if (compacts) {
+              expect(messages.some((message) => message.info.role === "assistant" && message.info.summary)).toBe(true)
+              expect(
+                requestMessages(finalRequest).some((message) => requestText(message.content).includes(answer)),
+              ).toBe(false)
+              expect(commit?.state.status === "completed" && commit.state.metadata.truncated).toBe(false)
+            }
+            expect(
+              result.parts
+                .filter((part) => part.type === "text")
+                .map((part) => part.text)
+                .join(""),
+            ).toBe(answer)
+          } else if (mode === "failed" || newRequest) {
+            expect(JSON.stringify(requests.at(-1)!.messages)).toContain("CRITICAL - MAXIMUM STEPS REACHED")
+            expect(result.parts).toContainEqual(
+              expect.objectContaining({ type: "text", text: "Maximum steps reached." }),
+            )
+          } else {
+            for (const request of requests) {
+              expect(JSON.stringify(request.tools)).not.toContain('"name":"answer_commit"')
+            }
+            expect(requests[1].tool_choice).toBe("required")
+            expect(result.info).toHaveProperty("structured", { count: 42 })
+          }
+        } finally {
+          languageSpy.mockRestore()
+        }
+      }),
+    {
+      config: {
+        ...cfg,
+        snapshot: false,
+        learn: { enabled: false },
+        agent: {
+          analyst: { steps: mode === "compacted-unlimited" ? undefined : 2, permission: { StructuredOutput: "allow" } },
+        },
+      },
+    },
+    30_000,
+  )
+}
+// altimate_change end
+
 noLLMServer.instance(
   "loop exits immediately when last assistant has stop finish",
   () =>
@@ -1098,6 +1296,72 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
     )
   }),
 )
+// altimate_change start - provider length codes must retain the automatic compaction path
+noLLMServer.instance(
+  "HTTP 413 content_length_exceeded stays a context overflow and runs compaction without a commit",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat, sessions } = yield* boot()
+      const requests: Record<string, unknown>[] = []
+      const summaryText = "The user requested a count. Continue after compacting the conversation."
+      const language = createOpenAICompatible({
+        name: "test",
+        baseURL: "https://unused.invalid/v1",
+        fetch: Object.assign(
+          async (_url: string | URL | Request, init?: RequestInit) => {
+            if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+            requests.push(JSON.parse(init.body))
+            if (requests.length > 3) throw new Error("unexpected request after overflow recovery")
+            if (requests.length === 1) {
+              return new Response(
+                JSON.stringify({ error: { code: "content_length_exceeded", message: "request entity too large" } }),
+                { status: 413, headers: { "Content-Type": "application/json" } },
+              )
+            }
+            const response = reply().text(requests.length === 2 ? summaryText : "42").stop().item()
+            if (response.type !== "sse") throw new Error("expected SSE response")
+            return new Response(
+              [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              { headers: { "Content-Type": "text/event-stream" } },
+            )
+          },
+          { preconnect: () => undefined },
+        ),
+      }).chatModel("test-model")
+      const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+      const classify = spyOn(MessageV2, "fromError")
+      try {
+        const result = yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "build",
+          model: promptRef,
+          parts: [{ type: "text", text: "How many rows?" }],
+        })
+        expect(classify.mock.results.map((result) => result.value)).toContainEqual(
+          expect.objectContaining({ name: "ContextOverflowError" }),
+        )
+        expect(result.info).not.toHaveProperty("error")
+        expect(result.info).toHaveProperty("finish", "stop")
+        expect(result.parts.filter((part) => part.type === "text").map((part) => part.text).join("")).toBe("42")
+        expect(requests).toHaveLength(3)
+        expect(JSON.stringify(requests[2].messages)).toContain(summaryText)
+        const messages = yield* sessions.messages({ sessionID: chat.id })
+        expect(messages.filter((message) => message.info.role === "assistant" && message.info.summary)).toHaveLength(1)
+        expect(messages.flatMap((message) => message.parts)).toContainEqual(
+          expect.objectContaining({ type: "compaction", overflow: true }),
+        )
+        expect(messages.flatMap((message) => message.parts).some((part) => part.type === "tool" && part.tool === "answer_commit")).toBe(false)
+      } finally {
+        classify.mockRestore()
+        languageSpy.mockRestore()
+      }
+    }),
+  { config: { ...cfg, snapshot: false, learn: { enabled: false }, compaction: { auto: true } } },
+  30_000,
+)
+// altimate_change end
+
 it.instance("loop stops provider overflow instead of auto-compacting when disabled", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({
