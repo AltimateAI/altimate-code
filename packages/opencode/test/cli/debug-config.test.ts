@@ -481,3 +481,28 @@ describe("debug config redaction", () => {
     })
   })
 })
+
+describe("remote server URLs and prose", () => {
+  test("prints only the origin of a remote MCP url, since paths can carry credentials", () => {
+    expect(
+      redactConfig({
+        mcp: {
+          make: { type: "remote", url: "https://eu2.make.com/mcp/u/path-secret/stateless" },
+          query: { type: "remote", url: "https://mcp.example.com/sse?token=query-secret" },
+          bare: { type: "remote", url: "https://mcp.example.com" },
+        },
+      }),
+    ).toEqual({
+      mcp: {
+        make: { type: "remote", url: "https://eu2.make.com/***" },
+        query: { type: "remote", url: "https://mcp.example.com/***" },
+        bare: { type: "remote", url: "https://mcp.example.com" },
+      },
+    })
+  })
+
+  test("keeps prose that mentions a link", () => {
+    const prompt = "See https://example.com/docs before answering."
+    expect(redactConfig({ agent: { review: { prompt } } })).toEqual({ agent: { review: { prompt } } })
+  })
+})
