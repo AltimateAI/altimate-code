@@ -8,6 +8,9 @@
  * - Result format mapping
  */
 import { describe, test, expect, mock, beforeEach } from "bun:test"
+import { restoreModuleMocksAfterTests } from "./module-mock"
+
+await restoreModuleMocksAfterTests("mssql", "@azure/identity", "node:child_process")
 
 // --- Mock mssql ---
 

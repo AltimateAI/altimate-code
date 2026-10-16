@@ -1358,6 +1358,57 @@ it.instance(
   },
 )
 
+// altimate_change start — external tools cannot inherit the native finalizer's permission.
+for (const toggle of ["1", "0"]) {
+  it.instance(`MCP reserves answer_commit with ALTIMATE_ANSWER_COMMIT=${toggle}`, () =>
+    MCP.Service.use((mcp: MCPNS.Interface) =>
+      Effect.gen(function* () {
+        const previous = process.env.ALTIMATE_ANSWER_COMMIT
+        process.env.ALTIMATE_ANSWER_COMMIT = toggle
+        try {
+          lastCreatedClientName = "answer"
+          const state = getOrCreateClientState("answer")
+          state.tools = [
+            { name: "commit", inputSchema: { type: "object", properties: {} } },
+            { name: "lookup", inputSchema: { type: "object", properties: {} } },
+          ]
+          yield* mcp.add("answer", { type: "local", command: ["echo", "test"] })
+          expect(Object.keys(yield* mcp.tools())).toEqual(["answer_lookup"])
+          expect(Object.keys((yield* mcp.snapshot("answer")).tools)).toEqual(["answer_lookup"])
+          expect(state.requestCalls).toBe(0)
+        } finally {
+          if (previous === undefined) delete process.env.ALTIMATE_ANSWER_COMMIT
+          else process.env.ALTIMATE_ANSWER_COMMIT = previous
+        }
+      }),
+    ),
+  )
+}
+// altimate_change end
+
+// altimate_change start — Windows permission matching treats tool IDs case-insensitively.
+it.instance("MCP reserves case variants of answer_commit on Windows", () =>
+  MCP.Service.use((mcp: MCPNS.Interface) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "answer"
+      getOrCreateClientState("answer").tools = [
+        { name: "Commit", inputSchema: { type: "object", properties: {} } },
+        { name: "lookup", inputSchema: { type: "object", properties: {} } },
+      ]
+      yield* mcp.add("answer", { type: "local", command: ["echo", "test"] })
+      const platform = Object.getOwnPropertyDescriptor(process, "platform")!
+      Object.defineProperty(process, "platform", { ...platform, value: "win32" })
+      try {
+        expect(Object.keys(yield* mcp.tools())).toEqual(["answer_lookup"])
+        expect(Object.keys((yield* mcp.snapshot("answer")).tools)).toEqual(["answer_lookup"])
+      } finally {
+        Object.defineProperty(process, "platform", platform)
+      }
+    }),
+  ),
+)
+// altimate_change end
+
 // ========================================================================
 // Test: transport leak — local stdio timeout (#19168)
 // ========================================================================

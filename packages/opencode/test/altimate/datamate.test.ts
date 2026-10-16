@@ -11,6 +11,7 @@ import { slugify } from "../../src/altimate/tools/datamate"
 // ---------------------------------------------------------------------------
 
 const tmpRoot = path.join(os.tmpdir(), "datamate-test-" + process.pid + "-" + Math.random().toString(36).slice(2))
+const originalTestHome = process.env.OPENCODE_TEST_HOME
 
 // ---------------------------------------------------------------------------
 // buildMcpConfig
@@ -83,7 +84,8 @@ describe("getCredentials", () => {
   })
 
   afterEach(async () => {
-    delete process.env.OPENCODE_TEST_HOME
+    if (originalTestHome === undefined) delete process.env.OPENCODE_TEST_HOME
+    else process.env.OPENCODE_TEST_HOME = originalTestHome
     await fsp.rm(testHome, { recursive: true, force: true }).catch(() => {})
   })
 
@@ -342,7 +344,8 @@ describe("saveCredentials", () => {
   })
 
   afterEach(async () => {
-    delete process.env.OPENCODE_TEST_HOME
+    if (originalTestHome === undefined) delete process.env.OPENCODE_TEST_HOME
+    else process.env.OPENCODE_TEST_HOME = originalTestHome
     await fsp.rm(testHome, { recursive: true, force: true }).catch(() => {})
   })
 
@@ -415,7 +418,8 @@ describe("TUI credential round-trip", () => {
   })
 
   afterEach(async () => {
-    delete process.env.OPENCODE_TEST_HOME
+    if (originalTestHome === undefined) delete process.env.OPENCODE_TEST_HOME
+    else process.env.OPENCODE_TEST_HOME = originalTestHome
     await fsp.rm(testHome, { recursive: true, force: true }).catch(() => {})
   })
 

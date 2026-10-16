@@ -258,6 +258,21 @@ export function replyAfterSilentTurn(failure?: { tool: string; error: string }):
   )
 }
 
+// altimate_change start — prompt for best-effort responses at budget boundaries
+/** One continuation at the soft wall-clock deadline, delivered at the next step boundary. */
+export const REPLY_BEFORE_TIME_BUDGET =
+  "The run is nearing its time budget. Stop exploring and give your best current answer now, " +
+  "using the information already obtained. Avoid further tool calls unless strictly needed to answer. " +
+  "State the limitations and any work that remains incomplete; do not guess missing values or claim unverified success."
+
+/** One best-effort response after the run has exhausted its work budget. */
+export const REPLY_AFTER_BUDGET =
+  "The run's work budget has been exhausted. Do not start more work or call tools. " +
+  "Reply now with the best answer supported by the information already obtained. " +
+  "State the limitations and any work that remains incomplete; do not guess missing values or claim unverified success. " +
+  "If there is not enough evidence to answer, say so plainly and summarize the useful progress."
+// altimate_change end
+
 /**
  * Mechanism-accurate overflow notice. The previous text blamed "large
  * media attachments" — but the overflow flag is set whenever a request exceeded

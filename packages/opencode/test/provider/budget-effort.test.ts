@@ -1,0 +1,521 @@
+// altimate_change start — run budgets must override configured reasoning options with provider-supported minima
+import { describe, expect, spyOn, test } from "bun:test"
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
+import { createAnthropic } from "@ai-sdk/anthropic"
+import { jsonSchema, tool, type ModelMessage } from "ai"
+import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
+import { begin, downgradeEffort } from "@/altimate/session/run-budget-effort"
+import { withBudgetControl } from "@/altimate/session/run-budget-control"
+import { Provider } from "@/provider/provider"
+import { ProviderTransform } from "@/provider/transform"
+import { ModelID, ProviderID } from "@/provider/schema"
+import { LLM } from "@/session/llm"
+import { SessionID, MessageID } from "@/session/schema"
+import { Session } from "@/session"
+import { Config } from "@/config/config"
+import { Plugin } from "@/plugin"
+import { Auth } from "@/auth"
+import { Bus } from "@/bus"
+
+function model(npm: string, id: string): Provider.Model {
+  return {
+    id: ModelID.make(id),
+    providerID: ProviderID.make("test"),
+    api: { npm, id, url: "https://example.invalid" },
+    name: id,
+    capabilities: {
+      reasoning: true,
+      temperature: true,
+      attachment: false,
+      toolcall: true,
+      input: { text: true, audio: false, image: false, video: false, pdf: false },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: { context: 200_000, output: 32_000 },
+    status: "active",
+    release_date: "2025-01-01",
+    options: {},
+    headers: {},
+    variants: { high: { reasoningEffort: "high" }, low: { reasoningEffort: "high" } },
+  }
+}
+
+describe("run budget reasoning effort", () => {
+  test.each(["finalization", "finalization-no-downgrade"])(
+    "%s removes executable and historical tools even when the provider emits a tool call",
+    async (control) => {
+      const resolved = model("@ai-sdk/openai-compatible", "o3")
+      const sessionID = SessionID.make("ses_budget_finalization_tools")
+      const requests: Record<string, unknown>[] = []
+      let executions = 0
+      const language = createOpenAICompatible({
+        name: "test",
+        baseURL: "https://unused.invalid/v1",
+        fetch: (async (_url, init) => {
+          requests.push(JSON.parse(String(init?.body)))
+          const chunk = {
+            id: "response",
+            choices: [
+              {
+                index: 0,
+                delta: {
+                  tool_calls: [
+                    { index: 0, id: "call_write", type: "function", function: { name: "write", arguments: "{}" } },
+                  ],
+                },
+                finish_reason: "tool_calls",
+              },
+            ],
+          }
+          return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+            headers: { "Content-Type": "text/event-stream" },
+          })
+        }) as typeof fetch,
+      }).chatModel("o3")
+      const spies = [
+        spyOn(Bus, "publish").mockResolvedValue(undefined),
+        spyOn(Provider, "getLanguage").mockResolvedValue(language),
+        spyOn(Provider, "getProvider").mockResolvedValue({ id: resolved.providerID, options: {} } as Provider.Info),
+        spyOn(Config, "get").mockResolvedValue({ tracing: { enabled: false } }),
+        spyOn(Auth, "get").mockResolvedValue(undefined),
+        spyOn(Plugin, "trigger").mockImplementation(async (_name, _input, output) => output),
+      ]
+      const request = async () => {
+        const stream = await LLM.stream({
+          sessionID,
+          user: {
+            id: MessageID.make("msg_budget_finalization_tools"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: "test",
+            model: { providerID: resolved.providerID, modelID: resolved.id },
+          },
+          model: resolved,
+          agent: { name: "test", mode: "primary", options: {}, permission: [] },
+          system: [],
+          abort: new AbortController().signal,
+          messages: [
+            { role: "user", content: "Inspect the evidence." },
+            { role: "assistant", content: [{ type: "tool-call", toolCallId: "history", toolName: "glob", input: {} }] },
+            {
+              role: "tool",
+              content: [
+                {
+                  type: "tool-result",
+                  toolCallId: "history",
+                  toolName: "glob",
+                  output: { type: "text", value: "orders.sql" },
+                },
+              ],
+            },
+            { role: "user", content: "Finalize without tools." },
+          ],
+          tools: {
+            write: tool({
+              inputSchema: jsonSchema({ type: "object", properties: {} }),
+              execute: async () => {
+                executions++
+                return "written"
+              },
+            }),
+          },
+        })
+        for await (const _event of stream.fullStream) {
+          /* drain real SDK tool dispatch */
+        }
+      }
+      try {
+        await withBudgetControl({ sessionID, control }, request)
+        expect(executions).toBe(0)
+        expect(requests[0]!.tools ?? []).toEqual([])
+        await withBudgetControl({ sessionID, control: "work" }, request)
+        expect(executions).toBe(1)
+        expect(requests[1]!.tools).toEqual(
+          expect.arrayContaining([expect.objectContaining({ function: expect.objectContaining({ name: "write" }) })]),
+        )
+      } finally {
+        for (const spy of spies) spy.mockRestore()
+      }
+    },
+  )
+
+  test.each([
+    ["@ai-sdk/openai", "o3", "low"],
+    ["@ai-sdk/openai", "gpt-5", "minimal"],
+    ["@ai-sdk/openai", "gpt-5.2", "low"],
+    ["@ai-sdk/openai", "gpt-5.2-pro", "medium"],
+    ["@ai-sdk/openai", "gpt-5-pro", "high"],
+    ["@ai-sdk/azure", "o3", "low"],
+    ["@ai-sdk/amazon-bedrock/mantle", "gpt-5", "minimal"],
+  ])("%s / %s uses accepted effort %s independently of custom variants", (npm, id, effort) => {
+    const configured = { reasoningEffort: "high", store: false }
+    expect(applyBudgetEffort(model(npm, id), configured)).toMatchObject({ reasoningEffort: effort, store: false })
+    expect(configured).toEqual({ reasoningEffort: "high", store: false })
+  })
+
+  test("OpenRouter replaces an existing token budget as well as high effort", () => {
+    const resolved = model("@openrouter/ai-sdk-provider", "openai/gpt-5")
+    const options = applyBudgetEffort(resolved, { reasoning: { effort: "high", max_tokens: 16_000 } })
+    expect(ProviderTransform.providerOptions(resolved, options)).toEqual({
+      openrouter: { reasoning: { effort: "minimal" } },
+    })
+  })
+
+  test.each(["claude-sonnet-4-5", "claude-opus-4-6"])(
+    "Anthropic %s disables thinking without retaining its old budget",
+    (id) => {
+      const resolved = model("@ai-sdk/anthropic", id)
+      const options = applyBudgetEffort(resolved, {
+        thinking: { type: "enabled", budgetTokens: 16_000 },
+        effort: "high",
+      })
+      expect(options.thinking).toEqual({ type: "disabled" })
+      expect(options.effort).toBe(id.includes("4-6") ? "low" : undefined)
+    },
+  )
+
+  test("Bedrock Claude disables raw thinking overrides as well as reasoningConfig", () => {
+    const resolved = model("@ai-sdk/amazon-bedrock", "us.anthropic.claude-opus-4-6-v1:0")
+    expect(
+      applyBudgetEffort(resolved, {
+        reasoningConfig: { type: "adaptive", maxReasoningEffort: "high", budgetTokens: 16_000 },
+        additionalModelRequestFields: {
+          thinking: { type: "enabled", budget_tokens: 16_000 },
+          output_config: { effort: "high" },
+          keep: true,
+        },
+      }),
+    ).toEqual({
+      reasoningConfig: { type: "disabled", maxReasoningEffort: "low" },
+      additionalModelRequestFields: { thinking: { type: "disabled" }, output_config: { effort: "low" }, keep: true },
+    })
+  })
+
+  test.each(["claude-opus-4-7", "claude-opus-5-5", "claude-fable-5-1"])(
+    "Anthropic %s keeps adaptive thinking at the lowest effort because it rejects disabled thinking",
+    (id) => {
+      const resolved = model("@ai-sdk/anthropic", id)
+      const options = applyBudgetEffort(resolved, {
+        thinking: { type: "adaptive", budgetTokens: 16_000 },
+        effort: "high",
+        keep: true,
+      })
+      expect(options).toEqual({
+        thinking: { type: "adaptive", display: "summarized" },
+        effort: "low",
+        keep: true,
+      })
+    },
+  )
+
+  test.each(["global.anthropic.claude-opus-5-5", "us.anthropic.claude-opus-4-7-v1:0"])(
+    "Bedrock %s keeps adaptive thinking at the lowest effort in reasoningConfig and raw fields",
+    (id) => {
+      const resolved = model("@ai-sdk/amazon-bedrock", id)
+      expect(
+        applyBudgetEffort(resolved, {
+          reasoningConfig: { type: "adaptive", maxReasoningEffort: "high", budgetTokens: 16_000 },
+          additionalModelRequestFields: {
+            thinking: { type: "enabled", budget_tokens: 16_000 },
+            output_config: { effort: "high", other: 1 },
+            keep: true,
+          },
+        }),
+      ).toEqual({
+        reasoningConfig: { type: "adaptive", maxReasoningEffort: "low", display: "summarized" },
+        additionalModelRequestFields: {
+          thinking: { type: "adaptive", display: "summarized" },
+          output_config: { effort: "low", other: 1 },
+          keep: true,
+        },
+      })
+    },
+  )
+
+  test.each([
+    ["anthropic--claude-opus-4-7", { thinking: { type: "adaptive", display: "summarized" }, output_config: { effort: "low" } }],
+    ["anthropic--claude-sonnet-4-6", { thinking: { type: "disabled" }, output_config: { effort: "low" } }],
+  ])("SAP %s keeps unrelated model parameters and uses the lowest accepted thinking setting", (id, expected) => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", id)
+    expect(
+      applyBudgetEffort(resolved, {
+        modelParams: { thinking: { type: "adaptive" }, output_config: { effort: "high" }, max_tokens: 4096 },
+      }),
+    ).toEqual({ modelParams: { ...expected, max_tokens: 4096 } })
+  })
+
+  test("Bedrock Nova lowers effort and removes an old fixed budget", () => {
+    expect(
+      applyBudgetEffort(model("@ai-sdk/amazon-bedrock", "amazon.nova-2-lite-v1:0"), {
+        reasoningConfig: { type: "enabled", maxReasoningEffort: "high", budgetTokens: 16_000 },
+      }),
+    ).toEqual({ reasoningConfig: { type: "enabled", maxReasoningEffort: "low" } })
+  })
+
+  test.each([
+    ["gemini-2.5-pro", { thinkingBudget: 128 }],
+    ["gemini-2.5-flash", { thinkingBudget: 0 }],
+    ["gemini-3-pro", { includeThoughts: true, thinkingLevel: "low" }],
+    ["gemini-3-flash", { includeThoughts: true, thinkingLevel: "minimal" }],
+  ])("Google %s uses its lowest supported thinking setting", (id, expected) => {
+    expect(
+      applyBudgetEffort(model("@ai-sdk/google", id), {
+        thinkingConfig: { thinkingBudget: 16_000, thinkingLevel: "high" },
+      }).thinkingConfig,
+    ).toEqual(expected)
+  })
+
+  test("models without a reasoning control preserve their options", () => {
+    const resolved = model("@ai-sdk/cohere", "command-r")
+    const options = { unrelated: true }
+    expect(applyBudgetEffort(resolved, options)).toBe(options)
+    resolved.capabilities.reasoning = false
+    expect(applyBudgetEffort(resolved, options)).toBe(options)
+  })
+
+  test("Mistral adjustable reasoning can be disabled even though its only configured variant is high", () => {
+    const resolved = model("@ai-sdk/mistral", "mistral-medium-3.5")
+    expect(applyBudgetEffort(resolved, { reasoningEffort: "high" })).toEqual({ reasoningEffort: "none" })
+  })
+
+  test("the actual SDK request overrides the plugin effort until the run ends", async () => {
+    const resolved = model("@ai-sdk/openai-compatible", "o3")
+    const requests: Record<string, unknown>[] = []
+    const language = createOpenAICompatible({
+      name: "test",
+      baseURL: "https://unused.invalid/v1",
+      fetch: (async (_url, init) => {
+        requests.push(JSON.parse(String(init?.body)))
+        const chunk = {
+          id: "response",
+          choices: [{ index: 0, delta: { content: "Final answer" }, finish_reason: "stop" }],
+        }
+        return new Response(`data: ${JSON.stringify(chunk)}\n\ndata: [DONE]\n\n`, {
+          headers: { "Content-Type": "text/event-stream" },
+        })
+      }) as typeof fetch,
+    }).chatModel("o3")
+    const sessionID = SessionID.make("ses_budget_effort_provider_test")
+    const childID = SessionID.make("ses_budget_effort_provider_child_test")
+    const spies = [
+      spyOn(Provider, "getLanguage").mockResolvedValue(language),
+      spyOn(Provider, "getProvider").mockResolvedValue({ id: resolved.providerID, options: {} } as Provider.Info),
+      spyOn(Config, "get").mockResolvedValue({ tracing: { enabled: false } }),
+      spyOn(Auth, "get").mockResolvedValue(undefined),
+      spyOn(Session, "get").mockImplementation(
+        (async (id) =>
+          ({ id, parentID: id === childID ? sessionID : undefined }) as Session.Info) as typeof Session.get,
+      ),
+      spyOn(Plugin, "trigger").mockImplementation(async (name, _input, output) => {
+        if (name === "chat.params") (output as { options: Record<string, unknown> }).options.reasoningEffort = "high"
+        return output
+      }),
+    ]
+    const end = begin(sessionID)
+    const request = async (sessionID = SessionID.make("ses_budget_effort_provider_test")) => {
+      const stream = await LLM.stream({
+        sessionID,
+        user: {
+          id: MessageID.make("msg_budget_effort_provider_test"),
+          sessionID,
+          role: "user",
+          time: { created: Date.now() },
+          agent: "test",
+          model: { providerID: resolved.providerID, modelID: resolved.id },
+          variant: "high",
+        },
+        model: resolved,
+        agent: { name: "test", mode: "primary", options: {}, permission: [] },
+        system: [],
+        abort: new AbortController().signal,
+        messages: [{ role: "user", content: "Answer now." }],
+        tools: {},
+      })
+      for await (const _event of stream.fullStream) {
+        /* drain the actual SDK stream */
+      }
+    }
+    try {
+      await request()
+      downgradeEffort(sessionID)
+      await request()
+      await request() // finalization uses the same session override
+      await request(childID)
+      await request(SessionID.make("ses_budget_effort_unrelated_test"))
+      end()
+      await request()
+      await request(childID)
+      expect(requests.map((body) => body.reasoning_effort)).toEqual([
+        "high",
+        "low",
+        "low",
+        "low",
+        "high",
+        "high",
+        "high",
+      ])
+      expect(resolved.variants?.high).toEqual({ reasoningEffort: "high" })
+    } finally {
+      end()
+      for (const spy of spies) spy.mockRestore()
+    }
+  })
+
+  test("SAP Claude Opus 4.7 removes unsigned reasoning and drops an assistant left empty", () => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", "anthropic--claude-opus-4-7")
+    resolved.providerID = ProviderID.make("sap-ai-core")
+    const messages: ModelMessage[] = [
+      { role: "user", content: "Investigate." },
+      { role: "assistant", content: [{ type: "reasoning", text: "An unfinished thought" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "reasoning", text: "Another unfinished thought" },
+          { type: "text", text: "Evidence collected." },
+        ],
+      },
+      { role: "user", content: "Answer now." },
+    ]
+    const original = structuredClone(messages)
+    expect(budgetMessages(messages, resolved, { modelParams: { thinking: { type: "adaptive" } } })).toEqual([
+      messages[0]!,
+      { role: "assistant", content: [{ type: "text", text: "Evidence collected." }] },
+      messages[3]!,
+    ])
+    expect(messages).toEqual(original)
+  })
+
+  test("SAP Claude removes reasoning with signature metadata its SDK cannot round-trip", () => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", "anthropic--claude-opus-4-7")
+    resolved.providerID = ProviderID.make("sap-ai-core")
+    const messages: ModelMessage[] = [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "reasoning",
+            text: "Previously completed thought",
+            providerOptions: {
+              "sap-ai-core": { signature: "signature" },
+              "sap-ai": { signature: "signature" },
+              anthropic: { signature: "signature" },
+            },
+          },
+          { type: "reasoning", text: "", providerOptions: { "sap-ai": { redactedData: "redacted" } } },
+          { type: "text", text: "Evidence collected." },
+        ],
+      },
+    ]
+    expect(budgetMessages(messages, resolved, {})).toEqual([
+      { role: "assistant", content: [{ type: "text", text: "Evidence collected." }] },
+    ])
+  })
+
+  test("non-Anthropic SAP models preserve reasoning history", () => {
+    const resolved = model("@jerome-benoit/sap-ai-provider-v2", "gpt-5")
+    const messages: ModelMessage[] = [
+      { role: "assistant", content: [{ type: "reasoning", text: "An unfinished thought" }] },
+    ]
+    expect(budgetMessages(messages, resolved, {})).toBe(messages)
+  })
+
+  test.each(["downgraded", "active", "none"] as const)(
+    "Anthropic interrupted reasoning resumes without empty assistant content (%s budget)",
+    async (budget) => {
+      const downgrade = budget === "downgraded"
+      const resolved = model("@ai-sdk/anthropic", "claude-opus-4-6")
+      resolved.variants = ProviderTransform.variants(resolved)
+      const requests: Record<string, any>[] = []
+      const language = createAnthropic({
+        apiKey: "test-key",
+        fetch: (async (_url, init) => {
+          requests.push(JSON.parse(String(init?.body)))
+          const chunks = [
+            {
+              type: "message_start",
+              message: {
+                id: "msg_answer",
+                type: "message",
+                role: "assistant",
+                model: resolved.api.id,
+                content: [],
+                stop_reason: null,
+                stop_sequence: null,
+                usage: { input_tokens: 10, output_tokens: 0 },
+              },
+            },
+            { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+            { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Final answer" } },
+            { type: "content_block_stop", index: 0 },
+            {
+              type: "message_delta",
+              delta: { stop_reason: "end_turn", stop_sequence: null },
+              usage: { output_tokens: 2 },
+            },
+            { type: "message_stop" },
+          ]
+          return new Response(
+            chunks.map((chunk) => `event: ${chunk.type}\ndata: ${JSON.stringify(chunk)}\n\n`).join(""),
+            {
+              headers: { "Content-Type": "text/event-stream" },
+            },
+          )
+        }) as typeof fetch,
+      })(resolved.api.id)
+      const spies = [
+        spyOn(Provider, "getLanguage").mockResolvedValue(language),
+        spyOn(Provider, "getProvider").mockResolvedValue({ id: resolved.providerID, options: {} } as Provider.Info),
+        spyOn(Config, "get").mockResolvedValue({ tracing: { enabled: false } }),
+        spyOn(Auth, "get").mockResolvedValue(undefined),
+        spyOn(Session, "get").mockImplementation((async (id) => ({ id }) as Session.Info) as typeof Session.get),
+        spyOn(Plugin, "trigger").mockImplementation(async (_name, _input, output) => output),
+      ]
+      const sessionID = SessionID.make("ses_budget_effort_anthropic_test")
+      const end = budget === "none" ? undefined : begin(sessionID)
+      if (downgrade) downgradeEffort(sessionID)
+      const messages: ModelMessage[] = [
+        { role: "user", content: "Investigate." },
+        { role: "assistant", content: [{ type: "reasoning", text: "An unfinished thought" }] },
+        { role: "user", content: "Answer now." },
+      ]
+      try {
+        const stream = await LLM.stream({
+          sessionID,
+          user: {
+            id: MessageID.make("msg_budget_effort_anthropic_test"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: "test",
+            model: { providerID: resolved.providerID, modelID: resolved.id },
+            variant: "high",
+          },
+          model: resolved,
+          agent: { name: "test", mode: "primary", options: {}, permission: [] },
+          system: [],
+          abort: new AbortController().signal,
+          messages,
+          tools: {},
+        })
+        for await (const _event of stream.fullStream) {
+          /* drain the actual SDK stream */
+        }
+        expect(requests).toHaveLength(1)
+        if (downgrade) expect(requests[0]!.thinking).toBeUndefined()
+        else expect(requests[0]!.thinking).toEqual({ type: "adaptive" })
+        expect(requests[0]!.output_config.effort).toBe(downgrade ? "low" : "high")
+        expect(
+          requests[0]!.messages.some((message: any) => message.role === "assistant" && message.content.length === 0),
+        ).toBe(false)
+        expect(messages[1]!.content).toEqual([{ type: "reasoning", text: "An unfinished thought" }])
+      } finally {
+        end?.()
+        for (const spy of spies) spy.mockRestore()
+      }
+    },
+  )
+})
+// altimate_change end

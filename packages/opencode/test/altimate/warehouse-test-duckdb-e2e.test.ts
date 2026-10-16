@@ -192,6 +192,9 @@ describe("warehouse.test against a real DuckDB store", () => {
     const ok = await tool.execute({ name: "local" }, ctx)
     expect(ok.title).toContain("OK")
 
+    // Release the live engine before testing a fresh open's deadline. reset()
+    // alone drops the registry reference without closing the connector.
+    await Registry.closeAll()
     Registry.reset()
     const prev = process.env["ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS"]
     process.env["ALTIMATE_DUCKDB_OPEN_TIMEOUT_MS"] = "1"

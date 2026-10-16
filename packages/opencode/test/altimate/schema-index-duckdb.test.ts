@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test"
 import path from "node:path"
 import { connect } from "../../../drivers/src/duckdb"
-import { loadOptionalDriver } from "../../../drivers/src/resolve"
+import { LocalEngine } from "../../../drivers/src/local-engine"
 import { SchemaCache } from "../../src/altimate/native/schema/cache"
 import { tmpdir } from "../fixture/fixture"
 
@@ -10,8 +10,6 @@ const duckdbTest = process.env.ALTIMATE_DUCKDB_E2E === "1" ? test : test.skip
 
 duckdbTest("indexes a large catalog once with bounded metadata queries", async () => {
   await using tmp = await tmpdir()
-  const module = await loadOptionalDriver("duckdb", "duckdb")
-  const duckdb = module.default ?? module
   const connector = await connect({ type: "duckdb", path: ":memory:" })
   const cache = SchemaCache.create(path.join(tmp.path, "schema-cache.db"))
   let metadataSpy: ReturnType<typeof spyOn> | undefined
@@ -25,7 +23,7 @@ duckdbTest("indexes a large catalog once with bounded metadata queries", async (
     await connector.execute("ATTACH ':memory:' AS secondary")
     await connector.execute("CREATE TABLE secondary.main.item_0 (foreign_field BOOLEAN)")
     await connector.execute("CREATE TABLE secondary.main.foreign_only (id INTEGER)")
-    metadataSpy = spyOn(duckdb.Connection.prototype, "all")
+    metadataSpy = spyOn(LocalEngine.prototype, "call")
     const started = performance.now()
 
     const result = await cache.indexWarehouse("warehouse", "duckdb", connector)

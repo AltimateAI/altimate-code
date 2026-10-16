@@ -23,6 +23,9 @@ import { disposeAllInstancesAndEmitGlobalDisposed } from "@/server/global-lifecy
 // carries the fork trace fixes (PR #867/#895). subscribeTraceConsumer's own SDK /event subscription
 // does NOT receive this worker's in-process (Server.Default().fetch) session events.
 import { TraceConsumer } from "@/altimate/observability/trace-consumer"
+// altimate_change start — report isolated trace subscriber failures without interrupting the worker
+import { Log } from "@/altimate/util/log"
+// altimate_change end
 import { Instance } from "@/project/instance"
 // altimate_change — onboarding telemetry: flush this thread's buffer in rpc.shutdown()
 import { Telemetry } from "@/altimate/telemetry"
@@ -105,7 +108,13 @@ let traceTail: Promise<void> = traceReady.catch(() => {})
 GlobalBus.on("event", (event) => {
   Rpc.emit("global.event", event)
   // altimate_change start — trace: feed bus events to the per-session trace consumer, serialized.
-  traceTail = traceTail.then(() => traceConsumer.handleEvent(event.payload)).catch(() => {})
+  traceTail = traceTail
+    .then(() => traceConsumer.handleEvent(event.payload))
+    .catch((error) => {
+      Log.Default.debug("[tracing] worker event capture failed", {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
   // altimate_change end
 })
 

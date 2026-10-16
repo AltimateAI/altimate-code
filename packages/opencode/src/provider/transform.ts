@@ -736,7 +736,8 @@ export namespace ProviderTransform {
     return null
   }
 
-  function anthropicOmitsThinking(apiId: string) {
+  /** Models that always think: they reject `thinking.type: "disabled"` and only accept adaptive thinking. */
+  export function anthropicOmitsThinking(apiId: string) {
     return anthropicOpus47OrLater(apiId) || apiId.includes("fable-5")
   }
 
@@ -1527,6 +1528,13 @@ export namespace ProviderTransform {
   // altimate_change end
 
   export function schema(model: Provider.Model, schema: JSONSchema.BaseSchema | JSONSchema7): JSONSchema7 {
+    // altimate_change start — omit the tool schema dialect declaration for Anthropic, Bedrock, and Vertex
+    if (["@ai-sdk/anthropic", "@ai-sdk/amazon-bedrock", "@ai-sdk/google-vertex/anthropic"].includes(model.api.npm)) {
+      const { $schema, ...rest } = schema
+      schema = rest
+    }
+    // altimate_change end
+
     /*
     if (["openai", "azure"].includes(providerID)) {
       if (schema.type === "object" && schema.properties) {

@@ -11,7 +11,14 @@
 import { describe, expect, test, beforeAll, afterAll, mock } from "bun:test"
 import { initTool } from "./tool-fixture"
 
-// Mock DuckDB driver so sql.execute tests don't need native duckdb
+// Mock DuckDB driver so sql.execute tests don't need native duckdb.
+// Bun's mock.module leaks across test files: snapshot the genuine exports before
+// mocking and restore them in afterAll so later DuckDB-backed tests see the real driver.
+import * as realDuckdb from "@altimateai/drivers/duckdb"
+const genuineDuckdb = { ...realDuckdb }
+afterAll(() => {
+  mock.module("@altimateai/drivers/duckdb", () => genuineDuckdb)
+})
 mock.module("@altimateai/drivers/duckdb", () => ({
   connect: async () => ({
     execute: async (sql: string) => ({
@@ -281,16 +288,26 @@ describe("Adversarial: sql-classify bypass attempts", () => {
 
   // --- EXPLAIN variants ---
 
-  test("EXPLAIN SELECT is classified as write (ambiguous)", () => {
+  // EXPLAIN inherits the class of the statement it explains: planning a SELECT reads
+  // nothing but metadata, while `EXPLAIN ANALYZE` executes the statement, so an
+  // explained write is still a write. Treating every EXPLAIN as a write hard-denied
+  // read-only agents from inspecting query plans on DuckDB/SQLite.
+  test("EXPLAIN SELECT is classified as read", () => {
     const r = classifyAndCheck("EXPLAIN SELECT * FROM users")
-    expect(r.queryType).toBe("write")
+    expect(r.queryType).toBe("read")
     expect(r.blocked).toBe(false)
   })
 
-  test("EXPLAIN ANALYZE SELECT is classified as write (ambiguous)", () => {
+  test("EXPLAIN ANALYZE SELECT is classified as read", () => {
     const r = classifyAndCheck("EXPLAIN ANALYZE SELECT * FROM users")
-    expect(r.queryType).toBe("write")
+    expect(r.queryType).toBe("read")
     expect(r.blocked).toBe(false)
+  })
+
+  test("EXPLAIN ANALYZE of a write executes it and stays a write", () => {
+    expect(classifyAndCheck("EXPLAIN ANALYZE DELETE FROM users").queryType).toBe("write")
+    expect(classifyAndCheck("EXPLAIN UPDATE users SET a = 1").queryType).toBe("write")
+    expect(classifyAndCheck("EXPLAIN (ANALYZE, BUFFERS) INSERT INTO t VALUES (1)").queryType).toBe("write")
   })
 })
 

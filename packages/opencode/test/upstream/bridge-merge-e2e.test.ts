@@ -692,8 +692,12 @@ describe("E2E: SessionStatus.set async drift fixed (cycle 4)", () => {
     const content = readFileSync(path.join(srcDir, "session", "prompt.ts"), "utf-8")
     const cancel = content.match(/export async function cancel\(sessionID:[\s\S]*?^  \}/m)?.[0]
     expect(cancel).toBeDefined()
-    expect(cancel!.indexOf("match.closing = true")).toBeGreaterThan(-1)
-    expect(cancel!.indexOf("match.closing = true")).toBeLessThan(cancel!.indexOf("match.abort.abort()"))
+    const closingIdx = cancel!.indexOf("match.closing = true")
+    // Cancellation now forwards the optional harness deadline reason.
+    const abortIdx = cancel!.indexOf("match.abort.abort(reason)")
+    expect(closingIdx).toBeGreaterThan(-1)
+    expect(abortIdx).toBeGreaterThan(-1)
+    expect(closingIdx).toBeLessThan(abortIdx)
   })
 
   test("SessionPrompt.loop scopes fallback idle restoration to its own generation", async () => {

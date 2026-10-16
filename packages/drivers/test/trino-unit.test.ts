@@ -6,6 +6,9 @@
  * - catalog-scoped introspection SQL
  */
 import { beforeEach, describe, expect, mock, test } from "bun:test"
+import { restoreModuleMocksAfterTests } from "./module-mock"
+
+await restoreModuleMocksAfterTests("trino-client")
 
 let mockCreateCalls: any[] = []
 let mockQueryCalls: string[] = []

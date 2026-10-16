@@ -6,20 +6,30 @@ export namespace BusEvent {
 
   const registry = new Map<string, Definition>()
 
-  export function define<Type extends string, Properties extends ZodType>(type: Type, properties: Properties) {
+  // altimate_change start — private event definitions are excluded from wildcard transport
+  export function define<Type extends string, Properties extends ZodType>(
+    type: Type,
+    properties: Properties,
+    options?: { private?: boolean },
+  ) {
     // altimate_change start — make idempotent so SyncEvent.define (cycle 3 bridge) and
     // SyncEvent.init can both safely call this without duplicate-registration concerns.
     // First registration wins to keep schema stable across re-imports/test resets.
-    const existing = registry.get(type) as { type: Type; properties: Properties } | undefined
+    const existing = registry.get(type) as { type: Type; properties: Properties; private?: boolean } | undefined
     if (existing) return existing
     // altimate_change end
     const result = {
       type,
       properties,
+      // altimate_change start — sensitive events require an explicit typed subscription
+      private: options?.private,
+      // altimate_change end
     }
     registry.set(type, result)
     return result
   }
+
+  // altimate_change end
 
   export function payloads() {
     return z
@@ -27,6 +37,9 @@ export namespace BusEvent {
         "type",
         registry
           .entries()
+          // altimate_change start — private events are absent from public SSE schemas
+          .filter(([, def]) => !def.private)
+          // altimate_change end
           .map(([type, def]) => {
             return z
               .object({

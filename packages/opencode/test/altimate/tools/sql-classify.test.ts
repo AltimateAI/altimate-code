@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
-import { classify, classifyMulti, classifyAndCheck, computeSqlFingerprint } from "../../../src/altimate/tools/sql-classify"
+import { classify, classifyMulti, classifyAndCheck, computeSqlFingerprint, isSingleQuery } from "../../../src/altimate/tools/sql-classify"
+import { statementsOf } from "../../../src/altimate/tools/sql-tokenize"
 
 describe("classify", () => {
   // --- Read queries ---
@@ -12,12 +13,15 @@ describe("classify", () => {
     expect(classify("select id from orders")).toBe("read")
   })
 
-  test("SHOW → write (ambiguous, prompts for permission)", () => {
-    expect(classify("SHOW TABLES")).toBe("write")
+  // Metadata statements cannot modify data; a read-only agent must be able to list
+  // tables and inspect plans. Only an EXPLAIN that would execute a write stays a write.
+  test("SHOW → read (metadata)", () => {
+    expect(classify("SHOW TABLES")).toBe("read")
   })
 
-  test("EXPLAIN → write (ambiguous, prompts for permission)", () => {
-    expect(classify("EXPLAIN SELECT * FROM users")).toBe("write")
+  test("EXPLAIN of a read → read; EXPLAIN ANALYZE of a write → write", () => {
+    expect(classify("EXPLAIN SELECT * FROM users")).toBe("read")
+    expect(classify("EXPLAIN ANALYZE DELETE FROM users")).toBe("write")
   })
 
   test("WITH...SELECT (CTE) → read", () => {
@@ -102,8 +106,8 @@ describe("classify", () => {
 
   // --- "other" category (ambiguous ops) → write (prompts for permission) ---
 
-  test("SHOW TABLES → write (prompts)", () => {
-    expect(classify("SHOW TABLES")).toBe("write")
+  test("SHOW TABLES → read (metadata)", () => {
+    expect(classify("SHOW TABLES")).toBe("read")
   })
 
   test("SET variable → write (prompts)", () => {
@@ -116,6 +120,32 @@ describe("classify", () => {
 })
 
 describe("classifyMulti", () => {
+  for (const dialect of ["mysql", "sqlite", "bigquery", "clickhouse", "unknown", undefined]) {
+    test(`dollar-delimited writes fail closed for ${dialect ?? "omitted"} dialect`, () => {
+      const sql = "SELECT $x$; DELETE FROM t; $x$"
+      expect(classifyMulti(sql, dialect)).toBe("write")
+      expect(classifyAndCheck(sql, dialect)).toMatchObject({ queryType: "write", blocked: false })
+      const statements = statementsOf(sql, dialect)
+      expect(statements).toHaveLength(3)
+      expect(statements.map((statement) => classify(statement, dialect))).toContain("write")
+      expect(isSingleQuery(sql, dialect)).toBe(false)
+    })
+  }
+
+  for (const [dialect, sql] of [
+    ["postgres", "SELECT $x$ a; b $x$"],
+    ["postgres", "SELECT $$ ; DROP TABLE t $$"],
+    ["redshift", "SELECT $x$ a; b $x$"],
+    ["duckdb", "SELECT $x$ a; b $x$"],
+    ["duckdb", "SELECT $$ ; DROP TABLE t $$"],
+    ["snowflake", "SELECT $$ ; DROP TABLE t $$"],
+  ]) {
+    test(`dollar-quoted content remains one read for ${dialect}: ${sql}`, () => {
+      expect(classifyAndCheck(sql, dialect)).toEqual({ queryType: "read", blocked: false })
+      expect(isSingleQuery(sql, dialect)).toBe(true)
+    })
+  }
+
   test("all reads → read", () => {
     expect(classifyMulti("SELECT 1; SELECT 2")).toBe("read")
   })
@@ -169,9 +199,9 @@ describe("classifyAndCheck", () => {
     expect(r.blocked).toBe(false)
   })
 
-  test("SHOW → write (ambiguous), not blocked", () => {
+  test("SHOW → read (metadata), not blocked", () => {
     const r = classifyAndCheck("SHOW TABLES")
-    expect(r.queryType).toBe("write")
+    expect(r.queryType).toBe("read")
     expect(r.blocked).toBe(false)
   })
 
@@ -233,9 +263,10 @@ describe("sql-execute permission flow", () => {
     }
   })
 
-  test("ambiguous queries (SHOW, SET, USE) prompt for permission", () => {
-    // "other" category → treated as write → triggers ctx.ask()
-    const ambiguousQueries = ["SHOW TABLES", "SET search_path = public", "USE mydb"]
+  test("ambiguous session statements (SET, USE) prompt for permission", () => {
+    // "other" category → treated as write → triggers ctx.ask(). SHOW is a metadata
+    // read and is covered separately.
+    const ambiguousQueries = ["SET search_path = public", "USE mydb"]
     for (const q of ambiguousQueries) {
       const { queryType, blocked } = classifyAndCheck(q)
       expect(queryType).toBe("write") // prompts for permission
@@ -291,5 +322,37 @@ describe("computeSqlFingerprint", () => {
     const result = computeSqlFingerprint("SELECT 1")
     // Either a valid result (napi loaded) or null (napi unavailable) — both are correct
     expect(result === null || typeof result === "object").toBe(true)
+  })
+})
+
+describe("SQL-building aggregates are reads", () => {
+  const cases: [string, string][] = [
+    ["duckdb", "SELECT string_agg('SELECT * FROM ' || table_name, ' UNION ALL ') FROM information_schema.tables WHERE table_schema = 'main'"],
+    ["duckdb", "SELECT string_agg('''' || Symbol || '''', ',' ORDER BY Symbol) FROM t"],
+    ["duckdb", "SELECT string_agg('INSERT INTO x SELECT * FROM ' || table_name, '; ') FROM information_schema.tables"],
+    ["duckdb", "SELECT string_agg('DROP TABLE ' || table_name, '; ') FROM information_schema.tables"],
+    ["sqlite", "SELECT group_concat('SELECT * FROM ' || name, ' UNION ALL ') FROM sqlite_master WHERE type = 'table'"],
+    ["postgres", "SELECT string_agg('SELECT * FROM ' || quote_ident(table_name), ' UNION ALL ') FROM information_schema.tables"],
+    ["postgres", "SELECT string_agg(format('CREATE INDEX ON %I', table_name), '; ') FROM information_schema.tables"],
+  ]
+  for (const [dialect, sql] of cases) {
+    test(`${dialect}: ${sql.slice(0, 60)} → read, with no keyword-in-literal false positive`, () => {
+      expect(classifyAndCheck(sql, dialect)).toEqual({ queryType: "read", blocked: false })
+    })
+  }
+
+  // Known core-parser gap (altimate-core-internal): DuckDB `//` integer division fails to parse,
+  // so a read-only string_agg query using it is conservatively classified as a write.
+  // Flip to `test` once the parser supports it.
+  test.skip("duckdb: `//` integer division in a string_agg query → read (core parser gap)", () => {
+    const sql = "SELECT 'c' || (rn // 240) c, count(*), string_agg('''' || Symbol || '''', ',' ORDER BY Symbol) FROM t GROUP BY 1"
+    expect(classifyAndCheck(sql, "duckdb").queryType).toBe("read")
+  })
+
+  test("duckdb: `//` currently fails closed with an explanatory diagnostic", () => {
+    const r = classifyAndCheck("SELECT 'c' || (rn // 240) c, string_agg(Symbol, ',') FROM t GROUP BY 1", "duckdb")
+    expect(r.queryType).toBe("write")
+    expect(r.blocked).toBe(false)
+    expect(r.parseError).toBeTruthy()
   })
 })

@@ -2,7 +2,9 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { NodePath } from "@effect/platform-node"
 import { Cause, Duration, Effect, Layer, Option, Schedule, Context } from "effect"
 import path from "path"
-import type { Agent } from "../agent/agent"
+// altimate_change start — resolve truncation delegation hints against available subagents.
+import { Agent } from "../agent/agent"
+// altimate_change end
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { evaluate } from "@/permission/evaluate"
 import { Config } from "@/config/config"
@@ -24,10 +26,15 @@ export type Result = { content: string; truncated: false } | { content: string; 
 
 export type Options = TruncateCore.Options
 
-function hasTaskTool(agent?: Agent.Info) {
-  if (!agent?.permission) return false
-  return evaluate("task", "*", agent.permission).action !== "deny"
+// altimate_change start — upstream_fix: named task allow-lists must not suggest denied subagents.
+async function taskSubagent(agent?: Agent.Info) {
+  if (!agent?.permission) return undefined
+  const agents = (await Agent.list()).filter(
+    (candidate) => candidate.mode !== "primary" && evaluate("task", candidate.name, agent.permission).action !== "deny",
+  )
+  return (agents.find((candidate) => candidate.name === "explore") ?? agents[0])?.name
 }
+// altimate_change end
 
 export interface Interface {
   readonly cleanup: () => Effect.Effect<void>
@@ -110,8 +117,9 @@ export const layer = Layer.effect(
       const preview = TruncateCore.preview(lines, totalBytes, { maxLines, maxBytes, direction, headRatio })
       const file = yield* write(text)
 
-      const hint = hasTaskTool(agent)
-        ? `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
+      const subagent = yield* Effect.promise(() => taskSubagent(agent))
+      const hint = subagent
+        ? `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse the Task tool to have ${subagent} agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
         : `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
 
       return {

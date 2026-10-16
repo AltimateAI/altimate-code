@@ -10,7 +10,7 @@
  * unrelated cwd, run against a compiled binary — lives in
  * packages/opencode/test/altimate/store-path-resolution.test.ts.
  */
-import { describe, test, expect, mock, afterEach } from "bun:test"
+import { describe, test, expect, afterEach } from "bun:test"
 import { Database } from "bun:sqlite"
 import * as fs from "fs"
 import * as os from "os"
@@ -232,30 +232,17 @@ describe("absoluteFileUriPath", () => {
 
 describe("DuckDB driver create-on-open", () => {
   test("refuses to open a missing store and creates nothing", async () => {
-    // The real duckdb addon is an optional dependency; the guard runs before
-    // any Database is constructed, so a stub is enough to prove it fires first.
+    // The native handle lives in a helper process; reject before constructing
+    // that engine, rather than mocking a binding this process never imports.
     let constructed = false
-    mock.module("duckdb", () => ({
-      default: {
-        Database: class {
-          constructor(_p: string, optsOrCb: any, cb?: (err: Error | null) => void) {
-            constructed = true
-            const done = typeof optsOrCb === "function" ? optsOrCb : cb!
-            setTimeout(() => done(null), 0)
-          }
-          connect() {
-            return {}
-          }
-          close(cb: any) {
-            if (cb) cb(null)
-          }
-        },
-      },
-    }))
-
     const missing = path.join(tmp(), "absent.duckdb")
     const { connect } = await import("../src/duckdb")
-    const connector = await connect({ type: "duckdb", path: missing })
+    const connector = await connect({ type: "duckdb", path: missing }, {
+      createEngine() {
+        constructed = true
+        throw new Error("missing-store guard should run before engine construction")
+      },
+    })
 
     await expect(connector.connect()).rejects.toThrow("not found")
     expect(constructed).toBe(false)

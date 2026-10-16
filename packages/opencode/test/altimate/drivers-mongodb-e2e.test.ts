@@ -1976,15 +1976,16 @@ describe.skipIf(!DOCKER && !MONGODB_USE_CI)("MongoDB Driver E2E", () => {
       ).rejects.toThrow()
     })
 
-    test("handles queries on non-existent collection (find returns empty)", async () => {
-      const result = await connector.execute(
-        cmd({
-          command: "find",
-          database: "testdb",
-          collection: "totally_nonexistent_collection_xyz",
-        }),
-      )
-      expect(result.row_count).toBe(0)
+    test("rejects queries on a non-existent collection and lists the available ones", async () => {
+      await expect(
+        connector.execute(
+          cmd({
+            command: "find",
+            database: "testdb",
+            collection: "totally_nonexistent_collection_xyz",
+          }),
+        ),
+      ).rejects.toThrow(/does not exist or is not accessible.*Available collections: .*users/)
     })
 
     test("handles numeric edge cases in documents", async () => {

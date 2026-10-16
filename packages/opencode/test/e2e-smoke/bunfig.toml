@@ -1,0 +1,4 @@
+# Keep the smoke runner independent of the product unit-test preload. The real
+# product is loaded only in the source CLI subprocess, whose failures are saved.
+[test]
+root = "."

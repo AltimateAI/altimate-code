@@ -1,26 +1,38 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
-import { connect } from "../src/duckdb"
-import type { Connector } from "../src/types"
+import { connect, type DuckDBEngine } from "../src/duckdb"
+import { LocalEngine } from "../src/local-engine"
+import type { ConnectionConfig, Connector } from "../src/types"
 
 // Run in a separate process because other suites mock the DuckDB module.
 const duckdbTest = process.env.ALTIMATE_DUCKDB_E2E === "1" ? test : test.skip
 
 let connector: Connector | undefined
-let allSpy: ReturnType<typeof spyOn> | undefined
-let duckdb: typeof import("duckdb")
+let callSpy: ReturnType<typeof spyOn> | undefined
 
 afterEach(async () => {
-  allSpy?.mockRestore()
-  allSpy = undefined
+  callSpy?.mockRestore()
+  callSpy = undefined
   await connector?.close()
   connector = undefined
 })
 
-async function open() {
-  duckdb = await import("duckdb").then((module) => module.default)
-  connector = await connect({ type: "duckdb", path: ":memory:" })
+async function open(engine?: DuckDBEngine, config: Partial<ConnectionConfig> = {}) {
+  connector = await connect(
+    { type: "duckdb", path: ":memory:", ...config },
+    engine ? { createEngine: () => engine } : undefined,
+  )
   await connector.connect()
   return connector
+}
+
+function scriptedEngine(query: (sql: string, timeoutMs?: number, signal?: AbortSignal) => Promise<unknown[]>): DuckDBEngine {
+  return {
+    async open() {},
+    async call<T>(_method, payload, timeoutMs, _onDispatch, signal) {
+      return await query(payload.sql as string, timeoutMs, signal) as T
+    },
+    async close() {},
+  }
 }
 
 describe("DuckDB schema introspection", () => {
@@ -48,11 +60,11 @@ describe("DuckDB schema introspection", () => {
     for (let i = 0; i < 24; i++) {
       await driver.execute(`CREATE TABLE item_${i} (id INTEGER)`)
     }
-    allSpy = spyOn(duckdb.Connection.prototype, "all")
+    callSpy = spyOn(LocalEngine.prototype, "call")
 
     const metadata = await driver.introspectSchema!()
 
-    expect(allSpy).toHaveBeenCalledTimes(2)
+    expect(callSpy).toHaveBeenCalledTimes(2)
     expect(metadata.schemas).toEqual(["empty_schema", "main"])
     expect(metadata.tables).toHaveLength(26)
     expect(metadata.tables.find((table) => table.name === "events")).toEqual({
@@ -84,30 +96,57 @@ describe("DuckDB schema introspection", () => {
     expect(metadata.tables[0].columns.at(-1)?.name).toBe("field_1099")
   })
 
-  duckdbTest("rejects an already aborted introspection without querying", async () => {
-    const driver = await open()
-    allSpy = spyOn(duckdb.Connection.prototype, "all")
+  test("forwards query deadlines and abort signals to both bulk metadata queries", async () => {
+    const calls: Array<{ sql: string; timeoutMs?: number; signal?: AbortSignal }> = []
+    const driver = await open(scriptedEngine(async (sql, timeoutMs, signal) => {
+      calls.push({ sql, timeoutMs, signal })
+      return calls.length === 1
+        ? [{ schema_name: "main" }]
+        : [{ table_schema: "main", table_name: "events", table_type: "BASE TABLE", column_name: "id", data_type: "INTEGER", is_nullable: "NO" }]
+    }), { query_timeout_ms: 37 })
+    const controller = new AbortController()
+
+    expect(await driver.introspectSchema!(controller.signal)).toEqual({
+      schemas: ["main"],
+      tables: [{ schema: "main", name: "events", type: "table", columns: [{ name: "id", data_type: "INTEGER", nullable: false }] }],
+    })
+    expect(calls).toHaveLength(2)
+    for (const call of calls) {
+      expect(call.timeoutMs).toBe(37)
+      expect(call.signal).toBe(controller.signal)
+      expect(call.sql).not.toMatch(/\bLIMIT\b/i)
+    }
+  })
+
+  test("rejects an already aborted introspection without querying", async () => {
+    const engine = scriptedEngine(async () => [])
+    const driver = await open(engine)
+    callSpy = spyOn(engine, "call")
     const controller = new AbortController()
     controller.abort(new Error("Index cancelled"))
 
     await expect(driver.introspectSchema!(controller.signal)).rejects.toThrow("Index cancelled")
-    expect(allSpy).not.toHaveBeenCalled()
+    expect(callSpy).not.toHaveBeenCalled()
   })
 
-  duckdbTest("stops waiting on abort and starts no further metadata queries", async () => {
-    const driver = await open()
-    let complete: ((error: Error | null, rows: unknown[]) => void) | undefined
-    allSpy = spyOn(duckdb.Connection.prototype, "all").mockImplementation(function (_sql, ...args) {
-      complete = args.at(-1) as typeof complete
-      return this
-    })
+  test("stops waiting on abort and starts no further metadata queries", async () => {
+    const entered = Promise.withResolvers<void>()
+    let complete!: (rows: unknown[]) => void
+    const engine = scriptedEngine((_sql, _timeoutMs, signal) => new Promise((resolve, reject) => {
+      complete = resolve
+      signal!.addEventListener("abort", () => reject(signal!.reason), { once: true })
+      entered.resolve()
+    }))
+    const driver = await open(engine)
+    callSpy = spyOn(engine, "call")
     const controller = new AbortController()
     const pending = driver.introspectSchema!(controller.signal)
+    await entered.promise
     controller.abort(new Error("Index cancelled"))
 
     await expect(pending).rejects.toThrow("Index cancelled")
-    complete!(null, [{ schema_name: "main" }])
+    complete([{ schema_name: "main" }])
     await Promise.resolve()
-    expect(allSpy).toHaveBeenCalledTimes(1)
+    expect(callSpy).toHaveBeenCalledTimes(1)
   })
 })

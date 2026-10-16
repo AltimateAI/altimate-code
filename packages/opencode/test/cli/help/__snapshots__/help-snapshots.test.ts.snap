@@ -81,6 +81,7 @@ Options:
                                                                                             [string]"
 `;
 
+// altimate_change start — document the committed-answer echo allowance in run help
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode run --help 1`] = `
 "altimate-code run [message..]
 
@@ -125,7 +126,8 @@ Options:
       --variant                       model variant (provider-specific reasoning effort, e.g., high,
                                       max, minimal)                                         [string]
       --thinking                      show thinking blocks                [boolean] [default: false]
-  -o, --output                        write final assistant response to file (.md or .txt)  [string]
+  -o, --output                        write completed assistant text, including preambles, when the
+                                      run ends (.md or .txt); not incremental               [string]
       --audience                      output calibration: executive (no SQL/jargon, business
                                       framing) or technical (default)
                                                         [string] [choices: "executive", "technical"]
@@ -133,11 +135,15 @@ Options:
                                       statement (1-indexed)                                 [number]
       --trace                         enable session tracing (default: true, disable with
                                       --no-trace)                          [boolean] [default: true]
-      --max-turns                     maximum number of assistant turns before aborting the session
+      --max-turns                     maximum assistant work turns; allows one committed-answer
+                                      echo, or one best-effort reply after a budget abort   [number]
+      --time-budget                   maximum time in seconds including startup (env:
+                                      ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow
                                                                                             [number]
       --dangerously-skip-permissions  auto-approve permissions that are not explicitly denied
                                       (dangerous!)                        [boolean] [default: false]"
 `;
+// altimate_change end
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode debug --help 1`] = `
 "altimate-code debug

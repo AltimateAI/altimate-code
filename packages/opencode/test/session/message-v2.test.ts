@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { APICallError } from "ai"
-import { MessageV2 } from "../../src/session/message-v2"
+import { MessageV2, isEchoTransportError } from "../../src/session/message-v2"
+import { SessionRetry } from "../../src/session/retry"
+import { ProviderError } from "../../src/provider/error"
 import { ProviderTransform } from "@/provider/transform"
 import type { Provider } from "@/provider/provider"
 
@@ -1437,6 +1439,29 @@ describe("session.message-v2.fromError", () => {
     })
   })
 
+  // A first-byte (response headers) timeout used to fall through to UnknownError, which the
+  // session never retries — one slow provider accept ended an otherwise healthy run.
+  test("classifies a header timeout as a retryable APIError naming the deadline", () => {
+    const cause = new ProviderError.HeaderTimeoutError(10_000)
+    const result = MessageV2.fromError(cause, { providerID })
+
+    expect(result.name).toBe("APIError")
+    const data = result.data as MessageV2.APIError["data"]
+    expect(data.isRetryable).toBe(true)
+    // "timed out" keeps run accounting attributing an exhausted retry to a timeout.
+    expect(data.message).toBe("The model stopped responding: response headers timed out after 10s")
+    expect(data.metadata).toStrictEqual({ code: "ProviderHeaderTimeoutError", timeoutMs: "10000" })
+    expect(SessionRetry.retryable(result)).toBe(data.message)
+  })
+
+  test("still treats other provider stream errors as non-retryable unknown errors", () => {
+    const cause = new ProviderError.ResponseStreamError("websocket closed")
+    const result = MessageV2.fromError(cause, { providerID })
+
+    expect(result.name).toBe("UnknownError")
+    expect(SessionRetry.retryable(result)).toBeUndefined()
+  })
+
   // BUG: REGRESSION: OpenAI Responses API server_error stream chunks should become retryable APIError.
   test("serializes OpenAI response server_error stream chunks as retryable APIError", () => {
     const body = {
@@ -1504,6 +1529,132 @@ describe("session.message-v2.fromError", () => {
     })
     const result = MessageV2.fromError(error, { providerID })
     expect(SessionV1.ContextOverflowError.isInstance(result)).toBe(true)
+  })
+
+  for (const statusCode of [400, 503]) {
+    for (const code of [
+      "guardrail_intervened", "content_filter", "content_policy", "content_policy_violation",
+      "content_policy_blocked", "policy_violation", "safety_rejection", "moderation_blocked",
+    ]) {
+      test(`HTTP ${statusCode} structured ${code} overrides overflow text`, () => {
+        const result = MessageV2.fromError(new APICallError({
+          message: "maximum context length exceeded",
+          url: "https://example.com",
+          requestBodyValues: {},
+          statusCode,
+          isRetryable: statusCode === 503,
+          responseBody: JSON.stringify({ error: { code, message: "maximum context length exceeded" } }),
+        }), { providerID })
+
+        expect(result.name).toBe("APIError")
+        expect((result.data as MessageV2.APIError["data"]).metadata?.code).toBe(code)
+        expect(isEchoTransportError(result)).toBe(false)
+      })
+    }
+
+    test(`HTTP ${statusCode} nested orchestration guardrail overrides overflow text`, () => {
+      const result = MessageV2.fromError(new APICallError({
+        message: "maximum context length exceeded",
+        url: "https://example.com",
+        requestBodyValues: {},
+        statusCode,
+        isRetryable: statusCode === 503,
+        responseBody: JSON.stringify({
+          error: { message: "maximum context length exceeded" },
+          details: { orchestrationError: { code: "guardrail_intervened" } },
+        }),
+      }), { providerID })
+
+      expect(result.name).toBe("APIError")
+      expect((result.data as MessageV2.APIError["data"]).metadata?.code).toBe("guardrail_intervened")
+      expect(isEchoTransportError(result)).toBe(false)
+    })
+  }
+
+  for (const code of ["context_length_exceeded", "content_length_exceeded"]) {
+    test(`an upstream ${code} wrapped by the gateway under provider_specific_fields is still an overflow`, () => {
+      const result = MessageV2.fromError(new APICallError({
+        message: "Request failed",
+        url: "https://example.com",
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+        responseBody: JSON.stringify({
+          error: {
+            code: "invalid_request_error",
+            message: "upstream request failed",
+            provider_specific_fields: { error: { code, message: "maximum context length exceeded" } },
+          },
+        }),
+      }), { providerID })
+
+      expect(result.name).toBe("ContextOverflowError")
+    })
+  }
+
+  for (const code of ["context_length_exceeded", "content_length_exceeded"]) {
+    test(`a nested diagnostic ${code} never masks a top-level policy denial`, () => {
+      const result = MessageV2.fromError(new APICallError({
+        message: "Request failed",
+        url: "https://example.com",
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+        responseBody: JSON.stringify({
+          error: { code: "policy_violation", message: "maximum context length exceeded" },
+          details: { request: { code } },
+        }),
+      }), { providerID })
+
+      expect(result.name).toBe("APIError")
+      expect(isEchoTransportError(result)).toBe(false)
+      expect((result as any).data.metadata.code).toBe("policy_violation")
+    })
+  }
+
+  for (const code of ["context_length_exceeded", "content_length_exceeded"]) {
+    test(`explicit ${code} remains overflow despite a nested policy code`, () => {
+      const result = MessageV2.fromError(new APICallError({
+        message: "Request failed",
+        url: "https://example.com",
+        requestBodyValues: {},
+        statusCode: 400,
+        isRetryable: false,
+        responseBody: JSON.stringify({
+          error: { code },
+          orchestrationError: { code: "guardrail_intervened" },
+        }),
+      }), { providerID })
+
+      expect(result.name).toBe("ContextOverflowError")
+    })
+  }
+
+  test("an explicit policy code on HTTP 413 stays a policy error, not an overflow", () => {
+    const result = MessageV2.fromError(new APICallError({
+      message: "Request failed",
+      url: "https://example.com",
+      requestBodyValues: {},
+      statusCode: 413,
+      isRetryable: false,
+      responseBody: JSON.stringify({ error: { code: "policy_violation" } }),
+    }), { providerID })
+
+    expect(result.name).toBe("APIError")
+    expect(result).toHaveProperty("data.metadata.code", "policy_violation")
+  })
+
+  test("HTTP 413 without a policy code is still an overflow", () => {
+    const result = MessageV2.fromError(new APICallError({
+      message: "Request failed",
+      url: "https://example.com",
+      requestBodyValues: {},
+      statusCode: 413,
+      isRetryable: false,
+      responseBody: JSON.stringify({ error: { message: "request entity too large" } }),
+    }), { providerID })
+
+    expect(result.name).toBe("ContextOverflowError")
   })
 
   test("does not classify 429 no body as context overflow", () => {

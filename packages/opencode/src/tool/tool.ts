@@ -23,6 +23,10 @@ import {
 // altimate_change start — humanize tool-call titles at the source
 import { describeToolCall } from "../altimate/tool-label"
 // altimate_change end
+// altimate_change start — upstream_fix: normalize optional strict-schema fillers before validation
+import { fillerSafeParameters } from "./filler-parameters"
+import { ToolJsonSchema } from "./json-schema"
+// altimate_change end
 
 interface Metadata {
   [key: string]: any
@@ -60,8 +64,13 @@ export type Context<M extends Metadata = Metadata> = {
   callID?: string
   extra?: { [key: string]: unknown }
   messages: SessionV1.WithParts[]
+  // altimate_change start — pass effective permission rules to search result filtering
+  permissions?: PermissionV1.Ruleset
+  // altimate_change end
   metadata(input: { title?: string; metadata?: M }): Effect.Effect<void>
-  ask(input: Omit<PermissionV1.Request, "id" | "sessionID" | "tool">): Effect.Effect<void>
+  // altimate_change start — allow search approvals to preserve absolute read restrictions
+  ask(input: Omit<PermissionV1.Request, "id" | "sessionID" | "tool"> & { ruleset?: PermissionV1.Ruleset }): Effect.Effect<void>
+  // altimate_change end
 }
 
 export interface ExecuteResult<M extends Metadata = Metadata> {
@@ -264,9 +273,15 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
     Effect.gen(function* () {
       const toolInfo = typeof init === "function" ? { ...(yield* init(ctx)) } : { ...init }
       // altimate_change end
+      // altimate_change start — upstream_fix: share filler handling across all tool schemas
+      const jsonSchema = ToolJsonSchema.fromTool({ ...toolInfo, id })
+      const parameters = fillerSafeParameters(toolInfo.parameters, jsonSchema)
+      // altimate_change end
       // Compile the parser closure once per tool init; `decodeUnknownEffect`
       // allocates a new closure per call, so hoisting avoids re-closing it.
-      const decode = Schema.decodeUnknownEffect(toolInfo.parameters)
+      // altimate_change start — upstream_fix: validate after optional fillers become omissions
+      const decode = Schema.decodeUnknownEffect(parameters)
+      // altimate_change end
       const execute = toolInfo.execute
       toolInfo.execute = (args, ctx) => {
         const attrs = {
@@ -287,6 +302,13 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           )
           // altimate_change start — telemetry instrumentation for tool execution
           const startTime = Date.now()
+          // Search callers without a ruleset use the configured agent defaults,
+          // including read denials. An unknown agent leaves an empty ruleset,
+          // which the search filter treats as deny-all rather than ask-everything.
+          if (["grep", "glob", "list"].includes(id) && !ctx.permissions?.length) {
+            const agent = yield* agents.get(ctx.agent)
+            ctx = { ...ctx, permissions: agent?.permission ?? [] }
+          }
           // Debug mode: trace each call as it starts and ends (no-op unless ALTIMATE_DEBUG).
           const endTrace = traceToolCall(id, ctx.callID)
           const rawResult = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(
@@ -321,7 +343,9 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           }
         }).pipe(Effect.orDie, Effect.withSpan("Tool.execute", { attributes: attrs }))
       }
-      return toolInfo
+      // altimate_change start — upstream_fix: expose the same decoder to schema and batch callers
+      return { ...toolInfo, parameters, jsonSchema }
+      // altimate_change end
     })
 }
 
