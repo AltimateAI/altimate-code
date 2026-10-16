@@ -11,4 +11,10 @@ export function deadline(elapsedS: number, budgetS: number | undefined): "soft" 
   return undefined
 }
 
+/** Leave answer time inside the work budget, scaling the reserve for short runs. */
+export function queryDeadline(startedAt: number, budgetS: number | undefined): number | undefined {
+  if (budgetS === undefined) return undefined
+  return Math.min(Number.MAX_SAFE_INTEGER, startedAt + budgetS * 1000 - Math.min(90_000, budgetS * 200))
+}
+
 export * as RunTimeBudget from "./run-time-budget"

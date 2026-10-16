@@ -79,6 +79,30 @@ describe("schema_inspect warehouse qualifiers", () => {
     expect(result.output).not.toContain("Resolved")
   })
 
+  test.each([
+    { warehouse: "scratch", table: "scratch.t" },
+    { warehouse: "scratch", schema_name: "scratch", table: "t" },
+    { warehouse: "scratch", schema_name: "main", table: "scratch.t" },
+    { warehouse: "scratch", schema_name: "", table: "main.t" },
+  ])("accepts qualified scratch addresses %j", async (args) => {
+    const result = await inspect(args)
+    expect(result.metadata.success).toBe(true)
+    expect(result.output).toContain("Table: main.t")
+    expect(result.output).toContain("id | BIGINT")
+  })
+
+  test.each(["main", "public"])("accepts an existing %s schema qualifier with an explicit warehouse", async (schema) => {
+    const primary = await Registry.get("primary")
+    if (schema !== "main") {
+      await primary.execute(`CREATE SCHEMA ${schema}`)
+      await primary.execute(`CREATE TABLE ${schema}.t (local_id INTEGER)`)
+    }
+    const result = await inspect({ warehouse: "primary", table: `${schema}.t` })
+    expect(result.metadata.success).toBe(true)
+    expect(result.output).toContain(`Table: ${schema}.t`)
+    expect(result.output).toContain("local_id")
+  })
+
   test("an explicit warehouse wins over a warehouse-shaped schema name", async () => {
     const result = await inspect({ warehouse: "primary", schema_name: "scratch", table: "t" })
     expect(result.metadata.success).toBe(false)

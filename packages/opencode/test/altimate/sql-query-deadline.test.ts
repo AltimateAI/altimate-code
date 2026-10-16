@@ -16,6 +16,7 @@ import {
 import { Dispatcher } from "../../src/altimate/native"
 import * as Registry from "../../src/altimate/native/connections/registry"
 import { QueryTimeoutError, type Connector } from "@altimateai/drivers/types"
+import { RunBudget } from "../../src/altimate/run-budget"
 
 const FOREVER_SQLITE =
   "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < 4000000000) SELECT count(*) AS n FROM c"
@@ -71,7 +72,8 @@ afterEach(() => {
   Registry.reset()
 })
 
-const run = (params: Record<string, unknown>) => Dispatcher.call("sql.execute", params as never) as Promise<any>
+const run = (params: Record<string, unknown>, context?: { signal?: AbortSignal; sessionID?: string }) =>
+  Dispatcher.call("sql.execute", params as never, context) as Promise<any>
 
 async function queuedPostgres() {
   const queries: string[] = []
@@ -107,6 +109,55 @@ async function queuedPostgres() {
 }
 
 describe("sql.execute deadline — native engines", () => {
+  test.each([0, 10_000])("query_timeout_ms %i is capped by the remaining run budget", async (queryTimeoutMs) => {
+    Registry.setConfigs({ source: { type: "mongodb", query_timeout_ms: 0 } })
+    const dispose = RunBudget.registerQueryDeadline("deadline-session", Date.now() + 200)
+    const execute = mock<Connector["execute"]>(() => new Promise(() => {}))
+    const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
+    try {
+      const before = performance.now()
+      const result = await run(
+        { sql: "SELECT 1", warehouse: "source", query_timeout_ms: queryTimeoutMs },
+        { sessionID: "deadline-session" },
+      )
+      expect(performance.now() - before).toBeLessThan(1000)
+      expect(result.error).toContain("QUERY_TIMEOUT")
+      const options = execute.mock.calls[0]?.[3]
+      expect(options?.queryTimeoutMs).toBeGreaterThan(0)
+      expect(options?.queryTimeoutMs).toBeLessThanOrEqual(200)
+      expect(options?.signal?.aborted).toBe(true)
+    } finally {
+      dispose()
+      get.mockRestore()
+    }
+  })
+
+  test("session abort reaches the connector and returns promptly", async () => {
+    Registry.setConfigs({ source: { type: "mongodb" } })
+    const controller = new AbortController()
+    const started = Promise.withResolvers<void>()
+    let receivedSignal: AbortSignal | undefined
+    const get = spyOn(Registry, "get").mockResolvedValue({
+      execute: (_sql: string, _limit: number, _binds: unknown, options: { signal?: AbortSignal }) => {
+        receivedSignal = options.signal
+        started.resolve()
+        return new Promise(() => {})
+      },
+    } as never)
+    try {
+      const pending = run({ sql: "SELECT 1", warehouse: "source" }, { signal: controller.signal })
+      await started.promise
+      const before = performance.now()
+      controller.abort(new Error("session stopped"))
+      const result = await Promise.race([pending, Bun.sleep(1000).then(() => ({ error: "abort was ignored" }))])
+      expect(result.error).toContain("session stopped")
+      expect(performance.now() - before).toBeLessThan(2000)
+      expect(receivedSignal?.aborted).toBe(true)
+    } finally {
+      get.mockRestore()
+    }
+  })
+
   test("the outer PostgreSQL deadline abandons a queued acquisition and releases its late client without executing SQL", async () => {
     const db = await queuedPostgres()
     try {
@@ -168,13 +219,14 @@ describe("sql.execute deadline — native engines", () => {
     }
   })
 
-  test("sql.execute keeps non-PostgreSQL connector options unchanged for unprotected requests", async () => {
+  test("sql.execute forwards bounded options without read-only protection to non-PostgreSQL connectors", async () => {
     Registry.setConfigs({ source: { type: "snowflake" } })
     const execute = mock<Connector["execute"]>(async () => ({ columns: [], rows: [], row_count: 0, truncated: false }))
     const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
     try {
       expect((await run({ sql: "SELECT 1", warehouse: "source", read_only: false })).error).toBeUndefined()
-      expect(execute.mock.calls[0]?.[3]).toEqual({ queryTimeoutMs: undefined })
+      expect(execute.mock.calls[0]?.[3]).toMatchObject({ queryTimeoutMs: expect.any(Number), signal: expect.any(AbortSignal) })
+      expect(execute.mock.calls[0]?.[3]).not.toHaveProperty("readOnly")
     } finally {
       get.mockRestore()
     }
@@ -213,7 +265,7 @@ describe("sql.execute deadline — native engines", () => {
     const seed = new Database(db)
     seed.exec("CREATE TABLE sentinel(x)")
     seed.close()
-    Registry.setConfigs({ lite: { type: "sqlite", path: db } as never })
+    Registry.setConfigs({ lite: { type: "SQLite", path: db } as never })
     try {
       // Observe A's dispatch to the helper so B is queued strictly behind it.
       const dispatched = Promise.withResolvers<void>()
@@ -285,6 +337,28 @@ describe("sql.execute deadline — dbt path never falls back", () => {
     scriptedAdapter = adapter
     await body()
   }
+
+  test("aborting a dbt query returns promptly without retrying on the native connection", async () => {
+    Registry.setConfigs({ lite: { type: "sqlite", path: ":memory:" } as never })
+    const controller = new AbortController()
+    const started = Promise.withResolvers<void>()
+    const get = spyOn(Registry, "get")
+    try {
+      await withAdapter({ immediatelyExecuteSQL: () => {
+        started.resolve()
+        return new Promise(() => {})
+      } }, async () => {
+        const pending = run({ sql: "SELECT 1" }, { signal: controller.signal })
+        await started.promise
+        controller.abort(new Error("session stopped"))
+        const result = await Promise.race([pending, Bun.sleep(1000).then(() => ({ error: "abort was ignored" }))])
+        expect(result.error).toContain("session stopped")
+        expect(get).not.toHaveBeenCalled()
+      })
+    } finally {
+      get.mockRestore()
+    }
+  })
 
   test("a read-only PostgreSQL request skips the configured dbt adapter and uses a read-only transaction", async () => {
     const db = await queuedPostgres()

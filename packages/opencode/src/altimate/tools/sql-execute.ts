@@ -39,29 +39,50 @@ import * as Precedence from "../workspace/precedence"
 // altimate_change start — never render a warehouse failure as an empty result
 import { normalizeError } from "./response-normalization"
 // altimate_change end
+import { readSql } from "./sql-check"
 
 const MAX_SQL_ROWS = 10_000
-const LIMIT_ERROR = `limit must be a finite positive integer between 1 and ${MAX_SQL_ROWS}`
+const LIMIT_ERROR = "limit must be a finite positive integer"
+const MAX_GENERATED_SQL_BYTES = 1024 * 1024
+// Below the default tool-output cap, so a redirect never spills the SQL into a truncated file.
+const MAX_REDIRECT_SQL_BYTES = 40 * 1024
+
+function generatedRead(sql: string, warehouse: string, stage: "source" | "result"): string {
+  try {
+    return readSql(sql, Registry.canonicalType(Registry.getConfig(warehouse)?.type) ?? undefined)
+  } catch {
+    throw new Error(`query_from ${stage} must be a single read-only SELECT (or WITH ... SELECT).`)
+  }
+}
 
 const parameters = z.object({
-  query: z.string().describe("SQL query to execute"),
+  query: z.string().nullish().describe("SQL query to execute; omit when using query_from"),
+  query_from: z
+    .object({
+      warehouse: z.string().describe("Warehouse containing the SQL generator or saved SQL"),
+      sql: z.string().describe("Single read-only SELECT returning exactly one row and one SQL string column"),
+    })
+    .nullish()
+    .describe(
+      "Fetch SQL internally instead of copying generated SQL through the conversation; requires an explicit target warehouse",
+    ),
   warehouse: z.string().optional().describe("Warehouse connection name"),
   limit: z
     .number({ error: LIMIT_ERROR })
     .int(LIMIT_ERROR)
     .min(1, LIMIT_ERROR)
-    .max(MAX_SQL_ROWS, LIMIT_ERROR)
+    .transform((limit) => Math.min(limit, MAX_SQL_ROWS))
     .optional()
     .default(100)
-    .describe(`Max rows to return (1-${MAX_SQL_ROWS}; default 100)`),
+    .describe(`Max rows to return (default 100; larger values are capped at ${MAX_SQL_ROWS})`),
   query_timeout_ms: z
     .number()
     .int()
-    .min(0)
+    .min(1)
     .max(3_600_000)
     .optional()
     .describe(
-      "Optional per-query execution deadline in ms. Omit to use the configured deadline (connection setting or environment). Set only when a specific query needs a longer or shorter budget; 0 disables.",
+      "Optional per-query execution deadline in ms. Omit or use 0 to use the configured deadline (connection setting or environment), bounded by the remaining run budget. Set a positive value only when a specific query needs a longer or shorter budget.",
     ),
 })
 
@@ -73,10 +94,79 @@ export const SqlExecuteTool = Tool.define(
       Effect.gen(function* () {
         const bridge = yield* EffectBridge.make()
         return yield* legacyToInit({
-          description: "Execute SQL against a connected data warehouse. Returns results as a formatted table.",
+          description:
+            "Execute SQL against a connected data warehouse. Returns results as a formatted table. " +
+            "Provide exactly one of query or query_from. query_from runs a read-only generator SELECT and executes its single SQL string result (up to 1 MiB) as a read-only SELECT on warehouse, without previewing or retyping the generated SQL. " +
+            "For DuckDB table sets, generate query_table([...], true) with escaped table-name string literals. For thousands of tables, UNION ALL BY NAME batches of at most 128 names to stay within the default expression depth.",
           parameters,
           formatValidationError: (error) => error.issues?.map((issue) => issue.message).join("; ") || LIMIT_ERROR,
           async execute(args, ctx) {
+            let sql = args.query ?? ""
+            // Strict-schema clients send null or empty placeholders for unused optional fields.
+            const queryFrom = args.query_from?.warehouse.trim() || args.query_from?.sql.trim() ? args.query_from : undefined
+            if (Boolean(sql.trim()) === Boolean(queryFrom)) {
+              throw new Error("Provide exactly one of query or query_from.")
+            }
+            let sourcePrecedence: Precedence.Verdict | undefined
+            if (queryFrom) {
+              if (!queryFrom.warehouse.trim() || !queryFrom.sql.trim()) {
+                throw new Error("query_from requires non-empty warehouse and sql.")
+              }
+              if (!args.warehouse?.trim()) throw new Error("query_from requires an explicit target warehouse.")
+              const source = queryFrom
+              const sourceSql = generatedRead(source.sql, source.warehouse, "source")
+              await ctx.ask({
+                permission: "sql_execute",
+                patterns: [sourceSql],
+                always: ["*"],
+                metadata: { warehouse: source.warehouse },
+              })
+              sourcePrecedence = await Precedence.check(ctx.sessionID, "sql_execute", source.warehouse)
+              if (sourcePrecedence.redirect) return sourcePrecedence.redirect
+              try {
+                const result = await Dispatcher.call("sql.execute", {
+                  sql: sourceSql,
+                  warehouse: source.warehouse,
+                  limit: 2,
+                  query_timeout_ms: args.query_timeout_ms,
+                  ...(Registry.canonicalType(Registry.getConfig(source.warehouse)?.type) === "postgres"
+                    ? { read_only: true }
+                    : {}),
+                }, { signal: ctx.abort, sessionID: ctx.sessionID })
+                const error = normalizeError(result.error)
+                if (error !== undefined) {
+                  throw new Error(`query_from source failed: ${error.trim() || "SQL execution failed."}`)
+                }
+                const value = result.rows[0]?.[0]
+                if (
+                  result.truncated ||
+                  result.row_count !== 1 ||
+                  result.columns.length !== 1 ||
+                  result.rows.length !== 1 ||
+                  result.rows[0].length !== 1 ||
+                  typeof value !== "string" ||
+                  !value.trim()
+                ) {
+                  throw new Error(
+                    "query_from must return exactly one row and one non-empty SQL string column, without truncation.",
+                  )
+                }
+                if (Buffer.byteLength(value, "utf8") > MAX_GENERATED_SQL_BYTES) {
+                  throw new Error("query_from generated SQL exceeds the 1 MiB limit.")
+                }
+                sql = generatedRead(value, args.warehouse, "result")
+              } catch (error) {
+                if (!sourcePrecedence.notice) throw error
+                const message = error instanceof Error ? error.message : String(error)
+                throw new Error(`${sourcePrecedence.notice}\n\n${message}`)
+              }
+              await ctx.ask({
+                permission: "sql_execute",
+                patterns: [sql],
+                always: ["*"],
+                metadata: { warehouse: args.warehouse },
+              })
+            }
             // altimate_change start - SQL write access control
             // Permission checks OUTSIDE try/catch so denial errors propagate to the framework
             // MongoDB warehouses take JSON command documents; the SQL classifier would read
@@ -88,15 +178,15 @@ export const SqlExecuteTool = Tool.define(
               ? (Registry.canonicalType(Registry.getConfig(args.warehouse)?.type) ?? undefined)
               : undefined
             const mongoWarehouse = isMongoWarehouse(warehouse)
-            const mongo = mongoWarehouse ? classifyMongoCommand(args.query) : null
+            const mongo = mongoWarehouse ? classifyMongoCommand(sql) : null
             if (mongoWarehouse && !mongo) {
               throw new Error(
                 'A MongoDB query must be a JSON command, e.g. {"command":"find","collection":"c","filter":{}}. SQL text is not supported.',
               )
             }
-            const classification = mongo ?? classifyAndCheck(args.query, dialect)
+            const classification = mongo ?? classifyAndCheck(sql, dialect)
             const { queryType, blocked } = classification
-            const query = mongo?.normalized ?? args.query
+            const query = mongo?.normalized ?? sql
             if (blocked) {
               throw new Error(
                 "DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety. This cannot be overridden.",
@@ -119,11 +209,11 @@ export const SqlExecuteTool = Tool.define(
             // writes to), so table DDL/row DML there needs no write permission. Statements that can
             // reach outside the engine (COPY TO, ATTACH, INSTALL/LOAD, EXPORT, SET) still ask, and
             // the hard-deny list above still applies.
-            if (queryType === "write" && !(isScratch(args.warehouse) && isScratchSafeWrite(args.query))) {
+            if (queryType === "write" && !(isScratch(args.warehouse) && isScratchSafeWrite(sql))) {
               // Unprovable SQL still goes through write approval; the prompt carries the parse error.
               await ctx.ask({
                 permission: "sql_execute_write",
-                patterns: [args.query.slice(0, 200)],
+                patterns: [sql.slice(0, 200)],
                 always: ["*"],
                 metadata: { queryType, ...(parseError && { parseError }) },
               })
@@ -139,8 +229,28 @@ export const SqlExecuteTool = Tool.define(
             // the same statement needed a moment ago. Approving and then redirecting is not a
             // wasted prompt: the write still happens, through the engine, and what the user
             // authorised is the write — not which connection carries it.
-            const precedence = await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)
-            if (precedence.redirect) return precedence.redirect
+            const precedence = { ...(await Precedence.check(ctx.sessionID, "sql_execute", args.warehouse)) }
+            if (precedence.redirect) {
+              // The workspace tool needs the SQL; a generated statement exists only in this
+              // frame, so hand it to the caller or the redirect cannot be followed.
+              if (queryFrom && Buffer.byteLength(sql, "utf8") > MAX_REDIRECT_SQL_BYTES) {
+                throw new Error(
+                  "query_from generated SQL is too large to hand to the workspace tool; run it on a local connection.",
+                )
+              }
+              const redirect = queryFrom
+                ? {
+                    ...precedence.redirect,
+                    output: `${precedence.redirect.output}\n\nSQL to run:\n${sql}`,
+                    metadata: { ...precedence.redirect.metadata, generated_sql: true },
+                  }
+                : precedence.redirect
+              return sourcePrecedence ? Precedence.annotate(sourcePrecedence, redirect) : redirect
+            }
+            if (sourcePrecedence?.notice) {
+              precedence.notice = [sourcePrecedence.notice, precedence.notice].filter(Boolean).join("\n")
+              precedence.precedence ??= sourcePrecedence.precedence
+            }
             // altimate_change end
 
             // altimate_change start — shadow-mode pre-execution SQL validation
@@ -148,7 +258,7 @@ export const SqlExecuteTool = Tool.define(
             // but does NOT block execution. Used to measure catch rate before deciding
             // whether to enable blocking in a future release. Fire-and-forget so it
             // doesn't add latency to the sql_execute hot path.
-            preValidateSql(args.query, args.warehouse, queryType).catch(() => {})
+            preValidateSql(sql, args.warehouse, queryType).catch(() => {})
             // altimate_change end
 
             try {
@@ -161,7 +271,7 @@ export const SqlExecuteTool = Tool.define(
                 limit: args.limit,
                 query_timeout_ms: args.query_timeout_ms,
                 ...(readOnly ? { read_only: true } : {}),
-              })
+              }, { signal: ctx.abort, sessionID: ctx.sessionID })
 
               // altimate_change start — a failure must not be rendered as "(0 rows)".
               // sql.execute never throws: it catches every connection and query error
@@ -196,7 +306,7 @@ export const SqlExecuteTool = Tool.define(
               // than after formatting) means a formatting failure below still leaves this
               // execution counted, instead of silently dropping it from the telemetry.
               try {
-                const fp = computeSqlFingerprint(args.query, dialect)
+                const fp = computeSqlFingerprint(sql, dialect)
                 if (fp) {
                   Telemetry.track({
                     type: "sql_fingerprint",
@@ -218,14 +328,14 @@ export const SqlExecuteTool = Tool.define(
               // altimate_change end
 
               const limits = await bridge.promise(truncate.limits())
-              const suggestion = PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
+              const suggestion = ctx.agent === "analyst" ? null : PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
               const extra =
                 (suggestion ? "\n\n" + suggestion : "") + (precedence.notice ? precedence.notice + "\n\n" : "")
               const formatted = await formatSqlResult(result, {
                 limit: args.limit,
                 // The statement text lets the formatter add the empty/near-empty
                 // result hint when a string-literal filter is present.
-                sql: query,
+                sql: ctx.agent === "analyst" ? undefined : query,
                 maxBytes: Math.max(
                   0,
                   Math.min(SQL_MAX_PREVIEW_BYTES, limits.maxBytes) - Buffer.byteLength(extra, "utf8"),
@@ -233,7 +343,7 @@ export const SqlExecuteTool = Tool.define(
                 maxLines: Math.max(0, limits.maxLines - extra.split("\n").length + 1),
                 write: (text) => bridge.promise(truncate.write(text)),
               })
-              const lint = await lintSqlResult(args.query, args.warehouse, ctx.sessionID)
+              const lint = await lintSqlResult(sql, args.warehouse, ctx.sessionID)
               let output = formatted.output + (lint ? "\n\n" + lint.output : "")
               // altimate_change start — progressive disclosure suggestions
               if (suggestion) {
@@ -248,7 +358,7 @@ export const SqlExecuteTool = Tool.define(
               // altimate_change — carries the fail-open notice when the target could not be
               // attributed to the workspace; a no-op otherwise.
               const response = Precedence.annotate(precedence, {
-                title: `SQL: ${args.query.slice(0, 60)}${args.query.length > 60 ? "..." : ""}`,
+                title: queryFrom ? "SQL: generated read" : `SQL: ${sql.slice(0, 60)}${sql.length > 60 ? "..." : ""}`,
                 metadata: { ...formatted.metadata, ...(lint && { lint_rules: lint.rules }) },
                 output,
               })
@@ -270,7 +380,7 @@ export const SqlExecuteTool = Tool.define(
               return Precedence.annotate(precedence, {
                 title: "SQL: ERROR",
                 metadata: { rowCount: 0, truncated: false, error: msg },
-                output: `Failed to execute SQL: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
+                output: `Failed to execute SQL: ${msg}`,
               })
             }
           },

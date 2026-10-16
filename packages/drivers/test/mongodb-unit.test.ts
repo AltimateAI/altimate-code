@@ -49,12 +49,12 @@ async function fakeMongo(
             collection: () => ({
               find: (filter: unknown) => {
                 finds.push(filter)
-                return { limit: () => ({ toArray: async () => docs }) }
+                return { limit: () => ({ toArray: async () => docs, async *[Symbol.asyncIterator]() { yield* docs } }) }
               },
               aggregate: (pipeline: Record<string, unknown>[], options: unknown) => {
                 pipelines.push(pipeline)
                 aggregateOptions.push(options)
-                return { toArray: async () => docs }
+                return { toArray: async () => docs, async *[Symbol.asyncIterator]() { yield* docs } }
               },
               countDocuments: async (filter: unknown, options: unknown) => {
                 counts.push({ filter, options })
@@ -392,7 +392,7 @@ describe("MongoDB extraction limits", () => {
   test("countDocuments without an explicit bound still counts all matches", async () => {
     const { connector, query, counts } = await fakeMongo()
     await connector.execute(query("countDocuments"), 1, undefined, { queryTimeoutMs: 0 })
-    expect(counts).toEqual([{ filter: {}, options: {} }])
+    expect(counts).toEqual([{ filter: {}, options: { maxTimeMS: 120_000 } }])
   })
 })
 
@@ -427,7 +427,7 @@ describe("MongoDB native command filters", () => {
   test("count forwards the native query filter", async () => {
     const { connector, counts } = await fakeMongo()
     await connector.execute(JSON.stringify({ count: "orders", query: { status: "A" } }), 1, undefined, { queryTimeoutMs: 0 })
-    expect(counts).toEqual([{ filter: { status: "A" }, options: {} }])
+    expect(counts).toEqual([{ filter: { status: "A" }, options: { maxTimeMS: 120_000 } }])
   })
 
   test("distinct forwards the native key and query filter", async () => {
@@ -447,13 +447,13 @@ describe("MongoDB native command filters", () => {
         { $limit: 11 },
       ],
     ])
-    expect(aggregateOptions).toEqual([{}])
+    expect(aggregateOptions).toEqual([{ maxTimeMS: 120_000 }])
     expect(result.rows).toEqual([["A"]])
   })
 
   test("an explicit filter takes precedence over the native query alias", async () => {
     const { connector, counts } = await fakeMongo()
     await connector.execute(JSON.stringify({ count: "orders", query: { status: "A" }, filter: { status: "B" } }), 1, undefined, { queryTimeoutMs: 0 })
-    expect(counts).toEqual([{ filter: { status: "B" }, options: {} }])
+    expect(counts).toEqual([{ filter: { status: "B" }, options: { maxTimeMS: 120_000 } }])
   })
 })

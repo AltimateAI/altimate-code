@@ -167,10 +167,11 @@ export async function connect(
     timeoutMs: number | undefined,
     maxResultBytes?: number,
     onDispatch?: () => void,
+    signal?: AbortSignal,
   ): Promise<any[]> {
     if (!shared) throw new Error("DuckDB connection not open")
     try {
-      return await shared.engine.call<any[]>("all", { sql, params, connectionId, maxResultBytes }, timeoutMs, onDispatch)
+      return await shared.engine.call<any[]>("all", { sql, params, connectionId, maxResultBytes }, timeoutMs, onDispatch, signal)
     } catch (err) {
       throw err instanceof Error ? wrapDuckDBError(err) : err
     }
@@ -322,6 +323,7 @@ export async function connect(
         resolveQueryTimeout(config, options).ms,
         options?.maxResultBytes,
         options?.onDispatch,
+        options?.signal,
       )
       // altimate_change end
       const columns =

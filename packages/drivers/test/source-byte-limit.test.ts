@@ -51,7 +51,7 @@ async function postgres(rows: unknown[][]) {
       },
     },
   }))
-  const connector = await connectPostgres({ type: "postgres" })
+  const connector = await connectPostgres({ type: "postgres", query_timeout_ms: 0 })
   await connector.connect()
   return { connector, queries, releases, consumed: () => consumed, bufferedRows: () => stream?._result.rows.length }
 }

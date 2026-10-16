@@ -27,11 +27,12 @@ describe("resolveQueryTimeout", () => {
     expect(resolveQueryTimeout(cfg(), undefined, env)).toEqual({ ms: 3000, source: "env" })
   })
 
-  test("0 disables at every level; null disables on the connection", () => {
-    expect(resolveQueryTimeout(cfg(), { queryTimeoutMs: 0 }, {}).ms).toBeUndefined()
+  test("per-call zero uses the default while connection settings can disable it", () => {
+    expect(resolveQueryTimeout(cfg(), { queryTimeoutMs: 0 }, {})).toEqual({ ms: DEFAULT_QUERY_TIMEOUT_MS, source: "default" })
+    expect(resolveQueryTimeout(cfg(750), { queryTimeoutMs: 0 }, {})).toEqual({ ms: 750, source: "connection" })
     expect(resolveQueryTimeout(cfg(0), undefined, {}).ms).toBeUndefined()
     expect(resolveQueryTimeout(cfg(null), undefined, {}).ms).toBeUndefined()
-    expect(resolveQueryTimeout(cfg(), undefined, { [QUERY_TIMEOUT_ENV]: "0" }).ms).toBeUndefined()
+    expect(resolveQueryTimeout(cfg(), undefined, { [QUERY_TIMEOUT_ENV]: "0" }).ms).toBe(DEFAULT_QUERY_TIMEOUT_MS)
     // a connection's 0 beats the env deadline
     expect(resolveQueryTimeout(cfg(0), undefined, { [QUERY_TIMEOUT_ENV]: "500" }).ms).toBeUndefined()
   })
@@ -66,6 +67,7 @@ describe("QueryTimeoutError", () => {
     expect(e.message).toContain("PostgreSQL")
     expect(e.message).toContain("120s")
     expect(e.message).toContain("query_timeout_ms")
+    expect(e.message).not.toContain("0 disables")
     expect(e.cancelled).toBe(true)
     expect(String(e).toLowerCase()).toContain("timeout") // categorizeQueryError keys off this
   })
@@ -209,6 +211,10 @@ describe("MongoDB deadline plumbing", () => {
         if (opts.failWith) throw opts.failWith
         return [{ a: 1 }]
       },
+      async *[Symbol.asyncIterator]() {
+        if (opts.failWith) throw opts.failWith
+        yield { a: 1 }
+      },
     })
     const coll = {
       find: (_f: unknown, o: unknown) => ((seen.find = o), cursor("find")),
@@ -224,7 +230,9 @@ describe("MongoDB deadline plumbing", () => {
         return 3
       },
       distinct: async (_field: unknown, _f: unknown, o: unknown) => ((seen.distinct = o), ["x"]),
-      listIndexes: (o: unknown) => ((seen.listIndexes = o), { toArray: async () => [{ name: "_id_", key: { _id: 1 } }] }),
+      listIndexes: (o: unknown) => ((seen.listIndexes = o), {
+        async *[Symbol.asyncIterator]() { yield { name: "_id_", key: { _id: 1 } } },
+      }),
     }
     mock.module("mongodb", () => ({
       default: {

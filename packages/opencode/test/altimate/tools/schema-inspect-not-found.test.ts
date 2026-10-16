@@ -39,6 +39,7 @@ describe("schema_inspect unknown tables", () => {
     expect(result.metadata.success).toBe(false)
     expect(result.output).toContain('Table "nope" was not found in schema "public"')
     expect(result.output).toContain("information_schema.tables")
+    expect(result.output).not.toContain("dispatcher is running")
   })
 
   test("a blank schema_name is sent as unset", async () => {
