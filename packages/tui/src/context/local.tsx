@@ -1,7 +1,7 @@
 import { createStore } from "solid-js/store"
 import { dedupeWith } from "effect/Array"
 import { createSimpleContext } from "./helper"
-import { batch, createMemo, onCleanup } from "solid-js"
+import { batch, createMemo, createResource, onCleanup } from "solid-js"
 import { useEvent } from "./event"
 import path from "path"
 import { useTuiPaths } from "./runtime"
@@ -21,9 +21,10 @@ import {
 import { useTheme } from "./theme"
 import { useToast } from "../ui/toast"
 import { useRoute } from "./route"
-import { useData } from "./data"
+import { locationKey, useData } from "./data"
 import { usePermission } from "./permission"
 import { useLocation } from "./location"
+import { useClient } from "./client"
 import { parse } from "../util/model"
 
 export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
@@ -38,6 +39,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const event = useEvent()
     const permission = usePermission()
     const location = useLocation()
+    const client = useClient()
 
     const models = () => data.location.model.list(location.ref)
     const providers = () => data.location.provider.list(location.ref)
@@ -137,6 +139,17 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
 
     function createModel() {
       type ModelSelection = ModelPreferenceModel & { variant?: string }
+      // altimate: ALT-F06 Load the server default for this location, including model and connection refreshes.
+      const [defaultModel, { refetch }] = createResource(
+        () => location.ref ?? data.location.default(),
+        (location) =>
+          client.api.model
+            .default({ location })
+            .then((result) => ({ location, model: result.data }))
+            .catch(() => undefined),
+      )
+      onCleanup(event.on("model.updated", () => void refetch()))
+      onCleanup(event.on("server.connected", () => void refetch()))
       const [preferences, setPreferences] = createStore<ModelPreference & { ready: boolean }>({
         ready: false,
         recent: [],
@@ -196,6 +209,19 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           if (isModelValid(item)) {
             return item
           }
+        }
+
+        // altimate: ALT-F06 Honor an enabled server default after explicit choices and recents.
+        const response = defaultModel()
+        const preferred =
+          response && locationKey(response.location) === locationKey(location.ref ?? data.location.default())
+            ? response.model
+            : undefined
+        if (preferred?.enabled) {
+          const model = models()?.find(
+            (item) => item.enabled && item.providerID === preferred.providerID && item.id === preferred.id,
+          )
+          if (model) return { providerID: model.providerID, modelID: model.id }
         }
 
         const model = models()?.[0]
@@ -384,7 +410,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           return preferences.ready
         },
         get catalogReady() {
-          return models() !== undefined
+          // altimate: ALT-F06 Wait for the server default before an automatic prompt commits a fallback.
+          return models() !== undefined && !defaultModel.loading
         },
         recent() {
           return preferences.recent

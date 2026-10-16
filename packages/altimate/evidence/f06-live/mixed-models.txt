@@ -1,0 +1,50 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                          Select model                                     esc
+
+                                                                          Search
+
+                                                                          Altimate AI
+                                                                        ● Altimate LLM Gateway
+
+                                                                          Anthropic
+                                                                          Claude Haiku 5.5
+                                                                          Claude Sonnet 5.5
+                                                                          Claude Opus 5.5
+                                                               ┃          Claude Opus 5.5 Fast
+                                                               ┃  Ask     Claude Fable 5.1
+                                                               ┃          Claude Opus 5
+                                                               ┃  Buil    Claude Opus 5 Fast
+                                                               ╹▀▀▀▀▀▀    Claude Sonnet 5                                         ▀▀▀▀▀▀▀▀
+                                                               /…/a…/p    Claude Fable 5                                          commands
+                                                                          Claude Opus 4.8
+                                                                          Claude Opus 4.8 Fast
+                                                                          Claude Opus 4.7
+                                                                          Claude Sonnet 4.6
+                                                                          Claude Opus 4.6
+                                                                          Claude Opus 4.5
+
+                                                                          Connect an integration ctrl+a  Favorite ctrl+f
+
+
+
+
+
+
+
+
+                                                                                                                                                                                                 local
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments

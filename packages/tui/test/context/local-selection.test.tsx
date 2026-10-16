@@ -1,6 +1,78 @@
 import { expect, test } from "bun:test"
 import { agent, model, renderLocal, session } from "../fixture/local"
-import { json } from "../fixture/tui-client"
+import { directory, json } from "../fixture/tui-client"
+
+test("uses the server default instead of the first catalog model when there are no recents", async () => {
+  await using setup = await renderLocal({
+    models: [model("first"), model("second")],
+    defaultModel: model("second"),
+  })
+  expect(setup.local.model.current()).toEqual({ providerID: "provider", modelID: "second" })
+  setup.local.model.set({ providerID: "provider", modelID: "first" })
+  expect(setup.local.model.current()?.modelID).toBe("first")
+})
+
+test("recent models take precedence over the server default", async () => {
+  await using setup = await renderLocal({
+    models: [model("first"), model("second"), model("third")],
+    defaultModel: model("second"),
+    preferences: { recent: [{ providerID: "provider", modelID: "third" }] },
+  })
+  expect(setup.local.model.current()?.modelID).toBe("third")
+})
+
+test("retains the server default while refreshing models for the same location", async () => {
+  const response = Promise.withResolvers<Response>()
+  const requested = Promise.withResolvers<void>()
+  let refreshing = false
+  await using setup = await renderLocal({
+    models: [model("first"), model("second")],
+    defaultModel: model("second"),
+    fetch: (url) => {
+      if (url.pathname !== "/api/model/default" || !refreshing) return
+      requested.resolve()
+      return response.promise
+    },
+  })
+  refreshing = true
+  setup.events.emit({ id: "evt_model_updated", type: "model.updated", created: 1, location: { directory }, data: {} })
+  await requested.promise
+  expect(setup.local.model.catalogReady).toBe(false)
+  expect(setup.local.model.current()?.modelID).toBe("second")
+  response.resolve(json({ location: { directory }, data: model("first") }))
+  await setup.waitFor(() => setup.local.model.catalogReady)
+  expect(setup.local.model.current()?.modelID).toBe("first")
+})
+
+test.each([
+  ["missing", null],
+  ["unavailable", model("missing")],
+  ["disabled", { ...model("second"), enabled: false }],
+] as const)("falls back to the first catalog model when the server default is %s", async (_, defaultModel) => {
+  await using setup = await renderLocal({ models: [model("first"), model("second")], defaultModel })
+  expect(setup.local.model.current()?.modelID).toBe("first")
+})
+
+test("CLI model takes precedence over config, recents, and the server default", async () => {
+  await using setup = await renderLocal({
+    models: [model("first"), model("second"), model("third"), model("fourth")],
+    defaultModel: model("fourth"),
+    args: { model: "provider/second" },
+    preferences: { recent: [{ providerID: "provider", modelID: "third" }] },
+    fetch: (url) => {
+      if (url.pathname === "/api/config") return json([{ type: "document", info: { model: "provider/first" } }])
+    },
+  })
+  expect(setup.local.model.current()?.modelID).toBe("second")
+})
+
+test("skips a server default that is disabled in the catalog", async () => {
+  await using setup = await renderLocal({
+    models: [model("first"), { ...model("second"), enabled: false }],
+    defaultModel: model("second"),
+  })
+  expect(setup.local.model.current()?.modelID).toBe("first")
+})
 
 test("cycles all recent models in a stable order in both directions", async () => {
   await using setup = await renderLocal({
@@ -18,9 +90,10 @@ test("cycles all recent models in a stable order in both directions", async () =
   }
 })
 
-test("uses the last configured model and variant ahead of recents", async () => {
+test("uses the last configured model and variant ahead of recents and the server default", async () => {
   await using setup = await renderLocal({
     models: [model("first"), model("second", ["low", "high"]), model("third")],
+    defaultModel: model("first"),
     preferences: { recent: [{ providerID: "provider", modelID: "third" }] },
     fetch: (url) => {
       if (url.pathname === "/api/config")

@@ -1,64 +1,7 @@
-/** @jsxImportSource @opentui/solid */
 import { expect, test } from "bun:test"
-import { RGBA } from "@opentui/core"
-import { testRender } from "@opentui/solid"
-import type { Context } from "@opencode/plugin/tui/context"
-import { createStore, produce } from "solid-js/store"
-import { SidebarOnboarding } from "../../src/feature-plugins/sidebar/footer"
-
-function context(options?: {
-  dismissed?: boolean
-  integrations?: Array<{ connections: unknown[] }>
-  dispatched?: string[]
-}) {
-  const color = RGBA.fromInts(200, 200, 200)
-  const [onboarding, setOnboarding] = createStore({ dismissed: options?.dismissed ?? false })
-  const location = { directory: "/workspace" }
-  return {
-    location,
-    theme: {
-      background: { raised: { high: color } },
-      text: { base: color, muted: color },
-    },
-    storage: {
-      store: () => [
-        onboarding,
-        (mutation: (draft: { dismissed: boolean }) => void) => {
-          setOnboarding(produce(mutation))
-          return Promise.resolve()
-        },
-      ],
-    },
-    keymap: {
-      dispatch: (id: string) => options?.dispatched?.push(id),
-    },
-    ui: {
-      format: { path: (value: string) => value },
-    },
-    data: {
-      session: {
-        get: () => ({ location }),
-      },
-      location: {
-        integration: { list: () => options?.integrations },
-        vcs: { info: () => undefined },
-      },
-    },
-  } as unknown as Context
-}
-
-async function render(input: Context, height = 22, copy?: { lines: string[]; connect: string }) {
-  const app = await testRender(
-    () => (
-      <box width={38}>
-        <SidebarOnboarding context={input} sessionID="session" copy={copy} />
-      </box>
-    ),
-    { width: 38, height },
-  )
-  await app.renderOnce()
-  return app
-}
+import path from "node:path"
+import descriptor from "../../../altimate/identity.json"
+import { context, render } from "../fixture/sidebar-footer"
 
 test("sidebar waits for integrations before showing onboarding", async () => {
   const app = await render(context())
@@ -147,3 +90,29 @@ test("branded onboarding copy replaces the OpenCode free-model text", async () =
     app.renderer.destroy()
   }
 })
+
+test("sidebar resolves branded onboarding through the host identity descriptor", async () => {
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--preload",
+      path.join(import.meta.dir, "../../../altimate/script/identity-preload.ts"),
+      path.join(import.meta.dir, "../fixture/sidebar-footer.tsx"),
+    ],
+    { cwd: path.join(import.meta.dir, "../.."), stdout: "pipe", stderr: "pipe" },
+  )
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ])
+  expect(code, stderr).toBe(0)
+  const output = JSON.parse(stdout) as { frame: string; dispatched: string[] }
+  const frame = output.frame.replace(/\s+/g, " ")
+  for (const line of descriptor.onboarding.lines) expect(frame).toContain(line)
+  expect(frame).toContain(descriptor.onboarding.connect)
+  expect(frame).toContain("/connect")
+  expect(frame).not.toContain("free models")
+  expect(frame).not.toContain("OpenCode")
+  expect(output.dispatched).toEqual(["provider.connect"])
+}, 30_000)

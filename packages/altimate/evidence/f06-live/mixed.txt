@@ -1,0 +1,50 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                           ▄▀█ █   ▀█▀ █ █▀▄▀█ ▄▀█ ▀█▀ █▀▀ █▀▀ █▀█ █▀▄ █▀▀
+                                                                           █▀█ █▄▄  █  █ █ ▀ █ █▀█  █  ██▄ █▄▄ █▄█ █▄▀ ██▄
+
+
+
+                                                               ┃
+                                                               ┃  Ask anything… "What is the tech stack of this project?"
+                                                               ┃
+                                                               ┃  Build · Altimate LLM Gateway Altimate AI
+                                                               ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+                                                               /…/a…/packages/cli:spike/v2-branded-host  shift+tab agents  ctrl+p commands
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                                                                                                 local
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments

@@ -22,6 +22,7 @@ import { createTuiResolvedConfig } from "./tui-runtime"
 export async function renderLocal(
   input: {
     models?: ModelInfo[]
+    defaultModel?: ModelInfo | null
     agents?: AgentInfo[]
     sessions?: SessionInfo[]
     preferences?: Partial<ModelPreference>
@@ -38,6 +39,7 @@ export async function renderLocal(
     const location = { directory: url.searchParams.get("location[directory]") ?? directory }
     if (url.pathname === "/api/agent") return json({ location, data: input.agents ?? [agent("build")] })
     if (url.pathname === "/api/model") return json({ location, data: input.models ?? [model("first")] })
+    if (url.pathname === "/api/model/default") return json({ location, data: input.defaultModel ?? null })
     const session = input.sessions?.find((session) => url.pathname === `/api/session/${session.id}`)
     if (session) return json({ data: session })
   }, events)
@@ -90,6 +92,7 @@ export async function renderLocal(
   )
   await waitForModel(() => local !== undefined && local.model.ready)
   await data.location.sync()
+  await waitForModel(() => local.model.catalogReady)
   return {
     ...setup,
     local,
