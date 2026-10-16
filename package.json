@@ -103,12 +103,12 @@
     "@typescript/native-preview": "catalog:",
     "glob": "13.0.5",
     "husky": "9.1.7",
-    "minimatch": "10.0.3",
+    "minimatch": "10.2.5",
     "oxlint": "1.60.0",
     "oxlint-tsgolint": "0.21.0",
     "prettier": "3.6.2",
     "semver": "^7.6.0",
-    "turbo": "2.8.13"
+    "turbo": "2.9.14"
   },
   "dependencies": {
     "@opencode-ai/plugin": "workspace:*",
@@ -137,6 +137,7 @@
     "web-tree-sitter"
   ],
   "overrides": {
+    "@babel/core": "7.29.6",
     "@opentui/core": "catalog:",
     "@opentui/keymap": "catalog:",
     "@opentui/solid": "catalog:",
