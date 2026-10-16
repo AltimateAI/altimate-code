@@ -1,6 +1,9 @@
 import { expect, mock, test } from "bun:test"
 import { connect } from "../src/postgres"
 import { QueryTimeoutError } from "../src/types"
+import { restoreModuleMocksAfterTests } from "./module-mock"
+
+await restoreModuleMocksAfterTests("pg")
 
 async function database(rollbackFails = false) {
   const queries: string[] = []

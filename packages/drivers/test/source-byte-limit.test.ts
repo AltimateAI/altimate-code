@@ -3,6 +3,9 @@ import { createRequire } from "node:module"
 import { dirname, join } from "node:path"
 import { connect as connectPostgres } from "../src/postgres"
 import { connect as connectMongo } from "../src/mongodb"
+import { restoreModuleMocksAfterTests } from "./module-mock"
+
+await restoreModuleMocksAfterTests("pg", "mongodb")
 
 // Use pg's real row parser and accumulation behavior while replacing only transport/pooling.
 // Import its implementation directly so other tests' pg module mocks cannot replace it.

@@ -1,6 +1,9 @@
 import { describe, expect, mock, test } from "bun:test"
 import { createRequire } from "node:module"
 import { normalizeMqlCommand } from "../src/mongodb"
+import { restoreModuleMocksAfterTests } from "./module-mock"
+
+await restoreModuleMocksAfterTests("mongodb")
 
 // Use the driver's BSON package directly so the MongoDB client mock cannot replace Binary.
 const { Binary } = createRequire(import.meta.resolve("mongodb"))("bson")

@@ -1,5 +1,8 @@
 import { expect, mock, test } from "bun:test"
 import { connect } from "../src/mongodb"
+import { restoreModuleMocksAfterTests } from "./module-mock"
+
+await restoreModuleMocksAfterTests("mongodb")
 
 async function database() {
   const started = Promise.withResolvers<void>()
@@ -26,7 +29,13 @@ async function database() {
   mock.module("mongodb", () => ({ default: { MongoClient: class {
     async connect() {}
     async close() {}
-    db() { return { collection: () => ({ find: () => cursor, aggregate: () => cursor }) } }
+    db() {
+      return {
+        databaseName: "test",
+        listCollections: () => ({ toArray: async () => [{ name: "source", type: "collection" }] }),
+        collection: () => ({ find: () => cursor, aggregate: () => cursor }),
+      }
+    }
   } } }))
   const connector = await connect({ type: "mongodb", query_timeout_ms: 0 })
   await connector.connect()
@@ -44,7 +53,8 @@ for (const command of ["find", "aggregate"]) {
         maxResultBytes,
       }).catch((error) => error)
       try {
-        await db.started
+        // Surface validation/setup failures instead of waiting forever for an unopened cursor.
+        await Promise.race([db.started, execution.then((error) => { throw error })])
         const start = performance.now()
         controller.abort(reason)
         expect(await Promise.race([execution, Bun.sleep(100).then(() => "still reading")])).toBe(reason)
@@ -62,22 +72,24 @@ for (const command of ["find", "aggregate"]) {
   }
 }
 
-test.each([undefined, 1000])("Mongo cursor deadline closes a stalled read without a caller signal (byte bound %s)", async (maxResultBytes) => {
-  const db = await database()
-  const execution = db.connector.execute(JSON.stringify({ command: "find", collection: "source" }), 100, undefined, {
-    queryTimeoutMs: 20,
-    maxResultBytes,
-  }).catch((error) => error)
-  try {
-    await db.started
-    expect(await Promise.race([execution, Bun.sleep(100).then(() => "still reading")])).toMatchObject({ code: "QUERY_TIMEOUT" })
-    expect(db.closed()).toBe(1)
-    db.deliver()
-    await Bun.sleep(10)
-    expect(db.fetched()).toBe(1)
-  } finally {
-    db.deliver()
-    await execution
-    await db.connector.close()
-  }
-})
+for (const maxResultBytes of [undefined, 1000]) {
+  test(`Mongo cursor deadline closes a stalled read without a caller signal (byte bound ${maxResultBytes})`, async () => {
+    const db = await database()
+    const execution = db.connector.execute(JSON.stringify({ command: "find", collection: "source" }), 100, undefined, {
+      queryTimeoutMs: 20,
+      maxResultBytes,
+    }).catch((error) => error)
+    try {
+      await Promise.race([db.started, execution.then((error) => { throw error })])
+      expect(await Promise.race([execution, Bun.sleep(100).then(() => "still reading")])).toMatchObject({ code: "QUERY_TIMEOUT" })
+      expect(db.closed()).toBe(1)
+      db.deliver()
+      await Bun.sleep(10)
+      expect(db.fetched()).toBe(1)
+    } finally {
+      db.deliver()
+      await execution
+      await db.connector.close()
+    }
+  })
+}

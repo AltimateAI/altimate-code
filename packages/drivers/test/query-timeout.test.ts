@@ -11,6 +11,9 @@ import {
   tighter,
 } from "../src/query-timeout"
 import { QUERY_TIMEOUT_CODE, QueryTimeoutError, isQueryTimeoutError } from "../src/types"
+import { restoreModuleMocksAfterTests } from "./module-mock"
+
+await restoreModuleMocksAfterTests("pg", "mongodb")
 
 describe("resolveQueryTimeout", () => {
   const cfg = (query_timeout_ms?: unknown) => ({ type: "x", query_timeout_ms })

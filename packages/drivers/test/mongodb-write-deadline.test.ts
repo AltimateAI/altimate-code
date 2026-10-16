@@ -1,6 +1,9 @@
 // altimate_change start — regression coverage for MongoDB write deadlines (4252054136)
 import { describe, expect, mock, test } from "bun:test"
 import { QueryTimeoutError } from "../src/types"
+import { restoreModuleMocksAfterTests } from "./module-mock"
+
+await restoreModuleMocksAfterTests("mongodb")
 
 async function fakeMongo(queryTimeoutMs?: number | null, failWith?: Error) {
   const seen: Record<string, unknown> = {}

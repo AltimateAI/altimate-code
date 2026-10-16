@@ -7,6 +7,9 @@
  * - Registry: known-unsupported DB hints, password validation
  */
 import { describe, test, expect, mock, beforeEach, afterEach } from "bun:test"
+import { restoreModuleMocksAfterTests } from "./module-mock"
+
+await restoreModuleMocksAfterTests("pg", "mongodb")
 
 // ---------------------------------------------------------------------------
 // DuckDB: wrapDuckDBError + lock retry

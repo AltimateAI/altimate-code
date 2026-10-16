@@ -82,12 +82,15 @@ describe("DuckDB shared file engines", () => {
     expect((await first.execute("SELECT 42 AS answer")).rows).toEqual([[42]])
   })
 
-  test("rejects every statement a peer queued before the shared-session restart", async () => {
+  test("rejects every statement a stateful peer queued before the shared-session restart", async () => {
     const dbPath = storePath()
     const first = await connect({ type: "duckdb", path: dbPath, create: true })
     const second = await connect({ type: "duckdb", path: dbPath, create: true })
     connectors.push(first, second)
     await Promise.all([first.connect(), second.connect()])
+    // Only state dispatched before the restart can be lost. A queued BEGIN
+    // alone has not established a transaction on the retired helper.
+    await second.execute("CREATE TEMP TABLE session_state AS SELECT 1 AS value")
     const timedOut = first.execute(
       "SELECT count(*) AS n FROM range(100000000000) a, range(1000) b",
       10,
@@ -98,10 +101,32 @@ describe("DuckDB shared file engines", () => {
     const begin = second.execute("BEGIN").catch((error) => error)
     const write = second.execute("CREATE TABLE must_not_run_pair AS SELECT 1 AS value").catch((error) => error)
     expect(await timedOut).toMatchObject({ code: "QUERY_TIMEOUT", stateLost: true })
-    expect(await begin).toMatchObject({ stateLost: true })
-    expect(await write).toMatchObject({ stateLost: true })
+    expect(await begin).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
+    expect(await write).toMatchObject({ code: "SESSION_STATE_LOST", stateLost: true })
     expect((await second.execute("SELECT count(*) AS n FROM information_schema.tables WHERE table_name = 'must_not_run_pair'")).rows)
       .toEqual([[0n]])
+  })
+
+  test("runs a stateless peer's queued transaction entirely on the replacement helper", async () => {
+    const dbPath = storePath()
+    const first = await connect({ type: "duckdb", path: dbPath, create: true })
+    const second = await connect({ type: "duckdb", path: dbPath, create: true })
+    connectors.push(first, second)
+    await Promise.all([first.connect(), second.connect()])
+    const results = await Promise.allSettled([
+      first.execute(
+        "SELECT count(*) AS n FROM range(100000000000) a, range(1000) b",
+        10,
+        undefined,
+        { queryTimeoutMs: 100 },
+      ),
+      second.execute("BEGIN"),
+      second.execute("CREATE TABLE queued_transaction AS SELECT 7 AS value"),
+      second.execute("COMMIT"),
+    ])
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { code: "QUERY_TIMEOUT", stateLost: true } })
+    for (const result of results.slice(1)) expect(result.status).toBe("fulfilled")
+    expect((await first.execute("SELECT value FROM queued_transaction")).rows).toEqual([[7]])
   })
 
   test("coalesces eight opens while the first engine open is held at a barrier", async () => {
