@@ -35,5 +35,12 @@
   "title": {
     "home": "Altimate Code",
     "prefix": "Altimate Code"
+  },
+  "onboarding": {
+    "lines": [
+      "Connect your Altimate account to start.",
+      "Paste your instance::api-key, or connect another provider such as Claude, GPT or Gemini."
+    ],
+    "connect": "Connect Altimate"
   }
 }

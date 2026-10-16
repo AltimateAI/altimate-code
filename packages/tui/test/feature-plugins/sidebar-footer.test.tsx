@@ -47,11 +47,11 @@ function context(options?: {
   } as unknown as Context
 }
 
-async function render(input: Context, height = 22) {
+async function render(input: Context, height = 22, copy?: { lines: string[]; connect: string }) {
   const app = await testRender(
     () => (
       <box width={38}>
-        <SidebarOnboarding context={input} sessionID="session" />
+        <SidebarOnboarding context={input} sessionID="session" copy={copy} />
       </box>
     ),
     { width: 38, height },
@@ -120,6 +120,29 @@ test("sidebar onboarding opens integrations and can be dismissed", async () => {
     await app.mockMouse.click(dismiss.x, dismiss.y)
     await app.renderOnce()
     expect(app.captureCharFrame()).not.toContain("Getting started")
+  } finally {
+    app.renderer.destroy()
+  }
+})
+
+test("branded onboarding copy replaces the OpenCode free-model text", async () => {
+  const dispatched: string[] = []
+  const app = await render(context({ integrations: [], dispatched }), 22, {
+    lines: ["Connect your Altimate account to start."],
+    connect: "Connect Altimate",
+  })
+
+  try {
+    const frame = app.captureCharFrame()
+    expect(frame).toContain("Getting started")
+    expect(frame).toContain("Connect your Altimate account")
+    expect(frame).toContain("Connect Altimate")
+    expect(frame).toContain("/connect")
+    expect(frame).not.toContain("free models")
+    expect(frame).not.toContain("OpenCode")
+    const connect = app.renderer.root.findDescendantById("sidebar.footer.getting-started.connect")!
+    await app.mockMouse.click(connect.x, connect.y)
+    expect(dispatched).toEqual(["provider.connect"])
   } finally {
     app.renderer.destroy()
   }

@@ -1,0 +1,50 @@
+ ⠹ New session                   +
+
+  ┃                                                                                                                                                             New session - 2026-10-16T03:24:50.
+  ┃  hello                                                                                                                                                      454Z
+  ┃
+
+     ⚠ Retrying in 7s · attempt 4 · An error occurred in Effect.tryPromise
+
+     Build · Altimate LLM Gateway
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                                                                  ⬖ Getting started                ✕
+
+                                                                                                                                                                    Connect your Altimate account to
+                                                                                                                                                                    start.
+
+                                                                                                                                                                    Paste your instance::api-key, or
+                                                                                                                                                                    connect another provider such as
+  ┃                                                                                                                                                                 Claude, GPT or Gemini.
+  ┃
+  ┃                                                                                                                                                                 Connect Altimate        /connect
+  ┃  Build · Altimate LLM Gateway Altimate AI
+  ╹▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+   ■■■■⬝⬝⬝⬝ esc interrupt                                                                                                  shift+tab agents  ctrl+p commands    /…/packages/cli:spike/v2-branded-host
+
+ ✓ Server  ○ UI  Theme  Tools  Experiments

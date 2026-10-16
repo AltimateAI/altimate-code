@@ -145,6 +145,25 @@ export function gateway(
           ],
         })
       })
+      // Altimate default: prefer the tenant gateway, then Altimate Base. A model is only listed when its provider
+      // has credentials, so a missing key leaves the host's own default untouched and never breaks startup.
+      // Registered before the config plugin, so an explicit user `model` still wins.
+      await ctx.model.transform((editor) => {
+        const preferred = [
+          [tenantID, Model.ID.make("altimate-default")],
+          [baseID, Model.ID.make("altimate-base")],
+        ] as const
+        const available = preferred.find(([providerID, modelID]) => editor.get(providerID, modelID)?.enabled)
+        if (available) editor.default.set(String(available[0]), String(available[1]))
+        // OpenCode's anonymous free tier rejects this build's user agent, so do not offer it. A key, a connection or
+        // a configured provider apiKey replaces the "public" marker and keeps the provider listed.
+        const opencode = editor.provider.get(Provider.ID.make("opencode"))
+        if (opencode?.provider.settings?.apiKey !== "public") return
+        for (const model of editor.list(opencode.provider.id))
+          editor.update(String(model.providerID), String(model.id), (draft) => {
+            draft.enabled = false
+          })
+      })
       await ctx.integration.transform((editor) => {
         editor.method.update({
           integrationID: tenantIntegration,

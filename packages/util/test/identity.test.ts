@@ -43,6 +43,15 @@ describe("host identity", () => {
     expect(() => resolveIdentity({ ...altimate, hostPlugins: 42 })).toThrow("hostPlugins")
   })
 
+  // altimate: ALT-F06
+  test("stock identity has no onboarding override and the branded one never advertises free models", () => {
+    expect(defaults.onboarding).toBeUndefined()
+    expect(resolveIdentity(altimate).onboarding?.lines.join(" ")).not.toMatch(/free|OpenCode/i)
+    expect(() => resolveIdentity({ ...altimate, onboarding: { lines: [], connect: "x" } })).toThrow("onboarding")
+    expect(() => resolveIdentity({ ...altimate, onboarding: { lines: ["x"], connect: "" } })).toThrow("onboarding")
+    expect(() => resolveIdentity({ ...altimate, onboarding: null })).toThrow("onboarding")
+  })
+
   // altimate: ALT-F03
   test("validates update sources and explicit deferred methods", () => {
     expect(resolveIdentity(defaults)).toBe(defaults)

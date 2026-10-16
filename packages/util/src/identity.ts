@@ -33,6 +33,8 @@ export type Descriptor = {
   readonly hostPlugins?: string
   // altimate: ALT-F05 - optional distribution-owned artifact packaging hook.
   readonly buildPlugin?: string
+  // altimate: ALT-F06 sidebar "Getting started" copy; absent means the stock OpenCode text.
+  readonly onboarding?: { readonly lines: readonly string[]; readonly connect: string }
 }
 
 export const defaults: Descriptor = {
@@ -84,6 +86,8 @@ export function resolveIdentity(input: unknown): Descriptor {
   // altimate: ALT-F05
   if (value.buildPlugin !== undefined && (typeof value.buildPlugin !== "string" || !value.buildPlugin))
     throw new Error("Identity.buildPlugin must be a nonempty module path")
+  // altimate: ALT-F06
+  requireOnboarding(value.onboarding)
   for (const key of ["app", "displayName", "userAgent", "serviceName"]) {
     if (typeof value[key] !== "string" || value[key] === "") throw new Error(`Identity.${key} must be nonempty`)
   }
@@ -157,6 +161,22 @@ function requireUpdater(input: unknown) {
 function requireUpdateUrl(input: unknown) {
   if (typeof input !== "string" || !["http:", "https:"].includes(new URL(input).protocol))
     throw new Error("Identity updater URLs must use http or https")
+}
+
+// altimate: ALT-F06
+function requireOnboarding(input: unknown) {
+  if (input === undefined) return
+  const value = input as { lines?: unknown; connect?: unknown } | null
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !strings(value.lines) ||
+    !value.lines.length ||
+    value.lines.some((line) => !line) ||
+    typeof value.connect !== "string" ||
+    !value.connect
+  )
+    throw new Error("Identity.onboarding must contain nonempty lines and a connect label")
 }
 
 function strings(value: unknown): value is string[] {

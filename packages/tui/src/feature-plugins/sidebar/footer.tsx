@@ -1,12 +1,27 @@
 import { Plugin } from "@opencode/plugin/tui"
-import { createMemo, Show } from "solid-js"
+import { createMemo, For, Show } from "solid-js"
+import { Identity } from "@opencode/util/identity"
 import { useTerminalDimensions } from "@opentui/solid"
 import { FilePath } from "../../ui/file-path"
 import { useWorkingDirectoryActions } from "../../ui/working-directory-actions"
 import { usePromptMove } from "../../component/prompt/move"
 import { hasConnectedProvider } from "../../util/connected-provider"
 
-export function SidebarOnboarding(props: { context: Plugin.Context; sessionID: string }) {
+const stockOnboarding = {
+  lines: [
+    "OpenCode includes free models so you can start immediately.",
+    "Connect from 75+ providers to use other models, including Claude, GPT, Gemini etc",
+  ],
+  connect: "Connect provider",
+}
+
+export function SidebarOnboarding(props: {
+  context: Plugin.Context
+  sessionID: string
+  // altimate: ALT-F06 branded builds replace the stock copy through the identity descriptor.
+  copy?: typeof stockOnboarding
+}) {
+  const copy = () => props.copy ?? Identity.onboarding ?? stockOnboarding
   const dimensions = useTerminalDimensions()
   const [onboarding, updateOnboarding] = props.context.storage.store("getting-started", {
     initial: { dismissed: false },
@@ -54,10 +69,7 @@ export function SidebarOnboarding(props: { context: Plugin.Context; sessionID: s
               ✕
             </text>
           </box>
-          <text fg={props.context.theme.text.muted}>OpenCode includes free models so you can start immediately.</text>
-          <text fg={props.context.theme.text.muted}>
-            Connect from 75+ providers to use other models, including Claude, GPT, Gemini etc
-          </text>
+          <For each={copy().lines}>{(line) => <text fg={props.context.theme.text.muted}>{line}</text>}</For>
           <box
             id="sidebar.footer.getting-started.connect"
             flexDirection="row"
@@ -65,7 +77,7 @@ export function SidebarOnboarding(props: { context: Plugin.Context; sessionID: s
             justifyContent="space-between"
             onMouseUp={() => props.context.keymap.dispatch("provider.connect")}
           >
-            <text fg={props.context.theme.text.base}>Connect provider</text>
+            <text fg={props.context.theme.text.base}>{copy().connect}</text>
             <text fg={props.context.theme.text.muted}>/connect</text>
           </box>
         </box>

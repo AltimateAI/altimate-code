@@ -33,6 +33,8 @@ export async function createHost(input: {
   sessionDirectory?: string
   project?: boolean
   altimate?: boolean
+  /** Config `model`; null leaves it unset so the host default applies. */
+  model?: string | null
   steps?: readonly ScriptedStep[]
   permissions?: Permission.Ruleset
   plugins?: readonly Plugin.Plugin[]
@@ -51,7 +53,7 @@ export async function createHost(input: {
       directory: join(input.directory, "config"),
       project: input.project ?? false,
       content: JSON.stringify({
-        model: "scripted/scripted",
+        model: input.model === null ? undefined : (input.model ?? "scripted/scripted"),
         agents: { title: { disabled: true } },
         snapshots: false,
         permissions: input.permissions,
