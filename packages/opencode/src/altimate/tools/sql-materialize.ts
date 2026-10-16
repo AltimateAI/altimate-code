@@ -2,8 +2,6 @@ import z from "zod"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import { normalizeMqlCommand, type Connector } from "@altimateai/drivers"
-import { QueryTimeoutError } from "@altimateai/drivers/types"
-import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
 import { isResultByteLimitError, rowBytes } from "@altimateai/drivers/result-byte-limit"
 import { Tool } from "../../tool/tool"
 import * as Registry from "../native/connections/registry"
@@ -12,6 +10,7 @@ import { classifyAndCheck, classifyMongoCommand } from "./sql-classify"
 import { readSql } from "./sql-check"
 import { lintSqlResult } from "./sql-result-lint"
 import * as Precedence from "../workspace/precedence"
+import { executeQuery, type QueryContext } from "../native/query-execution"
 
 /** Default and hard ceilings, see the tool description. */
 export const DEFAULT_MAX_ROWS = 2_000_000
@@ -232,38 +231,24 @@ function boundedMongo(sql: string, limit: number): string {
   return JSON.stringify({ ...cmd, pipeline: [...cmd.pipeline, { $limit: limit }] })
 }
 
-async function executeSource(source: Connector, input: MaterializeInput, sql: string, limit: number, maxBytes: number) {
+async function executeSource(source: Connector, input: MaterializeInput, sql: string, limit: number, maxBytes: number, context?: QueryContext) {
   const config = Registry.getConfig(input.source_warehouse)
   const type = Registry.canonicalType(config?.type)
-  const controller = type === "postgres" ? new AbortController() : undefined
   const options = {
     queryTimeoutMs: input.query_timeout_ms,
     maxResultBytes: maxBytes,
-    ...(controller ? { readOnly: true, signal: controller.signal } : {}),
+    ...(type === "postgres" ? { readOnly: true } : {}),
   }
-  const work = source.execute(sql, limit, undefined, options)
-  // Local engines own queue admission and cancellation. An outer timer would abandon
-  // queued work that could subsequently execute, so only remote engines get a fallback.
-  const deadline = resolveQueryTimeout(config, options).ms
-  if (deadline === undefined || type === "sqlite" || type === "duckdb") return work
-  let timer: ReturnType<typeof setTimeout> | undefined
-  try {
-    return await Promise.race([
-      work,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          const error = new QueryTimeoutError({ engine: type ?? "database", timeoutMs: deadline, cancelled: false })
-          controller?.abort(error)
-          reject(error)
-        }, deadline)
-      }),
-    ])
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
+  return executeQuery(config, options, context, (bounded) => source.execute(sql, limit, undefined, bounded))
 }
 
-export async function materialize(input: MaterializeInput): Promise<MaterializeResult> {
+export function materialize(input: MaterializeInput, context?: QueryContext): Promise<MaterializeResult> {
+  return executeQuery(Registry.getConfig(input.source_warehouse), { queryTimeoutMs: input.query_timeout_ms }, context,
+    (options) => materializeWithinDeadline(input, { ...context, signal: options.signal }))
+}
+
+async function materializeWithinDeadline(input: MaterializeInput, context: QueryContext): Promise<MaterializeResult> {
+  context?.signal?.throwIfAborted()
   const mode = input.mode ?? "create"
   const table = input.target_table
   if (typeof table !== "string" || !IDENTIFIER.test(table)) {
@@ -285,6 +270,7 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
   // UDFs fail at the database boundary and pg_notify cannot deliver notifications.
   // Resolve first so a configured warehouse using the reserved name fails explicitly.
   const source = await Registry.get(input.source_warehouse)
+  context.signal?.throwIfAborted()
   if (!source.supportsResultByteLimit) {
     throw new MaterializeError(
       `Warehouse "${input.source_warehouse}" does not support bounded result transfer. ` +
@@ -295,7 +281,7 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
   const type = Registry.canonicalType(Registry.getConfig(input.source_warehouse)?.type)
   const query = mongo ? boundedMongo(sql, maxRows + 1) : boundedSql(sql, type, maxRows + 1)
   const prepare = async (reader: Connector) => {
-    const result = await executeSource(reader, input, query, maxRows + 1, maxBytes).catch((e) => {
+    const result = await executeSource(reader, input, query, maxRows + 1, maxBytes, context).catch((e) => {
       if (isResultByteLimitError(e)) {
         throw new MaterializeError(
           `The source result is above the ${sizeLabel(maxBytes)} bound; transfer stopped and nothing was materialized. ` +
@@ -349,7 +335,12 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
     const warnings: string[] = []
     return withScratchConnection(async (scratch, directory) => {
       const { result, names, types } = prepared ?? (await prepare(scratch))
-      const run = (sql: string) => scratch.execute(sql, undefined, undefined, { noLimit: true })
+      const run = (sql: string) => executeQuery(
+        Registry.getConfig(SCRATCH_NAME),
+        { noLimit: true, queryTimeoutMs: input.query_timeout_ms },
+        context,
+        (options) => scratch.execute(sql, undefined, undefined, options),
+      )
       const scratchRows = async (sql: string) => (await run(sql)).rows
       const q = quoteIdent(table)
       const existing = await scratchRows(
@@ -415,7 +406,8 @@ export async function materialize(input: MaterializeInput): Promise<MaterializeR
         began = false
       } catch (e) {
         try {
-          if (began) await run("ROLLBACK")
+          // Cleanup must still run if cancellation arrived between scratch statements.
+          if (began) await scratch.execute("ROLLBACK", undefined, undefined, { noLimit: true, queryTimeoutMs: 1000 })
         } catch {
           // the transaction may already be gone
         }
@@ -482,7 +474,7 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       .min(0)
       .max(3_600_000)
       .optional()
-      .describe("Source query deadline; uses the common connection policy when omitted (0 disables it)"),
+      .describe("Query deadline in ms; omitted or 0 uses the configured default, bounded by the remaining run budget"),
   }),
   async execute(args, ctx): Promise<{ title: string; metadata: Record<string, any>; output: string }> {
     // altimate_change start — validate and authorize source reads before workspace redirects
@@ -507,7 +499,7 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
     if (verdict.redirect) return verdict.redirect
     // altimate_change end
     try {
-      const r = await materialize(args)
+      const r = await materialize(args, { signal: ctx.abort, sessionID: ctx.sessionID })
       const lint = await lintSqlResult(args.sql, args.source_warehouse, ctx.sessionID)
       const checks = lint ? "\n\n" + lint.output : ""
       const lintMetadata = lint ? { lint_rules: lint.rules } : {}

@@ -283,11 +283,13 @@ export class LocalEngine {
     })
   }
 
-  private sendOpen(child: Child, request: OpenRequest): Promise<void> {
+  private sendOpen(child: Child, request: OpenRequest, signal?: AbortSignal): Promise<void> {
     return this.send(child, "open", { ...request.payload, engine: this.opts.engine }, request.timeoutMs, () =>
       request.onTimeout
         ? request.onTimeout()
         : new Error(`${this.opts.label} store did not finish opening in ${request.timeoutMs}ms`),
+      undefined,
+      signal,
     )
   }
 
@@ -304,6 +306,7 @@ export class LocalEngine {
     payload: Record<string, unknown>,
     timeoutMs?: number,
     onDispatch?: () => void,
+    signal?: AbortSignal,
   ): Promise<T> {
     const connectionId = payload["connectionId"] as number | undefined
     this.registerSession(connectionId)
@@ -325,15 +328,23 @@ export class LocalEngine {
           throw this.sessionStateLostError()
         }
       }
-      const child = await this.ensureChild()
-      if (this.closed) throw new Error(`${this.opts.label} connection closed`)
-      return this.send(child, op, payload, op === "disconnect" ? CLOSE_TIMEOUT_MS : timeoutMs, () =>
-        op === "disconnect"
-          ? new Error(`${this.opts.label} session did not finish closing`)
-          : this.discloseTimeout(session, timeoutMs!),
-        onDispatch,
-      ) as Promise<T>
-    })
+      try {
+        const child = await this.ensureChild(signal)
+        if (this.closed) throw new Error(`${this.opts.label} connection closed`)
+        return await this.send(child, op, payload, op === "disconnect" ? CLOSE_TIMEOUT_MS : timeoutMs, () =>
+          op === "disconnect"
+            ? new Error(`${this.opts.label} session did not finish closing`)
+            : this.discloseTimeout(session, timeoutMs!),
+          onDispatch,
+          signal,
+        ) as T
+      } catch (error) {
+        // An aborted active call retires the helper. The session stays unacknowledged
+        // so its next statement reports SESSION_STATE_LOST rather than silently
+        // running outside the discarded transaction.
+        throw error
+      }
+    }, signal)
   }
 
   async close(): Promise<void> {
@@ -363,10 +374,20 @@ export class LocalEngine {
 
   // -- internals -------------------------------------------------------------
 
-  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.tail.then(fn, fn)
-    this.tail = run.catch(() => {})
-    return run
+  private enqueue<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => reject(signal!.reason)
+      signal?.addEventListener("abort", abort, { once: true })
+      if (signal?.aborted) abort()
+      const start = () => {
+        signal?.removeEventListener("abort", abort)
+        signal?.throwIfAborted()
+        return fn()
+      }
+      const run = this.tail.then(start, start)
+      this.tail = run.catch(() => {})
+      run.then(resolve, reject)
+    })
   }
 
   private timeoutQueryError(timeoutMs: number): QueryTimeoutError {
@@ -484,11 +505,12 @@ export class LocalEngine {
   }
 
   /** The live process, respawned and reopened after a kill or crash. */
-  private async ensureChild(): Promise<Child> {
+  private async ensureChild(signal?: AbortSignal): Promise<Child> {
+    signal?.throwIfAborted()
     if (this.child && !this.child.retired) return this.child
     const child = this.spawn(this.openRequest!)
     try {
-      await this.sendOpen(child, this.openRequest!)
+      await this.sendOpen(child, this.openRequest!, signal)
     } catch (err) {
       await this.retire(child)
       throw err
@@ -503,16 +525,20 @@ export class LocalEngine {
     timeoutMs: number | undefined,
     onTimeout: () => Error,
     onDispatch?: () => void,
+    signal?: AbortSignal,
   ): Promise<any> {
     return new Promise((resolve, reject) => {
       if (child.retired) return reject(new Error(`${this.opts.label} helper process is not running`))
+      if (signal?.aborted) return reject(signal.reason)
       const id = ++this.seq
       let timer: ReturnType<typeof setTimeout> | undefined
       let settled = false
+      let stopping = false
       const settle = (fn: () => void) => {
         if (settled) return
         settled = true
         if (timer) clearTimeout(timer)
+        signal?.removeEventListener("abort", abort)
         if (child.pending?.id === id) child.pending = undefined
         fn()
       }
@@ -521,12 +547,18 @@ export class LocalEngine {
         resolve: (v) => settle(() => resolve(v)),
         reject: (e) => settle(() => reject(e)),
       }
+      const stop = (error: () => unknown) => {
+        if (settled || stopping) return
+        stopping = true
+        void this.retire(child).then(() => settle(() => reject(error())))
+      }
+      const abort = () => stop(() => signal!.reason)
+      signal?.addEventListener("abort", abort, { once: true })
       if (timeoutMs !== undefined) {
         timer = setTimeout(() => {
-          if (settled) return
           // Stop the work first, then report: the caller must not see the
           // timeout while the process still holds the store.
-          void this.retire(child).then(() => settle(() => reject(onTimeout())))
+          stop(onTimeout)
         }, timeoutMs)
       }
       try {

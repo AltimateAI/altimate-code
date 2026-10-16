@@ -640,9 +640,9 @@ describe("sql_materialize", () => {
     }
   })
 
-  test("an explicitly disabled deadline allows the single source read to finish", async () => {
+  test("a zero deadline uses the configured default for the single source read", async () => {
     const get = fakePostgres(async (_sql, _limit, _binds, options) => {
-      expect(options?.queryTimeoutMs).toBe(0)
+      expect(options?.queryTimeoutMs).toBe(120_000)
       await new Promise((resolve) => setTimeout(resolve, 30))
       return { columns: ["n"], rows: [[1]], row_count: 1, truncated: false }
     })
@@ -826,12 +826,13 @@ describe("sql_materialize", () => {
     }
   })
 
-  test("a fake source fetch observes the sentinel bound and omitted common deadline", async () => {
+  test("a fake source fetch observes the sentinel bound and resolved common deadline", async () => {
     const source = await Registry.get("ordersdb")
     let fetched = 0
     const execute = spyOn(source, "execute").mockImplementation(async (sql, limit, _binds, options) => {
       expect(options?.noLimit).not.toBe(true)
-      expect(options).toHaveProperty("queryTimeoutMs", undefined)
+      expect(options).toHaveProperty("queryTimeoutMs", 120_000)
+      expect(options?.signal).toBeInstanceOf(AbortSignal)
       expect(limit).toBe(4)
       const rows = Array.from({ length: Math.min(100, limit!) }, (_, n) => [n])
       fetched = rows.length
