@@ -51,7 +51,7 @@ async function postgres(rows: unknown[][]) {
       },
     },
   }))
-  const connector = await connectPostgres({ type: "postgres" })
+  const connector = await connectPostgres({ type: "postgres", query_timeout_ms: 0 })
   await connector.connect()
   return { connector, queries, releases, consumed: () => consumed, bufferedRows: () => stream?._result.rows.length }
 }
@@ -126,7 +126,11 @@ async function mongo(docs: Record<string, unknown>[]) {
         async connect() {}
         async close() {}
         db() {
-          return { collection: () => ({ find: () => cursor, aggregate: () => cursor }) }
+          return {
+            databaseName: "test",
+            listCollections: () => ({ toArray: async () => [{ name: "source", type: "collection" }] }),
+            collection: () => ({ find: () => cursor, aggregate: () => cursor }),
+          }
         }
       },
     },

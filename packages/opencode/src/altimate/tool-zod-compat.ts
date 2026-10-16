@@ -22,6 +22,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { Agent } from "@/agent/agent"
 import type { SessionID, MessageID } from "../session/schema"
 import type { Context as NewContext, DefWithoutID } from "../tool/tool"
+import { fillerSafeParameters } from "../tool/filler-parameters"
 
 export type Metadata = { [key: string]: any; error?: string }
 
@@ -35,7 +36,7 @@ export interface LegacyContext<M extends Metadata = Metadata> {
   extra?: { [key: string]: any }
   messages: SessionV1.WithParts[]
   permissions?: PermissionV1.Ruleset
-  metadata(input: { title?: string; metadata?: M }): void
+  metadata(input: { title?: string; metadata?: M }): void | Promise<void>
   ask(input: Parameters<NewContext["ask"]>[0]): Promise<void>
 }
 
@@ -173,6 +174,7 @@ export function zodToJsonSchema(schema: z.ZodType): JSONSchema7 {
 
 /** Build a `DefWithoutID` from a resolved legacy tool object (no Effect wrapper). */
 function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
+  const validationSchema = zodToJsonSchema(legacy.parameters)
   return {
     description: legacy.description,
     // altimate_change start — decode THROUGH zod's `parse` so defaults, coercions and transforms
@@ -180,16 +182,19 @@ function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
     // Schema.declare only validates and passes the raw input through, silently dropping zod
     // `.default()`/`.transform()`. Validation failures still surface as Effect SchemaErrors whose
     // nested issue.actual carries the original input (used by formatValidationError below).
-    parameters: Schema.declare<unknown>((u): u is unknown => legacy.parameters.safeParse(u).success).pipe(
-      Schema.decodeTo(Schema.Unknown, {
-        decode: SchemaGetter.transform((u: unknown) => legacy.parameters.parse(u)),
-        encode: SchemaGetter.transform((u: unknown) => u),
-      }),
+    parameters: fillerSafeParameters(
+      Schema.declare<unknown>((u): u is unknown => legacy.parameters.safeParse(u).success).pipe(
+        Schema.decodeTo(Schema.Unknown, {
+          decode: SchemaGetter.transform((u: unknown) => legacy.parameters.parse(u)),
+          encode: SchemaGetter.transform((u: unknown) => u),
+        }),
+      ),
+      validationSchema,
     ),
     // altimate_change end
     // altimate_change start — upstream_fix: use an explicit JSON schema when a legacy
     // tool needs hidden compatibility arguments that should not be advertised.
-    jsonSchema: legacy.jsonSchema ?? zodToJsonSchema(legacy.parameters),
+    jsonSchema: legacy.jsonSchema ?? validationSchema,
     // altimate_change end
     ...(legacy.formatValidationError
       ? {
@@ -229,9 +234,7 @@ function legacyDefToDef(legacy: LegacyToolDef): DefWithoutID {
             extra: ctx.extra as { [key: string]: any } | undefined,
             messages: ctx.messages,
             permissions: ctx.permissions,
-            metadata: (input) => {
-              void bridge.promise(ctx.metadata(input))
-            },
+            metadata: (input) => bridge.promise(ctx.metadata(input)),
             ask: (input) => bridge.promise(ctx.ask(input)),
           }
           return yield* Effect.promise(() =>

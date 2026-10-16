@@ -83,10 +83,10 @@ describe("schema.inspect warehouse default schemas", () => {
     expect(result.resolution).toBeUndefined()
     expect(result.table).toBe(table)
     expect(source.describeTable.mock.calls).toEqual([[schema ?? "main", table]])
-    expect(source.listSchemas).not.toHaveBeenCalled()
+    expect(source.listSchemas).toHaveBeenCalledTimes(schema ? 0 : 1)
   })
 
-  test("a real schema blocks alias resolution without adding generic table splitting", async () => {
+  test("a real schema qualifier takes precedence over a warehouse alias", async () => {
     configure({ type: "duckdb" }, "main")
     const source = {
       listSchemas: mock(async () => ["main", "remote"]),
@@ -99,8 +99,21 @@ describe("schema.inspect warehouse default schemas", () => {
     const result = await Dispatcher.call("schema.inspect", { table: "remote.t" })
     expect(result.resolution).toBeUndefined()
     expect(result.warehouse).toBe("primary")
-    expect(result.table).toBe("remote.t")
-    expect(source.describeTable.mock.calls).toEqual([["main", "remote.t"]])
+    expect(result.table).toBe("t")
+    expect(source.describeTable.mock.calls).toEqual([["remote", "t"]])
+  })
+
+  test("preserves a dotted table name when schemas cannot be listed", async () => {
+    const target = configure({ type: "duckdb" }, "main")
+    const connector = {
+      ...target,
+      listSchemas: mock(async () => { throw new Error("Schema listing is unavailable") }),
+    }
+    connectorSpy?.mockRestore()
+    connectorSpy = spyOn(Registry, "get").mockResolvedValue(connector as unknown as Connector)
+    const result = await Dispatcher.call("schema.inspect", { warehouse: "remote", table: "literal.name" })
+    expect(result.columns).toHaveLength(1)
+    expect(target.describeTable.mock.calls).toEqual([["main", "literal.name"]])
   })
 
   test.each([

@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import path from "path"
 import { tmpdir } from "../../fixture/fixture"
 import { testEffect } from "../../lib/effect"
@@ -81,6 +81,15 @@ function compact(result: Awaited<ReturnType<typeof checkSql>>) {
 const leftSql = "SELECT * FROM orders"
 const rightSql = "SELECT * FROM customers"
 const sevenKeys = Array.from({ length: 7 }, (_, i) => `SELECT ${i + 1} AS id`).join(" UNION ALL ")
+
+test("publishes an object schema while requiring a coverage pattern at validation", async () => {
+  const tool = await initTool(SqlCheckTool)
+  expect(tool.jsonSchema).toMatchObject({ type: "object", properties: { pattern: { type: "string" } } })
+  expect(tool.jsonSchema).not.toHaveProperty("anyOf")
+  const decode = Schema.decodeUnknownSync(tool.parameters)
+  expect(() => decode({ warehouse: "sqlite_fixture", check: "coverage", sql: "SELECT '' AS note", column: "note" })).toThrow()
+  expect(decode({ warehouse: "sqlite_fixture", check: "grain" })).toEqual({ warehouse: "sqlite_fixture", check: "grain" })
+})
 
 testEffect(Agent.defaultLayer).instance(
   "analyst and data-explorer can invoke sql_check while SQL writes remain denied",
@@ -226,6 +235,105 @@ for (const warehouse of ["sqlite_fixture", "scratch"] as const) {
       compact(result)
     })
 
+    test("keys reports complete left coverage for a proper subset", async () => {
+      const result = await checkSql({
+        warehouse,
+        check: "keys",
+        left_sql: "SELECT 'item-a' AS k UNION ALL SELECT 'item-a' UNION ALL SELECT NULL",
+        left_col: "k",
+        right_sql: "SELECT 'item-a' AS k UNION ALL SELECT 'item-ab'",
+        right_col: "k",
+      })
+      expect(result.metadata).toMatchObject({
+        distinct_left: 1,
+        distinct_right: 2,
+        matched_exact: 1,
+        left_coverage: 1,
+        right_coverage: 0.5,
+        unmatched_left: [],
+        unmatched_right: ["item-ab"],
+      })
+      expect(result.output).toContain("left coverage complete")
+      expect(result.output).toContain("left 1/1; right 1/2")
+      expect(result.output).not.toContain("unmatched keys found")
+      expect(result.metadata.format_differences).not.toContain("prefix/suffix")
+    })
+
+    test("integer keys skip text format probes even when values share prefixes", async () => {
+      const result = await checkSql({
+        warehouse,
+        check: "keys",
+        left_sql: "SELECT 12 AS k UNION ALL SELECT -12 UNION ALL SELECT NULL",
+        left_col: "k",
+        right_sql: "SELECT 12 AS k UNION ALL SELECT 123",
+        right_col: "k",
+      })
+      expect(result.metadata).toMatchObject({
+        matched_exact: 1,
+        left_coverage: 0.5,
+        right_coverage: 0.5,
+        matched_trim_lower: "n/a",
+        matched_normalized: "n/a",
+        matched_without_leading_zeros: "n/a",
+        format_differences: [],
+      })
+      expect(result.output).toContain("skipped (integer keys)")
+      expect(result.output).toContain("unmatched left keys found")
+    })
+
+    test("normalization counts distinct left values despite colliding right forms", async () => {
+      const result = await checkSql({
+        warehouse,
+        check: "keys",
+        left_sql: "SELECT 'ABC' AS k UNION ALL SELECT ' AbC ' UNION ALL SELECT '0012'",
+        left_col: "k",
+        right_sql:
+          "SELECT 'abc' AS k UNION ALL SELECT 'ABC' UNION ALL SELECT ' abc ' UNION ALL SELECT '12' UNION ALL SELECT '012'",
+        right_col: "k",
+      })
+      expect(result.metadata).toMatchObject({
+        matched_exact: 1,
+        matched_trim_lower: 2,
+        matched_normalized: warehouse === "scratch" ? 2 : "n/a",
+        matched_without_leading_zeros: 3,
+      })
+      expect(result.metadata.format_differences).toEqual(
+        expect.arrayContaining(["case-only", "whitespace", "leading zeros"]),
+      )
+    })
+
+    test("prefix diagnostics compare unmatched left keys with covered right keys", async () => {
+      const result = await checkSql({
+        warehouse,
+        check: "keys",
+        left_sql: "SELECT 'item' AS k UNION ALL SELECT 'prefix-item'",
+        left_col: "k",
+        right_sql: "SELECT 'item' AS k",
+        right_col: "k",
+      })
+      expect(result.metadata.format_differences).toContain("prefix/suffix")
+      expect(result.output).toContain("up to 100 unmatched left keys and 100 right keys")
+    })
+
+    test("keys reports empty-side coverage as unavailable", async () => {
+      for (const empty of ["left", "right", "both"]) {
+        const result = await checkSql({
+          warehouse,
+          check: "keys",
+          left_sql: `SELECT 'item' AS k${empty !== "right" ? " WHERE 1 = 0" : ""}`,
+          left_col: "k",
+          right_sql: `SELECT 'item' AS k${empty !== "left" ? " WHERE 1 = 0" : ""}`,
+          right_col: "k",
+        })
+        expect(result.metadata).toMatchObject({
+          matched_exact: 0,
+          left_coverage: empty !== "right" ? null : 0,
+          right_coverage: empty !== "left" ? null : 0,
+        })
+        expect(result.output).toContain("n/a (empty input)")
+      }
+    })
+
     test("keys detects whitespace combined with a case difference", async () => {
       const result = await checkSql({
         warehouse,
@@ -353,6 +461,32 @@ for (const warehouse of ["sqlite_fixture", "scratch"] as const) {
       })
       expect(result.metadata).toMatchObject({ check: "coverage" })
       expect(result.title).not.toContain("ERROR")
+    })
+
+    test("registered coverage checks preserve empty patterns and default filler deadlines", async () => {
+      const source = warehouse === "scratch" ? await getScratch("test-session") : await Registry.get(warehouse)
+      const execute = spyOn(source, "execute")
+      const tool = await initTool(SqlCheckTool)
+      try {
+        for (const query_timeout_ms of [undefined, [], "", 0, null, 4321]) {
+          const result = await tool.execute(
+            { warehouse, check: "coverage", sql: "SELECT '' AS note", column: "note", pattern: "", query_timeout_ms },
+            {
+              sessionID: "test-session",
+              messageID: "test-message",
+              agent: "test",
+              abort: new AbortController().signal,
+              messages: [],
+            },
+          )
+          expect(result.title).not.toContain("ERROR")
+          expect(result.metadata).toMatchObject({ check: "coverage", matching_rows: 1 })
+          expect(execute.mock.calls.at(-1)?.[3]?.queryTimeoutMs).toBe(query_timeout_ms === 4321 ? 4321 : 120_000)
+        }
+        expect(execute).toHaveBeenCalledTimes(6)
+      } finally {
+        execute.mockRestore()
+      }
     })
 
     test("still reports missing required fields after empty values are dropped", async () => {
@@ -772,4 +906,89 @@ test("the registered tool reports SQL refusal as an error result", async () => {
   expect(result.title).toContain("ERROR")
   expect(result.metadata.error).toBeDefined()
   expect(result.output).toMatch(/read|SELECT/i)
+})
+
+for (const warehouse of ["sqlite_fixture", "scratch"] as const) {
+  for (const contained of [true, false]) {
+    test(
+      `keys finishes large ${contained ? "contained" : "disjoint"} text sets within its deadline on ${warehouse === "scratch" ? "DuckDB" : "SQLite"}`,
+      async () => {
+        const connector = await Registry.get(warehouse)
+        const leftTable = contained ? "contained_left_keys" : "disjoint_left_keys"
+        const rightTable = contained ? "contained_right_keys" : "disjoint_right_keys"
+        const values = (size: number) =>
+          warehouse === "scratch"
+            ? `SELECT i AS n FROM range(${size}) keys(i)`
+            : `WITH RECURSIVE keys(n) AS (SELECT 0 UNION ALL SELECT n + 1 FROM keys WHERE n + 1 < ${size}) SELECT n FROM keys`
+        await connector.execute(
+          `CREATE TABLE ${leftTable} AS SELECT '${contained ? "key-" : "missing-"}' || n AS id FROM (${values(7_000)}) source_keys`,
+          undefined,
+          undefined,
+          { noLimit: true },
+        )
+        await connector.execute(
+          `CREATE TABLE ${rightTable} AS SELECT 'key-' || n AS id FROM (${values(130_000)}) source_keys`,
+          undefined,
+          undefined,
+          { noLimit: true },
+        )
+
+        const started = performance.now()
+        const result = await checkSql({
+          warehouse,
+          check: "keys",
+          left_sql: `SELECT id FROM ${leftTable}`,
+          left_col: "id",
+          right_sql: `SELECT id FROM ${rightTable}`,
+          right_col: "id",
+          query_timeout_ms: 5_000,
+        })
+        const elapsed = performance.now() - started
+        expect(elapsed).toBeLessThan(5_000)
+        expect(result.metadata).toMatchObject({
+          distinct_left: 7_000,
+          distinct_right: 130_000,
+          matched_exact: contained ? 7_000 : 0,
+          matched_trim_lower: contained ? 7_000 : 0,
+          matched_normalized: warehouse === "sqlite_fixture" ? "n/a" : contained ? 7_000 : 0,
+          matched_without_leading_zeros: contained ? 7_000 : 0,
+        })
+        expect(result.metadata.unmatched_left).toHaveLength(contained ? 0 : 5)
+        expect(result.metadata.unmatched_right).toHaveLength(5)
+        compact(result)
+      },
+      30_000,
+    )
+  }
+}
+
+test("SQLite keys keeps text probes for mixed integer and text storage", async () => {
+  const result = await checkSql({
+    warehouse: "sqlite_fixture",
+    check: "keys",
+    left_sql: "SELECT 12 AS id UNION ALL SELECT ' ABC '",
+    left_col: "id",
+    right_sql: "SELECT 12 AS id UNION ALL SELECT 'abc'",
+    right_col: "id",
+  })
+  expect(result.metadata).toMatchObject({
+    matched_exact: 1,
+    matched_trim_lower: 2,
+  })
+  expect(result.metadata.format_differences).toContain("whitespace")
+})
+
+test("DuckDB keys skips text probes for unsigned and huge integer types", async () => {
+  for (const type of ["UTINYINT", "USMALLINT", "UINTEGER", "UBIGINT", "HUGEINT", "UHUGEINT"]) {
+    const result = await checkSql({
+      warehouse: "scratch",
+      check: "keys",
+      left_sql: `SELECT CAST(12 AS ${type}) AS id`,
+      left_col: "id",
+      right_sql: `SELECT CAST(12 AS ${type}) AS id UNION ALL SELECT CAST(123 AS ${type})`,
+      right_col: "id",
+    })
+    expect(result.metadata).toMatchObject({ distinct_left: 1, distinct_right: 2, matched_exact: 1 })
+    expect(result.metadata.format_differences).toEqual([])
+  }
 })

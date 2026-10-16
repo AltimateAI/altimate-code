@@ -355,6 +355,23 @@ describe("large dataset handling", () => {
 // ---------------------------------------------------------------------------
 
 describe("re-indexing and multi-warehouse", () => {
+  test("all search terms respect the warehouse filter for tables and columns", async () => {
+    const cache = SchemaCache.createInMemory()
+    try {
+      const connector = mockConnector({ public: { orders: ["order_id"], customers: ["customer_id"] } })
+      await cache.indexWarehouse("selected", "postgres", connector)
+      await cache.indexWarehouse("other", "postgres", connector)
+
+      const result = cache.search("orders customers", "selected")
+      expect(result.tables).toHaveLength(2)
+      expect(result.columns).toHaveLength(2)
+      expect(result.tables.every((table) => table.warehouse === "selected")).toBe(true)
+      expect(result.columns.every((column) => column.warehouse === "selected")).toBe(true)
+    } finally {
+      cache.close()
+    }
+  })
+
   test("re-indexing replaces old data completely", async () => {
     const cache = SchemaCache.createInMemory()
 

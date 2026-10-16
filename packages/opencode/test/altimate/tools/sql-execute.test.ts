@@ -47,7 +47,113 @@ afterEach(() => {
   precedence.mockRestore()
 })
 
+describe("sql_execute result guidance", () => {
+  test("omits progressive and small-result hints for the analyst", async () => {
+    dispatch.mockResolvedValue({ columns: ["region"], rows: [["North"]], row_count: 1, truncated: false } as never)
+    suggestion.mockReturnValue("Tip: Use sql_analyze to check this query.")
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT region FROM sales WHERE region = 'North'" }, { ...ctx, agent: "analyst" })
+
+    expect(output.output).toBe("region\n------\nNorth\n\n(1 rows)")
+    expect(suggestion).not.toHaveBeenCalled()
+  })
+
+  test("retains progressive and small-result hints for other agents", async () => {
+    dispatch.mockResolvedValue({ columns: ["region"], rows: [["North"]], row_count: 1, truncated: false } as never)
+    suggestion.mockReturnValue("Tip: Use sql_analyze to check this query.")
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT region FROM sales WHERE region = 'North'" }, ctx)
+
+    expect(output.output).toContain("Tip: Use sql_analyze")
+    expect(output.output).toContain("Hint: only 1 row(s).")
+  })
+
+  test("preserves binder errors without dispatcher startup advice", async () => {
+    const error = 'Binder Error: Referenced column "missing" not found'
+    dispatch.mockResolvedValue({ columns: [], rows: [], row_count: 0, truncated: false, error } as never)
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT missing FROM items" }, ctx)
+
+    expect(output.output).toBe(`Failed to execute SQL: ${error}`)
+  })
+
+  test("does not suggest starting a separate dispatcher for native handler errors", async () => {
+    dispatch.mockRejectedValue(new Error("No native handler for sql.execute"))
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT 1" }, ctx)
+
+    expect(output.output).toBe("Failed to execute SQL: No native handler for sql.execute")
+  })
+})
+
 describe("sql_execute parser read boundary", () => {
+  test("asks for write approval with the parse error for parser failures", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
+    try {
+      await expect(tool.execute({ query: "SELECT (" }, ctx)).rejects.toThrow("write denied by test")
+      expect(ask).toHaveBeenCalledTimes(1)
+      expect(ask.mock.calls[0][0]).toMatchObject({
+        permission: "sql_execute_write",
+        metadata: { queryType: "write", parseError: "Parse error at line 1, column 9: Unexpected token: LParen" },
+      })
+      expect(dispatch).not.toHaveBeenCalled()
+      expect(precedence).not.toHaveBeenCalled()
+    } finally {
+      ask.mockRestore()
+    }
+  })
+
+  test.each([
+    ["duckdb", "SELECT 9 // 2"],
+    ["sqlite", "SELECT 'article' NOT GLOB 'a*'"],
+    ["duckdb", "SELECT TIMESTAMPTZ '2024-02-03 00:00:00+00'"],
+    ["duckdb", "SELECT * FROM items match"],
+  ])("explains unsupported %s read syntax: %s", async (type, query) => {
+    const config = spyOn(Registry, "getConfig").mockReturnValue({ type })
+    const tool = await initTool(SqlExecuteTool)
+    const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
+    try {
+      await expect(tool.execute({ query, warehouse: "source" }, ctx)).rejects.toThrow("write denied by test")
+      expect(ask).toHaveBeenCalledTimes(1)
+      expect(dispatch).not.toHaveBeenCalled()
+    } finally {
+      ask.mockRestore()
+      config.mockRestore()
+    }
+  })
+
+  test("executes parser-rejected SQL only after write approval", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.void)
+    try {
+      await tool.execute({ query: "SELECT (" }, ctx)
+      expect(ask).toHaveBeenCalledTimes(1)
+      expect(dispatch).toHaveBeenCalledTimes(1)
+    } finally {
+      ask.mockRestore()
+    }
+  })
+
+  test.each([
+    "SELECT 'unclosed",
+    "/* unclosed",
+    "EXPLAIN ANALYZE DELETE FROM victim",
+    "SELECT $tag$'--$tag$ AS a; DELETE FROM victim",
+    String.raw`SELECT E'\'--' AS a) x) y; DELETE FROM victim; SELECT * FROM (SELECT * FROM (SELECT ''`,
+  ])("requires write approval for parser-rejected statements: %s", async (query) => {
+    const tool = await initTool(SqlExecuteTool)
+    const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
+    try {
+      await expect(tool.execute({ query }, ctx)).rejects.toThrow("write denied by test")
+      expect(ask).toHaveBeenCalledTimes(1)
+      expect(dispatch).not.toHaveBeenCalled()
+      expect(precedence).not.toHaveBeenCalled()
+    } finally {
+      ask.mockRestore()
+    }
+  })
+
   for (const type of ["postgres", "postgresql", "sqlite"]) {
     test(`enforces read-only execution for ${type} reads without restricting approved writes`, async () => {
       dispatch.mockRestore()
@@ -157,12 +263,8 @@ describe("sql_execute parser read boundary", () => {
     "WITH removed AS (DELETE FROM victim RETURNING *) SELECT * FROM removed",
     "SELECT 1 INTO victim",
     String.raw`SELECT E'\'--' AS a; DELETE FROM victim`,
-    String.raw`SELECT E'\'--' AS a) x) y; DELETE FROM victim; SELECT * FROM (SELECT * FROM (SELECT ''`,
-    "SELECT $tag$'--$tag$ AS a; DELETE FROM victim",
     "SELECT $$--$$ AS a; DELETE FROM victim",
-    "EXPLAIN ANALYZE DELETE FROM victim",
     "SELECT 1; CHECKPOINT",
-    "SELECT 'unclosed",
   ]) {
     test(`requires write permission for query-shaped writes: ${query}`, async () => {
       const tool = await initTool(SqlExecuteTool)
@@ -210,28 +312,95 @@ describe("sql_execute parser read boundary", () => {
   })
 })
 
+describe("sql_execute MongoDB commands", () => {
+  test.each([
+    "SELECT 1",
+    "{not json",
+    "[]",
+    "{}",
+    '{"collection":"articles","find":3}',
+    '{"command":"fin","collection":"articles"}',
+  ])(
+    "reports a MongoDB shape error before permissions: %s",
+    async (query) => {
+      const config = spyOn(Registry, "getConfig").mockReturnValue({ type: "mongodb" })
+      const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
+      try {
+        const tool = await initTool(SqlExecuteTool)
+        await expect(tool.execute({ query, warehouse: "source" }, ctx)).rejects.toThrow(/MongoDB.*JSON command/)
+        expect(ask).not.toHaveBeenCalled()
+        expect(dispatch).not.toHaveBeenCalled()
+        expect(precedence).not.toHaveBeenCalled()
+      } finally {
+        ask.mockRestore()
+        config.mockRestore()
+      }
+    },
+  )
+
+  test.each([
+    [
+      { collection: "articles", find: { published: true } },
+      { command: "find", collection: "articles", filter: { published: true } },
+    ],
+    [
+      { collection: "articles", aggregate: [{ $match: { published: true } }] },
+      { command: "aggregate", collection: "articles", pipeline: [{ $match: { published: true } }] },
+    ],
+    [{ listCollections: 1 }, { command: "listCollections" }],
+    [{ estimatedDocumentCount: "articles" }, { command: "estimatedDocumentCount", collection: "articles" }],
+  ])("dispatches MongoDB reads in normalized form: %j", async (query, normalized) => {
+    const config = spyOn(Registry, "getConfig").mockReturnValue({ type: "mongodb" })
+    const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied by test")))
+    try {
+      const tool = await initTool(SqlExecuteTool)
+      await tool.execute({ query: JSON.stringify(query), warehouse: "source" }, ctx)
+      expect(ask).not.toHaveBeenCalled()
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      expect(dispatch.mock.calls[0][0]).toBe("sql.execute")
+      expect(JSON.parse((dispatch.mock.calls[0][1] as { sql: string }).sql)).toEqual(normalized)
+    } finally {
+      ask.mockRestore()
+      config.mockRestore()
+    }
+  })
+})
+
 describe("sql_execute limit validation", () => {
-  for (const limit of [0, -1, 1.5, 1e9, NaN, Infinity, -Infinity]) {
+  for (const limit of [-1, 1.5, NaN, Infinity, -Infinity]) {
     test(`rejects ${limit} before querying`, async () => {
       const tool = await initTool(SqlExecuteTool)
       await expect(tool.execute({ query: "SELECT 42", limit }, ctx)).rejects.toThrow(
-        "limit must be a finite positive integer between 1 and 10000",
+        "limit must be a finite positive integer",
       )
       expect(dispatch).not.toHaveBeenCalled()
     })
   }
 
-  test("keeps default 100 and accepts both bounds without extra queries", async () => {
+  test("keeps default 100 for omitted and filler limits and accepts both bounds without extra queries", async () => {
     const tool = await initTool(SqlExecuteTool)
-    for (const limit of [undefined, 1, 10_000]) {
+    for (const limit of [undefined, 0, 1, 10_000]) {
       const output = await tool.execute({ query: "SELECT 42", limit }, ctx)
       expect(output.output).toBe("answer\n------\n42\n\n(1 rows)")
     }
     expect(dispatch.mock.calls).toEqual([
-      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 100 }],
-      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 1 }],
-      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 10_000 }],
+      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 100 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
+      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 100 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
+      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 1 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
+      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 10_000 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
     ])
+  })
+
+  test("clamps oversized row limits before querying", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    await tool.execute({ query: "SELECT 42", limit: 1e9 }, ctx)
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(dispatch).toHaveBeenCalledWith("sql.execute", {
+      sql: "SELECT 42",
+      warehouse: undefined,
+      limit: 10_000,
+      query_timeout_ms: undefined,
+    }, { signal: ctx.abort, sessionID: ctx.sessionID })
   })
 })
 
@@ -244,30 +413,32 @@ describe("sql_execute query timeout", () => {
     })
   }
 
-  test("passes explicit deadlines and disabled deadline to the native dispatcher", async () => {
+  test("passes positive deadlines to the native dispatcher", async () => {
     const tool = await initTool(SqlExecuteTool)
-    for (const query_timeout_ms of [0, 1, 600_000, 3_600_000]) {
+    for (const query_timeout_ms of [1, 600_000, 3_600_000]) {
       await tool.execute({ query: "SELECT 42", warehouse: "analytics", query_timeout_ms }, ctx)
       expect(dispatch).toHaveBeenLastCalledWith("sql.execute", {
         sql: "SELECT 42",
         warehouse: "analytics",
         limit: 100,
         query_timeout_ms,
-      })
+      }, { signal: ctx.abort, sessionID: ctx.sessionID })
     }
-    expect(dispatch).toHaveBeenCalledTimes(4)
+    expect(dispatch).toHaveBeenCalledTimes(3)
   })
 
-  test("leaves an omitted deadline undefined so native defaults still apply", async () => {
+  test("leaves omitted and filler deadlines undefined so native defaults still apply", async () => {
     const tool = await initTool(SqlExecuteTool)
-    await tool.execute({ query: "SELECT 42" }, ctx)
-    expect(dispatch).toHaveBeenCalledTimes(1)
-    expect(dispatch).toHaveBeenCalledWith("sql.execute", {
-      sql: "SELECT 42",
-      warehouse: undefined,
-      limit: 100,
-      query_timeout_ms: undefined,
-    })
+    for (const query_timeout_ms of [undefined, 0, [], "", null]) {
+      await tool.execute({ query: "SELECT 42", query_timeout_ms }, ctx)
+      expect(dispatch).toHaveBeenLastCalledWith("sql.execute", {
+        sql: "SELECT 42",
+        warehouse: undefined,
+        limit: 100,
+        query_timeout_ms: undefined,
+      }, { signal: ctx.abort, sessionID: ctx.sessionID })
+    }
+    expect(dispatch).toHaveBeenCalledTimes(5)
   })
 })
 

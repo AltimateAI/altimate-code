@@ -17,7 +17,7 @@ describe("SQL dialect comment safety", () => {
     "SELECT 1 /*! + side_effecting_function() */",
   ]) {
     test(`executable comments are hard denied: ${sql}`, () => {
-      expect(classifyAndCheck(sql)).toEqual({ queryType: "write", blocked: true })
+      expect(classifyAndCheck(sql)).toMatchObject({ queryType: "write", blocked: true })
       expect(isSingleQuery(sql)).toBe(false)
       expect(() => readSql(sql, "mysql")).toThrow(/single read-only SELECT/)
     })
@@ -37,7 +37,7 @@ describe("SQL dialect comment safety", () => {
         // Reject executable comments outright: generic parsers cannot prove their safety.
         "SELECT 1 /*! + 1 */",
       ]) {
-        expect(classifyAndCheck(sql, dialect)).toEqual({ queryType: "write", blocked: true })
+        expect(classifyAndCheck(sql, dialect)).toMatchObject({ queryType: "write", blocked: true })
       }
     })
   }
@@ -53,8 +53,8 @@ describe("SQL dialect comment safety", () => {
   test("MySQL arithmetic cannot hide hard-denied trailing statements from the generic parser", () => {
     for (const statement of ["DROP DATABASE x", "DROP SCHEMA x", "TRUNCATE TABLE x"]) {
       const sql = `SELECT 1--2; ${statement}`
-      expect(classifyAndCheck(sql, "mysql")).toEqual({ queryType: "write", blocked: true })
-      expect(classifyAndCheck(sql, "mariadb")).toEqual({ queryType: "write", blocked: true })
+      expect(classifyAndCheck(sql, "mysql")).toMatchObject({ queryType: "write", blocked: true })
+      expect(classifyAndCheck(sql, "mariadb")).toMatchObject({ queryType: "write", blocked: true })
       expect(classifyAndCheck(sql, "postgres")).toEqual({ queryType: "read", blocked: false })
     }
   })

@@ -1,13 +1,19 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import type { Connector } from "@altimateai/drivers"
 import { QueryTimeoutError } from "@altimateai/drivers/types"
+import { ResultByteLimitError } from "@altimateai/drivers/result-byte-limit"
 import * as Registry from "../../src/altimate/native/connections/registry"
 import { registerAll } from "../../src/altimate/native/connections/register"
 import { closeScratch, getScratch } from "../../src/altimate/native/connections/scratch"
 import { materialize } from "../../src/altimate/tools/sql-materialize"
 
 type Command = Record<string, any>
-type Execution = { command: Command; limit: number | undefined; timeout: number | undefined }
+type Execution = {
+  command: Command
+  limit: number | undefined
+  timeout: number | undefined
+  maxBytes: number | undefined
+}
 
 const find = {
   command: "find",
@@ -59,7 +65,7 @@ function result(rows: unknown[][], columns = ["text"]) {
 function fakeMongo(respond: (call: Execution, index: number) => ReturnType<typeof result>) {
   const seen: Execution[] = []
   const execute: Connector["execute"] = async (sql, limit, _binds, options) => {
-    const call = { command: JSON.parse(sql), limit, timeout: options?.queryTimeoutMs }
+    const call = { command: JSON.parse(sql), limit, timeout: options?.queryTimeoutMs, maxBytes: options?.maxResultBytes }
     seen.push(call)
     return respond(call, seen.length - 1)
   }
@@ -71,47 +77,30 @@ function fakeMongo(respond: (call: Execution, index: number) => ReturnType<typeo
   return seen
 }
 
-function expectCount(call: Execution, command: Command, cap: number) {
-  expect(call.command).toMatchObject({ database: "articles", collection: "articles" })
-  if (command.command === "find") {
-    expect(call.command).toMatchObject({ command: "countDocuments", filter: find.filter, skip: find.skip, limit: cap })
-  } else {
-    expect(call.command).toMatchObject({
-      command: "aggregate",
-      pipeline: [...command.pipeline, { $limit: cap }, { $count: "n" }],
-    })
-  }
+function expectRead(call: Execution, command: Command, cap: number) {
+  expect(call.command).toEqual(
+    command.command === "aggregate" ? { ...command, pipeline: [...command.pipeline, { $limit: cap }] } : command,
+  )
   expect(call.limit).toBe(cap)
 }
 
-function expectSample(call: Execution, command: Command) {
-  expect(call.command).toEqual(
-    command.command === "find"
-      ? { ...command, limit: 1000 }
-      : { ...command, pipeline: [...command.pipeline, { $limit: 1000 }] },
-  )
-  expect(call.limit).toBe(1000)
-}
-
-describe("MongoDB materialization preflight", () => {
+describe("MongoDB materialization", () => {
   for (const command of [find, aggregate]) {
-    test(`${command.command}: refuses an over-cap count without sampling or extraction`, async () => {
-      const seen = fakeMongo((_call, index) => {
-        if (index === 0) return result([[4]], ["n"])
-        throw new Error("Sampling and extraction must not run")
-      })
-      await expect(materialize({ ...input, sql: JSON.stringify(command), max_rows: 3 })).rejects.toThrow(
-        /more than 3 rows.*row cap of 3/,
-      )
+    test(`${command.command}: accepts collection with an inline filter or pipeline`, async () => {
+      const { command: name, filter, pipeline, ...options } = command as Command
+      const shorthand = { ...options, [name]: name === "find" ? filter : pipeline }
+      const seen = fakeMongo(() => result([["kept"]]))
+      const materialized = await materialize({ ...input, sql: JSON.stringify(shorthand), max_rows: 10 })
+      expect(materialized.rows).toBe(1)
       expect(seen).toHaveLength(1)
-      expectCount(seen[0], command, 4)
-      const scratch = await getScratch()
-      const tables = await scratch.execute("SELECT table_name FROM information_schema.tables WHERE table_name = 'articles'")
-      expect(tables.rows).toEqual([])
+      expect(seen[0].command).toEqual(
+        name === "aggregate" ? { ...command, pipeline: [...pipeline, { $limit: 11 }] } : command,
+      )
+      expect((await (await getScratch()).execute("SELECT text FROM articles")).rows).toEqual([["kept"]])
     })
 
-    test(`${command.command}: samples before extraction and keeps rows in scratch`, async () => {
-      const seen = fakeMongo((_call, index) => (index === 0 ? result([[2]], ["n"]) : result([["first"], ["second"]])))
+    test(`${command.command}: reads the source once with row, byte and timeout bounds`, async () => {
+      const seen = fakeMongo(() => result([["first"], ["second"]]))
       const materialized = await materialize({
         ...input,
         sql: JSON.stringify(command),
@@ -121,123 +110,112 @@ describe("MongoDB materialization preflight", () => {
       })
       expect(materialized.rows).toBe(2)
       expect(materialized.warnings).toEqual([])
-      expect(seen).toHaveLength(3)
-      expectCount(seen[0], command, 11)
-      expectSample(seen[1], command)
-      expect(seen[2].command).toEqual(
-        command.command === "aggregate" ? { ...command, pipeline: [...aggregate.pipeline, { $limit: 11 }] } : command,
-      )
-      expect(seen[2].limit).toBe(11)
-      expect(seen.map((call) => call.timeout)).toEqual([4321, 4321, 4321])
+      expect(seen).toHaveLength(1)
+      expectRead(seen[0], command, 11)
+      expect(seen[0].maxBytes).toBe(32)
+      expect(seen[0].timeout).toBeGreaterThan(0)
+      expect(seen[0].timeout).toBeLessThanOrEqual(4321)
       expect((await (await getScratch()).execute("SELECT text FROM articles ORDER BY text")).rows).toEqual([
         ["first"],
         ["second"],
       ])
     })
 
-    test(`${command.command}: estimates count times mean UTF-8 bytes with the row codec`, async () => {
-      const sample = [
+    test(`${command.command}: refuses the extra row without creating a table`, async () => {
+      const seen = fakeMongo(() => result([["one"], ["two"], ["three"], ["four"]]))
+      await expect(materialize({ ...input, sql: JSON.stringify(command), max_rows: 3 })).rejects.toThrow(
+        /row cap of 3 rows/,
+      )
+      expect(seen).toHaveLength(1)
+      expectRead(seen[0], command, 4)
+      const scratch = await getScratch()
+      const tables = await scratch.execute("SELECT table_name FROM information_schema.tables WHERE table_name = 'articles'")
+      expect(tables.rows).toEqual([])
+    })
+
+    test(`${command.command}: refuses a truncated result without retrying`, async () => {
+      const seen = fakeMongo(() => ({ ...result([["first"]]), truncated: true }))
+      await expect(materialize({ ...input, sql: JSON.stringify(command), max_rows: 3 })).rejects.toThrow(
+        /row cap of 3 rows/,
+      )
+      expect(seen).toHaveLength(1)
+      expectRead(seen[0], command, 4)
+    })
+
+    test(`${command.command}: checks actual UTF-8 bytes with the row codec`, async () => {
+      const rows = [
         [1n, new Uint8Array([0, 255]), "é"],
         [22n, new Uint8Array(), "long🙂"],
       ]
-      const estimatedBytes =
-        10 * ((Buffer.byteLength('["1","00ff","é"]', "utf8") + Buffer.byteLength('["22","","long🙂"]', "utf8")) / 2)
-      const seen = fakeMongo((_call, index) => {
-        if (index === 0) return result([[10]], ["n"])
-        if (index === 1) return result(sample, ["id", "binary", "text"])
-        throw new Error("Extraction must not run")
-      })
+      const actualBytes =
+        Buffer.byteLength('["1","00ff","é"]', "utf8") + Buffer.byteLength('["22","","long🙂"]', "utf8")
+      const seen = fakeMongo(() => result(rows, ["id", "binary", "text"]))
       await expect(
-        materialize({ ...input, sql: JSON.stringify(command), max_rows: 20, max_bytes: estimatedBytes - 1 }),
-      ).rejects.toThrow(`about 10 rows ≈ ${estimatedBytes} bytes, above the ${estimatedBytes - 1} bytes bound`)
-      expect(seen).toHaveLength(2)
-      expectCount(seen[0], command, 21)
-      expectSample(seen[1], command)
-    })
-
-    test(`${command.command}: a failed count clamps extraction and reports the SQL fallback warning`, async () => {
-      const seen = fakeMongo((_call, index) => {
-        if (index === 0) throw new Error("count is unsupported")
-        return result([["kept"]])
-      })
-      const materialized = await materialize({ ...input, sql: JSON.stringify(command) })
-      expect(materialized.rows).toBe(1)
-      expect(materialized.warnings).toEqual([
-        "Pre-flight estimate unavailable (count is unsupported); extraction row cap clamped to 200,000 rows. The byte cap is enforced during transfer.",
-      ])
-      expect(seen).toHaveLength(2)
-      expectCount(seen[0], command, 2_000_001)
-      expect(seen[1].command).toEqual(
-        command.command === "aggregate"
-          ? { ...command, pipeline: [...aggregate.pipeline, { $limit: 200_001 }] }
-          : command,
-      )
-      expect(seen[1].limit).toBe(200_001)
+        materialize({ ...input, sql: JSON.stringify(command), max_rows: 20, max_bytes: actualBytes - 1 }),
+      ).rejects.toThrow(`above the ${actualBytes - 1} bytes bound`)
+      expect(seen).toHaveLength(1)
+      expectRead(seen[0], command, 21)
+      expect(seen[0].maxBytes).toBe(actualBytes - 1)
     })
   }
 
-  test("find: retains a smaller user limit for both count and sample", async () => {
+  test("find: preserves a smaller user limit and all read options", async () => {
     const command = { ...find, limit: 7 }
-    const seen = fakeMongo((_call, index) => (index === 0 ? result([[1]], ["n"]) : result([["kept"]])))
+    const seen = fakeMongo(() => result([["kept"]]))
+    await materialize({ ...input, sql: JSON.stringify(command), max_rows: 10 })
+    expect(seen).toHaveLength(1)
+    expectRead(seen[0], command, 11)
+  })
+
+  test("find: supports a query without an explicit filter", async () => {
+    const command = { command: "find", collection: "articles" }
+    const seen = fakeMongo(() => result([["kept"]]))
     await materialize({ ...input, sql: JSON.stringify(command) })
-    expect(seen).toHaveLength(3)
-    expect(seen[0].command).toMatchObject({ command: "countDocuments", limit: 7 })
-    expect(seen[1].command).toEqual(command)
-    expect(seen[1].limit).toBe(1000)
+    expect(seen).toHaveLength(1)
+    expectRead(seen[0], command, 2_000_001)
   })
 
-  test("find: supports counting without an explicit filter", async () => {
-    const seen = fakeMongo((_call, index) => (index === 0 ? result([[1]], ["n"]) : result([["kept"]])))
-    await materialize({ ...input, sql: JSON.stringify({ command: "find", collection: "articles" }) })
-    expect(seen[0].command).toMatchObject({ command: "countDocuments", collection: "articles", limit: 2_000_001 })
-    expect(seen[0].command.filter ?? {}).toEqual({})
-  })
-
-  test("aggregate: an empty count result means zero rows, without fallback", async () => {
+  test("aggregate: an empty result needs only one source read", async () => {
     const seen = fakeMongo(() => result([], []))
     const materialized = await materialize({ ...input, sql: JSON.stringify(aggregate) })
     expect(materialized.rows).toBe(0)
     expect(materialized.materialized).toBe(false)
     expect(materialized.warnings).toEqual([])
-    expect(seen).toHaveLength(3)
-    expectCount(seen[0], aggregate, 2_000_001)
-    expectSample(seen[1], aggregate)
+    expect(seen).toHaveLength(1)
+    expectRead(seen[0], aggregate, 2_000_001)
   })
 
-  test.each(["successful", "failed"])(
-    "aggregate: bounds extraction after $unwind with a %s preflight",
-    async (preflight) => {
-      const command = { ...aggregate, pipeline: [{ $limit: 1 }, { $unwind: "$items" }] }
-      const seen = fakeMongo((_call, index) => {
-        if (index === 0) {
-          if (preflight === "failed") throw new Error("count is unsupported")
-          return result([[1]], ["n"])
-        }
-        if (preflight === "successful" && index === 1) return result([["sample"]])
-        return result([["one"], ["two"], ["three"], ["four"]])
-      })
-      await expect(materialize({ ...input, sql: JSON.stringify(command), max_rows: 3 })).rejects.toThrow(
-        /row cap of 3 rows/,
-      )
-      const extraction = seen.at(-1)!
-      expect(extraction.command).toEqual({ ...command, pipeline: [...command.pipeline, { $limit: 4 }] })
-      expect(extraction.limit).toBe(4)
-    },
-  )
-
-  test("failed count retains a smaller requested cap and reports its warning on refusal", async () => {
-    const seen = fakeMongo((_call, index) => {
-      if (index === 0) throw new Error("count is unsupported")
-      return result([["one"], ["two"], ["three"], ["four"]])
-    })
-    await expect(materialize({ ...input, sql: JSON.stringify(find), max_rows: 3 })).rejects.toThrow(
-      /extraction row cap clamped to 3 rows.*\n.*row cap of 3 rows/,
+  test("aggregate: bounds extraction after an expanding stage", async () => {
+    const command = { ...aggregate, pipeline: [{ $limit: 1 }, { $unwind: "$items" }] }
+    const seen = fakeMongo(() => result([["one"], ["two"], ["three"], ["four"]]))
+    await expect(materialize({ ...input, sql: JSON.stringify(command), max_rows: 3 })).rejects.toThrow(
+      /row cap of 3 rows/,
     )
-    expect(seen).toHaveLength(2)
-    expect(seen[1].limit).toBe(4)
+    expect(seen).toHaveLength(1)
+    expectRead(seen[0], command, 4)
   })
 
-  test("a count timeout propagates without sampling or falling back to extraction", async () => {
+  test("countDocuments: materializes the requested count once", async () => {
+    const command = { command: "countDocuments", collection: "articles", filter: { topic: "science" } }
+    const seen = fakeMongo(() => result([[3]], ["count"]))
+    const materialized = await materialize({ ...input, sql: JSON.stringify(command), max_rows: 10 })
+    expect(materialized.rows).toBe(1)
+    expect(materialized.warnings).toEqual([])
+    expect(seen).toHaveLength(1)
+    expectRead(seen[0], command, 11)
+    expect((await (await getScratch()).execute('SELECT "count" FROM articles')).rows).toEqual([[3n]])
+  })
+
+  test("a source failure propagates without retrying the read", async () => {
+    const seen = fakeMongo(() => {
+      throw new Error("source disconnected")
+    })
+    await expect(materialize({ ...input, sql: JSON.stringify(find) })).rejects.toThrow("source disconnected")
+    expect(seen).toHaveLength(1)
+    expectRead(seen[0], find, 2_000_001)
+  })
+
+  test("a source timeout propagates without retrying the read", async () => {
     const seen = fakeMongo(() => {
       throw new QueryTimeoutError({ engine: "mongodb", timeoutMs: 4321, cancelled: true })
     })
@@ -245,6 +223,21 @@ describe("MongoDB materialization preflight", () => {
       materialize({ ...input, sql: JSON.stringify(find), query_timeout_ms: 4321 }),
     ).rejects.toBeInstanceOf(QueryTimeoutError)
     expect(seen).toHaveLength(1)
+    expectRead(seen[0], find, 2_000_001)
+  })
+
+  test("a transfer byte limit refuses the result without creating a table", async () => {
+    const seen = fakeMongo(() => {
+      throw new ResultByteLimitError(32)
+    })
+    await expect(materialize({ ...input, sql: JSON.stringify(find), max_bytes: 32 })).rejects.toThrow(
+      /above the 32 bytes bound.*nothing was materialized/,
+    )
+    expect(seen).toHaveLength(1)
+    expectRead(seen[0], find, 2_000_001)
+    const scratch = await getScratch()
+    const tables = await scratch.execute("SELECT table_name FROM information_schema.tables WHERE table_name = 'articles'")
+    expect(tables.rows).toEqual([])
   })
 
   test("distinct is refused before an unbounded driver call", async () => {
@@ -255,7 +248,26 @@ describe("MongoDB materialization preflight", () => {
     expect(seen).toHaveLength(0)
   })
 
-  test.each(["$out", "$merge"])("aggregate %s is refused before any preflight or extraction", async (stage) => {
+  test.each([null, [], {}, { collection: "articles" }, { command: 42 }, { command: "" }].map((command) => ({ command })))(
+    "invalid command shape %j gets JSON command guidance before execution",
+    async ({ command }) => {
+      const seen = fakeMongo(() => result([["unused"]]))
+      await expect(materialize({ ...input, sql: JSON.stringify(command) })).rejects.toThrow(
+        'A MongoDB source query must be a JSON command, e.g. {"command":"find","collection":"c"}.',
+      )
+      expect(seen).toHaveLength(0)
+    },
+  )
+
+  test("SQL input gets MongoDB JSON command guidance before execution", async () => {
+    const seen = fakeMongo(() => result([["unused"]]))
+    await expect(materialize({ ...input, sql: "SELECT text FROM articles" })).rejects.toThrow(
+      'A MongoDB source query must be a JSON command, e.g. {"command":"find","collection":"c"}.',
+    )
+    expect(seen).toHaveLength(0)
+  })
+
+  test.each(["$out", "$merge"])("aggregate %s is refused before any source read", async (stage) => {
     const seen = fakeMongo(() => result([[1]], ["n"]))
     await expect(
       materialize({ ...input, sql: JSON.stringify({ aggregate: "articles", pipeline: [{ [stage]: "stolen" }] }) }),

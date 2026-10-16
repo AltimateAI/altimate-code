@@ -55,7 +55,7 @@ test.each([
   }
 })
 
-test("authorized Postgres materialization requests database read-only execution for every source probe", async () => {
+test("authorized Postgres materialization requests database read-only execution for its single source read", async () => {
   Registry.setConfigs({ pg_source: { type: "postgres" } })
   const options: unknown[] = []
   const ask = mock(async () => {})
@@ -94,7 +94,7 @@ test("authorized Postgres materialization requests database read-only execution 
     expect(result.metadata.materialized).toBe(true)
     expect(result.metadata.rowCount).toBe(1)
     expect(ask).toHaveBeenCalledTimes(1)
-    expect(options).toHaveLength(3)
+    expect(options).toHaveLength(1)
     for (const opts of options) expect(opts).toMatchObject({ readOnly: true })
   } finally {
     get.mockRestore()

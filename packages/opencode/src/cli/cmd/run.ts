@@ -412,7 +412,7 @@ export const RunCommand = cmd({
         // altimate_change start — wall-clock work budget, with a separate finalization allowance
         .option("time-budget", {
           type: "number",
-          describe: "maximum work time in seconds (env: ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow",
+          describe: "maximum time in seconds including startup (env: ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow",
         })
         // altimate_change end
         // altimate_change end
@@ -796,6 +796,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change end
       // altimate_change start — one clock for all work, including task children and continuation turns
       let timeStarted: number | undefined
+      let queryDeadline: number | undefined
       let timeBudgetTimer: ReturnType<typeof setInterval> | undefined
       const timeBudgetStop = new AbortController()
       let workActive = false
@@ -813,6 +814,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
               ? "soft-no-downgrade"
               : "soft"
         return {
+          ...(!finalizing && queryDeadline !== undefined
+            ? { "x-altimate-run-query-deadline": String(queryDeadline) }
+            : {}),
           "x-altimate-run-budget": finalizing
             ? control === "soft"
               ? "finalization"
@@ -928,7 +932,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const startWorkClock = () => {
         workActive = true
         if (timeStarted !== undefined) return
-        timeStarted = performance.now()
+        // altimate_change start — include process bootstrap in the work deadline
+        timeStarted = performance.now() - process.uptime() * 1000
+        // altimate_change end
+        // compute the query cutoff once so reminders cannot extend it
+        queryDeadline = RunTimeBudget.queryDeadline(Date.now() - process.uptime() * 1000, timeBudget)
         tracer?.setRunBudget(budgetMetadata())
         // Fixed short ticks avoid the signed-32-bit timeout overflow for large budgets.
         if (timeBudget !== undefined) timeBudgetTimer = setInterval(checkTimeBudget, 25)
@@ -2055,7 +2063,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (!emit("silent_turn", { failure: lastToolFailure ?? null, message: line })) {
             process.stdout.write(line + EOL)
           }
-          if (args.output) outputParts.note(line)
+          // altimate_change start — retain partial findings when bounded finalization cannot answer
+          if (args.output) outputParts.note(line, { preserveLastText: finalizationLimit !== undefined })
+          // altimate_change end
           if (finalizationLimit === undefined) accounting.onSessionError("SilentTurn", line)
         }
         // altimate_change start — no repeated silent replies or repeated finalizations

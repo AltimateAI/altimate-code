@@ -52,13 +52,17 @@ export class OutputCollector {
   private readonly notes: string[] = []
 
   /** A harness-generated line (silent turn, exhausted budget) that explains why there is no reply. */
-  note(line: string) {
-    if (line.trim()) this.notes.push(line.trim())
+  note(line: string, options: { preserveLastText?: boolean } = {}) {
+    if (!line.trim()) return
+    this.notes.push(line.trim())
+    if (options.preserveLastText && this.previous.length) {
+      this.notes.push(`Partial assistant response (not finalized):\n\n${this.previous.map((part) => part.text).join("\n\n")}`)
+    }
   }
 
   /**
-   * The reply when there is one; otherwise the harness notes alone (earlier commentary is not
-   * an answer and would read as one); otherwise everything that was said.
+   * The reply when there is one; otherwise the harness notes, with unfinished text only when
+   * explicitly requested; otherwise everything that was said.
    */
   content(): string {
     const chosen = this.final.length

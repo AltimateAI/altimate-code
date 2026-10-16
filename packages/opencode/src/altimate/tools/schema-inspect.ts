@@ -6,6 +6,7 @@ import type { SchemaInspectResult } from "../native/types"
 import { PostConnectSuggestions } from "./post-connect-suggestions"
 // altimate_change end
 import { resolveInspectionTarget } from "../native/connections/inspection-target"
+import * as Registry from "../native/connections/registry"
 import { profileValues } from "./schema-values"
 import { isRecord, normalizeError } from "./response-normalization"
 import { validateTableName, validateWarehouseName } from "./input-validation"
@@ -89,6 +90,20 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       // success, which read as a valid empty schema (21 of 44 inspections in one evaluation run).
       if ((schemaResult.columns ?? []).length === 0) {
         const resolvedSchema = schemaResult.schema_name ?? schemaName
+        const warehouse = schemaResult.warehouse ?? target.warehouse
+        if (warehouse && Registry.canonicalType(Registry.getConfig(warehouse)?.type) === "mongodb") {
+          const table = schemaResult.table ?? args.table
+          const collections = await (await Registry.get(warehouse)).listTables(resolvedSchema ?? "").catch(() => undefined)
+          if (collections?.some((collection) => collection.name === table)) {
+            return failed(`Collection "${table}" has no documents to infer a schema.`)
+          }
+          const available = collections
+            ? `Available collections: ${collections.map((collection) => collection.name).join(", ") || "none"}.`
+            : "Check the collection name and pass its database as schema_name."
+          return failed(
+            `Collection "${table}" was not found${resolvedSchema ? ` in database "${resolvedSchema}"` : ""} on warehouse "${warehouse}". ${available}`,
+          )
+        }
         const where = resolvedSchema ? ` in schema "${resolvedSchema}"` : ""
         return failed(
           `${schemaResult.resolution ? `${schemaResult.resolution}. ` : ""}` +
@@ -147,7 +162,7 @@ function schemaError(msg: string) {
   return {
     title: "Schema: ERROR",
     metadata: { success: false, columnCount: 0, rowCount: undefined, error: msg },
-    output: `Failed to inspect schema: ${msg}\n\nEnsure the dispatcher is running and a warehouse connection is configured.`,
+    output: `Failed to inspect schema: ${msg}`,
   }
 }
 

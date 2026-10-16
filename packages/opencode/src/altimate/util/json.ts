@@ -3,11 +3,14 @@ export function bigintReplacer(_key: string, value: unknown): unknown {
   return typeof value === "bigint" ? value.toString() : value
 }
 
-/** Copy JSON-shaped request data, preserving SDK media (URLs, buffers, etc.). */
-export function normalizeBigInts<T>(value: T): T {
+/** Copy JSON-shaped data, preserving SDK media; storage can opt into safe integer numbers. */
+export function normalizeBigInts<T>(value: T, mode: "string" | "safe-number" = "string"): T {
   const seen = new WeakMap<object, unknown>()
   const visit = (child: unknown): unknown => {
-    if (typeof child === "bigint") return child.toString()
+    if (typeof child === "bigint") {
+      const number = Number(child)
+      return mode === "safe-number" && Number.isSafeInteger(number) ? number : child.toString()
+    }
     if (child === null || typeof child !== "object") return child
     const proto = Object.getPrototypeOf(child)
     if (!Array.isArray(child) && proto !== Object.prototype && proto !== null) return child

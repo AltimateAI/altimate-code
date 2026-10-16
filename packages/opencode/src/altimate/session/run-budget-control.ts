@@ -5,7 +5,7 @@ import * as RunBudgetEffort from "./run-budget-effort"
 
 /** Run headers work through the shared SDK for both local and attached servers. */
 export async function withBudgetControl<T>(
-  input: { sessionID: SessionID; control?: string; noReply?: boolean },
+  input: { sessionID: SessionID; control?: string; noReply?: boolean; queryDeadline?: string },
   prompt: () => Promise<T>,
 ): Promise<T> {
   const soft = input.control === "soft" || input.control === "soft-no-downgrade"
@@ -16,6 +16,9 @@ export async function withBudgetControl<T>(
   // A synchronous prompt spans its entire session loop. A noReply reminder
   // borrows that scope; subsequent finalization prompts explicitly re-arm it.
   const release = input.noReply ? undefined : RunBudgetEffort.begin(input.sessionID, finalizing)
+  const releaseQueryDeadline = input.noReply
+    ? undefined
+    : RunBudget.registerQueryDeadline(input.sessionID, finalizing ? undefined : Number(input.queryDeadline))
   try {
     if (
       (input.control === "soft" || input.control === "finalization") &&
@@ -31,6 +34,7 @@ export async function withBudgetControl<T>(
     interrupt?.()
     return result
   } finally {
+    releaseQueryDeadline?.()
     release?.()
   }
 }
