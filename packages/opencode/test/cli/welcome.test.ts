@@ -16,6 +16,8 @@ describe("showWelcomeBannerIfNeeded", () => {
     fs.mkdirSync(dataDir, { recursive: true })
 
     // Set env vars for test isolation
+    const originalTestHome = process.env.OPENCODE_TEST_HOME
+    const originalDataHome = process.env.XDG_DATA_HOME
     process.env.OPENCODE_TEST_HOME = tmpDir
     process.env.XDG_DATA_HOME = tmpDir
 
@@ -29,8 +31,10 @@ describe("showWelcomeBannerIfNeeded", () => {
 
     cleanup = () => {
       process.stderr.write = originalStderrWrite
-      delete process.env.OPENCODE_TEST_HOME
-      delete process.env.XDG_DATA_HOME
+      if (originalTestHome === undefined) delete process.env.OPENCODE_TEST_HOME
+      else process.env.OPENCODE_TEST_HOME = originalTestHome
+      if (originalDataHome === undefined) delete process.env.XDG_DATA_HOME
+      else process.env.XDG_DATA_HOME = originalDataHome
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }
   })

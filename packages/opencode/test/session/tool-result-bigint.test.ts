@@ -14,6 +14,7 @@ import { Session } from "@/session/session"
 import { MessageV2 } from "@/session/message-v2"
 import { SessionPrompt } from "@/session/prompt"
 import { ToolRegistry } from "@/tool/registry"
+import { registerAll as registerConnections } from "@/altimate/native/connections/register"
 import { closeScratch } from "@/altimate/native/connections/scratch"
 import { Trace, type TraceFile } from "@/altimate/observability/tracing"
 import { SqlExecuteTool } from "@/altimate/tools/sql-execute"
@@ -54,6 +55,9 @@ it.live(
     provideTmpdirInstanceLegacy(
       () =>
         Effect.gen(function* () {
+          // Dispatcher unit tests clear the process-wide handlers and lazy hook.
+          // Reinstall the real SQL handler even when native/index is already cached.
+          registerConnections()
           const pluginList = spyOn(Plugin, "list").mockResolvedValue([])
           const pluginTrigger = spyOn(Plugin, "trigger").mockImplementation(async (_name, _input, output) => output)
           const sessions = yield* Session.Service
@@ -163,7 +167,7 @@ it.live(
             expect(completed).toHaveLength(4)
             expect(() => JSON.stringify(messages)).not.toThrow()
             for (const part of completed) {
-              expect(part.state.status).toBe("completed")
+              expect(part.state).toMatchObject({ status: "completed" })
               if (part.state.status === "completed") expect(part.state.metadata.counts).toEqual([normalized])
             }
             const events = published.mock.calls

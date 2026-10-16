@@ -137,7 +137,7 @@ Options:
                                       --no-trace)                          [boolean] [default: true]
       --max-turns                     maximum assistant work turns; allows one committed-answer
                                       echo, or one best-effort reply after a budget abort   [number]
-      --time-budget                   maximum work time in seconds (env:
+      --time-budget                   maximum time in seconds including startup (env:
                                       ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow
                                                                                             [number]
       --dangerously-skip-permissions  auto-approve permissions that are not explicitly denied

@@ -256,8 +256,9 @@ describe("sql.execute deadline — native engines", () => {
 
   // Policy for local engines: the engine's own deadline (execution only, queue
   // wait excluded) is authoritative and no outer race abandons a queued call. A
-  // restart rejects calls already queued on the lost session. They must never
-  // execute after being reported as failed; a fresh call can use the new session.
+  // restart rejects calls already queued on a session that may have lost state.
+  // They must never execute after being reported as failed; a fresh call can use
+  // the new session. Stateless file-backed sessions can survive a restart.
   test("a call queued before a timeout loses its session without executing and fresh work succeeds", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "queued-deadline-"))
     const db = path.join(dir, "q.db")
@@ -267,6 +268,10 @@ describe("sql.execute deadline — native engines", () => {
     seed.close()
     Registry.setConfigs({ lite: { type: "SQLite", path: db } as never })
     try {
+      // The merged timeout-isolation policy lets stateless file sessions recover.
+      // Establish transaction state so B must not silently execute in autocommit
+      // after A's timeout discards that transaction.
+      expect((await run({ sql: "BEGIN", warehouse: "lite" })).error).toBeUndefined()
       // Observe A's dispatch to the helper so B is queued strictly behind it.
       const dispatched = Promise.withResolvers<void>()
       const connector = await Registry.get("lite")
@@ -299,7 +304,8 @@ describe("sql.execute deadline — native engines", () => {
         check.close()
       }
     } finally {
-      await Registry.reset()
+      await Registry.closeAll()
+      Registry.reset()
       fs.rmSync(dir, { recursive: true, force: true })
     }
   }, 40_000)

@@ -106,7 +106,7 @@ describe("Tool name consistency in prompts", () => {
     const paragraph = prompt.trim().split("\n\n").at(-1)
     // altimate_change start - require one field for each requested answer item
     expect(paragraph).toContain(
-      "Finish by calling `answer_commit` with the single chosen value(s) with one field per item the request asks for, a one-or-two-sentence basis (population, grain, source object/column), or `unresolved` with the reason, then reply with exactly the text it returns and nothing else.",
+      "Finish by calling `answer_commit` with the single chosen value(s) with one field per item the request asks for (every named item, such as an entity and its related item or count, must be its own field: when the request asks for only the answer, anything left in the basis or prose is dropped), a one-or-two-sentence basis (population, grain, source object/column), or `unresolved` with the reason, then reply with exactly the text it returns and nothing else.",
     )
     // altimate_change end
     expect(paragraph).toContain("Always supply `basis`, even when unresolved")

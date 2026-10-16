@@ -961,11 +961,11 @@ describe("altimate-core failure isolation", () => {
       require("path").join(__dirname, "../../src/altimate/tools/sql-execute.ts"),
       "utf8",
     )
-    const execIdx = src.indexOf('Dispatcher.call("sql.execute"')
     const responseErrorIdx = src.indexOf("if (responseError !== undefined) {")
-    // The call takes the resolved dialect as a second argument; match the
-    // query-argument prefix so the ordering invariant is independent of it.
-    const fpCallIdx = src.indexOf("computeSqlFingerprint(args.query")
+    // query_from also dispatches a generator query earlier. Check the target
+    // execution and fingerprint its resolved SQL (direct or generated).
+    const execIdx = src.lastIndexOf('Dispatcher.call("sql.execute"', responseErrorIdx)
+    const fpCallIdx = src.indexOf("computeSqlFingerprint(sql, dialect)")
     // The success-path formatter was renamed from formatResult(result) to
     // formatSqlResult(result, …) when the result contract (preview envelope +
     // JSONL spill) landed; the ordering invariant is unchanged.
@@ -975,15 +975,15 @@ describe("altimate-core failure isolation", () => {
     expect(execIdx).toBeGreaterThan(0)
     expect(responseErrorIdx).toBeGreaterThan(execIdx)
     // The single fingerprint call sits strictly between the error check and
-    // formatResult() — i.e. only on the success path — and BEFORE formatting, so a
-    // formatResult() throw cannot cause a genuinely-executed query to go uncounted.
+    // formatSqlResult() — i.e. only on the success path — and BEFORE formatting, so a
+    // formatSqlResult() throw cannot cause a genuinely-executed query to go uncounted.
     expect(fpCallIdx).toBeGreaterThan(responseErrorIdx)
     expect(formatIdx).toBeGreaterThan(fpCallIdx)
     expect(guardComment).toBeGreaterThan(fpCallIdx)
     expect(guardComment).toBeLessThan(formatIdx)
 
     // Exactly one call site — no more "every outcome" fan-out.
-    const callSites = [...src.matchAll(/computeSqlFingerprint\(args\.query\b/g)]
+    const callSites = [...src.matchAll(/\bcomputeSqlFingerprint\s*\(/g)]
     expect(callSites.length).toBe(1)
 
     // Neither the result-error branch nor the catch block references it.
