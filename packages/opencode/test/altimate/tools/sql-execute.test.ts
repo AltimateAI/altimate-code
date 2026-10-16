@@ -228,10 +228,10 @@ describe("sql_execute limit validation", () => {
       expect(output.output).toBe("answer\n------\n42\n\n(1 rows)")
     }
     expect(dispatch.mock.calls).toEqual([
-      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 100 }],
-      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 100 }],
-      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 1 }],
-      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 10_000 }],
+      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 100 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
+      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 100 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
+      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 1 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
+      ["sql.execute", { sql: "SELECT 42", warehouse: undefined, limit: 10_000 }, { signal: ctx.abort, sessionID: ctx.sessionID }],
     ])
   })
 
@@ -244,7 +244,7 @@ describe("sql_execute limit validation", () => {
       warehouse: undefined,
       limit: 10_000,
       query_timeout_ms: undefined,
-    })
+    }, { signal: ctx.abort, sessionID: ctx.sessionID })
   })
 })
 
@@ -266,7 +266,7 @@ describe("sql_execute query timeout", () => {
         warehouse: "analytics",
         limit: 100,
         query_timeout_ms,
-      })
+      }, { signal: ctx.abort, sessionID: ctx.sessionID })
     }
     expect(dispatch).toHaveBeenCalledTimes(3)
   })
@@ -280,7 +280,7 @@ describe("sql_execute query timeout", () => {
         warehouse: undefined,
         limit: 100,
         query_timeout_ms: undefined,
-      })
+      }, { signal: ctx.abort, sessionID: ctx.sessionID })
     }
     expect(dispatch).toHaveBeenCalledTimes(5)
   })

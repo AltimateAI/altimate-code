@@ -14,7 +14,7 @@ import * as os from "os"
 import * as path from "path"
 import { initTool } from "./tool-fixture"
 import * as Registry from "../../src/altimate/native/connections/registry"
-import { closeScratch, getScratch, withScratchSession } from "../../src/altimate/native/connections/scratch"
+import { closeScratch, getScratch } from "../../src/altimate/native/connections/scratch"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { registerAll } from "../../src/altimate/native/connections/register"
 import { MaterializeError, SqlMaterializeTool, materialize } from "../../src/altimate/tools/sql-materialize"
@@ -412,12 +412,7 @@ describe("sql_materialize", () => {
       expect(r.rows).toBe(1)
       // The statement reaches Postgres wrapped as a derived table: a data-modifying CTE or
       // SELECT INTO inside it is rejected by the server itself.
-      expect(seen).toHaveLength(3)
-      expect(seen[0]).toMatch(
-        /^SELECT count\(\*\) FROM \(SELECT 1 AS __one FROM \(\s*SELECT 1 AS n\s*\) AS __m LIMIT 2000001\) AS __c$/,
-      )
-      expect(seen[1]).toMatch(/\) AS __sql_materialize_source LIMIT 1000$/)
-      expect(seen[2]).toMatch(/^SELECT \* FROM \(\s*SELECT 1 AS n\s*\) AS __sql_materialize_source LIMIT \d+$/)
+      expect(seen).toEqual(["SELECT * FROM (\nSELECT 1 AS n\n) AS __sql_materialize_source LIMIT 2000001"])
       for (const sql of [
         "WITH d AS (DELETE FROM accounts RETURNING *) SELECT * FROM d",
         "SELECT 1 INTO new_table",
@@ -427,7 +422,7 @@ describe("sql_materialize", () => {
           /only reads/,
         )
       }
-      expect(seen).toHaveLength(3)
+      expect(seen).toHaveLength(1)
     } finally {
       get.mockRestore()
     }
@@ -468,147 +463,56 @@ describe("sql_materialize", () => {
     expect(Number(t.rows[0][0])).toBe(0)
   })
 
-  test("preflight counts only cap + 1 rows and refuses overflow before sampling", async () => {
+  test("a source failure is propagated without another read", async () => {
     const seen: string[] = []
     const get = fakePostgres(async (sql) => {
       seen.push(sql)
-      if (/^SELECT count\(\*\)/i.test(sql)) {
-        return { columns: ["count"], rows: [["4"]], row_count: 1, truncated: false }
-      }
-      throw new Error("Sampling and extraction must not run")
+      throw new Error("source unavailable")
     })
     try {
       await expect(
-        materialize({
-          source_warehouse: "pg_source",
-          sql: "SELECT description FROM languages",
-          target_table: "large",
-          max_rows: 3,
-        }),
-      ).rejects.toThrow(/more than 3 rows.*row cap of 3/)
-      expect(seen).toEqual([
-        "SELECT count(*) FROM (SELECT 1 AS __one FROM (\nSELECT description FROM languages\n) AS __m LIMIT 4) AS __c",
-      ])
-      expect(
-        Number(
-          (await scratchSql("SELECT count(*) FROM information_schema.tables WHERE table_name = 'large'")).rows[0][0],
-        ),
-      ).toBe(0)
+        materialize({ source_warehouse: "pg_source", sql: "SELECT n FROM numbers", target_table: "unavailable" }),
+      ).rejects.toThrow("source unavailable")
+      expect(seen).toHaveLength(1)
     } finally {
       get.mockRestore()
     }
   })
 
-  test("preflight refuses wide rows above max_bytes before extraction", async () => {
-    const seen: string[] = []
-    const get = fakePostgres(async (sql) => {
-      seen.push(sql)
-      if (/^SELECT count\(\*\)/i.test(sql)) {
-        return { columns: ["count"], rows: [[20]], row_count: 1, truncated: false }
-      }
-      if (sql.endsWith("LIMIT 1000")) {
-        return { columns: ["description"], rows: [["x".repeat(1024)]], row_count: 1, truncated: false }
-      }
-      throw new Error("Extraction must not run")
-    })
-    try {
-      const tool = await initTool(SqlMaterializeTool)
-      const result = await tool.execute(
-        {
-          source_warehouse: "pg_source",
-          sql: "SELECT description FROM languages",
-          target_table: "wide",
-          max_rows: 30,
-          max_bytes: 1024,
-        },
-        ctx as any,
-      )
-      expect(result.title).toContain("ERROR")
-      expect(result.output).toContain("20 rows")
-      expect(result.output).toContain("max_bytes")
-      expect(result.output).toContain("20.08 KiB")
-      expect(result.output).toContain("1.00 KiB bound")
-      expect(seen).toHaveLength(2)
-      expect(seen[0]).toBe(
-        "SELECT count(*) FROM (SELECT 1 AS __one FROM (\nSELECT description FROM languages\n) AS __m LIMIT 31) AS __c",
-      )
-      expect(seen[1]).toMatch(/LIMIT 1000$/)
-    } finally {
-      get.mockRestore()
-    }
-  })
-
-  for (const { type, countSql } of [
-    {
-      type: "oracle",
-      countSql: "SELECT count(*) FROM (SELECT 1 AS __one FROM (\nSELECT n FROM numbers\n) __m WHERE ROWNUM <= 4) __c",
-    },
-    {
-      type: "sqlserver",
-      countSql: "SELECT count(*) FROM (SELECT TOP (4) 1 AS __one FROM (\nSELECT n FROM numbers\n) AS __m) AS __c",
-    },
+  for (const { type, sql } of [
+    { type: "oracle", sql: "SELECT * FROM (\nSELECT n FROM numbers\n) WHERE ROWNUM <= 4" },
+    { type: "sqlserver", sql: "SELECT TOP (4) * FROM (\nSELECT n FROM numbers\n) AS __sql_materialize_source" },
   ]) {
-    test(`preflight uses a bounded count for ${type} before refusing overflow`, async () => {
+    test(`bounds the single extraction for ${type}`, async () => {
       const seen: string[] = []
-      const get = fakePostgres(async (sql) => {
+      const get = fakePostgres(async (sql, limit) => {
         seen.push(sql)
-        return { columns: ["count"], rows: [[4]], row_count: 1, truncated: false }
+        expect(limit).toBe(4)
+        return { columns: ["n"], rows: [[1], [2], [3], [4]], row_count: 4, truncated: false }
       })
       Registry.setConfigs({ pg_source: { type } })
       try {
         await expect(
           materialize({ source_warehouse: "pg_source", sql: "SELECT n FROM numbers", target_table: "large", max_rows: 3 }),
-        ).rejects.toThrow(/more than 3 rows.*row cap of 3/)
-        expect(seen).toEqual([countSql])
+        ).rejects.toThrow(/row cap of 3/)
+        expect(seen).toEqual([sql])
       } finally {
         get.mockRestore()
       }
     })
   }
 
-  test("failed count clamps the extraction to 200,000 rows and reports the fallback", async () => {
-    const seen: { sql: string; limit: number | undefined }[] = []
-    const get = fakePostgres(async (sql, limit) => {
-      seen.push({ sql, limit })
-      if (/^SELECT count\(\*\)/i.test(sql)) throw new Error("count subqueries are unsupported")
-      return { columns: ["description"], rows: [["kept"]], row_count: 1, truncated: false }
-    })
-    try {
-      const tool = await initTool(SqlMaterializeTool)
-      const result = await tool.execute(
-        { source_warehouse: "pg_source", sql: "SELECT description FROM languages", target_table: "fallback" },
-        ctx as any,
-      )
-      expect(result.metadata.error).toBeUndefined()
-      expect(result.metadata.rowCount).toBe(1)
-      expect(result.output).toMatch(/pre.?flight|count/i)
-      expect(result.output).toContain("200,000")
-      expect(seen).toHaveLength(2)
-      expect(seen[1].limit).toBe(200_001)
-      expect(seen[1].sql).toMatch(/LIMIT 200001$/)
-      expect((await withScratchSession(ctx.sessionID, () => scratchSql("SELECT description FROM fallback"))).rows).toEqual([["kept"]])
-    } finally {
-      get.mockRestore()
-    }
-  })
-
-  for (const { name, max_bytes, count, width, bound } of [
-    { name: "default 256 MiB budget", max_bytes: undefined, count: 300_000, width: 1024, bound: "256.00 MiB" },
-    { name: "hard 2 GiB ceiling", max_bytes: 4 * 1024 ** 3, count: 1_000_000, width: 4096, bound: "2.0 GiB" },
+  for (const { name, max_bytes, bytes, bound } of [
+    { name: "default byte budget", max_bytes: undefined, bytes: 256 * 1024 ** 2, bound: "256.00 MiB" },
+    { name: "hard byte ceiling", max_bytes: 4 * 1024 ** 3, bytes: 2 * 1024 ** 3, bound: "2.0 GiB" },
   ]) {
-    test(`preflight applies the ${name} below the row cap`, async () => {
+    test(`enforces the ${name} during the single source read`, async () => {
       const previous = process.env.ALTIMATE_SCRATCH_MAX_BYTES
       delete process.env.ALTIMATE_SCRATCH_MAX_BYTES
-      const seen: string[] = []
-      const get = fakePostgres(async (sql) => {
-        seen.push(sql)
-        if (/^SELECT count\(\*\)/i.test(sql)) {
-          return { columns: ["count"], rows: [[count]], row_count: 1, truncated: false }
-        }
-        if (sql.endsWith("LIMIT 1000")) {
-          return { columns: ["description"], rows: [["x".repeat(width)]], row_count: 1, truncated: false }
-        }
-        throw new Error("Extraction must not run")
+      const limits: (number | undefined)[] = []
+      const get = fakePostgres(async (_sql, _limit, _binds, options) => {
+        limits.push(options?.maxResultBytes)
+        throw Object.assign(new Error("result byte limit"), { code: "RESULT_BYTE_LIMIT" })
       })
       try {
         await expect(
@@ -619,9 +523,7 @@ describe("sql_materialize", () => {
             max_bytes,
           }),
         ).rejects.toThrow(`${bound} bound`)
-        expect(seen).toHaveLength(2)
-        expect(seen[0]).toMatch(/^SELECT count\(\*\)/)
-        expect(seen[1]).toMatch(/LIMIT 1000$/)
+        expect(limits).toEqual([bytes])
       } finally {
         get.mockRestore()
         if (previous === undefined) delete process.env.ALTIMATE_SCRATCH_MAX_BYTES
@@ -630,59 +532,25 @@ describe("sql_materialize", () => {
     })
   }
 
-  test("the tool clamps oversized max_bytes to the hard 2 GiB ceiling during preflight", async () => {
-    const seen: string[] = []
-    const get = fakePostgres(async (sql) => {
-      seen.push(sql)
-      if (/^SELECT count\(\*\)/i.test(sql)) {
-        return { columns: ["count"], rows: [[1_000_000]], row_count: 1, truncated: false }
-      }
-      if (sql.endsWith("LIMIT 1000")) {
-        return { columns: ["description"], rows: [["x".repeat(4096)]], row_count: 1, truncated: false }
-      }
-      throw new Error("Extraction must not run")
+  test("the tool clamps oversized max_bytes to the hard 2 GiB ceiling for the source read", async () => {
+    const limits: (number | undefined)[] = []
+    const get = fakePostgres(async (_sql, _limit, _binds, options) => {
+      limits.push(options?.maxResultBytes)
+      return { columns: ["n"], rows: [[1]], row_count: 1, truncated: false }
     })
     try {
       const tool = await initTool(SqlMaterializeTool)
       const result = await tool.execute(
         {
           source_warehouse: "pg_source",
-          sql: "SELECT description FROM languages",
+          sql: "SELECT 1 AS n",
           target_table: "capped_transfer",
           max_bytes: 4 * 1024 ** 3,
         },
         ctx as any,
       )
-      expect(result.title).toContain("ERROR")
-      expect(result.output).toContain("2.0 GiB bound")
-      expect(seen).toHaveLength(2)
-      expect(seen[0]).toMatch(/^SELECT count\(\*\)/)
-      expect(seen[1]).toMatch(/LIMIT 1000$/)
-    } finally {
-      get.mockRestore()
-    }
-  })
-
-  test("failed count keeps a smaller row cap and includes the fallback warning on refusal", async () => {
-    const seen: { sql: string; limit: number | undefined }[] = []
-    const get = fakePostgres(async (sql, limit) => {
-      seen.push({ sql, limit })
-      if (/^SELECT count\(\*\)/i.test(sql)) throw new Error("count subqueries are unsupported")
-      return { columns: ["n"], rows: [[1], [2], [3], [4]], row_count: 4, truncated: false }
-    })
-    try {
-      const tool = await initTool(SqlMaterializeTool)
-      const result = await tool.execute(
-        { source_warehouse: "pg_source", sql: "SELECT n FROM numbers", target_table: "fallback_small", max_rows: 3 },
-        ctx as any,
-      )
-      expect(result.title).toContain("ERROR")
-      expect(result.output).toContain("row cap of 3")
-      expect(result.output).toMatch(/pre.?flight/i)
-      expect(result.output).toContain("count subqueries are unsupported")
-      expect(seen).toHaveLength(2)
-      expect(seen[1].limit).toBe(4)
-      expect(seen[1].sql).toMatch(/LIMIT 4$/)
+      expect(result.metadata.error).toBeUndefined()
+      expect(limits).toEqual([2 * 1024 ** 3])
     } finally {
       get.mockRestore()
     }
@@ -705,23 +573,32 @@ describe("sql_materialize", () => {
     ])
   })
 
-  test("passes the source deadline to count, sample and extraction", async () => {
-    const seen: { sql: string; timeout: number | undefined }[] = []
-    const get = fakePostgres(async (sql, _limit, _binds, options) => {
-      seen.push({ sql, timeout: options?.queryTimeoutMs })
-      return { columns: ["n"], rows: [[1]], row_count: 1, truncated: false }
+  test("reads a small source result once with one deadline and both bounds", async () => {
+    const seen: { sql: string; limit: number | undefined; timeout: number | undefined; bytes: number | undefined }[] = []
+    const get = fakePostgres(async (sql, limit, _binds, options) => {
+      seen.push({ sql, limit, timeout: options?.queryTimeoutMs, bytes: options?.maxResultBytes })
+      return { columns: ["n"], rows: [[1], [2], [3]], row_count: 3, truncated: false }
     })
     try {
-      await materialize({
+      const result = await materialize({
         source_warehouse: "pg_source",
-        sql: "SELECT 1 AS n",
-        target_table: "deadline",
+        sql: "SELECT n FROM numbers",
+        target_table: "single_read",
+        max_rows: 3,
+        max_bytes: 64,
         query_timeout_ms: 4321,
       })
-      expect(seen).toHaveLength(3)
-      expect(seen[0].sql).toMatch(/^SELECT count\(\*\)/)
-      expect(seen[1].sql).toMatch(/LIMIT 1000$/)
-      expect(seen.map((query) => query.timeout)).toEqual([4321, 4321, 4321])
+      expect(result.rows).toBe(3)
+      expect(result.warnings).toEqual([])
+      expect(seen).toEqual([
+        {
+          sql: "SELECT * FROM (\nSELECT n FROM numbers\n) AS __sql_materialize_source LIMIT 4",
+          limit: 4,
+          timeout: 4321,
+          bytes: 64,
+        },
+      ])
+      expect((await scratchSql("SELECT n FROM single_read ORDER BY n")).rows).toEqual([[1n], [2n], [3n]])
     } finally {
       get.mockRestore()
     }
@@ -754,17 +631,70 @@ describe("sql_materialize", () => {
         )
         expect(result.metadata.error).toBeUndefined()
         expect(result.metadata.rowCount).toBe(1)
-        expect(seen).toHaveLength(3)
-        expect(seen[0].sql).toMatch(/^SELECT count\(\*\)/)
-        expect(seen[1].sql).toMatch(/LIMIT 1000$/)
-        expect(seen.map((query) => query.timeout)).toEqual([expected, expected, expected])
+        expect(seen).toHaveLength(1)
+        expect(seen[0].sql).toMatch(/LIMIT 2000001$/)
+        expect(seen[0].timeout).toBe(expected ?? 120_000)
       } finally {
         get.mockRestore()
       }
     })
   }
 
-  test("a preflight timeout stops before sampling or extraction", async () => {
+  test("a remote source cannot outlast its deadline and later write to scratch", async () => {
+    await getScratch()
+    const finished = Promise.withResolvers<void>()
+    let calls = 0
+    let signal: AbortSignal | undefined
+    const get = fakePostgres(async (_sql, _limit, _binds, options) => {
+      calls++
+      signal = options?.signal
+      await new Promise((resolve) => setTimeout(resolve, 150))
+      finished.resolve()
+      return { columns: ["n"], rows: [[1]], row_count: 1, truncated: false }
+    })
+    try {
+      const started = performance.now()
+      await expect(
+        materialize({
+          source_warehouse: "pg_source",
+          sql: "SELECT 1 AS n",
+          target_table: "late_result",
+          query_timeout_ms: 30,
+        }),
+      ).rejects.toBeInstanceOf(QueryTimeoutError)
+      expect(performance.now() - started).toBeLessThan(150)
+      expect(signal?.aborted).toBe(true)
+      await finished.promise
+      expect(calls).toBe(1)
+      expect(
+        (await scratchSql("SELECT table_name FROM information_schema.tables WHERE table_name = 'late_result'")).rows,
+      ).toEqual([])
+    } finally {
+      await finished.promise
+      get.mockRestore()
+    }
+  })
+
+  test("a zero deadline uses the configured default for the single source read", async () => {
+    const get = fakePostgres(async (_sql, _limit, _binds, options) => {
+      expect(options?.queryTimeoutMs).toBe(120_000)
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      return { columns: ["n"], rows: [[1]], row_count: 1, truncated: false }
+    })
+    try {
+      const result = await materialize({
+        source_warehouse: "pg_source",
+        sql: "SELECT 1 AS n",
+        target_table: "no_deadline",
+        query_timeout_ms: 0,
+      })
+      expect(result.rows).toBe(1)
+    } finally {
+      get.mockRestore()
+    }
+  })
+
+  test("a source timeout propagates without retrying", async () => {
     const seen: string[] = []
     const get = fakePostgres(async (sql) => {
       seen.push(sql)
@@ -780,18 +710,18 @@ describe("sql_materialize", () => {
         }),
       ).rejects.toBeInstanceOf(QueryTimeoutError)
       expect(seen).toHaveLength(1)
-      expect(seen[0]).toMatch(/^SELECT count\(\*\)/)
+      expect(seen[0]).toMatch(/AS __sql_materialize_source LIMIT/)
     } finally {
       get.mockRestore()
     }
   })
 
-  test("a truncated extraction is refused even when the preflight count is below the cap", async () => {
-    const get = fakePostgres(async (sql) => ({
+  test("a truncated extraction is refused even when returned rows are below the cap", async () => {
+    const get = fakePostgres(async () => ({
       columns: ["n"],
       rows: [[1]],
       row_count: 1,
-      truncated: !/^SELECT count\(\*\)/i.test(sql) && !sql.endsWith("LIMIT 1000"),
+      truncated: true,
     }))
     try {
       await expect(
@@ -802,17 +732,11 @@ describe("sql_materialize", () => {
     }
   })
 
-  test("stops extraction at max_bytes when later rows are wider than the preflight sample", async () => {
+  test("stops extraction at max_bytes when later rows are wider", async () => {
     let produced = 0
     const limits: (number | undefined)[] = []
-    const get = fakePostgres(async (sql, _limit, _binds, options) => {
+    const get = fakePostgres(async (_sql, _limit, _binds, options) => {
       limits.push(options?.maxResultBytes)
-      if (/^SELECT count\(\*\)/i.test(sql)) {
-        return { columns: ["count"], rows: [[4]], row_count: 1, truncated: false }
-      }
-      if (sql.endsWith("LIMIT 1000")) {
-        return { columns: ["description"], rows: [["x"]], row_count: 1, truncated: false }
-      }
       const rows = []
       let bytes = 0
       for (const value of ["x", "y".repeat(128), "must not be fetched", "nor this"]) {
@@ -835,7 +759,7 @@ describe("sql_materialize", () => {
       expect(error).toBeInstanceOf(Error)
       expect(error instanceof Error ? error.message : undefined).toMatch(/32 bytes bound/)
       expect(produced).toBe(2)
-      expect(limits).toEqual([32, 32, 32])
+      expect(limits).toEqual([32])
       expect(
         Number(
           (await scratchSql("SELECT count(*) FROM information_schema.tables WHERE table_name = 'bounded'")).rows[0][0],
@@ -846,30 +770,7 @@ describe("sql_materialize", () => {
     }
   })
 
-  test("a byte limit during sampling is fatal and cannot fall back to extraction", async () => {
-    let calls = 0
-    const get = fakePostgres(async () => {
-      calls++
-      if (calls === 1) return { columns: ["count"], rows: [[1]], row_count: 1, truncated: false }
-      if (calls === 2) throw Object.assign(new Error("result byte limit"), { code: "RESULT_BYTE_LIMIT" })
-      throw new Error("Extraction must not run after the sample exceeds the byte cap")
-    })
-    try {
-      const error = await materialize({
-        source_warehouse: "pg_source",
-        sql: "SELECT description FROM languages",
-        target_table: "sample_overflow",
-        max_bytes: 32,
-      }).catch((error: unknown) => error)
-      expect(error).toBeInstanceOf(Error)
-      expect(error instanceof Error ? error.message : undefined).toMatch(/32 bytes bound/)
-      expect(calls).toBe(2)
-    } finally {
-      get.mockRestore()
-    }
-  })
-
-  test("refuses an unbounded connector before count, sample or extraction", async () => {
+  test("refuses an unbounded connector before extraction", async () => {
     const real = Registry.get.bind(Registry)
     let calls = 0
     const get = spyOn(Registry, "get").mockImplementation(async (name: string) =>
@@ -901,46 +802,37 @@ describe("sql_materialize", () => {
     }
   })
 
-  test("the byte backstop refuses an extraction wider than the preflight sample", async () => {
+  test("the byte backstop refuses oversized rows before changing an existing target", async () => {
+    await materialize({ source_warehouse: "ordersdb", sql: "SELECT 7 AS id", target_table: "preserved" })
     const seen: string[] = []
     const get = fakePostgres(async (sql) => {
       seen.push(sql)
-      if (/^SELECT count\(\*\)/i.test(sql)) {
-        return { columns: ["count"], rows: [[1]], row_count: 1, truncated: false }
-      }
-      return {
-        columns: ["description"],
-        rows: [[sql.endsWith("LIMIT 1000") ? "x" : "x".repeat(128)]],
-        row_count: 1,
-        truncated: false,
-      }
+      return { columns: ["description"], rows: [["x".repeat(128)]], row_count: 1, truncated: false }
     })
     try {
       await expect(
         materialize({
           source_warehouse: "pg_source",
           sql: "SELECT description FROM languages",
-          target_table: "underestimated",
+          target_table: "preserved",
+          mode: "replace",
           max_bytes: 32,
         }),
       ).rejects.toThrow(/32 bytes bound/)
-      expect(seen).toHaveLength(3)
+      expect(seen).toHaveLength(1)
+      expect((await scratchSql("SELECT id FROM preserved")).rows).toEqual([[7n]])
     } finally {
       get.mockRestore()
     }
   })
 
-  test("bounds the source fetch to cap + 1 when rows increase after preflight and passes the deadline", async () => {
+  test("bounds the source fetch to cap + 1 despite nested limits and passes the deadline", async () => {
     const source = await Registry.get("ordersdb")
     const original = source.execute.bind(source)
     const fetched: number[] = []
     const execute = spyOn(source, "execute").mockImplementation(async (sql, limit, binds, options) => {
       expect(options?.noLimit).not.toBe(true)
       expect(options?.queryTimeoutMs).toBe(4321)
-      if (/^SELECT count\(\*\)/i.test(sql)) {
-        return { columns: ["count"], rows: [[2]], row_count: 1, truncated: false }
-      }
-      if (sql.endsWith("LIMIT 1000")) return original(sql, limit, binds, options)
       expect(limit).toBe(3)
       expect(sql).toMatch(/\) AS __sql_materialize_source LIMIT 3$/)
       const result = await original(sql, limit, binds, options)
@@ -969,18 +861,13 @@ describe("sql_materialize", () => {
     }
   })
 
-  test("a fake source fetch observes the sentinel bound and omitted common deadline", async () => {
+  test("a fake source fetch observes the sentinel bound and resolved common deadline", async () => {
     const source = await Registry.get("ordersdb")
     let fetched = 0
     const execute = spyOn(source, "execute").mockImplementation(async (sql, limit, _binds, options) => {
       expect(options?.noLimit).not.toBe(true)
-      expect(options).toHaveProperty("queryTimeoutMs", undefined)
-      if (/^SELECT count\(\*\)/i.test(sql)) {
-        return { columns: ["count"], rows: [[3]], row_count: 1, truncated: false }
-      }
-      if (sql.endsWith("LIMIT 1000")) {
-        return { columns: ["id"], rows: [[0]], row_count: 1, truncated: false }
-      }
+      expect(options).toHaveProperty("queryTimeoutMs", 120_000)
+      expect(options?.signal).toBeInstanceOf(AbortSignal)
       expect(limit).toBe(4)
       const rows = Array.from({ length: Math.min(100, limit!) }, (_, n) => [n])
       fetched = rows.length
