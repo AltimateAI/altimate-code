@@ -507,6 +507,18 @@ describe("remote server URLs and prose", () => {
     })
   })
 
+  test.each([
+    "https:/api.example.com/v1?api_key=secret&label=hello world",
+    "jdbc:postgresql://db.example.com/app?password=secret&app=my app",
+  ])("redacts scheme-prefixed value %s even with spaces", (url) => {
+    expect(JSON.stringify(redactConfig({ options: { baseURL: url } }))).not.toContain("secret")
+  })
+
+  test("keeps prose that starts with a label", () => {
+    const prompt = "Review: check {file} carefully, see https://example.com/docs?x=1"
+    expect(redactConfig({ agent: { review: { prompt } } })).toEqual({ agent: { review: { prompt } } })
+  })
+
   test("keeps prose that mentions a link", () => {
     const prompt = "See https://example.com/docs before answering."
     expect(redactConfig({ agent: { review: { prompt } } })).toEqual({ agent: { review: { prompt } } })

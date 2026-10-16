@@ -5,9 +5,10 @@ const secretName =
 
 function redactURL(value: string): string {
   const trimmed = value.trim()
-  // Prose (prompts, descriptions) is not a URL even when it mentions one; a value that starts
-  // with a scheme or `//` is still treated as a URL, even with spaces in its query.
-  if (/\s/.test(trimmed) && !/^(?:[a-z][a-z\d+.-]*:)?\/\//i.test(trimmed)) return value
+  // Prose (prompts, descriptions) is not a URL even when it mentions one. A value that starts with
+  // `//` or a scheme directly followed by a non-space (`https:/x`, `jdbc:...`) is still a URL, even
+  // with spaces later; `Review: check {file}` stays prose.
+  if (/\s/.test(trimmed) && !/^(?:\/\/|[a-z][a-z\d+.-]*:\S)/i.test(trimmed)) return value
   // Also covers malformed authorities and opaque schemes such as jdbc:postgresql://.
   const authority = /^(?:[^/?#]*:)?\/\/([^/?#]*)/.exec(trimmed)?.[1]
   if (authority?.includes("@")) return "***"
