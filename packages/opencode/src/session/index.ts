@@ -1,6 +1,9 @@
 // altimate_change start — release session-owned scratch stores on deletion
 import { closeScratch } from "@/altimate/native/connections/scratch"
 // altimate_change end
+// altimate_change start — upstream_fix: normalize native integers before part persistence and events
+import { normalizeBigInts } from "@/altimate/util/json"
+// altimate_change end
 import { Slug } from "@opencode-ai/core/util/slug"
 import path from "path"
 import { BusEvent } from "@/bus/bus-event"
@@ -40,6 +43,34 @@ import { AppRuntime } from "@/effect/app-runtime"
 // core SessionTable columns brand project ids as "Project.ID"; re-brand the fork "ProjectID"
 // at the drizzle boundary so column comparisons/inserts typecheck.
 import { ProjectV2 } from "@opencode-ai/core/project"
+// altimate_change end
+
+// altimate_change start — upstream_fix: keep stored, published, and returned parts JSON-safe
+async function persistPart(part: MessageV2.Part) {
+  part = normalizeBigInts(part, "safe-number")
+  const { id, messageID, sessionID, ...data } = part
+  const time = Date.now()
+  Database.use((db) => {
+    db.insert(PartTable)
+      .values({
+        id,
+        message_id: messageID,
+        session_id: sessionID,
+        time_created: time,
+        data,
+      })
+      .onConflictDoUpdate({ target: PartTable.id, set: { data } })
+      .run()
+    Database.effect(() =>
+      Bus.publish(MessageV2.Event.PartUpdated, {
+        sessionID: part.sessionID,
+        part: structuredClone(part),
+        time: Date.now(),
+      }),
+    )
+  })
+  return part
+}
 // altimate_change end
 
 export namespace Session {
@@ -809,30 +840,9 @@ export namespace Session {
 
   const UpdatePartInput = MessageV2.Part
 
-  export const updatePart = fn(UpdatePartInput, async (part) => {
-    const { id, messageID, sessionID, ...data } = part
-    const time = Date.now()
-    Database.use((db) => {
-      db.insert(PartTable)
-        .values({
-          id,
-          message_id: messageID,
-          session_id: sessionID,
-          time_created: time,
-          data,
-        })
-        .onConflictDoUpdate({ target: PartTable.id, set: { data } })
-        .run()
-      Database.effect(() =>
-        Bus.publish(MessageV2.Event.PartUpdated, {
-          sessionID: part.sessionID,
-          part: structuredClone(part),
-          time: Date.now(),
-        }),
-      )
-    })
-    return part
-  })
+  // altimate_change start — upstream_fix: normalize tool data at the shared persistence boundary
+  export const updatePart = fn(UpdatePartInput, persistPart)
+  // altimate_change end
 
   export const updatePartDelta = fn(
     z.object({
