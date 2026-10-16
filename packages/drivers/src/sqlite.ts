@@ -80,6 +80,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           { sql },
           timeoutMs,
           options?.onDispatch,
+          options?.signal,
         )
         // altimate_change end
         return {
@@ -91,7 +92,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       }
 
       // altimate_change start — forward the budget before the helper collects rows
-      const rows = await engine.call<any[]>("all", { sql: query, maxResultBytes: options?.maxResultBytes }, timeoutMs, options?.onDispatch)
+      const rows = await engine.call<any[]>("all", { sql: query, maxResultBytes: options?.maxResultBytes }, timeoutMs, options?.onDispatch, options?.signal)
       // altimate_change end
       const columns = rows.length > 0 ? Object.keys(rows[0]) : []
       const truncated = effectiveLimit > 0 && rows.length > effectiveLimit

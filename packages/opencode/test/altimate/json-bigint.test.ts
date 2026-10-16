@@ -36,3 +36,17 @@ test("request estimator handles BigInts in message output, schema metadata, and 
   expect(estimateInputTokens(input)).toBe(estimateInputTokens(normalizeBigInts(input)))
   expect(estimateInputTokens(input)).toBeGreaterThan(0)
 })
+
+test("storage normalization uses numbers only for exactly representable integers", () => {
+  const counts = [0n, 42n, -42n, 9007199254740991n, -9007199254740991n, 9007199254740992n, -9007199254740992n]
+  const source = { rows: [{ counts, nullable: null }], optional: undefined }
+  const result = normalizeBigInts(source, "safe-number")
+
+  expect(result.rows as unknown).toEqual([
+    { counts: [0, 42, -42, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, "9007199254740992", "-9007199254740992"], nullable: null },
+  ])
+  expect(result).toHaveProperty("optional", undefined)
+  expect(source.rows[0]!.counts).toBe(counts)
+  expect(counts[1]).toBe(42n)
+  expect(() => JSON.stringify(result)).not.toThrow()
+})

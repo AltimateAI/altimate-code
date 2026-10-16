@@ -934,7 +934,12 @@ export const SessionRoutes = lazy(() =>
           TraceContext.bind(messageID, body.noReply ? undefined : c.req.header("traceparent"))
           // altimate_change start — save the soft reminder before interrupting, with run-scoped effort
           const msg = await withBudgetControl(
-            { sessionID, control: c.req.header("x-altimate-run-budget"), noReply: body.noReply },
+            {
+              sessionID,
+              control: c.req.header("x-altimate-run-budget"),
+              noReply: body.noReply,
+              queryDeadline: c.req.header("x-altimate-run-query-deadline"),
+            },
             () => SessionPrompt.prompt({ ...body, sessionID, messageID }),
           ).catch((error) => {
             TraceContext.release(sessionID, [messageID])
@@ -1030,7 +1035,11 @@ export const SessionRoutes = lazy(() =>
         TraceContext.bind(messageID, c.req.header("traceparent"))
         // altimate_change start — command runs share the same effort lifetime as message runs
         const msg = await withBudgetControl(
-          { sessionID, control: c.req.header("x-altimate-run-budget") },
+          {
+            sessionID,
+            control: c.req.header("x-altimate-run-budget"),
+            queryDeadline: c.req.header("x-altimate-run-query-deadline"),
+          },
           () => SessionPrompt.command({ ...body, sessionID, messageID }),
         ).catch((error) => {
           TraceContext.release(sessionID, [messageID])

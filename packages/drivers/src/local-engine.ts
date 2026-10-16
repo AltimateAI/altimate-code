@@ -14,9 +14,8 @@
  *    and transactions. In-memory engines remain private to their connector.
  *  - Calls run one at a time in arrival order. The deadline covers execution
  *    only (not time queued behind another call), so a caller is never cancelled
- *    by someone else's timeout. A restart rejects every stale queued call,
- *    including the timed-out caller's, and discloses peers' lost state once
- *    before accepting fresh calls.
+ *    by someone else's timeout. A restart rejects stale queued calls for
+ *    sessions that may have lost state; stateless file readers can continue.
  *  - After a kill the handle is reopened with the same arguments and open deadline on the next
  *    call. All sessions on that engine lose their state, and the timeout error
  *    says so.
@@ -30,7 +29,7 @@ import * as os from "os"
 import * as path from "path"
 import { LOCAL_ENGINE_CHILD_SOURCE } from "./local-engine-child-source"
 import { pack, unpack } from "./local-engine-codec"
-import { QueryTimeoutError } from "./types"
+import { LocalEngineProcessError, QueryTimeoutError } from "./types"
 
 /** Grace for a killed process to be reaped before we move on. */
 const REAP_TIMEOUT_MS = 2_000
@@ -38,6 +37,9 @@ const REAP_TIMEOUT_MS = 2_000
 const CLOSE_TIMEOUT_MS = 2_000
 /** Short grace when close must bypass an in-flight query. */
 const ACTIVE_CLOSE_TIMEOUT_MS = 500
+/** Keep diagnostics bounded, including when another process inherits the stderr pipe. */
+const STDERR_TAIL_CHARS = 8_192
+const STDERR_DRAIN_TIMEOUT_MS = 100
 
 type Engine = "sqlite" | "duckdb"
 
@@ -49,7 +51,9 @@ interface ChildProc {
   // altimate_change end
   stdin: { write(data: string): unknown; flush(): unknown }
   stdout: AsyncIterable<Uint8Array>
+  stderr: AsyncIterable<Uint8Array>
   exited: Promise<number>
+  signalCode: string | null
   kill(signal?: string): void
 }
 
@@ -66,10 +70,22 @@ interface Child {
   retired: boolean
   /** We ended it on purpose; its exit is not a crash. */
   killedByUs: boolean
+  stderrTail: string
 }
 
 interface Session {
   generation: number
+  stateful: boolean
+  lostGeneration: number
+}
+
+/** Prove simple reads only; unfamiliar SQL and batches conservatively retain the state-loss guard. */
+function isStatelessRead(sql: unknown): boolean {
+  if (typeof sql !== "string") return false
+  const statement = sql.trim().replace(/;$/, "")
+  return /^(SELECT|WITH|VALUES)\b/i.test(statement) &&
+    !statement.includes(";") &&
+    !/\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|ALTER|COPY|CALL|EXECUTE|BEGIN|START|COMMIT|ROLLBACK|SAVEPOINT|RELEASE|SET|RESET|USE|ATTACH|DETACH|PRAGMA|INSTALL|LOAD|SETSEED|NEXTVAL|LOAD_EXTENSION)\b/i.test(statement)
 }
 
 const liveChildren = new Set<Child>()
@@ -252,6 +268,7 @@ export class LocalEngine {
   private tail: Promise<unknown> = Promise.resolve()
   private closed = false
   private generation = 0
+  private sharedStateful = false
   private readonly sessions = new Map<number | undefined, Session>()
   private readonly cwd: string
 
@@ -283,18 +300,24 @@ export class LocalEngine {
     })
   }
 
-  private sendOpen(child: Child, request: OpenRequest): Promise<void> {
+  private sendOpen(child: Child, request: OpenRequest, signal?: AbortSignal): Promise<void> {
     return this.send(child, "open", { ...request.payload, engine: this.opts.engine }, request.timeoutMs, () =>
       request.onTimeout
         ? request.onTimeout()
         : new Error(`${this.opts.label} store did not finish opening in ${request.timeoutMs}ms`),
+      undefined,
+      signal,
     )
   }
 
   /** Register even idle shared-engine connectors so a restart reaches every peer. */
   registerSession(connectionId?: number): void {
     if (!this.sessions.has(connectionId)) {
-      this.sessions.set(connectionId, { generation: this.generation })
+      this.sessions.set(connectionId, {
+        generation: this.generation,
+        stateful: this.opts.storePath === ":memory:" || this.opts.storePath === "",
+        lostGeneration: 0,
+      })
     }
   }
 
@@ -304,6 +327,7 @@ export class LocalEngine {
     payload: Record<string, unknown>,
     timeoutMs?: number,
     onDispatch?: () => void,
+    signal?: AbortSignal,
   ): Promise<T> {
     const connectionId = payload["connectionId"] as number | undefined
     this.registerSession(connectionId)
@@ -318,22 +342,35 @@ export class LocalEngine {
       if (this.closed || !this.openRequest) throw new Error(`${this.opts.label} connection not open`)
       if (op !== "disconnect") {
         if (this.sessions.get(connectionId) !== session) throw new Error(`${this.opts.label} connection not open`)
-        // Reject calls queued before a restart or before this session acknowledged
-        // it, even if an earlier rejection has since acknowledged it.
-        if (enqueued !== this.generation || acknowledged !== this.generation) {
+        // Reject the entire stale burst only when this session may have lost
+        // state, even if an earlier rejection has since acknowledged that loss.
+        if (enqueued < session.lostGeneration || acknowledged < session.lostGeneration) {
           session.generation = this.generation
           throw this.sessionStateLostError()
         }
       }
-      const child = await this.ensureChild()
+      const child = await this.ensureChild(signal)
       if (this.closed) throw new Error(`${this.opts.label} connection closed`)
+      // Mark before dispatch: a batch may change state before it times out.
+      if (op !== "disconnect" && !isStatelessRead(payload["sql"])) {
+        session.stateful = true
+        // SQLite shares one native session. DuckDB configuration, attachments
+        // and loaded extensions can affect every connection in the helper.
+        if (this.opts.engine === "sqlite" || /\b(SET|RESET|USE|ATTACH|DETACH|PRAGMA|INSTALL|LOAD|LOAD_EXTENSION|SETSEED)\b/i.test(String(payload["sql"])) || /\b(CREATE|DROP|ALTER)\s+(OR\s+REPLACE\s+)?(PERSISTENT\s+|TEMPORARY\s+)?(IF\s+(NOT\s+)?EXISTS\s+)?SECRET\b/i.test(String(payload["sql"]))) {
+          this.sharedStateful = true
+        }
+      }
+      // An aborted active call retires the helper. The session stays unacknowledged
+      // so its next statement reports SESSION_STATE_LOST rather than silently
+      // running outside the discarded transaction.
       return this.send(child, op, payload, op === "disconnect" ? CLOSE_TIMEOUT_MS : timeoutMs, () =>
         op === "disconnect"
           ? new Error(`${this.opts.label} session did not finish closing`)
           : this.discloseTimeout(session, timeoutMs!),
         onDispatch,
+        signal,
       ) as Promise<T>
-    })
+    }, signal)
   }
 
   async close(): Promise<void> {
@@ -363,10 +400,20 @@ export class LocalEngine {
 
   // -- internals -------------------------------------------------------------
 
-  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.tail.then(fn, fn)
-    this.tail = run.catch(() => {})
-    return run
+  private enqueue<T>(fn: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => reject(signal!.reason)
+      signal?.addEventListener("abort", abort, { once: true })
+      if (signal?.aborted) abort()
+      const start = () => {
+        signal?.removeEventListener("abort", abort)
+        signal?.throwIfAborted()
+        return fn()
+      }
+      const run = this.tail.then(start, start)
+      this.tail = run.catch(() => {})
+      run.then(resolve, reject)
+    })
   }
 
   private timeoutQueryError(timeoutMs: number): QueryTimeoutError {
@@ -401,6 +448,9 @@ export class LocalEngine {
     if (child.retired) return
     child.retired = true
     this.generation++
+    for (const session of this.sessions.values()) {
+      if (session.stateful || this.sharedStateful) session.lostGeneration = this.generation
+    }
   }
 
   private spawn(request: OpenRequest): Child {
@@ -413,16 +463,17 @@ export class LocalEngine {
       env: buildHelperEnv(dir, process.env, typeof request.payload["sandboxDirectory"] === "string"),
       stdin: "pipe",
       stdout: "pipe",
-      stderr: "ignore",
+      stderr: "pipe",
     })
     // altimate_change start — remember this process's spill path across helper respawns
     const spillDirectory = this.opts.engine === "duckdb" ? path.join(dir, `duckdb-${proc.pid}`) : undefined
     // altimate_change end
-    const child: Child = { proc, retired: false, killedByUs: false }
+    const child: Child = { proc, retired: false, killedByUs: false, stderrTail: "" }
     liveChildren.add(child)
     this.child = child
     void this.readLoop(child)
-    void proc.exited.then(() => {
+    const stderrDrained = this.readStderr(child)
+    void proc.exited.then(async (exitCode) => {
       // altimate_change start — SIGKILL cannot let DuckDB clean up; wait for actual exit, not the reap timeout
       if (spillDirectory) {
         try {
@@ -434,11 +485,35 @@ export class LocalEngine {
       if (this.child === child) this.child = undefined
       const pending = child.pending
       child.pending = undefined
-      if (pending && !child.killedByUs)
-        pending.reject(new Error(`${this.opts.label} helper process exited unexpectedly`))
+      if (pending && !child.killedByUs) {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([
+          stderrDrained,
+          new Promise<void>((resolve) => { timer = setTimeout(resolve, STDERR_DRAIN_TIMEOUT_MS) }),
+        ])
+        if (timer) clearTimeout(timer)
+        pending.reject(new LocalEngineProcessError({
+          engine: this.opts.label,
+          exitCode,
+          signal: proc.signalCode,
+          stderr: child.stderrTail,
+        }))
+      }
       // altimate_change end
     })
     return child
+  }
+
+  private async readStderr(child: Child): Promise<void> {
+    const decoder = new TextDecoder()
+    try {
+      for await (const chunk of child.proc.stderr) {
+        child.stderrTail = (child.stderrTail + decoder.decode(chunk, { stream: true })).slice(-STDERR_TAIL_CHARS)
+      }
+      child.stderrTail = (child.stderrTail + decoder.decode()).slice(-STDERR_TAIL_CHARS)
+    } catch {
+      // Preserve diagnostics already received if the pipe closes with an error.
+    }
   }
 
   private async readLoop(child: Child): Promise<void> {
@@ -484,11 +559,12 @@ export class LocalEngine {
   }
 
   /** The live process, respawned and reopened after a kill or crash. */
-  private async ensureChild(): Promise<Child> {
+  private async ensureChild(signal?: AbortSignal): Promise<Child> {
+    signal?.throwIfAborted()
     if (this.child && !this.child.retired) return this.child
     const child = this.spawn(this.openRequest!)
     try {
-      await this.sendOpen(child, this.openRequest!)
+      await this.sendOpen(child, this.openRequest!, signal)
     } catch (err) {
       await this.retire(child)
       throw err
@@ -503,16 +579,20 @@ export class LocalEngine {
     timeoutMs: number | undefined,
     onTimeout: () => Error,
     onDispatch?: () => void,
+    signal?: AbortSignal,
   ): Promise<any> {
     return new Promise((resolve, reject) => {
       if (child.retired) return reject(new Error(`${this.opts.label} helper process is not running`))
+      if (signal?.aborted) return reject(signal.reason)
       const id = ++this.seq
       let timer: ReturnType<typeof setTimeout> | undefined
       let settled = false
+      let stopping = false
       const settle = (fn: () => void) => {
         if (settled) return
         settled = true
         if (timer) clearTimeout(timer)
+        signal?.removeEventListener("abort", abort)
         if (child.pending?.id === id) child.pending = undefined
         fn()
       }
@@ -521,12 +601,19 @@ export class LocalEngine {
         resolve: (v) => settle(() => resolve(v)),
         reject: (e) => settle(() => reject(e)),
       }
+      const stop = (error: () => unknown) => {
+        if (settled || stopping) return
+        stopping = true
+        void this.retire(child).then(() => settle(() => reject(error())))
+      }
+      const abort = () => stop(() => signal!.reason)
+      signal?.addEventListener("abort", abort, { once: true })
       if (timeoutMs !== undefined) {
         timer = setTimeout(() => {
-          if (settled) return
+          if (settled || child.retired) return
           // Stop the work first, then report: the caller must not see the
           // timeout while the process still holds the store.
-          void this.retire(child).then(() => settle(() => reject(onTimeout())))
+          stop(onTimeout)
         }, timeoutMs)
       }
       try {

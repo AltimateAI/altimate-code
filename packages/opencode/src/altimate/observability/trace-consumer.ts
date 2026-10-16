@@ -257,7 +257,7 @@ export class TraceConsumer {
               }
             }
             // altimate_change end
-            if (part.type === "tool" && (part.state?.status === "completed" || part.state?.status === "error")) {
+            if (part.type === "tool" && ["running", "completed", "error"].includes(part.state?.status)) {
               trace.logToolCall(part as Parameters<Trace["logToolCall"]>[0])
             }
           }

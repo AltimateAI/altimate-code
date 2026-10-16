@@ -34,6 +34,22 @@ describe("MongoDB command classification", () => {
     expect(JSON.parse(r.normalized)).toEqual({ command: "find", collection: "c", filter: {} })
   })
 
+  test.each([
+    { collection: "articles", find: { published: true } },
+    { collection: "articles", aggregate: [{ $match: { published: true } }] },
+    { command: "listCollections" },
+    { listCollections: 1 },
+    { command: "estimatedDocumentCount", collection: "articles" },
+    { estimatedDocumentCount: "articles" },
+  ])("recognizes collection shorthand and metadata reads: %j", (command) => {
+    expect(classifyMongoCommand(JSON.stringify(command))?.queryType).toBe("read")
+  })
+
+  test.each([{}, { collection: "articles", find: 3 }, { command: 3 }, { command: "" }, { command: "fin" }])(
+    "rejects a missing or invalid command: %j",
+    (command) => expect(classifyMongoCommand(JSON.stringify(command))).toBeNull(),
+  )
+
   test("writes stay writes; drops are blocked; $out/$merge pipelines are writes", () => {
     expect(classifyMongoCommand('{"command":"insertOne","collection":"c","document":{}}')!.queryType).toBe("write")
     expect(classifyMongoCommand('{"command":"deleteMany","collection":"c","filter":{}}')!.queryType).toBe("write")

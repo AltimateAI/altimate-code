@@ -134,7 +134,7 @@ export const SqlExplainTool = Tool.define("sql_explain", {
         sql: args.sql,
         warehouse: args.warehouse,
         analyze: args.analyze,
-      })
+      }, { signal: ctx.abort, sessionID: ctx.sessionID })
 
       if (!result.success) {
         const error = result.error ?? "Unknown error"

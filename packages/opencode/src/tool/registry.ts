@@ -43,6 +43,11 @@ import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change start — upstream_fix: task.background schema follows RuntimeFlags.
 import { RuntimeFlags } from "@/effect/runtime-flags"
 // altimate_change end
+// altimate_change start — upstream_fix: plugin tools share the optional filler contract
+import { Result, Schema } from "effect"
+import { fillerSafeParameters } from "./filler-parameters"
+import { ToolJsonSchema } from "./json-schema"
+// altimate_change end
 // altimate_change start — Effect Context.Service facade so v1.17.9 consumers that compose
 // ToolRegistry into the Effect runtime (yield* ToolRegistry.Service / .defaultLayer / .node)
 // compile. Delegates to the existing namespace functions; behavior preserved.
@@ -155,6 +160,30 @@ import { TrainingImportTool } from "../altimate/tools/training-import"
 // altimate_change end
 // altimate_change start - import dbt PR review tool
 import { DbtPrReviewTool } from "../altimate/tools/dbt-pr-review"
+// altimate_change end
+
+// altimate_change start — upstream_fix: plugin tools share the optional filler contract
+function fillerSafePlugin(tool: Tool.DefWithoutID): Tool.DefWithoutID {
+  const schema = ToolJsonSchema.fromTool({ ...tool, id: "plugin" })
+  const parameters = fillerSafeParameters(tool.parameters, schema)
+  const decode = Schema.decodeUnknownResult(parameters)
+  const known = new Set(Object.keys(schema.properties ?? {}))
+  return {
+    ...tool,
+    parameters,
+    // Plugin handlers historically received raw arguments: use the normalized form only when it
+    // validates, and keep any arguments the schema does not list.
+    execute: (args, ctx) => {
+      const decoded = decode(args)
+      if (Result.isFailure(decoded) || !decoded.success || typeof decoded.success !== "object")
+        return tool.execute(args, ctx)
+      const extra = Object.fromEntries(
+        Object.entries(args as Record<string, unknown>).filter(([key]) => !known.has(key)),
+      )
+      return tool.execute({ ...extra, ...(decoded.success as object) }, ctx)
+    },
+  }
+}
 // altimate_change end
 
 export namespace ToolRegistry {
@@ -275,7 +304,7 @@ export namespace ToolRegistry {
               ...(result.attachments ? { attachments: result.attachments as any } : {}),
             }
           },
-        }),
+        }).pipe(Effect.map(fillerSafePlugin)),
     }
   }
   // altimate_change end
@@ -522,10 +551,7 @@ export namespace ToolRegistry {
     return all(plugins, configInput)
   }
 
-  export async function ids(
-    plugins?: Awaited<ReturnType<typeof Plugin.list>>,
-    configInput?: RegistryConfigInput,
-  ) {
+  export async function ids(plugins?: Awaited<ReturnType<typeof Plugin.list>>, configInput?: RegistryConfigInput) {
     return all(plugins, configInput).then((x) => x.map((t) => t.id))
   }
   // altimate_change end
@@ -645,10 +671,7 @@ export namespace ToolRegistry {
             })
           : Effect.succeed(undefined)
       const bridgeWithPlugins = <T>(
-        fn: (
-          plugins?: Awaited<ReturnType<typeof Plugin.list>>,
-          configInput?: RegistryConfigInput,
-        ) => Promise<T>,
+        fn: (plugins?: Awaited<ReturnType<typeof Plugin.list>>, configInput?: RegistryConfigInput) => Promise<T>,
       ): Effect.Effect<T> =>
         Effect.gen(function* () {
           const plugins = yield* resolvePlugins()
