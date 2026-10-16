@@ -519,6 +519,11 @@ describe("remote server URLs and prose", () => {
     expect(redactConfig({ agent: { review: { prompt } } })).toEqual({ agent: { review: { prompt } } })
   })
 
+  test("keeps permission actions for tools named like endpoint keys", () => {
+    const permission = { skill: { endpoint: "allow" }, api: "deny" }
+    expect(redactConfig({ permission })).toEqual({ permission })
+  })
+
   test("masks unparseable endpoint values entirely", () => {
     expect(redactConfig({ mcp: { remote: { type: "remote", url: "mcp.example.com/mcp/u/path-secret" } } })).toEqual({
       mcp: { remote: { type: "remote", url: "***" } },
