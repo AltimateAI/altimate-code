@@ -72,7 +72,7 @@ describe.each(writes)("MongoDB %s write deadline", (command, extra) => {
     await connector.execute(query, undefined, undefined, { queryTimeoutMs: 250 })
     expect(seen[command]).toEqual({ ...preservedOptions, maxTimeMS: 250 })
     await connector.execute(query, undefined, undefined, { queryTimeoutMs: 0 })
-    expect(seen[command]).toEqual(preservedOptions)
+    expect(seen[command]).toEqual({ ...preservedOptions, maxTimeMS: 4000 })
     await connector.close()
   })
 

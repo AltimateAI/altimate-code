@@ -34,7 +34,7 @@ async function database(rollbackFails = false) {
       },
     },
   }))
-  const connector = await connect({ type: "postgres" })
+  const connector = await connect({ type: "postgres", query_timeout_ms: 0 })
   await connector.connect()
   const execute = (sql: string) => connector.execute(sql, 1, undefined, { queryTimeoutMs: 0, readOnly: true })
   return { connector, execute, queries, releases, writes: () => writes, notifications: () => notifications }
@@ -133,6 +133,46 @@ test("Postgres executes a pool client admitted before cancellation", async () =>
     expect(db.releases).toEqual([undefined])
   } finally {
     await db.connector.close()
+  }
+})
+
+test("Postgres abort discards an active statement without waiting for its response or rollback", async () => {
+  const started = Promise.withResolvers<void>()
+  const finished = Promise.withResolvers<{ fields: never[]; rows: never[] }>()
+  const releases: unknown[] = []
+  const queries: string[] = []
+  mock.module("pg", () => ({ default: { Pool: class {
+    async connect() {
+      return {
+        query(sql: string) {
+          queries.push(sql)
+          if (sql === "BEGIN READ ONLY") return Promise.resolve({ fields: [], rows: [] })
+          started.resolve()
+          return finished.promise
+        },
+        release(discard?: boolean) { releases.push(discard) },
+      }
+    }
+    async end() {}
+  } } }))
+  const connector = await connect({ type: "postgres", query_timeout_ms: 0 })
+  await connector.connect()
+  const controller = new AbortController()
+  const reason = new Error("session stopped")
+  const execution = connector.execute("SELECT value FROM source", 100, undefined, {
+    signal: controller.signal,
+    readOnly: true,
+  }).catch((error) => error)
+  try {
+    await started.promise
+    controller.abort(reason)
+    expect(await Promise.race([execution, Bun.sleep(100).then(() => "still executing")])).toBe(reason)
+    expect(releases).toEqual([true])
+    expect(queries).toEqual(["BEGIN READ ONLY", "SELECT value FROM source LIMIT 101"])
+  } finally {
+    finished.resolve({ fields: [], rows: [] })
+    await execution
+    await connector.close()
   }
 })
 
