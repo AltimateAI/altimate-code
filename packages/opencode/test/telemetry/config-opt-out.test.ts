@@ -110,7 +110,6 @@ describe("Telemetry.init() inside an Instance context — config.telemetry.disab
               session_id: "config-opt-out-enabled",
               command: "test",
               surface: "test",
-              client: "",
               duration_ms: 1,
               fresh_install: false,
             })

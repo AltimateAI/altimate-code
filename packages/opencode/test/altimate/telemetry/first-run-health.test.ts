@@ -47,13 +47,11 @@ describe("first-run health telemetry", () => {
     }
   })
 
-  test("startup_ready carries surface and client as top-level properties", () => {
+  test("startup_ready carries surface as a top-level property", () => {
     const events: Telemetry.Event[] = []
     const spy = spyOn(Telemetry, "track").mockImplementation((event) => {
       events.push(event)
     })
-    const saved = process.env.ALTIMATE_CLI_CLIENT
-    process.env.ALTIMATE_CLI_CLIENT = "datamates"
     try {
       Telemetry.startupReady("serve")
       const event = events.find((e) => e.type === "startup_ready") as Extract<
@@ -61,21 +59,16 @@ describe("first-run health telemetry", () => {
         { type: "startup_ready" }
       >
       expect(event.surface).toBe("serve")
-      expect(event.client).toBe("datamates")
     } finally {
-      if (saved === undefined) delete process.env.ALTIMATE_CLI_CLIENT
-      else process.env.ALTIMATE_CLI_CLIENT = saved
       spy.mockRestore()
     }
   })
 
-  test("client_connected is emitted exactly once per process with surface and client", () => {
+  test("client_connected is emitted exactly once per process with surface", () => {
     const events: Telemetry.Event[] = []
     const spy = spyOn(Telemetry, "track").mockImplementation((event) => {
       events.push(event)
     })
-    const saved = process.env.ALTIMATE_CLI_CLIENT
-    process.env.ALTIMATE_CLI_CLIENT = "datamates"
     try {
       Telemetry.setCommand("serve")
       Telemetry.clientConnected()
@@ -87,11 +80,8 @@ describe("first-run health telemetry", () => {
       >[]
       expect(connected).toHaveLength(1)
       expect(connected[0].surface).toBe("serve")
-      expect(connected[0].client).toBe("datamates")
       expect(connected[0].since_start_ms).toBeGreaterThan(0)
     } finally {
-      if (saved === undefined) delete process.env.ALTIMATE_CLI_CLIENT
-      else process.env.ALTIMATE_CLI_CLIENT = saved
       spy.mockRestore()
     }
   })

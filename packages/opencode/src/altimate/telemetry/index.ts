@@ -674,10 +674,9 @@ export namespace Telemetry {
         session_id: string
         /** Top-level CLI command, e.g. "tui", "serve", "run". */
         command: string
-        /** Same value as `command`, under the name dashboards query (Properties.surface). */
+        /** Same value as `command`, under the name dashboards query (Properties.surface). Shared
+         * with `client_connected`, which has no `command`, so the funnel joins on one key. */
         surface: string
-        /** CLI client from ALTIMATE_CLI_CLIENT, e.g. "datamates" for the VS Code extension. */
-        client: string
         /** Wall time from process start until the command could serve its first request or frame. */
         duration_ms: number
         /** True when this process emitted a non-upgrade first_launch, i.e. a brand-new machine. */
@@ -689,8 +688,8 @@ export namespace Telemetry {
         type: "client_connected"
         timestamp: number
         session_id: string
+        /** Launching command/surface ("serve", "run", "tui"); IDE-funnel reads filter surface=="serve". */
         surface: string
-        client: string
         /** Process uptime when the first client attached. */
         since_start_ms: number
       }
@@ -2191,7 +2190,6 @@ export namespace Telemetry {
       session_id: sessionId,
       command,
       surface: command,
-      client: Flag.ALTIMATE_CLI_CLIENT,
       duration_ms: Math.round(performance.now()),
       fresh_install: freshInstall,
     })
@@ -2206,7 +2204,6 @@ export namespace Telemetry {
       timestamp: Date.now(),
       session_id: sessionId,
       surface: command,
-      client: Flag.ALTIMATE_CLI_CLIENT,
       since_start_ms: Math.round(performance.now()),
     })
   }
