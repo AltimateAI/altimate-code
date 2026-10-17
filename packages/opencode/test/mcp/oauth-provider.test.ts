@@ -33,6 +33,44 @@ describe("McpOAuthProvider.redirectUrl", () => {
   })
 })
 
+describe("McpOAuthProvider.redirectToAuthorization", () => {
+  test("forwards http and https authorization URLs", async () => {
+    const seen: string[] = []
+    const provider = new McpOAuthProvider(
+      "test-server",
+      "https://mcp.example.com/mcp",
+      {},
+      { onRedirect: (url) => void seen.push(url.href) },
+      stubAuth,
+    )
+    await provider.redirectToAuthorization(new URL("https://auth.example.com/authorize?state=1"))
+    await provider.redirectToAuthorization(new URL("http://127.0.0.1:8080/authorize"))
+    expect(seen).toEqual(["https://auth.example.com/authorize?state=1", "http://127.0.0.1:8080/authorize"])
+  })
+
+  test.each(["file:///tmp/authorize", "custom-scheme://authorize", "javascript:alert(1)", "data:text/html,authorize"])(
+    "rejects authorization URL %s before invoking onRedirect",
+    async (input) => {
+      const seen: string[] = []
+      const mcpName = "test-server"
+      const serverUrl = "https://fixture-user:fixture-password@mcp.example.com/mcp?token=fixture-token"
+      const provider = new McpOAuthProvider(
+        mcpName,
+        serverUrl,
+        {},
+        { onRedirect: (url) => void seen.push(url.href) },
+        stubAuth,
+      )
+      const url = new URL(input)
+      const redirect = provider.redirectToAuthorization(url)
+      await expect(redirect).rejects.toThrow(`returned a ${url.protocol} authorization URL`)
+      await expect(redirect).rejects.toThrow(mcpName)
+      await expect(redirect).rejects.not.toThrow(serverUrl)
+      expect(seen).toEqual([])
+    },
+  )
+})
+
 describe("McpOAuthProvider.clientMetadata", () => {
   test("includes redirect_uris from redirectUrl", () => {
     const provider = makeProvider({ callbackPort: 6620 })
