@@ -329,6 +329,9 @@ export const layer = Layer.effect(
                 "*": "deny",
                 ...readOnlyDataPermission,
                 answer_commit: "allow",
+                // altimate_change start — sandboxed Python is analyst-only, outside the shared data allow-list.
+                python_exec: "allow",
+                // altimate_change end
                 webfetch: "allow",
                 websearch: "allow",
                 question: "allow",

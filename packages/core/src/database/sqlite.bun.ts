@@ -14,6 +14,9 @@ import type { Connection } from "effect/unstable/sql/SqlConnection"
 import { classifySqliteError, SqlError } from "effect/unstable/sql/SqlError"
 import * as Statement from "effect/unstable/sql/Statement"
 import { Sqlite } from "./sqlite"
+// altimate_change start — upstream_fix: cross-process first-run setup lock
+import * as SetupLock from "./setup-lock"
+// altimate_change end
 
 const ATTR_DB_SYSTEM_NAME = "db.system.name"
 
@@ -161,7 +164,18 @@ const nativeLayer = (config: Config) =>
         create: config.create ?? true,
       })
       yield* Effect.addFinalizer(() => Effect.sync(() => native.close()))
-      if (config.disableWAL !== true) native.run("PRAGMA journal_mode = WAL;")
+      // altimate_change start — upstream_fix: the WAL switch needs a write lock and can fail at once with
+      // SQLITE_BUSY, so install the busy handler first and serialize the switch across processes.
+      native.run("PRAGMA busy_timeout = 5000;")
+      if (config.disableWAL !== true && config.readonly !== true) {
+        const release = SetupLock.acquireSync(config.filename)
+        try {
+          native.run("PRAGMA journal_mode = WAL;")
+        } finally {
+          release()
+        }
+      }
+      // altimate_change end
       return native
     }),
   )
@@ -181,3 +195,11 @@ export const layer = (config: Config) => {
     Layer.provide(Reactivity.layer),
   )
 }
+
+// altimate_change start — upstream_fix: sentinel database used as a cross-process mutex (see setup-lock.ts)
+export function openSetupLock(filename: string, timeoutMs: number) {
+  const lock = new Database(filename, { create: true })
+  lock.run(`PRAGMA busy_timeout = ${timeoutMs}`)
+  return { exec: (sql: string) => void lock.run(sql), close: () => lock.close() }
+}
+// altimate_change end

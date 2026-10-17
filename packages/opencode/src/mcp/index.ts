@@ -1249,9 +1249,9 @@ export const layer = Layer.effect(
         const timeout = requestTimeout(s, clientName, mcpConfig, defaultTimeout)
         for (const mcpTool of listed) {
           const key = McpCatalog.sanitize(clientName) + "_" + McpCatalog.sanitize(mcpTool.name)
-          // altimate_change start — reserve the native finalizer's permission and echo identity,
-          // including when ALTIMATE_ANSWER_COMMIT=0 disables the native tool.
-          if (Wildcard.match(key, "answer_commit")) continue
+          // altimate_change start — reserve the native finalizer's and analyst Python's permission and
+          // identity, including when their native tools are disabled.
+          if (Wildcard.match(key, "answer_commit") || Wildcard.match(key, "python_exec")) continue
           // altimate_change end
           // attach the original client name for source classification downstream.
           result[key] = Object.assign(McpCatalog.convertTool(mcpTool, client, timeout), { client: clientName })
