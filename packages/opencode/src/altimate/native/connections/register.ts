@@ -525,7 +525,7 @@ register("sql.execute", async (params: SqlExecuteParams, context): Promise<SqlEx
     // dbt knows how to connect using profiles.yml — no separate connection config needed.
     // altimate_change start — dbt cannot enforce the connector's read-only option.
     // Protected requests must reach the native driver's transaction handling.
-    if (!params.warehouse && !params.read_only) {
+    if (!params.warehouse && !params.read_only && !context?.forceReadOnly) {
       const dbtResult = await tryExecuteViaDbt(
         params.sql,
         params.limit,
@@ -559,7 +559,7 @@ register("sql.execute", async (params: SqlExecuteParams, context): Promise<SqlEx
       Registry.getConfig(fallbackName),
       {
         queryTimeoutMs: params.query_timeout_ms,
-        ...(fallbackType === "postgres" && params.read_only ? { readOnly: true } : {}),
+        ...(context?.forceReadOnly || (fallbackType === "postgres" && params.read_only) ? { readOnly: true } : {}),
       },
       context,
       async (options) => {

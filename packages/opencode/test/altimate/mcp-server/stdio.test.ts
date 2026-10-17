@@ -1,3 +1,4 @@
+// altimate_change start — standalone MCP policy and middleware regressions
 import { expect, test } from "bun:test"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
@@ -43,6 +44,7 @@ for (const allowWrite of [false, true]) {
       stderr += data.toString()
     })
     const client = new Client({ name: "stdio-test", version: "1" })
+    let spill: string | undefined
     try {
       await client.connect(transport)
       expect((await client.listTools()).tools).toHaveLength(5)
@@ -53,12 +55,23 @@ for (const allowWrite of [false, true]) {
       expect(write.isError).toBe(!allowWrite)
       const read = await client.callTool({
         name: "sql_execute",
-        arguments: { warehouse: "source", query: "SELECT COUNT(*) AS n FROM items" },
+        arguments: {
+          warehouse: "source",
+          query: "SELECT CASE WHEN COUNT(*) = 1 THEN 'one inserted item' ELSE 'empty source' END AS value FROM items",
+        },
       })
       expect(read.isError).toBe(false)
-      expect(JSON.stringify(read.content)).toContain(allowWrite ? "1" : "0")
+      expect(JSON.stringify(read.content)).toContain(allowWrite ? "one inserted item" : "empty source")
+      const output = await client.callTool({
+        name: "sql_execute",
+        arguments: { warehouse: "source", query: "SELECT 'private server output' AS value", full_text_columns: ["value"] },
+      })
+      spill = JSON.stringify(output.content).match(/(\/[^\s`"\\]+\/tool_[A-Za-z0-9]+)/)?.[1]
+      expect(spill).toBeDefined()
+      expect(await Bun.file(spill!).exists()).toBe(true)
     } finally {
       await client.close()
+      if (spill) expect(await Bun.file(spill).exists()).toBe(false)
       await rm(dir, { recursive: true, force: true })
     }
     expect(stderr).not.toContain("UNEXPECTED_NETWORK_CALL")
@@ -82,3 +95,29 @@ test("CLI exits cleanly when the client closes stdin", async () => {
     process.kill()
   }
 }, 15_000)
+
+// altimate_change end
+
+// altimate_change start — execute the entrypoint's actual middleware without launching agent services
+// Exercise the guard directly too, so deleting it fails deterministically even
+// when the stdio child exits while the CLI is still unwinding.
+test("mcp serve skips CLI middleware before starting the agent heap service", async () => {
+  const source = await Bun.file(path.resolve(import.meta.dir, "../../../src/index.ts")).text()
+  const opening = ".middleware(async (opts) => {"
+  const start = source.indexOf(opening)
+  const end = source.indexOf("\n  })\n  .usage", start)
+  expect(start).toBeGreaterThan(0)
+  expect(end).toBeGreaterThan(start)
+  const body = source.slice(start + opening.length, end)
+  const code = new Bun.Transpiler({ loader: "ts" }).transformSync(`async function middleware(opts: any) {${body}\n}`)
+  let starts = 0
+  const middleware = new Function("Heap", `${code}; return middleware`)({
+    start() {
+      starts++
+      throw new Error("Agent heap initialization reached by MCP server")
+    },
+  })
+  await middleware({ _: ["mcp", "serve"] })
+  expect(starts).toBe(0)
+})
+// altimate_change end

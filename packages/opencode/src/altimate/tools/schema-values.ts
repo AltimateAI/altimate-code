@@ -134,7 +134,7 @@ export interface ValueProfileInput {
 /** Never throws: a failed profile becomes a one-line note. */
 export async function profileValues(
   input: ValueProfileInput,
-  ctx: Pick<LegacyContext, "sessionID" | "ask"> & { abort?: AbortSignal },
+  ctx: Pick<LegacyContext, "sessionID" | "ask" | "extra"> & { abort?: AbortSignal },
 ): Promise<string> {
   try {
     const list = (await Dispatcher.call("warehouse.list", {})) as unknown
@@ -165,7 +165,7 @@ export async function profileValues(
       limit: PROFILE_MAX_COLUMNS + 1,
       query_timeout_ms: PROFILE_TIMEOUT_MS,
       ...(dialect === "postgres" ? { read_only: true } : {}),
-    }, { signal: ctx.abort, sessionID: ctx.sessionID })) as unknown
+    }, { signal: ctx.abort, sessionID: ctx.sessionID, ...(ctx.extra?.forceReadOnly === true ? { forceReadOnly: true } : {}) })) as unknown
     const data = isRecord(res) && isRecord(res.data) ? res.data : res
     const error = normalizeError(isRecord(res) ? res.error : undefined) ?? normalizeError(isRecord(data) ? data.error : undefined)
     if (error) throw new Error(error)

@@ -512,6 +512,14 @@ jobs:
         env:
           ALTIMATE_DUCKDB_E2E: "1"
 
+      # Same reason as above: the in-process MCP server tests use real SQLite/DuckDB drivers, which the
+      # whole-package run replaces with module mocks, so they run in their own process.
+      - name: Run MCP server tests (real drivers, no mocks)
+        run: bun test --timeout 90000 test/altimate/mcp-server/server.test.ts
+        working-directory: packages/opencode
+        env:
+          ALTIMATE_MCP_E2E: "1"
+
       - name: Run Docker driver E2E (MySQL, SQL Server, Redshift)
         run: bun test test/altimate/drivers-docker-e2e.test.ts
         working-directory: packages/opencode

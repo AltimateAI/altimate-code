@@ -31,9 +31,13 @@ The server exposes exactly `warehouse_list`, `schema_inspect`, `sql_execute`, `s
 }
 ```
 
-Relative database paths resolve beside this file. Omit `--connections` to use normal connection discovery: global and project `.altimate-code/connections.json` files, followed by `ALTIMATE_CODE_CONN_*` environment overrides. Set your client's working directory to the project when using project discovery.
+Relative database paths resolve beside this file. With `--connections`, this file is the only source of connections: global and project `connections.json` files and `ALTIMATE_CODE_CONN_*` overrides are ignored. Omit `--connections` to use normal connection discovery: global and project `.altimate-code/connections.json` files, followed by `ALTIMATE_CODE_CONN_*` environment overrides. Set your client's working directory to the project when using project discovery.
 
-Source writes are refused by default. Add `--allow-write` to enable SQL write permissions; existing hard safety blocks still apply. `sql_materialize` always requires a read-only source query and writes only into the server session's temporary `scratch` warehouse. Scratch tables disappear when the server exits. Large results may include a local spill file path that your client can open with any file reader.
+<!-- altimate_change start — MCP read-only limits and private output lifecycle -->
+
+Source writes are refused by default. Without `--allow-write`, source queries request database-enforced read-only execution on PostgreSQL, SQLite and DuckDB. For other connection types, read-only is enforced by SQL classification only; stored functions with side effects are not blocked — use a read-only database user. The server prints this caveat on stderr at startup and includes it in `warehouse_list` for each affected connection. Add `--allow-write` to enable SQL write permissions; existing hard safety blocks still apply. `sql_materialize` always requires a read-only source query and writes only into the server session's temporary `scratch` warehouse. Scratch tables disappear when the server exits. Large results may include a local spill file path that your client can open with any file reader. Spill files use a private directory and are deleted when the server exits. Local `tool_output.max_lines` and `tool_output.max_bytes` settings control output limits; remote agent configuration is not loaded.
+
+<!-- altimate_change end -->
 
 The server writes only MCP protocol messages to stdout and sends logs to stderr. It does not initialize telemetry and honors `ALTIMATE_TELEMETRY_DISABLED`.
 

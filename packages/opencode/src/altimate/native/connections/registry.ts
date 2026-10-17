@@ -219,6 +219,27 @@ export function load(): void {
   loaded = true
 }
 
+/** Load only an explicit connections file, resolving stores relative to that file. */
+export async function loadFile(file: string): Promise<void> {
+  await closeAll()
+  const absolute = path.resolve(file)
+  const parsed: unknown = JSON.parse(await fs.promises.readFile(absolute, "utf8"))
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Connections file must contain an object keyed by connection name")
+  }
+  for (const [name, value] of Object.entries(parsed)) {
+    if (!value || typeof value !== "object" || typeof value.type !== "string") {
+      throw new Error(`Invalid connection: ${name}`)
+    }
+  }
+  configs = new Map(
+    Object.entries(resolveStorePaths(parsed as Record<string, ConnectionConfig>, path.dirname(absolute))),
+  )
+  if (configs.has(SCRATCH_NAME)) Log.Default.warn(SCRATCH_NAME_CONFLICT)
+  loaded = true
+  censusSent = false
+}
+
 /** Ensure configs are loaded. */
 function ensureLoaded(): void {
   if (!loaded) load()

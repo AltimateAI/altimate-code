@@ -140,7 +140,7 @@ export const SqlExecuteTool = Tool.define(
                   ...(Registry.canonicalType(Registry.getConfig(source.warehouse)?.type) === "postgres"
                     ? { read_only: true }
                     : {}),
-                }, { signal: ctx.abort, sessionID: ctx.sessionID })
+                }, { signal: ctx.abort, sessionID: ctx.sessionID, ...(ctx.extra?.forceReadOnly === true ? { forceReadOnly: true } : {}) })
                 const error = normalizeError(result.error)
                 if (error !== undefined) {
                   throw new Error(`query_from source failed: ${error.trim() || "SQL execution failed."}`)
@@ -281,7 +281,7 @@ export const SqlExecuteTool = Tool.define(
                 limit,
                 query_timeout_ms: args.query_timeout_ms,
                 ...(readOnly ? { read_only: true } : {}),
-              }, { signal: ctx.abort, sessionID: ctx.sessionID })
+              }, { signal: ctx.abort, sessionID: ctx.sessionID, ...(ctx.extra?.forceReadOnly === true ? { forceReadOnly: true } : {}) })
 
               // altimate_change start — a failure must not be rendered as "(0 rows)".
               // sql.execute never throws: it catches every connection and query error

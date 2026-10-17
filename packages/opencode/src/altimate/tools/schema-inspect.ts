@@ -133,7 +133,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
         )
         if (profile) output += "\n\n" + profile
       }
-      const suggestion = PostConnectSuggestions.getProgressiveSuggestion("schema_inspect")
+      const suggestion = ctx.extra?.mcpClient ? null : PostConnectSuggestions.getProgressiveSuggestion("schema_inspect")
       if (suggestion) {
         output += "\n\n" + suggestion
         PostConnectSuggestions.trackSuggestions({

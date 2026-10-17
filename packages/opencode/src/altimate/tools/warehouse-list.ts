@@ -1,4 +1,5 @@
 import z from "zod"
+import { readOnlyCaveat } from "../native/connections/read-only"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 // altimate_change start — workspace precedence
@@ -36,6 +37,11 @@ export const WarehouseListTool = Tool.define("warehouse_list", {
       for (const wh of warehouses) {
         const row = `${wh.name} | ${wh.type} | ${wh.database ?? "-"}`
         lines.push(shadowedCount ? `${row} | ${notes.get(wh.name) ?? "local"}` : row)
+      }
+
+      if (ctx.extra?.forceReadOnly) {
+        const caveats = warehouses.map(readOnlyCaveat).filter((note): note is string => !!note)
+        if (caveats.length) lines.push("", ...caveats)
       }
 
       return {

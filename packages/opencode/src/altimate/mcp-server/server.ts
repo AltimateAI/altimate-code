@@ -1,11 +1,9 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema, type Tool as McpTool } from "@modelcontextprotocol/sdk/types.js"
-import { readFile } from "node:fs/promises"
-import path from "node:path"
-import { isLocalFilePath, type ConnectionConfig } from "@altimateai/drivers"
 import * as Registry from "../native/connections/registry"
 import { createAdapter, descriptions } from "./adapter"
+import { readOnlyCaveat } from "../native/connections/read-only"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 export interface ServeOptions {
@@ -14,28 +12,12 @@ export interface ServeOptions {
 }
 
 export async function createServer(options: ServeOptions = {}) {
-  if (options.connections) {
-    const file = path.resolve(options.connections)
-    const configs: unknown = JSON.parse(await readFile(file, "utf8"))
-    if (!configs || typeof configs !== "object" || Array.isArray(configs))
-      throw new Error("Connections file must contain an object keyed by connection name")
-    const resolved: Record<string, ConnectionConfig> = {}
-    for (const [name, value] of Object.entries(configs)) {
-      if (!value || typeof value !== "object" || typeof value.type !== "string")
-        throw new Error(`Invalid connection: ${name}`)
-      const config = { ...value } as ConnectionConfig
-      if (
-        ["duckdb", "sqlite"].includes(config.type.toLowerCase()) &&
-        typeof config.path === "string" &&
-        isLocalFilePath(config.path) &&
-        !path.isAbsolute(config.path) &&
-        !path.win32.isAbsolute(config.path)
-      ) {
-        config.path = path.resolve(path.dirname(file), config.path)
-      }
-      resolved[name] = config
+  if (options.connections) await Registry.loadFile(options.connections)
+  if (!options.allowWrite) {
+    for (const connection of Registry.list().warehouses) {
+      const caveat = readOnlyCaveat(connection)
+      if (caveat) console.error(caveat)
     }
-    Registry.setConfigs(resolved)
   }
   const adapter = await createAdapter(options)
   const server = new Server({ name: "altimate-code", version: InstallationVersion }, { capabilities: { tools: {} } })
@@ -58,8 +40,18 @@ export async function createServer(options: ServeOptions = {}) {
       }
     }
   })
+  let cleanup: Promise<void> | undefined
+  const dispose = () => (cleanup ??= adapter.close())
   server.onclose = async () => {
-    await adapter.close().catch(console.error)
+    await dispose().catch(console.error)
+  }
+  const close = server.close.bind(server)
+  server.close = async () => {
+    try {
+      await close()
+    } finally {
+      await dispose()
+    }
   }
   return server
 }
@@ -95,5 +87,7 @@ export async function serveStdio(options: ServeOptions = {}): Promise<void> {
     process.stdin.off("end", close)
     process.off("SIGINT", close)
     process.off("SIGTERM", close)
+    await server.close()
+    await Registry.closeAll()
   }
 }

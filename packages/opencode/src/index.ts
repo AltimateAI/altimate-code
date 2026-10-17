@@ -135,11 +135,11 @@ let cli = yargs(args)
   })
   // altimate_change end
   .middleware(async (opts) => {
+    if (opts.printLogs) process.env.OPENCODE_PRINT_LOGS = "1"
+    if (opts.logLevel) process.env.OPENCODE_LOG_LEVEL = opts.logLevel
     // altimate_change start — MCP stdio needs no banner, telemetry startup or agent initialization
     if (opts._[0] === "mcp" && opts._[1] === "serve") return
     // altimate_change end
-    if (opts.printLogs) process.env.OPENCODE_PRINT_LOGS = "1"
-    if (opts.logLevel) process.env.OPENCODE_LOG_LEVEL = opts.logLevel
     if (opts.pure) {
       process.env.OPENCODE_PURE = "1"
     }

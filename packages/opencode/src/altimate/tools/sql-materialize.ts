@@ -242,7 +242,7 @@ async function executeSource(source: Connector, input: MaterializeInput, sql: st
   const options = {
     queryTimeoutMs: input.query_timeout_ms,
     maxResultBytes: maxBytes,
-    ...(type === "postgres" ? { readOnly: true } : {}),
+    ...(type === "postgres" || context?.forceReadOnly ? { readOnly: true } : {}),
   }
   return executeQuery(config, options, context, (bounded) => source.execute(sql, limit, undefined, bounded))
 }
@@ -503,7 +503,7 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
     if (verdict.redirect) return verdict.redirect
     // altimate_change end
     try {
-      const r = await materialize(args, { signal: ctx.abort, sessionID: ctx.sessionID })
+      const r = await materialize(args, { signal: ctx.abort, sessionID: ctx.sessionID, ...(ctx.extra?.forceReadOnly === true ? { forceReadOnly: true } : {}) })
       const lint = await lintSqlResult(args.sql, args.source_warehouse, ctx.sessionID)
       const checks = lint ? "\n\n" + lint.output : ""
       const lintMetadata = lint ? { lint_rules: lint.rules } : {}
