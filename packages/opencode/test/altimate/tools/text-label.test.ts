@@ -187,7 +187,7 @@ describe("text_label batching and coverage", () => {
     expect(result.errors.join("\n")).toContain("provider temporarily unavailable")
   })
 
-  test("a provider 400 preserves status and message, never retries, and stops new batches", async () => {
+  test("a repeated provider 400 preserves status and message, never retries a batch, and stops new batches", async () => {
     let calls = 0
     const result = await run({
       concurrency: 1,
@@ -196,11 +196,54 @@ describe("text_label batching and coverage", () => {
         throw providerError(400, "Unsupported thinkingBudget for this model")
       },
     })
-    expect(calls).toBe(1)
+    expect(calls).toBe(3)
     expect(result.status).toEqual(Array(rows.length).fill("failed"))
     expect(result.errors.join("\n")).toContain("400")
     expect(result.errors.join("\n")).toContain("Unsupported thinkingBudget for this model")
     expect(result.errors.join("\n")).not.toContain("No output generated")
+  })
+
+  test("an auth failure stops the run after one call", async () => {
+    let calls = 0
+    const result = await run({
+      concurrency: 1,
+      labeller: async () => {
+        calls++
+        throw providerError(401, "bad credentials")
+      },
+    })
+    expect(calls).toBe(1)
+    expect(result.status).toEqual(Array(rows.length).fill("failed"))
+  })
+
+  test("one batch-specific 400 fails only that batch", async () => {
+    let calls = 0
+    const result = await run({
+      concurrency: 1,
+      labeller: async (system, user, abort) => {
+        if (calls++ === 1) throw providerError(400, "content filtered")
+        return answer(system, user)
+      },
+    })
+    expect(result.status.filter((status) => status === "failed")).toHaveLength(4)
+    expect(result.status.filter((status) => status === "labeled")).toHaveLength(rows.length - 4)
+  })
+
+  test("NULL source text is failed with an explicit error and never sent to the model", async () => {
+    const sent: string[] = []
+    const result = await run({
+      rows: [
+        { id: 1, text: "hello" },
+        { id: 2, text: "", missing: true },
+      ],
+      labeller: async (system, user) => {
+        sent.push(user)
+        return answer(system, user)
+      },
+    })
+    expect(result.status).toEqual(["labeled", "failed"])
+    expect(result.rowErrors[1]).toContain("NULL")
+    expect(sent.join("")).not.toContain('"row":2')
   })
 
   test("out-of-set labels are unparseable, including after the missing-row retry", async () => {
@@ -315,6 +358,14 @@ describe("text_label scratch results", () => {
     expect((await scratch.execute("SELECT label, count(*) FROM scratch.ticket_labels GROUP BY label")).rows).toEqual([
       ["Alpha", 5n],
     ])
+  })
+
+  test("an empty population or wrong column names is rejected without creating a table", async () => {
+    const empty = await labelScratch({ ...input, sql: `${input.sql} WHERE 1 = 0` }, { abort: never }, answer)
+    expect(empty.metadata).toMatchObject({ ok: false, persisted: false })
+    const wrong = await labelScratch({ ...input, sql: `${input.sql} WHERE 1 = 0`, text_column: "nope" }, { abort: never }, answer)
+    expect(wrong.metadata).toMatchObject({ ok: false, persisted: false })
+    expect(wrong.output).toContain("columns")
   })
 
   test("failed batches remain in scratch and their IDs are retrievable, with prominent coverage warnings", async () => {

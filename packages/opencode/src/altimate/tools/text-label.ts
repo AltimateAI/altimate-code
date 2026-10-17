@@ -24,7 +24,7 @@ const MAX_BYTES = 64 * 1024 * 1024
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
 
 export type Label = { label: string; description: string }
-export type Row = { id: string | number | bigint; text: string }
+export type Row = { id: string | number | bigint; text: string; missing?: boolean }
 export type Status = "labeled" | "failed" | "unparseable"
 export type Labeller = (system: string, user: string, abort: AbortSignal) => Promise<string>
 
@@ -87,7 +87,7 @@ export function clampInt(value: number | undefined, fallback: number, min: numbe
   return Math.min(max, Math.max(min, Math.floor(value)))
 }
 
-function errorDetails(error: unknown): { message: string; transient: boolean; permanentHttp: boolean } {
+function errorDetails(error: unknown): { message: string; transient: boolean; permanentHttp: boolean; status?: number } {
   // AI SDK retry errors can wrap the provider's APICallError in lastError/cause.
   let current = error
   const seen = new Set<unknown>()
@@ -109,6 +109,7 @@ function errorDetails(error: unknown): { message: string; transient: boolean; pe
         message: `HTTP ${status}: ${e.message ?? String(current)}`,
         transient,
         permanentHttp: status >= 400 && status < 500 && !transient,
+        status,
       }
     }
     const nested = e.lastError ?? e.cause
@@ -168,6 +169,11 @@ export async function labelRows(input: {
   let chars = 2
   const size = clampInt(input.batchSize, DEFAULT_BATCH, 1, MAX_BATCH)
   for (let index = 0; index < input.rows.length; index++) {
+    if (input.rows[index].missing) {
+      rowErrors[index] = "Source text is NULL; nothing to classify."
+      record(rowErrors[index]!)
+      continue
+    }
     const length = JSON.stringify({ row: size, text: input.rows[index].text }).length + 1
     if (length > BATCH_CHARS) {
       rowErrors[index] = "Text exceeds the model batch size limit; shorten it explicitly before retrying."
@@ -193,6 +199,8 @@ export async function labelRows(input: {
   let next = 0
   let batches = 0
   let fatal: string | undefined
+  let succeeded = 0
+  let permanentFailures = 0
   async function worker() {
     while (next < jobs.length && !fatal && !signal.aborted && Date.now() < input.deadline) {
       let pending = jobs[next++]
@@ -213,7 +221,13 @@ export async function labelRows(input: {
             status[i] = "failed"
             rowErrors[i] = detail.message
           }
-          if (detail.permanentHttp) fatal = detail.message
+          if (detail.permanentHttp) {
+            // Credential/model errors affect every batch. Other 4xx (e.g. a content filter) may be batch-specific,
+            // so stop the run only when they repeat with no batch having succeeded.
+            permanentFailures++
+            if ([401, 403, 404].includes(detail.status ?? 0) || (permanentFailures >= 3 && succeeded === 0))
+              fatal = detail.message
+          }
           if (!detail.transient || transientRetries >= 2 || signal.aborted || fatal) break
           try {
             await delay(250 * 2 ** transientRetries++, undefined, { signal })
@@ -222,6 +236,7 @@ export async function labelRows(input: {
           }
           continue
         }
+        succeeded++
         const parsed = parseReply(reply, input.labels, pending.length)
         pending = pending.filter((index, position) => {
           const value = parsed.get(position + 1)
@@ -333,8 +348,9 @@ export async function labelScratch(input: TextLabelInput, context: LabelContext,
     const columns = data.columns.map((column) => column.toLowerCase())
     const idIndex = columns.indexOf(args.id_column.toLowerCase())
     const textIndex = columns.indexOf(args.text_column.toLowerCase())
-    if (data.rows.length && (idIndex < 0 || textIndex < 0 || idIndex === textIndex))
+    if (idIndex < 0 || textIndex < 0 || idIndex === textIndex)
       return fail("id_column and text_column must identify distinct columns in the query result.")
+    if (!data.rows.length) return fail("The query returned no rows; nothing to label.")
     const rows: Row[] = []
     const ids = new Set<string>()
     let numeric: boolean | undefined
@@ -352,7 +368,7 @@ export async function labelScratch(input: TextLabelInput, context: LabelContext,
       const text = row[textIndex]
       if (text !== null && typeof text !== "string")
         return fail("text_column must be text or NULL; cast other types to VARCHAR in SQL.")
-      rows.push({ id, text: text ?? "" })
+      rows.push({ id, text: text ?? "", missing: text === null })
     }
     const deadline = Date.now() + (args.max_seconds ?? DEFAULT_SECONDS) * 1000
     const concurrency = clampInt(Number(process.env.ALTIMATE_TEXT_LABEL_CONCURRENCY), DEFAULT_CONCURRENCY, 1, 16)

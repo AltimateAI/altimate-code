@@ -127,7 +127,7 @@ it.instance("uses the turn's session model with small calls and preserves stream
     })
     expect(result.output).toContain("HTTP 400: Provider rejected unsupported thinkingBudget")
     expect(result.output).not.toContain("No output generated")
-    expect(stream).toHaveBeenCalledTimes(1)
+    expect(stream).toHaveBeenCalledTimes(3)
     expect(getModel).toHaveBeenCalledWith(model.providerID, model.id)
     expect(defaultModel).not.toHaveBeenCalled()
     expect(getSmallModel).not.toHaveBeenCalled()
