@@ -1,0 +1,84 @@
+import { expect, test } from "bun:test"
+import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
+import { mkdtemp, rm } from "node:fs/promises"
+import path from "node:path"
+import os from "node:os"
+import { Database } from "bun:sqlite"
+
+for (const allowWrite of [false, true]) {
+  test(`CLI stdio handshake, read and write policy (allow-write=${allowWrite})`, async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-stdio-test-"))
+    const db = new Database(path.join(dir, "db.sqlite"))
+    db.run("CREATE TABLE items (id INTEGER)")
+    db.close()
+    const connections = path.join(dir, "connections.json")
+    await Bun.write(connections, JSON.stringify({ source: { type: "sqlite", path: "db.sqlite" } }))
+    // Any network attempt, including module initialization, fails this test. stdout must contain only MCP frames.
+    const guard = path.join(dir, "no-network.ts")
+    await Bun.write(
+      guard,
+      'globalThis.fetch = (() => { process.stderr.write("UNEXPECTED_NETWORK_CALL\\n"); throw new Error("No network allowed") }) as typeof fetch\n',
+    )
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [
+        "run",
+        "--conditions=browser",
+        "--preload",
+        guard,
+        "src/index.ts",
+        "mcp",
+        "serve",
+        "--connections",
+        connections,
+        ...(allowWrite ? ["--allow-write"] : []),
+      ],
+      cwd: path.resolve(import.meta.dir, "../../.."),
+      stderr: "pipe",
+      env: { ...process.env, ALTIMATE_TELEMETRY_DISABLED: "1" } as Record<string, string>,
+    })
+    let stderr = ""
+    transport.stderr?.on("data", (data) => {
+      stderr += data.toString()
+    })
+    const client = new Client({ name: "stdio-test", version: "1" })
+    try {
+      await client.connect(transport)
+      expect((await client.listTools()).tools).toHaveLength(5)
+      const write = await client.callTool({
+        name: "sql_execute",
+        arguments: { warehouse: "source", query: "INSERT INTO items VALUES (7)" },
+      })
+      expect(write.isError).toBe(!allowWrite)
+      const read = await client.callTool({
+        name: "sql_execute",
+        arguments: { warehouse: "source", query: "SELECT COUNT(*) AS n FROM items" },
+      })
+      expect(read.isError).toBe(false)
+      expect(JSON.stringify(read.content)).toContain(allowWrite ? "1" : "0")
+    } finally {
+      await client.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+    expect(stderr).not.toContain("UNEXPECTED_NETWORK_CALL")
+  }, 15_000)
+}
+
+test("CLI exits cleanly when the client closes stdin", async () => {
+  const process = Bun.spawn([Bun.which("bun")!, "run", "--conditions=browser", "src/index.ts", "mcp", "serve"], {
+    cwd: path.resolve(import.meta.dir, "../../.."),
+    env: { ...Bun.env, ALTIMATE_TELEMETRY_DISABLED: "1" },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  process.stdin.end()
+  try {
+    expect(await process.exited).toBe(0)
+    expect(await new Response(process.stdout).text()).toBe("")
+    expect(await new Response(process.stderr).text()).toBe("")
+  } finally {
+    process.kill()
+  }
+}, 15_000)

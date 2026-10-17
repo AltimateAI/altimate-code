@@ -108,6 +108,9 @@ export const McpCommand = cmd({
     yargs
       .command(McpAddCommand)
       .command(McpListCommand)
+      // altimate_change start — expose native data tools over stdio without an agent
+      .command(McpServeCommand)
+      // altimate_change end
       // altimate_change start — upstream_fix (#790): `status` is the name people reach for when a
       // server will not connect, and it was the one name that did not exist. It shares the list
       // handler rather than duplicating a view that already probes live and already prints the
@@ -123,6 +126,20 @@ export const McpCommand = cmd({
       .demandCommand(),
   async handler() {},
 })
+
+// altimate_change start — standalone native-tool MCP server
+export const McpServeCommand = cmd({
+  command: "serve",
+  describe: "serve data tools over MCP stdio (no model required)",
+  builder: (yargs) => yargs
+    .option("connections", { type: "string", describe: "Connections JSON file" })
+    .option("allow-write", { type: "boolean", default: false, describe: "Allow SQL write permissions" }),
+  async handler(args) {
+    const { serveStdio } = await import("../../altimate/mcp-server/server")
+    await serveStdio({ connections: args.connections, allowWrite: args.allowWrite })
+  },
+})
+// altimate_change end
 
 // altimate_change start — upstream_fix (#878/#701): config-level diagnostics, shared by every
 // exit of `mcp list` / `mcp status` so a config with nothing listable still reports them.

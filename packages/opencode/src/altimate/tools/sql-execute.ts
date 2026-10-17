@@ -360,6 +360,7 @@ export const SqlExecuteTool = Tool.define(
               const suggestion = ctx.agent === "analyst" ? null : PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
               const lint = await lintSqlResult(sql, args.warehouse, ctx.sessionID)
               const formatted = await formatSqlResult(result, {
+                mcpClient: ctx.extra?.mcpClient === true,
                 limit,
                 fullTextColumns: args.full_text_columns,
                 // The statement text lets the formatter add the empty/near-empty

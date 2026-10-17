@@ -6,6 +6,7 @@ export const SQL_MAX_PREVIEW_BYTES = 16 * 1024
 export const SQL_MAX_SPILL_BYTES = 32 * 1024 * 1024
 
 interface FormatOptions {
+  mcpClient?: boolean
   limit: number
   maxBytes?: number
   maxLines?: number
@@ -520,7 +521,10 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     const chunks: string[] = []
     serializeRows(result, (chunk) => chunks.push(chunk))
     metadata.result_path = await options.write(chunks.join(""))
-    spill = `All ${result.rows.length} returned rows saved to ${metadata.result_path}. JSONL text: columns/values per row; $bigint, $date (ISO), $bytes (base64) tags; strings unchanged. Use read with char_offset/max_chars to recover any clipped text.`
+    const reader = options.mcpClient
+      ? "Open this path with any file reader to recover clipped text."
+      : "Use read with char_offset/max_chars to recover any clipped text."
+    spill = `All ${result.rows.length} returned rows saved to ${metadata.result_path}. JSONL text: columns/values per row; $bigint, $date (ISO), $bytes (base64) tags; strings unchanged. ${reader}`
   } catch {
     spill = `Spill failed (write/serialization error or ${SQL_MAX_SPILL_BYTES / 1024 / 1024} MiB size limit); returned rows were not saved.`
   }
