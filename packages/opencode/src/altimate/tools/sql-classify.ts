@@ -165,6 +165,9 @@ export function classifyMulti(sql: string, dialect?: string): "read" | "write" {
   return classify(sql, dialect)
 }
 
+/** DuckDB table functions that execute a statement on an attached PostgreSQL, MySQL or SQLite database. */
+export const REMOTE_EXECUTE_CALL = /\b(postgres_execute|mysql_execute|sqlite_execute)\s*\(/i
+
 /**
  * Single-pass: classify and check for hard-denied statement types.
  * Returns both the overall query type and whether a hard-deny pattern was found.
@@ -193,7 +196,13 @@ export function classifyAndCheck(sql: string, dialect?: string): {
         (s: { statement_type: string }) => s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
       )
 
-    return { queryType: otherIsReadOnly(sql, result.statements, dialect) ? "read" : "write", blocked }
+    // DuckDB scanner functions run their statement on the attached remote database, outside any local
+    // read-only transaction, so a SELECT calling them is a write.
+    const remoteExecute = REMOTE_EXECUTE_CALL.test(maskSql(tokenizeSql(sql, dialect).tokens))
+    return {
+      queryType: !remoteExecute && otherIsReadOnly(sql, result.statements, dialect) ? "read" : "write",
+      blocked,
+    }
   } catch (error) {
     return { ...classifyFallback(sql, dialect), parseError: error instanceof Error ? error.message : String(error) }
   }

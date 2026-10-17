@@ -1044,6 +1044,8 @@ test.each([
   "lowrite(1, 'value')",
   "force_checkpoint()",
   "query('SELECT 1')",
+  "postgres_execute('remote', 'DELETE FROM orders')",
+  "mysql_execute('remote', 'DELETE FROM orders')",
   String.raw`U&"pg\005fterminate_backend"(1)`,
   String.raw`pg_catalog.U&"pg_terminate_\+000062ackend"(1)`,
   `U&"pg!005fcancel_backend" UESCAPE '!' (1)`,

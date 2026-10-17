@@ -358,3 +358,7 @@ describe("SQL-building aggregates are reads", () => {
     expect(r.parseError).toMatch(/Parse error.*Expected RParen/)
   })
 })
+
+test.each(["postgres_execute", "mysql_execute"])("a SELECT calling %s is classified as a write", (fn) => {
+  expect(classify(`SELECT * FROM ${fn}('remote', 'DELETE FROM orders')`, "duckdb")).toBe("write")
+})
