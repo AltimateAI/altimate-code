@@ -407,6 +407,7 @@ export namespace Database {
     // altimate_change end
   })
 
+  // altimate_change start — upstream_fix: setup extracted from the lazy Client so it runs under the setup lock
   function open() {
     const sqlite = new BunDatabase(Path, { create: true })
     state.sqlite = sqlite
@@ -473,6 +474,7 @@ export namespace Database {
 
     return db
   }
+  // altimate_change end
 
   export function close() {
     const sqlite = state.sqlite
