@@ -1356,7 +1356,8 @@ export namespace ProviderTransform {
     ) {
       const id = model.api.id.toLowerCase()
       const generation = Number(/(?:^|\/)gemini-(\d+)(?:[.-]|$)/.exec(id)?.[1])
-      if (generation === 3) {
+      // Fall back to the earlier substring rule when the id has no parseable generation.
+      if (generation === 3 || (Number.isNaN(generation) && id.includes("gemini-3"))) {
         return { thinkingConfig: { thinkingLevel: "minimal" } }
       }
       // Gemini 2.x and unversioned aliases (e.g. gemini-flash-latest) keep the budget control.
