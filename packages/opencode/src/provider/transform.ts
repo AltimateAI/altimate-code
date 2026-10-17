@@ -1613,9 +1613,16 @@ export namespace ProviderTransform {
 
         const result: any = {}
         for (const [key, value] of Object.entries(obj)) {
+          // altimate_change start — Gemini rejects empty-string enum/const values ("cannot be empty");
+          // drop them and keep the branch's type. Tool arguments are still validated by Zod at runtime.
+          if (key === "const" && value === "") continue
+          if (key === "enum" && Array.isArray(value) && value.every((v) => String(v) === "")) continue
+          // altimate_change end
           if (key === "enum" && Array.isArray(value)) {
             // Convert all enum values to strings
-            result[key] = value.map((v) => String(v))
+            // altimate_change start — skip empty-string values Gemini rejects
+            result[key] = value.map((v) => String(v)).filter((v) => v !== "")
+            // altimate_change end
             // If we have integer type with enum, change type to string
             if (result.type === "integer" || result.type === "number") {
               result.type = "string"
