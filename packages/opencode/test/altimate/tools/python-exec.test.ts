@@ -387,7 +387,7 @@ describe("python_exec", () => {
         "import socket\ntry:\n    socket.create_connection(('1.1.1.1', 53), timeout=1)\n    print('CONNECTED')\nexcept OSError:\n    print('BLOCKED')"
       const result = await tool.execute({ code, inputs: [] }, ctx)
       expect(result.metadata.ok).toBe(true)
-      expect(["sandbox-exec", "bwrap", "landlock"]).toContain(result.metadata.filesystem)
+      expect(["sandbox-exec", "bwrap"]).toContain(result.metadata.filesystem)
       expect(result.output).toContain(`filesystem ${result.metadata.filesystem}`)
       expect(result.output).toContain(`network ${result.metadata.network}`)
       if (result.metadata.network === "isolated") expect(result.output).toContain("BLOCKED")
@@ -580,8 +580,8 @@ describe("python_exec", () => {
     20_000,
   )
 
-  test("python_exec refuses when the host has no working sandbox", async () => {
-    if (detected?.ok || !python) return
+  const unsandboxed = python && !detected?.ok ? test : test.skip
+  unsandboxed("python_exec refuses when the host has no working sandbox", async () => {
     const tool = await initTool(PythonExecTool)
     const result = await tool.execute({ code: "print(1)" }, ctx)
     expect(result.metadata.ok).toBe(false)
@@ -589,10 +589,9 @@ describe("python_exec", () => {
     expect(result.output).toContain("never run unconfined")
   })
 
-  sandboxed(
+  test.skipIf(process.platform !== "darwin" || !detected?.ok)(
     "sandboxed code cannot signal the agent or other host processes",
     async () => {
-      if (process.platform !== "darwin") return
       const outside = Bun.spawn(["sleep", "7333"])
       try {
         const tool = await initTool(PythonExecTool)
@@ -812,6 +811,32 @@ describe("python_exec confinement", () => {
     expect(Sandbox.unsupported("linux", { bwrapInstalled: true, appArmorRestricted: false })).not.toContain("AppArmor")
   })
 
+  test("the AppArmor message needs a user-namespace denial in the self-test AND the sysctl", () => {
+    expect(Sandbox.indicatesUserNamespaceDenial("bwrap: setting up uid map: Permission denied")).toBe(true)
+    expect(Sandbox.indicatesUserNamespaceDenial("bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted")).toBe(true)
+    expect(Sandbox.indicatesUserNamespaceDenial("PYTHON_LEAK")).toBe(false)
+    expect(Sandbox.indicatesUserNamespaceDenial("ModuleNotFoundError: No module named 'pandas'")).toBe(false)
+  })
+
+  test("self-test canaries are outside every allowlisted path, /tmp and the private dir is 0700", async () => {
+    const excluded = ["/usr", "/lib", "/etc/ssl", "/tmp", "/tmp/session"]
+    const base = await fs.mkdtemp(path.join(os.homedir(), ".altimate-canary-test-"))
+    try {
+      const { files, dirs } = await Sandbox.createCanaries(excluded, [base])
+      expect(files.length).toBe(1)
+      for (const file of files)
+        for (const e of excluded) expect(file === e || file.startsWith(e + "/")).toBe(false)
+      expect(files[0].startsWith("/tmp/")).toBe(false)
+      expect((await fs.stat(dirs[0])).mode & 0o777).toBe(0o700)
+      // A root that is itself allowlisted yields no canary.
+      const none = await Sandbox.createCanaries([base], [base])
+      expect(none.files).toEqual([])
+      for (const d of [...dirs, ...none.dirs]) await fs.rm(d, { recursive: true, force: true })
+    } finally {
+      await fs.rm(base, { recursive: true, force: true })
+    }
+  })
+
   test("unsupported platforms are refused", async () => {
     for (const platform of ["win32", "freebsd"] as const) {
       const result = await Sandbox.detectConfinement({
@@ -906,9 +931,7 @@ describe("python_exec confinement", () => {
       const result = await confinementFor(python)
       expect(result.ok).toBe(true)
       if (result.ok)
-        expect(result.confinement.filesystem).toBe(
-          process.platform === "darwin" ? "sandbox-exec" : result.confinement.filesystem,
-        )
+        expect(result.confinement.filesystem).toBe(process.platform === "darwin" ? "sandbox-exec" : "bwrap")
     },
     30_000,
   )

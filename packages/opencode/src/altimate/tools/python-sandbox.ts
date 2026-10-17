@@ -329,6 +329,44 @@ function appArmorRestrictsUserNamespaces(): boolean {
   }
 }
 
+/** Self-test output that shows the kernel refused to create a user namespace (not a confinement defect). */
+const USERNS_DENIAL = /RTM_NEWADDR|setting up uid map|Operation not permitted|Permission denied.*namespace|creating new namespace/i
+
+/** True when a self-test failure message indicates a denied user namespace. */
+export function indicatesUserNamespaceDenial(failure: string): boolean {
+  return USERNS_DENIAL.test(failure)
+}
+
+/**
+ * Create canary files that are NOT under any bound or allowlisted path and not under `/tmp`
+ * (bubblewrap replaces `/tmp` with an empty tmpfs, which would make a `/tmp` canary vacuous).
+ * One lives in a private directory under the user's home, the other under the process working
+ * directory: each is readable only if `$HOME` or `/` were exposed to the sandbox.
+ */
+export async function createCanaries(
+  excluded: string[],
+  roots: string[] = [os.homedir(), process.cwd()],
+): Promise<{ files: string[]; dirs: string[] }> {
+  const files: string[] = []
+  const dirs: string[] = []
+  for (const root of roots) {
+    try {
+      const dir = realpathSync(await fs.mkdtemp(path.join(root, ".altimate-python-canary-")))
+      await fs.chmod(dir, 0o700)
+      dirs.push(dir)
+      // "/" is bound only as a metadata entry, never as readable content.
+      const inside = excluded.some((e) => e !== "/" && (dir === e || dir.startsWith(e + "/")))
+      if (inside || dir === "/tmp" || dir.startsWith("/tmp/")) continue
+      const file = path.join(dir, "canary.txt")
+      await fs.writeFile(file, "outside", { mode: 0o600 })
+      files.push(file)
+    } catch {
+      continue
+    }
+  }
+  return { files, dirs }
+}
+
 /** Refusal text for a host with no working mechanism. Never changes system settings. */
 export function unsupported(
   platform: NodeJS.Platform,
@@ -361,10 +399,12 @@ export async function detectConfinement(input: {
 }): Promise<Detection> {
   const platform = input.platform ?? process.platform
   const options = input.mechanisms ?? candidates(platform)
-  const refusal = () =>
+  // The AppArmor message needs both the sysctl and a self-test failure that shows a denied user namespace.
+  const refusal = (evidence: { appArmor?: boolean } = {}) =>
     unsupported(platform, {
       bwrapInstalled: options.some((o) => o.filesystem === "bwrap"),
-      appArmorRestricted: platform === "linux" && (input.appArmorRestricted ?? appArmorRestrictsUserNamespaces)(),
+      appArmorRestricted:
+        platform === "linux" && evidence.appArmor === true && (input.appArmorRestricted ?? appArmorRestrictsUserNamespaces)(),
     })
   if (!options.length)
     return {
@@ -375,7 +415,7 @@ export async function detectConfinement(input: {
           : refusal(),
     }
   const work = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), "altimate-python-sandbox-")))
-  const elsewhere = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), "altimate-python-canary-")))
+  let canaryDirs: string[] = []
   try {
     const paths = await interpreterPaths(input.python, work, input.env(work))
     if (!paths)
@@ -385,9 +425,12 @@ export async function detectConfinement(input: {
       }
     const allow = readAllowlist(platform, paths)
     if (!allow.ok) return { ok: false, reason: `python_exec refused: ${allow.reason}.` }
-    const canary = path.join(elsewhere, "canary.txt")
+    const excluded = [...allow.directories, ...allow.files, ...allow.links, work]
+    const canaries = await createCanaries(excluded)
+    canaryDirs = canaries.dirs
+    if (!canaries.files.length)
+      return { ok: false, reason: `python_exec refused: could not create a self-test canary outside the sandbox allowlist. ${REFUSAL_TAIL}` }
     const inside = path.join(work, "inside.txt")
-    await fs.writeFile(canary, "outside")
     await fs.writeFile(inside, "inside")
     await fs.mkdir(path.join(work, "tmp"))
     const cell = path.join(work, "selftest.py")
@@ -397,13 +440,18 @@ export async function detectConfinement(input: {
         "import duckdb, pandas, subprocess",
         `assert open(${JSON.stringify(inside)}).read() == "inside"`,
         `assert subprocess.run(["cat", ${JSON.stringify(inside)}], capture_output=True).stdout == b"inside"`,
-        "try:",
-        `    open(${JSON.stringify(canary)}).read()`,
-        "    print('PYTHON_LEAK')",
-        "except OSError:",
-        "    print('PYTHON_CONFINED')",
-        `result = subprocess.run(["cat", ${JSON.stringify(canary)}], capture_output=True)`,
-        "print('SUBPROCESS_CONFINED' if result.returncode != 0 and b'outside' not in result.stdout else 'SUBPROCESS_LEAK')",
+        "py_ok = sub_ok = True",
+        `for canary in ${JSON.stringify(canaries.files)}:`,
+        "    try:",
+        "        open(canary).read()",
+        "        py_ok = False",
+        "    except OSError:",
+        "        pass",
+        '    result = subprocess.run(["cat", canary], capture_output=True)',
+        "    if result.returncode == 0 or b'outside' in result.stdout:",
+        "        sub_ok = False",
+        "print('PYTHON_CONFINED' if py_ok else 'PYTHON_LEAK')",
+        "print('SUBPROCESS_CONFINED' if sub_ok else 'SUBPROCESS_LEAK')",
       ].join("\n"),
     )
     const bootstrap = path.join(work, "_bootstrap.py")
@@ -439,9 +487,11 @@ export async function detectConfinement(input: {
         ok: false,
         reason: `python_exec refused: sandbox-exec self-test failed: ${failures.join("; ")}. ${REFUSAL_TAIL}`,
       }
-    return { ok: false, reason: `${refusal()} Self-test results: ${failures.join("; ")}` }
+    const denied = failures.some(indicatesUserNamespaceDenial)
+    const base = refusal({ appArmor: denied })
+    return { ok: false, reason: `${base} Self-test results: ${failures.join("; ")}` }
   } finally {
     await fs.rm(work, { recursive: true, force: true })
-    await fs.rm(elsewhere, { recursive: true, force: true })
+    for (const dir of canaryDirs) await fs.rm(dir, { recursive: true, force: true })
   }
 }
