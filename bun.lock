@@ -272,7 +272,7 @@
         "@ai-sdk/togetherai": "2.0.41",
         "@ai-sdk/vercel": "2.0.39",
         "@ai-sdk/xai": "3.0.82",
-        "@altimateai/altimate-core": "0.7.0",
+        "@altimateai/altimate-core": "0.8.0",
         "@altimateai/drivers": "workspace:*",
         "@aws-sdk/credential-providers": "3.1057.0",
         "@clack/prompts": "1.0.0-alpha.1",
@@ -645,17 +645,17 @@
 
     "@altimateai/altimate-code": ["@altimateai/altimate-code@workspace:packages/opencode"],
 
-    "@altimateai/altimate-core": ["@altimateai/altimate-core@0.7.0", "", { "optionalDependencies": { "@altimateai/altimate-core-darwin-arm64": "0.7.0", "@altimateai/altimate-core-darwin-x64": "0.7.0", "@altimateai/altimate-core-linux-arm64-gnu": "0.7.0", "@altimateai/altimate-core-linux-x64-gnu": "0.7.0", "@altimateai/altimate-core-win32-x64-msvc": "0.7.0" } }, "sha512-9LqXOUHhrsuZlvdfZEoFLyMGg5Uz83cHj6TrqMb0h8lK97UdeVBvd2S/53TB7sPVlYnpjFlI++fNh8swqADsLA=="],
+    "@altimateai/altimate-core": ["@altimateai/altimate-core@0.8.0", "", { "optionalDependencies": { "@altimateai/altimate-core-darwin-arm64": "0.8.0", "@altimateai/altimate-core-darwin-x64": "0.8.0", "@altimateai/altimate-core-linux-arm64-gnu": "0.8.0", "@altimateai/altimate-core-linux-x64-gnu": "0.8.0", "@altimateai/altimate-core-win32-x64-msvc": "0.8.0" } }, "sha512-Wmw99OBnrYF1faBDD4zrY6/LH6DLNOJKg1XBOPaNPf8HbFoskmOnsvUEnZK6qVAb11YHjVw/lh0y33zyatDaOQ=="],
 
-    "@altimateai/altimate-core-darwin-arm64": ["@altimateai/altimate-core-darwin-arm64@0.7.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-NBPwsfBT5Ul41u9zNiovYaOpZ+zhzHKq5+GqFWZcy4iW6k0aWUb30niTrz2Yse73/nWIt6G//pS4m4IX/nMy4g=="],
+    "@altimateai/altimate-core-darwin-arm64": ["@altimateai/altimate-core-darwin-arm64@0.8.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-qFvLLIE7WTCCWrSKFDylK9ypi9mHhRvphs/wcHIDWMhVUtLYmmP2KqYK7+2WKslGJafy9iypoP65VkqQx0cibg=="],
 
-    "@altimateai/altimate-core-darwin-x64": ["@altimateai/altimate-core-darwin-x64@0.7.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-pLEJT2ePh247XOIicaJw8x5i2hRsCF2HqgVUy9nKJf5ebynHLGZ2JFC0fMq4oRe9ZCmywN8EzMD1UwN1Nw9AUQ=="],
+    "@altimateai/altimate-core-darwin-x64": ["@altimateai/altimate-core-darwin-x64@0.8.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-DhQGxdyAdyK6uNlJEMPiE7OsdtzNv2eIpCpBhCtXVFNZTVKebwpXxb5RObpLq70j+x4NgjAMf1PVM8NHD/mRpA=="],
 
-    "@altimateai/altimate-core-linux-arm64-gnu": ["@altimateai/altimate-core-linux-arm64-gnu@0.7.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-co6Sm/iFIyYnsWxkhw7tUJRB9hfHH0Bjt0oa4bAysG8hVVoMhCN8ADS4fvPAg52Z8umk126mAN8k2XPfXh/ieA=="],
+    "@altimateai/altimate-core-linux-arm64-gnu": ["@altimateai/altimate-core-linux-arm64-gnu@0.8.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-UhhSJiTH7TRZSVQFzqc11MuHvYfdSDtqatXy6Q/RhFJ3s7AfL0XPL0BY3xW+BY9n+dsNxzeybkwtosGPE+iVTw=="],
 
-    "@altimateai/altimate-core-linux-x64-gnu": ["@altimateai/altimate-core-linux-x64-gnu@0.7.0", "", { "os": "linux", "cpu": "x64" }, "sha512-hc9tOl8v+DQFsy8TIkFPxZGTyohPcwpfUqquLgiuKn2U6MDyJK3962Nzf/TzgfcbHj+GQE34oyPJ709iaBZnGg=="],
+    "@altimateai/altimate-core-linux-x64-gnu": ["@altimateai/altimate-core-linux-x64-gnu@0.8.0", "", { "os": "linux", "cpu": "x64" }, "sha512-6LHZXcZi3DYwTvbGgzicS2dtC+MeJ6bzuFqWtb963Ulr1zFEUDWKUiiWWUsXs6JHVEoU9cX/xlGD0t3hZxA8Zg=="],
 
-    "@altimateai/altimate-core-win32-x64-msvc": ["@altimateai/altimate-core-win32-x64-msvc@0.7.0", "", { "os": "win32", "cpu": "x64" }, "sha512-GrykrvnilY1yZCgusNxVTvYr5ENkD1vpgjGib2qX/yvJVs0Nb59/JsSLzvA9XqAt2FVf7OcZ5ttH11OkxuFivg=="],
+    "@altimateai/altimate-core-win32-x64-msvc": ["@altimateai/altimate-core-win32-x64-msvc@0.8.0", "", { "os": "win32", "cpu": "x64" }, "sha512-AxjfES6ez0agb/2+hG82sVtRx/F/mlqmDC6WNPBBd5M1OALCNm/MKK5ydGRfNA94is9/mbqhNTtk1fGYUuJRGg=="],
 
     "@altimateai/dbt-integration": ["@altimateai/dbt-integration@0.2.14", "", { "dependencies": { "@altimateai/altimate-core": "0.1.6", "node-abort-controller": "^3.1.1", "node-fetch": "^3.3.2", "python-bridge": "^1.1.0", "semver": "^7.6.3", "yaml": "^2.5.0" }, "peerDependencies": { "patch-package": "^8.0.0" } }, "sha512-44hFBx3gXss2RUlRZE9cIpAocffB3miAzpjvmma1EED0jiOhyrgmzGsw3RXEZqs73OuLYpDehixvRUt1vTfcfQ=="],
 

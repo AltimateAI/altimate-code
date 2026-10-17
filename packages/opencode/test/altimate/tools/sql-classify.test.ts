@@ -341,18 +341,20 @@ describe("SQL-building aggregates are reads", () => {
     })
   }
 
-  // Known core-parser gap (altimate-core-internal): DuckDB `//` integer division fails to parse,
-  // so a read-only string_agg query using it is conservatively classified as a write.
-  // Flip to `test` once the parser supports it.
-  test.skip("duckdb: `//` integer division in a string_agg query → read (core parser gap)", () => {
+  test("duckdb: `//` integer division in a string_agg query → read", () => {
     const sql = "SELECT 'c' || (rn // 240) c, count(*), string_agg('''' || Symbol || '''', ',' ORDER BY Symbol) FROM t GROUP BY 1"
-    expect(classifyAndCheck(sql, "duckdb").queryType).toBe("read")
+    expect(classifyAndCheck(sql, "duckdb")).toEqual({ queryType: "read", blocked: false })
   })
 
-  test("duckdb: `//` currently fails closed with an explanatory diagnostic", () => {
+  test("duckdb: `//` classifies as read without a parse diagnostic", () => {
     const r = classifyAndCheck("SELECT 'c' || (rn // 240) c, string_agg(Symbol, ',') FROM t GROUP BY 1", "duckdb")
+    expect(r).toEqual({ queryType: "read", blocked: false })
+  })
+
+  test("duckdb: malformed string_agg fails closed with an explanatory diagnostic", () => {
+    const r = classifyAndCheck("SELECT string_agg(Symbol, ','", "duckdb")
     expect(r.queryType).toBe("write")
     expect(r.blocked).toBe(false)
-    expect(r.parseError).toBeTruthy()
+    expect(r.parseError).toMatch(/Parse error.*Expected RParen/)
   })
 })
