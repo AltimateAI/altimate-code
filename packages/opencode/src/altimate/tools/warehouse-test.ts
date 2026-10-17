@@ -30,10 +30,12 @@ export const WarehouseTestTool = Tool.define("warehouse_test", {
       // the other process lets go, and the driver's own message names the PID
       // holding the lock. Telling the model to stop and report would be wrong
       // advice for the one fault it can actually act on.
+      // These guidance responses are successful diagnostics of an unhealthy connection.
       if (result.recoverable) {
         return {
           title: `Connection '${args.name}': STORE LOCKED`,
           metadata: {
+            success: true,
             connected: false,
             error: result.error,
             error_category: result.error_category,
@@ -56,6 +58,7 @@ export const WarehouseTestTool = Tool.define("warehouse_test", {
         return {
           title: `Connection '${args.name}': INFRASTRUCTURE FAILURE`,
           metadata: {
+            success: true,
             connected: false,
             error: result.error,
             error_category: result.error_category,

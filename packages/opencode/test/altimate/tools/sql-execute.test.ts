@@ -12,6 +12,7 @@ import * as Registry from "@/altimate/native/connections/registry"
 import { registerAll } from "@/altimate/native/connections/register"
 import type { Connector, ExecuteOptions } from "@altimateai/drivers/types"
 import { SqlExecuteTool } from "@/altimate/tools/sql-execute"
+import * as SqlResultLint from "@/altimate/tools/sql-result-lint"
 import { PostConnectSuggestions } from "@/altimate/tools/post-connect-suggestions"
 import * as Precedence from "@/altimate/workspace/precedence"
 import { initTool } from "../tool-fixture"
@@ -257,7 +258,7 @@ describe("sql_execute parser read boundary", () => {
     const ask = spyOn(ctx, "ask")
     try {
       await tool.execute({ query: "VALUES (1)" }, ctx)
-      await tool.execute({ query: 'SELECT \'DELETE INTO\' AS "UPDATE"' }, ctx)
+      await tool.execute({ query: "SELECT 'DELETE INTO' AS \"UPDATE\"" }, ctx)
       expect(ask).not.toHaveBeenCalled()
       expect(dispatch).toHaveBeenCalledTimes(2)
     } finally {
@@ -312,7 +313,9 @@ describe("sql_execute parser read boundary", () => {
 
   test("refuses multiple reads with a clear driver support message", async () => {
     const tool = await initTool(SqlExecuteTool)
-    await expect(tool.execute({ query: "SELECT 1; SELECT 2" }, ctx)).rejects.toThrow(/multi-statement reads.*not supported/i)
+    await expect(tool.execute({ query: "SELECT 1; SELECT 2" }, ctx)).rejects.toThrow(
+      /multi-statement reads.*not supported/i,
+    )
     expect(dispatch).not.toHaveBeenCalled()
     expect(precedence).not.toHaveBeenCalled()
   })
@@ -530,3 +533,250 @@ failedSpill.live("a spill service defect keeps SQL success, preview and clipping
     expect(output.metadata.output_truncated).toBe(true)
   }),
 )
+
+describe("sql_execute full text selection", () => {
+  test.each([{ full_text_columns: [] }, { full_text_columns: null }, { full_text_columns: undefined }])(
+    "treats full_text_columns %j like a plain query",
+    async ({ full_text_columns }) => {
+      const tool = await initTool(SqlExecuteTool)
+      for (const limit of [undefined, 50]) {
+        const plain = await tool.execute({ query: "SELECT 42", limit }, ctx)
+        const output = await tool.execute({ query: "SELECT 42", full_text_columns, limit }, ctx)
+        expect(output).toEqual(plain)
+        expect(dispatch).toHaveBeenLastCalledWith(
+          "sql.execute",
+          expect.objectContaining({ sql: "SELECT 42", limit: limit ?? 100 }),
+          { signal: ctx.abort, sessionID: ctx.sessionID },
+        )
+      }
+    },
+  )
+
+  test("defaults an active full text query to 20 rows", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT 42", full_text_columns: ["answer"] }, ctx)
+    expect(dispatch).toHaveBeenCalledWith(
+      "sql.execute",
+      expect.objectContaining({ sql: "SELECT 42", limit: 20 }),
+      { signal: ctx.abort, sessionID: ctx.sessionID },
+    )
+    expect(output.output).toContain("42")
+    expect(output.output).not.toContain("clamped")
+    expect(output.metadata.error).toBeUndefined()
+  })
+
+  test.each([50, 10_001])("clamps an active full text limit of %i to 20 with a result note", async (limit) => {
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT 42", full_text_columns: ["answer"], limit }, ctx)
+    expect(dispatch).toHaveBeenCalledWith(
+      "sql.execute",
+      expect.objectContaining({ sql: "SELECT 42", limit: 20 }),
+      { signal: ctx.abort, sessionID: ctx.sessionID },
+    )
+    expect(output.output).toContain("42")
+    expect(output.output).toMatch(new RegExp(`Note:.*limit.*${limit}.*clamped.*20`, "i"))
+    expect(output.metadata.error).toBeUndefined()
+  })
+
+  test("prioritizes named text within the preview cap without changing the executed query", async () => {
+    const text = "Complete body condition.\n".repeat(3000)
+    dispatch.mockResolvedValue({
+      columns: ["id", "title", "body"],
+      rows: [[17, "Policy title", text]],
+      row_count: 1,
+      truncated: false,
+    } as never)
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute(
+      { query: "SELECT id, title, body FROM rules", limit: 1, full_text_columns: ["body"] },
+      ctx,
+    )
+    expect(output.output).toContain("id | title | body")
+    expect(output.output).toContain("Complete body condition.")
+    expect(output.output).toMatch(/continued in (?:the )?spill/i)
+    expect(Buffer.byteLength(output.output, "utf8")).toBeLessThanOrEqual(16 * 1024)
+    expect(output.metadata).toMatchObject({ preview_columns: 3, output_truncated: true, truncated: true })
+    expect(output.metadata.result_path).toBeDefined()
+    expect(dispatch).toHaveBeenCalledWith(
+      "sql.execute",
+      expect.objectContaining({ sql: "SELECT id, title, body FROM rules", limit: 1 }),
+      { signal: ctx.abort, sessionID: ctx.sessionID },
+    )
+  })
+
+  test("notes missing full text columns and available columns while returning rows", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const output = await tool.execute({ query: "SELECT 42", full_text_columns: ["missing"] }, ctx)
+    expect(output.output).toContain("42")
+    expect(output.output).toMatch(/Note:.*missing.*available columns: answer/i)
+    expect(output.metadata.error).toBeUndefined()
+    expect(output.metadata.rows_returned).toBe(1)
+  })
+
+  test("describes full text behavior without advertising a literal default limit", async () => {
+    const tool = await initTool(SqlExecuteTool)
+    const schema = tool.jsonSchema as { properties: Record<string, { description?: string; default?: unknown }> }
+    expect(schema.properties.limit.description).toContain("omit to use the default")
+    expect(schema.properties.limit.description).not.toMatch(/default\s+\d+/i)
+    expect(schema.properties.limit.default).toBeUndefined()
+    expect(tool.description).toContain("all selected columns")
+    expect(tool.description).toContain("[]")
+    expect(tool.description).toContain("null")
+    expect(tool.description).toContain("clamp")
+    expect(tool.description).toContain("priorit")
+    expect(tool.description).toContain("char_offset")
+    expect(schema.properties.full_text_columns.description).toContain("max_chars")
+    expect(tool.description).not.toContain("without preview or spill cuts")
+  })
+})
+
+const fullText = testEffect(
+  Layer.mergeAll(
+    Truncate.defaultLayer,
+    FSUtil.defaultLayer,
+    agents,
+    TestConfig.layer({ get: () => Effect.succeed({ tool_output: { max_bytes: 16 * 1024, max_lines: 2000 } }) }),
+  ),
+)
+
+fullText.live("full text clips a 50 KiB named cell and retains its complete spill", () =>
+  Effect.gen(function* () {
+    const body = "x".repeat(50 * 1024)
+    dispatch.mockResolvedValue({ columns: ["body"], rows: [[body]], row_count: 1, truncated: false } as never)
+    const tool = yield* SqlExecuteTool
+    const initialized = yield* tool.init()
+    const output = yield* initialized.execute({ query: "SELECT body FROM rules", full_text_columns: ["body"] }, ctx)
+
+    expect(Buffer.byteLength(output.output, "utf8")).toBeLessThanOrEqual(16 * 1024)
+    expect(output.output).toMatch(/continued in (?:the )?spill/i)
+    expect(output.output).toContain("char_offset")
+    expect(output.output).toContain("max_chars")
+    expect(output.metadata).toMatchObject({ output_truncated: true, truncated: true })
+    const resultPath = output.metadata.result_path as string
+    expect(path.isAbsolute(resultPath)).toBe(true)
+    const fs = yield* FSUtil.Service
+    const saved = yield* fs.readFileString(resultPath)
+    expect(JSON.parse(saved.trimEnd())).toEqual({ columns: ["body"], values: [body] })
+    yield* fs.remove(resultPath)
+  }),
+)
+
+fullText.live("full text saves unclipped named cells for later recovery", () =>
+  Effect.gen(function* () {
+    const tool = yield* SqlExecuteTool
+    const initialized = yield* tool.init()
+    const output = yield* initialized.execute({ query: "SELECT 42", full_text_columns: ["answer"] }, ctx)
+
+    expect(output.metadata).toMatchObject({ output_truncated: false, truncated: false })
+    const resultPath = output.metadata.result_path as string
+    expect(path.isAbsolute(resultPath)).toBe(true)
+    expect(output.output).toContain(resultPath)
+    expect(output.output).toContain("char_offset")
+    const fs = yield* FSUtil.Service
+    expect(JSON.parse((yield* fs.readFileString(resultPath)).trimEnd())).toEqual({ columns: ["answer"], values: [42] })
+    yield* fs.remove(resultPath)
+  }),
+)
+
+fullText.live("full text limits a connector's 40 returned rows to 20 preview rows and saves all rows", () =>
+  Effect.gen(function* () {
+    const rows = Array.from({ length: 40 }, (_, index) => [`entry-${index + 1}`])
+    dispatch.mockResolvedValue({ columns: ["body"], rows, row_count: 40, truncated: false } as never)
+    const tool = yield* SqlExecuteTool
+    const initialized = yield* tool.init()
+    const output = yield* initialized.execute({ query: "SELECT body FROM rules", full_text_columns: ["body"] }, ctx)
+
+    expect(dispatch).toHaveBeenCalledWith(
+      "sql.execute",
+      expect.objectContaining({ sql: "SELECT body FROM rules", limit: 20 }),
+      { signal: ctx.abort, sessionID: ctx.sessionID },
+    )
+    expect(output.metadata).toMatchObject({ rows_returned: 40, preview_rows: 20, row_limited: true, truncated: true })
+    expect(output.output).toContain("entry-20")
+    expect(output.output).not.toContain("entry-21")
+    expect(output.output).toMatch(/(?:connector.*40.*20|40.*returned.*20|20.*40.*returned)/i)
+    const resultPath = output.metadata.result_path as string
+    const fs = yield* FSUtil.Service
+    expect(
+      (yield* fs.readFileString(resultPath))
+        .trimEnd()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    ).toEqual(rows.map((values) => ({ columns: ["body"], values })))
+    yield* fs.remove(resultPath)
+  }),
+)
+
+it.live("full text includes lint and suggestion notes in the configured output budget", () =>
+  Effect.gen(function* () {
+    const lint = spyOn(SqlResultLint, "lintSqlResult").mockResolvedValue({
+      output: "Checks:\n" + "Review this query. ".repeat(1000),
+      rules: ["limit_without_order_by"],
+    })
+    suggestion.mockReturnValue("Tip: " + "Inspect the saved result. ".repeat(1000))
+    try {
+      const tool = yield* SqlExecuteTool
+      const initialized = yield* tool.init()
+      const output = yield* initialized.execute({ query: "SELECT 42", full_text_columns: ["answer"], limit: 50 }, ctx)
+
+      expect(Buffer.byteLength(output.output, "utf8")).toBeLessThanOrEqual(1024)
+      expect(output.metadata).toMatchObject({ output_truncated: true, truncated: true })
+      expect(output.metadata.error).toBeUndefined()
+      const fs = yield* FSUtil.Service
+      yield* fs.remove(output.metadata.result_path as string)
+    } finally {
+      lint.mockRestore()
+    }
+  }),
+)
+
+const shortFullText = testEffect(
+  Layer.mergeAll(
+    Truncate.defaultLayer,
+    FSUtil.defaultLayer,
+    agents,
+    TestConfig.layer({ get: () => Effect.succeed({ tool_output: { max_bytes: 1024, max_lines: 10 } }) }),
+  ),
+)
+
+shortFullText.live("full text preserves the routing notice with a ten-line output limit", () =>
+  Effect.gen(function* () {
+    const notice = "Not routed through the selected workspace: routing was unavailable, so the query ran locally."
+    precedence.mockResolvedValue({ notice, precedence: "undetermined" })
+    suggestion.mockReturnValue("Tip: " + "Inspect the saved result. ".repeat(1000))
+    const lint = spyOn(SqlResultLint, "lintSqlResult").mockResolvedValue({
+      output: "Checks:\n" + "Review this query. ".repeat(1000),
+      rules: ["limit_without_order_by"],
+    })
+    try {
+      const tool = yield* SqlExecuteTool
+      const initialized = yield* tool.init()
+      const output = yield* initialized.execute({ query: "SELECT 42", full_text_columns: ["answer"], limit: 50 }, ctx)
+
+      expect(output.output).toStartWith(notice)
+      expect(output.output.split("\n").length).toBeLessThanOrEqual(10)
+      expect(Buffer.byteLength(output.output, "utf8")).toBeLessThanOrEqual(1024)
+      expect(output.metadata.precedence).toBe("undetermined")
+      expect(output.metadata.error).toBeUndefined()
+      expect(dispatch).toHaveBeenCalledTimes(1)
+      const fs = yield* FSUtil.Service
+      yield* fs.remove(output.metadata.result_path as string)
+    } finally {
+      lint.mockRestore()
+    }
+  }),
+)
+
+test("full text selection retains write permission checks", async () => {
+  const tool = await initTool(SqlExecuteTool)
+  const ask = spyOn(ctx, "ask").mockImplementation(() => Effect.die(new Error("write denied")))
+  try {
+    await expect(
+      tool.execute({ query: "DELETE FROM rules RETURNING policy", limit: 1, full_text_columns: ["policy"] }, ctx),
+    ).rejects.toThrow("write denied")
+    expect(ask).toHaveBeenCalledTimes(1)
+    expect(dispatch).not.toHaveBeenCalled()
+  } finally {
+    ask.mockRestore()
+  }
+})

@@ -67,6 +67,9 @@ describe("Tool name consistency in prompts", () => {
         const analyst = await Agent.get("analyst")
         expect(analyst).toBeDefined()
         expect(analyst!.prompt).not.toContain("sql_validate")
+        expect(analyst!.prompt).toContain(
+          "keep that reasoning out of the final message. When a rule or policy decides the answer, read its full text (not a preview), enumerate each competing clause, and evaluate every condition as satisfied, violated or unknown against the row's own fields and dates before choosing.",
+        )
       },
     })
   })
