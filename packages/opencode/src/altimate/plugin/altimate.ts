@@ -5,6 +5,7 @@ import open from "open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
 import * as OnboardingTelemetry from "../telemetry/onboarding"
+import { Telemetry } from "../telemetry"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "../util/machine-id"
 import { Config } from "@/config/config"
@@ -89,17 +90,21 @@ export async function buildCliContext(machineIdPath?: string): Promise<string> {
     } catch (err) {
       // Config was unreadable — NOT the normal path. Server routes run inside
       // Instance.provide() (AsyncLocalStorage-propagated across awaits), so
-      // Config.get() resolves during an ordinary browser authorize(). The known
-      // exception is `altimate auth login <url>`, which deliberately skips
-      // instance bootstrap (ProvidersLoginCommand `instance: (args) => !isAuthProviderUrl(args.target)`);
-      // on that path this fires. Fail CLOSED — omit the durable machine_id rather
-      // than transmit it for a user who may have opted out via config; a missed
-      // correlation beats leaking a stable identifier. Log so a low correlation
-      // rate is traceable here instead of being mistaken for a lost reply.
-      log.warn("cli_context: config unreadable, omitting machine_id (fail-closed)", {
+      // Config.get() resolves during an ordinary browser authorize(). It fires on
+      // the paths that skip instance bootstrap: `altimate auth login <url>` and the
+      // create-and-link hand-off of `altimate-code link`. Follow the telemetry
+      // module's own decision for this process: it evaluates the same gates in
+      // doInit() and, with the config unreadable, keeps sending the machine id
+      // itself — so this context carries the id exactly when telemetry does, and
+      // omits it whenever telemetry is off (opted out, no sink, test runner).
+      // Failing closed here instead hid the id from every create-and-link
+      // hand-off, which made the link step unattributable on the funnel.
+      await Telemetry.init().catch(() => {})
+      disabled = !Telemetry.isEnabled()
+      log.info("cli_context: config unreadable, following telemetry state", {
         code: (err as NodeJS.ErrnoException)?.code,
+        enabled: !disabled,
       })
-      disabled = true
     }
   }
   let machineId = ""
