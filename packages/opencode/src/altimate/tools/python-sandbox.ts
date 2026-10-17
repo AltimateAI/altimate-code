@@ -366,7 +366,14 @@ export async function detectConfinement(input: {
       bwrapInstalled: options.some((o) => o.filesystem === "bwrap"),
       appArmorRestricted: platform === "linux" && (input.appArmorRestricted ?? appArmorRestrictsUserNamespaces)(),
     })
-  if (!options.length) return { ok: false, reason: refusal() }
+  if (!options.length)
+    return {
+      ok: false,
+      reason:
+        platform === "darwin"
+          ? `python_exec refused: sandbox-exec not found at /usr/bin/sandbox-exec, so no enforced filesystem confinement is available. ${REFUSAL_TAIL}`
+          : refusal(),
+    }
   const work = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), "altimate-python-sandbox-")))
   const elsewhere = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), "altimate-python-canary-")))
   try {
@@ -427,6 +434,11 @@ export async function detectConfinement(input: {
         `${option.filesystem}: ${(result.stderr || out || result.error || "no output").trim().split("\n").slice(-1)[0]}`,
       )
     }
+    if (platform === "darwin")
+      return {
+        ok: false,
+        reason: `python_exec refused: sandbox-exec self-test failed: ${failures.join("; ")}. ${REFUSAL_TAIL}`,
+      }
     return { ok: false, reason: `${refusal()} Self-test results: ${failures.join("; ")}` }
   } finally {
     await fs.rm(work, { recursive: true, force: true })

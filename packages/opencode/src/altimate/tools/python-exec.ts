@@ -9,7 +9,7 @@
  * session directory, and network is blocked. Without an enforced mechanism the tool refuses.
  */
 import z from "zod"
-import { spawn, spawnSync } from "node:child_process"
+import { execFile, spawn } from "node:child_process"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as os from "node:os"
@@ -222,6 +222,9 @@ async function workspaceSize(directory: string): Promise<number> {
 /** How long output may keep draining after the sandbox is killed before the pipes are closed. */
 const PIPE_GRACE_MS = 300
 
+/** Descendant sweep period (macOS only); kept coarse so `ps` never competes with the event loop. */
+const TRACK_INTERVAL_MS = 500
+
 type RunResult = {
   code: number | null
   signal: string | null
@@ -259,37 +262,51 @@ function run(
     // Descendants seen so far (pid -> start time). A child that calls setsid leaves the process
     // group, and once its parent exits it is re-parented, so the tree must be recorded while alive.
     const known = new Map<number, string>()
-    const snapshot = () => {
-      const ps = spawnSync("/bin/ps", ["-A", "-o", "pid=,ppid=,lstart="], { encoding: "utf8", timeout: 2000 })
-      const table = new Map<number, { parent: number; started: string }>()
-      for (const line of (ps.stdout ?? "").split("\n")) {
-        const m = /^\s*(\d+)\s+(\d+)\s+(.*\S)\s*$/.exec(line)
-        if (m) table.set(Number(m[1]), { parent: Number(m[2]), started: m[3] })
-      }
-      return table
-    }
-    const track = () => {
-      if (!child.pid) return
-      const table = snapshot()
-      const tree = new Set<number>([...known.keys(), child.pid])
-      for (let grew = true; grew; ) {
-        grew = false
-        for (const [pid, entry] of table)
-          if (!tree.has(pid) && tree.has(entry.parent)) {
-            tree.add(pid)
-            known.set(pid, entry.started)
-            grew = true
+    const trackDescendants = process.platform === "darwin"
+    // Asynchronous so the event loop is never blocked; at most one `ps` is in flight.
+    const snapshot = () =>
+      new Promise<Map<number, { parent: number; started: string }>>((done) => {
+        execFile("/bin/ps", ["-A", "-o", "pid=,ppid=,lstart="], { encoding: "utf8", timeout: 2000 }, (_error, out) => {
+          const table = new Map<number, { parent: number; started: string }>()
+          for (const line of (out ?? "").split("\n")) {
+            const m = /^\s*(\d+)\s+(\d+)\s+(.*\S)\s*$/.exec(line)
+            if (m) table.set(Number(m[1]), { parent: Number(m[2]), started: m[3] })
           }
-      }
+          done(table)
+        })
+      })
+    let sweeping: Promise<Map<number, { parent: number; started: string }>> | undefined
+    const track = () => {
+      if (!child.pid || !trackDescendants) return Promise.resolve(new Map<number, { parent: number; started: string }>())
+      sweeping ??= snapshot()
+        .then((table) => {
+          const tree = new Set<number>([...known.keys(), child.pid!])
+          for (let grew = true; grew; ) {
+            grew = false
+            for (const [pid, entry] of table)
+              if (!tree.has(pid) && tree.has(entry.parent)) {
+                tree.add(pid)
+                known.set(pid, entry.started)
+                grew = true
+              }
+          }
+          return table
+        })
+        .finally(() => {
+          sweeping = undefined
+        })
+      return sweeping
     }
-    const tracker = setInterval(track, 100)
-    // Kill the whole sandbox, not only the process group: the group, then every recorded
-    // descendant whose start time still matches (so a reused pid is never signalled). On Linux the
-    // bwrap PID namespace (--die-with-parent) also ends everything when bwrap dies.
-    const kill = () => {
+    const tracker = trackDescendants ? setInterval(() => void track(), TRACK_INTERVAL_MS) : undefined
+    // Kill the whole sandbox, not only the process group: a final sweep, then every recorded
+    // descendant whose start time still matches (so a reused pid is never signalled), then the
+    // group. On Linux the bwrap PID namespace (--die-with-parent) also ends everything when bwrap dies.
+    let killing = false
+    const kill = async () => {
+      if (killing) return
+      killing = true
       try {
-        track()
-        const table = snapshot()
+        const table = await track()
         for (const [pid, started] of known) if (table.get(pid)?.started === started) process.kill(pid, "SIGKILL")
       } catch {}
       try {
@@ -315,11 +332,11 @@ function run(
     }
     const timer = setTimeout(() => {
       timedOut = true
-      kill()
+      void kill()
     }, timeoutMs)
-    const onAbort = () => kill()
+    const onAbort = () => void kill()
     abort.addEventListener("abort", onAbort, { once: true })
-    if (abort.aborted) kill()
+    if (abort.aborted) void kill()
     // Check the whole Python directory, including temporary exports and output, so
     // repeated calls cannot bypass the workspace budget through HOME or TMPDIR.
     let checking: Promise<void> | undefined
@@ -330,7 +347,7 @@ function run(
           () => {},
           (error) => {
             workspaceError = error instanceof Error ? error.message : String(error)
-            kill()
+            void kill()
           },
         )
         .finally(() => {
@@ -345,7 +362,7 @@ function run(
     child.on("exit", (code, signal) => {
       exitCode = code
       exitSignal = signal
-      kill()
+      void kill()
     })
     child.on("close", () => void finish())
   })

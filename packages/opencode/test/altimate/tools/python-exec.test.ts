@@ -197,6 +197,28 @@ describe("python_exec", () => {
   )
 
   sandboxed(
+    "keeps the event loop responsive while a cell runs",
+    async () => {
+      const tool = await initTool(PythonExecTool)
+      let worst = 0
+      let last = performance.now()
+      const timer = setInterval(() => {
+        const now = performance.now()
+        worst = Math.max(worst, now - last)
+        last = now
+      }, 10)
+      try {
+        const result = await tool.execute({ code: "import time\ntime.sleep(2)\nprint('done')" }, ctx)
+        expect(result.metadata.ok).toBe(true)
+      } finally {
+        clearInterval(timer)
+      }
+      expect(worst).toBeLessThan(250)
+    },
+    15_000,
+  )
+
+  sandboxed(
     "persists workspace files across calls in one session",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -812,6 +834,44 @@ describe("python_exec confinement", () => {
       })
       expect(result.ok).toBe(false)
       if (!result.ok) expect(result.reason).toContain("bubblewrap")
+    },
+    30_000,
+  )
+
+  e2e(
+    "macOS without sandbox-exec reports it as missing",
+    async () => {
+      const result = await Sandbox.detectConfinement({
+        python,
+        bootstrap: BOOTSTRAP,
+        env: childEnv,
+        platform: "darwin",
+        mechanisms: [],
+      })
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.reason).toContain("sandbox-exec not found")
+        expect(result.reason).not.toContain("no filesystem confinement mechanism is supported")
+      }
+    },
+    30_000,
+  )
+
+  e2e(
+    "macOS sandbox-exec self-test failure reports the reason",
+    async () => {
+      const result = await Sandbox.detectConfinement({
+        python,
+        bootstrap: BOOTSTRAP,
+        env: childEnv,
+        platform: "darwin",
+        mechanisms: [{ filesystem: "sandbox-exec", network: "isolated", prefix: ["/usr/bin/false"] }],
+      })
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.reason).toContain("sandbox-exec self-test failed:")
+        expect(result.reason).not.toContain("no filesystem confinement mechanism is supported")
+      }
     },
     30_000,
   )
