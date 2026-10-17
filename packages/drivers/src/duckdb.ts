@@ -181,7 +181,7 @@ export async function connect(
 
   const query = async (sql: string, signal?: AbortSignal): Promise<any[]> => {
     signal?.throwIfAborted()
-    return run(sql, undefined, resolveQueryTimeout(config).ms, undefined, undefined, signal)
+    return run(sql, undefined, resolveQueryTimeout(config).ms, undefined, undefined, undefined, signal)
   }
   const queryWithParams = (sql: string, params: any[]): Promise<any[]> =>
     run(sql, params, resolveQueryTimeout(config).ms)
