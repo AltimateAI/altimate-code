@@ -6,6 +6,8 @@ export interface SqlFunctionCall {
   name: string
   args: string[]
   escaped: boolean
+  /** Lowercased schema or catalog prefix, when the call is written `schema.name(...)`. */
+  qualifier?: string
 }
 
 /** Recognize calls using SQL tokens: punctuation inside quoted names is never code. */
@@ -54,7 +56,12 @@ export function sqlFunctionCalls(sql: string, dialect?: string): SqlFunctionCall
       }
       if (depth === 0) break
     }
-    calls.push({ name: name.toLowerCase(), args, escaped })
+    let qualifier: string | undefined
+    if (parts[i - 1]?.kind === "code" && parts[i - 1].text === "." && parts[i - 2]) {
+      const q = parts[i - 2]
+      qualifier = (q.kind === "identifier" ? q.text.slice(1, -1) : q.text).toLowerCase()
+    }
+    calls.push({ name: name.toLowerCase(), args, escaped, qualifier })
   }
   return calls
 }

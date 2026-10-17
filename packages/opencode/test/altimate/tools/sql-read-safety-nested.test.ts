@@ -313,3 +313,62 @@ describe("SQL Server carriage-return comment boundary", () => {
     })
   }
 })
+
+describe("nested and remote SQL function allowlist", () => {
+  const safe = [
+    "SELECT count(*), sum(x), coalesce(max(y), 0) FROM t WHERE id IN (1, 2) GROUP BY z",
+    "SELECT lower(name), date_trunc('day', created_at), round(avg(v), 2) FROM t",
+    "WITH a AS (SELECT 1 AS id) SELECT * FROM a WHERE EXISTS (SELECT 1)",
+    "SELECT row_number() OVER (PARTITION BY a ORDER BY b), CAST(x AS varchar(10)) FROM t",
+    "SELECT pg_catalog.current_database(), current_setting('server_version'), pg_size_pretty(pg_database_size('x'))",
+    "SELECT * FROM pg_stat_activity WHERE pg_stat_get_backend_pid(1) > 0",
+  ]
+  for (const name of ["postgres_query", "mysql_query", "sqlite_query"]) {
+    for (const inner of safe) {
+      test(`keeps standard-function ${name} reads: ${inner}`, () => {
+        const sql = remote(name, inner)
+        expect(classifyAndCheck(sql, "duckdb")).toEqual({ queryType: "read", blocked: false })
+      })
+    }
+  }
+
+  test("keeps standard-function query() and TO_QUERY reads", () => {
+    expect(classifyAndCheck(query("SELECT upper(a), count(*) FROM t GROUP BY 1"), "duckdb").queryType).toBe("read")
+    expect(classifyAndCheck("SELECT * FROM TABLE(TO_QUERY($$SELECT upper(a) FROM t$$))", "snowflake").queryType).toBe("read")
+    expect(classifyAndCheck("SELECT eval('SELECT length(a) FROM t')", "sqlite").queryType).toBe("read")
+  })
+
+  const unsafe = [
+    "SELECT public.mutate()",
+    "SELECT mutate()",
+    "SELECT myschema.upper(a) FROM t",
+    "SELECT pg_stat_statements_reset()",
+    "SELECT pg_stat_reset()",
+    "SELECT pg_stat_reset_shared('bgwriter')",
+    "SELECT pg_catalog.pg_stat_statements_reset()",
+    "SELECT * FROM t AS x(a, b)",
+  ]
+  for (const name of ["postgres_query", "mysql_query", "sqlite_query"]) {
+    for (const inner of unsafe) {
+      test(`requires write for ${name}: ${inner}`, () => {
+        const sql = remote(name, inner)
+        expect(classifyAndCheck(sql, "duckdb").queryType).toBe("write")
+        expect(() => readSql(sql, "duckdb")).toThrow(/single read-only SELECT/)
+      })
+    }
+  }
+
+  test("requires write for unknown functions in query(), TO_QUERY and eval", () => {
+    expect(classifyAndCheck(query("SELECT public.mutate()"), "duckdb").queryType).toBe("write")
+    expect(classifyAndCheck("SELECT * FROM TABLE(TO_QUERY($$SELECT mutate()$$))", "snowflake").queryType).toBe("write")
+    expect(classifyAndCheck("SELECT eval('SELECT mutate()')", "sqlite").queryType).toBe("write")
+  })
+
+  test("statistics reset functions are not read-only at the top level", () => {
+    for (const fn of ["pg_stat_statements_reset()", "pg_stat_reset()", "pg_stat_reset_slru('x')"]) {
+      expect(classifyAndCheck(`SELECT ${fn}`, "postgres").queryType).toBe("write")
+      expect(() => readSql(`SELECT ${fn}`, "postgres")).toThrow(/single read-only SELECT/)
+    }
+    expect(classifyAndCheck("SELECT pg_stat_get_numscans(1)", "postgres").queryType).toBe("read")
+  })
+})

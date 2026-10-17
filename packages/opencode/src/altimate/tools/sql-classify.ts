@@ -7,7 +7,7 @@
 import { hasMongoWriteStage, normalizeMqlCommand } from "@altimateai/drivers"
 import { maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
 import { sqlFunctionCalls, sqlLiteral } from "./sql-functions"
-import { hasSideEffectFunction } from "./sql-function-policy"
+import { hasSideEffectFunction, isReadOnlyNestedFunction } from "./sql-function-policy"
 
 // Safe import: napi binary may not be available on all platforms
 let getStatementTypes: ((sql: string, dialect?: string | null) => any) | null = null
@@ -193,6 +193,13 @@ function functionSafety(sql: string, dialect: string | undefined, depth: number,
       hasSideEffectFunction(call.name, strict) ||
       /^(odbc_query|odbc_copy|odbc_commit|odbc_rollback|openquery|external_query)$/.test(call.name)
     ) write = true
+    // Nested and remote SQL cannot be proven read-only by a denylist: a user-defined
+    // function may write. Require every call to be on the read-only allowlist.
+    // SQL-string executors (query, postgres_query, ...) are exempt because their literal SQL is
+    // classified recursively below; dynamic arguments and executors with side effects still fail closed.
+    const nestedExecutor =
+      Object.hasOwn(SQL_ARGUMENTS, call.name) && call.qualifier === undefined && !hasSideEffectFunction(call.name)
+    if (depth > 0 && !nestedExecutor && !isReadOnlyNestedFunction(call.name, call.qualifier)) write = true
     // SQL Server's XML .query() takes XQuery, not executable SQL.
     if (call.name === "query" && /^(sqlserver|tsql|mssql)$/i.test(dialect ?? "")) continue
     const argument = Object.hasOwn(SQL_ARGUMENTS, call.name) ? SQL_ARGUMENTS[call.name] : undefined
@@ -203,7 +210,7 @@ function functionSafety(sql: string, dialect: string | undefined, depth: number,
       continue
     }
     const result = classifySql(inner, argument.dialect, depth + 1)
-    if (result.queryType !== "read") write = true
+    if (result.queryType !== "read" || !isSingleQuery(inner, argument.dialect)) write = true
     if (result.blocked) blocked = true
   }
   return { write, blocked }
