@@ -245,6 +245,9 @@ function extractFields(docs: Record<string, unknown>[]): Map<string, Set<string>
   return fieldTypes
 }
 
+/** Documents per reply batch on byte-bounded reads. */
+export const BOUNDED_READ_BATCH = 1000
+
 /** Server error code for an operation stopped by `maxTimeMS`. */
 const MONGO_MAX_TIME_EXPIRED = 50
 
@@ -466,8 +469,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           const read = async () => {
             if (stopped) throw failure
             if (maxResultBytes === undefined && maxTimeMS === undefined && !signal) return cursor.toArray()
+            // One document per round trip made a 127k-document read take ~10 minutes. A reply
+            // batch is still bounded (a server reply never exceeds 16 MiB) and the byte budget
+            // stops the read at the first document past the cap.
             const docs: Record<string, unknown>[] = []
-            for await (const doc of maxResultBytes === undefined ? cursor : cursor.batchSize(1)) {
+            for await (const doc of maxResultBytes === undefined ? cursor : cursor.batchSize(BOUNDED_READ_BATCH)) {
               if (stopped) throw failure
               if (maxResultBytes === undefined) {
                 docs.push(doc)
