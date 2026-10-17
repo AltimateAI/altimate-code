@@ -307,6 +307,50 @@ describe("ProviderTransform.smallOptions - google thinking", () => {
       variants: overrides.variants ?? {},
     }) as any
 
+  // altimate_change start — small calls must use thinking controls supported by each Gemini generation
+  for (const provider of [
+    { providerID: "google", npm: "@ai-sdk/google" },
+    { providerID: "google-vertex", npm: "@ai-sdk/google-vertex" },
+  ] as const) {
+    for (const testCase of [
+      { id: "gemini-2.0-flash", thinkingConfig: { thinkingBudget: 0 } },
+      { id: "gemini-2.5-flash", thinkingConfig: { thinkingBudget: 0 } },
+      { id: "gemini-3-pro", thinkingConfig: { thinkingLevel: "minimal" } },
+      { id: "gemini-3.1-pro", thinkingConfig: { thinkingLevel: "minimal" } },
+      { id: "gemini-4-argon", thinkingConfig: { thinkingLevel: "low" } },
+      { id: "gemini-5-pro", thinkingConfig: { thinkingLevel: "low" } },
+      { id: "gemini-30-pro", thinkingConfig: { thinkingLevel: "low" } },
+      { id: "gemini-flash-latest", thinkingConfig: { thinkingBudget: 0 } },
+    ]) {
+      for (const configured of [false, true]) {
+        test(`${provider.providerID} ${testCase.id} uses supported small thinking controls with ${configured ? "generated" : "empty"} variants`, () => {
+          const model = createGoogleModel(testCase.id, provider)
+          if (configured) model.variants = ProviderTransform.variants(model)
+
+          const result = ProviderTransform.smallOptions(model)
+
+          expect(result).toEqual({ thinkingConfig: testCase.thinkingConfig })
+          if (testCase.thinkingConfig.thinkingLevel) {
+            expect(result.thinkingConfig).not.toHaveProperty("thinkingBudget")
+          }
+        })
+      }
+    }
+
+    test(`${provider.providerID} uses the lowest configured Gemini 4 thinking level regardless of variant names or order`, () => {
+      const model = createGoogleModel("gemini-4-argon", {
+        ...provider,
+        variants: {
+          detailed: { thinkingConfig: { includeThoughts: true, thinkingLevel: "high" } },
+          balanced: { thinkingConfig: { includeThoughts: true, thinkingLevel: "medium" } },
+        },
+      })
+
+      expect(ProviderTransform.smallOptions(model)).toEqual({ thinkingConfig: { thinkingLevel: "medium" } })
+    })
+  }
+  // altimate_change end
+
   test("disables Gemini 2.5 thinking budget for small calls even when high is the first variant", () => {
     const result = ProviderTransform.smallOptions(
       createGoogleModel("gemini-2.5-pro", {

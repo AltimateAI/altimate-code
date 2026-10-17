@@ -1347,7 +1347,7 @@ export namespace ProviderTransform {
     ) {
       return mergeDeep({ store: false }, small)
     }
-    // altimate_change start — upstream_fix: restore Google minimal thinking for small calls only on reasoning models
+    // altimate_change start — upstream_fix: use generation-supported Google thinking controls for small reasoning calls
     if (
       (model.providerID === "google" ||
         model.api.npm === "@ai-sdk/google" ||
@@ -1355,10 +1355,18 @@ export namespace ProviderTransform {
       model.capabilities.reasoning
     ) {
       const id = model.api.id.toLowerCase()
-      if (id.includes("gemini-3")) {
+      const generation = Number(/(?:^|\/)gemini-(\d+)(?:[.-]|$)/.exec(id)?.[1])
+      if (generation === 3) {
         return { thinkingConfig: { thinkingLevel: "minimal" } }
       }
-      return { thinkingConfig: { thinkingBudget: 0 } }
+      // Gemini 2.x and unversioned aliases (e.g. gemini-flash-latest) keep the budget control.
+      if (!(generation >= 4)) {
+        return { thinkingConfig: { thinkingBudget: 0 } }
+      }
+      // Gemini 4+ rejects budgets and "minimal"; prefer the lowest configured supported level.
+      const levels = Object.values(model.variants ?? {}).map((variant) => variant.thinkingConfig?.thinkingLevel)
+      const thinkingLevel = WIDELY_SUPPORTED_EFFORTS.find((level) => levels.includes(level)) ?? "low"
+      return { thinkingConfig: { thinkingLevel } }
     }
     // altimate_change end
     if (model.providerID === "openrouter" || model.providerID === "llmgateway") {
