@@ -546,6 +546,7 @@ describe("sql_execute full text selection", () => {
         expect(dispatch).toHaveBeenLastCalledWith(
           "sql.execute",
           expect.objectContaining({ sql: "SELECT 42", limit: limit ?? 100 }),
+          { signal: ctx.abort, sessionID: ctx.sessionID },
         )
       }
     },
@@ -554,7 +555,11 @@ describe("sql_execute full text selection", () => {
   test("defaults an active full text query to 20 rows", async () => {
     const tool = await initTool(SqlExecuteTool)
     const output = await tool.execute({ query: "SELECT 42", full_text_columns: ["answer"] }, ctx)
-    expect(dispatch).toHaveBeenCalledWith("sql.execute", expect.objectContaining({ limit: 20 }))
+    expect(dispatch).toHaveBeenCalledWith(
+      "sql.execute",
+      expect.objectContaining({ sql: "SELECT 42", limit: 20 }),
+      { signal: ctx.abort, sessionID: ctx.sessionID },
+    )
     expect(output.output).toContain("42")
     expect(output.output).not.toContain("clamped")
     expect(output.metadata.error).toBeUndefined()
@@ -563,7 +568,11 @@ describe("sql_execute full text selection", () => {
   test.each([50, 10_001])("clamps an active full text limit of %i to 20 with a result note", async (limit) => {
     const tool = await initTool(SqlExecuteTool)
     const output = await tool.execute({ query: "SELECT 42", full_text_columns: ["answer"], limit }, ctx)
-    expect(dispatch).toHaveBeenCalledWith("sql.execute", expect.objectContaining({ limit: 20 }))
+    expect(dispatch).toHaveBeenCalledWith(
+      "sql.execute",
+      expect.objectContaining({ sql: "SELECT 42", limit: 20 }),
+      { signal: ctx.abort, sessionID: ctx.sessionID },
+    )
     expect(output.output).toContain("42")
     expect(output.output).toMatch(new RegExp(`Note:.*limit.*${limit}.*clamped.*20`, "i"))
     expect(output.metadata.error).toBeUndefined()
@@ -591,6 +600,7 @@ describe("sql_execute full text selection", () => {
     expect(dispatch).toHaveBeenCalledWith(
       "sql.execute",
       expect.objectContaining({ sql: "SELECT id, title, body FROM rules", limit: 1 }),
+      { signal: ctx.abort, sessionID: ctx.sessionID },
     )
   })
 
@@ -676,14 +686,23 @@ fullText.live("full text limits a connector's 40 returned rows to 20 preview row
     const initialized = yield* tool.init()
     const output = yield* initialized.execute({ query: "SELECT body FROM rules", full_text_columns: ["body"] }, ctx)
 
-    expect(dispatch).toHaveBeenCalledWith("sql.execute", expect.objectContaining({ limit: 20 }))
+    expect(dispatch).toHaveBeenCalledWith(
+      "sql.execute",
+      expect.objectContaining({ sql: "SELECT body FROM rules", limit: 20 }),
+      { signal: ctx.abort, sessionID: ctx.sessionID },
+    )
     expect(output.metadata).toMatchObject({ rows_returned: 40, preview_rows: 20, row_limited: true, truncated: true })
     expect(output.output).toContain("entry-20")
     expect(output.output).not.toContain("entry-21")
     expect(output.output).toMatch(/(?:connector.*40.*20|40.*returned.*20|20.*40.*returned)/i)
     const resultPath = output.metadata.result_path as string
     const fs = yield* FSUtil.Service
-    expect((yield* fs.readFileString(resultPath)).trimEnd().split("\n")).toHaveLength(40)
+    expect(
+      (yield* fs.readFileString(resultPath))
+        .trimEnd()
+        .split("\n")
+        .map((line) => JSON.parse(line)),
+    ).toEqual(rows.map((values) => ({ columns: ["body"], values })))
     yield* fs.remove(resultPath)
   }),
 )

@@ -529,7 +529,7 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     (excess
       ? `Note: connector returned ${result.rows.length} rows; showing at most ${limit} (requested row limit). `
       : result.truncated
-        ? `Result may be row-limited (requested row limit ${limit}; total unknown). More rows may exist. `
+        ? "Result may be row-limited (connector reported a limit; total unknown). More rows may exist. "
         : "Row-limited: no. ") +
     `Output truncated: ${clipped ? "yes" : "no"}. ${spill}` +
     (clipped && !fullText ? " Prioritize specific cells with full_text_columns; omit limit to use the default." : "") +
@@ -563,7 +563,9 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
   metadata.preview_rows = preview.rows
   metadata.preview_columns = schema.columns
   metadata.schema_truncated = schema.clipped
-  metadata.output_truncated = preview.clipped || schema.clipped || notesClipped || excess
+  // Clipped aliases use schema_truncated; omitted columns also hide cell values.
+  metadata.output_truncated =
+    preview.clipped || (rows.length > 0 && schema.columns < result.columns.length) || notesClipped || excess
   metadata.truncated = metadata.row_limited || metadata.output_truncated
   return {
     output: bounded(

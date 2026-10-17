@@ -177,6 +177,7 @@ describe("SQL result previews", () => {
     expect(Buffer.byteLength(formatted.output, "utf8")).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
     // Clipped names are lossy, so the full result is saved for recovery.
     expect(saved.writes).toHaveLength(1)
+    expect(saved.rows()).toEqual([{ columns: [alias], values: [1] }])
   })
 
   test("renders distinct small Buffer cells as base64 without spilling", async () => {
@@ -445,18 +446,22 @@ describe("SQL result previews", () => {
     expect(saved.rows()).toHaveLength(2)
   })
 
-  test("does not attribute a smaller connector cap to the requested tool limit", async () => {
-    const formatted = await formatSqlResult(result([[1], [2]], ["id"], true), {
-      limit: 100,
-      sql: JSON.stringify({ command: "find", collection: "items", limit: 2 }),
-      write: spill().write,
-    })
+  test.each([{ fullTextColumns: undefined }, { fullTextColumns: ["id"] }])(
+    "does not attribute a smaller connector cap to the requested tool limit (%p)",
+    async ({ fullTextColumns }) => {
+      const formatted = await formatSqlResult(result([[1], [2]], ["id"], true), {
+        limit: 100,
+        sql: JSON.stringify({ command: "find", collection: "items", limit: 2 }),
+        fullTextColumns: fullTextColumns?.slice(),
+        write: spill().write,
+      })
 
-    expect(formatted.output).toContain("may be row-limited")
-    expect(formatted.output).not.toContain("row limit 100")
-    expect(formatted.metadata.row_limited).toBe(true)
-    expect(formatted.metadata.output_truncated).toBe(false)
-  })
+      expect(formatted.output).toContain("Result may be row-limited (connector reported a limit; total unknown)")
+      expect(formatted.output).not.toContain("requested row limit")
+      expect(formatted.metadata.row_limited).toBe(true)
+      expect(formatted.metadata.output_truncated).toBe(false)
+    },
+  )
 
   test("previews the first 50 rows and spills all rows even without a backend row limit", async () => {
     const rows = Array.from({ length: 75 }, (_, i) => [`row-${String(i).padStart(3, "0")}`])
@@ -522,6 +527,7 @@ describe("SQL result previews", () => {
     expect(formatted.output).not.toContain("Output truncated: yes")
     expect(formatted.metadata.result_path).toBeDefined()
     expect(saved.writes).toHaveLength(1)
+    expect(saved.rows()).toEqual([{ columns: [alias], values: [42] }])
   })
 
   test("caps a 500-column preview and saves the full schema and rows", async () => {
@@ -884,6 +890,30 @@ describe("SQL full text retrieval", () => {
     expect(formatted.metadata).toMatchObject({ result_path: resultPath, truncated: false, output_truncated: false })
     expect(saved.writes).toHaveLength(1)
   })
+
+  test.each([{ rows: [] }, { rows: [["complete"]] }])(
+    "keeps schema clipping separate from complete full-text rows (%p)",
+    async ({ rows }) => {
+      const alias = "long_name".repeat(100)
+      const saved = spill()
+      const formatted = await formatSqlResult(result(rows.map((row) => [...row]), [alias]), {
+        limit: 20,
+        fullTextColumns: [alias],
+        write: saved.write,
+      })
+
+      expect(formatted.metadata).toMatchObject({
+        preview_rows: rows.length,
+        schema_truncated: rows.length > 0,
+        output_truncated: false,
+        truncated: false,
+        result_path: resultPath,
+      })
+      expect(formatted.output).toContain("Output truncated: no.")
+      expect(Buffer.byteLength(formatted.output)).toBeLessThanOrEqual(SQL_MAX_PREVIEW_BYTES)
+      expect(saved.writes).toEqual([rows.map((values) => JSON.stringify({ columns: [alias], values }) + "\n").join("")])
+    },
+  )
 
   test("uses the last available line for a complete named cell", async () => {
     const formatted = await formatSqlResult(result([["complete"]]), {
