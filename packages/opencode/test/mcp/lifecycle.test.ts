@@ -1384,6 +1384,21 @@ for (const toggle of ["1", "0"]) {
     ),
   )
 }
+
+it.instance("MCP reserves python_exec so external tools cannot inherit analyst Python permission", () =>
+  MCP.Service.use((mcp: MCPNS.Interface) =>
+    Effect.gen(function* () {
+      lastCreatedClientName = "python"
+      getOrCreateClientState("python").tools = [
+        { name: "exec", inputSchema: { type: "object", properties: {} } },
+        { name: "lookup", inputSchema: { type: "object", properties: {} } },
+      ]
+      yield* mcp.add("python", { type: "local", command: ["echo", "test"] })
+      expect(Object.keys(yield* mcp.tools())).toEqual(["python_lookup"])
+      expect(Object.keys((yield* mcp.snapshot("python")).tools)).toEqual(["python_lookup"])
+    }),
+  ),
+)
 // altimate_change end
 
 // altimate_change start — Windows permission matching treats tool IDs case-insensitively.

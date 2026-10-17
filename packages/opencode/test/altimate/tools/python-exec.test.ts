@@ -1,5 +1,5 @@
 // altimate_change start — sandboxed analyst Python execution regression coverage
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
@@ -10,12 +10,15 @@ import {
   childEnv,
   clampTimeout,
   clip,
-  networkIsolation,
+  BOOTSTRAP,
+  confinementFor,
   pythonExecAvailable,
+  resetConfinement,
   DEFAULT_TIMEOUT_MS,
   MAX_TIMEOUT_MS,
   WORKSPACE_LIMIT_BYTES,
 } from "../../../src/altimate/tools/python-exec"
+import * as Sandbox from "../../../src/altimate/tools/python-sandbox"
 import { getScratch, closeScratch } from "../../../src/altimate/native/connections/scratch"
 import { initTool } from "../tool-fixture"
 import { tmpdir } from "../../fixture/fixture"
@@ -178,7 +181,7 @@ describe("python_exec", () => {
         ctx,
       )
       expect(result.metadata.ok).toBe(true)
-      expect(result.output).toContain("3")
+      expect(result.output).toMatch(/^3$/m)
       expect(result.output).toContain("scratch.parsed (2 rows)")
       expect(result.output).toContain(result.metadata.network)
       const rows = (await scratch.execute("SELECT id, words FROM parsed ORDER BY id")).rows
@@ -290,7 +293,7 @@ describe("python_exec", () => {
         ctx,
       )
       expect(second.metadata.ok).toBe(false)
-      expect(second.output).toContain("previous_input")
+      expect(second.output).toContain(path.join("in", "previous_input.parquet"))
     },
     15_000,
   )
@@ -346,39 +349,136 @@ describe("python_exec", () => {
   )
 
   e2e(
-    "reports isolation and blocks network access where isolation is available",
+    "reports the confinement mechanism and blocks network access",
     async () => {
-      const isolation = networkIsolation()
       const tool = await initTool(PythonExecTool)
       const code =
-        isolation.network === "isolated"
-          ? "import socket\ntry:\n    socket.create_connection(('1.1.1.1', 53), timeout=1)\n    print('CONNECTED')\nexcept OSError:\n    print('BLOCKED')"
-          : "print('network isolation unavailable')"
+        "import socket\ntry:\n    socket.create_connection(('1.1.1.1', 53), timeout=1)\n    print('CONNECTED')\nexcept OSError:\n    print('BLOCKED')"
       const result = await tool.execute({ code, inputs: [] }, ctx)
       expect(result.metadata.ok).toBe(true)
-      expect(result.metadata.network).toBe(isolation.network)
-      expect(result.output).toContain(isolation.network)
-      if (isolation.network === "isolated") expect(result.output).toContain("BLOCKED")
+      expect(["sandbox-exec", "bwrap", "landlock"]).toContain(result.metadata.filesystem)
+      expect(result.output).toContain(`filesystem ${result.metadata.filesystem}`)
+      expect(result.output).toContain(`network ${result.metadata.network}`)
+      if (result.metadata.network === "isolated") expect(result.output).toContain("BLOCKED")
     },
-    15_000,
+    30_000,
   )
 
   e2e(
-    "confines writes to the session workspace where the OS allows it",
+    "denies reads of host files outside the allowlist",
     async () => {
-      const confined = networkIsolation().prefix[0] === "sandbox-exec"
+      await using elsewhere = await tmpdir()
+      const secret = path.join(elsewhere.path, "host-secret.txt")
+      await fs.writeFile(secret, "host-secret-contents")
+      const targets = [
+        secret,
+        path.join(os.homedir(), ".ssh", "id_rsa"),
+        path.join(os.homedir(), ".ssh"),
+        "/etc/hosts",
+        "/etc/hostname",
+        os.homedir(),
+      ]
+      const tool = await initTool(PythonExecTool)
+      const code = [
+        "import os",
+        `for target in ${JSON.stringify(targets)}:`,
+        "    try:",
+        "        data = os.listdir(target) if os.path.isdir(target) else open(target).read()",
+        "        print('READ', target, str(data)[:40])",
+        "    except OSError:",
+        "        print('DENIED', target)",
+      ].join("\n")
+      const result = await tool.execute({ code, inputs: [] }, ctx)
+      expect(result.metadata.ok).toBe(true)
+      expect(result.output).not.toContain("READ ")
+      expect(result.output).not.toContain("host-secret-contents")
+      for (const target of targets) expect(result.output).toContain(`DENIED ${target}`)
+    },
+    30_000,
+  )
+
+  e2e(
+    "subprocesses inherit the read confinement",
+    async () => {
+      await using elsewhere = await tmpdir()
+      const secret = path.join(elsewhere.path, "subprocess-secret.txt")
+      await fs.writeFile(secret, "subprocess-secret-contents")
+      const tool = await initTool(PythonExecTool)
+      const code = [
+        "import subprocess",
+        "open('mine.txt', 'w').write('workspace-contents')",
+        "print(subprocess.run(['cat', 'mine.txt'], capture_output=True, text=True).stdout)",
+        `outside = subprocess.run(['cat', ${JSON.stringify(secret)}], capture_output=True, text=True)`,
+        "print('CAT_EXIT', outside.returncode, outside.stdout)",
+        `shell = subprocess.run(['/bin/sh', '-c', 'cat ${secret}'], capture_output=True, text=True)`,
+        "print('SH_OUT', shell.stdout)",
+      ].join("\n")
+      const result = await tool.execute({ code, inputs: [] }, ctx)
+      expect(result.metadata.ok).toBe(true)
+      expect(result.output).toContain("workspace-contents")
+      expect(result.output).not.toContain("subprocess-secret-contents")
+      expect(result.output).not.toMatch(/CAT_EXIT 0/)
+    },
+    30_000,
+  )
+
+  e2e(
+    "pandas and duckdb read and write workspace files inside the sandbox",
+    async () => {
+      const tool = await initTool(PythonExecTool)
+      const code = [
+        "import duckdb, pandas as pd",
+        "pd.DataFrame({'k': ['a', 'b', 'a'], 'v': [1, 2, 3]}).to_parquet('frame.parquet')",
+        "print('SUM', duckdb.sql(\"SELECT sum(v) FROM 'frame.parquet' WHERE k = 'a'\").fetchone()[0])",
+        "print('ROWS', len(pd.read_parquet('frame.parquet')))",
+      ].join("\n")
+      const result = await tool.execute({ code, inputs: [] }, ctx)
+      expect(result.metadata.ok).toBe(true)
+      expect(result.output).toContain("SUM 4")
+      expect(result.output).toContain("ROWS 3")
+    },
+    30_000,
+  )
+
+  e2e(
+    "confines writes to the session workspace",
+    async () => {
       const outside = path.join(os.homedir(), `.pyexec-write-probe-${process.pid}`)
       const tool = await initTool(PythonExecTool)
       const code = `import os\ntry:\n    open(${JSON.stringify(outside)}, 'w').write('x')\n    print('WROTE')\nexcept OSError:\n    print('DENIED')\nopen('inside.txt', 'w').write('ok')\nprint('INSIDE_OK')`
       try {
         const result = await tool.execute({ code, inputs: [] }, ctx)
         expect(result.output).toContain("INSIDE_OK")
-        expect(result.output).toContain(confined ? "DENIED" : "WROTE")
+        expect(result.output).toContain("DENIED")
+        await expect(fs.stat(outside)).rejects.toHaveProperty("code", "ENOENT")
       } finally {
         await fs.rm(outside, { force: true })
       }
     },
-    15_000,
+    30_000,
+  )
+
+  e2e(
+    "refuses to run when no confinement mechanism is available",
+    async () => {
+      const detect = spyOn(Sandbox, "detectConfinement").mockResolvedValue({
+        ok: false,
+        reason: "python_exec refused: no enforced filesystem confinement is available (test).",
+      })
+      resetConfinement()
+      try {
+        const tool = await initTool(PythonExecTool)
+        const result = await tool.execute({ code: "open('ran.txt', 'w').write('x')\nprint('UNCONFINED_RUN')" }, ctx)
+        expect(detect).toHaveBeenCalled()
+        expect(result.metadata.ok).toBe(false)
+        expect(result.output).toContain("python_exec refused")
+        expect(result.output).not.toContain("UNCONFINED_RUN")
+      } finally {
+        detect.mockRestore()
+        resetConfinement()
+      }
+    },
+    30_000,
   )
 
   test("rejects input names that are not scratch tables", async () => {
@@ -404,6 +504,226 @@ describe("python_exec", () => {
       expect(result.output).toContain("ValueError: boom")
     },
     15_000,
+  )
+})
+describe("python_exec confinement", () => {
+  // Merged-usr host: /bin, /lib and /lib64 are symlinks into /usr, as is /etc/localtime.
+  const read = {
+    directories: ["/opt/py", "/usr"],
+    files: ["/etc/ld.so.cache"],
+    links: ["/bin", "/etc/localtime", "/lib", "/lib64"],
+  }
+  const symlinks: Record<string, string> = {
+    "/bin": "usr/bin",
+    "/lib": "usr/lib",
+    "/lib64": "usr/lib64",
+    "/etc/localtime": "../usr/share/zoneinfo/UTC",
+  }
+
+  test("bwrap argv binds exactly the allowlist read-only and the session directory writable", () => {
+    const args = Sandbox.bwrapArgs(read, ["/tmp/scratch/python"], "/tmp/scratch/python/workspace", {
+      readlink: (p: string) => symlinks[p],
+    })
+    expect(args).toEqual([
+      "--unshare-all",
+      "--die-with-parent",
+      "--new-session",
+      "--cap-drop",
+      "ALL",
+      "--tmpfs",
+      "/tmp",
+      "--dev",
+      "/dev",
+      "--proc",
+      "/proc",
+      "--ro-bind",
+      "/etc/ld.so.cache",
+      "/etc/ld.so.cache",
+      "--ro-bind",
+      "/opt/py",
+      "/opt/py",
+      "--ro-bind",
+      "/usr",
+      "/usr",
+      "--symlink",
+      "usr/bin",
+      "/bin",
+      "--symlink",
+      "../usr/share/zoneinfo/UTC",
+      "/etc/localtime",
+      "--symlink",
+      "usr/lib",
+      "/lib",
+      "--symlink",
+      "usr/lib64",
+      "/lib64",
+      "--bind",
+      "/tmp/scratch/python",
+      "/tmp/scratch/python",
+      "--chdir",
+      "/tmp/scratch/python/workspace",
+    ])
+    const binds = args.flatMap((arg, i) => (arg === "--bind" || arg === "--ro-bind" ? [args[i + 1]] : []))
+    expect(binds).not.toContain("/")
+    expect(binds).not.toContain(os.homedir())
+  })
+
+  test("the launched bwrap command runs the interpreter after the sandbox arguments", () => {
+    const argv = Sandbox.launch({
+      confinement: {
+        filesystem: "bwrap",
+        network: "isolated",
+        prefix: ["/usr/bin/bwrap"],
+        read: { ...read, links: [] },
+      },
+      write: ["/tmp/scratch/python"],
+      cwd: "/tmp/scratch/python/workspace",
+      python: "/opt/py/bin/python3",
+      args: ["/tmp/scratch/python/call/_bootstrap.py", "cell.py", "/tmp/scratch/python/call"],
+    })
+    expect(argv[0]).toBe("/usr/bin/bwrap")
+    expect(argv.slice(argv.indexOf("--"))).toEqual([
+      "--",
+      "/opt/py/bin/python3",
+      "-I",
+      "/tmp/scratch/python/call/_bootstrap.py",
+      "cell.py",
+      "/tmp/scratch/python/call",
+    ])
+  })
+
+  test("the read allowlist keeps merged-usr symlinks for bwrap and binds their resolved targets", () => {
+    const targets: Record<string, string> = {
+      "/bin": "/usr/bin",
+      "/lib": "/usr/lib",
+      "/lib64": "/usr/lib64",
+      "/etc/localtime": "/usr/share/zoneinfo/UTC",
+    }
+    const exists = new Set(["/usr", "/etc/ld.so.cache", "/etc/ld.so.conf", "/opt/py"])
+    const result = Sandbox.readAllowlist(
+      "linux",
+      { roots: ["/opt/py"], libraries: [] },
+      {
+        home: "/home/u",
+        resolve: (p) => targets[p] ?? (exists.has(p) ? p : undefined),
+        link: (p) => p in targets,
+      },
+    )
+    expect(result).toEqual({
+      ok: true,
+      directories: ["/opt/py", "/usr"],
+      files: ["/etc/ld.so.cache", "/etc/ld.so.conf"],
+      links: ["/bin", "/etc/localtime", "/lib", "/lib64"],
+    })
+  })
+
+  test("the macOS profile denies reads, writes, network and services outside the allowlist", () => {
+    const profile = Sandbox.sandboxProfile({ directories: ["/opt/py"], files: ["/", "/dev/null"], links: [] }, [
+      "/private/tmp/s",
+    ])
+    expect(profile).toContain("(deny network*)")
+    expect(profile).toContain("(deny appleevent-send)")
+    expect(profile).toMatch(/\(deny mach-lookup \(require-not/)
+    expect(profile).toMatch(/\(deny file-read\* \(require-not \(require-any [^\n]*\(subpath "\/opt\/py"\)/)
+    expect(profile).toMatch(/\(deny file-write\* \(require-not \(require-any \(subpath "\/private\/tmp\/s"\)/)
+    expect(profile).not.toContain('(subpath "/")')
+    expect(profile).not.toContain(`(subpath "${os.homedir()}")`)
+  })
+
+  test("the read allowlist rejects interpreter roots that expose the root or home directory", () => {
+    const resolve = (p: string) => p
+    expect(Sandbox.readAllowlist("linux", { roots: ["/home/u"], libraries: [] }, { home: "/home/u", resolve }).ok).toBe(
+      false,
+    )
+    expect(Sandbox.readAllowlist("linux", { roots: ["/"], libraries: [] }, { home: "/home/u", resolve }).ok).toBe(false)
+    expect(
+      Sandbox.readAllowlist(
+        "linux",
+        { roots: ["/opt/py"], libraries: ["/home/u/libx.so"] },
+        { home: "/home/u", resolve },
+      ).ok,
+    ).toBe(false)
+    const ok = Sandbox.readAllowlist(
+      "linux",
+      {
+        roots: ["/opt/py", "/opt/py/lib/python3.12"],
+        libraries: [
+          "/opt/py/lib/libpython.so",
+          "/opt/ssl/lib/libssl.so.3",
+          "/usr/lib/libc.so",
+          "/dev/shm/sem.mp-1",
+          "/srv/data/mapped.bin",
+        ],
+      },
+      { home: "/home/u", resolve },
+    )
+    expect(ok.ok && ok.directories).toEqual(expect.arrayContaining(["/opt/py", "/opt/ssl/lib", "/usr"]))
+    expect(ok.ok && ok.directories).not.toContain("/opt/py/lib/python3.12")
+    expect(ok.ok && ok.directories).not.toContain("/dev/shm")
+    expect(ok.ok && ok.directories).not.toContain("/srv/data")
+  })
+
+  test("unsupported platforms are refused", async () => {
+    for (const platform of ["win32", "freebsd"] as const) {
+      const result = await Sandbox.detectConfinement({
+        python: "python3",
+        bootstrap: BOOTSTRAP,
+        env: childEnv,
+        platform,
+      })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.reason).toContain("never run unconfined")
+    }
+  })
+
+  e2e(
+    "Linux with no working mechanism is refused",
+    async () => {
+      const result = await Sandbox.detectConfinement({
+        python,
+        bootstrap: BOOTSTRAP,
+        env: childEnv,
+        platform: "linux",
+        mechanisms: [],
+      })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.reason).toContain("bubblewrap")
+    },
+    30_000,
+  )
+
+  e2e(
+    "a mechanism that does not actually confine reads fails the self-test and is refused",
+    async () => {
+      await using bin = await tmpdir()
+      // A fake bwrap that discards the sandbox arguments and runs the interpreter unconfined.
+      const fake = path.join(bin.path, "bwrap")
+      await fs.writeFile(fake, '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n', { mode: 0o755 })
+      const result = await Sandbox.detectConfinement({
+        python,
+        bootstrap: BOOTSTRAP,
+        env: childEnv,
+        platform: "linux",
+        mechanisms: [{ filesystem: "bwrap", network: "isolated", prefix: [fake] }],
+      })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.reason).toContain("Self-test")
+    },
+    30_000,
+  )
+
+  e2e(
+    "the host mechanism passes its self-test",
+    async () => {
+      resetConfinement()
+      const result = await confinementFor(python)
+      expect(result.ok).toBe(true)
+      if (result.ok)
+        expect(result.confinement.filesystem).toBe(
+          process.platform === "darwin" ? "sandbox-exec" : result.confinement.filesystem,
+        )
+    },
+    30_000,
   )
 })
 // altimate_change end

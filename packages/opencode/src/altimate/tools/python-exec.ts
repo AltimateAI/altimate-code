@@ -4,17 +4,19 @@
  * Python never receives warehouse connections or credentials: inputs are scratch tables
  * exported to Parquet in a session-private working directory, and DataFrames saved by the
  * code are imported back into scratch. The child gets a minimal environment, a memory
- * limit, a deadline, and no network where the platform can enforce it (Linux network
- * namespace via `unshare`, macOS `sandbox-exec`).
+ * limit, a deadline, and OS confinement (see `python-sandbox.ts`): reads are limited to the
+ * session directory, the interpreter installation and required system files, writes to the
+ * session directory, and network is blocked. Without an enforced mechanism the tool refuses.
  */
 import z from "zod"
-import { spawn, spawnSync } from "node:child_process"
+import { spawn } from "node:child_process"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as os from "node:os"
 import { Tool } from "../../tool/tool"
 import { withScratchConnection } from "../native/connections/scratch"
 import { quoteIdent } from "./sql-materialize"
+import * as Sandbox from "./python-sandbox"
 
 export const DEFAULT_TIMEOUT_MS = 120_000
 export const MAX_TIMEOUT_MS = 600_000
@@ -52,7 +54,7 @@ def save(df, name):
         con.execute("COPY _frame TO ? (FORMAT parquet)", [file])
 `
 
-const BOOTSTRAP = `import os, resource, runpy, sys, threading, time
+export const BOOTSTRAP = `import os, resource, runpy, sys, threading, time
 def limit(kind):
     soft, hard = resource.getrlimit(kind)
     ceiling = ${MEMORY_LIMIT_BYTES}
@@ -91,46 +93,32 @@ sys.argv = [sys.argv[1]]
 runpy.run_path(sys.argv[0], run_name="__main__")
 `
 
-export type Isolation = { prefix: string[]; network: "isolated" | "not isolated" }
-
-let isolation: Isolation | undefined
-
-/** Pick the strongest available no-network wrapper once per process. */
-export function networkIsolation(): Isolation {
-  if (isolation) return isolation
-  const works = (cmd: string[]) => {
-    try {
-      return spawnSync(cmd[0], [...cmd.slice(1), "true"], { stdio: "ignore", timeout: 5000 }).status === 0
-    } catch {
-      return false
-    }
-  }
-  const candidates: string[][] =
-    process.platform === "linux"
-      ? [
-          ["unshare", "--net"],
-          ["unshare", "--user", "--map-root-user", "--net"],
-        ]
-      : process.platform === "darwin"
-        ? [["sandbox-exec", "-p", "(version 1)(allow default)(deny network*)"]]
-        : []
-  const found = candidates.find(works)
-  isolation = found ? { prefix: found, network: "isolated" } : { prefix: [], network: "not isolated" }
-  return isolation
-}
+let confinement: { python: string; result: Promise<Sandbox.Detection> } | undefined
 
 /**
- * On macOS, also confine writes to the session's Python directory (plus the null/tty devices),
- * so a cell cannot modify the user's files. Reads stay unrestricted. Linux relies on the
- * network namespace only.
+ * Detect and self-test the confinement mechanism once per interpreter and process. A refusal is
+ * not cached, so a transient failure (a slow first import) does not disable the tool until restart.
  */
-export function confineWrites(iso: Isolation, writeRoot: string): string[] {
-  if (iso.prefix[0] !== "sandbox-exec") return iso.prefix
-  const root = writeRoot.replaceAll("\\", "\\\\").replaceAll('"', '\\"')
-  const profile =
-    "(version 1)(allow default)(deny network*)" +
-    `(deny file-write* (require-not (require-any (subpath "${root}") (literal "/dev/null") (literal "/dev/dtracehelper") (regex #"^/dev/tty"))))`
-  return ["sandbox-exec", "-p", profile]
+export function confinementFor(python: string): Promise<Sandbox.Detection> {
+  if (confinement?.python === python) return confinement.result
+  const result = Sandbox.detectConfinement({ python, bootstrap: BOOTSTRAP, env: childEnv })
+    .catch(
+      (error): Sandbox.Detection => ({
+        ok: false,
+        reason: `python_exec refused: confinement detection failed (${error instanceof Error ? error.message : String(error)}).`,
+      }),
+    )
+    .then((detection) => {
+      if (!detection.ok && confinement?.result === result) confinement = undefined
+      return detection
+    })
+  confinement = { python, result }
+  return result
+}
+
+/** Forget the cached detection (tests). */
+export function resetConfinement() {
+  confinement = undefined
 }
 
 let discovery: { key: string; result: Promise<string | undefined> } | undefined
@@ -145,22 +133,23 @@ export function interpreter(): Promise<string | undefined> {
     try {
       // Only locating Python uses the host HOME/PATH, so pyenv/asdf shims can resolve.
       // Never inherit credentials, and never run analyst code in this probe.
-      const resolve = spawnSync(Bun.which(name) ?? name, ["-I", "-c", "import sys; print(sys.executable)"], {
-        env: {
-          ...childEnv(directory),
-          HOME: os.homedir(),
-          PATH: process.env.PATH ?? "/usr/bin:/bin",
-          ...(process.env.PYENV_ROOT ? { PYENV_ROOT: process.env.PYENV_ROOT } : {}),
+      const resolve = await Sandbox.execute(
+        [Bun.which(name) ?? name, "-I", "-c", "import sys; print(sys.executable)"],
+        {
+          env: {
+            ...childEnv(directory),
+            HOME: os.homedir(),
+            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            ...(process.env.PYENV_ROOT ? { PYENV_ROOT: process.env.PYENV_ROOT } : {}),
+          },
+          timeout: 5000,
         },
-        encoding: "utf8",
-        timeout: 5000,
-      })
+      )
       const executable = resolve.status === 0 ? resolve.stdout.trim() : ""
       if (!executable || !path.isAbsolute(executable)) return
-      const probe = spawnSync(executable, ["-I", "-c", "import pandas, duckdb"], {
+      const probe = await Sandbox.execute([executable, "-I", "-c", "import pandas, duckdb"], {
         cwd: directory,
         env: childEnv(directory),
-        stdio: "ignore",
         timeout: 10000,
       })
       return probe.status === 0 ? executable : undefined
@@ -309,7 +298,9 @@ function run(
 export const PythonExecTool = Tool.define("python_exec", {
   description:
     "Run Python for non-SQL computation over scratch data; no warehouse connections or inherited credentials. " +
-    "Network access is blocked where supported; the result reports isolation. Materialize source data to scratch first. " +
+    "Runs in an OS sandbox: it can read only its working directory and the Python installation, write only its working directory, " +
+    "and has no network; the result reports the confinement used. It refuses to run where the host cannot enforce this. " +
+    "Materialize source data to scratch first. " +
     "List scratch tables in inputs, then `from altimate_io import load, save, workspace`: " +
     "`load('table')` returns a pandas DataFrame; `save(df, 'name')` replaces that scratch table after a successful call. " +
     "The working directory (also `workspace`) is a size-capped, session-private path: files persist across calls " +
@@ -334,8 +325,10 @@ export const PythonExecTool = Tool.define("python_exec", {
     await ctx.ask({ permission: "python_exec", patterns: ["*"], always: ["*"], metadata: {} })
     const python = await interpreter()
     if (!python) return failure("python_exec unavailable: no Python with pandas and duckdb was discovered.")
+    const detected = await confinementFor(python)
+    if (!detected.ok) return failure(detected.reason)
+    const sandbox = detected.confinement
     const timeoutMs = clampTimeout(args.timeout_ms)
-    const iso = networkIsolation()
     try {
       // Hold the session's scratch lock through execution and import. Concurrent cells
       // (including subagent calls sharing a root) cannot race the persistent workspace.
@@ -380,7 +373,13 @@ export const PythonExecTool = Tool.define("python_exec", {
           }
           const started = Date.now()
           const result = await run(
-            [...confineWrites(iso, await fs.realpath(privateDirectory)), python, "-I", path.join(callDirectory, "_bootstrap.py"), cell, callDirectory],
+            Sandbox.launch({
+              confinement: sandbox,
+              write: [await fs.realpath(privateDirectory)],
+              cwd: workspace,
+              python,
+              args: [path.join(callDirectory, "_bootstrap.py"), cell, callDirectory],
+            }),
             workspace,
             { ...childEnv(workspace), TMPDIR: path.join(callDirectory, "tmp") },
             timeoutMs,
@@ -437,7 +436,7 @@ export const PythonExecTool = Tool.define("python_exec", {
           const stderr = clip(result.stderr, OUTPUT_LIMIT / 3)
           const parts = [
             `Python ${status}.`,
-            `Isolation: network ${iso.network}; minimal environment; reads are not OS-isolated${iso.prefix[0] === "sandbox-exec" ? "; writes are confined to the workspace" : "; writes are not OS-confined"}.`,
+            `Isolation: filesystem ${sandbox.filesystem} (reads limited to the workspace and Python installation; writes to the workspace); network ${sandbox.network}; minimal environment.`,
             `Workspace: ${workspace}`,
           ]
           if (result.workspaceError) parts.push(`${result.workspaceError} Workspace cleared; retry with smaller files.`)
@@ -453,7 +452,8 @@ export const PythonExecTool = Tool.define("python_exec", {
               exitCode: result.code,
               timedOut: result.timedOut,
               elapsedMs: elapsed,
-              network: iso.network,
+              filesystem: sandbox.filesystem,
+              network: sandbox.network,
               workspace,
               workspaceError: result.workspaceError,
               imported,
