@@ -104,4 +104,20 @@ describe("Gemini tool JSON schemas", () => {
     expect(result.properties.blank).toEqual({ type: "string" })
     expect(result.properties.mode.enum).toEqual(["fast", "slow"])
   })
+
+  test("keeps an untyped node a string when its empty const or enum is dropped", () => {
+    const result = ProviderTransform.schema(model(ProviderID.googleVertex), {
+      type: "object",
+      properties: {
+        constOnly: { anyOf: [{ const: "" }, { type: "number" }] },
+        enumOnly: { enum: [""] },
+        nullable: { type: ["string", "null"], const: "" },
+        emptyEnum: { type: "string", enum: [] },
+      },
+    } as any) as any
+    expect(result.properties.constOnly.anyOf[0]).toEqual({ type: "string" })
+    expect(result.properties.enumOnly).toEqual({ type: "string" })
+    expect(result.properties.nullable).toEqual({ anyOf: [{ type: "string" }], nullable: true })
+    expect(result.properties.emptyEnum.enum).toEqual([])
+  })
 })

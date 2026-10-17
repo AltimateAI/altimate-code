@@ -1612,11 +1612,20 @@ export namespace ProviderTransform {
         }
 
         const result: any = {}
+        // altimate_change start — track dropped empty literals so an untyped node stays a string
+        let droppedEmptyLiteral = false
+        // altimate_change end
         for (const [key, value] of Object.entries(obj)) {
           // altimate_change start — Gemini rejects empty-string enum/const values ("cannot be empty");
           // drop them and keep the branch's type. Tool arguments are still validated by Zod at runtime.
-          if (key === "const" && value === "") continue
-          if (key === "enum" && Array.isArray(value) && value.every((v) => String(v) === "")) continue
+          if (key === "const" && value === "") {
+            droppedEmptyLiteral = true
+            continue
+          }
+          if (key === "enum" && Array.isArray(value) && value.length > 0 && value.every((v) => String(v) === "")) {
+            droppedEmptyLiteral = true
+            continue
+          }
           // altimate_change end
           if (key === "enum" && Array.isArray(value)) {
             // Convert all enum values to strings
@@ -1633,6 +1642,10 @@ export namespace ProviderTransform {
             result[key] = value
           }
         }
+
+        // altimate_change start — an untyped node that lost its empty literal would become `{}` (any value)
+        if (droppedEmptyLiteral && result.type === undefined) result.type = "string"
+        // altimate_change end
 
         // altimate_change start — Gemini requires a single type; split JSON Schema type arrays
         if (Array.isArray(result.type)) {
