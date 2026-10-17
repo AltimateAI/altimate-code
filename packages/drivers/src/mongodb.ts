@@ -389,6 +389,46 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     return JSON.stringify(val)
   }
 
+  /**
+   * Raw documents for value profiling. `maxTimeMS` is the smaller of the caller's cap and the
+   * connection's query timeout; `signal` abandons the read and closes the cursor.
+   */
+  async function sampleDocuments(
+    schema: string,
+    table: string,
+    limit = 100,
+    options: { signal?: AbortSignal; maxTimeMS?: number } = {},
+  ): Promise<Record<string, unknown>[]> {
+    options.signal?.throwIfAborted()
+    const configured = resolveQueryTimeout(config).ms
+    const maxTimeMS =
+      options.maxTimeMS === undefined ? configured : configured === undefined ? options.maxTimeMS : Math.min(configured, options.maxTimeMS)
+    const { signal } = options
+    // The driver (6.x) cancels the operation on `signal`; the race below also covers fakes and older drivers.
+    const cursor = client
+      .db(schema)
+      .collection(table)
+      .find({}, { ...withMaxTime(maxTimeMS), ...(signal ? { signal } : {}) })
+      .limit(limit)
+    if (!signal) return cursor.toArray()
+    let abort: (() => void) | undefined
+    const aborted = new Promise<never>((_, reject) => {
+      abort = () => {
+        void Promise.resolve(cursor.close?.()).catch(() => {})
+        reject(signal.reason)
+      }
+      signal.addEventListener("abort", abort, { once: true })
+    })
+    // A read that rejects after the abort won the race must not surface as an unhandled rejection.
+    const read: Promise<Record<string, unknown>[]> = cursor.toArray()
+    read.catch(() => {})
+    try {
+      return await Promise.race([read, aborted])
+    } finally {
+      signal.removeEventListener("abort", abort!)
+    }
+  }
+
   const connector: Connector & {
     // altimate_change start
     runCommand(
@@ -909,6 +949,8 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }))
         .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name))
     },
+
+    sampleDocuments,
 
     async describeTable(schema: string, table: string): Promise<SchemaColumn[]> {
       const db = client.db(schema)

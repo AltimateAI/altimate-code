@@ -871,6 +871,42 @@ describe.skipIf(!DOCKER && !MONGODB_USE_CI)("MongoDB Driver E2E", () => {
       )
     })
 
+    test("sampleDocuments + profileDocuments — nested fields and values; describeTable stays top-level", async () => {
+      const { profileDocuments } = await import("../../src/altimate/tools/schema-values")
+      await connector.execute(cmd({ command: "createCollection", database: "testdb", name: "nested_profile" }))
+      await connector.execute(
+        cmd({
+          command: "insertMany",
+          database: "testdb",
+          collection: "nested_profile",
+          documents: [
+            { status: "open", address: { city: "Oslo" }, items: [{ sku: "S1" }, { sku: "S2" }] },
+            { status: "open", address: { city: "Rome" }, items: [{ sku: "S1" }] },
+            { status: "closed", address: { city: "Oslo" }, items: [] },
+          ],
+        }),
+      )
+      try {
+        const columns = await connector.describeTable("testdb", "nested_profile")
+        expect(columns.map((c) => [c.name, c.data_type])).toEqual([
+          ["_id", "objectId"],
+          ["address", "object"],
+          ["items", "array"],
+          ["status", "string"],
+        ])
+        const docs = await connector.sampleDocuments!("testdb", "nested_profile", 100, { maxTimeMS: 15_000 })
+        expect(docs).toHaveLength(3)
+        const out = profileDocuments(docs)
+        expect(out).toContain("Nested fields (sampled 3 docs):\naddress.city: string\nitems.sku: string (array element, in 67% of docs)")
+        expect(out).toContain("status: 2 distinct — open (2), closed (1)")
+        expect(out).toContain("address.city: 2 distinct — Oslo (2), Rome (1)")
+        expect(out).toContain("items.sku: 2 distinct — S1 (2), S2 (1)")
+        expect(out).toContain("_id: 3 distinct, unique in sample")
+      } finally {
+        await connector.execute(cmd({ command: "dropCollection", database: "testdb", collection: "nested_profile" }))
+      }
+    })
+
     test("describeTable — mixed-type fields show union type", async () => {
       await connector.execute(
         cmd({

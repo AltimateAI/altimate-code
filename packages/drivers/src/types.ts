@@ -135,6 +135,13 @@ export interface Connector {
   listSchemas(): Promise<string[]>
   listTables(schema: string): Promise<Array<{ name: string; type: string }>>
   describeTable(schema: string, table: string): Promise<SchemaColumn[]>
+  /** Document stores only: raw documents, bounded by `maxTimeMS` and cancellable through `signal`. */
+  sampleDocuments?(
+    schema: string,
+    table: string,
+    limit?: number,
+    options?: { signal?: AbortSignal; maxTimeMS?: number },
+  ): Promise<Record<string, unknown>[]>
   introspectSchema?(signal?: AbortSignal): Promise<SchemaMetadata>
   close(): Promise<void>
 }

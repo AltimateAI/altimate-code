@@ -75,4 +75,42 @@ describe("schema_inspect MongoDB collections", () => {
     expect(result.output).toContain('Collection "empty" has no documents to infer a schema')
     expect(result.output).not.toContain("was not found")
   })
+
+  test("profiles one document sample, lists nested fields, and bounds the read", async () => {
+    const connector = configure("records")
+    const docs = Array.from({ length: 10 }, (_, i) => ({
+      id: `e${i}`,
+      status: i < 7 ? "open" : "closed",
+      meta: { source: i % 2 ? "web" : "api" },
+      items: [{ sku: "S1" }],
+    }))
+    const sample = mock(async (..._args: unknown[]) => docs)
+    Object.assign(connector, { sampleDocuments: sample })
+    const abort = new AbortController()
+    const tool = await initTool(SchemaInspectTool)
+    const result = await tool.execute({ warehouse: "documents", table: "records.events" }, { ...ctx, abort: abort.signal })
+    expect(result.metadata.success).toBe(true)
+    expect(result.output).not.toContain("skipped")
+    expect(result.output).toContain("Nested fields (sampled 10 docs):\nitems.sku: string (array element)\nmeta.source: string")
+    expect(result.output).toContain("id: 10 distinct, unique in sample — e0, e1")
+    expect(result.output).toContain("status: 2 distinct — open (7), closed (3)")
+    expect(result.output).toContain("meta.source: 2 distinct — api (5), web (5)")
+    expect(result.output).not.toContain("\nmeta:")
+    expect(sample.mock.calls).toHaveLength(1)
+    const [schema, table, limit, options] = sample.mock.calls[0] as unknown as [string, string, number, { signal: AbortSignal; maxTimeMS: number }]
+    expect([schema, table, limit, options.maxTimeMS]).toEqual(["records", "events", 100, 15_000])
+    expect(options.signal.aborted).toBe(false)
+    abort.abort()
+    expect(options.signal.aborted).toBe(true)
+  })
+
+  test("a failing document sample keeps the schema", async () => {
+    const connector = configure("records")
+    Object.assign(connector, { sampleDocuments: mock(async () => { throw new Error("not authorized") }) })
+    const tool = await initTool(SchemaInspectTool)
+    const result = await tool.execute({ warehouse: "documents", table: "records.events" }, ctx)
+    expect(result.metadata.success).toBe(true)
+    expect(result.output).toContain("id | STRING")
+    expect(result.output).toContain("Value samples unavailable: not authorized")
+  })
 })
