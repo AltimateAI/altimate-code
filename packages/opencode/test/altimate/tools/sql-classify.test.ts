@@ -362,3 +362,11 @@ describe("SQL-building aggregates are reads", () => {
 test.each(["postgres_execute", "mysql_execute"])("a SELECT calling %s is classified as a write", (fn) => {
   expect(classify(`SELECT * FROM ${fn}('remote', 'DELETE FROM orders')`, "duckdb")).toBe("write")
 })
+
+test("a quoted remote-execute function name is still classified as a write", () => {
+  expect(classify(`SELECT * FROM "postgres_execute"('remote', 'DELETE FROM orders')`, "duckdb")).toBe("write")
+})
+
+test("duckdb line comments end at CR so a following DROP is blocked", () => {
+  expect(classifyAndCheck("SELECT 1 -- x\r; DROP SCHEMA s", "duckdb").blocked).toBe(true)
+})

@@ -21,7 +21,7 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
       kind = "comment"
       // PostgreSQL also ends line comments at CR. Keep following code visible
       // when the dialect is unknown; other dialects retain their LF handling.
-      const newline = !dialect || /^postgres$/i.test(dialect) ? /[\r\n]/ : /\n/
+      const newline = !dialect || /^(postgres|duckdb)$/i.test(dialect) ? /[\r\n]/ : /\n/
       const end = sql.slice(i + 2).search(newline)
       i = end < 0 ? sql.length : i + 2 + end
     } else if (sql.startsWith("/*", i)) {

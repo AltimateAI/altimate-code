@@ -198,7 +198,7 @@ export function classifyAndCheck(sql: string, dialect?: string): {
 
     // DuckDB scanner functions run their statement on the attached remote database, outside any local
     // read-only transaction, so a SELECT calling them is a write.
-    const remoteExecute = REMOTE_EXECUTE_CALL.test(maskSql(tokenizeSql(sql, dialect).tokens))
+    const remoteExecute = REMOTE_EXECUTE_CALL.test(maskSql(tokenizeSql(sql, dialect).tokens, true))
     return {
       queryType: !remoteExecute && otherIsReadOnly(sql, result.statements, dialect) ? "read" : "write",
       blocked,
