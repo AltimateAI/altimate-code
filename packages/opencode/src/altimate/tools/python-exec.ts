@@ -6,7 +6,9 @@
  * code are imported back into scratch. The child gets a minimal environment, a memory
  * limit, a deadline, and OS confinement (see `python-sandbox.ts`): reads are limited to the
  * session directory, the interpreter installation and required system files, writes to the
- * session directory, and network is blocked. Without an enforced mechanism the tool refuses.
+ * session directory, network is blocked, host process environments are unreadable, and child
+ * processes are denied (macOS) or confined to a PID namespace that dies with the sandbox (Linux).
+ * Without an enforced mechanism the tool refuses.
  */
 import z from "zod"
 import { execFile, spawn } from "node:child_process"
@@ -222,7 +224,11 @@ async function workspaceSize(directory: string): Promise<number> {
 /** How long output may keep draining after the sandbox is killed before the pipes are closed. */
 const PIPE_GRACE_MS = 300
 
-/** Descendant sweep period (macOS only); kept coarse so `ps` never competes with the event loop. */
+/**
+ * Descendant sweep period (macOS only); kept coarse so `ps` never competes with the event loop.
+ * The sandbox profile denies fork there, so the sweep is a second line of defence: a polling sweep
+ * alone cannot see a double-forked `setsid` grandchild whose parent exits between snapshots.
+ */
 const TRACK_INTERVAL_MS = 500
 
 type RunResult = {
@@ -474,6 +480,7 @@ export const PythonExecTool = Tool.define("python_exec", {
     "The working directory (also `workspace`) is a size-capped, session-private path: files persist across calls " +
     "and are deleted with the session; exceeding the cap clears the workspace. " +
     "Each call starts a fresh process with pandas and duckdb available. " +
+    "On macOS the sandbox blocks child processes (subprocess, multiprocessing, os.fork); use in-process libraries. " +
     "Print results to see them; long output is clipped. Omit timeout_ms to use the configured default.",
   parameters: z.object({
     code: z.string().describe("Python source to run"),

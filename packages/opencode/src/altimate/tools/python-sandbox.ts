@@ -2,22 +2,30 @@
  * OS confinement for `python_exec`.
  *
  * Analyst Python may read only its session directory, the interpreter installation and
- * the system files an interpreter needs; it may write only its session directory.
- * Subprocesses inherit the same confinement. Where no enforced mechanism exists the tool
- * refuses to run instead of running unconfined.
+ * the system files an interpreter needs; it may write only its session directory, and it may
+ * not read the arguments or environment of host processes. Where no enforced mechanism exists
+ * the tool refuses to run instead of running unconfined.
  *
  * - macOS: `sandbox-exec` profile that denies file reads and writes outside the allowlist,
- *   signals to processes other than itself and its children, network, Apple Events and Mach services outside a small allowlist (LaunchServices could
- *   otherwise start unconfined helper processes).
- * - Linux: `bwrap` with every namespace unshared and only the allowlist mounted. Without a
- *   working `bwrap` the tool refuses. Landlock alone is not used: it does not mediate
- *   `connect()` to pathname Unix sockets (Docker, D-Bus, SSH agent), which can reach host files.
+ *   child processes (a double-forked, `setsid` grandchild could otherwise detach before any
+ *   cleanup sees it), inspection of and signals to other processes, network, Apple Events and
+ *   Mach services outside a small allowlist (LaunchServices could otherwise start unconfined
+ *   helper processes). Seatbelt does not mediate the `KERN_PROCARGS2` sysctl, which returns
+ *   the environment of any same-user process, so the self-test refuses this mechanism wherever
+ *   that sysctl reaches a host process.
+ * - Linux: `bwrap` with every namespace unshared (a fresh PID namespace whose members all die
+ *   with the sandbox, and a private `/proc`) and only the allowlist mounted. Subprocesses
+ *   inherit the confinement. Without a working `bwrap` the tool refuses. Landlock alone is not
+ *   used: it does not mediate `connect()` to pathname Unix sockets (Docker, D-Bus, SSH agent),
+ *   which can reach host files.
  * - Other platforms: refused.
  *
- * Every mechanism must pass a self-test (a sandboxed interpreter and a subprocess fail to read
- * a canary file outside the allowlist) before it is used.
+ * Every mechanism must pass a self-test before it is used: the sandboxed interpreter (and, on
+ * Linux, a subprocess) fails to read a canary file outside the allowlist, fails to read the
+ * environment of a canary host process, and, on macOS, fails to start any child process.
  */
 import { spawn } from "node:child_process"
+import { randomUUID } from "node:crypto"
 import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
@@ -200,7 +208,12 @@ function ancestors(p: string): string[] {
   }
 }
 
-/** macOS Seatbelt profile: allow-default, then deny reads, writes, network, IPC and signals outside the allowlist. */
+/**
+ * macOS Seatbelt profile: allow-default, then deny reads, writes, network, IPC, child processes,
+ * and inspection of or signals to other processes. Deny-default is not used: it adds no protection
+ * for `KERN_PROCARGS2` (no Seatbelt operation mediates it) and would need a hand-maintained list of
+ * every sysctl, IOKit and Mach operation that pandas, NumPy and DuckDB touch on each macOS release.
+ */
 export function sandboxProfile(read: ReadAllowlist, write: string[]): string {
   const readable = [
     ...read.directories.map((d) => `(subpath ${quote(d)})`),
@@ -223,9 +236,15 @@ export function sandboxProfile(read: ReadAllowlist, write: string[]): string {
     "(allow default)",
     "(deny network*)",
     "(deny appleevent-send)",
-    // Signals reach only the process itself and its own children, never the agent or any other host process.
+    // No fork or posix_spawn: a child could setsid and be re-parented to launchd before any
+    // descendant sweep sees it, keeping workspace write access after the deadline.
+    "(deny process-fork)",
+    // proc_info (paths, open files, pid lists) only for the process itself.
+    "(deny process-info*)",
+    "(allow process-info* (target self))",
+    // Signals reach only the process itself, never the agent or any other host process.
     "(deny signal)",
-    "(allow signal (target self) (target children))",
+    "(allow signal (target self))",
     `(deny mach-lookup (require-not (require-any ${MACH_SERVICES.map((s) => `(global-name ${quote(s)})`).join(" ")})))`,
     `(deny file-read* (require-not (require-any ${readable.join(" ")})))`,
     `(allow file-read-metadata ${metadata.join(" ")})`,
@@ -297,7 +316,8 @@ export function launch(input: {
   return [...confinement.prefix, ...bwrapArgs(confinement.read, write, cwd), "--", python, "-I", ...args]
 }
 
-async function interpreterPaths(python: string, cwd: string, env: Record<string, string>) {
+/** Installation roots and loaded native libraries of `python`, used to build its read allowlist. */
+export async function interpreterPaths(python: string, cwd: string, env: Record<string, string>) {
   const result = await execute([python, "-I", "-c", PROBE], { cwd, env, timeout: 20_000 })
   if (result.status !== 0) return undefined
   try {
@@ -319,6 +339,72 @@ function candidates(platform: NodeJS.Platform): Omit<Confinement, "read">[] {
 }
 
 const REFUSAL_TAIL = "Python is never run unconfined."
+
+/** Environment variable carried only by the self-test's host canary process. */
+const ENVIRON_CANARY = "ALTIMATE_PYTHON_SELFTEST_CANARY"
+
+/**
+ * Python defining `host_environ(pid)`: the initial argv and environment of another process as raw
+ * bytes (empty when denied). macOS uses the `KERN_PROCARGS2`/`KERN_PROCARGS` sysctls, Linux `/proc`.
+ */
+export const READ_HOST_ENVIRON = `def host_environ(pid):
+    import ctypes, sys
+    if sys.platform == "darwin":
+        libc = ctypes.CDLL(None, use_errno=True)
+        out = b""
+        for node in (49, 38):  # KERN_PROCARGS2, KERN_PROCARGS
+            mib = (ctypes.c_int * 3)(1, node, pid)
+            size = ctypes.c_size_t(0)
+            if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0:
+                continue
+            buf = ctypes.create_string_buffer(size.value)
+            if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) == 0:
+                out += buf.raw[: size.value]
+        return out
+    try:
+        with open("/proc/%d/environ" % pid, "rb") as f:
+            return f.read()
+    except OSError:
+        return b""
+`
+
+/** Self-test findings that reject a mechanism, keyed by the token the self-test prints. */
+const FINDINGS: Record<string, string> = {
+  PYTHON_LEAK: "sandboxed Python read a file outside the allowlist",
+  SUBPROCESS_LEAK: "a sandboxed subprocess read a file outside the allowlist",
+  CHILDREN_ALLOWED: "sandboxed Python started a child process, which could detach and outlive the call",
+  ENVIRON_LEAK: "sandboxed Python read the environment of another process run by this user",
+}
+/** Why the macOS environment check fails: no Seatbelt operation mediates this sysctl. */
+const PROCARGS_NOTE = " (sandbox-exec cannot block the KERN_PROCARGS2 sysctl on this macOS version)"
+
+/**
+ * Start a host process whose environment alone carries `marker`, and resolve once it is running.
+ * It runs the analyst interpreter rather than a system binary: macOS already hides the environment
+ * of Apple platform binaries, which would make the check vacuous while the agent's stays readable.
+ */
+function startEnvironCanary(python: string, marker: string) {
+  const child = spawn(python, ["-I", "-c", "import time; print('ready', flush=True); time.sleep(300)"], {
+    env: { PATH: "/usr/bin:/bin", [ENVIRON_CANARY]: marker },
+    stdio: ["ignore", "pipe", "ignore"],
+  })
+  const ready = new Promise<boolean>((resolve) => {
+    const timer = setTimeout(() => resolve(false), 10_000)
+    child.stdout.once("data", () => {
+      clearTimeout(timer)
+      resolve(true)
+    })
+    child.once("error", () => {
+      clearTimeout(timer)
+      resolve(false)
+    })
+    child.once("exit", () => {
+      clearTimeout(timer)
+      resolve(false)
+    })
+  })
+  return { child, ready }
+}
 
 /** True when the kernel blocks unprivileged user namespaces through AppArmor (Ubuntu 23.10+ default). */
 function appArmorRestrictsUserNamespaces(): boolean {
@@ -383,8 +469,10 @@ export function unsupported(
 
 /**
  * Pick the strongest working mechanism. A mechanism is accepted only if the sandboxed
- * interpreter can import pandas and duckdb and read its own directory, while both Python and a
- * `cat` subprocess fail to read a canary file outside the allowlist.
+ * interpreter can import pandas, NumPy and DuckDB and read its own directory, while it fails to
+ * read a canary file outside the allowlist and the environment of a canary host process. On
+ * macOS it must also fail to fork or spawn; on Linux a `cat` subprocess must fail to read the
+ * canary file.
  */
 export async function detectConfinement(input: {
   python: string
@@ -416,6 +504,7 @@ export async function detectConfinement(input: {
     }
   const work = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), "altimate-python-sandbox-")))
   let canaryDirs: string[] = []
+  let environCanary: ReturnType<typeof startEnvironCanary> | undefined
   try {
     const paths = await interpreterPaths(input.python, work, input.env(work))
     if (!paths)
@@ -430,34 +519,79 @@ export async function detectConfinement(input: {
     canaryDirs = canaries.dirs
     if (!canaries.files.length)
       return { ok: false, reason: `python_exec refused: could not create a self-test canary outside the sandbox allowlist. ${REFUSAL_TAIL}` }
+    // A host process whose environment carries a marker: sandboxed code must not be able to read it.
+    const marker = randomUUID()
+    environCanary = startEnvironCanary(input.python, marker)
+    const host = environCanary.child.pid
+    // Without an unconfined read of the marker the environment check below would prove nothing.
+    const observed =
+      host !== undefined &&
+      (await environCanary.ready) &&
+      (
+        await execute(
+          [
+            input.python,
+            "-I",
+            "-c",
+            `${READ_HOST_ENVIRON}\nprint("VISIBLE" if ${JSON.stringify(marker)}.encode() in host_environ(${host}) else "HIDDEN")`,
+          ],
+          { cwd: work, env: input.env(work), timeout: 20_000 },
+        )
+      ).stdout.includes("VISIBLE")
+    if (!observed)
+      return {
+        ok: false,
+        reason: `python_exec refused: could not start a self-test process whose environment is observable outside the sandbox. ${REFUSAL_TAIL}`,
+      }
     const inside = path.join(work, "inside.txt")
     await fs.writeFile(inside, "inside")
     await fs.mkdir(path.join(work, "tmp"))
-    const cell = path.join(work, "selftest.py")
-    await fs.writeFile(
-      cell,
-      [
-        "import duckdb, pandas, subprocess",
-        `assert open(${JSON.stringify(inside)}).read() == "inside"`,
-        `assert subprocess.run(["cat", ${JSON.stringify(inside)}], capture_output=True).stdout == b"inside"`,
-        "py_ok = sub_ok = True",
-        `for canary in ${JSON.stringify(canaries.files)}:`,
-        "    try:",
-        "        open(canary).read()",
-        "        py_ok = False",
-        "    except OSError:",
-        "        pass",
-        '    result = subprocess.run(["cat", canary], capture_output=True)',
-        "    if result.returncode == 0 or b'outside' in result.stdout:",
-        "        sub_ok = False",
-        "print('PYTHON_CONFINED' if py_ok else 'PYTHON_LEAK')",
-        "print('SUBPROCESS_CONFINED' if sub_ok else 'SUBPROCESS_LEAK')",
-      ].join("\n"),
-    )
     const bootstrap = path.join(work, "_bootstrap.py")
     await fs.writeFile(bootstrap, input.bootstrap)
     const failures: string[] = []
     for (const option of options) {
+      // sandbox-exec must deny every child process; bwrap's PID namespace confines and reaps them.
+      const denyChildren = option.filesystem === "sandbox-exec"
+      const cell = path.join(work, `selftest-${option.filesystem}.py`)
+      await fs.writeFile(
+        cell,
+        [
+          "import duckdb, numpy, os, pandas, subprocess",
+          READ_HOST_ENVIRON,
+          `assert open(${JSON.stringify(inside)}).read() == "inside"`,
+          "py_ok = True",
+          `for canary in ${JSON.stringify(canaries.files)}:`,
+          "    try:",
+          "        open(canary).read()",
+          "        py_ok = False",
+          "    except OSError:",
+          "        pass",
+          "print('PYTHON_CONFINED' if py_ok else 'PYTHON_LEAK')",
+          `print('ENVIRON_LEAK' if ${JSON.stringify(marker)}.encode() in host_environ(${host}) else 'ENVIRON_CONFINED')`,
+          ...(denyChildren
+            ? [
+                "started = []",
+                "for start in (os.fork, lambda: os.posix_spawn('/bin/echo', ['echo'], {}), lambda: subprocess.Popen(['/bin/echo']).pid):",
+                "    try:",
+                "        pid = start()",
+                "    except OSError:",
+                "        continue",
+                "    if pid == 0:",
+                "        os._exit(0)",
+                "    started.append(pid)",
+                "print('CHILDREN_ALLOWED' if started else 'CHILDREN_DENIED')",
+              ]
+            : [
+                `assert subprocess.run(["cat", ${JSON.stringify(inside)}], capture_output=True).stdout == b"inside"`,
+                "sub_ok = True",
+                `for canary in ${JSON.stringify(canaries.files)}:`,
+                '    result = subprocess.run(["cat", canary], capture_output=True)',
+                "    if result.returncode == 0 or b'outside' in result.stdout:",
+                "        sub_ok = False",
+                "print('SUBPROCESS_CONFINED' if sub_ok else 'SUBPROCESS_LEAK')",
+              ]),
+        ].join("\n"),
+      )
       const confinement: Confinement = {
         ...option,
         read: { directories: allow.directories, files: allow.files, links: allow.links },
@@ -471,15 +605,18 @@ export async function detectConfinement(input: {
       })
       const result = await execute(argv, { cwd: work, env: input.env(work), timeout: 30_000 })
       const out = result.stdout
-      if (
-        result.status === 0 &&
-        out.includes("PYTHON_CONFINED") &&
-        out.includes("SUBPROCESS_CONFINED") &&
-        !out.includes("LEAK")
-      )
+      const required = ["PYTHON_CONFINED", "ENVIRON_CONFINED", denyChildren ? "CHILDREN_DENIED" : "SUBPROCESS_CONFINED"]
+      const found = Object.keys(FINDINGS).filter((token) => out.includes(token))
+      if (result.status === 0 && required.every((token) => out.includes(token)) && !found.length)
         return { ok: true, confinement }
       failures.push(
-        `${option.filesystem}: ${(result.stderr || out || result.error || "no output").trim().split("\n").slice(-1)[0]}`,
+        `${option.filesystem}: ${
+          found.length
+            ? found
+                .map((t) => FINDINGS[t] + (t === "ENVIRON_LEAK" && option.filesystem === "sandbox-exec" ? PROCARGS_NOTE : ""))
+                .join("; ")
+            : (result.stderr || out || result.error || "no output").trim().split("\n").slice(-1)[0]
+        }`,
       )
     }
     if (platform === "darwin")
@@ -491,6 +628,7 @@ export async function detectConfinement(input: {
     const base = refusal({ appArmor: denied })
     return { ok: false, reason: `${base} Self-test results: ${failures.join("; ")}` }
   } finally {
+    environCanary?.child.kill("SIGKILL")
     await fs.rm(work, { recursive: true, force: true })
     for (const dir of canaryDirs) await fs.rm(dir, { recursive: true, force: true })
   }

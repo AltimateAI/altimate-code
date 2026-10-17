@@ -1,6 +1,7 @@
 // altimate_change start — sandboxed analyst Python execution regression coverage
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test"
 import { spawnSync } from "node:child_process"
+import { existsSync } from "node:fs"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -52,6 +53,71 @@ const e2e = python ? test : test.skip
 // bubblewrap with user namespaces). Without one they are skipped and the refusal test below runs.
 const detected = python ? await confinementFor(python) : undefined
 const sandboxed = detected?.ok ? test : test.skip
+// Subprocess behaviour applies only where the sandbox permits children (bwrap); macOS denies them.
+const bwrapSandboxed = detected?.ok && detected.confinement.filesystem === "bwrap" ? test : test.skip
+// The macOS profile itself, run through the real sandbox-exec whether or not detection accepts it.
+const macProfile = python && process.platform === "darwin" && existsSync("/usr/bin/sandbox-exec") ? test : test.skip
+
+async function runUnderMacProfile(code: string, directory: string) {
+  await fs.mkdir(path.join(directory, "tmp"), { recursive: true })
+  const paths = await Sandbox.interpreterPaths(python, directory, childEnv(directory))
+  if (!paths) throw new Error("could not inspect the interpreter")
+  const allow = Sandbox.readAllowlist("darwin", paths)
+  if (!allow.ok) throw new Error(allow.reason)
+  const argv = Sandbox.launch({
+    confinement: {
+      filesystem: "sandbox-exec",
+      network: "isolated",
+      prefix: ["/usr/bin/sandbox-exec"],
+      read: { directories: allow.directories, files: allow.files, links: allow.links },
+    },
+    write: [directory],
+    cwd: directory,
+    python,
+    args: ["-c", code],
+  })
+  return Sandbox.execute(argv, { cwd: directory, env: childEnv(directory), timeout: 30_000 })
+}
+
+/** A host process whose environment alone carries `marker`; resolves once it is running. */
+async function environCanary(marker: string) {
+  const host = Bun.spawn([python, "-I", "-c", "import time; print('ready', flush=True); time.sleep(60)"], {
+    env: { PATH: "/usr/bin:/bin", PYEXEC_CANARY_ENV: marker },
+    stdout: "pipe",
+  })
+  await host.stdout.getReader().read()
+  return host
+}
+
+const readEnvironCode = (pid: number, marker: string) =>
+  `${Sandbox.READ_HOST_ENVIRON}\nprint("ENV_READ" if ${JSON.stringify(marker)}.encode() in host_environ(${pid}) else "ENV_DENIED")`
+
+/** Double fork: the intermediate parent calls setsid and exits, leaving a re-parented grandchild. */
+const doubleForkCode = (tag: string) =>
+  [
+    "import os",
+    "try:",
+    "    first = os.fork()",
+    "except OSError as error:",
+    "    print('FORK_DENIED', error.errno)",
+    "else:",
+    "    if first == 0:",
+    "        os.setsid()",
+    "        if os.fork() == 0:",
+    `            os.execv('/bin/sleep', ['sleep', '${tag}'])`,
+    "        os._exit(0)",
+    "    os.waitpid(first, 0)",
+    "    print('FORKED')",
+  ].join("\n")
+
+async function survivors(pattern: string) {
+  for (let i = 0; i < 20; i++) {
+    const out = spawnSync("pgrep", ["-f", pattern], { encoding: "utf8" }).stdout.trim()
+    if (!out) return ""
+    await Bun.sleep(100)
+  }
+  return spawnSync("pgrep", ["-f", pattern], { encoding: "utf8" }).stdout.trim()
+}
 if (python && !detected?.ok)
   console.warn(`python_exec sandbox tests skipped: ${detected && !detected.ok ? detected.reason : "no Python"}`)
 
@@ -428,7 +494,7 @@ describe("python_exec", () => {
     30_000,
   )
 
-  sandboxed(
+  bwrapSandboxed(
     "subprocesses inherit the read confinement",
     async () => {
       await using elsewhere = await tmpdir()
@@ -537,7 +603,7 @@ describe("python_exec", () => {
     15_000,
   )
 
-  sandboxed(
+  bwrapSandboxed(
     "returns at the deadline when a session-detached descendant holds stdout open",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -561,7 +627,7 @@ describe("python_exec", () => {
     20_000,
   )
 
-  sandboxed(
+  bwrapSandboxed(
     "returns promptly when the cell exits leaving a session-detached descendant on stdout",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -578,6 +644,45 @@ describe("python_exec", () => {
       spawnSync("pkill", ["-f", "sleep 7332"])
     },
     20_000,
+  )
+
+  e2e(
+    "sandboxed code cannot read the environment of a host process",
+    async () => {
+      const marker = `pyexec-environ-${crypto.randomUUID()}`
+      const host = await environCanary(marker)
+      try {
+        // The marker is observable outside the sandbox, so the check below is not vacuous.
+        const unconfined = spawnSync(python, ["-I", "-c", readEnvironCode(host.pid, marker)], { encoding: "utf8" })
+        expect(unconfined.stdout).toContain("ENV_READ")
+        resetConfinement()
+        const tool = await initTool(PythonExecTool)
+        const result = await tool.execute({ code: readEnvironCode(host.pid, marker) }, ctx)
+        // Either the sandbox denies the read, or the self-test found the exposure and the call was refused.
+        expect(result.output).not.toContain("ENV_READ")
+        expect(result.output).not.toContain(marker)
+        if (!result.metadata.ok) expect(result.output).toContain("python_exec refused")
+        else expect(result.output).toContain("ENV_DENIED")
+      } finally {
+        host.kill()
+      }
+    },
+    60_000,
+  )
+
+  e2e(
+    "a double-forked setsid grandchild does not survive the call",
+    async () => {
+      const tool = await initTool(PythonExecTool)
+      const result = await tool.execute({ code: doubleForkCode("7344"), timeout_ms: 10_000 }, ctx)
+      try {
+        if (process.platform === "darwin") expect(result.output).not.toContain("FORKED")
+        expect(await survivors("sleep 7344")).toBe("")
+      } finally {
+        spawnSync("pkill", ["-f", "sleep 7344"])
+      }
+    },
+    60_000,
   )
 
   const unsandboxed = python && !detected?.ok ? test : test.skip
@@ -598,24 +703,22 @@ describe("python_exec", () => {
         const result = await tool.execute(
           {
             code: [
-              "import os, signal, subprocess",
+              "import os, signal",
               "for name, pid in (('parent', os.getppid()), ('other', %d)):" .replace("%d", "OUTSIDE"),
               "    try:",
               "        os.kill(pid, signal.SIGURG)",
               "        print(name, 'SIGNALLED')",
               "    except OSError:",
               "        print(name, 'DENIED')",
-              "child = subprocess.Popen(['sleep', '5'])",
-              "child.send_signal(signal.SIGURG)",
-              "child.kill()",
-              "print('child OK')",
+              "os.kill(os.getpid(), 0)",
+              "print('self OK')",
             ].join("\n").replace("OUTSIDE", String(outside.pid)),
           },
           ctx,
         )
         expect(result.output).toContain("parent DENIED")
         expect(result.output).toContain("other DENIED")
-        expect(result.output).toContain("child OK")
+        expect(result.output).toContain("self OK")
         expect(outside.killed || outside.exitCode !== null).toBe(false)
         expect(process.kill(process.pid, 0)).toBe(true)
       } finally {
@@ -742,8 +845,12 @@ describe("python_exec confinement", () => {
     ])
     expect(profile).toContain("(deny network*)")
     expect(profile).toContain("(deny appleevent-send)")
+    expect(profile).toContain("(deny process-fork)")
+    expect(profile).toContain("(deny process-info*)")
+    expect(profile).toContain("(allow process-info* (target self))")
     expect(profile).toContain("(deny signal)")
-    expect(profile).toContain("(allow signal (target self) (target children))")
+    expect(profile).toContain("(allow signal (target self))")
+    expect(profile).not.toContain("(target children)")
     expect(profile).toMatch(/\(deny mach-lookup \(require-not/)
     expect(profile).toMatch(/\(deny file-read\* \(require-not \(require-any [^\n]*\(subpath "\/opt\/py"\)/)
     expect(profile).toMatch(/\(deny file-write\* \(require-not \(require-any \(subpath "\/private\/tmp\/s"\)/)
@@ -919,21 +1026,135 @@ describe("python_exec confinement", () => {
         mechanisms: [{ filesystem: "bwrap", network: "isolated", prefix: [fake] }],
       })
       expect(result.ok).toBe(false)
-      if (!result.ok) expect(result.reason).toContain("Self-test")
+      if (!result.ok) {
+        expect(result.reason).toContain("Self-test")
+        expect(result.reason).toContain("read a file outside the allowlist")
+        expect(result.reason).toContain("read the environment of another process")
+      }
     },
     30_000,
   )
 
   e2e(
-    "the host mechanism passes its self-test",
+    "the host mechanism passes its self-test, or macOS is refused only for host environment exposure",
     async () => {
       resetConfinement()
       const result = await confinementFor(python)
+      if (process.platform === "darwin" && !result.ok) {
+        // Seatbelt does not mediate KERN_PROCARGS2; file, fork and other checks must still pass.
+        expect(result.reason).toContain("sandbox-exec self-test failed")
+        expect(result.reason).toContain("KERN_PROCARGS2")
+        expect(result.reason).not.toContain("child process")
+        expect(result.reason).not.toContain("outside the allowlist")
+        return
+      }
       expect(result.ok).toBe(true)
       if (result.ok)
         expect(result.confinement.filesystem).toBe(process.platform === "darwin" ? "sandbox-exec" : "bwrap")
     },
-    30_000,
+    60_000,
+  )
+
+  macProfile(
+    "the macOS profile denies fork, posix_spawn, subprocess and multiprocessing, so no grandchild survives",
+    async () => {
+      await using directory = await tmpdir()
+      const dir = await fs.realpath(directory.path)
+      const code = [
+        doubleForkCode("7345"),
+        "import multiprocessing, subprocess",
+        "for name, start in (",
+        "    ('posix_spawn', lambda: os.posix_spawn('/bin/sleep', ['sleep', '7345'], {})),",
+        "    ('subprocess', lambda: subprocess.Popen(['/bin/sleep', '7345'], start_new_session=True)),",
+        "    ('multiprocessing', lambda: multiprocessing.get_context('spawn').Process(target=print).start()),",
+        "):",
+        "    try:",
+        "        start()",
+        "        print(name, 'ALLOWED')",
+        "    except OSError:",
+        "        print(name, 'DENIED')",
+      ].join("\n")
+      try {
+        const result = await runUnderMacProfile(code, dir)
+        expect(result.stdout).toContain("FORK_DENIED 1")
+        expect(result.stdout).not.toContain("FORKED")
+        for (const name of ["posix_spawn", "subprocess", "multiprocessing"]) expect(result.stdout).toContain(`${name} DENIED`)
+        expect(result.stdout).not.toContain("ALLOWED")
+        expect(await survivors("sleep 7345")).toBe("")
+      } finally {
+        spawnSync("pkill", ["-f", "sleep 7345"])
+      }
+    },
+    60_000,
+  )
+
+  macProfile(
+    "pandas, NumPy and DuckDB still work under the macOS profile",
+    async () => {
+      await using directory = await tmpdir()
+      const dir = await fs.realpath(directory.path)
+      const code = [
+        "import duckdb, numpy as np, pandas as pd",
+        "df = pd.DataFrame({'k': ['a', 'b', 'a'], 'v': np.arange(3)})",
+        "df.to_parquet('frame.parquet')",
+        "print('DUCKDB', duckdb.sql(\"SELECT k, sum(v) FROM 'frame.parquet' GROUP BY k ORDER BY k\").fetchall())",
+        "print('PANDAS', df.groupby('k')['v'].sum().to_dict())",
+        "print('NUMPY', float(np.linalg.inv(np.eye(3) * 2).sum()))",
+      ].join("\n")
+      const result = await runUnderMacProfile(code, dir)
+      expect(result.stderr).not.toContain("Traceback")
+      expect(result.stdout).toContain("DUCKDB [('a', 2), ('b', 1)]")
+      expect(result.stdout).toContain("PANDAS {'a': 2, 'b': 1}")
+      expect(result.stdout).toContain("NUMPY 1.5")
+    },
+    60_000,
+  )
+
+  macProfile(
+    "a host environment readable under the macOS profile makes detection refuse",
+    async () => {
+      await using directory = await tmpdir()
+      const dir = await fs.realpath(directory.path)
+      const marker = `pyexec-environ-${crypto.randomUUID()}`
+      const host = await environCanary(marker)
+      try {
+        const result = await runUnderMacProfile(readEnvironCode(host.pid, marker), dir)
+        expect(result.stdout).toMatch(/ENV_READ|ENV_DENIED/)
+        resetConfinement()
+        const detection = await confinementFor(python)
+        if (result.stdout.includes("ENV_READ")) {
+          expect(detection.ok).toBe(false)
+          if (!detection.ok) expect(detection.reason).toContain("read the environment of another process")
+        }
+      } finally {
+        host.kill()
+      }
+    },
+    60_000,
+  )
+
+  macProfile(
+    "the macOS self-test fails closed when fork denial is not enforced",
+    async () => {
+      await using bin = await tmpdir()
+      // A sandbox-exec wrapper that drops the fork denial from the profile it is given.
+      const fake = path.join(bin.path, "sandbox-exec")
+      await fs.writeFile(
+        fake,
+        "#!/bin/sh\nshift\nprofile=$(printf '%s\\n' \"$1\" | grep -v '^(deny process-fork)$')\nshift\nexec /usr/bin/sandbox-exec -p \"$profile\" \"$@\"\n",
+        { mode: 0o755 },
+      )
+      const result = await Sandbox.detectConfinement({
+        python,
+        bootstrap: BOOTSTRAP,
+        env: childEnv,
+        platform: "darwin",
+        mechanisms: [{ filesystem: "sandbox-exec", network: "isolated", prefix: [fake] }],
+      })
+      expect(result.ok).toBe(false)
+      if (!result.ok) expect(result.reason).toContain("started a child process")
+    },
+    60_000,
   )
 })
 
