@@ -33,7 +33,10 @@ export function verdictHeadline(env: VerdictEnvelope): string {
   const tierLabel = env.tierForced
     ? `${env.tier} tier — forced (was ${env.tierClassified ?? "unknown"})`
     : `${env.tier} tier`
-  return `${VERDICT_LABEL[env.verdict]} — ${counts} (${tierLabel})`
+  // Project scope reviews the whole manifest rather than a diff; say so in the
+  // headline so a reader never mistakes it for a PR verdict.
+  const scopeLabel = env.scope === "project" ? "whole project" : tierLabel
+  return `${VERDICT_LABEL[env.verdict]} — ${counts} (${scopeLabel})`
 }
 
 /** Full PR/MR summary comment body (markdown), prefixed with the dedup marker. */
@@ -79,8 +82,40 @@ export function renderSummary(env: VerdictEnvelope): string {
     lines.push(`> 🧭 **Tier: ${env.tier}** — ${shown}${overflow}`, "")
   }
 
+  // Lane report — only present in project scope. It goes ABOVE the findings:
+  // "no findings" means nothing until the reader knows which lanes produced it.
+  if (env.lanes) {
+    lines.push(
+      `> 🛠️ **Project review** — every model in the manifest, no base ref.`,
+      `> Lanes run: ${env.lanes.ran.length ? env.lanes.ran.map((l) => `\`${l}\``).join(", ") : "_none_"}`,
+      "",
+    )
+    // The AST lanes are only as good as their input. `dbt compile` is the
+    // customer's job, and when it hasn't run the engine silently returns zero
+    // findings per unparseable model — which reads as "clean". Say so.
+    const { compiledModels: compiled, totalModels: total } = env.lanes
+    if (total > 0 && compiled < total) {
+      lines.push(
+        `> ⚠️ **${total - compiled} of ${total} models had no compiled SQL** — the engine analysed their raw Jinja,`,
+        `> which the SQL parser cannot read, so the AST lanes (core lint, PII classification, grain,`,
+        `> filter consistency) returned nothing for them. Run \`dbt compile\` and re-run for a complete review.`,
+        "",
+      )
+    }
+    if (env.lanes.skipped.length) {
+      lines.push(`<details><summary>Lanes skipped (${env.lanes.skipped.length}) — why</summary>`, "")
+      for (const s of env.lanes.skipped) lines.push(`- \`${s.lane}\` — ${s.reason}`)
+      lines.push("", "</details>", "")
+    }
+  }
+
   if (!env.findings.length) {
-    lines.push("No issues found in the changed dbt models. 🎉", "")
+    lines.push(
+      env.scope === "project"
+        ? "No issues found in any model in the manifest — within the lanes listed above. 🎉"
+        : "No issues found in the changed dbt models. 🎉",
+      "",
+    )
   } else {
     const grouped = groupBySeverity(env.findings)
     for (const sev of ["critical", "warning", "suggestion"] as const) {

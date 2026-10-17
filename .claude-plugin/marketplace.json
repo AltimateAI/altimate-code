@@ -1,0 +1,20 @@
+{
+  "name": "altimate-code",
+  "owner": {
+    "name": "Altimate AI",
+    "email": "support@altimate.ai"
+  },
+  "metadata": {
+    "description": "Altimate Code as a Claude Code plugin — deterministic dbt/SQL analysis driven by the altimate engine",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "altimate-data",
+      "source": "./plugins/claude-code",
+      "description": "Deterministic dbt and SQL analysis: lint, grade, PII, column-level lineage, blast radius, and schema verification, powered by the altimate CLI",
+      "category": "data-engineering",
+      "keywords": ["dbt", "sql", "lineage", "trino", "data-engineering"]
+    }
+  ]
+}

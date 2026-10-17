@@ -1,0 +1,14 @@
+{
+  "name": "altimate-data",
+  "displayName": "Altimate Data",
+  "version": "0.1.0",
+  "description": "Deterministic dbt and SQL analysis powered by the altimate engine",
+  "author": {
+    "name": "Altimate AI",
+    "email": "support@altimate.ai"
+  },
+  "homepage": "https://github.com/AltimateAI/altimate-code",
+  "repository": "AltimateAI/altimate-code",
+  "license": "Apache-2.0",
+  "keywords": ["dbt", "sql", "lineage", "data-engineering"]
+}

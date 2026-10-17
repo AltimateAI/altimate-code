@@ -45,6 +45,32 @@ export function splitDiff(diff: string | undefined): DiffLines {
   return { added, removed }
 }
 
+/**
+ * Blank the CONTENTS of multi-line comments — both SQL `/* … *\/` and Jinja
+ * `{# … #}` — across the whole text, preserving every newline so line
+ * numbering survives.
+ *
+ * `stripComments` is applied per LINE by the detectors, which means a block
+ * comment spanning several lines is invisible to it — only the first and last
+ * lines carry a delimiter. Measured on a 215-model project, that let prose
+ * inside a comment fire real findings: `int_query_time_bins.sql` was reported
+ * for a CROSS JOIN by a comment explaining that the CROSS JOIN had been
+ * REMOVED. Applied once where the diff lines are assembled, so every detector
+ * and the declarative catalog get it.
+ *
+ * A hunk containing only part of a block comment (no opening or no closing
+ * delimiter) is inherently undecidable and is left alone.
+ */
+export function blankBlockComments(s: string): string {
+  const blank = (m: string) => m.replace(/[^\n]/g, " ")
+  // Jinja comments too (`{#- … -#}` whitespace-control variants included): dbt
+  // models routinely carry long design notes in them, and prose about SQL reads
+  // as SQL. Measured: a `{# … #}` block citing `docs/…-2026-06-02.md §5.1/§6`
+  // was reported as an unguarded DIVISION, and one quoting `365 /
+  // self.lookback_days` from the legacy implementation likewise.
+  return s.replace(/\/\*[\s\S]*?\*\//g, blank).replace(/\{#[\s\S]*?#\}/g, blank)
+}
+
 /** Strip line/block comments so detectors don't fire on commented-out code. */
 function stripComments(s: string): string {
   return s
@@ -107,6 +133,11 @@ interface Ctx {
   removed: string[]
   model: string
   inMartOrReporting: boolean
+  /** True when `added` is the WHOLE model rather than a real hunk (project
+   *  scope — see orchestrate.ts). Detectors whose CONDITION is "this appeared
+   *  in the diff" degenerate here and must opt out; detectors that test a
+   *  whole-file property are unaffected. */
+  wholeFile: boolean
 }
 
 type Detector = (c: Ctx) => Finding | null
@@ -161,27 +192,189 @@ const detectSelectStar: Detector = (c) => {
 
 // 5. LEFT/RIGHT JOIN silently collapsed to INNER by a WHERE/AND on the outer table.
 
-// 6. Cross join / cartesian product added.
+/** Table FUNCTIONS that follow `CROSS JOIN` in the lateral-expansion idiom.
+ *  `CROSS JOIN UNNEST(arr)` is not a join between two relations at all — it
+ *  expands an array into rows for the SAME row, which is why Trino/Presto,
+ *  BigQuery and Athena all spell array expansion this way. Treating it as a
+ *  cartesian product is simply wrong, not merely noisy. */
+const CROSS_JOIN_TABLE_FN = /^(unnest|lateral|table|json_table|generate_series|sequence|explode|flatten|openjson)\b/i
+
+/**
+ * Extract the CTE bodies of a model as `name → body` (body WITHOUT the outer
+ * parens). Paren-balanced and literal-blanked, so a `(` inside a string or a
+ * nested subquery can't end the body early. Best-effort: a model whose CTE list
+ * doesn't parse simply yields fewer entries, which costs a suppression, never a
+ * false suppression.
+ */
+function cteBodies(sql: string): Map<string, string> {
+  const out = new Map<string, string>()
+  const s = stripLiterals(stripComments(sql))
+  const re = /(?:^|[\s,(])([A-Za-z_][A-Za-z0-9_]*)\s+as\s*(?:materialized\s+|not\s+materialized\s+)?\(/gi
+  for (let m = re.exec(s); m; m = re.exec(s)) {
+    const open = m.index + m[0].length - 1
+    let depth = 0
+    let end = -1
+    for (let i = open; i < s.length; i++) {
+      if (s[i] === "(") depth++
+      else if (s[i] === ")") {
+        depth--
+        if (depth === 0) {
+          end = i
+          break
+        }
+      }
+    }
+    if (end === -1) continue
+    // Only keep the FIRST binding of a name: a later `x as (` inside a window
+    // or cast context must not overwrite a real CTE.
+    if (!out.has(m[1].toLowerCase())) out.set(m[1].toLowerCase(), s.slice(open + 1, end))
+    re.lastIndex = open + 1
+  }
+  return out
+}
+
+/** True when a token sits at paren depth 0 of `body` (so a `group by` inside a
+ *  nested subquery doesn't count as the body's own). */
+function hasAtTopLevel(body: string, re: RegExp): boolean {
+  let depth = 0
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if (ch === "(") depth++
+    else if (ch === ")") depth = Math.max(0, depth - 1)
+    else if (depth === 0) {
+      re.lastIndex = 0
+      if (re.test(body.slice(i, i + 40))) return true
+    }
+  }
+  return false
+}
+
+/**
+ * PROVABLY at most one row: an aggregate select with no `GROUP BY`, or an
+ * explicit `LIMIT 1`. Both are guarantees of the SQL standard, not heuristics —
+ * `select max(x) from t` returns exactly one row for any `t`.
+ *
+ * A CTE with a `GROUP BY` is NOT accepted: it may return many rows and we
+ * cannot see the join predicate (a cross join has none), so flagging it is the
+ * honest outcome.
+ */
+function isSingleRowCte(body: string): boolean {
+  if (hasAtTopLevel(body, /^\s*limit\s+1\b/i)) return true
+  if (hasAtTopLevel(body, /^\s*group\s+by\b/i)) return false
+  // An aggregate anywhere in the (top-level) select list with no GROUP BY
+  // collapses the relation to a single row.
+  return /\b(count|sum|min|max|avg|any_value|array_agg|approx_distinct)\s*\(/i.test(body)
+}
+
+/**
+ * A parenthesised operand built only from constants — `( select 0 union all
+ * select 1 … )`, the hand-rolled spine. No `FROM` and no `ref()`/`source()`
+ * means there is no relation to multiply against, so the row count is a fixed
+ * literal and the cross join is a deliberate, bounded expansion.
+ */
+function isConstantSpine(operand: string): boolean {
+  if (!operand.startsWith("(")) return false
+  const body = stripLiterals(stripComments(operand))
+  return !/\bfrom\b/i.test(body) && !/\{\{\s*(ref|source)\s*\(/i.test(body)
+}
+
+/** Read the operand that follows a `CROSS JOIN`, paren-balanced when it opens
+ *  with `(`, else the next identifier (a CTE / relation / `{{ ref() }}` name). */
+function crossJoinOperand(sql: string, afterIndex: number): string {
+  const rest = sql.slice(afterIndex).replace(/^\s+/, "")
+  if (rest.startsWith("(")) {
+    let depth = 0
+    for (let i = 0; i < rest.length; i++) {
+      if (rest[i] === "(") depth++
+      else if (rest[i] === ")") {
+        depth--
+        if (depth === 0) return rest.slice(0, i + 1)
+      }
+    }
+    return rest
+  }
+  return rest.slice(0, 200)
+}
+
+/**
+ * 6. Cross join / cartesian product added.
+ *
+ * Scoped to the shapes that can actually be a cartesian product. Measured on a
+ * real 215-model Trino project, the naive `\bcross\s+join\b` match was ~2/3
+ * false positives at `critical` — and `join_risk` is a blocking category, so
+ * every one of them was a merge-blocking verdict on correct, idiomatic SQL that
+ * the project's own guidelines prescribe. Three shapes are suppressed, each
+ * because the row count is PROVABLE from the text rather than merely likely:
+ *
+ *   1. `CROSS JOIN UNNEST(...)` (and the other table functions) — lateral array
+ *      expansion, not a join between relations.
+ *   2. `CROSS JOIN <cte>` where the CTE is an aggregate with no GROUP BY, or
+ *      carries `LIMIT 1` — a scalar broadcast of exactly one row.
+ *   3. `CROSS JOIN ( select <constants> … )` — a bounded literal spine.
+ *
+ * Anything else still fires: a bare relation, a `{{ ref() }}`, or a CTE whose
+ * cardinality cannot be established (including a GROUP BY one) is exactly the
+ * case a reviewer needs to see.
+ */
 const detectCrossJoin: Detector = (c) => {
-  const hit = c.added.find((l) => /\bcross\s+join\b/i.test(stripComments(l)))
-  if (!hit) return null
-  return makeFinding({
-    severity: "critical",
-    category: "join_risk",
-    title: `${c.model}: CROSS JOIN creates a cartesian product`,
-    body:
-      "A CROSS JOIN multiplies every left row by every right row — an M×N explosion that inflates row counts, " +
-      "every downstream aggregate, and warehouse cost. Confirm a join key is intended and add an `ON` clause.",
-    file: c.file.path,
-    model: c.model,
-    confidence: "high",
-    evidence: { tool: "dbt-patterns", result: { rule: "cross_join", line: hit.trim() } },
-    ruleKey: "join_risk:cross-join",
-  })
+  // Join the added lines so an operand split across lines (`cross join` then
+  // `unnest(` on the next) is still classified — the per-line scan this
+  // replaced could not see it, and that is the single most common formatting
+  // of the UNNEST idiom.
+  const added = c.added.map((l) => stripComments(l))
+  const joined = added.join("\n")
+  const ctes = cteBodies(c.newSql)
+  const re = /\bcross\s+join\b/gi
+  for (let m = re.exec(joined); m; m = re.exec(joined)) {
+    const operand = crossJoinOperand(joined, m.index + m[0].length).replace(/^\s+/, "")
+    if (CROSS_JOIN_TABLE_FN.test(operand)) continue
+    if (isConstantSpine(operand)) continue
+    const ident = /^([A-Za-z_][A-Za-z0-9_]*)/.exec(operand)?.[1]?.toLowerCase()
+    if (ident) {
+      const body = ctes.get(ident)
+      if (body && isSingleRowCte(body)) continue
+    }
+    // The line the match STARTED on, for the finding's evidence.
+    const lineNo = joined.slice(0, m.index).split("\n").length - 1
+    const hit = added[lineNo] ?? operand
+    return makeFinding({
+      // `warning` / `medium`, NOT `critical` / `high` — severity tracks how the
+      // finding was ESTABLISHED, not only what it would mean if true. A genuine
+      // cartesian product is critical, and core's AST `CartesianProduct` rule
+      // grades it that way because it has a parse tree to prove it with. This
+      // detector only ever runs in DEGRADED mode (CORE_AST_COVERED suppresses it
+      // whenever core lint works), and in that mode it cannot see the operand's
+      // cardinality at all. A heuristic that cannot prove its claim must not
+      // hard-block a merge — `join_risk` is in the default `blockOn`, so a
+      // `critical` here is a blocking verdict. The signal survives: three
+      // warnings still trip `warningPatternThreshold`.
+      severity: "warning",
+      category: "join_risk",
+      title: `${c.model}: CROSS JOIN may create a cartesian product`,
+      body:
+        "A CROSS JOIN multiplies every left row by every right row — an M×N explosion that inflates row counts, " +
+        "every downstream aggregate, and warehouse cost. Confirm a join key is intended and add an `ON` clause.\n\n" +
+        "_Not flagged: `CROSS JOIN UNNEST(...)`, a cross join to a single-row aggregate CTE, or one to a " +
+        "constant spine — those are bounded by construction. What remains is typically a cross join to a " +
+        "`{{ ref() }}`ed relation (e.g. a date spine), whose row count is not knowable from this file — which " +
+        "is why this is a warning to verify rather than an assertion that it is wrong._",
+      file: c.file.path,
+      model: c.model,
+      confidence: "medium",
+      evidence: { tool: "dbt-patterns", result: { rule: "cross_join", line: hit.trim() } },
+      ruleKey: "join_risk:cross-join",
+    })
+  }
+  return null
 }
 
 // 7. A new JOIN added into a model that aggregates → likely fan-out inflating SUM/COUNT.
 const detectFanout: Detector = (c) => {
+  // Change-scoped by CONDITION, not just by wording: the signal is "a join was
+  // ADDED to an aggregating model". With the whole file presented as added it
+  // degenerates to "this model aggregates and has a join", which describes most
+  // correct analytics SQL — measured at 65 of 215 models on a real project.
+  if (c.wholeFile) return null
   const sql = stripComments(c.newSql)
   const aggregates = /\b(sum|count|avg|min|max)\s*\(/i.test(sql) && /\bgroup\s+by\b/i.test(sql)
   if (!aggregates) return null
@@ -617,8 +810,47 @@ const detectSelfJoin: Detector = (c) => {
 }
 
 // 39. Window function without PARTITION BY (whole-table window — often unintended).
+/**
+ * Reads the balanced `OVER ( … )` rather than the single line the `OVER` sits
+ * on. A window spec is routinely formatted across three lines —
+ *
+ *     row_number() over (
+ *         partition by account, full_table_name
+ *         order by ingestion_timestamp desc
+ *     ) as rn
+ *
+ * — so the per-line test saw `over (` with no `partition by` beside it and
+ * fired. Measured on a 215-model project: 37 findings, and ALL 37 windows were
+ * partitioned. This is the third instance of the same defect class in this file
+ * (the CROSS JOIN operand scan and the multi-line comment blanking were the
+ * first two): a single-line regex applied to SQL whose meaning spans lines. A
+ * fourth is likely — prefer a balanced/joined scan whenever a construct can be
+ * broken across lines.
+ */
 const detectWindowNoPartition: Detector = (c) => {
-  const hit = c.added.find((l) => /\bover\s*\(/i.test(stripComments(l)) && !/partition\s+by/i.test(l))
+  const text = c.added.map((l) => stripComments(l)).join("\n")
+  let hit: string | undefined
+  for (const m of text.matchAll(/\bover\s*\(/gi)) {
+    // Walk to the matching close paren so nested calls inside the spec
+    // (`order by coalesce(x, 0)`) don't truncate it.
+    let depth = 0
+    let end = text.length
+    for (let i = m.index + m[0].length - 1; i < text.length; i++) {
+      if (text[i] === "(") depth++
+      else if (text[i] === ")") {
+        depth--
+        if (depth === 0) {
+          end = i
+          break
+        }
+      }
+    }
+    const spec = text.slice(m.index, end + 1)
+    if (/partition\s+by/i.test(spec)) continue
+    // Report the line the OVER started on.
+    hit = c.added[text.slice(0, m.index).split("\n").length - 1] ?? spec
+    break
+  }
   if (!hit) return null
   return pattern(
     c,
@@ -765,10 +997,18 @@ const MODEL_DETECTORS: Detector[] = [
 ]
 
 /** Run the dbt anti-pattern detectors over a changed MODEL file. */
-export function detectModelPatterns(file: ChangedFile, newSql: string | undefined, rubric: Rubric): Finding[] {
+export function detectModelPatterns(
+  file: ChangedFile,
+  newSql: string | undefined,
+  rubric: Rubric,
+  opts?: { wholeFile?: boolean; dialect?: string },
+): Finding[] {
   const kind = classifyDbtFile(file.path)
   if (!isModelSql(kind) || file.status === "deleted" || !newSql) return []
-  const { added, removed } = splitDiff(file.diff)
+  // Blank multi-line block comments BEFORE the per-line detectors see the
+  // hunk — see blankBlockComments. Splitting on "\n" is safe because the
+  // blanker preserves newlines exactly.
+  const { added, removed } = splitDiff(blankBlockComments(file.diff ?? ""))
   const ctx: Ctx = {
     file,
     kind,
@@ -777,6 +1017,7 @@ export function detectModelPatterns(file: ChangedFile, newSql: string | undefine
     removed,
     model: modelNameFromPath(file.path),
     inMartOrReporting: /(^|\/)(marts|reporting)\//.test(file.path),
+    wholeFile: opts?.wholeFile === true,
   }
   const out: Finding[] = []
   for (const d of MODEL_DETECTORS) {
@@ -784,7 +1025,7 @@ export function detectModelPatterns(file: ChangedFile, newSql: string | undefine
     if (f) out.push({ ...f, severity: clampSeverity(f.category, f.severity, f.confidence) })
   }
   // Declarative rule catalog (data-driven checks) complements the programmatic detectors.
-  out.push(...evaluateCatalog(file, newSql, added, removed, rubric))
+  out.push(...evaluateCatalog(file, newSql, added, removed, rubric, opts?.dialect))
   return out.filter((f) => !exclusionReason(f, rubric))
 }
 

@@ -20,14 +20,344 @@ const has = (fs: any[], category: string, sev?: string) =>
 describe("dbt-patterns detectors", () => {
 
 
-  test("CROSS JOIN → critical join_risk", () => {
+  test("CROSS JOIN → join_risk WARNING (degraded-mode heuristic, must not block)", () => {
+    // Deliberately not `critical`: this regex detector is the fallback used only
+    // when core's AST CartesianProduct rule is unavailable, and it cannot see
+    // the operand's cardinality. `join_risk` is a blocking category, so grading
+    // an unprovable heuristic `critical` would hard-block merges.
     const sql = `select * from a cross join b`
     const f = detectModelPatterns(
       modelFile("models/marts/m.sql", sql, ["cross join {{ ref('b') }} b"]),
       sql,
       DEFAULT_RUBRIC,
     )
-    expect(has(f, "join_risk", "critical")).toBe(true)
+    expect(has(f, "join_risk", "warning")).toBe(true)
+    expect(has(f, "join_risk", "critical")).toBe(false)
+  })
+
+  // --- CROSS JOIN: the shapes that are NOT a cartesian product --------------
+  // Regression corpus taken verbatim from a real 215-model Trino project where
+  // the naive `\bcross\s+join\b` match was ~2/3 false positives — at
+  // `critical`, in a BLOCKING category, on SQL the project's own dbt guidelines
+  // prescribe. Each case is suppressed because the row count is provable from
+  // the text, not because it is merely unlikely.
+
+  test("CROSS JOIN UNNEST is array expansion, not a cartesian product", () => {
+    // docs/DBT_GUIDELINES.md in the measured project literally prescribes this.
+    const sql = `select a.account, t.col
+                 from {{ ref('src') }} a
+                 cross join unnest(cast(json_parse(a.columns_array) as array(json))) as t(col)`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "cross join unnest(cast(json_parse(a.columns_array) as array(json))) as t(col)",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
+  })
+
+  test("CROSS JOIN UNNEST split across lines is still recognised", () => {
+    // The commonest formatting of the idiom, and the one a per-line scan misses.
+    const sql = `select * from s cross join\n  unnest(\n    cast(json_parse(s.objects) as array(json))\n  ) as t(o)`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "cross join",
+        "  unnest(",
+        "    cast(json_parse(s.objects) as array(json))",
+        "  ) as t(o)",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
+  })
+
+  test("CROSS JOIN to a single-row aggregate CTE is a scalar broadcast", () => {
+    const sql = `with latest_ingestion as (
+      select max(ingestion_timestamp) as latest_timestamp from source
+    )
+    select s.* from source s cross join latest_ingestion l
+    where s.ingestion_timestamp = l.latest_timestamp`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, ["cross join latest_ingestion l"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
+  })
+
+  test("CROSS JOIN to a LIMIT 1 CTE is a scalar broadcast", () => {
+    const sql = `with latest_remaining_balance as (
+      select balance_date, remaining_balance from remaining_balance order by balance_date desc limit 1
+    )
+    select * from rates cross join latest_remaining_balance lrb`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, ["cross join latest_remaining_balance lrb"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
+  })
+
+  test("CROSS JOIN to a constant spine subquery is bounded", () => {
+    const sql = `select d.day, h.hour_of_day
+                 from days d
+                 cross join (select 0 as hour_of_day union all select 1 union all select 2) h`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "cross join (select 0 as hour_of_day union all select 1 union all select 2) h",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
+  })
+
+  test("CROSS JOIN to a GROUP BY CTE still fires — cardinality is not provable", () => {
+    // Deliberately NOT suppressed: a grouped CTE can return many rows and a
+    // cross join has no predicate to see. Flagging is the honest outcome.
+    const sql = `with per_account as (
+      select account, max(day) as last_day from spine group by account
+    )
+    select * from warehouses w cross join per_account p`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, ["cross join per_account p"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk", "warning")).toBe(true)
+  })
+
+  test("CROSS JOIN to a ref()'d relation still fires", () => {
+    const sql = `select * from {{ ref('warehouses') }} w cross join {{ ref('date_spine') }} d`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, ["cross join {{ ref('date_spine') }} d"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk", "warning")).toBe(true)
+  })
+
+  test("a model with BOTH an UNNEST and a real cross join still fires", () => {
+    // Suppression is per-occurrence, not per-file: one benign shape must not
+    // mask a genuine cartesian product elsewhere in the same model.
+    const sql = `select * from s
+                 cross join unnest(s.arr) as t(x)
+                 cross join {{ ref('other') }} o`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "cross join unnest(s.arr) as t(x)",
+        "cross join {{ ref('other') }} o",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk", "warning")).toBe(true)
+  })
+
+  test("fanout_join opts out of whole-file scope", () => {
+    // Its condition is "a join was ADDED to an aggregating model". In project
+    // scope every line is added, so it would fire on most correct analytics
+    // SQL. Still fires for a real diff (next assertion).
+    const sql = `select a.id, sum(b.amt) as amt
+                 from {{ ref('a') }} a
+                 left join {{ ref('b') }} b on b.id = a.id
+                 group by 1`
+    const added = ["left join {{ ref('b') }} b on b.id = a.id"]
+    const diffScoped = detectModelPatterns(modelFile("models/marts/m.sql", sql, added), sql, DEFAULT_RUBRIC)
+    expect(has(diffScoped, "fanout")).toBe(true)
+
+    const projectScoped = detectModelPatterns(modelFile("models/marts/m.sql", sql, added), sql, DEFAULT_RUBRIC, {
+      wholeFile: true,
+    })
+    expect(has(projectScoped, "fanout")).toBe(false)
+  })
+
+  test("SQL keywords inside a string LITERAL are not code", () => {
+    // The only `critical` in a whole-project review of a 215-model repo was
+    // this: a model that EMITS ADVICE TEXT about CREATE OR REPLACE. A reviewer
+    // whose single blocking finding is a string literal is worse than one with
+    // no findings at all.
+    const sql = `select
+      'create_or_replace_table' as tag_rk,
+      'The query is creating or replacing a table. '
+        || 'Use CREATE OR REPLACE TRANSIENT TABLE instead as it will '
+        || 'help save failsafe storage costs.' as reason
+    from {{ ref('q') }}`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "  'create_or_replace_table' as tag_rk,",
+        "  'The query is creating or replacing a table. '",
+        "    || 'Use CREATE OR REPLACE TRANSIENT TABLE instead as it will '",
+        "    || 'help save failsafe storage costs.' as reason",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "create-or-replace")).toBe(false)
+  })
+
+  test("literal blanking does not make non-empty literals look empty", () => {
+    // The catalog corpus is a ONE-DIRECTIONAL oracle: it catches a rule that
+    // stops firing on its example, not one that starts over-firing. Blanking
+    // rewrites `= 'active'` to `= ''`, which is exactly what `empty-string-eq`
+    // matches — it went 20 -> 214 on a real project before `literalsMatter`
+    // was set on it. This pins the direction the corpus cannot see.
+    const sql = `select * from {{ ref('t') }}
+      where status = 'active' and region = 'us-east-1' and kind = 'FULL'`
+    const f = detectModelPatterns(
+      modelFile("models/marts/m.sql", sql, [
+        "  where status = 'active' and region = 'us-east-1' and kind = 'FULL'",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "empty-string-eq")).toBe(false)
+  })
+
+  test("a genuine empty-string comparison still fires", () => {
+    const sql = `select * from {{ ref('t') }} where name = ''`
+    const f = detectModelPatterns(
+      modelFile("models/marts/m.sql", sql, ["where name = ''"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "empty-string-eq")).toBe(true)
+  })
+
+  test("a rule whose signal lives INSIDE a literal still fires (literalsMatter)", () => {
+    // Guard on the opt-out: blanking literals must not silently disarm the
+    // rules that exist to look at literal content.
+    const sql = `select * from {{ ref('t') }} where name like '%acme%'`
+    const f = detectModelPatterns(
+      modelFile("models/marts/m.sql", sql, ["where name like '%acme%'"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => /wildcard/i.test(String((x.evidence?.result as any)?.rule ?? "")))).toBe(true)
+  })
+
+  test("a dbt tags=[...] layer label is not a hardcoded environment name", () => {
+    // 46 of 46 findings on a real project, and 33% of every warning in it.
+    const sql = `{{ config(materialized='view', tags=['staging', 'billing']) }}
+    select account from {{ ref('src') }}`
+    const f = detectModelPatterns(
+      modelFile("models/staging/m.sql", sql, ["{{ config(materialized='view', tags=['staging', 'billing']) }}"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "hardcoded-env-name")).toBe(false)
+  })
+
+  test("a real hardcoded environment name still fires", () => {
+    const sql = `select * from {{ ref('t') }} where env = 'production'`
+    const f = detectModelPatterns(
+      modelFile("models/marts/m.sql", sql, ["where env = 'production'"]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "hardcoded-env-name")).toBe(true)
+  })
+
+  test("a BigQuery-only rule does not fire on a Trino project", () => {
+    const sql = `select * from {{ ref('t') }}`
+    const added = ["select * from src_table"]
+    const onTrino = detectModelPatterns(modelFile("models/marts/m.sql", sql, added), sql, DEFAULT_RUBRIC, {
+      dialect: "trino",
+    })
+    expect(onTrino.some((x) => (x.evidence?.result as any)?.rule === "bq-select-star-replace")).toBe(false)
+
+    const onBq = detectModelPatterns(modelFile("models/marts/m.sql", sql, added), sql, DEFAULT_RUBRIC, {
+      dialect: "bigquery",
+    })
+    expect(onBq.some((x) => (x.evidence?.result as any)?.rule === "bq-select-star-replace")).toBe(true)
+
+    // An UNKNOWN dialect must run everything — a detection failure must never
+    // silently suppress findings.
+    const unknown = detectModelPatterns(modelFile("models/marts/m.sql", sql, added), sql, DEFAULT_RUBRIC)
+    expect(unknown.some((x) => (x.evidence?.result as any)?.rule === "bq-select-star-replace")).toBe(true)
+  })
+
+  test("a multi-line OVER(...) with PARTITION BY is not window-no-partition", () => {
+    // Third instance of the single-line-regex-on-multi-line-SQL defect class.
+    const sql = `select *, row_number() over (
+        partition by account, full_table_name
+        order by ingestion_timestamp desc, coalesce(table_id, 0) desc
+    ) as rn from {{ ref('t') }}`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "    select *, row_number() over (",
+        "        partition by account, full_table_name",
+        "        order by ingestion_timestamp desc, coalesce(table_id, 0) desc",
+        "    ) as rn",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "window-no-partition")).toBe(false)
+  })
+
+  test("a genuinely unpartitioned multi-line window still fires", () => {
+    const sql = `select *, row_number() over (
+        order by ingestion_timestamp desc
+    ) as rn from {{ ref('t') }}`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "    select *, row_number() over (",
+        "        order by ingestion_timestamp desc",
+        "    ) as rn",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.some((x) => (x.evidence?.result as any)?.rule === "window-no-partition")).toBe(true)
+  })
+
+  test("prose inside a multi-line Jinja {# #} comment is not a finding", () => {
+    // dbt models carry long design notes in Jinja comments, and prose about SQL
+    // reads as SQL. Real case: a `{#- … -#}` block citing a docs path with a
+    // `/` in it was reported as an unguarded division.
+    const sql = `{#-
+      See docs/dbt-microbatch-bottlenecks-2026-06-02.md §5.1/§6 for why
+      batch_size must equal the aggregation grain.
+    -#}
+    select account, day from {{ ref('src') }}`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "{#-",
+        "  See docs/dbt-microbatch-bottlenecks-2026-06-02.md §5.1/§6 for why",
+        "  batch_size must equal the aggregation grain.",
+        "-#}",
+        "select account, day from {{ ref('src') }}",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(f.filter((x) => x.category === "sql_correctness")).toHaveLength(0)
+  })
+
+  test("prose inside a multi-line block comment is not a finding", () => {
+    // Real case: int_query_time_bins.sql was reported for a CROSS JOIN by a
+    // comment explaining that the CROSS JOIN had been REMOVED. Per-line comment
+    // stripping cannot see a block comment's interior lines.
+    const sql = `/*
+      Replaces the earlier \`time_bins CROSS JOIN source\` range-join pattern,
+      which materialized N_bins x N_queries pairs.
+    */
+    select * from {{ ref('q') }}`
+    const f = detectModelPatterns(
+      modelFile("models/intermediate/m.sql", sql, [
+        "/*",
+        "  Replaces the earlier `time_bins CROSS JOIN source` range-join pattern,",
+        "  which materialized N_bins x N_queries pairs.",
+        "*/",
+        "select * from {{ ref('q') }}",
+      ]),
+      sql,
+      DEFAULT_RUBRIC,
+    )
+    expect(has(f, "join_risk")).toBe(false)
   })
 
 

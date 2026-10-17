@@ -42,6 +42,17 @@ export interface Rule {
   absentNewSql?: RegExp
   /** drop a candidate added-line match if it ALSO matches this (false-positive guard). */
   unless?: RegExp
+  /** Opt out of string-literal blanking. Set ONLY when the rule's signal lives
+   *  INSIDE a quoted literal (a leading `%` wildcard, `interval '1 day'`, an
+   *  environment name). Everything else is matched against literal-blanked text
+   *  so SQL-looking prose inside a string can't fire a rule. */
+  literalsMatter?: boolean
+  /** Warehouses this rule applies to, as core dialect names (`bigquery`,
+   *  `redshift`, `databricks`, …). OMITTED means "applies everywhere", so an
+   *  existing rule that says nothing keeps its current behaviour. When the
+   *  project's dialect is unknown, every rule runs — a missing dialect must
+   *  never silently suppress findings. */
+  dialects?: string[]
   kind?: RuleKind
   pathGlob?: RegExp
   example: RuleExample
@@ -59,44 +70,86 @@ function stripComments(s: string): string {
     .replace(/\{#[\s\S]*?#\}/g, " ")
 }
 
+/**
+ * Blank single-quoted string-literal CONTENTS (keeping the quotes) so a rule
+ * cannot be tripped by SQL-looking text inside a literal.
+ *
+ * `dbt-patterns.ts` has carried this for its programmatic detectors since
+ * early on; the declarative catalog never called it. Measured consequence: the
+ * ONLY `critical` finding in a whole-project review of a 215-model repo was
+ * `create-or-replace` matching inside `|| 'CREATE OR REPLACE TRANSIENT TABLE
+ * instead as it will '` — a model emitting ADVICE TEXT about the statement.
+ * A reviewer whose single blocking finding is a string literal is worse than
+ * one with no findings at all.
+ *
+ * Handles doubled-quote escapes (`'it''s'`). Rules that legitimately inspect
+ * literal CONTENT (a leading `%` wildcard, an interval string, an environment
+ * name) opt out with `literalsMatter: true` — and the catalog's own
+ * example/counter corpus is what proves they did: a rule that needs literals
+ * and forgets the flag fails its positive example.
+ */
+function stripLiterals(s: string): string {
+  return s.replace(/'(?:[^']|'')*'/g, "''")
+}
+
 export interface RuleInput {
   file: ChangedFile
   newSql: string
   added: string[]
   removed: string[]
+  /** Core dialect name from the dbt manifest's `adapter_type` (see run.ts).
+   *  Undefined when it could not be determined — every rule then applies. */
+  dialect?: string
 }
 
 /** True when the rule matches the change. */
 export function ruleMatches(rule: Rule, input: RuleInput): boolean {
+  // Dialect gate. A `bq-*` rule advising `SELECT * EXCEPT` is not merely noisy
+  // on a Trino project — it tells the reader the finding is about a warehouse
+  // they do not run. Measured: 223 of 1,268 findings (17.5%) came from rules
+  // named for another engine. `run.ts` has always detected `adapter_type`; it
+  // simply was not plumbed this far. An UNKNOWN dialect runs every rule, so a
+  // detection failure can never silently suppress findings.
+  if (rule.dialects?.length && input.dialect && !rule.dialects.includes(input.dialect)) return false
   const kind = classifyDbtFile(input.file.path)
   const wantKind = rule.kind ?? "model_sql"
   if (wantKind !== "any" && kind !== wantKind) return false
   if (rule.pathGlob && !rule.pathGlob.test(input.file.path)) return false
 
+  // Blank string-literal contents unless the rule's signal lives inside one.
+  // POSITIVE matchers (`added`/`removed`/`newSql`) read the blanked text so SQL
+  // inside a string can't fire them. The GUARDS (`unless`, `absentNewSql`) read
+  // the ORIGINAL text: their job is to recognise context, and blanking can erase
+  // the very context they look for. Real case — `case-when-no-end` guards on
+  // `{{`, and the line `interval '{{ days }}' day` carries its Jinja INSIDE a
+  // literal, so a blanked guard stopped seeing it and the rule fired on valid
+  // templated SQL.
+  const clean = rule.literalsMatter ? stripComments : (t: string) => stripLiterals(stripComments(t))
+  const guard = stripComments
+
   // Relevance gate: a rule only fires when its signal is in THE DIFF, never on
   // an unrelated edit to a matching file. added/removed are diff-anchored by
   // construction; a `newSql` (whole-file) condition must also appear in the
   // changed lines to count as relevant. `absentNewSql` is a whole-file guard.
-  const diffText = stripComments([...input.added, ...input.removed].join("\n"))
+  const diffText = clean([...input.added, ...input.removed].join("\n"))
   let relevant = false
   if (rule.added) {
     const hit = input.added.some((l) => {
-      const s = stripComments(l)
-      return rule.added!.test(s) && !(rule.unless && rule.unless.test(s))
+      return rule.added!.test(clean(l)) && !(rule.unless && rule.unless.test(guard(l)))
     })
     if (!hit) return false
     relevant = true
   }
   if (rule.removed) {
-    if (!input.removed.some((l) => rule.removed!.test(stripComments(l)))) return false
+    if (!input.removed.some((l) => rule.removed!.test(clean(l)))) return false
     relevant = true
   }
   if (rule.newSql) {
-    if (!rule.newSql.test(stripComments(input.newSql))) return false
+    if (!rule.newSql.test(clean(input.newSql))) return false
     if (rule.newSql.test(diffText)) relevant = true
   }
   if (rule.absentNewSql) {
-    if (rule.absentNewSql.test(stripComments(input.newSql))) return false
+    if (rule.absentNewSql.test(guard(input.newSql))) return false
   }
   return relevant
 }
@@ -108,8 +161,9 @@ export function evaluateCatalog(
   added: string[],
   removed: string[],
   rubric: Rubric,
+  dialect?: string,
 ): Finding[] {
-  const input: RuleInput = { file, newSql, added, removed }
+  const input: RuleInput = { file, newSql, added, removed, dialect }
   const model = modelName(file.path)
   const matched: { rule: Rule; finding: Finding }[] = []
   for (const rule of CATALOG) {
@@ -167,7 +221,10 @@ const r = (
   severity: Severity,
   title: string,
   body: string,
-  match: Pick<Rule, "added" | "removed" | "newSql" | "absentNewSql" | "unless" | "kind" | "pathGlob">,
+  match: Pick<
+    Rule,
+    "added" | "removed" | "newSql" | "absentNewSql" | "unless" | "kind" | "pathGlob" | "literalsMatter" | "dialects"
+  >,
   example: RuleExample,
   counter?: RuleExample,
 ): Rule => ({ id, category, severity, title, body, ...match, example, counter })
@@ -376,7 +433,7 @@ const DATETIME: Rule[] = [
     "suggestion",
     "comparing a date column to a string literal",
     "Relying on implicit string→date casts is fragile; cast explicitly to date/timestamp.",
-    { added: /\b\w*(date|_at|_ts)\b\s*(=|>|<|>=|<=)\s*'\d{4}\/\d/i },
+    { literalsMatter: true, added: /\b\w*(date|_at|_ts)\b\s*(=|>|<|>=|<=)\s*'\d{4}\/\d/i },
     { add: "where order_date >= '2024/01/01'" },
     { add: "where order_date >= date '2024-01-01'" },
   ),
@@ -804,7 +861,7 @@ const MATERIALIZATION: Rule[] = [
     "suggestion",
     "ephemeral model with heavy joins is inlined everywhere",
     "An `ephemeral` model is inlined into every consumer; with joins that's repeated recompute. Prefer view/table.",
-    { newSql: /materialized\s*[=:]\s*['"]?ephemeral[\s\S]*\bjoin\b/i },
+    { literalsMatter: true, newSql: /materialized\s*[=:]\s*['"]?ephemeral[\s\S]*\bjoin\b/i },
     { add: "{{ config(materialized='ephemeral') }} select * from a join b on a.k=b.k" },
     { add: "{{ config(materialized='view') }} select * from a join b on a.k=b.k" },
   ),
@@ -814,7 +871,7 @@ const MATERIALIZATION: Rule[] = [
     "suggestion",
     "staging model materialized as table",
     "Staging models are usually views/ephemeral; a `table` here adds storage + a full rebuild each run.",
-    { newSql: /materialized\s*[=:]\s*['"]?table/i, pathGlob: /(^|\/)stg_|(^|\/)staging\//i },
+    { literalsMatter: true, newSql: /materialized\s*[=:]\s*['"]?table/i, pathGlob: /(^|\/)stg_|(^|\/)staging\//i },
     {
       add: "{{ config(materialized='table') }} select 1",
       newSql: "{{ config(materialized='table') }} select 1",
@@ -832,7 +889,7 @@ const MATERIALIZATION: Rule[] = [
     "warning",
     "incremental on_schema_change='ignore'",
     "With `on_schema_change='ignore'`, added/reordered columns silently misalign on append. Use 'sync_all_columns' or 'append_new_columns'.",
-    { added: /on_schema_change\s*[=:]\s*['"]ignore/i },
+    { literalsMatter: true, added: /on_schema_change\s*[=:]\s*['"]ignore/i },
     { add: "on_schema_change='ignore'" },
     { add: "on_schema_change='sync_all_columns'" },
   ),
@@ -842,7 +899,7 @@ const MATERIALIZATION: Rule[] = [
     "warning",
     "delete+insert incremental without unique_key",
     "`incremental_strategy='delete+insert'` with no `unique_key` can't delete matched rows — duplicates accrue.",
-    { newSql: /delete\s*\+\s*insert/i, absentNewSql: /unique_key/i },
+    { literalsMatter: true, newSql: /delete\s*\+\s*insert/i, absentNewSql: /unique_key/i },
     { add: "incremental_strategy='delete+insert' select 1", newSql: "incremental_strategy='delete+insert' select 1" },
     {
       add: "incremental_strategy='delete+insert' unique_key='id'",
@@ -855,7 +912,7 @@ const MATERIALIZATION: Rule[] = [
     "warning",
     "merge incremental without unique_key",
     "`incremental_strategy='merge'` needs a `unique_key` to match rows; without it it appends and duplicates.",
-    { newSql: /incremental_strategy\s*[=:]\s*['"]merge/i, absentNewSql: /unique_key/i },
+    { literalsMatter: true, newSql: /incremental_strategy\s*[=:]\s*['"]merge/i, absentNewSql: /unique_key/i },
     { add: "incremental_strategy='merge' select 1", newSql: "incremental_strategy='merge' select 1" },
     { add: "incremental_strategy='merge' unique_key='id'", newSql: "incremental_strategy='merge' unique_key='id'" },
   ),
@@ -875,7 +932,7 @@ const MATERIALIZATION: Rule[] = [
     "warning",
     "destructive pre/post-hook",
     "A `pre_hook`/`post_hook` running DELETE/TRUNCATE/DROP runs every build and can destroy data.",
-    { added: /(pre_hook|post_hook)[\s\S]*\b(delete|truncate|drop)\b/i },
+    { literalsMatter: true, added: /(pre_hook|post_hook)[\s\S]*\b(delete|truncate|drop)\b/i },
     { add: "post_hook='truncate table x'" },
     { add: "post_hook='grant select on x to role'" },
   ),
@@ -885,7 +942,7 @@ const MATERIALIZATION: Rule[] = [
     "suggestion",
     "large table materialization without clustering/partitioning",
     "A `table`/incremental over a big source with no partition_by/cluster_by scans fully on read. Add partitioning.",
-    {
+    { literalsMatter: true,
       newSql: /materialized\s*[=:]\s*['"]?(table|incremental)/i,
       absentNewSql: /(partition_by|cluster_by|partitioned\s+by|clustered\s+by)/i,
       pathGlob: /(^|\/)(marts|fct_|fact_)/i,
@@ -958,7 +1015,7 @@ const DBT_CONV: Rule[] = [
     "suggestion",
     "env_var() inside a model",
     "`{{ env_var(...) }}` in model SQL couples logic to the environment and can leak secrets into compiled code.",
-    { added: /\{\{\s*env_var\s*\(/i },
+    { literalsMatter: true, added: /\{\{\s*env_var\s*\(/i },
     { add: "where token = '{{ env_var('API_KEY') }}'" },
     { add: "where d > {{ var('cutoff', 0) }}" },
   ),
@@ -988,7 +1045,7 @@ const DBT_CONV: Rule[] = [
     "warning",
     "ref() pointing at a raw/source table name",
     "Using `ref()` on a source-style name (raw_/src_) suggests a missing `source()`; lineage will be wrong.",
-    { added: /\{\{\s*ref\(\s*['"](raw_|src_|source_)/i },
+    { literalsMatter: true, added: /\{\{\s*ref\(\s*['"](raw_|src_|source_)/i },
     { add: "from {{ ref('raw_orders') }}" },
     { add: "from {{ source('app','orders') }}" },
   ),
@@ -1138,7 +1195,7 @@ const SNAPSHOTS: Rule[] = [
     "warning",
     "check-strategy snapshot without check_cols",
     "A `strategy='check'` snapshot needs `check_cols`; without it changes aren't detected.",
-    { kind: "snapshot", newSql: /strategy\s*[=:]\s*['"]check/i, absentNewSql: /check_cols/i },
+    { literalsMatter: true, kind: "snapshot", newSql: /strategy\s*[=:]\s*['"]check/i, absentNewSql: /check_cols/i },
     { add: "{{ config(strategy='check') }}", newSql: "{{ config(strategy='check') }}" },
     {
       add: "{{ config(strategy='check', check_cols=['status']) }}",
@@ -1151,7 +1208,7 @@ const SNAPSHOTS: Rule[] = [
     "warning",
     "timestamp-strategy snapshot without updated_at",
     "A `strategy='timestamp'` snapshot requires `updated_at`; missing it breaks SCD tracking.",
-    { kind: "snapshot", newSql: /strategy\s*[=:]\s*['"]timestamp/i, absentNewSql: /updated_at/i },
+    { literalsMatter: true, kind: "snapshot", newSql: /strategy\s*[=:]\s*['"]timestamp/i, absentNewSql: /updated_at/i },
     { add: "{{ config(strategy='timestamp') }}", newSql: "{{ config(strategy='timestamp') }}" },
     {
       add: "{{ config(strategy='timestamp', updated_at='modified_at') }}",
@@ -1183,7 +1240,7 @@ const SECURITY_PII: Rule[] = [
     "critical",
     "hardcoded credential/secret in SQL",
     "A literal password/secret/api_key/token in model SQL leaks into compiled artifacts and git. Use env/secret manager.",
-    { added: /\b(password|secret|api_key|apikey|access_token|private_key)\s*[=:]\s*['"][^'"]{4,}/i },
+    { literalsMatter: true, added: /\b(password|secret|api_key|apikey|access_token|private_key)\s*[=:]\s*['"][^'"]{4,}/i },
     { add: "where api_key = 'sk-12345abc'" },
     { add: "where d > {{ var('cutoff', 0) }}" },
   ),
@@ -1233,7 +1290,7 @@ const SECURITY_PII: Rule[] = [
     "suggestion",
     "surrogate key built from raw PII",
     "Hashing PII into a join key still derives from PII and can correlate individuals; prefer a tokenized id.",
-    { added: /generate_surrogate_key\s*\(\s*\[[^\]]*\b(email|ssn|phone)\b/i },
+    { literalsMatter: true, added: /generate_surrogate_key\s*\(\s*\[[^\]]*\b(email|ssn|phone)\b/i },
     { add: "{{ dbt_utils.generate_surrogate_key(['email']) }}" },
     { add: "{{ dbt_utils.generate_surrogate_key(['order_id']) }}" },
   ),
@@ -1246,7 +1303,7 @@ const BIGQUERY: Rule[] = [
     "warning",
     "BigQuery: query on a partitioned table with no partition filter",
     "Without a `_PARTITIONTIME`/partition-column predicate, BigQuery scans the whole table (full cost).",
-    {
+    { dialects: ["bigquery"],
       added: /from\s+[^;\n]*(events|logs|fct_|fact_|_fct|_fact)/i,
       absentNewSql: /(_partitiontime|_partitiondate|\bwhere\b[\s\S]*(date|_at|created|partition))/i,
     },
@@ -1262,7 +1319,7 @@ const BIGQUERY: Rule[] = [
     "warning",
     "BigQuery: wildcard table without _TABLE_SUFFIX filter",
     "Wildcard tables (`events_*`) scan every shard unless filtered on `_TABLE_SUFFIX`.",
-    { added: /from\s+[`"][^`"]*\*[`"]/i, absentNewSql: /_table_suffix/i },
+    { dialects: ["bigquery"], added: /from\s+[`"][^`"]*\*[`"]/i, absentNewSql: /_table_suffix/i },
     { add: "from `proj.ds.events_*`", newSql: "from `proj.ds.events_*`" },
     {
       add: "from `proj.ds.events_*` where _table_suffix between '2024' and '2025'",
@@ -1275,20 +1332,24 @@ const BIGQUERY: Rule[] = [
     "warning",
     "BigQuery: legacy-SQL syntax",
     "Legacy SQL (`[proj:ds.table]`, `TABLE_DATE_RANGE`) is deprecated; use Standard SQL.",
-    { added: /(\[[\w-]+:[\w.]+\]|table_date_range|table_query)/i },
+    { dialects: ["bigquery"], added: /(\[[\w-]+:[\w.]+\]|table_date_range|table_query)/i },
     { add: "from [my-proj:ds.table]" },
     { add: "from `my-proj`.`ds`.`table`" },
   ),
-  r(
-    "bq-cross-join-unnest",
-    "fanout",
-    "suggestion",
-    "BigQuery: CROSS JOIN UNNEST can explode rows",
-    "`CROSS JOIN UNNEST(array)` multiplies rows by array length; confirm the fan-out is intended.",
-    { added: /cross\s+join\s+unnest\s*\(/i },
-    { add: "cross join unnest(items) as item" },
-    { add: "left join unnest(items) as item" },
-  ),
+  // bq-cross-join-unnest removed. Three reasons, in order of weight:
+  //  1. `CROSS JOIN UNNEST(arr)` is the ONLY way to expand an array in Trino,
+  //     Presto, Athena and BigQuery — so the rule fired on every correct use of
+  //     the idiom. Measured on a real Trino project: 10 findings, 10 of them the
+  //     plain idiom, 0 genuine unintended fan-out.
+  //  2. It was labelled "BigQuery:" while firing on a Trino repo, telling the
+  //     reader the finding was about a dialect they do not use. The Rule shape
+  //     carries no dialect, so it could not be scoped rather than retired.
+  //  3. The concern it gestures at — an array expansion the author did not
+  //     intend — is now handled where it can be reasoned about: `detectCrossJoin`
+  //     in dbt-patterns.ts classifies the CROSS JOIN operand and stays silent on
+  //     UNNEST precisely because a table function is not a relation join.
+  // (Same disposition as bq-safe-cast-missing above: a blanket regex whose
+  // positive case is the common correct one erodes trust faster than it helps.)
   // bq-safe-cast-missing removed: it flagged EVERY numeric/date CAST as "consider
   // SAFE_CAST", which is a false-positive on the overwhelmingly common case of a
   // clean cast. The genuine dirty-data concern is too context-dependent for a
@@ -1299,7 +1360,7 @@ const BIGQUERY: Rule[] = [
     "suggestion",
     "BigQuery: FLOAT64 for money loses precision",
     "Use `NUMERIC`/`BIGNUMERIC` for currency; `FLOAT64` introduces rounding error.",
-    { added: /cast\s*\(\s*\w*(amount|price|revenue|cost|total)\w*\s+as\s+float64/i },
+    { dialects: ["bigquery"], added: /cast\s*\(\s*\w*(amount|price|revenue|cost|total)\w*\s+as\s+float64/i },
     { add: "cast(amount as float64)" },
     { add: "cast(amount as numeric)" },
   ),
@@ -1309,7 +1370,7 @@ const BIGQUERY: Rule[] = [
     "suggestion",
     "BigQuery: prefer SELECT * EXCEPT/REPLACE over bare *",
     "If you must use `*`, BigQuery's `* EXCEPT(...)`/`* REPLACE(...)` is safer than a bare star.",
-    { added: /select\s+\*\s+from/i, unless: /except\s*\(|replace\s*\(|\{\{/i },
+    { dialects: ["bigquery"], added: /select\s+\*\s+from/i, unless: /except\s*\(|replace\s*\(|\{\{/i },
     { add: "select * from t" },
     { add: "select * except(x) from t" },
   ),
@@ -1319,7 +1380,7 @@ const BIGQUERY: Rule[] = [
     "suggestion",
     "BigQuery: GENERATE_ARRAY/DATE_ARRAY can be huge",
     "A wide `GENERATE_ARRAY`/`GENERATE_DATE_ARRAY` materializes every element; bound the range.",
-    { added: /generate_(date_|timestamp_)?array\s*\(/i },
+    { dialects: ["bigquery"], added: /generate_(date_|timestamp_)?array\s*\(/i },
     { add: "generate_date_array('2000-01-01', current_date)" },
     { add: "from {{ ref('date_spine') }}" },
   ),
@@ -1329,7 +1390,7 @@ const BIGQUERY: Rule[] = [
     "suggestion",
     "BigQuery: DATETIME vs TIMESTAMP confusion",
     "`DATETIME` has no timezone; mixing it with `TIMESTAMP` in comparisons shifts results.",
-    { added: /cast\s*\(\s*\w*\s+as\s+datetime\b/i },
+    { dialects: ["bigquery"], added: /cast\s*\(\s*\w*\s+as\s+datetime\b/i },
     { add: "cast(ts as datetime)" },
     { add: "cast(ts as timestamp)" },
   ),
@@ -1339,7 +1400,7 @@ const BIGQUERY: Rule[] = [
     "suggestion",
     "BigQuery: array access needs OFFSET/ORDINAL",
     "Indexing an array as `arr[0]` errors in BigQuery; use `arr[OFFSET(0)]` or `[ORDINAL(1)]`.",
-    { added: /\b\w+\[\s*\d+\s*\]/ },
+    { dialects: ["bigquery"], added: /\b\w+\[\s*\d+\s*\]/ },
     { add: "select items[0]" },
     { add: "select items[offset(0)]" },
   ),
@@ -1349,7 +1410,7 @@ const BIGQUERY: Rule[] = [
     "suggestion",
     "BigQuery: large exact COUNT(DISTINCT) — APPROX is cheaper",
     "On BigQuery, `APPROX_COUNT_DISTINCT` is dramatically cheaper than exact distinct at scale.",
-    { added: /count\s*\(\s*distinct/i, pathGlob: /(marts|reporting)/i },
+    { dialects: ["bigquery"], added: /count\s*\(\s*distinct/i, pathGlob: /(marts|reporting)/i },
     { add: "count(distinct user_id)", path: "models/marts/m.sql" },
     { add: "count(user_id)", path: "models/marts/m.sql" },
   ),
@@ -1359,7 +1420,7 @@ const BIGQUERY: Rule[] = [
     "suggestion",
     "BigQuery: case-sensitive string join",
     "BigQuery string comparison is case-sensitive by default; normalize with LOWER or set collation.",
-    { added: /\bon\s+\w+\.\w*(name|code|sku)\b\s*=\s*\w+\./i },
+    { dialects: ["bigquery"], added: /\bon\s+\w+\.\w*(name|code|sku)\b\s*=\s*\w+\./i },
     { add: "on a.sku = b.sku" },
     { add: "on lower(a.sku) = lower(b.sku)" },
   ),
@@ -1372,7 +1433,7 @@ const SNOWFLAKE: Rule[] = [
     "suggestion",
     "Snowflake: VARIANT path used without explicit cast",
     "Reading `col:field` from a VARIANT returns VARIANT; cast (`::string`) so downstream types are stable.",
-    { added: /\w+:[a-z_]\w*(?!\s*::)/i, unless: /::|http|case\s+when/i },
+    { dialects: ["snowflake"], added: /\w+:[a-z_]\w*(?!\s*::)/i, unless: /::|http|case\s+when/i },
     { add: "select payload:user_id from t" },
     { add: "select payload:user_id::int from t" },
   ),
@@ -1382,7 +1443,7 @@ const SNOWFLAKE: Rule[] = [
     "suggestion",
     "Snowflake: LATERAL FLATTEN multiplies rows",
     "`LATERAL FLATTEN(input => arr)` produces one row per element; verify the fan-out is intended.",
-    { added: /lateral\s+flatten\s*\(/i },
+    { dialects: ["snowflake"], added: /lateral\s+flatten\s*\(/i },
     { add: "from t, lateral flatten(input => t.items)" },
     { add: "from t" },
   ),
@@ -1392,7 +1453,7 @@ const SNOWFLAKE: Rule[] = [
     "warning",
     "Snowflake: time-travel (AT/BEFORE) in a model",
     "`AT(TIMESTAMP …)`/`BEFORE(STATEMENT …)` reads historical data — non-reproducible in a model.",
-    { added: /\b(at|before)\s*\(\s*(timestamp|offset|statement)\s*=>/i },
+    { dialects: ["snowflake"], added: /\b(at|before)\s*\(\s*(timestamp|offset|statement)\s*=>/i },
     { add: "from t at(offset => -60)" },
     { add: "from t" },
   ),
@@ -1402,7 +1463,7 @@ const SNOWFLAKE: Rule[] = [
     "warning",
     "Snowflake: RESULT_SCAN in a model",
     "`RESULT_SCAN(LAST_QUERY_ID())` depends on session state and can't be reproduced by dbt.",
-    { added: /result_scan\s*\(/i },
+    { dialects: ["snowflake"], added: /result_scan\s*\(/i },
     { add: "from table(result_scan(last_query_id()))" },
     { add: "from {{ ref('x') }}" },
   ),
@@ -1417,7 +1478,7 @@ const SNOWFLAKE: Rule[] = [
     "suggestion",
     "Snowflake: transient table has no fail-safe",
     "A `transient` materialization saves storage but loses Fail-safe recovery; confirm that's acceptable.",
-    { added: /transient\s*[=:]\s*true|materialized\s*[=:]\s*['"]?transient/i },
+    { dialects: ["snowflake"], added: /transient\s*[=:]\s*true|materialized\s*[=:]\s*['"]?transient/i },
     { add: "{{ config(transient=true) }}" },
     { add: "{{ config(materialized='table') }}" },
   ),
@@ -1427,7 +1488,7 @@ const SNOWFLAKE: Rule[] = [
     "critical",
     "Snowflake: COPY INTO / PUT inside a model",
     "`COPY INTO`/`PUT`/`GET` are loading commands, not transforms — they don't belong in a model.",
-    { added: /\b(copy\s+into|put\s+file|get\s+@)\b/i },
+    { dialects: ["snowflake"], added: /\b(copy\s+into|put\s+file|get\s+@)\b/i },
     { add: "copy into t from @stage" },
     { add: "select * from t" },
   ),
@@ -1437,7 +1498,7 @@ const SNOWFLAKE: Rule[] = [
     "suggestion",
     "Snowflake: ILIKE is case-insensitive scan",
     "`ILIKE` can't use search-optimization the way an anchored equality can; prefer LOWER(col)=… where possible.",
-    { added: /\bilike\b/i },
+    { dialects: ["snowflake"], added: /\bilike\b/i },
     { add: "where name ilike '%shirt%'" },
     { add: "where lower(name) = 'shirt'" },
   ),
@@ -1450,7 +1511,7 @@ const SNOWFLAKE: Rule[] = [
     "warning",
     "Snowflake: SAMPLE/TABLESAMPLE returns random subset",
     "`SAMPLE (n)` returns a different random subset each run — non-deterministic and lossy in a model.",
-    { added: /\bsample\s*\(\s*\d/i },
+    { dialects: ["snowflake"], added: /\bsample\s*\(\s*\d/i },
     { add: "from t sample (10)" },
     { add: "from t" },
   ),
@@ -1463,7 +1524,7 @@ const REDSHIFT: Rule[] = [
     "suggestion",
     "Redshift: large table without dist/sort keys",
     "A Redshift `table` over a big source with no `dist`/`sort` config redistributes on every join — slow.",
-    {
+    { dialects: ["redshift"], literalsMatter: true,
       newSql: /materialized\s*[=:]\s*['"]?table/i,
       absentNewSql: /(dist\s*[=:]|sort\s*[=:]|diststyle|sortkey)/i,
       pathGlob: /(marts|fct_|fact_)/i,
@@ -1485,7 +1546,7 @@ const REDSHIFT: Rule[] = [
     "suggestion",
     "Redshift: VARCHAR without length defaults to 256",
     "Redshift `VARCHAR` defaults to 256 chars and truncates silently; size it explicitly for long text.",
-    { added: /cast\s*\(\s*\w+\s+as\s+varchar\s*\)/i },
+    { dialects: ["redshift"], added: /cast\s*\(\s*\w+\s+as\s+varchar\s*\)/i },
     { add: "cast(notes as varchar)" },
     { add: "cast(notes as varchar(4096))" },
   ),
@@ -1495,7 +1556,7 @@ const REDSHIFT: Rule[] = [
     "suggestion",
     "Redshift: LISTAGG overflows past 64KB",
     "Redshift `LISTAGG` errors when the result exceeds 64KB; bound or pre-truncate the inputs.",
-    { added: /\blistagg\s*\(/i },
+    { dialects: ["redshift"], added: /\blistagg\s*\(/i },
     { add: "listagg(comment, ',')" },
     { add: "array_agg(comment)" },
   ),
@@ -1505,7 +1566,7 @@ const REDSHIFT: Rule[] = [
     "warning",
     "Redshift: leader-node-only function on a table",
     "`GENERATE_SERIES`/some functions run only on the leader node and error when used with table data.",
-    { added: /\bgenerate_series\s*\(/i },
+    { dialects: ["redshift"], added: /\bgenerate_series\s*\(/i },
     { add: "select generate_series(1, n) from t" },
     { add: "from {{ ref('numbers') }}" },
   ),
@@ -1515,7 +1576,7 @@ const REDSHIFT: Rule[] = [
     "suggestion",
     "Redshift: GETDATE()/SYSDATE in transform",
     "`GETDATE()`/`SYSDATE` bake run time into output (non-idempotent); pass an as-of var.",
-    { added: /\b(getdate|sysdate)\b/i },
+    { dialects: ["redshift"], added: /\b(getdate|sysdate)\b/i },
     { add: "where d > getdate() - 7" },
     { add: "where d > '2024-01-01'" },
   ),
@@ -1525,7 +1586,7 @@ const REDSHIFT: Rule[] = [
     "suggestion",
     "Redshift: SUPER path without cast",
     "Reading from a SUPER column without casting yields SUPER; cast for stable downstream types.",
-    { added: /\w+\.\w+\s*::\s*super\b|\bjson_extract_path_text\s*\(/i },
+    { dialects: ["redshift"], added: /\w+\.\w+\s*::\s*super\b|\bjson_extract_path_text\s*\(/i },
     { add: "select json_extract_path_text(data, 'id')" },
     { add: "select id from t" },
   ),
@@ -1538,7 +1599,7 @@ const DATABRICKS: Rule[] = [
     "suggestion",
     "Spark/Databricks: explode() multiplies rows",
     "`explode(array)`/`posexplode` emits one row per element — a fan-out; verify downstream grain.",
-    { added: /\b(explode|posexplode|explode_outer)\s*\(/i },
+    { dialects: ["databricks"], added: /\b(explode|posexplode|explode_outer)\s*\(/i },
     { add: "select explode(items)" },
     { add: "select items" },
   ),
@@ -1548,7 +1609,7 @@ const DATABRICKS: Rule[] = [
     "suggestion",
     "Spark: collect_list/collect_set ordering is non-deterministic",
     "`collect_list`/`collect_set` produce arrays in arbitrary order; sort explicitly if order matters.",
-    { added: /\bcollect_(list|set)\s*\(/i, unless: /sort_array/i },
+    { dialects: ["databricks"], added: /\bcollect_(list|set)\s*\(/i, unless: /sort_array/i },
     { add: "collect_list(id)" },
     { add: "sort_array(collect_list(id))" },
   ),
@@ -1558,7 +1619,7 @@ const DATABRICKS: Rule[] = [
     "warning",
     "Databricks: MERGE INTO without a selective condition",
     "A `MERGE` whose `ON` is too broad (or `1=1`) rewrites the whole Delta table each run.",
-    { added: /merge\s+into[\s\S]*\bon\s+(1\s*=\s*1|true)\b/i },
+    { dialects: ["databricks"], added: /merge\s+into[\s\S]*\bon\s+(1\s*=\s*1|true)\b/i },
     { add: "merge into t using s on 1=1" },
     { add: "merge into t using s on t.id=s.id" },
   ),
@@ -1568,7 +1629,7 @@ const DATABRICKS: Rule[] = [
     "suggestion",
     "Databricks: large Delta table without partitioning/Z-ORDER",
     "A big Delta `table` with no `partition_by`/Z-ORDER scans all files; add partitioning for prune-ability.",
-    {
+    { dialects: ["databricks"], literalsMatter: true,
       newSql: /materialized\s*[=:]\s*['"]?(table|incremental)/i,
       absentNewSql: /(partition_by|zorder|z_order|liquid)/i,
       pathGlob: /(marts|fct_|fact_)/i,
@@ -1590,7 +1651,7 @@ const DATABRICKS: Rule[] = [
     "suggestion",
     "Spark: CACHE/UNCACHE TABLE in a model",
     "`CACHE TABLE`/`REFRESH` are session/runtime ops, not transforms — remove from model SQL.",
-    { added: /\b(cache\s+table|uncache\s+table|refresh\s+table)\b/i },
+    { dialects: ["databricks"], added: /\b(cache\s+table|uncache\s+table|refresh\s+table)\b/i },
     { add: "cache table t" },
     { add: "select * from t" },
   ),
@@ -1600,7 +1661,7 @@ const DATABRICKS: Rule[] = [
     "suggestion",
     "Spark: to_date/to_timestamp without format",
     "`to_date(str)` without an explicit format guesses and silently NULLs unparseable values.",
-    { added: /\bto_(date|timestamp)\s*\(\s*[a-z_][\w.]*\s*\)/i },
+    { dialects: ["databricks"], added: /\bto_(date|timestamp)\s*\(\s*[a-z_][\w.]*\s*\)/i },
     { add: "to_date(order_date)" },
     { add: "to_date(order_date, 'yyyy-MM-dd')" },
   ),
@@ -1673,7 +1734,10 @@ const STYLE: Rule[] = [
     "warning",
     "hardcoded environment/schema name",
     "A literal `'prod'`/`'production'`/`analytics.` in SQL breaks across environments; use target/var.",
-    { added: /['"](prod|production|staging|dev)['"]/i },
+    // `tags=['staging', 'billing']` is a dbt LAYER label, not an environment.
+    // Measured on a 215-model project: 46 of 46 findings were the model's own
+    // config tag, and they were 33% of every warning in the review.
+    { literalsMatter: true, added: /['"](prod|production|staging|dev)['"]/i, unless: /\btags\s*[=:]/i },
     { add: "where env = 'production'" },
     { add: "where env = '{{ target.name }}'" },
   ),
@@ -1683,7 +1747,7 @@ const STYLE: Rule[] = [
     "suggestion",
     "LIKE without a wildcard — use =",
     "`like 'exact'` with no `%`/`_` is just equality; `=` is clearer and faster.",
-    { added: /\blike\s+'[^%_']+'/i },
+    { literalsMatter: true, added: /\blike\s+'[^%_']+'/i },
     { add: "where code like 'ABC'" },
     { add: "where code like 'ABC%'" },
   ),
@@ -1733,7 +1797,7 @@ const STYLE: Rule[] = [
     "suggestion",
     "string interval literal portability",
     "`interval '1 day'` literal syntax differs across warehouses; prefer dateadd/date_add functions.",
-    { added: /interval\s+'\d+\s*\w+'/i },
+    { literalsMatter: true, added: /interval\s+'\d+\s*\w+'/i },
     { add: "d + interval '1 day'" },
     { add: "dateadd(day, 1, d)" },
   ),
@@ -1846,7 +1910,7 @@ const MISC: Rule[] = [
     "suggestion",
     "comparing boolean to true/'true'",
     "`is_active = true` is redundant; use the boolean directly. `= 'true'` (string) is a type bug.",
-    { added: /\b\w+\s*=\s*('true'|'false')/i },
+    { literalsMatter: true, added: /\b\w+\s*=\s*('true'|'false')/i },
     { add: "where active = 'true'" },
     { add: "where active" },
   ),
@@ -2166,7 +2230,7 @@ const MISC: Rule[] = [
     "suggestion",
     "ILIKE with surrounding wildcards",
     "`ilike '%x%'` is a case-insensitive full scan; consider a search index or normalized column.",
-    { added: /\bilike\s+'%[^']*%'/i },
+    { literalsMatter: true, added: /\bilike\s+'%[^']*%'/i },
     { add: "where name ilike '%shirt%'" },
     { add: "where name = 'shirt'" },
   ),
@@ -2219,9 +2283,14 @@ const MISC2: Rule[] = [
     "suggestion",
     "comparing to empty string '' ",
     "`= ''` treats empty and NULL differently across warehouses; decide and handle both explicitly.",
-    { added: /=\s*''/ },
+    // literalsMatter: the signal is that the literal is EMPTY. Without the
+    // opt-out, `stripLiterals` rewrites every `= 'some_value'` to `= ''` and
+    // this rule matches all of them — it went 20 -> 214 on a real project the
+    // moment literal blanking was switched on. The counter-example below pins
+    // that: a non-empty literal must NOT fire.
+    { literalsMatter: true, added: /=\s*''/ },
     { add: "where name = ''" },
-    { add: "where name is null" },
+    { add: "where name = 'active'" },
   ),
   r(
     "decimal-no-scale",

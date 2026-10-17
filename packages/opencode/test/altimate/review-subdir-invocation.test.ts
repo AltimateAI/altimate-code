@@ -105,6 +105,36 @@ describe("R20: subdir-invocation content resolution (PR #1027 consensus MAJOR)",
     expect(content).toBe("-- compiled customers\n")
   })
 
+  test("a microbatch partition DIRECTORY is not the model's compiled SQL", async () => {
+    // Pins the layout that explains a surprising `--all` coverage number.
+    // dbt writes microbatch/partition compiles to
+    //   target/compiled/<project>/models/marts/<model>/<model>_<date>.sql
+    // — a DIRECTORY named after the model, one file per batch. The model's own
+    // artifact at models/marts/<model>.sql is never written. Counting files
+    // under target/compiled/ therefore wildly overstates how many models the
+    // engine can actually analyse (measured: 115 files, 7 models).
+    //
+    // Resolving one of those partitions as "the" compiled SQL would be wrong —
+    // each carries a different event-time bound — so a miss is correct here.
+    const { root } = await mkTempRepo()
+    const dbtRoot = path.join(root, "packages", "dbt")
+    const project = "acme"
+    const partitionDir = path.join(dbtRoot, "target", "compiled", project, "models", "marts", "events")
+    await fs.mkdir(partitionDir, { recursive: true })
+    await fs.writeFile(path.join(partitionDir, "events_2026-01-01.sql"), "-- batch 1\n")
+    await fs.writeFile(path.join(partitionDir, "events_2026-01-02.sql"), "-- batch 2\n")
+
+    const resolver = makeCompiledResolver({ cwd: dbtRoot, projectName: project, pathPrefix: "packages/dbt" })
+    // The model's manifest original_file_path is models/marts/events.sql.
+    expect(await resolver("packages/dbt/models/marts/events.sql", "new")).toBeUndefined()
+
+    // …and a sibling model that WAS compiled normally still resolves, so the
+    // miss above is about the layout, not a broken resolver.
+    const flat = path.join(dbtRoot, "target", "compiled", project, "models", "marts", "orders.sql")
+    await fs.writeFile(flat, "-- compiled orders\n")
+    expect(await resolver("packages/dbt/models/marts/orders.sql", "new")).toBe("-- compiled orders\n")
+  })
+
   test("makeCompiledResolver pathPrefix is a no-op when unset (repo-root-invoked case)", async () => {
     const { root } = await mkTempRepo()
     const project = "acme"

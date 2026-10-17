@@ -51,6 +51,66 @@ function fail(error: unknown): AltimateCoreResult {
   return { success: false, data: {}, error: String(error) }
 }
 
+/** Returned when the installed @altimateai/altimate-core predates the dbt-perf
+ *  bindings. Names the fix rather than the symbol, because the reader is a CLI
+ *  user, not the person who wrote the binding. */
+export const DBT_PERF_UNAVAILABLE =
+  "dbt-perf needs a newer @altimateai/altimate-core than the one installed " +
+  "(no analyze_dbt_perf binding). Build and link it locally:\n" +
+  "  cd <altimate-core-internal>/crates/altimate-core-node && npm run build\n" +
+  "  cd <this repo>/packages/opencode && bun link @altimateai/altimate-core"
+
+// altimate_change start — optional bindings for the dbt mart optimizer commands
+/** The message for a binding this altimate-core build does not export. Names
+ *  the export and the command, so the reader knows which build they need. */
+export function bindingUnavailable(exportName: string, command: string): string {
+  return (
+    `this altimate-core build lacks ${exportName} (needed by \`${command}\`). ` +
+    "Build and link a newer one, or point NAPI_RS_NATIVE_LIBRARY_PATH at a local build:\n" +
+    "  cd <altimate-core-internal>/crates/altimate-core-node && npm run build\n" +
+    "  export NAPI_RS_NATIVE_LIBRARY_PATH=<that dir>/altimate-core.<platform>.node"
+  )
+}
+
+/** True when the loaded core exports `name` as a function. */
+export function hasBinding(name: string): boolean {
+  return typeof (core as unknown as Record<string, unknown>)[name] === "function"
+}
+
+type AnyBinding = (...args: unknown[]) => unknown
+
+/** Call an export that may not exist in this core build. The bindings return a
+ *  `serde_json::Value` (an object once napi converts it) or a JSON string —
+ *  directly, or through a Promise for the async ones (`proposeRewritesForModel`
+ *  runs the equivalence engine on a tokio runtime); all are accepted. */
+async function callOptionalBinding(
+  exportName: string,
+  command: string,
+  invoke: (fn: AnyBinding) => unknown,
+): Promise<AltimateCoreResult> {
+  const fn = (core as unknown as Record<string, unknown>)[exportName]
+  if (typeof fn !== "function") return fail(bindingUnavailable(exportName, command))
+  try {
+    const raw = await invoke(fn as AnyBinding)
+    const value = typeof raw === "string" ? JSON.parse(raw) : raw
+    return ok(true, Array.isArray(value) ? { value: toPlain(value) } : toData(value))
+  } catch (e) {
+    return fail(e)
+  }
+}
+
+function toPlain(v: unknown): unknown {
+  return v === undefined ? undefined : JSON.parse(JSON.stringify(v))
+}
+
+/** A list result arrives either bare (wrapped as `value`) or under `key`. */
+function asArray(data: Record<string, unknown>, key: string): unknown[] {
+  if (Array.isArray(data.value)) return data.value
+  if (Array.isArray(data[key])) return data[key] as unknown[]
+  return []
+}
+// altimate_change end
+
 // ---------------------------------------------------------------------------
 // IFF / QUALIFY transpile transforms (ported from Python guard.py)
 // ---------------------------------------------------------------------------
@@ -370,6 +430,64 @@ export function registerAll(): void {
       return fail(e)
     }
   })
+  /**
+   * Whole-project dbt performance analysis.
+   *
+   * The `analyze_dbt_perf*` bindings ship in a LATER altimate-core than the
+   * pinned one, so they are resolved at call time rather than imported: an
+   * `import { analyzeDbtPerf }` would make every other core handler in this
+   * module fail to load on the pinned release. When they are absent the
+   * handler returns an actionable error instead of an
+   * "undefined is not a function" stack — see cli/cmd/dbt-perf.ts, which
+   * surfaces it verbatim.
+   */
+  register("altimate_core.dbt_perf", async (params) => {
+    const c = core as unknown as Record<string, unknown>
+    const fromManifest = c["analyzeDbtPerfFromManifest"]
+    const fromDir = c["analyzeDbtPerf"]
+    const useManifest = typeof params.manifest_json === "string" && params.manifest_json.length > 0
+    const fn = useManifest ? fromManifest : fromDir
+    if (typeof fn !== "function") return fail(DBT_PERF_UNAVAILABLE)
+    try {
+      const raw = (fn as (a: string, b?: string) => unknown)(
+        useManifest ? (params.manifest_json as string) : (params.project_dir ?? ""),
+        params.options_json ?? undefined,
+      )
+      // The binding returns a `serde_json::Value` (a JS object once napi has
+      // converted it). Tolerate a JSON string too, which is how every other
+      // review binding in this file returns its payload.
+      const report = typeof raw === "string" ? JSON.parse(raw) : raw
+      return ok(true, toData(report))
+    } catch (e) {
+      return fail(e)
+    }
+  })
+
+  // altimate_change start — dbt mart optimizer: rewrite proposals, parity plans,
+  // impact analysis and factoring. Resolved at call time like dbt_perf; a
+  // missing export is an actionable error naming the export, never an empty result.
+  register("altimate_core.dbt_rewrites", async (params) =>
+    callOptionalBinding("proposeRewritesForModel", "altimate dbt-optimize", (fn) =>
+      fn(params.project_dir, params.model, params.options_json ?? undefined),
+    ).then((r) => (r.success ? ok(true, { proposals: asArray(r.data, "proposals") }) : r)),
+  )
+  register("altimate_core.dbt_parity_plan", async (params) =>
+    callOptionalBinding("dbtParityPlan", "altimate dbt-parity", (fn) =>
+      fn(params.project_dir, params.model, params.before, params.after, params.options_json ?? undefined),
+    ),
+  )
+  register("altimate_core.dbt_impact", async (params) =>
+    callOptionalBinding("analyzeDbtImpact", "altimate dbt-impact", (fn) =>
+      fn(params.project_dir, params.change_json, params.options_json ?? undefined),
+    ),
+  )
+  register("altimate_core.dbt_factoring", async (params) =>
+    callOptionalBinding("proposeFactoring", "altimate dbt-factor", (fn) =>
+      fn(params.project_dir, params.options_json ?? undefined),
+    ).then((r) => (r.success ? ok(true, { proposals: asArray(r.data, "proposals") }) : r)),
+  )
+  // altimate_change end
+
   // AST base-vs-head structural diff — the `*_change` SQL rules, moved off diff-line regex.
   register("altimate_core.structural_diff", async (params) => {
     try {

@@ -1,13 +1,19 @@
 import path from "node:path"
-import { readFile, realpath, stat, access } from "node:fs/promises"
+import { readFile, realpath, stat, access, mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { existsSync } from "node:fs"
+import { jobsFromSelectors, readJobMap, resolveJobMap } from "../../cli/cmd/dbt-impact-jobs"
+import { compileSides } from "../../cli/cmd/dbt-impact-compiled"
+import { findModel, loadManifest } from "../../cli/cmd/dbt-mart-helpers"
 import { Installation } from "../../installation"
 import { loadReviewConfig, resolveRubric } from "./config"
 import type { Severity } from "./finding"
 import { collectChangedFiles, makeContentResolver, defaultBaseRef, gitRepoRoot, manifestHash } from "./git"
 import { makeCompiledResolver, dbtProjectName } from "./compiled"
+import { parseManifest } from "../native/dbt/manifest"
 import { buildCatalogSchemaContext } from "./schema-context"
 import { createDispatcherRunner } from "./runner"
-import { runReview } from "./orchestrate"
+import { runReview, type LagSides } from "./orchestrate"
 import { runAiReview } from "./ai-review"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
@@ -50,6 +56,77 @@ export interface ReviewPullRequestOptions {
   /** G2 — [EXPERIMENTAL] bypass the tier classifier with the supplied tier.
    *  Envelope carries `tierForced: true` when used. Debug / bench only. */
   forceTier?: "trivial" | "lite" | "full"
+  /** Project scope: review EVERY model in the manifest instead of a diff.
+   *  Mutually exclusive with `base` / `head`. See {@link ReviewScope}. */
+  all?: boolean
+  /** `--all` only: cap the number of models reviewed. Omitted →
+   *  {@link DEFAULT_ALL_MODEL_CAP}; `0` → no cap. */
+  maxModels?: number
+  // altimate_change start — schema_lag lane inputs
+  /** Job map file (overrides config `schemaLag.jobs`). */
+  jobs?: string
+  /** `selectors`: one job per `selectors.yml` selector (overrides config `schemaLag.jobsFrom`). */
+  jobsFrom?: "selectors"
+  /** Compiled base / head manifests; when omitted the lane compiles both sides itself. */
+  baseManifest?: string
+  headManifest?: string
+  /** dbt executable, profiles dir and target for the lane's `dbt ls` / `dbt compile`. */
+  dbt?: { dbtBin?: string; profilesDir?: string; target?: string }
+  // altimate_change end
+}
+
+/** Default `--all` model cap. A 214-model project runs the whole lane set in
+ *  ~7s, so the cap is not there to trim ordinary projects — it is there so a
+ *  pathological monorepo doesn't look hung. It never truncates silently (see
+ *  the stderr warning below). Lift it with `--max-models 0`. */
+export const DEFAULT_ALL_MODEL_CAP = 500
+
+/**
+ * Build the `--all` file list: every model in the dbt manifest, as a single
+ * version with no base side.
+ *
+ * Paths come out of the manifest dbt-project relative (`models/marts/x.sql`)
+ * but everything downstream — the working-tree resolver, the compiled-SQL
+ * resolver's prefix stripping, the finding `file` field — speaks repo-relative
+ * paths, so `pathPrefix` is prepended here (it is `""` when the dbt project IS
+ * the repo root).
+ *
+ * Models are sorted by path so two runs over the same manifest produce the same
+ * order, and the cap (when it bites) always truncates the same tail rather than
+ * whatever the manifest's object key order happened to be.
+ */
+async function manifestModelFiles(
+  manifestAbs: string,
+  pathPrefix: string,
+  maxModels?: number,
+): Promise<ChangedFile[]> {
+  const parsed = await parseManifest({ path: manifestAbs })
+  const prefix = pathPrefix && pathPrefix !== "." ? pathPrefix.replace(/\\/g, "/").replace(/\/+$/, "") : ""
+  const paths = parsed.models
+    .map((m) => m.path)
+    .filter((p): p is string => !!p)
+    .map((p) => (prefix ? `${prefix}/${p}` : p))
+    .sort()
+  if (!paths.length) {
+    throw new Error(
+      `--all: no models found in ${manifestAbs}. Run \`dbt parse\` (or \`dbt compile\`) in the project first, ` +
+        `or point --manifest at the right artifact.`,
+    )
+  }
+  const cap = maxModels === undefined ? DEFAULT_ALL_MODEL_CAP : maxModels
+  const capped = cap > 0 && paths.length > cap ? paths.slice(0, cap) : paths
+  if (capped.length < paths.length) {
+    // Loud, never silent: a truncated project review that reads as a clean one
+    // is exactly the failure this mode exists to fix.
+    process.stderr.write(
+      `⚠️  --all: reviewing ${capped.length} of ${paths.length} models (cap: ${cap}). ` +
+        `Pass --max-models 0 to review every model.\n`,
+    )
+  }
+  // `status: "added"` is the honest shape: the review has no previous version
+  // of any of these files. It is also what makes the single-version lanes
+  // (missing grain test, PII on introduced columns) evaluate the whole model.
+  return capped.map((p) => ({ path: p, status: "added" as const }))
 }
 
 /** dbt adapter_type → core SQL dialect. Mostly identity; a few aliases. */
@@ -207,32 +284,26 @@ async function detectStaleManifest(manifestAbs: string, changed: ChangedFile[], 
 }
 
 export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise<VerdictEnvelope> {
+  if (opts.all && (opts.base || opts.head)) {
+    throw new Error("--all reviews the whole manifest and has no base/head; drop --base/--head or drop --all.")
+  }
   const config = await loadReviewConfig(opts.cwd)
   if (opts.manifestPath) config.manifestPath = opts.manifestPath
   if (opts.mode) config.mode = opts.mode
   if (opts.severityThreshold) config.severityThreshold = opts.severityThreshold
+  // altimate_change start — schema_lag lane: CLI job map overrides config
+  if (opts.jobs || opts.jobsFrom)
+    config.schemaLag = { jobs: opts.jobs ? path.resolve(opts.cwd, opts.jobs) : "", jobsFrom: opts.jobsFrom ?? "" }
+  if (!!opts.baseManifest !== !!opts.headManifest) throw new Error("--base-manifest and --head-manifest go together")
+  // altimate_change end
   const rubric = resolveRubric(config)
 
-  // Only resolve a base ref if we actually need git (to collect changed files
-  // or to read old/new content). A caller that supplies BOTH `changedFiles` and
-  // `getContent` (e.g. a non-git CI integration) must not be forced through a
-  // git lookup that can fail when there's no usable history.
-  const needGit = !opts.changedFiles || !opts.getContent
-  const base = opts.base ?? (needGit ? await defaultBaseRef(opts.cwd) : "")
-  const changedFiles = opts.changedFiles ?? (await collectChangedFiles({ base, head: opts.head, cwd: opts.cwd }))
   // Resolve the repo top-level once; used to root working-tree FS reads, the
   // stale-manifest existence check, and the compiled-SQL resolver's path
   // mapping. Falls back to opts.cwd when we couldn't resolve it (non-git or
   // bare-repo contexts) — safe for the repo-root-invoked case but not helpful
   // in the subdir-invocation case that this addresses.
   const gitRoot = (await gitRepoRoot(opts.cwd)) ?? opts.cwd
-  // Map renamed files → their old path so getContent resolves the "old" side
-  // from where the file lived at `base`.
-  const renames = new Map(
-    changedFiles.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
-  )
-  const getContent =
-    opts.getContent ?? makeContentResolver({ base, head: opts.head, cwd: opts.cwd, renames, gitRoot })
 
   // Resolve the manifest against the PROJECT being reviewed (cwd), not the
   // binary's process.cwd() — otherwise a relative path silently misses when the
@@ -270,32 +341,11 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       }
     }
   }
-  // Freshness check: detect (and warn — non-fatal) when the manifest predates
-  // change-affecting files. Runs for both the pinned-head CI shape AND the
-  // working-tree local shape — the local scenario "dbt compile once, edit for
-  // an hour, then altimate review" is where staleness actually bites in
-  // practice, so gating this behind `--head` (the prior behavior) silently
-  // under-warned the most common developer workflow. mtime granularity on
-  // the working tree can be noisy during a live edit session, but the check
-  // is limited to files that would materially change the manifest
-  // (`isManifestAffecting`), so noise is bounded. Return value is stamped
-  // into the signed envelope so downstream auditors see it too.
-  const staleManifest = await detectStaleManifest(manifestAbs, changedFiles, gitRoot)
 
-  // Resolve the SQL dialect: explicit config wins; otherwise auto-detect from
-  // the dbt manifest's `adapter_type` (so a BigQuery/Redshift project isn't
-  // analyzed as the snowflake default — wrong-dialect portability suppression).
-  if (!config.dialect) config.dialect = (await detectDialect(manifestAbs)) ?? "snowflake"
-
-  // Prefer dbt's catalog.json (real warehouse columns from `dbt docs generate`)
-  // for the schema context — complete columns are what make column-lineage
-  // breakage and proven equivalence actually fire (the manifest only has
-  // documented columns). Falls back to manifest-derived schema when absent.
-  const catalogAbs = path.join(path.dirname(manifestAbs), "catalog.json")
-  const catalogSchema = await buildCatalogSchemaContext(catalogAbs)
-  const runner = createDispatcherRunner({ manifestPath: manifestAbs, schemaContext: catalogSchema })
-  const mhash = await manifestHash(manifestAbs, opts.cwd)
-
+  // Resolved here, ahead of the file list, because `--all` needs `pathPrefix`
+  // to build it: the manifest names models dbt-project relative and they have
+  // to be re-rooted at the repo before the resolvers below can find them.
+  //
   // Prefer dbt's COMPILED SQL (target/compiled) for the engine lanes — the clean
   // approach (Datafold/Recce/Fusion all render-then-analyze rather than parse Jinja).
   // Use `dbtRoot` (the discovered project root when G3 auto-discovery fired,
@@ -325,11 +375,134 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     /* keep original values on realpath failure */
   }
   const pathPrefix = path.relative(gitRootReal, dbtRootReal)
+
+  // File list. `--all` replaces the diff with the whole manifest: every model
+  // as a single version with no base ref. That is the point of the mode — the
+  // findings that matter in a mature project have not been in a diff for
+  // months. The base-vs-head lanes cannot run on it and runReview reports them
+  // as skipped (see orchestrate.ts::PROJECT_SCOPE_SKIPS).
+  let base = ""
+  let changedFiles: ChangedFile[]
+  if (opts.all) {
+    changedFiles = await manifestModelFiles(manifestAbs, pathPrefix, opts.maxModels)
+  } else {
+    // Only resolve a base ref if we actually need git (to collect changed files
+    // or to read old/new content). A caller that supplies BOTH `changedFiles` and
+    // `getContent` (e.g. a non-git CI integration) must not be forced through a
+    // git lookup that can fail when there's no usable history.
+    const needGit = !opts.changedFiles || !opts.getContent
+    base = opts.base ?? (needGit ? await defaultBaseRef(opts.cwd) : "")
+    changedFiles = opts.changedFiles ?? (await collectChangedFiles({ base, head: opts.head, cwd: opts.cwd }))
+  }
+
+  // Map renamed files → their old path so getContent resolves the "old" side
+  // from where the file lived at `base`.
+  const renames = new Map(
+    changedFiles.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
+  )
+  const getContent =
+    opts.getContent ?? makeContentResolver({ base, head: opts.head, cwd: opts.cwd, renames, gitRoot })
+
   const getCompiled = opts.getContent
     ? undefined
     : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix })
 
-  return runReview({
+  // Freshness check: detect (and warn — non-fatal) when the manifest predates
+  // change-affecting files. Runs for both the pinned-head CI shape AND the
+  // working-tree local shape — the local scenario "dbt compile once, edit for
+  // an hour, then altimate review" is where staleness actually bites in
+  // practice, so gating this behind `--head` (the prior behavior) silently
+  // under-warned the most common developer workflow. mtime granularity on
+  // the working tree can be noisy during a live edit session, but the check
+  // is limited to files that would materially change the manifest
+  // (`isManifestAffecting`), so noise is bounded. Return value is stamped
+  // into the signed envelope so downstream auditors see it too.
+  const staleManifest = await detectStaleManifest(manifestAbs, changedFiles, gitRoot)
+
+  // Resolve the SQL dialect: explicit config wins; otherwise auto-detect from
+  // the dbt manifest's `adapter_type` (so a BigQuery/Redshift project isn't
+  // analyzed as the snowflake default — wrong-dialect portability suppression).
+  if (!config.dialect) config.dialect = (await detectDialect(manifestAbs)) ?? "snowflake"
+
+  // Prefer dbt's catalog.json (real warehouse columns from `dbt docs generate`)
+  // for the schema context — complete columns are what make column-lineage
+  // breakage and proven equivalence actually fire (the manifest only has
+  // documented columns). Falls back to manifest-derived schema when absent.
+  const catalogAbs = path.join(path.dirname(manifestAbs), "catalog.json")
+  const catalogSchema = await buildCatalogSchemaContext(catalogAbs)
+  // altimate_change start — schema_lag lane: the job map, resolved lazily (dbt ls)
+  const projectAbs = path.dirname(path.dirname(manifestAbs))
+  const dbtOpts = {
+    dbtBin: opts.dbt?.dbtBin,
+    profilesDir:
+      opts.dbt?.profilesDir ?? (existsSync(path.join(projectAbs, "profiles.yml")) ? projectAbs : undefined),
+    target: opts.dbt?.target,
+  }
+  const lag = config.schemaLag
+  let jobsMemo: Promise<unknown | undefined> | undefined
+  const jobs =
+    lag && (lag.jobs || lag.jobsFrom)
+      ? () =>
+          (jobsMemo ??= (async () => {
+            const map = lag.jobs ? readJobMap(path.resolve(projectAbs, lag.jobs)) : jobsFromSelectors(projectAbs)
+            if ("error" in map) {
+              process.stderr.write(`⚠️  schema_lag: ${map.error}; cross-job lag is skipped\n`)
+              return undefined
+            }
+            const tmp = await mkdtemp(path.join(tmpdir(), "review-ls-"))
+            try {
+              const r = await resolveJobMap(map, {
+                projectDir: projectAbs,
+                ...dbtOpts,
+                targetPath: path.join(tmp, "target"),
+                logPath: path.join(tmp, "logs"),
+              })
+              for (const e of r.errors) process.stderr.write(`⚠️  schema_lag: ${e}\n`)
+              return r.map
+            } finally {
+              await rm(tmp, { recursive: true, force: true })
+            }
+          })())
+      : undefined
+  const runner = createDispatcherRunner({ manifestPath: manifestAbs, schemaContext: catalogSchema, jobs })
+  // altimate_change end
+  const mhash = await manifestHash(manifestAbs, opts.cwd)
+
+  // altimate_change start — schema_lag lane: compiled base/head, built once on first use
+  const cleanups: Array<() => void> = []
+  let sidesMemo: Promise<LagSides | undefined> | undefined
+  const lagSides = () =>
+    (sidesMemo ??= (async (): Promise<LagSides | undefined> => {
+      let basePath = opts.baseManifest ? path.resolve(opts.cwd, opts.baseManifest) : undefined
+      let headPath = opts.headManifest ? path.resolve(opts.cwd, opts.headManifest) : undefined
+      if (!basePath && !opts.all && base && !opts.changedFiles) {
+        const models = [
+          ...new Set(
+            changedFiles
+              .filter((f) => f.status === "modified" && f.path.endsWith(".sql") && /(^|\/)models\//.test(f.path))
+              .map((f) => path.basename(f.path, ".sql")),
+          ),
+        ]
+        if (!models.length) return undefined
+        const sides = await compileSides({ projectDir: projectAbs, gitRoot, base, head: opts.head, changed: models, dbt: dbtOpts })
+        cleanups.push(sides.cleanup)
+        for (const note of sides.notes) process.stderr.write(`ℹ️  schema_lag: ${note}\n`)
+        basePath = sides.baseManifest
+        headPath = sides.headManifest
+      }
+      if (!basePath || !headPath) return undefined
+      const b = loadManifest(projectAbs, basePath)
+      const h = loadManifest(projectAbs, headPath)
+      if (!b.ok || !h.ok) return undefined
+      return {
+        sql: (model, side) => findModel(side === "old" ? b.manifest : h.manifest, model)?.compiled_code ?? undefined,
+        manifest: h.path,
+        baseManifest: b.path,
+      }
+    })())
+  try {
+  // altimate_change end
+  return await runReview({
     changedFiles,
     config,
     rubric,
@@ -353,5 +526,11 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     explainTier: opts.explainTier,
     forceTier: opts.forceTier,
     staleManifest,
+    scope: opts.all ? "project" : "diff",
+    lagSides,
   })
+  } finally {
+    for (const cleanup of cleanups) cleanup()
+  }
+  // altimate_change end
 }

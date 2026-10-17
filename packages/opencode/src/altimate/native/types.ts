@@ -1277,6 +1277,33 @@ export const BridgeMethods = {
     params: { base_sql: string; head_sql: string }
     result: AltimateCoreResult
   },
+  /** Whole-project dbt performance analysis (`altimate dbt-perf`). Exactly one
+   *  of `project_dir` / `manifest_json` is used: the manifest text wins when
+   *  supplied. `data` carries the engine's `PerfReport`. */
+  "altimate_core.dbt_perf": {} as {
+    params: { project_dir?: string; manifest_json?: string; options_json?: string }
+    result: AltimateCoreResult
+  },
+  /** Rewrite proposals for one model (`altimate dbt-optimize`); `data.proposals`. */
+  "altimate_core.dbt_rewrites": {} as {
+    params: { project_dir: string; model: string; options_json?: string }
+    result: AltimateCoreResult
+  },
+  /** Data parity plan for a model change (`altimate dbt-parity`); `data` is the `ParityPlan`. */
+  "altimate_core.dbt_parity_plan": {} as {
+    params: { project_dir: string; model: string; before: string; after: string; options_json?: string }
+    result: AltimateCoreResult
+  },
+  /** Blast radius of a model/column change (`altimate dbt-impact`); `data` is the impact report. */
+  "altimate_core.dbt_impact": {} as {
+    params: { project_dir: string; change_json: string; options_json?: string }
+    result: AltimateCoreResult
+  },
+  /** Shared-logic factoring proposals (`altimate dbt-factor`); `data.proposals`. */
+  "altimate_core.dbt_factoring": {} as {
+    params: { project_dir: string; options_json?: string }
+    result: AltimateCoreResult
+  },
   // altimate_change end
   // --- altimate-core Phase 1 (P0) ---
   "altimate_core.fix": {} as { params: AltimateCoreFixParams; result: AltimateCoreResult },

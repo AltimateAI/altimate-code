@@ -78,6 +78,19 @@ export function applyMode(verdict: Verdict, mode: ReviewMode): Verdict {
 export const RiskTier = z.enum(["trivial", "lite", "full"])
 export type RiskTier = z.infer<typeof RiskTier>
 
+/**
+ * What the review looked at.
+ *
+ * `diff` (the default) is the PR shape: base..head, per-file hunks, and the
+ * lanes that compare the two versions of a model.
+ * `project` is the `--all` shape: every model in the manifest, one version
+ * each. The base-vs-head lanes cannot run there and are reported as SKIPPED
+ * with a reason in `lanes.skipped` — a report that silently omits half the
+ * lanes is worse than no report.
+ */
+export const ReviewScope = z.enum(["diff", "project"])
+export type ReviewScope = z.infer<typeof ReviewScope>
+
 export const EngineVersions = z.object({
   reviewer: z.string().default("dbt-pr-review/1"),
   core: z.string().optional(),
@@ -103,6 +116,23 @@ export const VerdictEnvelope = z.object({
   tierForced: z.boolean().optional(),
   /** The classifier's original tier before --force-tier overrode it (G2). */
   tierClassified: RiskTier.optional(),
+  /** What was reviewed: `diff` (base..head — the default, so it is omitted)
+   *  or `project` (`--all`: every model in the manifest, no base version). */
+  scope: ReviewScope.optional(),
+  /** Which review lanes ran and which could not, with the reason. Present in
+   *  `project` scope, where the base-vs-head lanes have no input — a consumer
+   *  must be able to tell "clean" from "that half of the review never ran". */
+  lanes: z
+    .object({
+      ran: z.array(z.string()),
+      skipped: z.array(z.object({ lane: z.string(), reason: z.string() })),
+      /** Models the engine lanes saw as dbt-COMPILED SQL, out of `totalModels`.
+       *  Below 100% the AST lanes ran against raw Jinja, could not parse it,
+       *  and returned zero findings for those models — see LaneReport. */
+      compiledModels: z.number().int().nonnegative(),
+      totalModels: z.number().int().nonnegative(),
+    })
+    .optional(),
   findings: z.array(Finding),
   summary: z.object({
     critical: z.number().int().nonnegative(),
@@ -178,6 +208,15 @@ export interface BuildEnvelopeInput {
   tierClassified?: RiskTier
   /** True when mtime signals the manifest predates a change-affecting file. */
   staleManifest?: boolean
+  /** `project` when the run reviewed the whole manifest (`--all`). */
+  scope?: ReviewScope
+  /** Lane run/skip report — see the envelope field. */
+  lanes?: {
+    ran: string[]
+    skipped: Array<{ lane: string; reason: string }>
+    compiledModels: number
+    totalModels: number
+  }
 }
 
 function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
@@ -201,6 +240,8 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     tierReasons: input.tierReasons,
     tierForced: input.tierForced,
     tierClassified: input.tierClassified,
+    scope: input.scope,
+    lanes: input.lanes,
     findings: input.findings,
     summary: summarize(input.findings, degraded),
     engine: EngineVersions.parse(input.engine ?? {}),

@@ -54,7 +54,7 @@ it; lower layers fill gaps and add context but never override a proof.
 <!-- HUMAN-AUTHORED: End -->
 
 <!-- AI-GENERATED: Start -->
-<!-- Last updated: 2026-05-30 -->
+<!-- Last updated: 2026-10-09 -->
 
 ## Layer → file map
 
@@ -67,10 +67,37 @@ it; lower layers fill gaps and add context but never override a proof.
 | verdict | `verdict.ts` (rubric → verdict, `stableStringify`, HMAC sign/verify), `rubric.ts`, `risk-tier.ts` (`TIER_LANES`) |
 | entry | `run.ts` (`reviewPullRequest` — wires resolvers + `runAiReview`), `git.ts`, `finding.ts`, `diff-filter.ts`, `format.ts`, `post-github.ts`, `config.ts` |
 
+## Lineage lanes and `analyzeDbtImpact`
+
+When the runner exposes `dbtImpact` (core `analyzeDbtImpact`, via
+`altimate_core.dbt_impact`), the lineage lanes ask it about each removed output
+column (modified model) or the model itself (delete/rename). A **BREAKING** hop
+outside dbt — a loader or a served table — is the only thing that lifts the
+modified-model fan-out cap to `critical` (`lineage_breakage:external-sink`); a
+break inside the dbt graph keeps the cap. Without the binding, the lanes behave
+as before. The same normalizer backs `altimate dbt-impact`
+(`cli/cmd/dbt-impact-helpers.ts`).
+
+## Schema-lag lane
+
+`schema_lag` (lite and full tiers, diff scope only) runs when a modified model's
+output columns change (column lineage, old vs new) or a YAML file in the diff
+changes declared columns. It sends the base → head compiled SQL to
+`analyzeDbtImpact` and turns each `schema_lag` finding into a `lineage_breakage`
+finding (`ruleKey` = the reason: `schema_lag:cross_job`,
+`schema_lag:incremental_needs_full_refresh`, `schema_lag:source_not_landed`;
+critical when BREAKING) carrying the suggested fix. Cross-job needs a job map:
+`schemaLag: {jobs: <file>}` or `{jobsFrom: selectors}` in `.altimate/review.yml`,
+resolved once per review with `dbt ls`; without it the core reports the check as
+skipped.
+
 ## Entry points
 
 - Tool: `dbt_pr_review` (`../tools/dbt-pr-review.ts`) — callable from any agent.
-- CLI: `altimate review` (`../../cli/cmd/review.ts`).
+- CLI: `altimate review` (`../../cli/cmd/review.ts`) — a **diff**; `--all` switches it to
+  project scope (every model in the manifest, no base ref). Project scope runs only the
+  single-version lanes and reports every base-vs-head lane as skipped-with-reason on
+  `VerdictEnvelope.lanes` (`PROJECT_SCOPE_SKIPS` in `orchestrate.ts`).
 - Agent: `reviewer` (read-only) — `../prompts/reviewer.txt`.
 - Action: `github/review/action.yml`.
 

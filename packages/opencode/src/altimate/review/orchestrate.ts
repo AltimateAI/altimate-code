@@ -12,7 +12,7 @@ import { type ChangedFile, filterChangedFiles } from "./diff-filter"
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
-import { type ReviewMode, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
+import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { type AiReviewInput } from "./ai-review"
 
@@ -163,7 +163,82 @@ export interface ReviewRunner {
     /** Warehouse connection name to diff against; omit for the default. */
     warehouse?: string,
   ): Promise<{ rowsOnlyInBase?: number; rowsOnlyInHead?: number; rowsChanged?: number; summary?: string } | null>
+  // altimate_change start — dbt impact past the dbt graph (analyzeDbtImpact)
+  /**
+   * Per-hop blast radius of one change — dbt models, loaders and served
+   * tables, each with a verdict. Returns null when the core build lacks the
+   * binding (the lanes then keep their dbt-graph-only behaviour).
+   */
+  dbtImpact?(change: { model: string; column?: string; kind: string }): Promise<ExternalImpactEntry[] | null>
+  /**
+   * Schema-lag findings for a base → head SQL change: readers that production
+   * can run against a relation that does not have the new column yet. Null
+   * when the core build lacks the binding.
+   */
+  schemaLag?(
+    change: { model: string; kind: "sql"; base_sql: string; head_sql: string },
+    manifests?: { manifest: string; base_manifest: string },
+  ): Promise<SchemaLagResult | null>
+  // altimate_change end
 }
+
+// altimate_change start — schema_lag lane
+export interface SchemaLagResult {
+  findings: Array<{
+    reason: string
+    verdict: string
+    consumer: string
+    column: string
+    producer: string
+    consumer_jobs?: string[]
+    producer_jobs?: string[]
+    window?: string
+    message: string
+    fix: string
+  }>
+  skipped: string[]
+}
+
+/**
+ * Compiled SQL of both sides for the schema_lag lane. One `target/` holds at
+ * most one side, so run.ts compiles base and head (or takes
+ * `--base-manifest` / `--head-manifest`); the head manifest is the DAG and node
+ * config (`materialized`, `on_schema_change`) the check reads.
+ */
+export interface LagSides {
+  sql(model: string, side: "old" | "new"): string | undefined
+  manifest: string
+  baseManifest: string
+}
+// altimate_change end
+
+// altimate_change start — impact evidence past the dbt graph
+export interface ExternalImpactEntry {
+  hop: number
+  node_type: string
+  name: string
+  verdict: string
+  reason?: string
+}
+
+/** BREAKING consumers outside dbt (a loader or a served table): the only
+ *  evidence that lets a MODIFIED model's lineage finding reach `critical`. */
+interface ExternalBreakEvidence {
+  breaks: Array<ExternalImpactEntry & { column?: string }>
+}
+
+function externalBreaks(entries: ExternalImpactEntry[], column?: string): ExternalBreakEvidence["breaks"] {
+  return entries
+    .filter((e) => e.verdict.toLowerCase() === "breaking" && !/^(model|dbt_)/i.test(e.node_type))
+    .map((e) => ({ ...e, column }))
+}
+
+function describeBreaks(b: ExternalBreakEvidence["breaks"]): string {
+  return b
+    .map((e) => `${e.node_type} \`${e.name}\`${e.column ? ` (column \`${e.column}\`)` : ""}${e.reason ? ` — ${e.reason}` : ""}`)
+    .join("; ")
+}
+// altimate_change end
 
 export interface OrchestrateInput {
   changedFiles: ChangedFile[]
@@ -198,6 +273,66 @@ export interface OrchestrateInput {
   forceTier?: "trivial" | "lite" | "full"
   /** Manifest was stale relative to change-affecting files (see run.ts::detectStaleManifest). */
   staleManifest?: boolean
+  // altimate_change start — schema_lag lane: compiled base/head, produced on demand
+  /** Undefined result: no compiled sides, and the lane uses the engine SQL. */
+  lagSides?: () => Promise<LagSides | undefined>
+  // altimate_change end
+  /** `diff` (default) reviews base..head; `project` reviews every model in the
+   *  manifest with no base version. See {@link ReviewScope}. */
+  scope?: ReviewScope
+}
+
+/** Which lanes ran and which could not, with the reason. Emitted on the
+ *  envelope in `project` scope; `diff` scope leaves it undefined (every lane
+ *  the tier enables runs there, so the list would be noise). */
+export interface LaneReport {
+  ran: string[]
+  skipped: Array<{ lane: string; reason: string }>
+  /** How many of `totalModels` the engine lanes saw as dbt-COMPILED SQL.
+   *  The SQL parser cannot parse Jinja: on a model that falls back to raw
+   *  `{{ config() }}` source the parse fails at line 1, every AST rule inside
+   *  the engine is skipped, and the lane returns ZERO findings — which reads
+   *  exactly like a clean model. Over a whole project that silence is the
+   *  difference between a review and a rubber stamp, so the counts are
+   *  reported and `renderSummary` warns when they diverge. */
+  compiledModels: number
+  totalModels: number
+}
+
+/**
+ * Lanes that compare a model's BASE version to its HEAD version. In project
+ * scope there is exactly one version of each model, so none of them has an
+ * input — they are reported as skipped, never silently dropped.
+ */
+const PROJECT_SCOPE_SKIPS: Record<string, string> = {
+  lineage_breakage:
+    "reports deleted/renamed models and the blast radius of a change — both are defined relative to a base ref",
+  column_breakage: "diffs a model's output columns between its base and head versions",
+  semantic_change: "proves base-vs-head row equivalence; in project scope there is no base version",
+  structural_diff: "compares the base and head parse trees (the `*_change` rules)",
+  dbt_config_diff: "compares the base and head `{{ config() }}` blocks (materialization / incremental changes)",
+  data_diff: "runs the base and head SQL against the warehouse and diffs the resulting rows",
+  topology_equivalence: "pairs models deleted in a diff against models added in the same diff (merge refactors)",
+  schema_yml_test_removal: "detects `unique` / `not_null` / `relationships` tests REMOVED between two schema.yml versions",
+  ai_review:
+    "the advisory LLM lane is grounded in the diff and caps at 20 files — project-wide it would review an arbitrary subset at unbounded cost; run `altimate review` on a diff for it",
+  schema_lag: "compares a model's base and head output / source columns to find readers that run before the producer is rebuilt",
+  "dbt_patterns:fanout_join":
+    "fires when a join is ADDED to an aggregating model; with the whole model presented as added it degenerates to \"this model aggregates and has a join\", which describes most correct analytics SQL",
+}
+
+/**
+ * Present a whole model to the diff-anchored detectors as if every line were
+ * added. The dbt-patterns detectors and the declarative rule catalog are
+ * relevance-gated on the diff by construction (`ruleMatches` requires the
+ * signal to appear in added/removed lines), so without this they evaluate to
+ * nothing in project scope and the report would be a quiet lie.
+ */
+function wholeFileAsAddedDiff(sql: string): string {
+  return sql
+    .split("\n")
+    .map((l) => "+" + l)
+    .join("\n")
 }
 
 /** Derive the dbt model name from a model file path. */
@@ -241,7 +376,14 @@ function impactToSeverity(impact: ImpactResult): Severity | null {
   }
 }
 
-function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: ImpactResult, rubric: Rubric): Finding[] {
+function lineageBreakageLane(
+  file: ChangedFile & { kind: string },
+  impact: ImpactResult,
+  rubric: Rubric,
+  // altimate_change start — loader/served-table evidence from analyzeDbtImpact
+  external?: ExternalBreakEvidence,
+  // altimate_change end
+): Finding[] {
   const model = modelNameFromPath(file.path)
   const total = impact.directCount + impact.transitiveCount
   const degraded = !impact.hasManifest
@@ -268,6 +410,9 @@ function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: Impac
         body:
           `\`${model}\` is ${file.status} but ${total} downstream model${total !== 1 ? "s" : ""}` +
           ` (+${impact.testCount} test${impact.testCount !== 1 ? "s" : ""}) still depend on it.` +
+          // altimate_change start — consumers outside dbt, when analyzeDbtImpact named them
+          (external?.breaks.length ? ` Outside dbt it also breaks: ${describeBreaks(external.breaks)}.` : "") +
+          // altimate_change end
           (degraded ? "\n\n_No manifest available — verify the blast radius locally._" : ""),
         file: file.path,
         model,
@@ -279,13 +424,34 @@ function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: Impac
     ]
   }
 
+  // altimate_change start — a modified model whose change BREAKS a loader or a
+  // served table (analyzeDbtImpact, column-level) is a real break, not fan-out.
+  if (external?.breaks.length) {
+    return [
+      makeFinding({
+        severity: clampSeverity("lineage_breakage", "critical", degraded ? "unknown" : "high"),
+        category: "lineage_breakage",
+        title: `${model}: change breaks consumers outside dbt`,
+        body:
+          `This change to \`${model}\` breaks ${external.breaks.length} consumer(s) the dbt graph does not show: ` +
+          `${describeBreaks(external.breaks)}. Keep the column(s) or update those consumers in the same release.`,
+        file: file.path,
+        model,
+        confidence: degraded ? "unknown" : "high",
+        degraded,
+        evidence: { tool: "altimate_core.dbt_impact", result: { impact, external: external.breaks } },
+        ruleKey: "lineage_breakage:external-sink",
+      }),
+    ]
+  }
+  // altimate_change end
   const sev = impactToSeverity(impact)
   if (!sev) return []
   // For a MODIFIED model, blast radius alone is NOT a breaking change — a wide
-  // fan-out doesn't mean the edit broke anything (it may be additive/safe). Until
-  // a real column-drop classifier exists, cap modified-model lineage impact at
-  // `warning` so merely touching a popular model never blocks. Only delete/rename
-  // (handled above) is treated as a genuine break.
+  // fan-out doesn't mean the edit broke anything (it may be additive/safe). Cap
+  // modified-model lineage impact at `warning` so merely touching a popular model
+  // never blocks. Delete/rename (handled above) and a loader/served-table break
+  // proven by analyzeDbtImpact (also above) are the genuine breaks.
   const capped: Severity = sev === "critical" ? "warning" : sev
   const clamped = clampSeverity("lineage_breakage", capped, degraded ? "unknown" : "high")
   return [
@@ -463,6 +629,110 @@ function parseLineageSource(src: string): { table: string; col: string } {
   return { col: (parts.at(-1) ?? "").toLowerCase(), table: (parts.at(-2) ?? "").toLowerCase() }
 }
 
+// altimate_change start — analyzeDbtImpact evidence, memoized per model file
+const columnEvidenceMemo = new WeakMap<ModelContext, Promise<ExternalBreakEvidence>>()
+
+/** Loader/served-table breaks caused by dropping `removed` columns of the
+ *  model. Empty when the runner has no dbtImpact (or the core lacks it). */
+function columnImpactEvidence(ctx: ModelContext, runner: ReviewRunner, removed: string[]): Promise<ExternalBreakEvidence> {
+  const cached = columnEvidenceMemo.get(ctx)
+  if (cached) return cached
+  const p = (async (): Promise<ExternalBreakEvidence> => {
+    if (!runner.dbtImpact || !removed.length) return { breaks: [] }
+    const model = modelNameFromPath(ctx.file.path)
+    const breaks: ExternalBreakEvidence["breaks"] = []
+    for (const column of removed) {
+      const entries = await runner.dbtImpact({ model, column, kind: "drop" }).catch(() => null)
+      if (entries) breaks.push(...externalBreaks(entries, column))
+    }
+    return { breaks }
+  })()
+  columnEvidenceMemo.set(ctx, p)
+  return p
+}
+
+/** Evidence for the lineage lane: model-level for a delete/rename, removed
+ *  output columns (from column lineage on compiled SQL) for a modification. */
+async function lineageImpactEvidence(
+  ctx: ModelContext,
+  runner: ReviewRunner,
+  dialect: string,
+): Promise<ExternalBreakEvidence> {
+  if (!runner.dbtImpact) return { breaks: [] }
+  const { file } = ctx
+  if (file.status === "deleted" || file.status === "renamed") {
+    const model = modelNameFromPath(file.oldPath ?? file.path)
+    const entries = await runner.dbtImpact({ model, kind: "drop" }).catch(() => null)
+    return { breaks: entries ? externalBreaks(entries) : [] }
+  }
+  if (file.status !== "modified" || !runner.columnLineage || !ctx.engineOldSql || !ctx.engineNewSql)
+    return { breaks: [] }
+  const cols = async (sql: string) =>
+    new Set((await runner.columnLineage!(sql, dialect)).map((e) => e.target.toLowerCase()).filter(Boolean))
+  const [oldCols, newCols] = await Promise.all([cols(ctx.engineOldSql), cols(ctx.engineNewSql)])
+  const removed = [...oldCols].filter((c) => !newCols.has(c))
+  return columnImpactEvidence(ctx, runner, removed)
+}
+// altimate_change end
+
+// altimate_change start — schema_lag lane
+/**
+ * SCHEMA LAG — a reader of a column the change adds (or a newly declared
+ * source column) that production can run before the producer is rebuilt:
+ * another job builds it, it is incremental and never gains the column, or the
+ * loader has not landed it. CI builds everything at once, so it passes there.
+ * Triggered when the model's output columns change or a YAML file in the diff
+ * changes declared columns.
+ */
+export async function schemaLagLane(
+  ctx: ModelContext,
+  runner: ReviewRunner,
+  dialect: string,
+  sourceYamlChanged: boolean,
+  lagSides?: () => Promise<LagSides | undefined>,
+): Promise<Finding[]> {
+  if (!runner.schemaLag) return []
+  const { file, engineOldSql, engineNewSql } = ctx
+  if (file.status !== "modified" || !engineOldSql || !engineNewSql || engineOldSql.trim() === engineNewSql.trim()) return []
+  const model = modelNameFromPath(file.path)
+  // The engine SQL can mix sides (raw Jinja base against a compiled head from a
+  // stale target/), so prefer the compiled base and head when they exist.
+  const sides = lagSides ? await lagSides().catch(() => undefined) : undefined
+  const oldSql = sides?.sql(model, "old") ?? engineOldSql
+  const newSql = sides?.sql(model, "new") ?? engineNewSql
+  if (oldSql.trim() === newSql.trim()) return []
+  let columnsChanged = sourceYamlChanged
+  if (!columnsChanged && runner.columnLineage) {
+    const cols = async (sql: string) =>
+      [...new Set((await runner.columnLineage!(sql, dialect)).map((e) => e.target.toLowerCase()).filter(Boolean))].sort()
+    const [o, n] = await Promise.all([cols(oldSql), cols(newSql)])
+    columnsChanged = o.join(",") !== n.join(",")
+  } else if (!runner.columnLineage) columnsChanged = true
+  if (!columnsChanged) return []
+  const r = await runner
+    .schemaLag(
+      { model, kind: "sql", base_sql: oldSql, head_sql: newSql },
+      sides ? { manifest: sides.manifest, base_manifest: sides.baseManifest } : undefined,
+    )
+    .catch(() => null)
+  if (!r) return []
+  return r.findings.map((f) =>
+    makeFinding({
+      severity: clampSeverity("lineage_breakage", f.verdict === "breaking" ? "critical" : "warning", "high"),
+      category: "lineage_breakage",
+      title: `${f.reason}: \`${f.consumer}\` reads \`${f.producer}.${f.column}\` before it exists in production`,
+      body: `${f.message}. Suggested fix: ${f.fix}.`,
+      file: file.path,
+      model,
+      column: f.column,
+      confidence: "high",
+      evidence: { tool: "altimate_core.dbt_impact", result: { schema_lag: f, skipped: r.skipped } },
+      ruleKey: f.reason,
+    }),
+  )
+}
+// altimate_change end
+
 /**
  * COLUMN-LEVEL breakage — the real lineage differentiator a linter can't do.
  * When a PR removes/renames an OUTPUT column of a model, trace (via the engine's
@@ -503,6 +773,14 @@ async function columnBreakageLane(
       }
     }
   }
+  // altimate_change start — removed columns read by loaders / served tables
+  const external = await columnImpactEvidence(ctx, runner, removed)
+  for (const e of external.breaks) {
+    const key = e.column ?? "?"
+    if (!brokenBy.has(key)) brokenBy.set(key, new Set())
+    brokenBy.get(key)!.add(`${e.node_type}:${e.name}`)
+  }
+  // altimate_change end
   if (!brokenBy.size) return []
 
   const detail = [...brokenBy.entries()]
@@ -1057,6 +1335,18 @@ interface ModelContext {
 
 export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelope> {
   const reviewable = filterChangedFiles(input.changedFiles, input.rubric.exclusions.excludeGlobs)
+  const scope: ReviewScope = input.scope ?? "diff"
+  // `project` scope (`altimate review --all`): one version of every model, no
+  // base ref. Every base-vs-head lane below is gated on this and reported in
+  // `laneReport.skipped` with the reason it could not run.
+  const projectScope = scope === "project"
+  const laneReport: LaneReport = { ran: [], skipped: [], compiledModels: 0, totalModels: 0 }
+  const laneRan = (lane: string) => {
+    if (!laneReport.ran.includes(lane)) laneReport.ran.push(lane)
+  }
+  const laneSkipped = (lane: string, reason: string) => {
+    if (!laneReport.skipped.some((s) => s.lane === lane)) laneReport.skipped.push({ lane, reason })
+  }
   const dialect = input.config.dialect
   const getContent = input.getContent
   const getCompiled = input.getCompiled
@@ -1089,7 +1379,18 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       if (impact.hasManifest) anyManifest = true
       const pii = engineNewSql ? (await input.runner.detectPii(engineNewSql, dialect)).columns : []
       const complex = engineNewSql && input.runner.isComplex ? await input.runner.isComplex(engineNewSql) : false
-      ctxByPath.set(file.path, { file, impact, pii, newSql, oldSql, engineNewSql, engineOldSql, complex })
+      // In project scope the caller has no hunks to hand us. Present the whole
+      // model as added so the diff-anchored detectors (dbt-patterns, the
+      // declarative rule catalog, the lexical scan) actually evaluate it —
+      // they are relevance-gated on the diff and would otherwise return
+      // nothing while still reporting as "ran".
+      const scoped =
+        projectScope && !file.diff && newSql ? { ...file, diff: wholeFileAsAddedDiff(newSql) } : file
+      if (projectScope) {
+        laneReport.totalModels++
+        if (compiledNew) laneReport.compiledModels++
+      }
+      ctxByPath.set(file.path, { file: scoped, impact, pii, newSql, oldSql, engineNewSql, engineOldSql, complex })
     }),
   )
 
@@ -1119,15 +1420,23 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     process.stderr.write(`⚠️  ${pathTokenConfigError}\n   Review continuing without path-token promotion.\n`)
     pathTokenCategoryOf = undefined
   }
-  const tierResult = classifyPR(reviewable, {
-    blastRadiusOf: (p) => {
-      const c = ctxByPath.get(p)
-      return c ? c.impact.directCount + c.impact.transitiveCount : 0
-    },
-    touchesPiiOf: (f) => (ctxByPath.get(f.path)?.pii.length ?? 0) > 0,
-    isComplexOf: (f) => ctxByPath.get(f.path)?.complex ?? false,
-    pathTokenCategoryOf,
-  })
+  // Tiering is a COST control for diffs: it reads diff signals (changed-line
+  // count, a contract/source block touched in the hunk) to decide which
+  // expensive lanes a small PR can skip. None of those signals exist in
+  // project scope, where the classifier would land on `trivial` and silently
+  // disable most of the review. Project scope is not a tiering situation — it
+  // runs every lane that can evaluate a single model version.
+  const tierResult = projectScope
+    ? { tier: "full" as const, reasons: ["project scope (--all): tiering is a diff cost-control and does not apply"] }
+    : classifyPR(reviewable, {
+        blastRadiusOf: (p) => {
+          const c = ctxByPath.get(p)
+          return c ? c.impact.directCount + c.impact.transitiveCount : 0
+        },
+        touchesPiiOf: (f) => (ctxByPath.get(f.path)?.pii.length ?? 0) > 0,
+        isComplexOf: (f) => ctxByPath.get(f.path)?.complex ?? false,
+        pathTokenCategoryOf,
+      })
   // Surface config errors in the tier-reasons stream so a reader of the
   // envelope (or PR comment) sees WHY their opt-in didn't fire.
   if (pathTokenConfigError) tierResult.reasons.unshift(pathTokenConfigError)
@@ -1151,6 +1460,42 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
 
+  // Lane enablement, resolved ONCE so the per-model loop and the lane report
+  // can never disagree about what ran. `runStructural` / `runAi` are wholly
+  // base-vs-head, so they carry the project-scope gate here; `runSemantic` and
+  // `runLineage` each cover a single-version lane AND base-vs-head ones, so
+  // theirs sits at the individual call sites below.
+  const runCoreLint = lanes.has("sql_quality") || lanes.has("warehouse_cost")
+  const runSemantic = lanes.has("semantic_change")
+  const runLineage = lanes.has("lineage_breakage")
+  const runTestCoverage = lanes.has("test_coverage")
+  const runDbtPatterns = lanes.has("dbt_patterns")
+  const runDbtConfig = runDbtPatterns || lanes.has("materialization") || lanes.has("contract_violation")
+  const runStructural = (runSemantic || runDbtPatterns) && !projectScope
+  const runPiiExposure = lanes.has("pii_exposure")
+  const runAi = lanes.has("ai_review") && !!input.aiReview && !projectScope
+  const runSchemaLag = lanes.has("schema_lag") && !projectScope
+  // Declared source columns changed: models reading sources may now read a
+  // column the loader has not landed yet.
+  const sourceYamlChanged = reviewable.some((f) => /\.ya?ml$/i.test(f.path) && /(^|\n)[+-]\s*-?\s*(\{\s*)?name:/.test(f.diff ?? ""))
+  const notEnabled =
+    `not enabled at \`${tier}\` tier` + (input.config.reviewers.length ? " / by the `reviewers` config" : "")
+  if (projectScope) {
+    // Single-version lanes: what a project review actually consists of.
+    const note = (lane: string, enabled: boolean) => (enabled ? laneRan(lane) : laneSkipped(lane, notEnabled))
+    note("core_lint", runCoreLint)
+    note("dbt_patterns", runDbtPatterns)
+    note("lexical_scan", runDbtPatterns)
+    note("dbt_config_lint", runDbtConfig)
+    note("grain_mismatch", runSemantic)
+    note("missing_grain_test", runTestCoverage)
+    note("sibling_filter_consistency", runSemantic)
+    laneRan("pii_classify")
+    note("pii_detect", runPiiExposure)
+    // Base-vs-head lanes: reported, never dropped.
+    for (const [lane, reason] of Object.entries(PROJECT_SCOPE_SKIPS)) laneSkipped(lane, reason)
+  }
+
   const all: Finding[][] = []
   // Files where the diff-scoped PII classifier completed (looked at the change),
   // those where it actually emitted a finding, and — per file — the lowercased
@@ -1162,28 +1507,42 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   for (const ctx of ctxByPath.values()) {
     const tasks: Promise<Finding[]>[] = []
     // Engine lanes consume COMPILED SQL (rendered by dbt) when available.
-    if (lanes.has("sql_quality") || lanes.has("warehouse_cost"))
-      tasks.push(qualityLane(ctx.file, input.runner, ctx.engineNewSql, dialect, ctx.engineOldSql))
-    if (lanes.has("semantic_change")) {
-      tasks.push(dataDiffLane(ctx, input.runner, dialect, input.config.dataDiff))
+    if (runCoreLint) tasks.push(qualityLane(ctx.file, input.runner, ctx.engineNewSql, dialect, ctx.engineOldSql))
+    if (runSemantic) {
+      // grainMismatchLane reads one version of the model; the other two are
+      // base-vs-head and no-op in project scope (see PROJECT_SCOPE_SKIPS).
       tasks.push(grainMismatchLane(ctx, input.runner))
+      if (!projectScope) {
+        tasks.push(dataDiffLane(ctx, input.runner, dialect, input.config.dataDiff))
+        tasks.push(
+          semanticChangeLane(
+            ctx.file,
+            input.runner,
+            ctx.engineOldSql,
+            ctx.engineNewSql,
+            dialect,
+            ctx.impact,
+            input.rubric,
+          ),
+        )
+      }
+    }
+    if (runLineage && !projectScope) {
+      // altimate_change start — the lineage lane waits on analyzeDbtImpact evidence
+      const lineageCtx = ctx
       tasks.push(
-        semanticChangeLane(
-          ctx.file,
-          input.runner,
-          ctx.engineOldSql,
-          ctx.engineNewSql,
-          dialect,
-          ctx.impact,
-          input.rubric,
+        lineageImpactEvidence(lineageCtx, input.runner, dialect).then((external) =>
+          lineageBreakageLane(lineageCtx.file, lineageCtx.impact, input.rubric, external),
         ),
       )
-    }
-    if (lanes.has("lineage_breakage")) {
-      all.push(lineageBreakageLane(ctx.file, ctx.impact, input.rubric))
+      // altimate_change end
       tasks.push(columnBreakageLane(ctx, input.runner, getCompiled, dialect))
     }
-    if (lanes.has("test_coverage")) tasks.push(missingGrainTestLane(ctx, input.runner))
+    if (runSchemaLag) {
+      laneRan("schema_lag")
+      tasks.push(schemaLagLane(ctx, input.runner, dialect, sourceYamlChanged, input.lagSides))
+    }
+    if (runTestCoverage) tasks.push(missingGrainTestLane(ctx, input.runner))
     // PII classification always runs (cheap name-pattern check, diff-scoped to
     // newly-introduced columns) — exposing PII is a hard-floor concern that
     // shouldn't depend on the cost tier enabling the pii_exposure lane. If core
@@ -1200,7 +1559,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         }
         if (diffScopedPii.findings.length) diffScopedPiiFindingFiles.add(currentCtx.file.path)
         const findings = [...diffScopedPii.findings]
-        if (lanes.has("pii_exposure")) {
+        if (runPiiExposure) {
           // The broad fallback covers output PII columns the precise lane did NOT
           // classify (pre-existing columns, or ones core's classifier missed) —
           // dedup against the columns core actually CONSIDERED, never all
@@ -1214,35 +1573,33 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       })(),
     )
     // Deterministic dbt anti-pattern detectors run on RAW SQL + diff (need Jinja).
-    if (lanes.has("dbt_patterns")) {
-      all.push(detectModelPatterns(ctx.file, ctx.newSql, input.rubric))
+    if (runDbtPatterns) {
+      all.push(
+        detectModelPatterns(ctx.file, ctx.newSql, input.rubric, { wholeFile: projectScope, dialect }),
+      )
       tasks.push(lexicalLane(ctx.file, input.runner))
     }
     // dbt config/Jinja lint (materialization / incremental / contract) — gate on its
     // own concerns, not just dbt_patterns, so it isn't silently dropped on a tier that
     // enables those concerns without dbt_patterns.
-    if (lanes.has("dbt_patterns") || lanes.has("materialization") || lanes.has("contract_violation")) {
-      tasks.push(dbtConfigLane(ctx, input.runner))
-    }
+    if (runDbtConfig) tasks.push(dbtConfigLane(ctx, input.runner))
     // Base-vs-head structural diff is a `semantic_change` concern (DISTINCT/UNION/grain/
     // surrogate-key/predicate changes) — gate on semantic_change, keeping dbt_patterns
     // so the trivial tier (which has no semantic_change lane) still gets it.
-    if (lanes.has("semantic_change") || lanes.has("dbt_patterns")) {
-      tasks.push(structuralChangeLane(ctx, input.runner))
-    }
+    if (runStructural) tasks.push(structuralChangeLane(ctx, input.runner))
     all.push(...(await Promise.all(tasks)))
   }
 
   // PR-level: cross-model sibling filter-consistency (divergent filters on a
   // shared upstream across the changed models).
-  if (lanes.has("semantic_change")) {
+  if (runSemantic) {
     all.push(await siblingConsistencyLane([...ctxByPath.values()], input.runner))
   }
 
   // PR-level: topology-aware equivalence for merge refactors (N models deleted +
   // 1 added that supersedes them). Per-model equivalence can't see these because
   // the new model has no 1:1 base. Advisory only (capped at warning).
-  if (lanes.has("semantic_change")) {
+  if (runSemantic && !projectScope) {
     all.push(await topologyEquivalenceLane(modelFiles, input.runner, getCompiled, dialect))
   }
 
@@ -1291,7 +1648,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // diff-specific detectors (incremental, materialization, ref conventions,
   // schema.yml test removal, portability) are NOT covered by core and stay.
   const coreRanFiles = new Set<string>()
-  if (lanes.has("sql_quality") || lanes.has("warehouse_cost")) {
+  if (runCoreLint) {
     await Promise.all(
       [...ctxByPath.values()].map(async (ctx) => {
         if (!ctx.engineNewSql || ctx.file.status === "deleted") return
@@ -1391,7 +1748,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // findings are clamped to ≤ warning upstream, so they enrich the review but
   // never change what blocks. Skipped when no aiReview fn is injected (tests /
   // headless-without-model) — the review degrades to deterministic-only.
-  if (lanes.has("ai_review") && input.aiReview) {
+  if (runAi && input.aiReview) {
     const aiFiles = [...ctxByPath.values()].map((ctx) => ({
       path: ctx.file.path,
       status: ctx.file.status,
@@ -1439,9 +1796,20 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     // and the reason list is what makes the verdict debuggable without the
     // customer having to re-run with --explain-tier. `trivial`/`lite` runs
     // stay silent to avoid noise on approvals.
-    tierReasons: input.explainTier || tierForced || pathTokenConfigError || tier === "full" ? tierReasons : undefined,
+    // A naturally-`full` diff run surfaces its reasons (the verdict is a
+    // customer-visible policy call). Project scope is always `full` by
+    // construction, so the same block there would be pure noise — the lane
+    // report below is what explains that run.
+    tierReasons:
+      input.explainTier || tierForced || pathTokenConfigError || (tier === "full" && !projectScope)
+        ? tierReasons
+        : undefined,
     tierForced: tierForced ? true : undefined,
     tierClassified: tierForced ? classifiedTier : undefined,
+    scope: projectScope ? "project" : undefined,
+    // Only in project scope: in diff scope every lane the tier enables runs,
+    // so the list would be noise on every PR comment.
+    lanes: projectScope ? laneReport : undefined,
   })
   return signEnvelope(envelope)
 }

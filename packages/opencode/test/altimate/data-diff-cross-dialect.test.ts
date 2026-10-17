@@ -264,3 +264,23 @@ describe("data.diff read-only warehouse probes", () => {
     },
   )
 })
+
+// altimate_change start — Trino partition literals (dbt-parity runs over Trino)
+import { trinoTimestampLiteral } from "../../src/altimate/native/connections/data-diff"
+
+describe("Trino partition WHERE", () => {
+  test("date partitions cast the literal — Trino never coerces varchar to a timestamp", () => {
+    expect(buildPartitionWhereClause("end_time", "2024-01-01", "day", undefined, "trino")).toBe(
+      `DATE_TRUNC('day', "end_time") = CAST('2024-01-01' AS TIMESTAMP)`,
+    )
+  })
+  test("zone-suffixed and JS Date values reduce to a zone-less ISO literal", () => {
+    expect(trinoTimestampLiteral("2024-01-01 00:00:00.000 UTC")).toBe("2024-01-01 00:00:00.000")
+    expect(trinoTimestampLiteral("2024-03-05T10:20:30Z")).toBe("2024-03-05 10:20:30")
+    expect(trinoTimestampLiteral(new Date(Date.UTC(2024, 0, 2)).toString())).toMatch(/^2024-01-0[12] /)
+  })
+  test("categorical partitions are unchanged", () => {
+    expect(buildPartitionWhereClause("region", "eu", undefined, undefined, "trino")).toBe(`"region" = 'eu'`)
+  })
+})
+// altimate_change end

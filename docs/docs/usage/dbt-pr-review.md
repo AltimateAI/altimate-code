@@ -118,6 +118,8 @@ Options:
 | `--explain-tier` | Emit the classifier's tier-reason list on the verdict envelope so you can see why a diff was rated `trivial`, `lite`, or `full`. Reasons already surface in the PR comment for `full`-tier runs — this flag adds them to `trivial`/`lite` for debugging. |
 | `--force-tier <tier>` | **[EXPERIMENTAL / bench debug]** Bypass the classifier and force `trivial` / `lite` / `full`. The verdict envelope carries `tierForced: true` and the classifier's original decision for audit. |
 | `--json` / `--output <file>` | Emit the verdict envelope as JSON. |
+| `--all` | **Project scope**: review every model in the manifest instead of a diff. Mutually exclusive with `--base`/`--head`. See [Project review](#project-review---all). |
+| `--max-models <n>` | `--all` only. Cap how many models are reviewed (`0` = no cap; default 500). Truncation is always announced on stderr. |
 
 > **Full vs lint-only.** With a compiled `manifest.json` present, the reviewer
 > proves lineage and equivalence exactly. Without it (or without a warehouse) it
@@ -157,6 +159,78 @@ Options:
     [completion-gate validators](../data-engineering/validators.md) are a
     different surface — they gate the **agent's own build loop** so it can't
     declare "done" on failing dbt tests or schema drift.
+
+## Project review (`--all`)
+
+`altimate review` reviews **a diff**. A model that has been wrong since the day it was
+written never appears in its output — which is why a project that has run the reviewer
+in CI for months can still be sitting on untouched project-level findings.
+
+`--all` is the other shape: every model in the manifest, one version each, no base ref.
+
+```bash
+altimate review --all --manifest target/manifest.json --severity warning --no-ai
+```
+
+### What runs, and what cannot
+
+Tiering is a cost control for diffs, so `--all` always runs at `full` tier. The lanes
+that evaluate **one version** of a model run; the lanes that compare a **base and a
+head** have no input and are reported as skipped — with the reason — on the envelope's
+`lanes` field and in the rendered summary.
+
+| Runs | Skipped (needs a base version) |
+|------|-------------------------------|
+| `core_lint` (AST lint / warehouse cost) | `semantic_change` (equivalence) |
+| `dbt_patterns` + the declarative rule catalog | `structural_diff` (the `*_change` rules) |
+| `lexical_scan` | `dbt_config_diff` (materialization / incremental change) |
+| `dbt_config_lint` | `column_breakage` |
+| `grain_mismatch` | `lineage_breakage` |
+| `missing_grain_test` | `data_diff` |
+| `sibling_filter_consistency` | `topology_equivalence` |
+| `pii_classify` / `pii_detect` | `schema_yml_test_removal` |
+| | `ai_review` (diff-grounded, caps at 20 files) |
+| | `dbt_patterns:fanout_join` (fires on a join *added* to an aggregating model) |
+
+A report that silently omitted half the lanes would be worse than no report, so the
+skip list is part of the output rather than a footnote.
+
+The last entry is the subtle one. Presenting a whole model as added is what makes the
+diff-anchored detectors evaluate it at all, but a detector whose *condition* is "this
+appeared in the diff" then degenerates. `fanout_join` ("a join was ADDED to a model that
+aggregates") becomes "this model aggregates and has a join", which describes most correct
+analytics SQL — it fired on 65 of 215 models before being scoped out. Detectors that test
+a whole-file property (`select *`, `ORDER BY` in a CTE) are unaffected and still run.
+
+### Compile first — `dbt parse` is not enough
+
+The engine parses SQL, not Jinja. A model that falls back to raw `{{ config(...) }}`
+source fails to parse at line 1, every AST rule is skipped **inside** the engine, and
+the lane returns zero findings — indistinguishable from a clean model. Over a whole
+project that silence is the difference between a review and a rubber stamp, so `--all`
+counts it and says so:
+
+```
+⚠️  207 of 214 models had no compiled SQL — the engine analysed their raw Jinja,
+   which the SQL parser cannot read, so the AST lanes (core lint, PII classification,
+   grain, filter consistency) returned nothing for them. Run `dbt compile` and re-run.
+```
+
+The same counts are on the envelope as `lanes.compiledModels` / `lanes.totalModels`.
+
+### Performance
+
+`--all` covers correctness, PII, contracts and grain, not cost. The performance rule
+set is a separate deterministic command:
+
+```bash
+altimate dbt-perf --cwd <dbt project> --manifest target/manifest.json --format json
+```
+
+It reports `skipped_rules` alongside `findings`; a rule that could not run is not a
+clean result. Findings carrying a `MaterializationChange` guardrail print their
+`delete_scope` and `reader_requirements` — those fields exist because a past
+performance fix switched a materialization without dropping the old relation.
 
 ## GitHub Action
 

@@ -216,6 +216,13 @@ describe("Registration", () => {
     "altimate_core.dbt_config_lint",
     "altimate_core.dbt_config_diff",
     "altimate_core.structural_diff",
+    "altimate_core.dbt_perf",
+    // altimate_change start — dbt mart optimizer bindings
+    "altimate_core.dbt_rewrites",
+    "altimate_core.dbt_parity_plan",
+    "altimate_core.dbt_impact",
+    "altimate_core.dbt_factoring",
+    // altimate_change end
   ] as const
 
   test("all altimate_core methods are registered", () => {
@@ -915,3 +922,24 @@ describe("core 0.5.1 dialect forwarding + decidable", () => {
     expect(typeof snowflake.diff).toBe("string")
   })
 })
+
+// ---------------------------------------------------------------------------
+// altimate_change start — dbt-perf binding feature detection
+// ---------------------------------------------------------------------------
+
+describe("altimate_core.dbt_perf", () => {
+  test("returns an actionable error when the binding is absent, never a crash", async () => {
+    registerAll()
+    // Version-robust on purpose: the analyze_dbt_perf bindings ship in a core
+    // newer than the pinned one, so this asserts the CONTRACT (a handled,
+    // explained failure — or a real report) rather than which side we are on.
+    const res = await Dispatcher.call("altimate_core.dbt_perf", { project_dir: "/nonexistent/dbt/project" })
+    if (res.success) {
+      expect(res.data).toBeDefined()
+    } else {
+      expect(typeof res.error).toBe("string")
+      expect(res.error).not.toContain("is not a function")
+    }
+  })
+})
+// altimate_change end

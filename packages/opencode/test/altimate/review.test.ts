@@ -1,4 +1,5 @@
 import { describe, test, expect } from "bun:test"
+import { isSchemaGapError } from "../../src/altimate/review/runner"
 import {
   makeFinding,
   fingerprint,
@@ -1894,6 +1895,63 @@ describe("orchestrate", () => {
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
+  // altimate_change start — analyzeDbtImpact lifts the modified-model cap only on an external break
+  describe("lineage lane with analyzeDbtImpact evidence", () => {
+    const files: ChangedFile[] = [{ path: "models/marts/mrt_q.sql", status: "modified", diff: "-  b,\n" }]
+    const lineage = async (sql: string) =>
+      (sql.match(/select (.*) from/i)?.[1] ?? "").split(",").map((c) => ({ source: `"x"."${c.trim()}"`, target: c.trim() }))
+    const withImpact = (hops: Array<{ kind: string; target: string; verdict: string }>, calls: unknown[] = []): ReviewRunner => ({
+      ...fakeRunner({}),
+      async impact() {
+        return { hasManifest: true, severity: "HIGH", directCount: 12, transitiveCount: 30, testCount: 5 }
+      },
+      columnLineage: lineage,
+      async downstreamModels() {
+        return []
+      },
+      async dbtImpact(change) {
+        calls.push(change)
+        return hops.map((h) => ({ hop: 1, node_type: h.kind, name: h.target, verdict: h.verdict }))
+      },
+    })
+    const run = (runner: ReviewRunner) =>
+      runReview({
+        changedFiles: files,
+        config: { ...DEFAULT_REVIEW_CONFIG },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner,
+        getContent: content("select a from x", "select a, b from x"),
+        getCompiled: async (_f: string, side: "old" | "new") => (side === "new" ? "select a from x" : "select a, b from x"),
+        generatedAt: "2026-05-29T00:00:00Z",
+      })
+
+    test("a removed column a LOADER reads → critical, blocks", async () => {
+      const calls: unknown[] = []
+      const env = await run(withImpact([{ kind: "loader", target: "QueryUsageLoader", verdict: "breaking" }], calls))
+      const lin = env.findings.filter((f) => f.category === "lineage_breakage")
+      expect(lin.some((f) => f.severity === "critical" && f.title.includes("outside dbt"))).toBe(true)
+      expect(lin.some((f) => f.body.includes("QueryUsageLoader"))).toBe(true)
+      expect(calls).toContainEqual({ model: "mrt_q", column: "b", kind: "drop" })
+      expect(env.verdict).toBe("REQUEST_CHANGES")
+    })
+
+    test("a break only inside dbt keeps the fan-out cap at warning", async () => {
+      const env = await run(withImpact([{ kind: "dbt_child", target: "mrt_child", verdict: "breaking" }]))
+      const fanout = env.findings.find((f) => f.category === "lineage_breakage" && f.title.includes("fan-out"))
+      expect(fanout?.severity).toBe("warning")
+      expect(env.findings.some((f) => f.title.includes("outside dbt"))).toBe(false)
+    })
+
+    test("no dbtImpact on the runner → unchanged behaviour", async () => {
+      const { dbtImpact: _drop, ...rest } = withImpact([])
+      const env = await run(rest as ReviewRunner)
+      const fanout = env.findings.find((f) => f.category === "lineage_breakage" && f.title.includes("fan-out"))
+      expect(fanout?.severity).toBe("warning")
+    })
+  })
+  // altimate_change end
+
   test("engine contract_violation is preserved (not coerced to sql_quality) and blocks", async () => {
     const files: ChangedFile[] = [{ path: "models/marts/fct_orders.sql", status: "modified", diff: "+x\n" }]
     const runner: ReviewRunner = {
@@ -2534,3 +2592,185 @@ describe("orchestrate", () => {
     expect(inline[0]).toMatchObject({ path: "models/x.sql", line: 5, side: "RIGHT" })
   })
 })
+
+// ---------------------------------------------------------------------------
+// orchestrate — project scope (`altimate review --all`)
+// ---------------------------------------------------------------------------
+describe("orchestrate: project scope", () => {
+  /** Records which lanes the runner was actually asked to do work for. */
+  function recordingRunner(calls: Record<string, number>): ReviewRunner {
+    const bump = (k: string) => {
+      calls[k] = (calls[k] ?? 0) + 1
+    }
+    return {
+      async manifestAvailable() {
+        return true
+      },
+      async impact() {
+        bump("impact")
+        return { hasManifest: true, severity: "HIGH", directCount: 4, transitiveCount: 9, testCount: 2 }
+      },
+      async grade() {
+        return { grade: "B" }
+      },
+      async check() {
+        bump("check")
+        return { issues: [{ rule: "cartesian-product", message: "implicit cross join", severity: "warning" }], ran: true }
+      },
+      async equivalence() {
+        bump("equivalence")
+        return { decided: true, equivalent: false, differences: ["rows differ"], confidence: "high" }
+      },
+      async detectPii() {
+        return { columns: [] }
+      },
+      async structuralDiff() {
+        bump("structuralDiff")
+        return [{ code: "SC010", rule: "join_key_regression", severity: "error", message: "join key changed" }]
+      },
+      async dbtConfigLint(_raw, oldRaw) {
+        bump(oldRaw ? "dbtConfigDiff" : "dbtConfigLint")
+        return []
+      },
+      async columnLineage() {
+        bump("columnLineage")
+        return []
+      },
+      async downstreamModels() {
+        bump("downstreamModels")
+        return []
+      },
+      async sourceFilters() {
+        bump("sourceFilters")
+        return {}
+      },
+      async declaredPrimaryKey() {
+        return undefined
+      },
+    } as ReviewRunner
+  }
+
+  const projectFiles: ChangedFile[] = [
+    { path: "models/marts/mrt_a.sql", status: "added" },
+    { path: "models/marts/mrt_b.sql", status: "added" },
+  ]
+  const projectSql = "select * from {{ ref('x') }} a, {{ ref('y') }} b"
+
+  test("runs the single-version lanes and reports every base-vs-head lane as skipped", async () => {
+    const calls: Record<string, number> = {}
+    const env = await runReview({
+      changedFiles: projectFiles,
+      config: DEFAULT_REVIEW_CONFIG,
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: recordingRunner(calls),
+      getContent: async () => projectSql,
+      generatedAt: "2026-05-29T00:00:00Z",
+      scope: "project",
+    })
+    expect(env.scope).toBe("project")
+    // Tiering is a diff cost-control; project scope always runs everything.
+    expect(env.tier).toBe("full")
+    expect(env.lanes).toBeDefined()
+    expect(env.lanes!.ran).toContain("core_lint")
+    expect(env.lanes!.ran).toContain("dbt_patterns")
+    expect(env.lanes!.ran).toContain("missing_grain_test")
+    // Base-vs-head lanes are NAMED as skipped, not silently dropped.
+    const skipped = Object.fromEntries(env.lanes!.skipped.map((s) => [s.lane, s.reason]))
+    for (const lane of [
+      "lineage_breakage",
+      "column_breakage",
+      "semantic_change",
+      "structural_diff",
+      "dbt_config_diff",
+      "data_diff",
+      "topology_equivalence",
+      "schema_yml_test_removal",
+      "ai_review",
+    ]) {
+      expect(skipped[lane]).toBeTruthy()
+    }
+    // …and the engine was never asked to do that work.
+    expect(calls.equivalence).toBeUndefined()
+    expect(calls.structuralDiff).toBeUndefined()
+    expect(calls.dbtConfigDiff).toBeUndefined()
+    expect(calls.downstreamModels).toBeUndefined()
+    // …while the single-version lanes did run.
+    expect(calls.check).toBeGreaterThan(0)
+    expect(calls.dbtConfigLint).toBeGreaterThan(0)
+  })
+
+  test("a whole model is presented to the diff-anchored detectors as added", async () => {
+    // The rule catalog is relevance-gated on the diff: with no synthetic diff
+    // it matches nothing and the review is a quiet lie.
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/mrt_a.sql", status: "added" }],
+      config: DEFAULT_REVIEW_CONFIG,
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      // core lint reporting `ran: false` keeps the regex twins alive, so this
+      // asserts the diff anchoring rather than the AST-vs-regex dedup.
+      runner: { ...recordingRunner({}), async check() { return { issues: [], ran: false } } } as ReviewRunner,
+      getContent: async () => "select a from {{ ref('x') }} cross join {{ ref('y') }}",
+      generatedAt: "2026-05-29T00:00:00Z",
+      scope: "project",
+    })
+    expect(env.findings.some((f) => f.evidence?.tool === "rule-catalog" || f.evidence?.tool === "dbt-patterns")).toBe(
+      true,
+    )
+  })
+
+  test("reports how many models had compiled SQL, and the summary warns when some did not", async () => {
+    const env = await runReview({
+      changedFiles: projectFiles,
+      config: DEFAULT_REVIEW_CONFIG,
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: recordingRunner({}),
+      getContent: async () => projectSql,
+      // Only the first model has compiled SQL.
+      getCompiled: async (f) => (f === "models/marts/mrt_a.sql" ? "select 1" : undefined),
+      generatedAt: "2026-05-29T00:00:00Z",
+      scope: "project",
+    })
+    expect(env.lanes!.totalModels).toBe(2)
+    expect(env.lanes!.compiledModels).toBe(1)
+    const summary = renderSummary(env)
+    expect(summary).toContain("1 of 2 models had no compiled SQL")
+    expect(summary).toContain("Project review")
+    expect(summary).toContain("Lanes skipped")
+  })
+
+  test("diff scope is unchanged: no scope/lanes fields, base-vs-head lanes still run", async () => {
+    const calls: Record<string, number> = {}
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/mrt_a.sql", status: "modified", diff: "+select 1\n" }],
+      config: DEFAULT_REVIEW_CONFIG,
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: recordingRunner(calls),
+      getContent: async (_f, side) => (side === "new" ? "select 1" : "select 2"),
+      generatedAt: "2026-05-29T00:00:00Z",
+    })
+    expect(env.scope).toBeUndefined()
+    expect(env.lanes).toBeUndefined()
+    expect(calls.equivalence).toBeGreaterThan(0)
+    expect(calls.structuralDiff).toBeGreaterThan(0)
+  })
+})
+
+// altimate_change start — precision: a validation error naming a relation dbt
+// knows but the review schema lacks is the schema's gap, not a SQL error.
+describe("validate lane: schema gaps are not findings", () => {
+  const known = new Set(["d02_order_lines_hub", "stg_tpch__orders"])
+  test("a missing manifest relation is a schema gap", () => {
+    expect(isSchemaGapError("Table 'd02_order_lines_hub' not found", known)).toBe(true)
+    expect(isSchemaGapError(`Table '"iceberg"."s"."stg_tpch__orders"' not found`, known)).toBe(true)
+  })
+  test("unknown tables and other errors are kept", () => {
+    expect(isSchemaGapError("Table 'typo_table' not found", known)).toBe(false)
+    expect(isSchemaGapError("Aggregate functions are not allowed in the WHERE clause", known)).toBe(false)
+    expect(isSchemaGapError("Table 'd02_order_lines_hub' not found", undefined)).toBe(false)
+  })
+})
+// altimate_change end

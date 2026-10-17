@@ -1,6 +1,6 @@
 ---
 name: dbt-pr-review
-description: Cloudflare-style AI code review for dbt/SQL pull requests. Produces a signed APPROVE/COMMENT/REQUEST_CHANGES verdict where every blocking finding is backed by a deterministic engine call — column-lineage blast radius, query equivalence, PII classification, and A–F grade. Use to review a dbt PR or the working-tree changes before merge.
+description: Cloudflare-style AI code review for dbt/SQL pull requests. Produces a signed APPROVE/COMMENT/REQUEST_CHANGES verdict where every blocking finding is backed by a deterministic engine call — column-lineage blast radius, query equivalence, PII classification, and A–F grade. Use to review a dbt PR or the working-tree changes before merge. Reviews a DIFF; for the whole project use `dbt-project-review`.
 ---
 
 # dbt PR Review
@@ -8,6 +8,14 @@ description: Cloudflare-style AI code review for dbt/SQL pull requests. Produces
 ## Requirements
 **Agent:** `reviewer` (read-only) — also works from `analyst`/`builder`.
 **Tools used:** `dbt_pr_review` (primary), `impact_analysis`, `altimate_core_equivalence`, `altimate_core_check`, `lineage_check`, read-only `git`.
+
+## Scope — diff, not project
+
+This reviews **a diff**: base..head, defaulting to the merge-base with `origin/main`.
+A model that has been wrong since the day it was written will not appear unless it is in
+the diff. If the question is "is this project healthy?" rather than "is this change
+safe?", use `dbt-project-review` (`altimate review --all`), which reviews every model in
+the manifest and reports the base-vs-head lanes as skipped.
 
 ## When to Use This Skill
 
