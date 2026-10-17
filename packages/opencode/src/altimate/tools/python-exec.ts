@@ -9,7 +9,7 @@
  * session directory, and network is blocked. Without an enforced mechanism the tool refuses.
  */
 import z from "zod"
-import { spawn } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as os from "node:os"
@@ -219,6 +219,9 @@ async function workspaceSize(directory: string): Promise<number> {
   return bytes
 }
 
+/** How long output may keep draining after the sandbox is killed before the pipes are closed. */
+const PIPE_GRACE_MS = 300
+
 type RunResult = {
   code: number | null
   signal: string | null
@@ -249,12 +252,66 @@ function run(
     child.stderr.on("data", (d) => {
       if (stderr.length < cap) stderr += d.toString().slice(0, cap - stderr.length)
     })
+    let exitCode: number | null = null
+    let exitSignal: string | null = null
+    let settled = false
+    let grace: ReturnType<typeof setTimeout> | undefined
+    // Descendants seen so far (pid -> start time). A child that calls setsid leaves the process
+    // group, and once its parent exits it is re-parented, so the tree must be recorded while alive.
+    const known = new Map<number, string>()
+    const snapshot = () => {
+      const ps = spawnSync("/bin/ps", ["-A", "-o", "pid=,ppid=,lstart="], { encoding: "utf8", timeout: 2000 })
+      const table = new Map<number, { parent: number; started: string }>()
+      for (const line of (ps.stdout ?? "").split("\n")) {
+        const m = /^\s*(\d+)\s+(\d+)\s+(.*\S)\s*$/.exec(line)
+        if (m) table.set(Number(m[1]), { parent: Number(m[2]), started: m[3] })
+      }
+      return table
+    }
+    const track = () => {
+      if (!child.pid) return
+      const table = snapshot()
+      const tree = new Set<number>([...known.keys(), child.pid])
+      for (let grew = true; grew; ) {
+        grew = false
+        for (const [pid, entry] of table)
+          if (!tree.has(pid) && tree.has(entry.parent)) {
+            tree.add(pid)
+            known.set(pid, entry.started)
+            grew = true
+          }
+      }
+    }
+    const tracker = setInterval(track, 100)
+    // Kill the whole sandbox, not only the process group: the group, then every recorded
+    // descendant whose start time still matches (so a reused pid is never signalled). On Linux the
+    // bwrap PID namespace (--die-with-parent) also ends everything when bwrap dies.
     const kill = () => {
+      try {
+        track()
+        const table = snapshot()
+        for (const [pid, started] of known) if (table.get(pid)?.started === started) process.kill(pid, "SIGKILL")
+      } catch {}
       try {
         if (child.pid) process.kill(-child.pid, "SIGKILL")
       } catch {
         child.kill("SIGKILL")
       }
+      // A descendant may still hold the pipes open; stop waiting for them shortly after the kill.
+      grace ??= setTimeout(finish, PIPE_GRACE_MS)
+    }
+    const finish = async () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      clearTimeout(grace)
+      clearInterval(monitor)
+      clearInterval(tracker)
+      abort.removeEventListener("abort", onAbort)
+      child.stdout.destroy()
+      child.stderr.destroy()
+      await checking
+      resolve({ code: exitCode, signal: exitSignal, stdout, stderr, timedOut, workspaceError })
     }
     const timer = setTimeout(() => {
       timedOut = true
@@ -283,15 +340,14 @@ function run(
     child.on("error", (e) => {
       stderr += `\n${e.message}`
     })
-    // A cell may spawn children and exit without waiting. They must not outlive it.
-    child.on("exit", kill)
-    child.on("close", async (code, signal) => {
-      clearTimeout(timer)
-      clearInterval(monitor)
-      abort.removeEventListener("abort", onAbort)
-      await checking
-      resolve({ code, signal, stdout, stderr, timedOut, workspaceError })
+    // A cell may spawn children and exit without waiting. They must not outlive it, and one that
+    // keeps stdout/stderr open must not keep the call from returning.
+    child.on("exit", (code, signal) => {
+      exitCode = code
+      exitSignal = signal
+      kill()
     })
+    child.on("close", () => void finish())
   })
 }
 

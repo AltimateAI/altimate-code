@@ -7,7 +7,7 @@
  * refuses to run instead of running unconfined.
  *
  * - macOS: `sandbox-exec` profile that denies file reads and writes outside the allowlist,
- *   network, Apple Events and Mach services outside a small allowlist (LaunchServices could
+ *   signals to processes other than itself and its children, network, Apple Events and Mach services outside a small allowlist (LaunchServices could
  *   otherwise start unconfined helper processes).
  * - Linux: `bwrap` with every namespace unshared and only the allowlist mounted. Without a
  *   working `bwrap` the tool refuses. Landlock alone is not used: it does not mediate
@@ -18,7 +18,7 @@
  * a canary file outside the allowlist) before it is used.
  */
 import { spawn } from "node:child_process"
-import { existsSync, lstatSync, readlinkSync, realpathSync } from "node:fs"
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs"
 import * as fs from "node:fs/promises"
 import * as os from "node:os"
 import * as path from "node:path"
@@ -200,7 +200,7 @@ function ancestors(p: string): string[] {
   }
 }
 
-/** macOS Seatbelt profile: allow-default, then deny reads, writes, network and IPC outside the allowlist. */
+/** macOS Seatbelt profile: allow-default, then deny reads, writes, network, IPC and signals outside the allowlist. */
 export function sandboxProfile(read: ReadAllowlist, write: string[]): string {
   const readable = [
     ...read.directories.map((d) => `(subpath ${quote(d)})`),
@@ -223,6 +223,9 @@ export function sandboxProfile(read: ReadAllowlist, write: string[]): string {
     "(allow default)",
     "(deny network*)",
     "(deny appleevent-send)",
+    // Signals reach only the process itself and its own children, never the agent or any other host process.
+    "(deny signal)",
+    "(allow signal (target self) (target children))",
     `(deny mach-lookup (require-not (require-any ${MACH_SERVICES.map((s) => `(global-name ${quote(s)})`).join(" ")})))`,
     `(deny file-read* (require-not (require-any ${readable.join(" ")})))`,
     `(allow file-read-metadata ${metadata.join(" ")})`,
@@ -315,10 +318,29 @@ function candidates(platform: NodeJS.Platform): Omit<Confinement, "read">[] {
   return bwrap ? [{ filesystem: "bwrap", network: "isolated", prefix: [bwrap] }] : []
 }
 
-function unsupported(platform: NodeJS.Platform): string {
-  return platform === "linux"
-    ? "python_exec refused: no enforced filesystem confinement is available on this Linux host (bubblewrap `bwrap` is missing or cannot create namespaces). Install bubblewrap and allow unprivileged user namespaces; Python is never run unconfined."
-    : `python_exec refused: no filesystem confinement mechanism is supported on ${platform}. Only macOS (sandbox-exec) and Linux (bubblewrap) can confine reads; Python is never run unconfined.`
+const REFUSAL_TAIL = "Python is never run unconfined."
+
+/** True when the kernel blocks unprivileged user namespaces through AppArmor (Ubuntu 23.10+ default). */
+function appArmorRestrictsUserNamespaces(): boolean {
+  try {
+    return readFileSync("/proc/sys/kernel/apparmor_restrict_unprivileged_userns", "utf8").trim() === "1"
+  } catch {
+    return false
+  }
+}
+
+/** Refusal text for a host with no working mechanism. Never changes system settings. */
+export function unsupported(
+  platform: NodeJS.Platform,
+  host: { bwrapInstalled?: boolean; appArmorRestricted?: boolean } = {},
+): string {
+  if (platform !== "linux")
+    return `python_exec refused: no filesystem confinement mechanism is supported on ${platform}. Only macOS (sandbox-exec) and Linux (bubblewrap) can confine reads; ${REFUSAL_TAIL}`
+  if (!host.bwrapInstalled)
+    return `python_exec refused: bubblewrap (\`bwrap\`) is not installed on this Linux host, so no enforced filesystem confinement is available. Install the \`bubblewrap\` package; ${REFUSAL_TAIL}`
+  if (host.appArmorRestricted)
+    return `python_exec refused: bubblewrap is installed but cannot create a user namespace because the AppArmor setting kernel.apparmor_restrict_unprivileged_userns=1 blocks unprivileged user namespaces. An administrator can either add an AppArmor profile that lets \`bwrap\` create user namespaces, or set the sysctl kernel.apparmor_restrict_unprivileged_userns=0. That is an admin decision; python_exec never changes system settings. ${REFUSAL_TAIL}`
+  return `python_exec refused: bubblewrap is installed but cannot create the namespaces it needs on this Linux host. Allow unprivileged user namespaces for \`bwrap\`; ${REFUSAL_TAIL}`
 }
 
 /**
@@ -334,10 +356,17 @@ export async function detectConfinement(input: {
   platform?: NodeJS.Platform
   /** Override the host's candidate mechanisms (tests). */
   mechanisms?: Omit<Confinement, "read">[]
+  /** Override the AppArmor user-namespace restriction probe (tests). */
+  appArmorRestricted?: () => boolean
 }): Promise<Detection> {
   const platform = input.platform ?? process.platform
   const options = input.mechanisms ?? candidates(platform)
-  if (!options.length) return { ok: false, reason: unsupported(platform) }
+  const refusal = () =>
+    unsupported(platform, {
+      bwrapInstalled: options.some((o) => o.filesystem === "bwrap"),
+      appArmorRestricted: platform === "linux" && (input.appArmorRestricted ?? appArmorRestrictsUserNamespaces)(),
+    })
+  if (!options.length) return { ok: false, reason: refusal() }
   const work = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), "altimate-python-sandbox-")))
   const elsewhere = realpathSync(await fs.mkdtemp(path.join(os.tmpdir(), "altimate-python-canary-")))
   try {
@@ -398,7 +427,7 @@ export async function detectConfinement(input: {
         `${option.filesystem}: ${(result.stderr || out || result.error || "no output").trim().split("\n").slice(-1)[0]}`,
       )
     }
-    return { ok: false, reason: `${unsupported(platform)} Self-test results: ${failures.join("; ")}` }
+    return { ok: false, reason: `${refusal()} Self-test results: ${failures.join("; ")}` }
   } finally {
     await fs.rm(work, { recursive: true, force: true })
     await fs.rm(elsewhere, { recursive: true, force: true })

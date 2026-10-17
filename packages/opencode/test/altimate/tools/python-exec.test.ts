@@ -45,6 +45,12 @@ const probe = spawnSync(
 )
 const python = probe.status === 0 ? probe.stdout.trim() : ""
 const e2e = python ? test : test.skip
+// Tests that run analyst code need a sandbox that works on this host (macOS sandbox-exec, or Linux
+// bubblewrap with user namespaces). Without one they are skipped and the refusal test below runs.
+const detected = python ? await confinementFor(python) : undefined
+const sandboxed = detected?.ok ? test : test.skip
+if (python && !detected?.ok)
+  console.warn(`python_exec sandbox tests skipped: ${detected && !detected.ok ? detected.reason : "no Python"}`)
 
 let previous: Record<string, string | undefined> = {}
 
@@ -154,7 +160,7 @@ describe("python_exec helpers", () => {
 })
 
 describe("python_exec", () => {
-  e2e(
+  sandboxed(
     "loads a scratch table and saves a DataFrame back to the same session",
     async () => {
       const scratch = await getScratch(ctx.sessionID)
@@ -190,7 +196,7 @@ describe("python_exec", () => {
     15_000,
   )
 
-  e2e(
+  sandboxed(
     "persists workspace files across calls in one session",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -214,7 +220,7 @@ describe("python_exec", () => {
     15_000,
   )
 
-  e2e(
+  sandboxed(
     "keeps different sessions' workspaces separate and removes files when the session closes",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -239,7 +245,7 @@ describe("python_exec", () => {
     15_000,
   )
 
-  e2e(
+  sandboxed(
     "reports the workspace size cap and permits a later call after clearing oversized files",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -262,7 +268,7 @@ describe("python_exec", () => {
     15_000,
   )
 
-  e2e(
+  sandboxed(
     "does not expose parent credentials, connection strings, or other environment variables",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -275,7 +281,7 @@ describe("python_exec", () => {
     15_000,
   )
 
-  e2e(
+  sandboxed(
     "does not retain undeclared scratch inputs from an earlier call",
     async () => {
       const scratch = await getScratch(ctx.sessionID)
@@ -298,7 +304,7 @@ describe("python_exec", () => {
     15_000,
   )
 
-  e2e(
+  sandboxed(
     "rejects path traversal in load and save table names",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -322,7 +328,7 @@ describe("python_exec", () => {
     15_000,
   )
 
-  e2e(
+  sandboxed(
     "kills code that runs past its deadline",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -334,7 +340,7 @@ describe("python_exec", () => {
     15_000,
   )
 
-  e2e(
+  sandboxed(
     "does not execute code when the call is already aborted",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -348,7 +354,7 @@ describe("python_exec", () => {
     15_000,
   )
 
-  e2e(
+  sandboxed(
     "reports the confinement mechanism and blocks network access",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -364,7 +370,7 @@ describe("python_exec", () => {
     30_000,
   )
 
-  e2e(
+  sandboxed(
     "denies reads of host files outside the allowlist",
     async () => {
       await using elsewhere = await tmpdir()
@@ -397,7 +403,7 @@ describe("python_exec", () => {
     30_000,
   )
 
-  e2e(
+  sandboxed(
     "subprocesses inherit the read confinement",
     async () => {
       await using elsewhere = await tmpdir()
@@ -422,7 +428,7 @@ describe("python_exec", () => {
     30_000,
   )
 
-  e2e(
+  sandboxed(
     "pandas and duckdb read and write workspace files inside the sandbox",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -440,7 +446,7 @@ describe("python_exec", () => {
     30_000,
   )
 
-  e2e(
+  sandboxed(
     "confines writes to the session workspace",
     async () => {
       const outside = path.join(os.homedir(), `.pyexec-write-probe-${process.pid}`)
@@ -458,7 +464,7 @@ describe("python_exec", () => {
     30_000,
   )
 
-  e2e(
+  sandboxed(
     "refuses to run when no confinement mechanism is available",
     async () => {
       const detect = spyOn(Sandbox, "detectConfinement").mockResolvedValue({
@@ -495,7 +501,7 @@ describe("python_exec", () => {
     expect(result.output).toContain("No code to run")
   })
 
-  e2e(
+  sandboxed(
     "reports a Python error with its traceback",
     async () => {
       const tool = await initTool(PythonExecTool)
@@ -504,6 +510,95 @@ describe("python_exec", () => {
       expect(result.output).toContain("ValueError: boom")
     },
     15_000,
+  )
+
+  sandboxed(
+    "returns at the deadline when a session-detached descendant holds stdout open",
+    async () => {
+      const tool = await initTool(PythonExecTool)
+      const started = Date.now()
+      const result = await tool.execute(
+        {
+          code: [
+            "import subprocess, time",
+            "subprocess.Popen(['sleep', '7331'], start_new_session=True)",
+            "time.sleep(60)",
+          ].join("\n"),
+          timeout_ms: 1000,
+        },
+        ctx,
+      )
+      expect(Date.now() - started).toBeLessThan(8000)
+      expect(result.metadata.timedOut).toBe(true)
+      expect(result.output).toContain("timed out")
+      expect(spawnSync("pgrep", ["-f", "sleep 7331"], { encoding: "utf8" }).stdout.trim()).toBe("")
+    },
+    20_000,
+  )
+
+  sandboxed(
+    "returns promptly when the cell exits leaving a session-detached descendant on stdout",
+    async () => {
+      const tool = await initTool(PythonExecTool)
+      const started = Date.now()
+      const result = await tool.execute(
+        {
+          code: "import subprocess\nsubprocess.Popen(['sleep', '7332'], start_new_session=True)\nprint('done')",
+          timeout_ms: 30_000,
+        },
+        ctx,
+      )
+      expect(Date.now() - started).toBeLessThan(10_000)
+      expect(result.output).toContain("done")
+      spawnSync("pkill", ["-f", "sleep 7332"])
+    },
+    20_000,
+  )
+
+  test("python_exec refuses when the host has no working sandbox", async () => {
+    if (detected?.ok || !python) return
+    const tool = await initTool(PythonExecTool)
+    const result = await tool.execute({ code: "print(1)" }, ctx)
+    expect(result.metadata.ok).toBe(false)
+    expect(result.output).toContain("python_exec refused")
+    expect(result.output).toContain("never run unconfined")
+  })
+
+  sandboxed(
+    "sandboxed code cannot signal the agent or other host processes",
+    async () => {
+      if (process.platform !== "darwin") return
+      const outside = Bun.spawn(["sleep", "7333"])
+      try {
+        const tool = await initTool(PythonExecTool)
+        const result = await tool.execute(
+          {
+            code: [
+              "import os, signal, subprocess",
+              "for name, pid in (('parent', os.getppid()), ('other', %d)):" .replace("%d", "OUTSIDE"),
+              "    try:",
+              "        os.kill(pid, signal.SIGURG)",
+              "        print(name, 'SIGNALLED')",
+              "    except OSError:",
+              "        print(name, 'DENIED')",
+              "child = subprocess.Popen(['sleep', '5'])",
+              "child.send_signal(signal.SIGURG)",
+              "child.kill()",
+              "print('child OK')",
+            ].join("\n").replace("OUTSIDE", String(outside.pid)),
+          },
+          ctx,
+        )
+        expect(result.output).toContain("parent DENIED")
+        expect(result.output).toContain("other DENIED")
+        expect(result.output).toContain("child OK")
+        expect(outside.killed || outside.exitCode !== null).toBe(false)
+        expect(process.kill(process.pid, 0)).toBe(true)
+      } finally {
+        outside.kill()
+      }
+    },
+    20_000,
   )
 })
 describe("python_exec confinement", () => {
@@ -623,6 +718,8 @@ describe("python_exec confinement", () => {
     ])
     expect(profile).toContain("(deny network*)")
     expect(profile).toContain("(deny appleevent-send)")
+    expect(profile).toContain("(deny signal)")
+    expect(profile).toContain("(allow signal (target self) (target children))")
     expect(profile).toMatch(/\(deny mach-lookup \(require-not/)
     expect(profile).toMatch(/\(deny file-read\* \(require-not \(require-any [^\n]*\(subpath "\/opt\/py"\)/)
     expect(profile).toMatch(/\(deny file-write\* \(require-not \(require-any \(subpath "\/private\/tmp\/s"\)/)
@@ -661,6 +758,33 @@ describe("python_exec confinement", () => {
     expect(ok.ok && ok.directories).not.toContain("/opt/py/lib/python3.12")
     expect(ok.ok && ok.directories).not.toContain("/dev/shm")
     expect(ok.ok && ok.directories).not.toContain("/srv/data")
+  })
+
+  test("a missing bubblewrap is refused with an install hint", async () => {
+    const result = await Sandbox.detectConfinement({
+      python: "python3",
+      bootstrap: BOOTSTRAP,
+      env: childEnv,
+      platform: "linux",
+      mechanisms: [],
+      appArmorRestricted: () => true,
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain("not installed")
+      expect(result.reason).toContain("Install the `bubblewrap` package")
+      expect(result.reason).not.toContain("apparmor_restrict_unprivileged_userns")
+    }
+  })
+
+  test("bubblewrap blocked by the AppArmor user-namespace restriction names the remedies", () => {
+    const reason = Sandbox.unsupported("linux", { bwrapInstalled: true, appArmorRestricted: true })
+    expect(reason).toContain("kernel.apparmor_restrict_unprivileged_userns=1")
+    expect(reason).toContain("AppArmor profile")
+    expect(reason).toContain("kernel.apparmor_restrict_unprivileged_userns=0")
+    expect(reason).toContain("admin decision")
+    expect(reason).toContain("never changes system settings")
+    expect(Sandbox.unsupported("linux", { bwrapInstalled: true, appArmorRestricted: false })).not.toContain("AppArmor")
   })
 
   test("unsupported platforms are refused", async () => {
