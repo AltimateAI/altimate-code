@@ -15,7 +15,8 @@ import * as Precedence from "../workspace/precedence"
 // altimate_change end
 
 export const SchemaInspectTool = Tool.define("schema_inspect", {
-  description: "List tables/collections when table is omitted or empty; otherwise inspect columns, types, and constraints for one table.",
+  description:
+    "List schemas with table/collection counts when table and schema_name are omitted; list up to 500 tables/collections when schema_name is given; otherwise inspect columns, types, and constraints for one table.",
   parameters: z.object({
     table: z
       .string()
@@ -36,7 +37,8 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
     // Pre-flight validation outranks the redirect, as it does for `sql_explain`: bad
     // input is answered here rather than forwarded to the engine tool, and an empty
     // warehouse string is never read as "the default" by the routing decision.
-    const inputError = (args.table?.trim() ? validateTableName(args.table) : null) ?? validateWarehouseName(args.warehouse)
+    const inputError =
+      (args.table?.trim() ? validateTableName(args.table) : null) ?? validateWarehouseName(args.warehouse)
     if (inputError) {
       return {
         title: "Schema: INVALID INPUT",
@@ -75,26 +77,48 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
           { warehouse: args.warehouse, schema_name: schemaName },
           { signal: ctx.abort, sessionID: ctx.sessionID, forceReadOnly: true },
         )
-        const lines = [
-          `Tables on warehouse "${result.warehouse}":`,
-          "",
-          "Schema | Name | Type | Rows",
-          "-------|------|------|-----",
-          ...result.tables.map((table) => `${table.schema} | ${table.name} | ${table.type} | ${table.row_count ?? ""}`),
-        ]
-        if (!result.tables.length) lines.push("No tables or collections found.")
-        if (result.truncated) lines.push("", "List truncated at 500 entries; pass schema_name to narrow the listing.")
+        const schemas = result.schemas
+        const lines = schemas
+          ? [
+              `Schemas on warehouse "${result.warehouse}":`,
+              "",
+              "Schema | Tables/collections",
+              "-------|-------------------",
+              ...schemas.map((schema) => `${schema.name} | ${schema.table_count ?? "unavailable"}`),
+            ]
+          : [
+              `Tables on warehouse "${result.warehouse}":`,
+              "",
+              "Schema | Name | Type | Rows",
+              "-------|------|------|-----",
+              ...result.tables.map(
+                (table) =>
+                  `${table.schema} | ${table.name} | ${table.type} | ${table.row_count === undefined ? (table.row_count_status ?? "") : `${table.row_count}${table.row_count_estimated ? " (estimate)" : ""}`}`,
+              ),
+            ]
+        if (schemas ? !schemas.length : !result.tables.length)
+          lines.push(schemas ? "No schemas found." : "No tables or collections found.")
+        if (result.truncated)
+          lines.push(
+            "",
+            schemas
+              ? "Showing first 200 schemas of ≥201; pass schema_name to narrow the listing."
+              : "Showing first 500 of ≥501 — pass a narrower schema or inspect a table by name.",
+          )
+        if (result.fallback) lines.push("", "Driver fallback: table list may be truncated by the driver.")
+        if (schemas)
+          lines.push("", `List tables with schema_inspect(warehouse="${result.warehouse}", schema_name="<schema>").`)
         lines.push(
           "",
           `Inspect one table with schema_inspect(warehouse="${result.warehouse}", schema_name="<schema>", table="<name>").`,
         )
         return Precedence.annotate(precedence, {
-          title: `Tables: ${result.warehouse}`,
+          title: `${schemas ? "Schemas" : "Tables"}: ${result.warehouse}`,
           metadata: {
             success: true,
             columnCount: 0,
             rowCount: undefined,
-            tableCount: result.tables.length,
+            ...(schemas ? { schemaCount: schemas.length } : { tableCount: result.tables.length }),
             truncated: result.truncated,
           },
           output: lines.join("\n"),

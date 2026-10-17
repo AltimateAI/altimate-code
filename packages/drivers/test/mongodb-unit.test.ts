@@ -36,15 +36,22 @@ async function fakeMongo(
                 return { databases: Object.keys(collections).map((name) => ({ name })) }
               },
             }),
-            listCollections: (filter: { name?: string }, options: unknown) => ({
-              toArray: async () => {
+            // altimate_change start — model listCollections as a cursor, including bounded consumption
+            listCollections: (filter: { name?: string }, options: unknown) => {
+              const rows = () => {
                 collectionLists.push({ database, options })
                 if (metadata.error) throw metadata.error
                 return (collections[database] ?? [])
                   .filter((name) => !filter.name || name === filter.name)
                   .map((name) => ({ name, type: "collection" }))
-              },
-            }),
+              }
+              return {
+                toArray: async () => rows(),
+                async *[Symbol.asyncIterator]() { yield* rows() },
+                async close() {},
+              }
+            },
+            // altimate_change end
             createCollection: async (name: string) => {
               collections[database] ??= []
               collections[database].push(name)
@@ -172,7 +179,9 @@ describe("MongoDB read namespace validation", () => {
     expect(await connector.execute(JSON.stringify({ command: "listCollections", database: "archive" }))).toEqual({
       columns: ["name", "type"], rows: [], row_count: 0, truncated: false,
     })
-    expect(databaseLists).toEqual([{ nameOnly: true, authorizedDatabases: true, maxTimeMS: 120_000 }])
+    // altimate_change start — an empty bounded cursor needs no unbounded metadata validation
+    expect(databaseLists).toEqual([])
+    // altimate_change end
   })
 
   test("metadata failures cannot become an empty read", async () => {

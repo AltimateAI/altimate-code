@@ -172,7 +172,8 @@ describe("schema_inspect warehouse qualifiers", () => {
     const tool = await initTool(SchemaInspectTool)
     expect(tool.jsonSchema?.required ?? []).not.toContain("table")
     expect(tool.jsonSchema?.properties).not.toHaveProperty("table_name")
-    expect((await inspect({ warehouse: "primary" })).output).toContain("main | t | table | 1")
+    expect((await inspect({ warehouse: "primary" })).output).toContain("main | 1")
+    expect((await inspect({ warehouse: "primary", schema_name: "main" })).output).toContain("main | t | table | 1")
   })
 })
 // altimate_change end

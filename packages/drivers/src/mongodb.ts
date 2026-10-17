@@ -42,6 +42,9 @@ type MqlCommand =
   | "dropCollection"
   | "createIndex"
   | "listIndexes"
+  // altimate_change start — scalar database catalog counts
+  | "dbStats"
+  // altimate_change end
   | "listCollections"
   | "ping"
 
@@ -474,7 +477,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       maxResultBytes?: number,
       signal?: AbortSignal,
     ): Promise<ConnectorResult> {
-      async function readCursor(cursor: any): Promise<Record<string, unknown>[]> {
+      async function readCursor(cursor: any, rowLimit?: number): Promise<Record<string, unknown>[]> {
         const consume = createResultByteBudget(maxResultBytes)
         let stopped = false
         let failure: unknown
@@ -499,7 +502,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           })
           const read = async () => {
             if (stopped) throw failure
-            if (maxResultBytes === undefined && maxTimeMS === undefined && !signal) return cursor.toArray()
+            if (rowLimit === undefined && maxResultBytes === undefined && maxTimeMS === undefined && !signal) return cursor.toArray()
             // One document per round trip made a 127k-document read take ~10 minutes. A reply
             // batch is still bounded (a server reply never exceeds 16 MiB) and the byte budget
             // stops the read at the first document past the cap.
@@ -508,6 +511,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
               if (stopped) throw failure
               if (maxResultBytes === undefined) {
                 docs.push(doc)
+                if (rowLimit !== undefined && docs.length >= rowLimit) break
                 continue
               }
               const serialized = Object.fromEntries(
@@ -565,17 +569,20 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         return { columns: ["ok"], rows: [[result.ok]], row_count: 1, truncated: false }
       }
 
+      // altimate_change start — catalog discovery consumes only a bounded cursor, never the metadata cache
+      if (cmd === "dbStats") {
+        const stats = await db.command({ dbStats: 1, ...withMaxTime(maxTimeMS) })
+        return { columns: ["collections"], rows: [[stats.collections]], row_count: 1, truncated: false }
+      }
       if (cmd === "listCollections") {
-        const collections = await readCollections(db, maxTimeMS)
-        const matches = parsed.filter
-          ? await db.listCollections(parsed.filter, {
-            nameOnly: true, authorizedCollections: true, ...withMaxTime(maxTimeMS),
-          }).toArray()
-          : collections
+        const matches = await readCursor(db.listCollections(parsed.filter ?? {}, {
+          nameOnly: true, authorizedCollections: true, batchSize: Math.min(effectiveLimit + 1, 501), ...withMaxTime(maxTimeMS),
+        }), effectiveLimit + 1)
         const rows = matches.slice(0, effectiveLimit)
-          .map((collection: { name: string; type: string }) => [collection.name, collection.type])
+          .map((collection) => [collection.name, collection.type])
         return { columns: ["name", "type"], rows, row_count: rows.length, truncated: matches.length > effectiveLimit }
       }
+      // altimate_change end
 
       if (!MONGO_COLLECTION_READS.has(cmd)) clearMetadata()
 

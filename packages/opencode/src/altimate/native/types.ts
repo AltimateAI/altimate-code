@@ -113,7 +113,16 @@ export interface SchemaListParams {
 
 export interface SchemaListResult {
   warehouse: string
-  tables: Array<{ schema: string; name: string; type: string; row_count?: number }>
+  tables: Array<{
+    schema: string
+    name: string
+    type: string
+    row_count?: number
+    row_count_estimated?: boolean
+    row_count_status?: "not counted"
+  }>
+  schemas?: Array<{ name: string; table_count?: number }>
+  fallback?: boolean
   truncated: boolean
 }
 

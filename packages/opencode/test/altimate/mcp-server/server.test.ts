@@ -80,12 +80,18 @@ mcpTest("lists exactly five tools and executes warehouse, schema, SQL and checks
 })
 
 // altimate_change start — warehouse discovery accepts strict-schema empty table fillers
-mcpTest("schema_inspect lists SQLite tables with protected counts when table is absent or empty", async () => {
+mcpTest("schema_inspect lists schemas, then SQLite tables with protected counts", async () => {
   const { call } = await fixture()
   for (const args of [{ warehouse: "source" }, { warehouse: "source", table: "", schema_name: "", values: false }]) {
     const result = await call("schema_inspect", args)
     expect(result.isError).toBe(false)
-    expect(body(result)).toContain("main | items | table | 2")
+    // altimate_change start — discovery starts with schema counts
+    expect(body(result)).toContain("main | 1")
+    expect(body(result)).not.toContain("main | items")
+    const tables = await call("schema_inspect", { warehouse: "source", schema_name: "main" })
+    expect(tables.isError).toBe(false)
+    expect(body(tables)).toContain("main | items | table | 2")
+    // altimate_change end
     expect(body(result)).toContain("Inspect one table with schema_inspect")
   }
 })
