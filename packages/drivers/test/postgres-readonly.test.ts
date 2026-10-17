@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test"
+import { EventEmitter } from "node:events"
 import { connect } from "../src/postgres"
 import { QueryTimeoutError } from "../src/types"
 import { restoreModuleMocksAfterTests } from "./module-mock"
@@ -225,6 +226,64 @@ test("Postgres never starts user SQL when cancellation arrives during session se
     await connector.close()
   }
 })
+
+for (const maxResultBytes of [undefined, 1024]) {
+  test(`Postgres forwards bound catalog arrays in ${maxResultBytes === undefined ? "regular" : "byte-limited"} read-only queries`, async () => {
+    const calls: { sql: string; values?: unknown[] }[] = []
+    const releases: unknown[] = []
+    class Query extends EventEmitter {
+      constructor(readonly config: { text: string; values?: unknown[]; rowMode: string }) {
+        super()
+      }
+    }
+    mock.module("pg", () => ({
+      default: {
+        Query,
+        Pool: class {
+          async connect() {
+            return {
+              query(query: string | Query, values?: unknown[]) {
+                const sql = typeof query === "string" ? query : query.config.text
+                calls.push({ sql, values: typeof query === "string" ? values : query.config.values })
+                const fields = [{ name: "proname" }]
+                if (query instanceof Query) {
+                  queueMicrotask(() => {
+                    query.emit("row", ["lower"], { fields })
+                    query.emit("end", { fields })
+                  })
+                  return query
+                }
+                return Promise.resolve({ fields, rows: [{ proname: "lower" }] })
+              },
+              release(discard?: boolean) { releases.push(discard) },
+            }
+          }
+          async end() {}
+        },
+      },
+    }))
+    const connector = await connect({ type: "postgres", query_timeout_ms: 0 })
+    await connector.connect()
+    const sql = "SELECT proname FROM pg_catalog.pg_proc WHERE proname = ANY($1)"
+    const values = [["lower", "upper"]]
+    try {
+      const result = await connector.execute(sql, undefined, values, {
+        noLimit: true,
+        readOnly: true,
+        maxResultBytes,
+      })
+      expect(result.rows).toEqual([["lower"]])
+      expect(calls).toEqual([
+        { sql: "BEGIN READ ONLY", values: undefined },
+        { sql, values },
+        { sql: "ROLLBACK", values: undefined },
+      ])
+      expect(releases).toEqual([undefined])
+    } finally {
+      await connector.close()
+    }
+  })
+}
 
 async function probeDatabase(config: Record<string, unknown> = { query_timeout_ms: 1000 }) {
   const queries: string[] = []

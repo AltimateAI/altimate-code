@@ -66,6 +66,7 @@ import { pathToFileURL } from "url"
 import { SqlExecuteTool } from "../altimate/tools/sql-execute"
 import { SqlMaterializeTool } from "../altimate/tools/sql-materialize"
 import { PythonExecTool, pythonExecAvailable } from "../altimate/tools/python-exec"
+import { TextLabelTool } from "../altimate/tools/text-label"
 import { SqlCheckTool } from "../altimate/tools/sql-check"
 import { AnswerCommit } from "../altimate/tools/answer-commit"
 import { SchemaInspectTool } from "../altimate/tools/schema-inspect"
@@ -594,6 +595,12 @@ export namespace ToolRegistry {
       } else {
         log.debug("python_exec not registered: no Python with pandas and duckdb is available")
       }
+    }
+    // altimate_change end
+    // altimate_change start — text_label is analyst-scoped (and its read-only data-explorer delegate), on by
+    // default; ALTIMATE_TEXT_LABEL=0 disables registration. Other agents never receive it.
+    if ((agent?.name === "analyst" || agent?.name === "data-explorer") && process.env.ALTIMATE_TEXT_LABEL !== "0") {
+      tools.push(await AppRuntime.runPromise(Effect.scoped(Effect.provide(TextLabelTool, FetchHttpClient.layer))))
     }
     // altimate_change end
     const result = await Promise.all(

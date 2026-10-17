@@ -18,6 +18,9 @@ import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, Sche
 import { QueryTimeoutError } from "./types"
 import { resolveQueryTimeout } from "./query-timeout"
 import { loadOptionalDriver } from "./resolve"
+// altimate_change start — detect conflicting shorthand arguments
+import { isDeepStrictEqual } from "node:util"
+// altimate_change end
 // altimate_change start — cap extraction before cursor results accumulate
 import { createResultByteBudget } from "./result-byte-limit"
 // altimate_change end
@@ -78,33 +81,59 @@ function validateMqlBounds(parsed: Record<string, unknown>): void {
   }
 }
 
-/** Accept native commands and `{collection, find: filter}` / `{collection, aggregate: pipeline}`. */
+// altimate_change start — accept collection-based read command shorthand
+/** Accept native command documents and collection-based command arguments. */
 export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T): T & MqlQuery {
   if (!parsed || typeof parsed !== "object") return parsed as T & MqlQuery
   if (typeof parsed["command"] === "string") {
-    validateMqlBounds(parsed)
-    return parsed as T & MqlQuery
+    const native = (parsed["command"] === "count" ? { ...parsed, command: "countDocuments" } : parsed) as Record<string, unknown>
+    if (parsed["command"] === "count" && native["filter"] === undefined) native["filter"] = native["query"]
+    validateMqlBounds(native)
+    return native as T & MqlQuery
   }
   if (parsed["listCollections"] === 1) {
     const { listCollections: _, ...rest } = parsed
     return { ...rest, command: "listCollections" } as T & MqlQuery
   }
   if (typeof parsed["collection"] === "string" && parsed["collection"]) {
-    const find = parsed["find"]
-    const aggregate = parsed["aggregate"]
-    if (find && typeof find === "object" && !Array.isArray(find)) {
-      const { find: _, ...rest } = parsed
-      const normalized = { ...rest, command: "find", filter: parsed["filter"] ?? find }
-      validateMqlBounds(normalized)
-      return normalized as T & MqlQuery
-    }
-    if (Array.isArray(aggregate)) {
-      const { aggregate: _, ...rest } = parsed
-      const normalized = { ...rest, command: "aggregate", pipeline: parsed["pipeline"] ?? aggregate }
+    const keys = Object.keys(NATIVE_COMMAND_KEYS).filter((key) => Object.hasOwn(parsed, key))
+    // Refuse ambiguous shapes rather than silently choosing a different command.
+    if (keys.length !== 1) return parsed as T & MqlQuery
+    const key = keys[0]!
+    const value = parsed[key]
+    const command = NATIVE_COMMAND_KEYS[key]!
+    const object = value !== null && typeof value === "object" && !Array.isArray(value)
+    const argument =
+      (command === "find" || command === "countDocuments") && object
+        ? "filter"
+        : command === "aggregate" && Array.isArray(value)
+          ? "pipeline"
+          : command === "distinct" && typeof value === "string"
+            ? "field"
+            : undefined
+    if (argument) {
+      const explicitArguments =
+        command === "countDocuments" ? [argument, "query"] : command === "distinct" ? [argument, "key"] : [argument]
+      for (const explicit of explicitArguments) {
+        if (parsed[explicit] !== undefined && !isDeepStrictEqual(parsed[explicit], value)) {
+          if (command === "distinct") {
+            throw new Error(
+              `Ambiguous distinct form: 'distinct' value ${JSON.stringify(value)} conflicts with explicit '${explicit}' value ${JSON.stringify(parsed[explicit])}`,
+            )
+          }
+          throw new Error(`Ambiguous MQL command: '${key}' conflicts with explicit '${explicit}' argument`)
+        }
+      }
+      const { [key]: _, ...rest } = parsed
+      const normalized: Record<string, unknown> = { ...rest, command }
+      if (normalized[argument] === undefined) normalized[argument] = value
+      if (command === "distinct" && normalized["filter"] === undefined) normalized["filter"] = normalized["query"]
       validateMqlBounds(normalized)
       return normalized as T & MqlQuery
     }
   }
+  // A collection-bearing document is shorthand, even when its arguments are invalid.
+  if (Object.hasOwn(parsed, "collection")) return parsed as T & MqlQuery
   for (const [key, command] of Object.entries(NATIVE_COMMAND_KEYS)) {
     const value = parsed[key]
     if (typeof value !== "string" || !value) continue
@@ -123,6 +152,8 @@ export function normalizeMqlCommand<T extends Record<string, unknown>>(parsed: T
   }
   return parsed as T & MqlQuery
 }
+
+// altimate_change end
 
 const MONGO_WRITE_STAGES = new Set(["$out", "$merge"])
 const MONGO_COLLECTION_READS = new Set([
@@ -244,6 +275,9 @@ function extractFields(docs: Record<string, unknown>[]): Map<string, Set<string>
 
   return fieldTypes
 }
+
+/** Documents per reply batch on byte-bounded reads. */
+export const BOUNDED_READ_BATCH = 1000
 
 /** Server error code for an operation stopped by `maxTimeMS`. */
 const MONGO_MAX_TIME_EXPIRED = 50
@@ -466,8 +500,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           const read = async () => {
             if (stopped) throw failure
             if (maxResultBytes === undefined && maxTimeMS === undefined && !signal) return cursor.toArray()
+            // One document per round trip made a 127k-document read take ~10 minutes. A reply
+            // batch is still bounded (a server reply never exceeds 16 MiB) and the byte budget
+            // stops the read at the first document past the cap.
             const docs: Record<string, unknown>[] = []
-            for await (const doc of maxResultBytes === undefined ? cursor : cursor.batchSize(1)) {
+            for await (const doc of maxResultBytes === undefined ? cursor : cursor.batchSize(BOUNDED_READ_BATCH)) {
               if (stopped) throw failure
               if (maxResultBytes === undefined) {
                 docs.push(doc)

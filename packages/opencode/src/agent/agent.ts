@@ -281,6 +281,9 @@ export const layer = Layer.effect(
           tool_lookup: "allow",
           // Materialized scratch tables for multi-step analysis (tool added separately; key is harmless if absent)
           sql_materialize: "allow",
+          // altimate_change start — model labels are persisted only in session-local scratch tables.
+          text_label: "allow",
+          // altimate_change end
           bash: "deny",
         } as const
         // Cap every configured ruleset at the subagent's read-only allow-list.

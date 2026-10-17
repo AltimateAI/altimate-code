@@ -9,12 +9,7 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SqlExecuteResult } from "../native/types"
 // altimate_change start - SQL write access control + fingerprinting
-import {
-  classifyAndCheck,
-  classifyMongoCommand,
-  computeSqlFingerprint,
-  isScratchSafeWrite,
-} from "./sql-classify"
+import { classifyAndCheck, classifyMongoCommand, computeSqlFingerprint, isScratchSafeWrite } from "./sql-classify"
 import { statementsOf } from "./sql-tokenize"
 
 const MONGO_WAREHOUSE_TYPES = new Set(["mongodb", "mongo"])
@@ -55,7 +50,8 @@ function generatedRead(sql: string, warehouse: string, stage: "source" | "result
   }
 }
 
-const parameters = z.object({
+const parameters = z
+  .object({
   query: z.string().nullish().describe("SQL query to execute; omit when using query_from"),
   query_from: z
     .object({
@@ -71,10 +67,16 @@ const parameters = z.object({
     .number({ error: LIMIT_ERROR })
     .int(LIMIT_ERROR)
     .min(1, LIMIT_ERROR)
-    .transform((limit) => Math.min(limit, MAX_SQL_ROWS))
     .optional()
-    .default(100)
-    .describe(`Max rows to return (default 100; larger values are capped at ${MAX_SQL_ROWS})`),
+    .describe(
+      `Max rows to return; omit to use the default. Ordinary mode caps larger values at ${MAX_SQL_ROWS}; active full_text_columns clamps larger limits to 20 with a result note.`,
+    ),
+  full_text_columns: z
+    .array(z.string().min(1))
+    .nullish()
+    .describe(
+      "Keep all selected columns and prioritize named cell text within the ordinary output budget. Always save all returned rows to result_path; use read with char_offset/max_chars to recover clipped text. [] or null, or omitting this field, turns the mode off. A non-empty list caps preview rows at 20; omit limit to use the default, or larger limits are clamped with a result note. Missing names produce a bounded note listing available columns; rows are still returned.",
+    ),
   query_timeout_ms: z
     .number()
     .int()
@@ -84,7 +86,7 @@ const parameters = z.object({
     .describe(
       "Optional per-query execution deadline in ms. Omit or use 0 to use the configured deadline (connection setting or environment), bounded by the remaining run budget. Set a positive value only when a specific query needs a longer or shorter budget.",
     ),
-})
+  })
 
 export const SqlExecuteTool = Tool.define(
   "sql_execute",
@@ -95,12 +97,18 @@ export const SqlExecuteTool = Tool.define(
         const bridge = yield* EffectBridge.make()
         return yield* legacyToInit({
           description:
-            "Execute SQL against a connected data warehouse. Returns results as a formatted table. " +
+            "Execute SQL against a connected data warehouse. Returns all selected columns as a formatted table. full_text_columns prioritizes named cells within the ordinary output budget and always saves returned rows to result_path; read with char_offset/max_chars recovers clipped text. [] or null, or omitting the field, turns the mode off. A non-empty list caps preview rows at 20: omit limit to use the default; larger limits clamp to 20 with a result note. Missing column names produce a bounded note listing available columns while still returning rows. " +
             "Provide exactly one of query or query_from. query_from runs a read-only generator SELECT and executes its single SQL string result (up to 1 MiB) as a read-only SELECT on warehouse, without previewing or retyping the generated SQL. " +
             "For DuckDB table sets, generate query_table([...], true) with escaped table-name string literals. For thousands of tables, UNION ALL BY NAME batches of at most 128 names to stay within the default expression depth.",
           parameters,
           formatValidationError: (error) => error.issues?.map((issue) => issue.message).join("; ") || LIMIT_ERROR,
           async execute(args, ctx) {
+            const fullText = Boolean(args.full_text_columns?.length)
+            const limit = fullText ? Math.min(args.limit ?? 20, 20) : Math.min(args.limit ?? 100, MAX_SQL_ROWS)
+            const limitNote =
+              fullText && args.limit !== undefined && args.limit > 20
+                ? `Note: limit ${args.limit} clamped to 20 for full_text_columns.`
+                : ""
             let sql = args.query ?? ""
             // Strict-schema clients send null or empty placeholders for unused optional fields.
             const queryFrom = args.query_from?.warehouse.trim() || args.query_from?.sql.trim() ? args.query_from : undefined
@@ -202,7 +210,9 @@ export const SqlExecuteTool = Tool.define(
               // Connectors expose one result set; several prepare only one statement
               // or cannot normalize a batch response. Do not silently drop reads.
               if (count > 1) {
-                throw new Error("Multi-statement reads are not supported by this execution path. Run each read separately.")
+                throw new Error(
+                  "Multi-statement reads are not supported by this execution path. Run each read separately.",
+                )
               }
             }
             // The ephemeral scratch database is the session's own workspace (what sql_materialize
@@ -268,7 +278,7 @@ export const SqlExecuteTool = Tool.define(
               const result = await Dispatcher.call("sql.execute", {
                 sql: query,
                 warehouse: args.warehouse,
-                limit: args.limit,
+                limit,
                 query_timeout_ms: args.query_timeout_ms,
                 ...(readOnly ? { read_only: true } : {}),
               }, { signal: ctx.abort, sessionID: ctx.sessionID })
@@ -328,26 +338,45 @@ export const SqlExecuteTool = Tool.define(
               // altimate_change end
 
               const limits = await bridge.promise(truncate.limits())
+              const maxBytes = Math.min(limits.maxBytes, SQL_MAX_PREVIEW_BYTES)
+              // Reserve the routing explanation before the formatter budgets optional notes.
+              const routingNotice = fullText ? Precedence.annotate(precedence, { output: "" }).output : ""
+              let routingPrefix = ""
+              let routingBytes = 0
+              let routingLines = 0
+              for (const char of routingNotice) {
+                const size = Buffer.byteLength(char, "utf8")
+                if (
+                  routingBytes + size > maxBytes ||
+                  limits.maxLines < 1 ||
+                  (char === "\n" && routingLines + 1 >= limits.maxLines)
+                )
+                  break
+                routingPrefix += char
+                routingBytes += size
+                if (char === "\n") routingLines++
+              }
+              const routingClipped = routingPrefix !== routingNotice
               const suggestion = ctx.agent === "analyst" ? null : PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
-              const extra =
-                (suggestion ? "\n\n" + suggestion : "") + (precedence.notice ? precedence.notice + "\n\n" : "")
+              const lint = await lintSqlResult(sql, args.warehouse, ctx.sessionID)
               const formatted = await formatSqlResult(result, {
-                limit: args.limit,
+                limit,
+                fullTextColumns: args.full_text_columns,
                 // The statement text lets the formatter add the empty/near-empty
                 // result hint when a string-literal filter is present.
                 sql: ctx.agent === "analyst" ? undefined : query,
-                maxBytes: Math.max(
-                  0,
-                  Math.min(SQL_MAX_PREVIEW_BYTES, limits.maxBytes) - Buffer.byteLength(extra, "utf8"),
-                ),
-                maxLines: Math.max(0, limits.maxLines - extra.split("\n").length + 1),
+                notes: [
+                  fullText ? "" : (precedence.notice ?? ""),
+                  limitNote,
+                  lint?.output ?? "",
+                  suggestion ?? "",
+                ].filter(Boolean),
+                maxBytes: routingClipped ? 0 : maxBytes - routingBytes,
+                maxLines: limits.maxLines - routingLines,
                 write: (text) => bridge.promise(truncate.write(text)),
               })
-              const lint = await lintSqlResult(sql, args.warehouse, ctx.sessionID)
-              let output = formatted.output + (lint ? "\n\n" + lint.output : "")
               // altimate_change start — progressive disclosure suggestions
-              if (suggestion) {
-                output += "\n\n" + suggestion
+              if (suggestion && formatted.output.includes(suggestion)) {
                 PostConnectSuggestions.trackSuggestions({
                   suggestionType: "progressive_disclosure",
                   suggestionsShown: ["sql_analyze"],
@@ -355,19 +384,18 @@ export const SqlExecuteTool = Tool.define(
                 })
               }
               // altimate_change end
-              // altimate_change — carries the fail-open notice when the target could not be
-              // attributed to the workspace; a no-op otherwise.
-              const response = Precedence.annotate(precedence, {
-                title: queryFrom ? "SQL: generated read" : `SQL: ${sql.slice(0, 60)}${sql.length > 60 ? "..." : ""}`,
-                metadata: { ...formatted.metadata, ...(lint && { lint_rules: lint.rules }) },
-                output,
-              })
-              if (precedence.notice && formatted.metadata.truncated) {
-                // Keep the result contract first while retaining the routing notice.
-                const newline = output.indexOf("\n")
-                response.output = output.slice(0, newline + 1) + precedence.notice + "\n\n" + output.slice(newline + 1)
+              // The full-text routing prefix already has its own reserved output allowance.
+              return {
+                ...Precedence.annotate(precedence, {
+                  title: queryFrom ? "SQL: generated read" : `SQL: ${sql.slice(0, 60)}${sql.length > 60 ? "..." : ""}`,
+                  metadata: {
+                    ...formatted.metadata,
+                    ...(routingClipped && { output_truncated: true, truncated: true }),
+                    ...(lint && { lint_rules: lint.rules }),
+                  },
+                }),
+                output: routingPrefix + formatted.output,
               }
-              return response
             } catch (e) {
               const msg = e instanceof Error ? e.message : String(e)
               // altimate_change: deliberately NOT fingerprinted, same reasoning as the

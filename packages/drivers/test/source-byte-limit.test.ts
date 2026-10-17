@@ -2,7 +2,7 @@ import { expect, mock, test } from "bun:test"
 import { createRequire } from "node:module"
 import { dirname, join } from "node:path"
 import { connect as connectPostgres } from "../src/postgres"
-import { connect as connectMongo } from "../src/mongodb"
+import { connect as connectMongo, BOUNDED_READ_BATCH } from "../src/mongodb"
 import { restoreModuleMocksAfterTests } from "./module-mock"
 
 await restoreModuleMocksAfterTests("pg", "mongodb")
@@ -143,8 +143,10 @@ async function mongo(docs: Record<string, unknown>[]) {
   return { connector, consumed: () => consumed, closed: () => closed, batchSize: () => batchSize }
 }
 
-test.each(["find", "aggregate"])("Mongo %s closes the cursor before fetching past maxResultBytes", async (command) => {
-  const db = await mongo([{ value: "a" }, { value: "x".repeat(100) }, { value: "must not be fetched" }])
+// The mock cursor yields documents one at a time whatever the batch size; `consumed` counts documents the
+// byte budget iterated. The real driver may prefetch up to one reply batch, which the budget never reads.
+test.each(["find", "aggregate"])("Mongo %s stops consuming at maxResultBytes and reads in bounded batches", async (command) => {
+  const db = await mongo([{ value: "a" }, { value: "x".repeat(100) }, { value: "must not be consumed" }])
   try {
     await expect(
       db.connector.execute(JSON.stringify({ command, collection: "source", pipeline: [] }), 100, undefined, {
@@ -154,7 +156,7 @@ test.each(["find", "aggregate"])("Mongo %s closes the cursor before fetching pas
     ).rejects.toMatchObject({ code: "RESULT_BYTE_LIMIT" })
     expect(db.consumed()).toBe(2)
     expect(db.closed()).toBe(true)
-    expect(db.batchSize()).toBe(1)
+    expect(db.batchSize()).toBe(BOUNDED_READ_BATCH)
   } finally {
     await db.connector.close()
   }
