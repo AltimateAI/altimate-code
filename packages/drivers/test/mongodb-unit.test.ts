@@ -10,7 +10,7 @@ const { Binary } = createRequire(import.meta.resolve("mongodb"))("bson")
 
 async function fakeMongo(
   docs?: Record<string, unknown>[],
-  metadata: { collections?: Record<string, string[]>; error?: Error } = {},
+  metadata: { collections?: Record<string, string[]>; error?: Error; read?: () => Promise<Record<string, unknown>[]> } = {},
 ) {
   const finds: unknown[] = []
   const findOptions: unknown[] = []
@@ -54,7 +54,7 @@ async function fakeMongo(
               find: (filter: unknown, options: unknown) => {
                 finds.push(filter)
                 findOptions.push(options)
-                return { limit: () => ({ toArray: async () => docs ?? [], async *[Symbol.asyncIterator]() { yield* docs ?? [] } }) }
+                return { limit: () => ({ toArray: () => (metadata.read ? metadata.read() : Promise.resolve(docs ?? [])), async *[Symbol.asyncIterator]() { yield* docs ?? [] } }) }
               },
               aggregate: (pipeline: Record<string, unknown>[], options: unknown) => {
                 pipelines.push(pipeline)
@@ -500,6 +500,29 @@ describe("MongoDB nested documents", () => {
   test("sampleDocuments honours an aborted signal", async () => {
     const { connector } = await fakeMongo(docs)
     await expect(connector.sampleDocuments!("test", "articles", 50, { signal: AbortSignal.abort(new Error("stop")) })).rejects.toThrow("stop")
+  })
+
+  test("a read rejecting after the abort is handled and the abort reason wins", async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on("unhandledRejection", onUnhandled)
+    try {
+      let rejectRead!: (e: Error) => void
+      const { connector, findOptions } = await fakeMongo(docs, {
+        read: () => new Promise((_, reject) => { rejectRead = reject }),
+      })
+      const controller = new AbortController()
+      const pending = connector.sampleDocuments!("test", "articles", 50, { signal: controller.signal })
+      const abortReason = new Error("cancelled")
+      controller.abort(abortReason)
+      await expect(pending).rejects.toBe(abortReason)
+      rejectRead(new Error("cursor closed"))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(unhandled).toEqual([])
+      expect(findOptions[0]).toMatchObject({ signal: controller.signal })
+    } finally {
+      process.off("unhandledRejection", onUnhandled)
+    }
   })
 })
 

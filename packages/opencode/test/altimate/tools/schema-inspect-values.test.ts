@@ -414,6 +414,14 @@ describe("MongoDB value profile", () => {
     expect(line("address")).toBeUndefined()
   })
 
+  test("a path seen outside and then inside an array is an array element, never unique", () => {
+    const docs = [{ tag: { id: "a" } }, { tag: [{ id: "b" }, { id: "c" }] }]
+    const out = profileDocuments(docs)
+    expect(out).toContain("tag.id: string (array element)")
+    const line = out.slice(out.indexOf("Value samples")).split("\n").find((l) => l.startsWith("tag.id:"))!
+    expect(line).not.toContain("unique in sample")
+  })
+
   test("a field whose values are all null is NULL, one with unrenderable values is not", () => {
     const docs = [{ gone: null, blob: new bson.Binary(Buffer.from([1])) }, { gone: null }]
     const out = profileDocuments(docs)

@@ -403,8 +403,13 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     const configured = resolveQueryTimeout(config).ms
     const maxTimeMS =
       options.maxTimeMS === undefined ? configured : configured === undefined ? options.maxTimeMS : Math.min(configured, options.maxTimeMS)
-    const cursor = client.db(schema).collection(table).find({}, withMaxTime(maxTimeMS)).limit(limit)
     const { signal } = options
+    // The driver (6.x) cancels the operation on `signal`; the race below also covers fakes and older drivers.
+    const cursor = client
+      .db(schema)
+      .collection(table)
+      .find({}, { ...withMaxTime(maxTimeMS), ...(signal ? { signal } : {}) })
+      .limit(limit)
     if (!signal) return cursor.toArray()
     let abort: (() => void) | undefined
     const aborted = new Promise<never>((_, reject) => {
@@ -414,8 +419,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       }
       signal.addEventListener("abort", abort, { once: true })
     })
+    // A read that rejects after the abort won the race must not surface as an unhandled rejection.
+    const read: Promise<Record<string, unknown>[]> = cursor.toArray()
+    read.catch(() => {})
     try {
-      return await Promise.race([cursor.toArray(), aborted])
+      return await Promise.race([read, aborted])
     } finally {
       signal.removeEventListener("abort", abort!)
     }

@@ -325,6 +325,8 @@ function collectFields(docs: Record<string, unknown>[]): DocField[] {
         const id = path.join("\0")
         const field = fields.get(id) ?? { path, name: path.join("."), types: new Set<string>(), docs: 0, inArray }
         field.types.add(describeValue(child).type)
+        // A path seen both inside and outside arrays stays an array element.
+        field.inArray ||= inArray
         if (!seen.has(id)) {
           seen.add(id)
           field.docs++
