@@ -386,10 +386,10 @@ function run(
     // member with no pid-identity question. Descendants that escaped the group (setsid) are
     // signalled only when still provably the same process; anything else is left alone and noted.
     // On Linux the bwrap PID namespace (--die-with-parent) also ends everything when bwrap dies.
-    let killing = false
-    const kill = async () => {
-      if (killing) return
-      killing = true
+    // finish awaits this so the call never returns while descendant cleanup is still in flight.
+    let killing: Promise<void> | undefined
+    const kill = () => (killing ??= killNow())
+    const killNow = async () => {
       let targets: number[] = []
       try {
         await sweeping?.catch(() => {})
@@ -421,6 +421,7 @@ function run(
       abort.removeEventListener("abort", onAbort)
       child.stdout.destroy()
       child.stderr.destroy()
+      await killing?.catch(() => {})
       await checking
       resolve({ code: exitCode, signal: exitSignal, stdout, stderr, timedOut, workspaceError, orphaned })
     }
