@@ -407,6 +407,7 @@ export namespace Database {
     // altimate_change end
   })
 
+  // altimate_change start — upstream_fix: setup extracted from the lazy Client so it runs under the setup lock
   function open() {
     const sqlite = new BunDatabase(Path, { create: true })
     state.sqlite = sqlite
@@ -439,8 +440,17 @@ export namespace Database {
           item.sql = "select 1;"
         }
       }
-      const adopted = adoptCoreOwnedDatabase(sqlite, entries)
-      const initialized = adopted ? false : initializeFreshDatabase(sqlite, entries)
+      // altimate_change start — upstream_fix: the schema-state checks share the write transaction, so a
+      // same-process core migration cannot create the schema between a check and the CREATE TABLEs
+      let adopted = false
+      let initialized = false
+      sqlite
+        .transaction(() => {
+          adopted = adoptCoreOwnedDatabase(sqlite, entries)
+          initialized = adopted ? false : initializeFreshDatabase(sqlite, entries)
+        })
+        .immediate()
+      // altimate_change end
       const repaired = adopted || initialized ? false : repairLegacyDatabase(sqlite, entries)
       // altimate_change start — backfill migration names before migrate
       backfillMigrationNames(sqlite, entries)
@@ -464,6 +474,7 @@ export namespace Database {
 
     return db
   }
+  // altimate_change end
 
   export function close() {
     const sqlite = state.sqlite

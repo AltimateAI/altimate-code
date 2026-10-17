@@ -22,7 +22,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/storage/Database") {}
 
-// altimate_change start — upstream_fix: set busy_timeout first and serialize first-run setup across processes (see setup-lock.ts)
+// altimate_change start — upstream_fix: `layer` takes the database filename so first-run setup can be serialized
 export const layer = (filename?: string) =>
   Layer.effect(
     Service,

@@ -69,7 +69,8 @@ export function hold<A, E, R>(filename: string, body: Effect.Effect<A, E, R>): E
         active.add(filename)
         return result
       }
-      yield* Effect.sleep(POLL_MS)
+      // `acquireUseRelease` makes `acquire` uninterruptible; no handle is open while sleeping, so cancel here.
+      yield* Effect.interruptible(Effect.sleep(POLL_MS))
     }
   })
   const release = (lock: { exec: (sql: string) => void; close: () => void }) =>

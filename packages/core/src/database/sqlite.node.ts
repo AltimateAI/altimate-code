@@ -161,7 +161,7 @@ const nativeLayer = (config: Config) =>
       yield* Effect.addFinalizer(() => Effect.sync(() => native.close()))
       // altimate_change start — upstream_fix: the WAL switch needs a write lock and can fail at once with
       // SQLITE_BUSY, so install the busy handler first and serialize the switch across processes.
-      native.exec("PRAGMA busy_timeout = 5000;")
+      native.exec(`PRAGMA busy_timeout = ${config.timeout ?? 5000};`)
       if (config.disableWAL !== true && config.readonly !== true) {
         const release = SetupLock.acquireSync(config.filename)
         try {
@@ -194,6 +194,7 @@ export const layer = (config: Config) => {
 // altimate_change start — upstream_fix: sentinel database used as a cross-process mutex (see setup-lock.ts)
 export function openSetupLock(filename: string, timeoutMs: number) {
   const lock = new DatabaseSync(filename, { timeout: timeoutMs })
+  lock.exec(`PRAGMA busy_timeout = ${timeoutMs}`)
   return { exec: (sql: string) => void lock.exec(sql), close: () => lock.close() }
 }
 // altimate_change end

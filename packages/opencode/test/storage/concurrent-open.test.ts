@@ -6,9 +6,9 @@ import path from "path"
 const fixture = path.join(import.meta.dir, "fixture", "open-database.ts")
 
 async function launch(data: string) {
-  const proc = Bun.spawn(["bun", "run", fixture], {
+  const proc = Bun.spawn([process.execPath, "run", fixture], {
     cwd: path.join(import.meta.dir, "..", ".."),
-    env: { ...process.env, XDG_DATA_HOME: data, OPENCODE_DB: "" },
+    env: { ...process.env, XDG_DATA_HOME: data, OPENCODE_DB: "", ALTIMATE_CLI_DB: "" },
     stdout: "pipe",
     stderr: "pipe",
   })
