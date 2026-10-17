@@ -823,7 +823,6 @@ register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaIn
         data_type: c.data_type,
         nullable: c.nullable,
         primary_key: false, // would need additional query for PK detection
-        ...(c.presence === undefined ? {} : { presence: c.presence }),
       })),
     }
   } catch (e) {

@@ -181,10 +181,8 @@ function formatSchema(result: Partial<SchemaInspectResult>): string {
   lines.push("Column | Type | Nullable | PK")
   lines.push("-------|------|----------|---")
   for (const col of result.columns ?? []) {
-    // MongoDB nested paths carry the share of sampled documents that contain them.
-    const presence = col.presence !== undefined && col.presence < 1 ? ` (in ${Math.round(col.presence * 100)}% of docs)` : ""
     lines.push(
-      `${col.name} | ${col.data_type ?? "unknown"}${presence} | ${col.nullable ? "YES" : "NO"} | ${col.primary_key ? "YES" : ""}`,
+      `${col.name} | ${col.data_type ?? "unknown"} | ${col.nullable ? "YES" : "NO"} | ${col.primary_key ? "YES" : ""}`,
     )
   }
   return lines.join("\n")

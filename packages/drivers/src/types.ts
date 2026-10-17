@@ -18,8 +18,6 @@ export interface SchemaColumn {
   name: string
   data_type: string
   nullable: boolean
-  /** Share (0-1) of sampled documents containing this field; set on MongoDB nested paths. */
-  presence?: number
 }
 
 export interface SchemaMetadata {
@@ -137,8 +135,13 @@ export interface Connector {
   listSchemas(): Promise<string[]>
   listTables(schema: string): Promise<Array<{ name: string; type: string }>>
   describeTable(schema: string, table: string): Promise<SchemaColumn[]>
-  /** Document stores only: the raw documents `describeTable` infers its schema from. */
-  sampleDocuments?(schema: string, table: string, limit?: number): Promise<Record<string, unknown>[]>
+  /** Document stores only: raw documents, bounded by `maxTimeMS` and cancellable through `signal`. */
+  sampleDocuments?(
+    schema: string,
+    table: string,
+    limit?: number,
+    options?: { signal?: AbortSignal; maxTimeMS?: number },
+  ): Promise<Record<string, unknown>[]>
   introspectSchema?(signal?: AbortSignal): Promise<SchemaMetadata>
   close(): Promise<void>
 }

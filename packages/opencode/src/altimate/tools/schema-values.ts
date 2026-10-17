@@ -61,6 +61,8 @@ interface ColumnProfile {
   /** Most frequent values; sorted by `rank` before use. */
   values: ValueCount[]
   text: boolean
+  /** Rows or documents with no value, when that differs from `total - nonNull` (unrenderable values). */
+  nulls?: number
   /** Set for values that can repeat inside one row (array elements), where uniqueness is meaningless. */
   multi?: boolean
   /** Column type suggests a format already (uuid), so a shape adds nothing. */
@@ -203,8 +205,9 @@ function renderShapes(values: ValueCount[], avgLength: number): string {
 }
 
 function renderProfile(p: ColumnProfile, sampled: boolean): string {
-  const nullPct = p.total > 0 ? Math.round(((p.total - p.nonNull) / p.total) * 100) : 0
-  const nulls = nullPct > 0 ? `, ${nullPct}% null` : p.total > p.nonNull ? `, <1% null` : ""
+  const missing = p.nulls ?? p.total - p.nonNull
+  const nullPct = p.total > 0 ? Math.round((missing / p.total) * 100) : 0
+  const nulls = nullPct > 0 ? `, ${nullPct}% null` : missing > 0 ? `, <1% null` : ""
   if (p.nonNull === 0) return `${p.name}: all NULL`
   const approx = sampled ? "~" : ""
   const unique = !p.multi && p.total > 1 && p.nonNull > 1 && p.distinct === p.nonNull
@@ -235,28 +238,119 @@ function formatProfiles(profiles: ColumnProfile[], header: string, skipped: numb
   ].join("\n")
 }
 
-function textOf(value: unknown): string | undefined {
-  if (typeof value === "string") return value
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value)
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? undefined : value.toISOString()
-  const bson = isRecord(value) ? value._bsontype : undefined
-  // ObjectId, Long, Decimal128 and friends print as their natural text; binary does not.
-  if (typeof bson === "string" && bson !== "Binary") return String(value)
-  return undefined
+interface BsonValue {
+  _bsontype?: string
+  [key: string]: any
 }
 
-/** Values at a dotted path as reported by the driver (`a.b`, `items[].sku`); missing paths yield none. */
-function valuesAt(doc: Record<string, unknown>, path: string): unknown[] {
+const UUID_DASHES = /^(.{8})(.{4})(.{4})(.{4})(.{12})$/
+
+/** MongoDB type name and display text of a value; `text` is absent when it has no useful text form. */
+function describeValue(value: unknown): { type: string; text?: string } {
+  if (value === null || value === undefined) return { type: "null" }
+  if (typeof value === "string") return { type: "string", text: value }
+  if (typeof value === "boolean") return { type: "bool", text: String(value) }
+  if (typeof value === "number") return { type: Number.isInteger(value) ? "int32" : "double", text: String(value) }
+  if (typeof value === "bigint") return { type: "int64", text: String(value) }
+  if (Array.isArray(value)) return { type: "array" }
+  if (value instanceof Date) return { type: "date", text: Number.isNaN(value.getTime()) ? undefined : value.toISOString() }
+  const v = value as BsonValue
+  switch (v._bsontype) {
+    case undefined:
+      return { type: "object" }
+    case "ObjectId":
+    case "ObjectID":
+      return { type: "objectId", text: v.toHexString?.() ?? String(v) }
+    case "Decimal128":
+      return { type: "decimal128", text: String(v) }
+    case "Long":
+      return { type: "int64", text: String(v) }
+    case "Int32":
+      return { type: "int32", text: String(v) }
+    case "Double":
+      return { type: "double", text: String(v) }
+    case "Timestamp":
+      // `t` is seconds since the epoch and `i` the ordinal within that second.
+      return { type: "timestamp", text: typeof v.t === "number" ? `Timestamp(${v.t}, ${v.i})` : undefined }
+    case "BSONRegExp":
+      return { type: "regex", text: `/${v.pattern}/${v.options ?? ""}` }
+    case "Code":
+      return { type: "javascript", text: String(v.code) }
+    case "BSONSymbol":
+      return { type: "symbol", text: String(v.value) }
+    case "MinKey":
+      return { type: "minKey", text: "MinKey" }
+    case "MaxKey":
+      return { type: "maxKey", text: "MaxKey" }
+    case "Binary": {
+      if (v.sub_type !== 4 || typeof v.toUUID !== "function") return { type: "binary" }
+      const hex = String(v.toUUID().toHexString()).replace(/-/g, "")
+      return { type: "uuid", text: hex.replace(UUID_DASHES, "$1-$2-$3-$4-$5") }
+    }
+    default:
+      return { type: String(v._bsontype).toLowerCase() }
+  }
+}
+
+/** Deepest field path reported, counting each key as one segment. */
+const NESTED_MAX_DEPTH = 3
+const NESTED_MAX_LISTED = 60
+
+interface DocField {
+  /** Key segments from the document root; never re-split from `name`, since keys may contain ".". */
+  path: string[]
+  /** MongoDB dot notation, as it is written in a filter or projection. */
+  name: string
+  types: Set<string>
+  /** Sampled documents containing the field. */
+  docs: number
+  /** The path passes through an array of objects. */
+  inArray: boolean
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+/** Fields of the sampled documents to depth 3: top-level keys plus nested keys, descending into arrays of objects. */
+function collectFields(docs: Record<string, unknown>[]): DocField[] {
+  const fields = new Map<string, DocField>()
+  for (const doc of docs) {
+    const seen = new Set<string>()
+    const visit = (value: Record<string, unknown>, parent: string[], inArray: boolean) => {
+      for (const [key, child] of Object.entries(value)) {
+        const path = [...parent, key]
+        const id = path.join("\0")
+        const field = fields.get(id) ?? { path, name: path.join("."), types: new Set<string>(), docs: 0, inArray }
+        field.types.add(describeValue(child).type)
+        if (!seen.has(id)) {
+          seen.add(id)
+          field.docs++
+        }
+        fields.set(id, field)
+        if (path.length >= NESTED_MAX_DEPTH) continue
+        if (isPlainObject(child)) visit(child, path, inArray)
+        else if (Array.isArray(child)) {
+          for (const element of child) if (isPlainObject(element)) visit(element, path, true)
+        }
+      }
+    }
+    visit(doc, [], false)
+  }
+  return [...fields.values()]
+}
+
+/** Values at a key path; arrays met on the way are searched element by element. */
+function valuesAt(doc: Record<string, unknown>, path: string[]): unknown[] {
   let current: unknown[] = [doc]
-  for (const segment of path.split(".")) {
-    const array = segment.endsWith("[]")
-    const key = array ? segment.slice(0, -2) : segment
+  for (const key of path) {
     const next: unknown[] = []
     for (const item of current) {
-      if (!isRecord(item)) continue
-      const value = item[key]
-      if (!array) next.push(value)
-      else if (Array.isArray(value)) next.push(...value)
+      for (const candidate of Array.isArray(item) ? item : [item]) {
+        if (isRecord(candidate) && Object.hasOwn(candidate, key)) next.push(candidate[key])
+      }
     }
     current = next
   }
@@ -265,48 +359,78 @@ function valuesAt(doc: Record<string, unknown>, path: string): unknown[] {
 
 const CONTAINER_ONLY = /^(object|array)$/
 
-/**
- * Value profile for sampled documents, in the same format as the SQL profile.
- * Columns are the field paths the driver reported; containers and binary are skipped.
- */
-export function profileDocuments(docs: Record<string, unknown>[], columns: ProfileColumn[]): string {
-  const eligible = columns.filter((c) => !UNPROFILABLE.test(c.data_type ?? "") && !CONTAINER_ONLY.test(c.data_type ?? ""))
-  // Top-level fields come first so the column cap never crowds them out with nested paths.
-  const ordered = [...eligible.filter((c) => !/[.[]/.test(c.name)), ...eligible.filter((c) => /[.[]/.test(c.name))]
-  const cols = ordered.slice(0, PROFILE_MAX_COLUMNS)
-  const profiles = cols.map((c): ColumnProfile => {
-    const counts = new Map<string, number>()
-    let nonNull = 0
-    for (const doc of docs) {
-      let present = false
-      for (const raw of valuesAt(doc, c.name)) {
-        const text = textOf(raw)
-        if (text === undefined) continue
-        present = true
-        const key = text.slice(0, PROFILE_FETCH_CHARS)
-        counts.set(key, (counts.get(key) ?? 0) + 1)
-      }
-      if (present) nonNull++
-    }
-    const values = rank([...counts].map(([value, count]) => ({ value, count })))
-    return {
-      name: c.name,
-      total: docs.length,
-      nonNull,
-      distinct: counts.size,
-      values: values.slice(0, PROFILE_FETCHED_VALUES),
-      text: TEXTUAL.test(c.data_type ?? ""),
-      multi: c.name.includes("[]"),
-      typed: /uuid/i.test(c.data_type ?? ""),
-    }
+function renderNested(fields: DocField[], docCount: number): string {
+  if (fields.length === 0) return ""
+  const listed = fields.slice(0, NESTED_MAX_LISTED).map((f) => {
+    const notes = [
+      ...(f.inArray ? ["array element"] : []),
+      ...(f.docs < docCount ? [`in ${Math.round((f.docs / docCount) * 100)}% of docs`] : []),
+    ]
+    return `${f.name}: ${[...f.types].filter((t) => t !== "null").join(" | ") || "null"}${notes.length ? ` (${notes.join(", ")})` : ""}`
   })
+  const more = fields.length - listed.length
+  return [`Nested fields (sampled ${docCount} docs):`, ...listed, ...(more > 0 ? [`(${more} more not listed)`] : [])].join("\n")
+}
+
+function profileField(docs: Record<string, unknown>[], f: DocField): string | ColumnProfile {
+  const counts = new Map<string, number>()
+  let present = 0
+  let rendered = 0
+  for (const doc of docs) {
+    let hasValue = false
+    let hasText = false
+    for (const raw of valuesAt(doc, f.path)) {
+      const { text } = describeValue(raw)
+      if (raw === null || raw === undefined) continue
+      hasValue = true
+      if (text === undefined) continue
+      hasText = true
+      const key = text.slice(0, PROFILE_FETCH_CHARS)
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    if (hasValue) present++
+    if (hasText) rendered++
+  }
+  const types = [...f.types].filter((t) => t !== "null")
+  // Never report "all NULL" for values that exist but have no text form.
+  if (present > 0 && rendered === 0) return `${f.name}: values not profiled (${types.join(" | ")})`
+  return {
+    name: f.name,
+    total: docs.length,
+    nonNull: rendered,
+    nulls: docs.length - present,
+    distinct: counts.size,
+    values: rank([...counts].map(([value, count]) => ({ value, count }))).slice(0, PROFILE_FETCHED_VALUES),
+    text: types.some((t) => t === "string" || t === "uuid"),
+    multi: f.inArray,
+    typed: types.length === 1 && types[0] === "uuid",
+  }
+}
+
+/**
+ * Nested-field listing and value profile for sampled documents, in the same format as the SQL
+ * profile. Fields come from the same documents the values do, so presence and counts agree.
+ */
+export function profileDocuments(docs: Record<string, unknown>[]): string {
+  if (docs.length === 0) return ""
+  const fields = collectFields(docs).sort((a, b) => a.name.localeCompare(b.name))
+  const nested = fields.filter((f) => f.path.length > 1)
+  const eligible = fields.filter((f) => {
+    const types = [...f.types].filter((t) => t !== "null")
+    return types.length === 0 || !types.every((t) => CONTAINER_ONLY.test(t))
+  })
+  // Top-level fields come first so the column cap never crowds them out with nested paths.
+  const ordered = [...eligible.filter((f) => f.path.length === 1), ...eligible.filter((f) => f.path.length > 1)]
+  const cols = ordered.slice(0, PROFILE_MAX_COLUMNS)
+  const results = cols.map((f) => profileField(docs, f))
   const sampled = docs.length >= PROFILE_SAMPLE_DOCUMENTS
-  return formatProfiles(
-    profiles,
+  const lines = results.map((r) => (typeof r === "string" ? r : renderProfile(r, sampled)))
+  const values = [
     `Value samples${sampled ? ` (first ${PROFILE_SAMPLE_DOCUMENTS} documents)` : ""}:`,
-    ordered.length - cols.length,
-    sampled,
-  )
+    ...lines,
+    ...(ordered.length > cols.length ? [`(${ordered.length - cols.length} more columns not profiled)`] : []),
+  ].join("\n")
+  return [renderNested(nested, docs.length), values].filter(Boolean).join("\n\n")
 }
 
 export interface ValueProfileInput {
@@ -332,7 +456,7 @@ export async function profileValues(
     const target = input.warehouse ? warehouses.find((w) => w.name === input.warehouse) : warehouses[0]
     const dialect = profileDialect(target?.type)
     if (target?.name && input.document && Registry.canonicalType(target.type) === "mongodb") {
-      return await profileCollection(input, input.document, target.name, ctx)
+      return await profileCollection(input.document, target.name, ctx)
     }
     if (!target?.name || !dialect) {
       return `Value samples skipped: not supported for ${target?.type ?? "this"} connections.`
@@ -377,9 +501,12 @@ export async function profileValues(
 
 type ProfileContext = Pick<LegacyContext, "sessionID" | "ask"> & { abort?: AbortSignal }
 
-/** Read-only: samples the same documents `describeTable` infers its schema from. */
+/**
+ * Read-only: samples documents through the connector rather than `sql.execute`, which flattens
+ * each document to strings per column and would lose the nested structure the profile reads.
+ * The find is bounded by `maxTimeMS` and cancelled with the tool call.
+ */
 async function profileCollection(
-  input: ValueProfileInput,
   document: { database: string; collection: string },
   warehouse: string,
   ctx: ProfileContext,
@@ -388,26 +515,18 @@ async function profileCollection(
   if (!connector.sampleDocuments) return "Value samples skipped: not supported for mongodb connections."
   await ctx.ask({
     permission: "sql_execute",
-    patterns: [
-      JSON.stringify({ ...document, command: "find", limit: PROFILE_SAMPLE_DOCUMENTS }),
-    ],
+    patterns: [JSON.stringify({ ...document, command: "find", limit: PROFILE_SAMPLE_DOCUMENTS })],
     always: ["*"],
     metadata: { warehouse },
   })
   const precedence = await Precedence.check(ctx.sessionID, "sql_execute", warehouse)
   if (precedence.redirect) return `Value samples skipped: ${precedence.redirect.output}`
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error("sampling timed out")), PROFILE_TIMEOUT_MS)
+  const deadline = AbortSignal.timeout(PROFILE_TIMEOUT_MS)
+  const signal = ctx.abort ? AbortSignal.any([ctx.abort, deadline]) : deadline
+  const docs = await connector.sampleDocuments(document.database, document.collection, PROFILE_SAMPLE_DOCUMENTS, {
+    signal,
+    maxTimeMS: PROFILE_TIMEOUT_MS,
   })
-  try {
-    const docs = await Promise.race([
-      connector.sampleDocuments(document.database, document.collection, PROFILE_SAMPLE_DOCUMENTS),
-      deadline,
-    ])
-    const profile = profileDocuments(docs, input.columns)
-    return profile && precedence.notice ? `${precedence.notice}\n${profile}` : profile
-  } finally {
-    clearTimeout(timer)
-  }
+  const profile = profileDocuments(docs)
+  return profile && precedence.notice ? `${precedence.notice}\n${profile}` : profile
 }

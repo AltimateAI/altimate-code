@@ -5,6 +5,7 @@ import * as Dispatcher from "../../../src/altimate/native/dispatcher"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { registerAll } from "../../../src/altimate/native/connections/register"
 import { SchemaInspectTool } from "../../../src/altimate/tools/schema-inspect"
+import { createRequire } from "module"
 import { buildProfileSql, profileDocuments, valueShape } from "../../../src/altimate/tools/schema-values"
 
 const ctx = {
@@ -356,47 +357,80 @@ describe("schema_inspect richer value profiles", () => {
   })
 })
 
-describe("MongoDB value profile", () => {
-  const columns = [
-    "_id", "status", "sku", "address.city", "items[].sku", "notes", "address", "tags",
-  ].map((name) => ({
-    name,
-    data_type: name === "address" ? "object" : name === "tags" ? "array" : name === "_id" ? "objectId" : "string",
-  }))
-  const docs = Array.from({ length: 12 }, (_, i) => ({
-    _id: { _bsontype: "ObjectId", toString: () => `id${i}` },
-    status: i < 8 ? "open" : "closed",
-    sku: `AB${i}-${1000 + i}`,
-    address: { city: i % 2 ? "Oslo" : "Rome" },
-    items: [{ sku: "X1" }, { sku: i % 3 ? "X2" : "X1" }],
-    ...(i < 4 ? { notes: null } : {}),
-    tags: ["a"],
-  }))
+// Real BSON values: `bson` is a dependency of `mongodb`, which the drivers package owns.
+const driversRequire = createRequire(new URL("../../../../drivers/package.json", import.meta.url))
+const bson = createRequire(driversRequire.resolve("mongodb"))("bson") as any
 
-  test("ranked values, uniqueness, shape, nulls and nested paths, skipping containers", () => {
-    const out = profileDocuments(docs, columns)
-    expect(out.split("\n")[0]).toBe("Value samples:")
-    expect(out).toContain("status: 2 distinct — open (8), closed (4)\n")
-    expect(out).toContain("sku: 12 distinct, unique in sample — ")
-    expect(out).toContain("address.city: 2 distinct — Oslo (6), Rome (6)")
-    expect(out).toContain("items[].sku: 2 distinct — X1 (")
-    expect(out).toContain("notes: all NULL")
-    expect(out).not.toContain("\naddress:")
-    expect(out).not.toContain("\ntags:")
-    // objectId text is shown but is not a text column, so no examples or shape
-    expect(out).toContain("_id: 12 distinct, unique in sample")
+describe("MongoDB value profile", () => {
+  test("renders real BSON types, dotted keys, nested fields and unrenderable values", () => {
+    const uuid = new bson.UUID("0f8fad5b-d9cb-469f-a165-70867728950e")
+    const docs = Array.from({ length: 4 }, (_, i) => ({
+      _id: new bson.ObjectId("65a1b2c3d4e5f60718293a4" + i),
+      ref: i === 0 ? uuid : new bson.UUID(),
+      price: bson.Decimal128.fromString("12.50"),
+      big: bson.Long.fromString(`900719925474099${i}`),
+      pattern: new bson.BSONRegExp("^ab+c", "i"),
+      script: new bson.Code("function () { return 1 }"),
+      stamp: new bson.Timestamp({ t: 1700000000, i: 7 }),
+      created: new Date("2024-03-01T10:00:00Z"),
+      raw: new bson.Binary(Buffer.from([1, 2, 3])),
+      "a.b": i % 2 ? "x" : "y",
+      address: { city: "Oslo", "x.y": i, geo: { lat: 1.5 } },
+      items: [{ sku: "S1" }, { sku: i === 3 ? "S2" : "S1" }],
+      min: new bson.MinKey(),
+      tags: ["t"],
+    }))
+    const out = profileDocuments(docs)
+    const line = (prefix: string) =>
+      out.slice(out.indexOf("Value samples")).split("\n").find((l) => l.startsWith(prefix + ":"))
+    expect(line("ref")).toBe(
+      `ref: 4 distinct, unique in sample — ${docs.map((d) => d.ref.toString()).sort().join(", ")}`,
+    )
+    expect(line("ref")).toContain("0f8fad5b-d9cb-469f-a165-70867728950e")
+    expect(line("ref")).not.toContain("NULL")
+    expect(line("_id")).toBe("_id: 4 distinct, unique in sample — 65a1b2c3d4e5f60718293a40, 65a1b2c3d4e5f60718293a41, 65a1b2c3d4e5f60718293a42, 65a1b2c3d4e5f60718293a43")
+    expect(line("price")).toBe("price: 1 distinct — 12.50 (4)")
+    expect(line("big")).toBe(`big: 4 distinct, unique in sample — ${docs.map((d) => d.big.toString()).sort().join(", ")}`)
+    expect(line("big")).toContain("9007199254740990, 9007199254740991")
+    expect(docs[0]!.big.toString()).toMatch(/^\d{16}$/)
+    expect(line("pattern")).toBe("pattern: 1 distinct — /^ab+c/i (4)")
+    expect(line("script")).toBe("script: 1 distinct — function () { return 1 } (4)")
+    expect(line("stamp")).toBe("stamp: 1 distinct — Timestamp(1700000000, 7) (4)")
+    expect(line("created")).toBe("created: 1 distinct — 2024-03-01T10:00:00.000Z (4)")
+    expect(line("min")).toBe("min: 1 distinct — MinKey (4)")
+    expect(line("raw")).toBe("raw: values not profiled (binary)")
+    // a real top-level key containing "." is found, and nested keys containing "." are too
+    expect(line("a.b")).toBe("a.b: 2 distinct — x (2), y (2)")
+    expect(line("address.x.y")).toBe("address.x.y: 4 distinct, unique in sample — 0, 1, 2, 3")
+    expect(line("address.city")).toBe("address.city: 1 distinct — Oslo (4)")
+    // MongoDB dot notation for array elements, with membership in the nested listing
+    expect(line("items.sku")).toBe("items.sku: 2 distinct — S1 (7), S2 (1)")
+    expect(out).toContain("Nested fields (sampled 4 docs):")
+    expect(out).toContain("items.sku: string (array element)")
+    expect(out).toContain("address.geo.lat: double")
+    expect(out).not.toContain("[]")
+    expect(out).not.toContain("[object")
+    expect(line("tags")).toBeUndefined()
+    expect(line("address")).toBeUndefined()
+  })
+
+  test("a field whose values are all null is NULL, one with unrenderable values is not", () => {
+    const docs = [{ gone: null, blob: new bson.Binary(Buffer.from([1])) }, { gone: null }]
+    const out = profileDocuments(docs)
+    expect(out).toContain("gone: all NULL")
+    expect(out).toContain("blob: values not profiled (binary)")
   })
 
   test("high-cardinality text shows frequent examples and a shape", () => {
     const many = Array.from({ length: 30 }, (_, i) => ({ code: i < 10 ? "ZZ-1" : `ab${i}-${100 + i}` }))
-    const out = profileDocuments(many, [{ name: "code", data_type: "string" }])
+    const out = profileDocuments(many)
     expect(out).toContain('code: 21 distinct, e.g. "ZZ-1" (10),')
     expect(out).toContain("shape `a+9+-9+` 67%, `A+-9` 33%")
   })
 
   test("a 100-document sample is labelled approximate", () => {
     const many = Array.from({ length: 100 }, (_, i) => ({ k: i % 2 ? "a" : "b" }))
-    const out = profileDocuments(many, [{ name: "k", data_type: "string" }])
+    const out = profileDocuments(many)
     expect(out).toContain("Value samples (first 100 documents):")
     expect(out).toContain("k: ~2 distinct — a (50), b (50)")
   })

@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test"
 import { createRequire } from "node:module"
-import { extractNestedPaths, normalizeMqlCommand } from "../src/mongodb"
+import { normalizeMqlCommand } from "../src/mongodb"
 import { restoreModuleMocksAfterTests } from "./module-mock"
 
 await restoreModuleMocksAfterTests("mongodb")
@@ -13,6 +13,7 @@ async function fakeMongo(
   metadata: { collections?: Record<string, string[]>; error?: Error } = {},
 ) {
   const finds: unknown[] = []
+  const findOptions: unknown[] = []
   const pipelines: Record<string, unknown>[][] = []
   const aggregateOptions: unknown[] = []
   const counts: { filter: unknown; options: unknown }[] = []
@@ -50,8 +51,9 @@ async function fakeMongo(
               collections[database].push(name)
             },
             collection: () => ({
-              find: (filter: unknown) => {
+              find: (filter: unknown, options: unknown) => {
                 finds.push(filter)
+                findOptions.push(options)
                 return { limit: () => ({ toArray: async () => docs, async *[Symbol.asyncIterator]() { yield* docs } }) }
               },
               aggregate: (pipeline: Record<string, unknown>[], options: unknown) => {
@@ -81,7 +83,7 @@ async function fakeMongo(
   const connector = await connect({ type: "mongodb", database: "test" })
   await connector.connect()
   const query = (command: string, extra: object = {}) => JSON.stringify({ collection: "articles", command, ...extra })
-  return { connector, query, collections, finds, pipelines, aggregateOptions, counts, distincts, collectionLists, databaseLists, estimates }
+  return { connector, query, collections, finds, findOptions, pipelines, aggregateOptions, counts, distincts, collectionLists, databaseLists, estimates }
 }
 
 describe("MongoDB read command shapes", () => {
@@ -461,46 +463,30 @@ describe("MongoDB native command filters", () => {
   })
 })
 
-describe("MongoDB nested field paths", () => {
+describe("MongoDB nested documents", () => {
   const docs = [
-    { _id: 1, user: { name: "a", geo: { lat: 1.5, deep: { too: "far" } } }, items: [{ sku: "x", qty: 1 }, { sku: "y" }], tags: ["t"] },
-    { _id: 2, user: { name: "b" }, items: [{ sku: "z", qty: null }], tags: [] },
-    { _id: 3, user: null, items: [] },
+    { _id: 1, user: { name: "a", geo: { lat: 1.5 } }, items: [{ sku: "x" }], "a.b": 1 },
+    { _id: 2, user: null, items: [] },
   ]
 
-  test("extracts dotted and array paths to depth 3 with types and per-document presence", () => {
-    const paths = extractNestedPaths(docs)
-    expect([...paths.keys()].sort()).toEqual([
-      "items[].qty",
-      "items[].sku",
-      "user.geo",
-      "user.geo.deep",
-      "user.geo.lat",
-      "user.name",
+  test("describeTable stays top-level: nested objects are 'object', arrays 'array', no nested paths", async () => {
+    const { connector } = await fakeMongo(docs)
+    expect(await connector.describeTable("test", "articles")).toEqual([
+      { name: "_id", data_type: "int32", nullable: false },
+      { name: "a.b", data_type: "int32", nullable: true },
+      { name: "items", data_type: "array", nullable: false },
+      { name: "user", data_type: "object", nullable: true },
     ])
-    expect(paths.get("user.geo.deep")!.types).toEqual(new Set(["object"]))
-    // sku appears twice in document 1 but the document is counted once
-    expect(paths.get("items[].sku")!.docs).toBe(2)
-    expect([...paths.get("items[].qty")!.types].sort()).toEqual(["int32", "null"])
-    expect(paths.get("user.name")!.docs).toBe(2)
   })
 
-  test("describeTable keeps top-level columns and adds nested paths with a presence share", async () => {
-    const { connector } = await fakeMongo(docs)
-    const columns = await connector.describeTable("test", "articles")
-    const byName = Object.fromEntries(columns.map((c) => [c.name, c]))
-    expect(byName.user).toEqual({ name: "user", data_type: "object", nullable: true })
-    expect(byName.items).toEqual({ name: "items", data_type: "array", nullable: false })
-    expect(byName["user.name"]).toEqual({ name: "user.name", data_type: "string", nullable: true, presence: 2 / 3 })
-    expect(byName["items[].sku"]).toMatchObject({ data_type: "string", presence: 2 / 3 })
-    expect(byName["items[].qty"]).toMatchObject({ data_type: "int32", nullable: true })
-    expect(columns[0]!.name).toBe("_id")
-    const names = columns.map((c) => c.name)
-    expect(names.slice(names.indexOf("user"))).toEqual(["user", "user.geo", "user.geo.deep", "user.geo.lat", "user.name"])
+  test("sampleDocuments returns raw documents under the smaller of the caller and connection deadlines", async () => {
+    const { connector, findOptions } = await fakeMongo(docs)
+    expect(await connector.sampleDocuments!("test", "articles", 50, { maxTimeMS: 15_000 })).toEqual(docs)
+    expect(findOptions).toEqual([{ maxTimeMS: 15_000 }])
   })
 
-  test("sampleDocuments returns the sampled documents", async () => {
+  test("sampleDocuments honours an aborted signal", async () => {
     const { connector } = await fakeMongo(docs)
-    expect(await connector.sampleDocuments!("test", "articles", 50)).toEqual(docs)
+    await expect(connector.sampleDocuments!("test", "articles", 50, { signal: AbortSignal.abort(new Error("stop")) })).rejects.toThrow("stop")
   })
 })
