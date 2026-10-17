@@ -1,0 +1,133 @@
+[
+  {
+    "name": "integer division in a CTE",
+    "spanId": "01a13148-cb97-7000-92a3-470964226a91",
+    "trace": "ses_eceb7e1eeffe14hbmGK64UM2ri.json",
+    "input": {
+      "query": "with a as (select Symbol, (row_number() over (order by Symbol)-1)//50 g from arca_etf)\nselect string_agg(q, ' union all ' order by g) from (select g, 'select '||g||' g,max(\"Adj Close\") m from query_table(['||string_agg(''''||Symbol||'''', ',' order by Symbol)||'],true) where Date like ''2015%''' q from a group by g)",
+      "warehouse": "scratch"
+    },
+    "output": {
+      "error": "Error: The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"allow\"},{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP DATABASE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP SCHEMA *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"TRUNCATE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"truncate *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Truncate *\",\"action\":\"deny\"}]"
+    },
+    "dialect": "duckdb"
+  },
+  {
+    "name": "integer division in a nested query",
+    "spanId": "01a13148-e9ec-7000-b389-84fc74ce2f5a",
+    "trace": "ses_eceb7e1eeffe14hbmGK64UM2ri.json",
+    "input": {
+      "query": "select string_agg(q, ' union all ' order by g) from (select g, 'select '||g||' g,max(\"Adj Close\") m from query_table(['||string_agg(''''||Symbol||'''', ',' order by Symbol)||'],true) where Date like ''2015%''' q from (select Symbol, (row_number() over (order by Symbol)-1)//50 g from arca_etf) a group by g) b",
+      "warehouse": "scratch"
+    },
+    "output": {
+      "error": "Error: The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"allow\"},{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP DATABASE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP SCHEMA *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"TRUNCATE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"truncate *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Truncate *\",\"action\":\"deny\"}]"
+    },
+    "dialect": "duckdb"
+  },
+  {
+    "name": "integer division with ordered aggregation",
+    "spanId": "01a13148-f629-7000-b939-a1b12fc2e6d8",
+    "trace": "ses_eceb7e1eeffe14hbmGK64UM2ri.json",
+    "input": {
+      "query": "select g, string_agg('''' || Symbol || '''', ',' order by Symbol) l from (select Symbol, (row_number() over (order by Symbol)-1)//100 g from arca_etf) a group by g order by g",
+      "warehouse": "scratch"
+    },
+    "output": {
+      "error": "Error: The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"allow\"},{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP DATABASE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP SCHEMA *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"TRUNCATE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"truncate *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Truncate *\",\"action\":\"deny\"}]"
+    },
+    "dialect": "duckdb"
+  },
+  {
+    "name": "integer division with generated SQL",
+    "spanId": "01a13144-1d86-7000-bea4-27cf772c506d",
+    "trace": "ses_ecebcc6e6ffembt21s7RmFYqdI.json",
+    "input": {
+      "limit": 20,
+      "query": "WITH t AS (SELECT Symbol, (row_number() OVER (ORDER BY Symbol)-1)//100 g FROM arca_etf)\nSELECT g, 'SELECT '||g||' g, max(\"Adj Close\") m FROM query_table(['||string_agg(''''||Symbol||'''', ',' ORDER BY Symbol)||'],true) WHERE \"Date\" LIKE ''2015%'' AND \"Adj Close\">200' q FROM t GROUP BY g ORDER BY g",
+      "warehouse": "scratch"
+    },
+    "output": {
+      "error": "Error: The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"allow\"},{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP DATABASE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP SCHEMA *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"TRUNCATE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"truncate *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Truncate *\",\"action\":\"deny\"}]"
+    },
+    "dialect": "duckdb"
+  },
+  {
+    "name": "integer division with grouped symbols",
+    "spanId": "01a13144-31d9-7000-9cb0-fb6ec2777d13",
+    "trace": "ses_ecebcc6e6ffembt21s7RmFYqdI.json",
+    "input": {
+      "limit": 20,
+      "query": "WITH t AS (SELECT Symbol, (row_number() OVER (ORDER BY Symbol)-1)//100 g FROM arca_etf)\nSELECT g, string_agg(Symbol, ',' ORDER BY Symbol) syms FROM t GROUP BY g ORDER BY g",
+      "warehouse": "scratch"
+    },
+    "output": {
+      "error": "Error: The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"allow\"},{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP DATABASE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP SCHEMA *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"TRUNCATE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"truncate *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Truncate *\",\"action\":\"deny\"}]"
+    },
+    "dialect": "duckdb"
+  },
+  {
+    "name": "integer division with a derived table",
+    "spanId": "01a13144-3e6d-7000-8da4-d1822918329a",
+    "trace": "ses_ecebcc6e6ffembt21s7RmFYqdI.json",
+    "input": {
+      "limit": 20,
+      "query": "SELECT g, string_agg(Symbol, ',' ORDER BY Symbol) syms FROM (SELECT Symbol, (row_number() OVER (ORDER BY Symbol)-1)//100 AS g FROM arca_etf) x GROUP BY g ORDER BY g",
+      "warehouse": "scratch"
+    },
+    "output": {
+      "error": "Error: The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"allow\"},{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP DATABASE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP SCHEMA *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"TRUNCATE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"truncate *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Truncate *\",\"action\":\"deny\"}]"
+    },
+    "dialect": "duckdb"
+  },
+  {
+    "name": "negated glob predicate",
+    "spanId": "01a13142-c957-7000-84ae-12b2ecbcd2e3",
+    "trace": "ses_ecebd6b1dffeRDuonEl8X8feO7.json",
+    "input": {
+      "query": "select filing_date from publicationinfo where substr(trim(filing_date),-4) not glob '[12][0-9][0-9][0-9]' group by substr(filing_date,1,3) limit 30",
+      "warehouse": "publication_database"
+    },
+    "output": {
+      "error": "Error: The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"allow\"},{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP DATABASE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP SCHEMA *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"TRUNCATE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"truncate *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Truncate *\",\"action\":\"deny\"}]"
+    },
+    "dialect": "sqlite"
+  },
+  {
+    "name": "pivot of a select",
+    "spanId": "01a1314c-3e88-7000-bd64-3d1a426b1b46",
+    "trace": "ses_eceb4d139ffegfOExGvw2GUq0e.json",
+    "input": {
+      "query": "pivot (select region, cat from cls) on cat using count(*)",
+      "warehouse": "scratch"
+    },
+    "output": {
+      "error": "Error: The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules [{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"allow\"},{\"permission\":\"*\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"*\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP DATABASE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"DROP SCHEMA *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"TRUNCATE *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"drop schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"truncate *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Database *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Drop Schema *\",\"action\":\"deny\"},{\"permission\":\"sql_execute_write\",\"pattern\":\"Truncate *\",\"action\":\"deny\"}]"
+    },
+    "dialect": "duckdb"
+  },
+  {
+    "name": "materialized integer division",
+    "spanId": "01a1314c-6b05-7000-926d-277fe6273296",
+    "trace": "ses_eceb4d139ffegfOExGvw2GUq0e.json",
+    "input": {
+      "source_warehouse": "scratch",
+      "sql": "with d as (select article_id, ' '||regexp_replace(lower(coalesce(title,'')||' '||coalesce(description,'')),'[^a-z0-9.\\-]+',' ','g')||' ' as txt from arts),\nlx as (select distinct cat, kw from lex),\ns as (select d.article_id, lx.cat, sum((len(d.txt)-len(replace(d.txt,' '||kw||' ','')))//(len(kw)+2)) as sc\n from d cross join lx group by all),\nr as (select article_id, cat, sc, row_number() over (partition by article_id order by sc desc, cat) rn, lead(sc) over (partition by article_id order by sc desc, cat) sc2 from s)\nselect article_id, cat, sc, sc2 from r where rn=1 and sc>=2 and sc>=sc2+2",
+      "target_table": "seed"
+    },
+    "output": "Failed to materialize: sql_materialize only reads from the source warehouse: use a single read-only SELECT (or WITH ... SELECT), without modifying CTEs, SELECT INTO or side-effect functions. Its only write target is the scratch database.",
+    "dialect": "duckdb"
+  },
+  {
+    "name": "materialized joins with prior aliases",
+    "spanId": "01a1314c-3f6e-7000-8de6-7dacf7e051ca",
+    "trace": "ses_eceb6072effebB5RHVoSWCUtKj.json",
+    "input": {
+      "source_warehouse": "scratch",
+      "sql": "with wc as (select l.c, t.w, count(*) n from toks t join lab0 l using(article_id) group by 1,2),\nvocab as (select w from wc group by w having sum(n)>=3),\nV as (select count(*) v from vocab),\ntot as (select c, sum(n) tn from wc where w in (select w from vocab) group by c),\ncls as (select distinct c from lab0),\nprior as (select c, ln(count(*)*1.0/(select count(*) from lab0)) lp from lab0 group by c),\nlp as (select cls.c, vocab.w, ln((coalesce(wc.n,0)+1.0)/(tot.tn+(select v from V))) l\n from cls cross join vocab join tot on tot.c=cls.c left join wc on wc.c=cls.c and wc.w=vocab.w),\nsc as (select t.article_id, lp.c, sum(lp.l) s from toks t join lp using(w) group by 1,2),\nsc2 as (select sc.article_id, sc.c, sc.s+prior.lp s from sc join prior using(c))\nselect article_id, arg_max(c, s) c from sc2 group by 1",
+      "target_table": "lab1"
+    },
+    "output": "Failed to materialize: sql_materialize only reads from the source warehouse: use a single read-only SELECT (or WITH ... SELECT), without modifying CTEs, SELECT INTO or side-effect functions. Its only write target is the scratch database.",
+    "dialect": "duckdb"
+  }
+]

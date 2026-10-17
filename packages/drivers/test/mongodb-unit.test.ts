@@ -9,7 +9,7 @@ await restoreModuleMocksAfterTests("mongodb")
 const { Binary } = createRequire(import.meta.resolve("mongodb"))("bson")
 
 async function fakeMongo(
-  docs: Record<string, unknown>[] = [],
+  docs?: Record<string, unknown>[],
   metadata: { collections?: Record<string, string[]>; error?: Error } = {},
 ) {
   const finds: unknown[] = []
@@ -54,16 +54,16 @@ async function fakeMongo(
               find: (filter: unknown, options: unknown) => {
                 finds.push(filter)
                 findOptions.push(options)
-                return { limit: () => ({ toArray: async () => docs, async *[Symbol.asyncIterator]() { yield* docs } }) }
+                return { limit: () => ({ toArray: async () => docs ?? [], async *[Symbol.asyncIterator]() { yield* docs ?? [] } }) }
               },
               aggregate: (pipeline: Record<string, unknown>[], options: unknown) => {
                 pipelines.push(pipeline)
                 aggregateOptions.push(options)
-                return { toArray: async () => docs, async *[Symbol.asyncIterator]() { yield* docs } }
+                return { toArray: async () => docs ?? [], async *[Symbol.asyncIterator]() { yield* docs ?? [] } }
               },
-              countDocuments: async (filter: unknown, options: unknown) => {
+              countDocuments: async (filter: Record<string, unknown>, options: unknown) => {
                 counts.push({ filter, options })
-                return 11
+                return docs?.filter((doc) => Object.entries(filter).every(([key, value]) => doc[key] === value)).length ?? 11
               },
               estimatedDocumentCount: async (options: unknown) => {
                 estimates.push(options)
@@ -429,6 +429,18 @@ describe("MongoDB aggregate write protection", () => {
 })
 
 describe("MongoDB native command filters", () => {
+  test("count command alias counts only documents matching the query filter", async () => {
+    const { connector, counts } = await fakeMongo([{ status: "A" }, { status: "B" }, { status: "A" }])
+    const result = await connector.execute(
+      JSON.stringify({ command: "count", collection: "orders", query: { status: "A" } }),
+      1,
+      undefined,
+      { queryTimeoutMs: 0 },
+    )
+    expect(result.rows).toEqual([[2]])
+    expect(counts).toEqual([{ filter: { status: "A" }, options: { maxTimeMS: 120_000 } }])
+  })
+
   test("count forwards the native query filter", async () => {
     const { connector, counts } = await fakeMongo()
     await connector.execute(JSON.stringify({ count: "orders", query: { status: "A" } }), 1, undefined, { queryTimeoutMs: 0 })
@@ -488,5 +500,105 @@ describe("MongoDB nested documents", () => {
   test("sampleDocuments honours an aborted signal", async () => {
     const { connector } = await fakeMongo(docs)
     await expect(connector.sampleDocuments!("test", "articles", 50, { signal: AbortSignal.abort(new Error("stop")) })).rejects.toThrow("stop")
+  })
+})
+
+describe("MongoDB collection command shorthand", () => {
+  test.each([
+    { name: "key", aliases: { key: "status" } },
+    { name: "field", aliases: { field: "status" } },
+    { name: "field with an agreeing key", aliases: { key: "category", field: "status" } },
+    { name: "key with an agreeing field", aliases: { key: "status", field: "category" } },
+  ])("refuses ambiguous distinct form with conflicting $name and names both values", ({ aliases }) => {
+    expect(() => normalizeMqlCommand({ collection: "items", distinct: "category", ...aliases })).toThrow(
+      /ambiguous distinct form.*category.*status/i,
+    )
+  })
+
+  test("normalizes distinct-as-field shorthand without changing the collection", () => {
+    expect(normalizeMqlCommand({ collection: "items", distinct: "category" })).toEqual({
+      collection: "items",
+      command: "distinct",
+      field: "category",
+    })
+  })
+
+  test.each([
+    { name: "key", aliases: { key: "category" } },
+    { name: "field", aliases: { field: "category" } },
+    { name: "key and field", aliases: { key: "category", field: "category" } },
+  ])("accepts distinct shorthand with agreeing $name", ({ aliases }) => {
+    const normalized = normalizeMqlCommand({ collection: "items", distinct: "category", ...aliases })
+    expect(normalized).toMatchObject({ collection: "items", command: "distinct", field: "category" })
+    expect(normalized).not.toHaveProperty("distinct")
+  })
+
+  test.each([
+    { collection: "items", find: "other" },
+    { collection: "", distinct: "category", key: "category" },
+    { collection: null, distinct: "category", key: "category" },
+  ])("does not fall through to native parsing when collection is present: %j", (input) => {
+    expect(normalizeMqlCommand(input)).toEqual(input)
+  })
+
+  test.each([
+    { name: "find and filter", input: { collection: "items", find: { status: "x" }, filter: { status: "y" } } },
+    { name: "count and query", input: { collection: "items", count: { status: "x" }, query: { status: "y" } } },
+    { name: "distinct and field", input: { collection: "items", distinct: "status", field: "category" } },
+  ])("refuses conflicting $name arguments", ({ input }) => {
+    expect(() => normalizeMqlCommand(input)).toThrow(/ambiguous.*conflict/i)
+  })
+
+  test("accepts equivalent embedded and explicit filters regardless of key order", () => {
+    expect(normalizeMqlCommand({
+      collection: "items",
+      find: { status: "x", active: true },
+      filter: { active: true, status: "x" },
+    })).toEqual({
+      collection: "items",
+      command: "find",
+      filter: { active: true, status: "x" },
+    })
+  })
+
+  test("normalizes a collection with an embedded find filter and projection", () => {
+    const command = {
+      collection: "articles",
+      find: {},
+      projection: { _id: 0, article_id: 1, title: 1, description: 1 },
+    }
+    expect(normalizeMqlCommand(command)).toEqual({
+      collection: "articles",
+      command: "find",
+      filter: {},
+      projection: command.projection,
+    })
+  })
+
+  test.each([
+    [
+      { collection: "items", aggregate: [{ $match: { active: true } }] },
+      { collection: "items", command: "aggregate", pipeline: [{ $match: { active: true } }] },
+    ],
+    [
+      { collection: "items", count: { active: true } },
+      { collection: "items", command: "countDocuments", filter: { active: true } },
+    ],
+    [
+      { collection: "items", distinct: "category", query: { active: true } },
+      {
+        collection: "items",
+        command: "distinct",
+        field: "category",
+        query: { active: true },
+        filter: { active: true },
+      },
+    ],
+    [
+      { command: "count", collection: "items", filter: {} },
+      { command: "countDocuments", collection: "items", filter: {} },
+    ],
+  ])("normalizes supported collection command keys: %j", (input, expected) => {
+    expect(normalizeMqlCommand(input)).toEqual(expected)
   })
 })

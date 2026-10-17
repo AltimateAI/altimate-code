@@ -55,7 +55,9 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
-function schemaErrors(schema: object | boolean): string[] {
+// altimate_change start — text_label must not advertise empty-string label sentinels.
+function schemaErrors(schema: object | boolean, rejectEmptySentinels = false): string[] {
+  // altimate_change end
   const errors = ajv.validateSchema(schema) ? [] : [ajv.errorsText(ajv.errors, { separator: "\n" })]
   function visit(value: unknown, location = "#") {
     if (!isObject(value)) return
@@ -68,6 +70,14 @@ function schemaErrors(schema: object | boolean): string[] {
     if (typeof value.format === "string" && !formats.has(value.format)) {
       errors.push(`${location}/format is not a standard format: ${value.format}`)
     }
+    // altimate_change start — reject empty sentinel schemas in model-facing tools.
+    if (rejectEmptySentinels) {
+      if (value.const === "") errors.push(`${location}/const must not be an empty string`)
+      if (Array.isArray(value.enum) && value.enum.includes("")) {
+        errors.push(`${location}/enum must not contain an empty string`)
+      }
+    }
+    // altimate_change end
     if (
       "additionalProperties" in value &&
       typeof value.additionalProperties !== "boolean" &&
@@ -145,6 +155,11 @@ describe("Anthropic tool JSON schemas", () => {
               const target = model(providerID)
               const tools = yield* registry.tools({ providerID, modelID: target.id, agent })
               expect(tools.map((tool) => tool.id)).toEqual(expect.arrayContaining(["sql_check", "sql_execute", "read"]))
+              // altimate_change start — validate the labeling schema with each Anthropic provider.
+              expect(tools.some((tool) => tool.id === "text_label")).toBe(
+                name === "analyst" && process.env.ALTIMATE_TEXT_LABEL !== "0",
+              )
+              // altimate_change end
               expect(tools.some((tool) => tool.id === "answer_commit")).toBe(name === "analyst")
 
               // Match prompt.ts / session/tools.ts conversion. Both SDK providers forward this schema unchanged.
@@ -170,15 +185,47 @@ describe("Anthropic tool JSON schemas", () => {
                 )
               }
               // Validate every registered tool, including ones hidden by this agent's permissions.
+              // altimate_change start — reject empty label sentinels without changing other tools' filler contracts.
               const errors = schemas.flatMap((tool) =>
-                schemaErrors(tool.schema).map((error) => `${tool.name}: ${error}`),
+                schemaErrors(tool.schema, tool.name === "text_label").map((error) => `${tool.name}: ${error}`),
               )
+              // altimate_change end
               expect(errors).toEqual([])
             }),
         )
       }
     }
   }
+
+  // altimate_change start — the text-label flag controls registration, including the lookup catalogue.
+  fixture(false).instance("text_label is allowed for analyst by default and not registered when disabled", () =>
+    Effect.gen(function* () {
+      const previous = process.env.ALTIMATE_TEXT_LABEL
+      try {
+        delete process.env.ALTIMATE_TEXT_LABEL
+        const registry = yield* ToolRegistry.Service
+        const agents = yield* Agent.Service
+        const analyst = yield* agents.get("analyst")
+        if (!analyst) throw new Error("analyst agent not found")
+        const target = model(ProviderID.anthropic)
+        const enabled = yield* registry.tools({ providerID: target.providerID, modelID: target.id, agent: analyst })
+        expect(enabled.map((tool) => tool.id)).toContain("text_label")
+        expect(PermissionNext.disabled(["text_label"], analyst.permission).has("text_label")).toBe(false)
+        const builder = yield* agents.get("builder")
+        const builderTools = yield* registry.tools({ providerID: target.providerID, modelID: target.id, agent: builder })
+        expect(builderTools.map((tool) => tool.id)).not.toContain("text_label")
+
+        process.env.ALTIMATE_TEXT_LABEL = "0"
+        expect(yield* registry.ids()).not.toContain("text_label")
+        const disabled = yield* registry.tools({ providerID: target.providerID, modelID: target.id, agent: analyst })
+        expect(disabled.map((tool) => tool.id)).not.toContain("text_label")
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_TEXT_LABEL
+        else process.env.ALTIMATE_TEXT_LABEL = previous
+      }
+    }),
+  )
+  // altimate_change end
 
   test.each(["@ai-sdk/anthropic", "@ai-sdk/amazon-bedrock", "@ai-sdk/google-vertex/anthropic"])(
     "%s removes only the root dialect declaration without mutating the input",
@@ -211,8 +258,16 @@ describe("Anthropic tool JSON schemas", () => {
       { type: "number", exclusiveMaximum: false },
       { type: "string", format: "custom-format" },
       { type: "object", additionalProperties: [] },
+      // altimate_change start — empty model-facing label sentinels are forbidden.
+      { type: "string", const: "" },
+      { type: "string", enum: [""] },
+      // altimate_change end
     ]) {
-      expect(schemaErrors({ type: "object", properties: { value: { anyOf: [fragment] } } }).length).toBeGreaterThan(0)
+      // altimate_change start — exercise the text_label schema restrictions as well.
+      expect(
+        schemaErrors({ type: "object", properties: { value: { anyOf: [fragment] } } }, true).length,
+      ).toBeGreaterThan(0)
+      // altimate_change end
     }
   })
 

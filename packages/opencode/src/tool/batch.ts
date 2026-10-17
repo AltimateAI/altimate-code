@@ -118,6 +118,9 @@ export const BatchTool = Tool.define("batch", {
         const lessons = ctx.extra?.lessons as LessonDelivery | undefined
         await lessons?.appendFileLessons(ctx.sessionID, call.tool, call.parameters, result)
         // altimate_change end
+        // altimate_change start — match direct-call ordering: append lessons before checking the result
+        Tool.assertSuccess(result)
+        // altimate_change end
         const attachments = result.attachments?.map((attachment) => ({
           ...attachment,
           id: PartID.ascending(),

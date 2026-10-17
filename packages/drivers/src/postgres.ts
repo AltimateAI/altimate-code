@@ -95,7 +95,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       pool = new Pool(poolConfig)
     },
 
-    async execute(sql: string, limit?: number, _binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
+    async execute(sql: string, limit?: number, binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
       const client = await acquireClient(pool, options?.signal)
       // Tighter of the explicit statement_timeout and the common execution
       // deadline: a configured limit stricter than the default is preserved.
@@ -216,7 +216,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           const consume = createResultByteBudget(options.maxResultBytes)
           const Query = pg.default?.Query ?? pg.Query
           return await runQuery(() => new Promise<ConnectorResult>((resolve, reject) => {
-            const stream = new Query({ text: query, rowMode: "array" })
+            const stream = new Query({ text: query, values: binds, rowMode: "array" })
             const rows: unknown[][] = []
             let columns: string[] = []
             let truncated = false
@@ -253,7 +253,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           }))
         }
         // altimate_change end
-        const result = await runQuery<any>(() => client.query(query))
+        // altimate_change start — preserve bound catalog names and other query parameters
+        const result = await runQuery<any>(() => client.query(query, binds))
+        // altimate_change end
         const columns = result.fields?.map((f: any) => f.name) ?? []
         const truncated = effectiveLimit > 0 && result.rows.length > effectiveLimit
         const rows = truncated
