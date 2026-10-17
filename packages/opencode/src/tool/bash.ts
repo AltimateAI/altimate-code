@@ -515,6 +515,10 @@ export const BashTool = Tool.define("bash", async () => {
       })
 
       let output = ""
+      // altimate_change start — keep stderr's tail separate from later successful stdout
+      let stderrTail = ""
+      let hasStdout = false
+      // altimate_change end
 
       // Initialize metadata with empty output
       ctx.metadata({
@@ -535,19 +539,31 @@ export const BashTool = Tool.define("bash", async () => {
         })
       }
 
-      proc.stdout?.on("data", append)
-      proc.stderr?.on("data", append)
+      // altimate_change start — distinguish stderr failures from tracebacks printed as stdout data
+      proc.stdout?.on("data", (chunk: Buffer) => {
+        hasStdout ||= chunk.length > 0
+        append(chunk)
+      })
+      proc.stderr?.on("data", (chunk: Buffer) => {
+        stderrTail = (stderrTail + chunk.toString()).slice(-MAX_METADATA_LENGTH)
+        append(chunk)
+      })
+      // altimate_change end
 
       let timedOut = false
       let aborted = false
       let exited = false
 
-      const kill = () => Shell.killTree(proc, { exited: () => exited })
-
-      if (ctx.abort.aborted) {
-        aborted = true
-        await kill()
+      // altimate_change start — a shell may exit while descendants still hold its pipes open
+      const kill = async () => {
+        try {
+          await Shell.killTree(proc, { exited: () => exited })
+        } finally {
+          proc.stdout?.destroy()
+          proc.stderr?.destroy()
+        }
       }
+      // altimate_change end
 
       const abortHandler = () => {
         aborted = true
@@ -562,25 +578,65 @@ export const BashTool = Tool.define("bash", async () => {
       }, timeout + 100)
 
       await new Promise<void>((resolve, reject) => {
+        // altimate_change start — background descendants may keep pipes open after shell exit
+        let drainTimer: ReturnType<typeof setTimeout> | undefined
         const cleanup = () => {
           clearTimeout(timeoutTimer)
+          clearTimeout(drainTimer)
           ctx.abort.removeEventListener("abort", abortHandler)
+        }
+
+        const finish = () => {
+          cleanup()
+          proc.removeListener("close", finish)
+          proc.stdout?.destroy()
+          proc.stderr?.destroy()
+          resolve()
         }
 
         proc.once("exit", () => {
           exited = true
           cleanup()
-          resolve()
+          // Exit ends the command timeout. Give buffered output a bounded drain;
+          // a background child retaining a pipe is not a failed command.
+          drainTimer = setTimeout(finish, 250)
         })
+        proc.once("close", finish)
+        // altimate_change end
 
         proc.once("error", (error) => {
           exited = true
           cleanup()
+          // altimate_change start — stop reading when spawning fails too
+          proc.removeListener("close", finish)
+          proc.stdout?.destroy()
+          proc.stderr?.destroy()
+          // altimate_change end
           reject(error)
         })
+        // altimate_change start — install listeners before killing an already-aborted command
+        if (ctx.abort.aborted) abortHandler()
+        // altimate_change end
       })
 
       const resultMetadata: string[] = []
+      // altimate_change start — shell outcomes are telemetry, not SDK errors
+      const traceback =
+        /(?:^|\r?\n)Traceback \(most recent call last\):\r?\n(?:[ \t].*\r?\n)+([A-Za-z_][\w.]*(?::[^\r\n]*)?)\s*$/
+      // A zero-exit traceback is only a failure when it ends stderr and stdout
+      // is empty. Tracebacks printed on stdout are ordinary command output.
+      const pythonError = (proc.exitCode !== 0 || !hasStdout) && traceback.test(stderrTail)
+      const failureKind = timedOut
+        ? "timeout"
+        : aborted
+          ? "abort"
+          : proc.signalCode
+            ? "signal"
+            : pythonError
+              ? "stderr_traceback"
+              : undefined
+      const failed = failureKind !== undefined || proc.exitCode !== 0
+      // altimate_change end
 
       if (timedOut) {
         resultMetadata.push(`bash tool terminated command after exceeding timeout ${timeout} ms`)
@@ -600,6 +656,13 @@ export const BashTool = Tool.define("bash", async () => {
           output: output.length > MAX_METADATA_LENGTH ? output.slice(0, MAX_METADATA_LENGTH) + "\n\n..." : output,
           exit: proc.exitCode,
           description: params.description,
+          // altimate_change start — retain the legacy exit field and record telemetry without metadata.error
+          exit_code: proc.exitCode,
+          ...(failed && { success: false }),
+          // Ordinary non-zero exits (for example, grep no-match) retain their
+          // exit status without declaring an execution failure to the wrapper.
+          ...(failureKind && { failure_kind: failureKind }),
+          // altimate_change end
         },
         output,
       }

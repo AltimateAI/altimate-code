@@ -28,10 +28,67 @@ try {
 // Only SELECT queries are known safe. "other" (SHOW, SET, USE, etc.) is ambiguous — prompt for permission.
 const READ_CATEGORIES = new Set(["query"])
 
+/** Adapt read/write-equivalent syntax for the bundled parser, never for execution.
+ * Only code tokens change; quoted content and the original statement boundaries
+ * remain authoritative when checking the parser's result. */
+function parserSql(sql: string, dialect?: string): string {
+  const duckdb = dialect?.toLowerCase() === "duckdb"
+  if (!duckdb && dialect?.toLowerCase() !== "sqlite") return sql
+  const compatible = tokenizeSql(sql, dialect).tokens
+    .map(({ kind, text }) => {
+      if (kind !== "code") return text
+      // The parser supports LIKE negation but not GLOB negation. Both are predicates.
+      text = text.replace(/\bNOT\s+GLOB\b/gi, "NOT LIKE")
+      if (!duckdb) return text
+      // SQLite uses / for integer operands; // is a DuckDB operator. PRIOR is
+      // an ordinary DuckDB identifier, not the parser's hierarchical operator.
+      return text.replaceAll("//", "/ ").replace(/\bprior(?=\s*\.)/gi, '"prior"')
+    })
+    .join("")
+  if (!duckdb) return compatible
+  // The native parser recognizes these query bodies inside a derived table,
+  // but reports their standalone form as UNKNOWN. Parse every body in full.
+  const statements = statementsOf(compatible, dialect)
+  const adapted = statements.map((statement) =>
+    /^\s*(PIVOT|UNPIVOT|WITH)\b/i.test(statement) && /\b(PIVOT|UNPIVOT)\b/i.test(maskSql(tokenizeSql(statement, dialect).tokens))
+      ? `SELECT * FROM (${statement})`
+      : statement,
+  )
+  return adapted.some((statement, index) => statement !== statements[index]) ? adapted.join("; ") : compatible
+}
+
+/** Mask only UNPIVOT output labels at their own query depth, retaining SELECT INTO. */
+function maskUnpivotLabels(sql: string): string {
+  const heads: string[] = []
+  const unpivots = new Set<number>()
+  let depth = 0
+  let previous = ""
+  return sql.replace(/\(|\)|\bINTO\s+NAME\b|\b[A-Z_][A-Z_0-9]*\b/gi, (token) => {
+    const word = token.toUpperCase()
+    if (word === "(") depth++
+    else if (word === ")") {
+      delete heads[depth]
+      unpivots.delete(depth--)
+    } else if (word === "UNPIVOT" && (!heads[depth] || (heads[depth] === "WITH" && previous === ")"))) {
+      unpivots.add(depth)
+      heads[depth] = word
+    } else if (/^INTO\s+NAME$/.test(word) && unpivots.delete(depth)) {
+      return " ".repeat(token.length)
+    } else if (!heads[depth] || (heads[depth] === "WITH" && /^(SELECT|VALUES|TABLE|PIVOT|INSERT|UPDATE|DELETE|MERGE)$/.test(word))) {
+      heads[depth] = word
+    }
+    previous = word
+    return token
+  })
+}
+
 // The parser labels SELECT INTO and queries with modifying CTEs as "query".
 // Quoted identifiers/literals and comments cannot introduce these write clauses.
 function hasQueryWriteClause(sql: string, dialect?: string): boolean {
-  return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i.test(maskSql(tokenizeSql(sql, dialect).tokens))
+  let masked = maskSql(tokenizeSql(sql, dialect).tokens)
+  // UNPIVOT's INTO NAME labels output columns; it does not create a table.
+  if (dialect?.toLowerCase() === "duckdb") masked = maskUnpivotLabels(masked)
+  return /\b(INTO|INSERT|UPDATE|DELETE|MERGE)\b/i.test(masked)
 }
 
 const READ_ONLY_OTHER_PATTERN = /^\s*(SHOW\b[^;]*|DESCRIBE\b[^;]*|DESC\b[^;]*)$/i
@@ -137,7 +194,7 @@ function classifyFallback(sql: string, dialect?: string): { queryType: "read" | 
 export function isSingleQuery(sql: string, dialect?: string): boolean {
   if (!getStatementTypes || !tokenizeSql(sql, dialect).complete) return false
   try {
-    const result = getStatementTypes(sql, dialect)
+    const result = getStatementTypes(parserSql(sql, dialect), dialect)
     return (
       statementsOf(sql, dialect).length === 1 &&
       result?.statement_count === 1 &&
@@ -239,7 +296,7 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
   }
   if (!getStatementTypes) return { ...classifyFallback(sql, dialect), parseError: "SQL parser is unavailable" }
   try {
-    const result = getStatementTypes(sql, dialect)
+    const result = getStatementTypes(parserSql(sql, dialect), dialect)
     if (!Array.isArray(result?.statements) || result.statement_count !== result.statements.length) {
       return { ...classifyFallback(sql, dialect), parseError: "SQL parser returned an invalid statement list" }
     }

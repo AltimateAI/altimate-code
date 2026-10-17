@@ -20,6 +20,12 @@ import { testEffect } from "../lib/effect"
 
 const evaluateRequest = PermissionEvaluate.evaluateRequest
 const it = testEffect(CrossSpawnSpawner.defaultLayer)
+import { Tool } from "../../src/tool/tool"
+// altimate_change start — shell outcome signals at the shared tool wrapper
+import { spyOn } from "bun:test"
+import { Telemetry } from "../../src/altimate/telemetry"
+import * as DebugMode from "../../src/altimate/debug/mode"
+// altimate_change end
 
 // The shared tool fixture stubs Truncate with a no-op so most tool tests don't
 // truncate. Truncation tests need the REAL Truncate service, so build the tool
@@ -848,4 +854,250 @@ describe("tool.bash PATH injection", () => {
     })
   })
 })
+// altimate_change end
+
+// altimate_change start — shell failures are telemetry, not SDK tool errors
+describe("tool.bash failure telemetry", () => {
+  const traceback = `Traceback (most recent call last):
+  File "/tmp/ema.py", line 13, in <module>
+    else: g,f,cls=r['grant_date'],r['filing_date'],r['cls']
+                  ~^^^^^^^^^^^^^^
+KeyError: 'grant_date'
+`
+  const missingModule = `Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'sklearn'
+`
+
+  test("records a nonzero exit without an SDK error and preserves output", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({ command: "echo 'failed command'; exit 7", description: "Fail a command" }, ctx)
+      expect(result.metadata.exit).toBe(7)
+      expect(result.metadata.exit_code).toBe(7)
+      expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBeUndefined()
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+      expect(result.output).toBe("failed command\n")
+    })
+  })
+
+  test.each([
+    ["grep no match", "printf 'haystack\\n' | grep needle"],
+    ["diff differences", "diff <(printf 'left\\n') <(printf 'right\\n')"],
+  ])("records %s exit one without an SDK error", async (_, command) => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({ command, description: "Compare ordinary command results" }, ctx)
+      expect(result.metadata.exit_code).toBe(1)
+      expect(result.metadata.success).toBe(false)
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+    })
+  })
+
+  test("treats a trailing Python traceback on stdout with exit zero as data", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({ command: `cat <<'TRACEBACK'\n${traceback}TRACEBACK`, description: "Show traceback" }, ctx)
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(result.output).toBe(traceback)
+    })
+  })
+
+  test("keeps a stderr traceback followed by successful stdout successful at exit zero", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `cat >&2 <<'TRACEBACK'\n${missingModule}TRACEBACK\necho 'next command succeeded'`,
+        description: "Show missing module and subsequent output",
+      }, ctx)
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(result.output).toContain("next command succeeded")
+    })
+  })
+
+  test("records a final stderr traceback with empty stdout as failure telemetry at exit zero", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `cat >&2 <<'TRACEBACK'\n${missingModule}TRACEBACK`,
+        description: "Show a final stderr traceback",
+      }, ctx)
+      expect(result.metadata.exit_code).toBe(0)
+      expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBe("stderr_traceback")
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+    })
+  })
+
+  test("records a stderr traceback and nonzero exit despite stdout output", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `echo 'command started'; cat >&2 <<'TRACEBACK'\n${traceback}TRACEBACK\nexit 1`,
+        description: "Fail after stdout and stderr output",
+      }, ctx)
+      expect(result.metadata.exit_code).toBe(1)
+      expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBe("stderr_traceback")
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+    })
+  })
+
+  test("keeps a recovered stderr traceback successful at exit zero", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `cat >&2 <<'TRACEBACK'\n${traceback}Recovered successfully\nTRACEBACK`,
+        description: "Show a recovered stderr traceback",
+      }, ctx)
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.status).not.toBe("error")
+    })
+  })
+
+  test("successful output mentioning errors or a recovered stdout traceback stays successful", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `cat <<'TRACEBACK'\n${traceback}Recovered successfully\nTRACEBACK`,
+        description: "Show a recovered traceback",
+      }, ctx)
+      expect(result.metadata.exit).toBe(0)
+      expect(result.status).not.toBe("error")
+    })
+  })
+})
+// altimate_change end
+
+// altimate_change start — ordinary shell exits and execution failures have distinct signals
+test.each([
+  {
+    name: "grep no-match has a success hint and trace without core_failure",
+    command: `seq 1 ${Truncate.MAX_LINES + 10}; printf 'haystack\\n' | grep needle`,
+    timeout: undefined,
+    failureKind: undefined,
+    outcome: "success",
+    exitCode: 1,
+  },
+  {
+    name: "timeout retains a failed hint, error trace, and core_failure",
+    command: `seq 1 ${Truncate.MAX_LINES + 10}; sleep 30`,
+    timeout: 1000,
+    failureKind: "timeout",
+    outcome: "error",
+    exitCode: null,
+  },
+])("tool.bash $name", async ({ command, timeout, failureKind, outcome, exitCode }) => {
+  await provideInstance(projectRoot, async () => {
+    const bash = await initToolWithTruncate(BashTool)
+    const events: Telemetry.Event[] = []
+    const traces: string[] = []
+    const track = spyOn(Telemetry, "track").mockImplementation((event) => {
+      events.push(event)
+    })
+    const trace = spyOn(DebugMode, "traceToolCall").mockReturnValue((status) => {
+      traces.push(status)
+    })
+    try {
+      const result = await bash.execute({ command, timeout, description: "Generate output then finish the command" }, ctx)
+      expect(result.metadata.exit_code).toBe(exitCode)
+      expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBe(failureKind)
+      expect(result.status).not.toBe("error")
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain(outcome === "error"
+        ? "The tool call failed but the output was truncated"
+        : "The tool call succeeded but the output was truncated")
+      expect(result.output).not.toContain(outcome === "error" ? "The tool call succeeded" : "The tool call failed")
+      expect(traces).toEqual([outcome])
+      expect(events.some((event) => event.type === "tool_call" && event.tool_name === "bash" && event.status === "error"))
+        .toBe(outcome === "error")
+      expect(events.some((event) => event.type === "core_failure" && event.tool_name === "bash")).toBe(outcome === "error")
+      expect(await Filesystem.readText(result.metadata.outputPath)).toContain(`${Truncate.MAX_LINES + 10}\n`)
+    } finally {
+      trace.mockRestore()
+      track.mockRestore()
+    }
+  })
+})
+// altimate_change end
+
+// altimate_change start — draining pipes must remain bounded after the shell exits
+test("tool.bash returns promptly after shell exit while a background child holds output open", async () => {
+  await using tmp = await tmpdir()
+  await provideInstance(tmp.path, async () => {
+    const bash = await initTool(BashTool)
+    const started = Date.now()
+    try {
+      const result = await bash.execute({
+        command: "sh -c 'sleep 30 & echo done; echo $! > background.pid'",
+        description: "Leave a child holding the output pipe",
+        timeout: 1000,
+      }, ctx)
+      expect(result.output).toBe("done\n")
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.exit_code).toBe(0)
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.metadata.error).toBeUndefined()
+      expect(result.status).not.toBe("error")
+      expect(Date.now() - started).toBeLessThan(1500)
+    } finally {
+      const pid = Number(await fs.readFile(path.join(tmp.path, "background.pid"), "utf8").catch(() => ""))
+      if (pid) {
+        try {
+          process.kill(pid, "SIGTERM")
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+        }
+      }
+    }
+  })
+})
+
+test("tool.bash still terminates a foreground command after its timeout", async () => {
+  await provideInstance(projectRoot, async () => {
+    const bash = await initTool(BashTool)
+    const result = await bash.execute({ command: "sleep 30", description: "Time out a command", timeout: 20 }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.failure_kind).toBe("timeout")
+    expect(result.metadata.exit_code).toBeNull()
+    expect(result.metadata.error).toBeUndefined()
+    expect(result.status).not.toBe("error")
+    expect(result.output).toContain("exceeding timeout 20 ms")
+    expect(() => Tool.assertSuccess(result)).not.toThrow()
+  })
+}, 3000)
+
+test("tool.bash handles an already-aborted command without losing the exit event", async () => {
+  await provideInstance(projectRoot, async () => {
+    const bash = await initTool(BashTool)
+    const result = await bash.execute({ command: "sleep 2", description: "Abort a command", timeout: 20 }, {
+      ...ctx, abort: AbortSignal.abort(),
+    })
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.failure_kind).toBe("abort")
+    expect(result.metadata.exit_code).toBeNull()
+    expect(result.metadata.error).toBeUndefined()
+    expect(result.status).not.toBe("error")
+    expect(result.output).toContain("User aborted the command")
+    expect(() => Tool.assertSuccess(result)).not.toThrow()
+  })
+}, 3000)
 // altimate_change end

@@ -2,6 +2,7 @@ import { describe, test, expect, spyOn } from "bun:test"
 import { Effect, Result, Schema } from "effect"
 import path from "node:path"
 import { BatchTool } from "../../src/tool/batch"
+import { Tool } from "../../src/tool/tool"
 import { ToolRegistry } from "../../src/tool/registry"
 import { Session } from "../../src/session"
 import { MessageID, SessionID } from "../../src/session/schema"
@@ -21,7 +22,97 @@ function safeParse<S extends Schema.Decoder<unknown>>(schema: S, input: unknown)
     : { success: false as const, error: result.failure }
 }
 
+describe("BatchTool: inner result errors", () => {
+  test.each([
+    { name: "explicit error envelope", status: "error" as const, metadata: {} },
+    { name: "backend error metadata", metadata: { error: "Query failed" } },
+  ])("does not count an inner $name as successful", async ({ status, metadata }) => {
+    const tool = await getToolInfo()
+    const registry = spyOn(ToolRegistry, "tools").mockResolvedValue([{
+      id: "sql_execute",
+      registrySource: undefined,
+      description: "test query tool",
+      parameters: Schema.Unknown,
+      execute: () => Effect.succeed({ title: "Query", output: "Query failed", status, metadata }),
+    }])
+    const updatePart = Object.assign(async (part: Parameters<typeof Session.updatePart>[0]) => part, Session.updatePart)
+    const updates = spyOn(Session, "updatePart").mockImplementation(updatePart)
+    try {
+      const result = await tool.execute({ tool_calls: [{ tool: "sql_execute", parameters: {} }] }, {
+        sessionID: SessionID.make("ses_batch_errors"),
+        messageID: MessageID.make("msg_batch_errors"),
+        agent: "build",
+        abort: AbortSignal.any([]),
+        messages: [],
+      })
+      expect(result.metadata.successful).toBe(0)
+      expect(result.metadata.failed).toBe(1)
+      expect(result.metadata.details).toEqual([{ tool: "sql_execute", success: false }])
+      expect(result.output).toBe("Executed 0/1 tools successfully. 1 failed.")
+      const parts = updates.mock.calls.map(([part]) => part)
+      expect(parts.some((part) => part.type === "tool" && part.state.status === "completed")).toBe(false)
+      expect(parts.at(-1)).toMatchObject({
+        type: "tool",
+        state: { status: "error", error: "Query failed" },
+      })
+    } finally {
+      updates.mockRestore()
+      registry.mockRestore()
+    }
+  })
+})
+
 describe("BatchTool: file lessons", () => {
+  test.each(["ok", "error"] as const)("appends lessons before checking an inner %s result", async (status) => {
+    const tool = await getToolInfo()
+    const order: string[] = []
+    const innerResult = { title: "File", output: "Original output", status, metadata: {} }
+    const registry = spyOn(ToolRegistry, "tools").mockResolvedValue([{
+      id: "read",
+      registrySource: undefined,
+      description: "test file tool",
+      parameters: Schema.Unknown,
+      execute: () => Effect.succeed(innerResult),
+    }])
+    const updatePart = Object.assign(async (part: Parameters<typeof Session.updatePart>[0]) => part, Session.updatePart)
+    const updates = spyOn(Session, "updatePart").mockImplementation(updatePart)
+    const assertSuccess = Tool.assertSuccess
+    const check = spyOn(Tool, "assertSuccess").mockImplementation((result) => {
+      order.push("assertSuccess")
+      assertSuccess(result)
+    })
+    const lessons = {
+      async appendFileLessons(_session: string, _tool: string, _args: unknown, result: Tool.ExecuteResult) {
+        // An asynchronous lesson hook must finish before the SDK boundary checks the result.
+        await Promise.resolve()
+        result.output += "\nFile lesson"
+        order.push("appendFileLessons")
+      },
+    }
+    try {
+      const result = await tool.execute({ tool_calls: [{ tool: "read", parameters: { filePath: "report.sql" } }] }, {
+        sessionID: SessionID.make("ses_batch_order"),
+        messageID: MessageID.make("msg_batch_order"),
+        agent: "build",
+        abort: AbortSignal.any([]),
+        messages: [],
+        extra: { lessons },
+      })
+      expect(order).toEqual(["appendFileLessons", "assertSuccess"])
+      expect(check).toHaveBeenCalledWith(innerResult)
+      expect(result.metadata.failed).toBe(status === "error" ? 1 : 0)
+      expect(updates.mock.calls.at(-1)?.[0]).toMatchObject({
+        state: status === "error"
+          ? { status: "error", error: "Original output\nFile lesson" }
+          : { status: "completed", output: "Original output\nFile lesson" },
+      })
+    } finally {
+      check.mockRestore()
+      updates.mockRestore()
+      registry.mockRestore()
+    }
+  })
+
   test.each(["read", "edit", "write", "apply_patch"])("appends approved lessons to the inner %s result", async (toolName) => {
     await using tmp = await tmpdir()
     const sessionID = SessionID.make("ses_batch_lessons")

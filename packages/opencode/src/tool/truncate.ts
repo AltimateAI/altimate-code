@@ -24,7 +24,9 @@ export const GLOB = path.join(TRUNCATION_DIR, "*")
 
 export type Result = { content: string; truncated: false } | { content: string; truncated: true; outputPath: string }
 
-export type Options = TruncateCore.Options
+// altimate_change start — keep failed results failed in their truncation hint
+export type Options = TruncateCore.Options & { outcome?: "success" | "error" }
+// altimate_change end
 
 // altimate_change start — upstream_fix: named task allow-lists must not suggest denied subagents.
 async function taskSubagent(agent?: Agent.Info) {
@@ -118,9 +120,10 @@ export const layer = Layer.effect(
       const file = yield* write(text)
 
       const subagent = yield* Effect.promise(() => taskSubagent(agent))
+      const outcome = options.outcome === "error" ? "failed" : "succeeded"
       const hint = subagent
-        ? `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse the Task tool to have ${subagent} agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
-        : `The tool call succeeded but the output was truncated. Full output saved to: ${file}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
+        ? `The tool call ${outcome} but the output was truncated. Full output saved to: ${file}\nUse the Task tool to have ${subagent} agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
+        : `The tool call ${outcome} but the output was truncated. Full output saved to: ${file}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
 
       return {
         content: TruncateCore.assemble(preview, hint, direction),

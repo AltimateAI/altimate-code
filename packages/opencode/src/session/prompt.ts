@@ -2837,6 +2837,7 @@ export namespace SessionPrompt {
             await input.lessons?.appendFileLessons(ctx.sessionID, item.id, args, stamped)
             // altimate_change end
             // altimate_change start — return the source-stamped output
+            Tool.assertSuccess(stamped)
             return stamped
             // altimate_change end
           } finally {
