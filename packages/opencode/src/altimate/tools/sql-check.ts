@@ -3,30 +3,11 @@ import { Tool } from "../../tool/tool"
 import { zodToJsonSchema } from "../tool-zod-compat"
 import * as Precedence from "../workspace/precedence"
 import * as Registry from "../native/connections/registry"
-import { classifyAndCheck, isSingleQuery, REMOTE_EXECUTE_CALL } from "./sql-classify"
+import { classifyAndCheck, isSingleQuery } from "./sql-classify"
 import { maskSql, tokenizeSql } from "./sql-tokenize"
+import { sqlFunctionCalls } from "./sql-functions"
+import { hasSideEffectFunction } from "./sql-function-policy"
 import { executeQuery, type QueryContext } from "../native/query-execution"
-
-// Function calls that can change state outside the read-only transaction. PostgreSQL administrative,
-// WAL, replication, statistics-reset, large-object, file and dblink functions are denied as whole classes:
-// every `pg_*` call is refused unless it is a known pure read (type/size/catalog inspection, stat getters,
-// LSN and snapshot reads), so a new server-control function cannot slip through one name at a time.
-const PURE_PG_FUNCTIONS =
-  "typeof|size_pretty|column_size|\\w*_size|backend_pid|is_in_recovery|get_\\w*|describe_object|identify_object\\w*|" +
-  "input_is_valid|trigger_depth|has_role|\\w*_is_visible|current_\\w*_lsn|last_\\w*_lsn|wal_lsn_diff|walfile_name\\w*|" +
-  "split_walfile_name|postmaster_start_time|conf_load_time|my_temp_schema|is_other_temp_schema|jit_available|" +
-  "collation_for|tablespace_\\w*|relation_filepath|relation_filenode|filenode_relation|char_to_encoding|" +
-  "encoding_to_char|client_encoding|column_compression|xact_commit_timestamp\\w*|current_xact_id\\w*|current_snapshot|" +
-  "snapshot_\\w*|visible_in_snapshot|notification_queue_usage|listening_channels|blocking_pids|" +
-  "safe_snapshot_blocking_pids|isolation_test_session_is_blocked|stat_(?!reset)\\w*|statio_\\w*|mcv_list_\\w*|" +
-  "index\\w*_has_property|options_to_table|settings_get_flags|size_bytes|lsn\\w*|partition_\\w*|" +
-  "table_is_visible|has_\\w*_privilege|database_collation_actual_version|" +
-  "collation_actual_version|available_extension\\w*|control_\\w*|cursor\\w*|event_trigger_\\w*"
-const SIDE_EFFECT_FUNCTION_CALL = new RegExp(
-  "\\b(nextval|setval|set_config|load_extension|writefile|dblink\\w*|lo_\\w*|lowrite|loread|checkpoint|force_checkpoint|query|" +
-    `pg_(?!(?:${PURE_PG_FUNCTIONS})\\s*\\()\\w*)\\s*\\(`,
-  "i",
-)
 
 const column = z
   .string()
@@ -141,18 +122,10 @@ export function readSql(sql: string, dialect?: string): string {
   // embedding user SQL, even when the parser reports a query category.
   const { tokens, complete } = tokenizeSql(sql, dialect)
   const masked = maskSql(tokens)
-  // SELECT alone does not make sequence setters, extension loaders or file writers read-only.
-  // Preserve quoted function identifiers while hiding string literals and comments.
-  const functions = maskSql(tokens, true)
-  // The tokenizer does not decode PostgreSQL U&"..." function names. Refuse
-  // those calls so Unicode escapes cannot hide a side-effect function.
-  const escapedFunction = tokens.some(
-    (token, i) =>
-      token.kind === "identifier" &&
-      token.text.startsWith('"') &&
-      tokens[i - 1]?.kind === "code" &&
-      /(?:^|[^\w$])U&$/i.test(tokens[i - 1].text) &&
-      /^\s*(?:UESCAPE\s+)?\(/i.test(maskSql(tokens.slice(i + 1))),
+  // Keep sql_check's existing stricter ban on dynamic query(), even when the
+  // classifier can prove a literal body read-only. All calls use real code '(' tokens.
+  const unsafeFunction = sqlFunctionCalls(sql, dialect).some(
+    (call) => call.escaped || call.name === "query" || hasSideEffectFunction(call.name),
   )
   const body = masked.trim().replace(/;$/, "").trim()
   let depth = 0
@@ -166,7 +139,7 @@ export function readSql(sql: string, dialect?: string): string {
     queryType !== "read" ||
     !isSingleQuery(sql, dialect) ||
     !complete ||
-    escapedFunction ||
+    unsafeFunction ||
     !balanced ||
     depth !== 0 ||
     !/^(SELECT|WITH)\b/i.test(body) ||
@@ -174,20 +147,7 @@ export function readSql(sql: string, dialect?: string): string {
     /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|COPY|ATTACH|DETACH|PRAGMA|VACUUM|CALL|DO|INTO|INSTALL|LOAD|EXPORT|IMPORT|GRANT|REVOKE)\b/i.test(
       body,
     ) ||
-    /\bREPLACE\b(?!\s*\()/i.test(body) ||
-    /\b(nextval|setval|set_config|load_extension|writefile|dblink_exec|lo_import|lo_export|lo_create|lo_unlink|lo_put|pg_write_file|pg_append_file|pg_file_write|pg_file_rename|pg_file_unlink|pg_advisory_lock|pg_advisory_xact_lock)\s*\(/i.test(
-      functions,
-    ) ||
-    // PostgreSQL Unicode-escaped identifiers can spell a denied function without its literal name.
-    /\bU&/i.test(functions) ||
-    /\bSYSTEM\$\w+\s*\(/i.test(functions) ||
-    // Session-state, backend-signalling and replication functions are callable from a plain SELECT.
-    /\b(pg_try_advisory\w*|pg_advisory_unlock\w*|pg_advisory_lock\w*|pg_advisory_xact\w*|pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_rotate_logfile|pg_promote|pg_switch_wal|pg_logical_emit_message|pg_create_\w*_replication_slot|pg_drop_replication_slot|pg_replication_slot_advance|pg_replication_origin_\w+|dblink|dblink_\w+|pg_notify|pg_stat_reset\w*|pg_wal_replay_\w+|pg_logical_slot_\w+|pg_replication_slot_\w+|get_lock|release_lock|release_all_locks|is_free_lock|is_used_lock|master_pos_wait|source_pos_wait|sleep|benchmark|pg_xlog_replay_\w+|pg_log_backend_memory_contexts|pg_create_restore_point|pg_backup_\w+|pg_start_backup|pg_stop_backup|lo_from_bytea)\s*\(/i.test(
-      functions,
-    ) ||
-    SIDE_EFFECT_FUNCTION_CALL.test(functions) ||
-    // DuckDB attachments run these statements remotely, outside the local read-only transaction.
-    REMOTE_EXECUTE_CALL.test(functions)
+    /\bREPLACE\b(?!\s*\()/i.test(body)
   ) {
     throw new Error(
       "sql_check only accepts a single read-only SELECT (or WITH ... SELECT); it never writes or fixes data.",

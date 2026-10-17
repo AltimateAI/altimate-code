@@ -5,10 +5,18 @@ type SqlToken = { kind: "code" | "comment" | "literal" | "identifier"; text: str
 export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]; complete: boolean } {
   const tokens: SqlToken[] = []
   const mysqlComments = !dialect || /^(mysql|mariadb)$/i.test(dialect)
+  const hashComments = /^(mysql|mariadb|bigquery)$/i.test(dialect ?? "")
+  const clickhouseComments = /^clickhouse$/i.test(dialect ?? "")
+  // Only known LF-only dialects may keep code after CR inside a comment.
+  const lineEnding = /^(mysql|mariadb|sqlite|clickhouse)$/i.test(dialect ?? "") ? /\n/ : /[\r\n]/
+  // Only known nesting dialects can hide another /* ... */ level. Otherwise,
+  // expose code that could execute after the first closing delimiter.
+  const nestedComments = /^(postgres|duckdb|sqlserver|tsql|mssql|clickhouse|spark|databricks)$/i.test(dialect ?? "")
   const dollarQuotes = /^(postgres|redshift|duckdb|snowflake)$/i.test(dialect ?? "")
-  // PostgreSQL backticks are operators; PostgreSQL/DuckDB brackets contain array expressions.
-  const backtickIdentifiers = !/^(postgres|duckdb)$/i.test(dialect ?? "")
-  const bracketIdentifiers = !/^(postgres|duckdb)$/i.test(dialect ?? "")
+  // Quoting is dialect-specific: brackets can contain executable array expressions,
+  // and PostgreSQL backticks can be operators. Unknown dialects keep both visible.
+  const backtickIdentifiers = /^(mysql|mariadb|sqlite|bigquery|clickhouse|spark|databricks|hive)$/i.test(dialect ?? "")
+  const bracketIdentifiers = /^(sqlserver|tsql|mssql|sqlite)$/i.test(dialect ?? "")
   let complete = true
   let i = 0
   let code = 0
@@ -17,13 +25,14 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
     let kind: SqlToken["kind"] | undefined
     // MySQL requires whitespace/control after --. Keep ambiguous arithmetic visible
     // to the write-clause checks even when another dialect treats it as a comment.
-    if (sql.startsWith("--", i) && (!mysqlComments || i + 2 === sql.length || /[\s\x00-\x1f]/.test(sql[i + 2]))) {
+    if (
+      (sql.startsWith("--", i) && (!mysqlComments || i + 2 === sql.length || /[\s\x00-\x1f]/.test(sql[i + 2]))) ||
+      (hashComments && sql[i] === "#") ||
+      (clickhouseComments && (sql.startsWith("//", i) || sql.startsWith("# ", i) || sql.startsWith("#!", i)))
+    ) {
       kind = "comment"
-      // PostgreSQL also ends line comments at CR. Keep following code visible
-      // when the dialect is unknown; other dialects retain their LF handling.
-      const newline = !dialect || /^(postgres|duckdb)$/i.test(dialect) ? /[\r\n]/ : /\n/
-      const end = sql.slice(i + 2).search(newline)
-      i = end < 0 ? sql.length : i + 2 + end
+      const end = sql.slice(i + 1).search(lineEnding)
+      i = end < 0 ? sql.length : i + 1 + end
     } else if (sql.startsWith("/*", i)) {
       // MySQL/MariaDB execute these comments. Generic SQL parsers discard them,
       // so they cannot establish that a query is read-only or scratch-confined.
@@ -32,7 +41,7 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
       let depth = 1
       i += 2
       while (i < sql.length && depth) {
-        if (sql.startsWith("/*", i)) {
+        if (nestedComments && sql.startsWith("/*", i)) {
           depth++
           i += 2
         } else if (sql.startsWith("*/", i)) {
@@ -50,6 +59,15 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
         i += escaped ? 2 : 1
         let closed = false
         while (i < sql.length) {
+          // Ordinary strings in these engines can escape their closing quote.
+          // MySQL modes can disable that behavior (and make double quotes
+          // identifiers), so neither interpretation proves a read-only query.
+          if (
+            sql[i] === "\\" &&
+            !escaped &&
+            ((quote === "'" && /^(mysql|mariadb|clickhouse|snowflake)$/i.test(dialect ?? "")) ||
+              (quote === '"' && /^(mysql|mariadb)$/i.test(dialect ?? "")))
+          ) complete = false
           if (escaped && sql[i] === "\\") {
             i += 2
             continue
