@@ -158,11 +158,14 @@ const nativeLayer = (config: Config) =>
   Layer.effect(
     Sqlite.Native,
     Effect.gen(function* () {
+      // altimate_change start — upstream_fix: Bun honours readwrite/create over readonly, so a read-only open
+      // with the defaults could still write; read-only now disables both.
       const native = new Database(config.filename, {
         readonly: config.readonly,
-        readwrite: config.readwrite ?? true,
-        create: config.create ?? true,
+        readwrite: config.readonly === true ? false : (config.readwrite ?? true),
+        create: config.readonly === true ? false : (config.create ?? true),
       })
+      // altimate_change end
       yield* Effect.addFinalizer(() => Effect.sync(() => native.close()))
       // altimate_change start — upstream_fix: the WAL switch needs a write lock and can fail at once with
       // SQLITE_BUSY, so install the busy handler first and serialize the switch across processes.
