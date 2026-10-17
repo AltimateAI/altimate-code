@@ -44,12 +44,15 @@ import {
 import { currentAttachSnapshot } from "@/altimate/workspace/attach-snapshot"
 import {
   accountScope,
+  connectionLine,
   loadStatusView,
   menuStatusLine,
   rowLine,
   statusHeadline,
   type IntegrationRow,
+  type StatusView,
 } from "@/altimate/workspace/status-view"
+import { chooseConnection, type ConnectionChoice } from "@/altimate/workspace/connection-choice"
 // altimate_change end
 import { createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js"
 import {
@@ -2327,6 +2330,14 @@ async function showWorkspaceStatus(
       category: "Integrations",
     })
   }
+  if (view.connectionsError) {
+    rows.push({
+      title: "The connections in use could not be read",
+      value: "key:connections-unread",
+      description: `${view.connectionsError}. Re-read to try again.`,
+      category: "Integrations",
+    })
+  }
   for (const row of view.rows) {
     rows.push({
       title: `${STATE_MARK[row.state]} ${row.name}`,
@@ -2334,6 +2345,16 @@ async function showWorkspaceStatus(
       description: rowLine(row),
       category: "Integrations",
     })
+    // The one row here that acts: Enter opens the connection picker.
+    if (row.connection) {
+      const line = connectionLine(row.connection)
+      rows.push({
+        title: `    ⇄ ${line.title}`,
+        value: `conn:${row.id}`,
+        description: line.note,
+        category: "Integrations",
+      })
+    }
     for (const line of rowDetails(row)) {
       rows.push({
         title: `    ${line.key}`,
@@ -2397,11 +2418,94 @@ async function showWorkspaceStatus(
           showWorkspaceStatus(api, directory, bound, mine).catch((err) => reportFlowFailure(api, err))
           return
         }
+        const value = String(option.value)
+        const picked = value.startsWith("conn:") ? view.rows.find((r) => `conn:${r.id}` === value) : undefined
+        if (picked?.connection) {
+          showConnectionPicker(api, directory, bound, view, picked, picked.connection, mine)
+          return
+        }
         // Integration and key rows are information, not actions: choosing one
         // keeps the view open (it opens focused on the first integration row).
-        const value = String(option.value)
         if (value.startsWith("key:") || value.startsWith("row:")) return
         api.ui.dialog.clear()
+      }}
+    />
+  ))
+}
+
+/** Choose the connection one integration uses. Lists the integration's usable
+ * connections, the one in use marked; incomplete ones are counted, not offered,
+ * since choosing one would turn the integration off. A choice is recorded where
+ * the engine reads it and takes effect on the next message, when the engine
+ * starts again with it. `from` is the Status view the picker opened from. */
+function showConnectionPicker(
+  api: TuiPluginApi,
+  directory: string,
+  bound: BoundWorkspace,
+  view: StatusView,
+  row: IntegrationRow,
+  connection: ConnectionChoice,
+  from: symbol,
+): void {
+  if (ownedDialog !== from) return
+  const { options: all, inUse } = connection
+  const inUseId = inUse.kind === "chosen" || inUse.kind === "default" ? inUse.connection.id : undefined
+  const offered = all.filter((o) => o.usable)
+  const incomplete = all.length - offered.length
+  const rows: { title: string; value: string; description: string; category: string }[] = offered.map((o) => ({
+    title: o.name,
+    value: `pick:${o.id}`,
+    description: [
+      o.remote ? "Remote" : "Local",
+      ...(o.id === inUseId ? [inUse.kind === "chosen" ? "in use, chosen" : "in use by default (lowest id)"] : []),
+    ].join(" · "),
+    category: "Connections",
+  }))
+  if (offered.length === 0)
+    rows.push({
+      title: "No usable connection",
+      value: "info:none",
+      description: "Add one, or complete one, on the web.",
+      category: "Connections",
+    })
+  if (incomplete > 0)
+    rows.push({
+      title: `${incomplete} incomplete connection${incomplete === 1 ? "" : "s"} not shown`,
+      value: "info:incomplete",
+      description: "Missing required fields; complete them on the web to choose them here.",
+      category: "Connections",
+    })
+  const back = () => showWorkspaceStatus(api, directory, bound, mine).catch((err) => reportFlowFailure(api, err))
+  const mine = replaceOwnedDialog(api, () => (
+    <api.ui.DialogSelect
+      title={`${row.name} · choose a connection`}
+      options={[
+        ...rows,
+        { title: "Back", value: "back", description: "Return to the integrations.", category: "Actions" },
+      ]}
+      current={inUseId ? `pick:${inUseId}` : (rows[0]?.value ?? "back")}
+      renderFilter={false}
+      onSelect={(option) => {
+        const value = String(option.value)
+        if (value.startsWith("info:")) return
+        if (value === "back") return void back()
+        const choice = offered.find((o) => `pick:${o.id}` === value)
+        if (!choice) return
+        if (inUse.kind === "chosen" && inUse.connection.id === choice.id) return void back()
+        try {
+          chooseConnection(view.workspace.id, row.id, choice.id)
+        } catch (err) {
+          api.ui.toast({
+            variant: "error",
+            message: `Could not record the connection: ${err instanceof Error ? err.message : String(err)}`,
+          })
+          return
+        }
+        api.ui.toast({
+          variant: "success",
+          message: `${row.name} uses "${choice.name}" from your next message.`,
+        })
+        back()
       }}
     />
   ))

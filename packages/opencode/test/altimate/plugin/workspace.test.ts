@@ -60,6 +60,7 @@ import { findNamesakes } from "../../../src/altimate/workspace/workspace-name"
 import { createRoot } from "solid-js"
 import * as Manage from "../../../src/altimate/workspace/manage"
 import * as StatusView from "../../../src/altimate/workspace/status-view"
+import * as ConnectionChoice from "../../../src/altimate/workspace/connection-choice"
 const originalIsConfigured = AltimateApi.isConfigured
 const originalGetCreds = AltimateApi.getCredentials
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
@@ -1237,6 +1238,154 @@ describe("/integrations", () => {
     await runIntegrations(tui, os.tmpdir())
     expect(read).toHaveBeenCalledTimes(1)
     expect(read.mock.calls[0]![1]).toMatchObject({ datamateId: 43 })
+  })
+
+  describe("choosing the connection an integration uses", () => {
+    const prod = { id: "9", name: "Jira prod", remote: true, usable: true }
+    const staging = { id: "12", name: "Jira staging", remote: true, usable: true }
+    const old = { id: "2", name: "Jira old", remote: true, usable: false }
+    type Choice = NonNullable<StatusView.IntegrationRow["connection"]>
+    const row = (id: string, name: string, connection?: Choice): StatusView.IntegrationRow => ({
+      id,
+      name,
+      state: "served",
+      extension: false,
+      declared: [`${id}_a`],
+      served: [`${id}_a`],
+      gaps: [],
+      unreported: [],
+      ...(connection ? { connection } : {}),
+    })
+    const view = (jira: Choice | undefined, over: Partial<StatusView.StatusView> = {}): StatusView.StatusView => ({
+      workspace: { id: "42", name: "analytics" },
+      engineVersion: "0.7.3",
+      at: Date.now(),
+      served: 2,
+      declared: 2,
+      gaps: 0,
+      extServed: 0,
+      rows: [row("jira", "Jira", jira), row("altimate", "Altimate")],
+      extras: [],
+      selectionChanged: false,
+      ...over,
+    })
+    const settle = async () => {
+      for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0))
+    }
+    async function open(jira: Choice | undefined, over: Partial<StatusView.StatusView> = {}) {
+      linked(binding)
+      engine("0.7.3")
+      const read = spyOn(StatusView, "loadStatusView").mockResolvedValue(view(jira, over))
+      const choose = spyOn(ConnectionChoice, "chooseConnection").mockImplementation(() => {})
+      spies.push(read, choose)
+      const { tui, h } = harness()
+      await runIntegrations(tui, os.tmpdir())
+      const status = h.selects.at(-1)!
+      return { h, read, choose, status }
+    }
+
+    test("an integration that uses one chosen connection shows it under its row; the others show none", async () => {
+      const { status } = await open({ integrationId: "jira", options: [prod, staging], inUse: { kind: "default", connection: prod } })
+      const values = status.options.map((o) => o.value)
+      expect(values.filter((v) => String(v).startsWith("conn:"))).toEqual(["conn:jira"])
+      // Directly under its integration.
+      expect(values[values.indexOf("row:jira") + 1]).toBe("conn:jira")
+      const line = status.options.find((o) => o.value === "conn:jira")!
+      expect(line.title).toBe("    ⇄ Jira prod")
+      expect(line.description).toBe("default · Remote · Enter to change")
+    })
+
+    test("Enter opens the picker: usable connections, the one in use marked and focused, incomplete ones counted", async () => {
+      const { h, status } = await open({
+        integrationId: "jira",
+        options: [old, prod, staging],
+        inUse: { kind: "default", connection: prod },
+      })
+      status.onSelect({ value: "conn:jira" })
+      const picker = h.selects.at(-1)!
+      expect(picker.title).toBe("Jira · choose a connection")
+      expect(picker.options.map((o) => o.value)).toEqual(["pick:9", "pick:12", "info:incomplete", "back"])
+      expect(picker.options[0]!.description).toBe("Remote · in use by default (lowest id)")
+      expect(picker.options[1]!.description).toBe("Remote")
+      expect(picker.options[2]!.title).toBe("1 incomplete connection not shown")
+      expect(picker.current).toBe("pick:9")
+    })
+
+    test("choosing records the choice for the workspace, says when it applies, and shows the view again", async () => {
+      const { h, read, choose, status } = await open({
+        integrationId: "jira",
+        options: [prod, staging],
+        inUse: { kind: "default", connection: prod },
+      })
+      status.onSelect({ value: "conn:jira" })
+      h.selects.at(-1)!.onSelect({ value: "pick:12" })
+      expect(choose).toHaveBeenCalledWith("42", "jira", "12")
+      expect(h.toasts).toEqual(['Jira uses "Jira staging" from your next message.'])
+      await settle()
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(h.selects.at(-1)!.title).toContain("analytics")
+    })
+
+    test("choosing the default makes it the explicit choice", async () => {
+      const { h, choose, status } = await open({
+        integrationId: "jira",
+        options: [prod, staging],
+        inUse: { kind: "default", connection: prod },
+      })
+      status.onSelect({ value: "conn:jira" })
+      h.selects.at(-1)!.onSelect({ value: "pick:9" })
+      expect(choose).toHaveBeenCalledWith("42", "jira", "9")
+    })
+
+    test("choosing the connection already chosen writes nothing and goes back", async () => {
+      const { h, read, choose, status } = await open({
+        integrationId: "jira",
+        options: [prod, staging],
+        inUse: { kind: "chosen", connection: prod },
+      })
+      status.onSelect({ value: "conn:jira" })
+      h.selects.at(-1)!.onSelect({ value: "pick:9" })
+      expect(choose).not.toHaveBeenCalled()
+      expect(h.toasts).toEqual([])
+      await settle()
+      expect(read).toHaveBeenCalledTimes(2)
+    })
+
+    test("a choice that cannot be recorded says why and stays on the picker", async () => {
+      const { h, read, choose, status } = await open({
+        integrationId: "jira",
+        options: [prod, staging],
+        inUse: { kind: "default", connection: prod },
+      })
+      choose.mockImplementation(() => {
+        throw new Error("settings.json does not hold a JSON object")
+      })
+      status.onSelect({ value: "conn:jira" })
+      const pickers = h.selects.length
+      h.selects.at(-1)!.onSelect({ value: "pick:12" })
+      expect(h.toasts).toEqual(["Could not record the connection: settings.json does not hold a JSON object"])
+      await settle()
+      expect(read).toHaveBeenCalledTimes(1)
+      expect(h.selects).toHaveLength(pickers)
+    })
+
+    test("with no usable connection the picker says where to add one, and offers nothing to pick", async () => {
+      const { h, status } = await open({ integrationId: "jira", options: [old], inUse: { kind: "none" } })
+      expect(status.options.find((o) => o.value === "conn:jira")!.title).toBe("    ⇄ no usable connection")
+      status.onSelect({ value: "conn:jira" })
+      const picker = h.selects.at(-1)!
+      expect(picker.options.map((o) => o.value)).toEqual(["info:none", "info:incomplete", "back"])
+      const count = h.selects.length
+      picker.onSelect({ value: "info:none" })
+      expect(h.selects).toHaveLength(count)
+    })
+
+    test("connections that could not be read are said once, at the top", async () => {
+      const { status } = await open(undefined, { connectionsError: "the connections could not be read from Altimate" })
+      expect(status.options[0]!.value).toBe("key:connections-unread")
+      expect(status.options[0]!.description).toBe("the connections could not be read from Altimate. Re-read to try again.")
+      expect(status.options.some((o) => String(o.value).startsWith("conn:"))).toBe(false)
+    })
   })
 
   test("a usable engine opens the Status view", async () => {

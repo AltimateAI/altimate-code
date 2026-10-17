@@ -48,6 +48,8 @@ export const syncInternals: {
   now?: () => number
   /** Tests keep the attach snapshot out of the real state directory. */
   persistSnapshot?: (directory: string, snapshot: AttachSnapshot) => void
+  /** A workspace's connection choices (`choiceFingerprint`). */
+  choices?: (workspaceId: string) => string | null
   mcp?: {
     status: () => Promise<McpStatus>
     add: (name: string, cfg: LocalMcpConfig | McpEntry) => Promise<unknown>
