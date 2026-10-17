@@ -222,10 +222,41 @@ async function close() {
   return null;
 }
 
+// Guard setup, result consumption and cleanup share one serialized request.
+// Separate requests would let another caller run between setup and cleanup.
+async function withReadOnly(p, execute) {
+  if (engine === "sqlite") {
+    const previous = sqliteDb.query("PRAGMA query_only").get().query_only;
+    sqliteDb.exec("PRAGMA query_only = ON");
+    try {
+      return await execute();
+    } finally {
+      sqliteDb.exec("PRAGMA query_only = " + (previous ? "ON" : "OFF"));
+    }
+  }
+  const control = (sql) => all({ sql, connectionId: p.connectionId });
+  // The legacy binding has no autocommit getter. Implicit transactions receive
+  // different IDs; an explicit transaction keeps the same ID across statements.
+  // Refuse before BEGIN: a nested BEGIN would abort the caller's transaction.
+  const first = await control("SELECT txid_current() AS id");
+  const second = await control("SELECT txid_current() AS id");
+  if (first[0].id === second[0].id) {
+    throw new Error("DuckDB read-only execution cannot run inside an active transaction; finish it before running the query.");
+  }
+  await control("BEGIN TRANSACTION READ ONLY");
+  try {
+    return await execute();
+  } finally {
+    await control("ROLLBACK");
+  }
+}
+
 async function handle(req) {
   if (req.op === "open") return open(req.payload);
-  if (req.op === "all") return all(req.payload);
-  if (req.op === "run") return run(req.payload);
+  if (req.op === "all" || req.op === "run") {
+    const execute = () => req.op === "all" ? all(req.payload) : run(req.payload);
+    return req.payload.readOnly ? withReadOnly(req.payload, execute) : execute();
+  }
   if (req.op === "disconnect") return disconnect(req.payload);
   if (req.op === "close") return close();
   throw new Error("unknown op " + req.op);

@@ -1,15 +1,21 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { Effect, Schema } from "effect"
+import { Effect, Layer, Schema } from "effect"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import path from "path"
-import { tmpdir } from "../../fixture/fixture"
+import { TestInstance, testInstanceStoreLayer, tmpdir } from "../../fixture/fixture"
 import { testEffect } from "../../lib/effect"
 import { initTool } from "../tool-fixture"
 import { Agent } from "../../../src/agent/agent"
 import { Permission } from "../../../src/permission"
+import { PermissionNext } from "../../../src/permission/next"
+import { Bus } from "../../../src/bus"
+import { Instance } from "../../../src/project/instance"
+import { SessionID } from "../../../src/session/schema"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { closeScratch, getScratch } from "../../../src/altimate/native/connections/scratch"
-import { checkSql, SqlCheckTool } from "../../../src/altimate/tools/sql-check"
+import { checkSql, readSql, SqlCheckTool } from "../../../src/altimate/tools/sql-check"
+import { maskSql, statementsOf, tokenizeSql } from "../../../src/altimate/tools/sql-tokenize"
 
 const statements = [
   "CREATE TABLE orders (id INTEGER, customer_id INTEGER, kind TEXT, amount REAL, note TEXT)",
@@ -732,7 +738,8 @@ for (const warehouse of ["sqlite_fixture", "scratch"] as const) {
       try {
         await checkSql({ warehouse, check: "grain", sql: leftSql, columns: ["id"], query_timeout_ms: 4321 })
         expect(execute.mock.calls.length).toBeGreaterThan(0)
-        for (const call of execute.mock.calls) expect(call[3]).toMatchObject({ noLimit: true, queryTimeoutMs: 4321 })
+        for (const call of execute.mock.calls)
+          expect(call[3]).toMatchObject({ readOnly: true, noLimit: true, queryTimeoutMs: 4321 })
       } finally {
         execute.mockRestore()
       }
@@ -992,3 +999,205 @@ test("DuckDB keys skips text probes for unsigned and huge integer types", async 
     expect(result.metadata.format_differences).toEqual([])
   }
 })
+
+test.each([undefined, "postgres"])("SQL comments ending at CR expose following statements for %s", (dialect) => {
+  const sql = "SELECT 1 -- comment\r; DELETE FROM orders"
+  expect(statementsOf(sql, dialect)).toEqual(["SELECT 1", "DELETE FROM orders"])
+  expect(() => readSql(sql, dialect)).toThrow(/single read-only SELECT/)
+})
+
+test.each(["postgres", "duckdb"])("array expressions remain visible to read-only validation for %s", (dialect) => {
+  const sql = "SELECT ARRAY[nextval('sequence')] AS values"
+  const { tokens, complete } = tokenizeSql(sql, dialect)
+  expect(complete).toBe(true)
+  expect(tokens.some((token) => token.kind === "identifier")).toBe(false)
+  expect(maskSql(tokens)).toContain("ARRAY[nextval(")
+  expect(() => readSql(sql, dialect)).toThrow(/single read-only SELECT/)
+})
+
+test("PostgreSQL backtick operators do not conceal calls from read-only validation", () => {
+  const sql = "SELECT 1 ` pg_cancel_backend(1) ` 2"
+  expect(maskSql(tokenizeSql(sql, "postgres").tokens)).toBe(sql)
+  expect(() => readSql(sql, "postgres")).toThrow(/single read-only SELECT/)
+})
+
+test.each(["[odd;name]", "`odd;name`"])(
+  "SQLite retains quoted identifier %s as data rather than executable SQL",
+  (identifier) => {
+    const sql = `SELECT ${identifier} AS value`
+    expect(statementsOf(sql, "sqlite")).toEqual([sql])
+    expect(tokenizeSql(sql, "sqlite").tokens).toContainEqual({ kind: "identifier", text: identifier })
+    expect(readSql(sql, "sqlite")).toBe(sql)
+  },
+)
+
+test.each([
+  "pg_cancel_backend(1)",
+  'pg_catalog."pg_terminate_backend" /* comment */ (1)',
+  "pg_logical_emit_message(false, 'topic', 'message')",
+  "pg_advisory_unlock_all()",
+  "pg_wal_replay_resume()",
+  "pg_stat_reset()",
+  "pg_some_future_control_function(1)",
+  "dblink_send_query('remote', 'DELETE FROM orders')",
+  "lo_from_bytea(0, 'value')",
+  "lowrite(1, 'value')",
+  "force_checkpoint()",
+  "query('SELECT 1')",
+  String.raw`U&"pg\005fterminate_backend"(1)`,
+  String.raw`pg_catalog.U&"pg_terminate_\+000062ackend"(1)`,
+  `U&"pg!005fcancel_backend" UESCAPE '!' (1)`,
+])("all SQL checks refuse side-effect call %s", async (call) => {
+  Registry.setConfigs({ pg_fixture: { type: "postgres" } })
+  const get = spyOn(Registry, "get")
+  try {
+    await expect(
+      checkSql({ warehouse: "pg_fixture", check: "nulls", sql: `SELECT ${call} AS id`, columns: ["id"] }),
+    ).rejects.toThrow(/single read-only SELECT/)
+    expect(get).not.toHaveBeenCalled()
+  } finally {
+    get.mockRestore()
+  }
+})
+
+test.each([
+  "pg_typeof(1)",
+  "pg_column_size(1)",
+  "pg_size_pretty(1::bigint)",
+  "pg_backend_pid()",
+  "pg_stat_get_numscans(1)",
+])("read-only validation accepts PostgreSQL inspection call %s", (call) => {
+  const sql = `SELECT ${call} AS value`
+  expect(readSql(sql, "postgres")).toBe(sql)
+})
+
+test("read-only validation ignores side-effect names in literals, comments and column identifiers", () => {
+  const sql = `SELECT 'pg_cancel_backend(1)' AS "pg_stat_reset" /* dblink_send_query('remote', 'DELETE') */`
+  expect(readSql(sql, "postgres")).toBe(sql)
+})
+
+test("invalid check arguments identify the field before connecting", async () => {
+  const get = spyOn(Registry, "get")
+  try {
+    await expect(
+      checkSql({ warehouse: "sqlite_fixture", check: "nulls", sql: leftSql, columns: [""] }),
+    ).rejects.toThrow(/sql_check invalid input: columns\.0:/)
+    expect(get).not.toHaveBeenCalled()
+  } finally {
+    get.mockRestore()
+  }
+})
+
+test("SQLite read-only checks restore query_only after success and failure", async () => {
+  const connector = await Registry.get("sqlite_fixture")
+  try {
+    const guarded = await connector.execute("SELECT query_only FROM pragma_query_only()", undefined, undefined, {
+      readOnly: true,
+    })
+    expect(guarded.rows).toEqual([[1]])
+    expect(
+      (await checkSql({ warehouse: "sqlite_fixture", check: "grain", sql: leftSql, columns: ["id"] })).metadata
+        .total_rows,
+    ).toBe(5)
+    expect((await connector.execute("PRAGMA query_only")).rows).toEqual([[0]])
+    await expect(
+      connector.execute("INSERT INTO orders (id) VALUES (600)", undefined, undefined, { readOnly: true }),
+    ).rejects.toThrow(/readonly/i)
+    expect((await connector.execute("SELECT COUNT(*) FROM orders")).rows).toEqual([[5]])
+    expect((await connector.execute("PRAGMA query_only")).rows).toEqual([[0]])
+    await connector.execute("INSERT INTO orders (id) VALUES (600)")
+    await connector.execute("DELETE FROM orders WHERE id = 600")
+    await connector.execute("PRAGMA query_only = ON")
+    await checkSql({ warehouse: "sqlite_fixture", check: "grain", sql: leftSql, columns: ["id"] })
+    await expect(
+      checkSql({ warehouse: "sqlite_fixture", check: "grain", sql: "SELECT * FROM missing", columns: ["id"] }),
+    ).rejects.toThrow(/missing/)
+    expect((await connector.execute("PRAGMA query_only")).rows).toEqual([[1]])
+  } finally {
+    await connector.execute("PRAGMA query_only = OFF")
+    await connector.execute("DELETE FROM orders WHERE id = 600")
+  }
+})
+
+test("DuckDB read-only checks block hidden sequence writes and restore the session", async () => {
+  const connector = await Registry.get("scratch")
+  await connector.execute("CREATE SEQUENCE check_sequence")
+  await connector.execute("CREATE VIEW sequence_writer AS SELECT nextval('check_sequence') AS id")
+  await expect(
+    checkSql({ warehouse: "scratch", check: "grain", sql: "SELECT * FROM sequence_writer", columns: ["id"] }),
+  ).rejects.toThrow(/read.only/i)
+  expect(
+    (await connector.execute("SELECT last_value FROM duckdb_sequences() WHERE sequence_name = 'check_sequence'")).rows,
+  ).toEqual([[null]])
+  await connector.execute("INSERT INTO orders (id) VALUES (6)")
+  expect(
+    (await checkSql({ warehouse: "scratch", check: "grain", sql: leftSql, columns: ["id"] })).metadata.total_rows,
+  ).toBe(6)
+})
+
+test("DuckDB read-only checks refuse active transactions without aborting caller changes", async () => {
+  const connector = await Registry.get("scratch")
+  await connector.execute("BEGIN TRANSACTION")
+  try {
+    await connector.execute("INSERT INTO orders (id) VALUES (6)")
+    await expect(checkSql({ warehouse: "scratch", check: "grain", sql: leftSql, columns: ["id"] })).rejects.toThrow(
+      /DuckDB.*active transaction/i,
+    )
+    await connector.execute("COMMIT")
+    expect(Number((await connector.execute("SELECT COUNT(*) FROM orders")).rows[0][0])).toBe(6)
+  } catch (error) {
+    await connector.execute("ROLLBACK").catch(() => {})
+    throw error
+  }
+})
+
+testEffect(Layer.mergeAll(CrossSpawnSpawner.defaultLayer, testInstanceStoreLayer)).instance(
+  "multi-pattern SQL permissions reject a later deny before prompting and still prompt once when allowed",
+  () =>
+    Effect.gen(function* () {
+      const { directory } = yield* TestInstance
+      yield* Effect.promise(() =>
+        Instance.provide({
+          directory,
+          fn: async () => {
+            const asked: PermissionNext.Request[] = []
+            const publish = spyOn(Bus, "publish").mockImplementation(async (event, properties) => {
+              if (event.type !== PermissionNext.Event.Asked.type) return
+              const request = properties as PermissionNext.Request
+              asked.push(request)
+              await PermissionNext.reply({ requestID: request.id, reply: "once" })
+            })
+            const request = {
+              permission: "sql_execute",
+              patterns: ["SELECT * FROM orders", "SELECT * FROM sensitive_table"],
+              always: [],
+              metadata: {},
+              sessionID: SessionID.make("session_sql_permissions"),
+            }
+            try {
+              await expect(
+                PermissionNext.ask({
+                  ...request,
+                  ruleset: [
+                    { permission: "sql_execute", pattern: "*", action: "ask" },
+                    { permission: "sql_execute", pattern: "*sensitive_table*", action: "deny" },
+                  ],
+                }),
+              ).rejects.toBeInstanceOf(PermissionNext.DeniedError)
+              expect(asked).toEqual([])
+              expect(await PermissionNext.list()).toEqual([])
+              await PermissionNext.ask({
+                ...request,
+                ruleset: [{ permission: "sql_execute", pattern: "*", action: "ask" }],
+              })
+              expect(asked).toHaveLength(1)
+              expect(asked[0].patterns).toEqual(request.patterns)
+              expect(await PermissionNext.list()).toEqual([])
+            } finally {
+              publish.mockRestore()
+            }
+          },
+        }),
+      )
+    }),
+)

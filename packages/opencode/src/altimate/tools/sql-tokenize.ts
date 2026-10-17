@@ -6,6 +6,9 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
   const tokens: SqlToken[] = []
   const mysqlComments = !dialect || /^(mysql|mariadb)$/i.test(dialect)
   const dollarQuotes = /^(postgres|redshift|duckdb|snowflake)$/i.test(dialect ?? "")
+  // PostgreSQL backticks are operators; PostgreSQL/DuckDB brackets contain array expressions.
+  const backtickIdentifiers = !/^(postgres|duckdb)$/i.test(dialect ?? "")
+  const bracketIdentifiers = !/^(postgres|duckdb)$/i.test(dialect ?? "")
   let complete = true
   let i = 0
   let code = 0
@@ -16,8 +19,11 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
     // to the write-clause checks even when another dialect treats it as a comment.
     if (sql.startsWith("--", i) && (!mysqlComments || i + 2 === sql.length || /[\s\x00-\x1f]/.test(sql[i + 2]))) {
       kind = "comment"
-      i = sql.indexOf("\n", i + 2)
-      if (i < 0) i = sql.length
+      // PostgreSQL also ends line comments at CR. Keep following code visible
+      // when the dialect is unknown; other dialects retain their LF handling.
+      const newline = !dialect || /^postgres$/i.test(dialect) ? /[\r\n]/ : /\n/
+      const end = sql.slice(i + 2).search(newline)
+      i = end < 0 ? sql.length : i + 2 + end
     } else if (sql.startsWith("/*", i)) {
       // MySQL/MariaDB execute these comments. Generic SQL parsers discard them,
       // so they cannot establish that a query is read-only or scratch-confined.
@@ -38,7 +44,7 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
     } else {
       const escaped = /[eE]/.test(sql[i]) && sql[i + 1] === "'" && !/[\w$]/.test(sql[i - 1] ?? "")
       const quote = escaped ? "'" : sql[i]
-      if (quote === "'" || quote === '"' || quote === "`" || quote === "[") {
+      if (quote === "'" || quote === '"' || (quote === "`" && backtickIdentifiers) || (quote === "[" && bracketIdentifiers)) {
         kind = quote === "'" ? "literal" : "identifier"
         const end = quote === "[" ? "]" : quote
         i += escaped ? 2 : 1
