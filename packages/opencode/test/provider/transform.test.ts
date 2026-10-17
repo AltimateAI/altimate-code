@@ -319,6 +319,8 @@ describe("ProviderTransform.smallOptions - google thinking", () => {
       { id: "gemini-3.1-pro", thinkingConfig: { thinkingLevel: "minimal" } },
       { id: "models/gemini-3-pro-preview", thinkingConfig: { thinkingLevel: "minimal" } },
       { id: "vertex_gemini-3pro", thinkingConfig: { thinkingLevel: "minimal" } },
+      { id: "vertex_gemini-4argon", thinkingConfig: { thinkingLevel: "low" } },
+      { id: "publishers/google/models/gemini-4-argon", thinkingConfig: { thinkingLevel: "low" } },
       { id: "gemini-2.5-flash-lite-preview-06-17", thinkingConfig: { thinkingBudget: 0 } },
       { id: "gemini-4-argon", thinkingConfig: { thinkingLevel: "low" } },
       { id: "gemini-5-pro", thinkingConfig: { thinkingLevel: "low" } },
