@@ -6,6 +6,8 @@
 
 import { hasMongoWriteStage, normalizeMqlCommand } from "@altimateai/drivers"
 import { maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
+import { sqlFunctionCalls, sqlLiteral } from "./sql-functions"
+import { hasSideEffectFunction, isReadOnlyNestedFunction } from "./sql-function-policy"
 
 // Safe import: napi binary may not be available on all platforms
 let getStatementTypes: ((sql: string, dialect?: string | null) => any) | null = null
@@ -165,11 +167,68 @@ export function classifyMulti(sql: string, dialect?: string): "read" | "write" {
   return classify(sql, dialect)
 }
 
+// query_table and *_scan take table identifiers, not executable SQL. Only these
+// known SQL arguments can establish read safety recursively in their target dialect.
+const SQL_ARGUMENTS: Record<string, { index: number; dialect: string }> = {
+  query: { index: 0, dialect: "duckdb" },
+  to_query: { index: 0, dialect: "snowflake" },
+  postgres_query: { index: 1, dialect: "postgres" },
+  mysql_query: { index: 1, dialect: "mysql" },
+  sqlite_query: { index: 1, dialect: "sqlite" },
+  postgres_execute: { index: 1, dialect: "postgres" },
+  mysql_execute: { index: 1, dialect: "mysql" },
+  sqlite_execute: { index: 1, dialect: "sqlite" },
+  eval: { index: 0, dialect: "sqlite" },
+}
+
+// Nested execution lacks the outer driver's read-only boundary. Apply sql_check's
+// conservative function policy there without extending its PG allowlist to ordinary sql_execute reads.
+function functionSafety(sql: string, dialect: string | undefined, depth: number, strict = depth > 0) {
+  let write = false
+  let blocked = false
+  for (const call of sqlFunctionCalls(sql, dialect)) {
+    // ODBC and other opaque remote engines do not reveal the target SQL dialect.
+    if (
+      call.escaped ||
+      hasSideEffectFunction(call.name, strict) ||
+      /^(odbc_query|odbc_copy|odbc_commit|odbc_rollback|openquery|external_query)$/.test(call.name)
+    ) write = true
+    // Nested and remote SQL cannot be proven read-only by a denylist: a user-defined
+    // function may write. Require every call to be on the read-only allowlist.
+    // SQL-string executors (query, postgres_query, ...) are exempt because their literal SQL is
+    // classified recursively below; dynamic arguments and executors with side effects still fail closed.
+    const nestedExecutor =
+      Object.hasOwn(SQL_ARGUMENTS, call.name) && call.qualifier === undefined && !hasSideEffectFunction(call.name)
+    if (depth > 0 && !nestedExecutor && !isReadOnlyNestedFunction(call.name, call.qualifier)) write = true
+    // SQL Server's XML .query() takes XQuery, not executable SQL.
+    if (call.name === "query" && /^(sqlserver|tsql|mssql)$/i.test(dialect ?? "")) continue
+    const argument = Object.hasOwn(SQL_ARGUMENTS, call.name) ? SQL_ARGUMENTS[call.name] : undefined
+    if (!argument) continue
+    const inner = sqlLiteral(call.args[argument.index], dialect)
+    if (!inner?.trim() || depth >= 8) {
+      write = true
+      continue
+    }
+    const result = classifySql(inner, argument.dialect, depth + 1)
+    if (result.queryType !== "read" || !isSingleQuery(inner, argument.dialect)) write = true
+    if (result.blocked) blocked = true
+  }
+  return { write, blocked }
+}
+
 /**
  * Single-pass: classify and check for hard-denied statement types.
  * Returns both the overall query type and whether a hard-deny pattern was found.
  */
 export function classifyAndCheck(sql: string, dialect?: string): {
+  queryType: "read" | "write"
+  blocked: boolean
+  parseError?: string
+} {
+  return classifySql(sql, dialect, 0)
+}
+
+function classifySql(sql: string, dialect: string | undefined, depth: number): {
   queryType: "read" | "write"
   blocked: boolean
   parseError?: string
@@ -187,13 +246,18 @@ export function classifyAndCheck(sql: string, dialect?: string): {
 
     // A generic parser can treat MySQL arithmetic (--2) as a comment and omit
     // trailing statements. Keep dialect-aware lexical hard denies authoritative.
+    const functions = functionSafety(sql, dialect, depth)
     const blocked =
+      functions.blocked ||
       classifyFallback(sql, dialect).blocked ||
       result.statements.some(
         (s: { statement_type: string }) => s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
       )
 
-    return { queryType: otherIsReadOnly(sql, result.statements, dialect) ? "read" : "write", blocked }
+    return {
+      queryType: !functions.write && !blocked && otherIsReadOnly(sql, result.statements, dialect) ? "read" : "write",
+      blocked,
+    }
   } catch (error) {
     return { ...classifyFallback(sql, dialect), parseError: error instanceof Error ? error.message : String(error) }
   }
@@ -286,6 +350,8 @@ export function isScratchSafeWrite(sql: string): boolean {
   const dialect = "duckdb"
   if (!getStatementTypes || !sql || typeof sql !== "string") return false
   if (!tokenizeSql(sql, dialect).complete) return false
+  const functions = functionSafety(sql, dialect, 0, true)
+  if (functions.write || functions.blocked) return false
   try {
     const result = getStatementTypes(sql, dialect)
     const statements: Array<{ statement_type?: string }> = result?.statements ?? []

@@ -166,12 +166,13 @@ export async function connect(
     params: any[] | undefined,
     timeoutMs: number | undefined,
     maxResultBytes?: number,
+    readOnly?: boolean,
     onDispatch?: () => void,
     signal?: AbortSignal,
   ): Promise<any[]> {
     if (!shared) throw new Error("DuckDB connection not open")
     try {
-      return await shared.engine.call<any[]>("all", { sql, params, connectionId, maxResultBytes }, timeoutMs, onDispatch, signal)
+      return await shared.engine.call<any[]>("all", { sql, params, connectionId, maxResultBytes, readOnly }, timeoutMs, onDispatch, signal)
     } catch (err) {
       throw err instanceof Error ? wrapDuckDBError(err) : err
     }
@@ -180,7 +181,7 @@ export async function connect(
 
   const query = async (sql: string, signal?: AbortSignal): Promise<any[]> => {
     signal?.throwIfAborted()
-    return run(sql, undefined, resolveQueryTimeout(config).ms, undefined, undefined, signal)
+    return run(sql, undefined, resolveQueryTimeout(config).ms, undefined, undefined, undefined, signal)
   }
   const queryWithParams = (sql: string, params: any[]): Promise<any[]> =>
     run(sql, params, resolveQueryTimeout(config).ms)
@@ -332,6 +333,7 @@ export async function connect(
         binds?.length ? binds : undefined,
         resolveQueryTimeout(config, options).ms,
         options?.maxResultBytes,
+        options?.readOnly,
         options?.onDispatch,
         options?.signal,
       )
