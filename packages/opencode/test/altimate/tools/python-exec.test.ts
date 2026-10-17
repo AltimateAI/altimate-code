@@ -194,7 +194,8 @@ describe("python_exec helpers", () => {
       const original = process.env.ALTIMATE_PYTHON_EXEC
       try {
         delete process.env.ALTIMATE_PYTHON_EXEC
-        expect(await pythonExecAvailable()).toBe(true)
+        // Available only where the sandbox self-test also passes (macOS currently refuses).
+        expect(await pythonExecAvailable()).toBe(detected?.ok === true)
         process.env.ALTIMATE_PYTHON_EXEC = "0"
         expect(await pythonExecAvailable()).toBe(false)
       } finally {

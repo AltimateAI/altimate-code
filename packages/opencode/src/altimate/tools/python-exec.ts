@@ -16,6 +16,7 @@ import * as fs from "node:fs/promises"
 import * as path from "node:path"
 import * as os from "node:os"
 import { Tool } from "../../tool/tool"
+import { Log } from "@/altimate/util/log"
 import { withScratchConnection } from "../native/connections/scratch"
 import { quoteIdent } from "./sql-materialize"
 import * as Sandbox from "./python-sandbox"
@@ -26,6 +27,7 @@ export const OUTPUT_LIMIT = 30_000
 export const WORKSPACE_LIMIT_BYTES = 1024 ** 3
 const MEMORY_LIMIT_BYTES = 8 * 1024 ** 3
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/
+const log = Log.create({ service: "tool.python_exec" })
 
 const HELPER = `"""Scratch table exchange for python_exec."""
 import os as _os
@@ -118,9 +120,10 @@ export function confinementFor(python: string): Promise<Sandbox.Detection> {
   return result
 }
 
-/** Forget the cached detection (tests). */
+/** Forget the cached detection and registration verdict (tests). */
 export function resetConfinement() {
   confinement = undefined
+  registration = undefined
 }
 
 let discovery: { key: string; result: Promise<string | undefined> } | undefined
@@ -163,8 +166,27 @@ export function interpreter(): Promise<string | undefined> {
   return result
 }
 
+let registration: { python: string; result: Promise<boolean> } | undefined
+
+/**
+ * Register `python_exec` only where it can run: an interpreter with pandas and duckdb exists and
+ * the sandbox self-test passes. The verdict, including a refusal, is cached per interpreter and
+ * process so registration stays cheap; the refusal reason is logged once.
+ */
 export async function pythonExecAvailable(): Promise<boolean> {
-  return process.env.ALTIMATE_PYTHON_EXEC !== "0" && (await interpreter()) !== undefined
+  if (process.env.ALTIMATE_PYTHON_EXEC === "0") return false
+  const python = await interpreter()
+  if (!python) {
+    log.debug("python_exec not registered: no Python with pandas and duckdb is available")
+    return false
+  }
+  if (registration?.python === python) return registration.result
+  const result = confinementFor(python).then((detection) => {
+    if (!detection.ok) log.debug(`python_exec not registered: ${detection.reason}`)
+    return detection.ok
+  })
+  registration = { python, result }
+  return result
 }
 
 /** Minimal child environment: no credentials, tokens or connection strings from the parent. */

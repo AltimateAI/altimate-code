@@ -588,13 +588,10 @@ export namespace ToolRegistry {
       tools.push(await AppRuntime.runPromise(AnswerCommit.AnswerCommitTool))
     }
     // altimate_change end
-    // altimate_change start — expose sandboxed Python only to analysts with a usable runtime.
-    if (agent?.name === "analyst" && process.env.ALTIMATE_PYTHON_EXEC !== "0") {
-      if (await pythonExecAvailable()) {
-        tools.push(await AppRuntime.runPromise(PythonExecTool))
-      } else {
-        log.debug("python_exec not registered: no Python with pandas and duckdb is available")
-      }
+    // altimate_change start — expose sandboxed Python only to analysts whose host has a usable
+    // interpreter and passes the sandbox self-test; pythonExecAvailable logs the refusal reason.
+    if (agent?.name === "analyst" && process.env.ALTIMATE_PYTHON_EXEC !== "0" && (await pythonExecAvailable())) {
+      tools.push(await AppRuntime.runPromise(PythonExecTool))
     }
     // altimate_change end
     // altimate_change start — text_label is analyst-scoped (and its read-only data-explorer delegate), on by
