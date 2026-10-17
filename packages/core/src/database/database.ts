@@ -2,6 +2,7 @@ export * as Database from "./database"
 
 import { EffectDrizzleSqlite } from "@opencode-ai/effect-drizzle-sqlite"
 import { layer as sqliteLayer } from "#sqlite"
+import * as SetupLock from "./setup-lock"
 import { Context, Effect, Layer } from "effect"
 import { Global } from "../global"
 import { Flag } from "../flag/flag"
@@ -19,25 +20,31 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/storage/Database") {}
 
-export const layer = Layer.effect(
-  Service,
-  Effect.gen(function* () {
-    const db = yield* makeDatabase
+export const layer = (filename?: string) =>
+  Layer.effect(
+    Service,
+    Effect.gen(function* () {
+      const db = yield* makeDatabase
 
-    yield* db.run("PRAGMA journal_mode = WAL")
-    yield* db.run("PRAGMA synchronous = NORMAL")
-    yield* db.run("PRAGMA busy_timeout = 5000")
-    yield* db.run("PRAGMA cache_size = -64000")
-    yield* db.run("PRAGMA foreign_keys = ON")
-    yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
-    yield* DatabaseMigration.apply(db)
+      yield* db.run("PRAGMA busy_timeout = 5000")
+      // altimate_change start — upstream_fix: serialize first-run setup across processes (see setup-lock.ts)
+      const setup = Effect.gen(function* () {
+        yield* db.run("PRAGMA journal_mode = WAL")
+        yield* db.run("PRAGMA synchronous = NORMAL")
+        yield* db.run("PRAGMA cache_size = -64000")
+        yield* db.run("PRAGMA foreign_keys = ON")
+        yield* db.run("PRAGMA wal_checkpoint(PASSIVE)")
+        yield* DatabaseMigration.apply(db)
+      })
+      yield* filename ? SetupLock.hold(filename, setup) : setup
+      // altimate_change end
 
-    return { db }
-  }).pipe(Effect.orDie),
-)
+      return { db }
+    }).pipe(Effect.orDie),
+  )
 
 export function layerFromPath(filename: string) {
-  return layer.pipe(Layer.provide(sqliteLayer({ filename })))
+  return layer(filename).pipe(Layer.provide(sqliteLayer({ filename })))
 }
 
 export function path() {
