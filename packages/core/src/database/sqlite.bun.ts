@@ -167,7 +167,7 @@ const nativeLayer = (config: Config) =>
       // altimate_change start — upstream_fix: the WAL switch needs a write lock and can fail at once with
       // SQLITE_BUSY, so install the busy handler first and serialize the switch across processes.
       native.run("PRAGMA busy_timeout = 5000;")
-      if (config.disableWAL !== true) {
+      if (config.disableWAL !== true && config.readonly !== true) {
         const release = SetupLock.acquireSync(config.filename)
         try {
           native.run("PRAGMA journal_mode = WAL;")
