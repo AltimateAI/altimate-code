@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite"
 import { Effect, Layer, Schema } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import path from "path"
-import { TestInstance, testInstanceStoreLayer, tmpdir } from "../../fixture/fixture"
+import { requireInstance, testInstanceStoreLayer, tmpdir } from "../../fixture/fixture"
 import { testEffect } from "../../lib/effect"
 import { initTool } from "../tool-fixture"
 import { Agent } from "../../../src/agent/agent"
@@ -1157,48 +1157,47 @@ testEffect(Layer.mergeAll(CrossSpawnSpawner.defaultLayer, testInstanceStoreLayer
   "multi-pattern SQL permissions reject a later deny before prompting and still prompt once when allowed",
   () =>
     Effect.gen(function* () {
-      const { directory } = yield* TestInstance
+      const instance = yield* requireInstance
       yield* Effect.promise(() =>
-        Instance.provide({
-          directory,
-          fn: async () => {
-            const asked: PermissionNext.Request[] = []
-            const publish = spyOn(Bus, "publish").mockImplementation(async (event, properties) => {
-              if (event.type !== PermissionNext.Event.Asked.type) return
-              const request = properties as PermissionNext.Request
-              asked.push(request)
-              await PermissionNext.reply({ requestID: request.id, reply: "once" })
-            })
-            const request = {
-              permission: "sql_execute",
-              patterns: ["SELECT * FROM orders", "SELECT * FROM sensitive_table"],
-              always: [],
-              metadata: {},
-              sessionID: SessionID.make("session_sql_permissions"),
-            }
-            try {
-              await expect(
-                PermissionNext.ask({
-                  ...request,
-                  ruleset: [
-                    { permission: "sql_execute", pattern: "*", action: "ask" },
-                    { permission: "sql_execute", pattern: "*sensitive_table*", action: "deny" },
-                  ],
-                }),
-              ).rejects.toBeInstanceOf(PermissionNext.DeniedError)
-              expect(asked).toEqual([])
-              expect(await PermissionNext.list()).toEqual([])
-              await PermissionNext.ask({
+        Instance.restore(instance, async () => {
+          const asked: PermissionNext.Request[] = []
+          const publish = spyOn(Bus, "publish").mockImplementation(async (event, properties) => {
+            if (event.type !== PermissionNext.Event.Asked.type) return
+            const request = properties as PermissionNext.Request
+            asked.push(request)
+            await PermissionNext.reply({ requestID: request.id, reply: "once" })
+          })
+          const request = {
+            permission: "sql_execute",
+            patterns: ["SELECT * FROM orders", "SELECT * FROM sensitive_table"],
+            always: [],
+            metadata: {},
+            sessionID: SessionID.make("session_sql_permissions"),
+          }
+          try {
+            await expect(
+              PermissionNext.ask({
                 ...request,
-                ruleset: [{ permission: "sql_execute", pattern: "*", action: "ask" }],
-              })
-              expect(asked).toHaveLength(1)
-              expect(asked[0].patterns).toEqual(request.patterns)
-              expect(await PermissionNext.list()).toEqual([])
-            } finally {
-              publish.mockRestore()
-            }
-          },
+                ruleset: [
+                  { permission: "sql_execute", pattern: "*", action: "ask" },
+                  { permission: "sql_execute", pattern: "*sensitive_table*", action: "deny" },
+                ],
+              }),
+            ).rejects.toBeInstanceOf(PermissionNext.DeniedError)
+            expect(asked).toEqual([])
+            expect(await PermissionNext.list()).toEqual([])
+            await PermissionNext.ask({
+              ...request,
+              ruleset: [{ permission: "sql_execute", pattern: "*", action: "ask" }],
+            })
+            expect(asked).toHaveLength(1)
+            expect(asked[0].patterns).toEqual(request.patterns)
+            expect(await PermissionNext.list()).toEqual([])
+          } finally {
+            publish.mockRestore()
+            // PermissionNext's legacy state is not disposed by the Effect fixture.
+            await Instance.dispose()
+          }
         }),
       )
     }),
