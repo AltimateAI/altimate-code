@@ -14,6 +14,9 @@ import { readFileSync, readdirSync, existsSync } from "fs"
 import * as schema from "./schema"
 import { InstallationChannel } from "@opencode-ai/core/installation/version"
 import { Flag } from "../flag/flag"
+// altimate_change start — upstream_fix: cross-process first-run setup lock
+import * as SetupLock from "@opencode-ai/core/database/setup-lock"
+// altimate_change end
 import { iife } from "@/util/iife"
 import { Effect } from "effect"
 import freshSchema from "@opencode-ai/core/database/schema.gen"
@@ -394,13 +397,28 @@ export namespace Database {
 
   export const Client = lazy(() => {
     log.info("opening database", { path: Path })
+    // altimate_change start — upstream_fix: serialize first-run setup across processes (see core setup-lock.ts)
+    const releaseSetupLock = SetupLock.acquireSync(Path)
+    try {
+      return open()
+    } finally {
+      releaseSetupLock()
+    }
+    // altimate_change end
+  })
 
+  // altimate_change start — upstream_fix: setup extracted from the lazy Client so it runs under the setup lock
+  function open() {
     const sqlite = new BunDatabase(Path, { create: true })
     state.sqlite = sqlite
 
+    // altimate_change start — upstream_fix: install the busy handler before the first statement that
+    // takes a lock. Switching a fresh file to WAL needs an exclusive lock, so concurrent first-run
+    // processes failed immediately with "database is locked" when this came after journal_mode.
+    sqlite.run("PRAGMA busy_timeout = 5000")
+    // altimate_change end
     sqlite.run("PRAGMA journal_mode = WAL")
     sqlite.run("PRAGMA synchronous = NORMAL")
-    sqlite.run("PRAGMA busy_timeout = 5000")
     sqlite.run("PRAGMA cache_size = -64000")
     sqlite.run("PRAGMA foreign_keys = ON")
     sqlite.run("PRAGMA wal_checkpoint(PASSIVE)")
@@ -422,8 +440,17 @@ export namespace Database {
           item.sql = "select 1;"
         }
       }
-      const adopted = adoptCoreOwnedDatabase(sqlite, entries)
-      const initialized = adopted ? false : initializeFreshDatabase(sqlite, entries)
+      // altimate_change start — upstream_fix: the schema-state checks share the write transaction, so a
+      // same-process core migration cannot create the schema between a check and the CREATE TABLEs
+      let adopted = false
+      let initialized = false
+      sqlite
+        .transaction(() => {
+          adopted = adoptCoreOwnedDatabase(sqlite, entries)
+          initialized = adopted ? false : initializeFreshDatabase(sqlite, entries)
+        })
+        .immediate()
+      // altimate_change end
       const repaired = adopted || initialized ? false : repairLegacyDatabase(sqlite, entries)
       // altimate_change start — backfill migration names before migrate
       backfillMigrationNames(sqlite, entries)
@@ -446,7 +473,8 @@ export namespace Database {
     }
 
     return db
-  })
+  }
+  // altimate_change end
 
   export function close() {
     const sqlite = state.sqlite
