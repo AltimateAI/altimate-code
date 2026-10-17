@@ -232,6 +232,96 @@ type RunResult = {
   stderr: string
   timedOut: boolean
   workspaceError?: string
+  orphaned?: number[]
+}
+
+export type ProcessIdentity = { parent: number; uid: number; started: string; command: string }
+export type ProcessTable = Map<number, ProcessIdentity>
+
+/** Parse `ps -A -o pid=,ppid=,uid=,lstart=,comm=` output. */
+export function parseProcessTable(out: string): ProcessTable {
+  const table: ProcessTable = new Map()
+  for (const line of out.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\w{3}\s+\w{3}\s+\d+\s+[\d:]+\s+\d{4})\s+(.+?)\s*$/.exec(line)
+    if (m) table.set(Number(m[1]), { parent: Number(m[2]), uid: Number(m[3]), started: m[4], command: m[5] })
+  }
+  return table
+}
+
+const sameProcess = (a: ProcessIdentity, b: ProcessIdentity) =>
+  a.started === b.started && a.uid === b.uid && a.command === b.command
+
+/**
+ * Fold a fresh snapshot into the recorded descendants. An entry survives only while it is observed
+ * in every snapshot with an unchanged identity (start time, uid, command); the moment that breaks,
+ * the pid may have been reused, so the entry is dropped and never signalled (reused pids are
+ * returned). New members are
+ * processes whose parent is the root or a currently verified member.
+ */
+export function reconcileDescendants(
+  known: Map<number, ProcessIdentity>,
+  table: ProcessTable,
+  rootPid: number,
+  root: ProcessIdentity | undefined,
+) {
+  const reused: number[] = []
+  for (const [pid, recorded] of [...known]) {
+    const now = table.get(pid)
+    if (now && sameProcess(recorded, now)) known.set(pid, { ...recorded, parent: now.parent })
+    else {
+      known.delete(pid)
+      if (now) reused.push(pid)
+    }
+  }
+  const rootNow = table.get(rootPid)
+  const tree = new Set<number>(known.keys())
+  if (rootNow && root && sameProcess(root, rootNow)) tree.add(rootPid)
+  for (let grew = true; grew; ) {
+    grew = false
+    for (const [pid, entry] of table)
+      if (!tree.has(pid) && tree.has(entry.parent)) {
+        tree.add(pid)
+        known.set(pid, entry)
+        grew = true
+      }
+  }
+  return reused
+}
+
+/**
+ * Pids that are provably still the recorded descendants in this snapshot. Anything whose identity
+ * or ancestry no longer matches is skipped and reported, never signalled.
+ */
+export function verifiedKillTargets(
+  known: Map<number, ProcessIdentity>,
+  table: ProcessTable,
+  rootPid: number,
+  root: ProcessIdentity | undefined,
+) {
+  const kill: number[] = []
+  const skipped: number[] = []
+  const verified = (pid: number, seen = new Set<number>()): boolean => {
+    if (seen.has(pid)) return false
+    seen.add(pid)
+    const now = table.get(pid)
+    if (!now) return false
+    if (pid === rootPid) return !!root && sameProcess(root, now)
+    const recorded = known.get(pid)
+    return !!recorded && sameProcess(recorded, now)
+  }
+  for (const [pid, recorded] of known) {
+    const now = table.get(pid)
+    const identity = !!now && sameProcess(recorded, now)
+    // Parent unchanged, or the chain of current ancestors reaches a verified member.
+    let lineage = !!now && now.parent === recorded.parent
+    for (let up = now?.parent, hops = 0; !lineage && up && up > 1 && hops < 64; hops++) {
+      if (verified(up)) lineage = true
+      up = table.get(up)?.parent
+    }
+    if (identity && lineage) kill.push(pid)
+    else skipped.push(pid)
+  }
+  return { kill, skipped }
 }
 
 function run(
@@ -259,37 +349,30 @@ function run(
     let exitSignal: string | null = null
     let settled = false
     let grace: ReturnType<typeof setTimeout> | undefined
-    // Descendants seen so far (pid -> start time). A child that calls setsid leaves the process
-    // group, and once its parent exits it is re-parented, so the tree must be recorded while alive.
-    const known = new Map<number, string>()
+    // Descendants seen so far, with the identity they had when first observed. A child that calls
+    // setsid leaves the process group, and once its parent exits it is re-parented, so the tree must
+    // be recorded while alive.
+    const known = new Map<number, ProcessIdentity>()
+    let root: ProcessIdentity | undefined
+    const orphaned: number[] = []
     const trackDescendants = process.platform === "darwin"
     // Asynchronous so the event loop is never blocked; at most one `ps` is in flight.
     const snapshot = () =>
-      new Promise<Map<number, { parent: number; started: string }>>((done) => {
-        execFile("/bin/ps", ["-A", "-o", "pid=,ppid=,lstart="], { encoding: "utf8", timeout: 2000 }, (_error, out) => {
-          const table = new Map<number, { parent: number; started: string }>()
-          for (const line of (out ?? "").split("\n")) {
-            const m = /^\s*(\d+)\s+(\d+)\s+(.*\S)\s*$/.exec(line)
-            if (m) table.set(Number(m[1]), { parent: Number(m[2]), started: m[3] })
-          }
-          done(table)
-        })
+      new Promise<ProcessTable>((done) => {
+        execFile(
+          "/bin/ps",
+          ["-A", "-o", "pid=,ppid=,uid=,lstart=,comm="],
+          { encoding: "utf8", timeout: 2000 },
+          (_error, out) => done(parseProcessTable(out ?? "")),
+        )
       })
-    let sweeping: Promise<Map<number, { parent: number; started: string }>> | undefined
+    let sweeping: Promise<ProcessTable> | undefined
     const track = () => {
-      if (!child.pid || !trackDescendants) return Promise.resolve(new Map<number, { parent: number; started: string }>())
+      if (!child.pid || !trackDescendants) return Promise.resolve(new Map() as ProcessTable)
       sweeping ??= snapshot()
         .then((table) => {
-          const tree = new Set<number>([...known.keys(), child.pid!])
-          for (let grew = true; grew; ) {
-            grew = false
-            for (const [pid, entry] of table)
-              if (!tree.has(pid) && tree.has(entry.parent)) {
-                tree.add(pid)
-                known.set(pid, entry.started)
-                grew = true
-              }
-          }
+          root ??= table.get(child.pid!)
+          orphaned.push(...reconcileDescendants(known, table, child.pid!, root))
           return table
         })
         .finally(() => {
@@ -298,21 +381,31 @@ function run(
       return sweeping
     }
     const tracker = trackDescendants ? setInterval(() => void track(), TRACK_INTERVAL_MS) : undefined
-    // Kill the whole sandbox, not only the process group: a final sweep, then every recorded
-    // descendant whose start time still matches (so a reused pid is never signalled), then the
-    // group. On Linux the bwrap PID namespace (--die-with-parent) also ends everything when bwrap dies.
+    // Primary mechanism: the sandbox runs in its own process group, so one group SIGKILL ends every
+    // member with no pid-identity question. Descendants that escaped the group (setsid) are
+    // signalled only when still provably the same process; anything else is left alone and noted.
+    // On Linux the bwrap PID namespace (--die-with-parent) also ends everything when bwrap dies.
     let killing = false
     const kill = async () => {
       if (killing) return
       killing = true
+      let targets: number[] = []
       try {
+        await sweeping?.catch(() => {})
         const table = await track()
-        for (const [pid, started] of known) if (table.get(pid)?.started === started) process.kill(pid, "SIGKILL")
+        const verdict = verifiedKillTargets(known, table, child.pid!, root)
+        targets = verdict.kill
+        orphaned.push(...verdict.skipped)
       } catch {}
       try {
         if (child.pid) process.kill(-child.pid, "SIGKILL")
       } catch {
         child.kill("SIGKILL")
+      }
+      for (const pid of targets) {
+        try {
+          process.kill(pid, "SIGKILL")
+        } catch {}
       }
       // A descendant may still hold the pipes open; stop waiting for them shortly after the kill.
       grace ??= setTimeout(finish, PIPE_GRACE_MS)
@@ -328,7 +421,7 @@ function run(
       child.stdout.destroy()
       child.stderr.destroy()
       await checking
-      resolve({ code: exitCode, signal: exitSignal, stdout, stderr, timedOut, workspaceError })
+      resolve({ code: exitCode, signal: exitSignal, stdout, stderr, timedOut, workspaceError, orphaned })
     }
     const timer = setTimeout(() => {
       timedOut = true
@@ -512,6 +605,10 @@ export const PythonExecTool = Tool.define("python_exec", {
             `Isolation: filesystem ${sandbox.filesystem} (reads limited to the workspace and Python installation; writes to the workspace); network ${sandbox.network}; minimal environment.`,
             `Workspace: ${workspace}`,
           ]
+          if (result.orphaned?.length)
+            parts.push(
+              `Note: process(es) ${[...new Set(result.orphaned)].join(", ")} could not be verified as started by this call and were not signalled; they may be orphaned.`,
+            )
           if (result.workspaceError) parts.push(`${result.workspaceError} Workspace cleared; retry with smaller files.`)
           if (imported.length) parts.push(`Saved to scratch: ${imported.join(", ")}.`)
           if (importErrors.length) parts.push(`Could not import: ${importErrors.join("; ")}`)

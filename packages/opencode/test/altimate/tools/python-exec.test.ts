@@ -11,6 +11,9 @@ import {
   clampTimeout,
   clip,
   BOOTSTRAP,
+  parseProcessTable,
+  reconcileDescendants,
+  verifiedKillTargets,
   confinementFor,
   pythonExecAvailable,
   resetConfinement,
@@ -909,5 +912,54 @@ describe("python_exec confinement", () => {
     },
     30_000,
   )
+})
+
+describe("descendant identity verification", () => {
+  const id = (parent: number, started = "Sat Oct 17 10:00:00 2026", command = "sleep", uid = 501) => ({
+    parent,
+    uid,
+    started,
+    command,
+  })
+  const table = (rows: Record<number, ReturnType<typeof id>>) =>
+    new Map(Object.entries(rows).map(([k, v]) => [Number(k), v]))
+
+  test("parses ps output with lstart and command", () => {
+    const parsed = parseProcessTable("  12   1 501 Sat Oct  7 10:00:00 2026 /usr/bin/python3\n")
+    expect(parsed.get(12)).toEqual({ parent: 1, uid: 501, started: "Sat Oct  7 10:00:00 2026", command: "/usr/bin/python3" })
+  })
+
+  test("does not signal a recorded pid whose identity no longer matches", () => {
+    const root = id(1, undefined, "bwrap")
+    const known = new Map([[200, id(100)]])
+    // pid 200 was reused by an unrelated process that starts in the same second but runs another command
+    const now = table({ 100: root, 200: id(999, undefined, "Finder") })
+    const verdict = verifiedKillTargets(known, now, 100, root)
+    expect(verdict.kill).toEqual([])
+    expect(verdict.skipped).toEqual([200])
+    const reused = reconcileDescendants(known, now, 100, root)
+    expect(reused).toEqual([200])
+    expect(known.has(200)).toBe(false)
+  })
+
+  test("does not signal when uid differs or the root itself was reused", () => {
+    const root = id(1, undefined, "bwrap")
+    const known = new Map([[200, id(100)]])
+    expect(verifiedKillTargets(known, table({ 100: root, 200: id(100, undefined, "sleep", 0) }), 100, root).kill).toEqual([])
+    const reusedRoot = id(1, "Sat Oct 17 10:00:05 2026", "bwrap")
+    const moved = new Map([[200, id(150)]])
+    expect(verifiedKillTargets(moved, table({ 100: reusedRoot, 200: id(77) }), 100, root).kill).toEqual([])
+  })
+
+  test("signals a continuously observed descendant, including after re-parenting", () => {
+    const root = id(1, undefined, "bwrap")
+    const known = new Map<number, ReturnType<typeof id>>()
+    reconcileDescendants(known, table({ 100: root, 200: id(100) }), 100, root)
+    expect(known.has(200)).toBe(true)
+    // parent exited and the child was re-parented to launchd; it is still the same process
+    const later = table({ 200: id(1) })
+    reconcileDescendants(known, later, 100, root)
+    expect(verifiedKillTargets(known, later, 100, root).kill).toEqual([200])
+  })
 })
 // altimate_change end
