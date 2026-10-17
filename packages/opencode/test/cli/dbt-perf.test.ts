@@ -3,6 +3,9 @@ import { describe, test, expect } from "bun:test"
 import {
   type PerfFinding,
   type PerfReport,
+  buildPerfOptions,
+  formatPerfCost,
+  sortPerfFindings,
   filterPerfBySeverity,
   formatPerfText,
   normalizePerfReport,
@@ -139,6 +142,79 @@ describe("dbt-perf: text output", () => {
     expect(render()).toContain("No findings.")
     const filtered = render({ findings: [finding({ severity: "info" })] }, "error")
     expect(filtered).toContain('No findings at or above "error" (1 below the threshold).')
+  })
+})
+// altimate_change start — A1: run_results / trino profile / sinks inputs + cost sort
+describe("dbt-perf: inputs and cost ordering", () => {
+  test("options carry only the inputs that were supplied (the binding rejects unknown keys)", () => {
+    expect(buildPerfOptions({})).toEqual({})
+    expect(buildPerfOptions({ runResults: "/r.json", trinoProfile: "/t.json", sinks: "/s.json", experimental: true })).toEqual({
+      run_results: "/r.json",
+      trino_profile: "/t.json",
+      sinks: "/s.json",
+      include_experimental: true,
+    })
+    // Exposure-derived sinks are on by default; only the opt-out is sent.
+    expect(buildPerfOptions({ exposureSinks: true })).toEqual({})
+    expect(buildPerfOptions({ exposureSinks: false })).toEqual({ sinks_from_exposures: false })
+  })
+
+  test("--sort cost: most expensive first, unmeasured last, stable", () => {
+    const f = (code: string, cost?: unknown) => finding({ code, cost })
+    const sorted = sortPerfFindings(
+      [f("A"), f("B", { exec_time_s: 2 }), f("C", { exec_time_s: 30 }), f("D", { exec_time_s: 2, exec_share: 0.5 }), f("E")],
+      "cost",
+    )
+    expect(sorted.map((x) => x.code)).toEqual(["C", "D", "B", "A", "E"])
+    expect(sortPerfFindings([f("A"), f("B", { exec_time_s: 9 })], "rule").map((x) => x.code)).toEqual(["A", "B"])
+  })
+
+  test("cost renders as one readable line", () => {
+    expect(
+      formatPerfCost({ exec_time_s: 12.34, exec_share: 0.25, physical_input_bytes: 3 * 1024 ** 3, on_critical_path: true }),
+    ).toBe("exec 12.3s (25.0% of run), input 3.0 GB, on critical path")
+  })
+
+  test("summary reports run_results / trino profile / parse failures", () => {
+    const out = formatPerfText({
+      findings: [],
+      allFindings: [],
+      skippedRules: [],
+      summary: { had_run_results: true, had_trino_profile: false, parse_failures: 2, parse_failed_models: ["a", "b"] },
+      pass: true,
+      minSeverity: "info",
+    })
+    expect(out).toContain("run_results: yes")
+    expect(out).toContain("trino profile: NO")
+    expect(out).toContain("Parse failures — 2 model(s) not read by SQL rules: a, b")
+  })
+
+  test("--sort cost prints a flat list with each finding's rule code", () => {
+    const out = formatPerfText({
+      findings: [finding({ code: "P101", cost: { exec_time_s: 5 } })],
+      allFindings: [finding({ code: "P101" })],
+      skippedRules: [],
+      summary: {},
+      pass: true,
+      minSeverity: "info",
+      sort: "cost",
+    })
+    expect(out).toContain("--- FINDINGS BY COST — 1 finding(s) ---")
+    expect(out).toContain("WARNING [P101] mrt_orders")
+    expect(out).toContain("cost: exec 5.0s")
+  })
+
+  test("the snake_case materialization_change guardrail prints its fields too", () => {
+    const out = formatPerfText({
+      findings: [finding({ guardrail: { kind: "materialization_change", delete_scope: "drop x" } })],
+      allFindings: [finding()],
+      skippedRules: [],
+      summary: {},
+      pass: true,
+      minSeverity: "info",
+    })
+    expect(out).toContain("GUARDRAIL MaterializationChange:")
+    expect(out).toContain("delete scope: drop x")
   })
 })
 // altimate_change end

@@ -58,13 +58,64 @@ export interface PerfSummary {
   findings_total?: number
   had_compiled_sql?: boolean
   had_sink_map?: boolean
+  had_run_results?: boolean
+  had_trino_profile?: boolean
+  /** Models whose compiled SQL the engine could not parse: SQL-shaped rules
+   *  produced nothing for them, so they were not read, not found clean. */
+  parse_failures?: number
+  parse_failed_models?: string[]
   [key: string]: unknown
 }
+
+/** The engine's `CostEvidence`, measured from run_results / a Trino profile. */
+export interface PerfCost {
+  exec_time_s?: number | null
+  exec_share?: number | null
+  peak_memory_bytes?: number | null
+  physical_input_bytes?: number | null
+  on_critical_path?: boolean
+  baseline_delta_pct?: number | null
+  [key: string]: unknown
+}
+
+export type PerfSortOrder = "rule" | "cost"
+
 
 export interface PerfReport {
   findings: PerfFinding[]
   skipped_rules: PerfSkippedRule[]
   summary: PerfSummary
+}
+
+/** The engine's `optionsJson`. Unknown keys are REJECTED by the binding, so
+ *  only keys that were actually supplied are emitted. */
+export interface PerfOptions {
+  dialect?: string
+  sinks?: string
+  run_results?: string
+  trino_profile?: string
+  include_experimental?: boolean
+  sinks_from_exposures?: boolean
+}
+
+export function buildPerfOptions(input: {
+  dialect?: string
+  sinks?: string
+  runResults?: string
+  trinoProfile?: string
+  experimental?: boolean
+  /** `false` stops the engine deriving the sink map from exposures' `meta.sink`. */
+  exposureSinks?: boolean
+}): PerfOptions {
+  const o: PerfOptions = {}
+  if (input.dialect) o.dialect = input.dialect
+  if (input.sinks) o.sinks = input.sinks
+  if (input.runResults) o.run_results = input.runResults
+  if (input.trinoProfile) o.trino_profile = input.trinoProfile
+  if (input.experimental) o.include_experimental = true
+  // Sent only when off: an older core rejects the unknown key.
+  if (input.exposureSinks === false) o.sinks_from_exposures = false
+  return o
 }
 
 export const PERF_SEVERITY_RANK: Record<PerfSeverity, number> = { error: 2, warning: 1, info: 0 }
@@ -126,6 +177,70 @@ function inlineValue(v: unknown): string {
   return String(v as string | number | boolean)
 }
 
+/** True for the materialization-change guardrail in either serialization the
+ *  engine has used (`MaterializationChange`, `materialization_change`). */
+export function isMaterializationChange(kind: unknown): boolean {
+  return typeof kind === "string" && kind.replace(/_/g, "").toLowerCase() === "materializationchange"
+}
+
+function num(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined
+}
+
+function bytes(n: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  let v = n
+  let i = 0
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024
+    i++
+  }
+  return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`
+}
+
+/** Sort key for `--sort cost`: measured execution time first, then share of
+ *  the run, then bytes read, then peak memory. A finding with no measured cost
+ *  sorts last (-1), never as if it were free. */
+export function perfCostKey(f: PerfFinding): number[] {
+  const c = (f.cost && typeof f.cost === "object" ? f.cost : {}) as PerfCost
+  const keys = [num(c.exec_time_s), num(c.exec_share), num(c.physical_input_bytes), num(c.peak_memory_bytes)]
+  return keys.map((k) => k ?? -1)
+}
+
+/** Order findings for display. `rule` keeps the engine's order (the text
+ *  renderer groups by rule code); `cost` is most-expensive first, stable. */
+export function sortPerfFindings(findings: PerfFinding[], order: PerfSortOrder): PerfFinding[] {
+  if (order !== "cost") return findings
+  return findings
+    .map((f, i) => ({ f, i, k: perfCostKey(f) }))
+    .sort((a, b) => {
+      for (let j = 0; j < a.k.length; j++) if (a.k[j] !== b.k[j]) return b.k[j] - a.k[j]
+      return a.i - b.i
+    })
+    .map((x) => x.f)
+}
+
+/** One-line rendering of a `CostEvidence`. Falls back to the raw value when
+ *  the engine sends a shape this CLI does not know. */
+export function formatPerfCost(cost: unknown): string {
+  if (!cost || typeof cost !== "object" || Array.isArray(cost)) return inlineValue(cost)
+  const c = cost as PerfCost
+  const parts: string[] = []
+  const t = num(c.exec_time_s)
+  if (t !== undefined) {
+    const share = num(c.exec_share)
+    parts.push(`exec ${t.toFixed(1)}s${share !== undefined ? ` (${(share * 100).toFixed(1)}% of run)` : ""}`)
+  }
+  const input = num(c.physical_input_bytes)
+  if (input !== undefined) parts.push(`input ${bytes(input)}`)
+  const mem = num(c.peak_memory_bytes)
+  if (mem !== undefined) parts.push(`peak memory ${bytes(mem)}`)
+  if (c.on_critical_path) parts.push("on critical path")
+  const delta = num(c.baseline_delta_pct)
+  if (delta !== undefined) parts.push(`${delta >= 0 ? "+" : ""}${delta.toFixed(1)}% vs baseline`)
+  return parts.length ? parts.join(", ") : inlineValue(cost)
+}
+
 /** Group key: the rule code, falling back to the rule name. */
 function groupKey(f: PerfFinding): string {
   return f.code ?? f.rule ?? "unknown"
@@ -140,6 +255,8 @@ export interface FormatPerfOptions {
   summary: PerfSummary
   pass: boolean
   minSeverity: PerfSeverity
+  /** `cost` renders one flat list, most expensive first, instead of rule groups. */
+  sort?: PerfSortOrder
 }
 
 export function formatPerfText(opts: FormatPerfOptions): string {
@@ -160,7 +277,15 @@ export function formatPerfText(opts: FormatPerfOptions): string {
   const inputs: string[] = []
   if (summary.had_compiled_sql !== undefined) inputs.push(`compiled SQL: ${summary.had_compiled_sql ? "yes" : "NO"}`)
   if (summary.had_sink_map !== undefined) inputs.push(`sink map: ${summary.had_sink_map ? "yes" : "NO"}`)
+  if (summary.had_run_results !== undefined) inputs.push(`run_results: ${summary.had_run_results ? "yes" : "NO"}`)
+  if (summary.had_trino_profile !== undefined)
+    inputs.push(`trino profile: ${summary.had_trino_profile ? "yes" : "NO"}`)
   if (inputs.length) lines.push(`Inputs — ${inputs.join(", ")}`)
+  // A model whose SQL did not parse was not read; zero findings on it is not clean.
+  if (typeof summary.parse_failures === "number" && summary.parse_failures > 0) {
+    const named = summary.parse_failed_models?.length ? `: ${summary.parse_failed_models.join(", ")}` : ""
+    lines.push(`Parse failures — ${summary.parse_failures} model(s) not read by SQL rules${named}`)
+  }
   lines.push("")
 
   // 2. Skipped rules, BEFORE the findings. A rule that could not run is not a
@@ -188,50 +313,57 @@ export function formatPerfText(opts: FormatPerfOptions): string {
       if (!groups.has(k)) groups.set(k, [])
       groups.get(k)!.push(f)
     }
-    for (const [code, items] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-      const rule = items[0].rule && items[0].rule !== code ? ` ${items[0].rule}` : ""
-      const family = items[0].family ? ` (${items[0].family})` : ""
-      lines.push(`--- ${code}${rule}${family} — ${items.length} finding(s) ---`)
-      for (const f of items) {
-        const sev = normalizePerfSeverity(f.severity).toUpperCase()
-        const model = f.model ? ` ${f.model}` : ""
-        const scope = f.scope ? ` <${f.scope}>` : ""
-        lines.push(`  ${sev}${model}${scope}: ${f.message ?? ""}`)
-        if (f.related_models?.length) lines.push(`    related: ${f.related_models.join(", ")}`)
-        if (f.suggestion) lines.push(`    suggestion: ${f.suggestion}`)
-        if (f.confidence !== undefined && f.confidence !== null)
-          lines.push(`    confidence: ${inlineValue(f.confidence)}`)
-        if (f.cost !== undefined && f.cost !== null) lines.push(`    cost: ${inlineValue(f.cost)}`)
-        if (f.blast_radius !== undefined && f.blast_radius !== null)
-          lines.push(`    blast radius: ${inlineValue(f.blast_radius)}`)
-        if (f.tension !== undefined && f.tension !== null) lines.push(`    tension: ${inlineValue(f.tension)}`)
-        // A materialization change is the one guardrail whose omission has
-        // already caused a data incident: the old relation survives the switch
-        // and readers silently keep hitting it. Print both fields in full.
-        const g = f.guardrail
-        if (g) {
-          const kind = g.kind ?? ""
-          if (kind === "MaterializationChange") {
-            lines.push(`    GUARDRAIL MaterializationChange:`)
-            lines.push(`      delete scope: ${inlineValue(g.delete_scope) || "(not stated — verify manually)"}`)
-            lines.push(
-              `      reader requirements: ${inlineValue(g.reader_requirements) || "(not stated — verify manually)"}`,
-            )
-          } else if (kind) {
-            lines.push(`    guardrail: ${kind}`)
-          }
-        }
-        if (f.suppression !== undefined && f.suppression !== null)
-          lines.push(`    suppression: ${inlineValue(f.suppression)}`)
-        const ev = Array.isArray(f.evidence) ? f.evidence : []
-        for (const e of ev) lines.push(`    evidence: ${inlineValue(e)}`)
-        if (f.inputs_used?.length) lines.push(`    inputs used: ${f.inputs_used.join(", ")}`)
-      }
+    if (opts.sort === "cost") {
+      lines.push(`--- FINDINGS BY COST — ${opts.findings.length} finding(s) ---`)
+      for (const f of opts.findings) renderFinding(lines, f, true)
       lines.push("")
+    } else {
+      for (const [code, items] of [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+        const rule = items[0].rule && items[0].rule !== code ? ` ${items[0].rule}` : ""
+        const family = items[0].family ? ` (${items[0].family})` : ""
+        lines.push(`--- ${code}${rule}${family} — ${items.length} finding(s) ---`)
+        for (const f of items) renderFinding(lines, f, false)
+        lines.push("")
+      }
     }
   }
 
   lines.push(opts.pass ? "PASS" : "FAIL")
   return lines.join("\n")
+}
+
+/** Render one finding. `withCode` prefixes the rule code, for the flat
+ *  cost-ordered list where there is no group header to carry it. */
+function renderFinding(lines: string[], f: PerfFinding, withCode: boolean): void {
+  const sev = normalizePerfSeverity(f.severity).toUpperCase()
+  const code = withCode ? ` [${groupKey(f)}]` : ""
+  const model = f.model ? ` ${f.model}` : ""
+  const scope = f.scope ? ` <${f.scope}>` : ""
+  lines.push(`  ${sev}${code}${model}${scope}: ${f.message ?? ""}`)
+  if (f.related_models?.length) lines.push(`    related: ${f.related_models.join(", ")}`)
+  if (f.suggestion) lines.push(`    suggestion: ${f.suggestion}`)
+  if (f.confidence !== undefined && f.confidence !== null) lines.push(`    confidence: ${inlineValue(f.confidence)}`)
+  if (f.cost !== undefined && f.cost !== null) lines.push(`    cost: ${formatPerfCost(f.cost)}`)
+  if (f.blast_radius !== undefined && f.blast_radius !== null)
+    lines.push(`    blast radius: ${inlineValue(f.blast_radius)}`)
+  if (f.tension !== undefined && f.tension !== null) lines.push(`    tension: ${inlineValue(f.tension)}`)
+  // A materialization change is the one guardrail whose omission has
+  // already caused a data incident: the old relation survives the switch
+  // and readers silently keep hitting it. Print both fields in full.
+  const g = f.guardrail
+  if (g) {
+    const kind = g.kind ?? ""
+    if (isMaterializationChange(kind)) {
+      lines.push(`    GUARDRAIL MaterializationChange:`)
+      lines.push(`      delete scope: ${inlineValue(g.delete_scope) || "(not stated — verify manually)"}`)
+      lines.push(`      reader requirements: ${inlineValue(g.reader_requirements) || "(not stated — verify manually)"}`)
+    } else if (kind) {
+      lines.push(`    guardrail: ${kind}`)
+    }
+  }
+  if (f.suppression !== undefined && f.suppression !== null) lines.push(`    suppression: ${inlineValue(f.suppression)}`)
+  const ev = Array.isArray(f.evidence) ? f.evidence : []
+  for (const e of ev) lines.push(`    evidence: ${inlineValue(e)}`)
+  if (f.inputs_used?.length) lines.push(`    inputs used: ${f.inputs_used.join(", ")}`)
 }
 // altimate_change end

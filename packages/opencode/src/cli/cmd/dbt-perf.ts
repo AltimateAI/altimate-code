@@ -8,7 +8,10 @@ import { existsSync, readFileSync, statSync } from "fs"
 import path from "path"
 import {
   type PerfSeverity,
+  type PerfSortOrder,
+  buildPerfOptions,
   filterPerfBySeverity,
+  sortPerfFindings,
   formatPerfText,
   normalizePerfReport,
   perfPass,
@@ -51,6 +54,34 @@ export const DbtPerfCommand = cmd({
         describe: "exit 1 if findings at this level or above are found (computed before --severity)",
         choices: ["none", "warning", "error"] as const,
         default: "none" as const,
+      })
+      .option("run-results", {
+        describe: "dbt run_results.json — measured execution time per model (enables cost-ranked rules)",
+        type: "string",
+      })
+      .option("trino-profile", {
+        describe: "Trino build profile JSON (peak memory, bytes read per model)",
+        type: "string",
+      })
+      .option("sinks", {
+        describe: "sink map JSON: which loaders / served tables read each mart column beyond the dbt graph",
+        type: "string",
+      })
+      .option("exposure-sinks", {
+        describe:
+          "without --sinks, derive the sink map from exposures' meta.sink (--no-exposure-sinks: loaders unknown)",
+        type: "boolean",
+        default: true,
+      })
+      .option("experimental", {
+        describe: "also run rules held out of the default report",
+        type: "boolean",
+        default: false,
+      })
+      .option("sort", {
+        describe: "finding order: grouped by rule, or most expensive first (needs --run-results or --trino-profile)",
+        choices: ["rule", "cost"] as const,
+        default: "rule" as const,
       }),
 
   handler: async (args: {
@@ -60,6 +91,12 @@ export const DbtPerfCommand = cmd({
     severity?: PerfSeverity
     "fail-on"?: "none" | "warning" | "error"
     failOn?: "none" | "warning" | "error"
+    "run-results"?: string
+    "trino-profile"?: string
+    sinks?: string
+    "exposure-sinks"?: boolean
+    experimental?: boolean
+    sort?: PerfSortOrder
   }) => {
     const startTime = Date.now()
     const projectDir = path.resolve(args.cwd ?? process.cwd())
@@ -93,11 +130,38 @@ export const DbtPerfCommand = cmd({
       }
     }
 
+    // Optional inputs: each must exist. The engine also rejects an unreadable
+    // path, but checking here names the flag the user got wrong.
+    const inputPaths: Record<string, string | undefined> = {
+      "--run-results": args["run-results"],
+      "--trino-profile": args["trino-profile"],
+      "--sinks": args.sinks,
+    }
+    const resolved: Record<string, string | undefined> = {}
+    for (const [flag, p] of Object.entries(inputPaths)) {
+      if (!p) continue
+      const abs = path.resolve(p)
+      if (!existsSync(abs) || !statSync(abs).isFile()) {
+        console.error(`Error: ${flag} file not found: ${abs}`)
+        process.exitCode = 1
+        return
+      }
+      resolved[flag] = abs
+    }
+    const options = buildPerfOptions({
+      runResults: resolved["--run-results"],
+      trinoProfile: resolved["--trino-profile"],
+      sinks: resolved["--sinks"],
+      experimental: args.experimental,
+      exposureSinks: args["exposure-sinks"],
+    })
+
     let result
     try {
       result = await Dispatcher.call("altimate_core.dbt_perf", {
         project_dir: projectDir,
         manifest_json: manifestJson,
+        options_json: Object.keys(options).length ? JSON.stringify(options) : undefined,
       })
     } catch (e) {
       // Dispatcher-level failure (registration, native load). Fatal: unlike
@@ -119,7 +183,12 @@ export const DbtPerfCommand = cmd({
     // Pass/fail on the UNFILTERED findings: --severity controls display only.
     const pass = perfPass(report.findings, failOn)
     const minSeverity: PerfSeverity = args.severity ?? "info"
-    const shown = filterPerfBySeverity(report.findings, minSeverity)
+    const sort: PerfSortOrder = args.sort ?? "rule"
+    const shown = sortPerfFindings(filterPerfBySeverity(report.findings, minSeverity), sort)
+    if (sort === "cost" && !report.summary.had_run_results && !report.summary.had_trino_profile)
+      console.error(
+        "Note: --sort cost without --run-results or --trino-profile has no measured cost to sort on; engine order kept.",
+      )
 
     if (args.format === "json") {
       process.stdout.write(
@@ -128,6 +197,8 @@ export const DbtPerfCommand = cmd({
             version: 1,
             project_dir: projectDir,
             manifest: manifestPath,
+            inputs: options,
+            sort,
             findings: shown,
             skipped_rules: report.skipped_rules,
             summary: { ...report.summary, findings_shown: shown.length, pass },
@@ -145,6 +216,7 @@ export const DbtPerfCommand = cmd({
           summary: report.summary,
           pass,
           minSeverity,
+          sort,
         }),
       )
       console.error(`Completed in ${Date.now() - startTime}ms`)

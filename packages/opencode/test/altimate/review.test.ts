@@ -1,4 +1,5 @@
 import { describe, test, expect } from "bun:test"
+import { isSchemaGapError } from "../../src/altimate/review/runner"
 import {
   makeFinding,
   fingerprint,
@@ -1894,6 +1895,63 @@ describe("orchestrate", () => {
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
+  // altimate_change start — analyzeDbtImpact lifts the modified-model cap only on an external break
+  describe("lineage lane with analyzeDbtImpact evidence", () => {
+    const files: ChangedFile[] = [{ path: "models/marts/mrt_q.sql", status: "modified", diff: "-  b,\n" }]
+    const lineage = async (sql: string) =>
+      (sql.match(/select (.*) from/i)?.[1] ?? "").split(",").map((c) => ({ source: `"x"."${c.trim()}"`, target: c.trim() }))
+    const withImpact = (hops: Array<{ kind: string; target: string; verdict: string }>, calls: unknown[] = []): ReviewRunner => ({
+      ...fakeRunner({}),
+      async impact() {
+        return { hasManifest: true, severity: "HIGH", directCount: 12, transitiveCount: 30, testCount: 5 }
+      },
+      columnLineage: lineage,
+      async downstreamModels() {
+        return []
+      },
+      async dbtImpact(change) {
+        calls.push(change)
+        return hops.map((h) => ({ hop: 1, node_type: h.kind, name: h.target, verdict: h.verdict }))
+      },
+    })
+    const run = (runner: ReviewRunner) =>
+      runReview({
+        changedFiles: files,
+        config: { ...DEFAULT_REVIEW_CONFIG },
+        rubric: DEFAULT_RUBRIC,
+        mode: "gate",
+        runner,
+        getContent: content("select a from x", "select a, b from x"),
+        getCompiled: async (_f: string, side: "old" | "new") => (side === "new" ? "select a from x" : "select a, b from x"),
+        generatedAt: "2026-05-29T00:00:00Z",
+      })
+
+    test("a removed column a LOADER reads → critical, blocks", async () => {
+      const calls: unknown[] = []
+      const env = await run(withImpact([{ kind: "loader", target: "QueryUsageLoader", verdict: "breaking" }], calls))
+      const lin = env.findings.filter((f) => f.category === "lineage_breakage")
+      expect(lin.some((f) => f.severity === "critical" && f.title.includes("outside dbt"))).toBe(true)
+      expect(lin.some((f) => f.body.includes("QueryUsageLoader"))).toBe(true)
+      expect(calls).toContainEqual({ model: "mrt_q", column: "b", kind: "drop" })
+      expect(env.verdict).toBe("REQUEST_CHANGES")
+    })
+
+    test("a break only inside dbt keeps the fan-out cap at warning", async () => {
+      const env = await run(withImpact([{ kind: "dbt_child", target: "mrt_child", verdict: "breaking" }]))
+      const fanout = env.findings.find((f) => f.category === "lineage_breakage" && f.title.includes("fan-out"))
+      expect(fanout?.severity).toBe("warning")
+      expect(env.findings.some((f) => f.title.includes("outside dbt"))).toBe(false)
+    })
+
+    test("no dbtImpact on the runner → unchanged behaviour", async () => {
+      const { dbtImpact: _drop, ...rest } = withImpact([])
+      const env = await run(rest as ReviewRunner)
+      const fanout = env.findings.find((f) => f.category === "lineage_breakage" && f.title.includes("fan-out"))
+      expect(fanout?.severity).toBe("warning")
+    })
+  })
+  // altimate_change end
+
   test("engine contract_violation is preserved (not coerced to sql_quality) and blocks", async () => {
     const files: ChangedFile[] = [{ path: "models/marts/fct_orders.sql", status: "modified", diff: "+x\n" }]
     const runner: ReviewRunner = {
@@ -2700,3 +2758,19 @@ describe("orchestrate: project scope", () => {
     expect(calls.structuralDiff).toBeGreaterThan(0)
   })
 })
+
+// altimate_change start — precision: a validation error naming a relation dbt
+// knows but the review schema lacks is the schema's gap, not a SQL error.
+describe("validate lane: schema gaps are not findings", () => {
+  const known = new Set(["d02_order_lines_hub", "stg_tpch__orders"])
+  test("a missing manifest relation is a schema gap", () => {
+    expect(isSchemaGapError("Table 'd02_order_lines_hub' not found", known)).toBe(true)
+    expect(isSchemaGapError(`Table '"iceberg"."s"."stg_tpch__orders"' not found`, known)).toBe(true)
+  })
+  test("unknown tables and other errors are kept", () => {
+    expect(isSchemaGapError("Table 'typo_table' not found", known)).toBe(false)
+    expect(isSchemaGapError("Aggregate functions are not allowed in the WHERE clause", known)).toBe(false)
+    expect(isSchemaGapError("Table 'd02_order_lines_hub' not found", undefined)).toBe(false)
+  })
+})
+// altimate_change end

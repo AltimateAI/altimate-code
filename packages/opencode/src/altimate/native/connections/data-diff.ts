@@ -365,6 +365,21 @@ function buildColumnDiscoverySQL(tableName: string, dialect: string): string {
       const table = esc(parts[parts.length - 1])
       return `PRAGMA table_info('${table}')`
     }
+    // altimate_change start — Trino: a 3-part name's catalog selects WHICH
+    // information_schema to read; the session catalog's would miss the table.
+    // Trino folds unquoted identifiers to lowercase, so the filters are too.
+    case "trino": {
+      if (!SAFE_TABLE_NAME.test(tableName)) {
+        throw new Error(`Unsafe table name for Trino information_schema: ${tableName}`)
+      }
+      const lower = parts.map((p) => esc(p.toLowerCase()))
+      const table = lower[lower.length - 1]
+      const conditions = [`table_name = '${table}'`]
+      if (lower.length >= 2) conditions.push(`table_schema = '${lower[lower.length - 2]}'`)
+      const infoSchema = lower.length === 3 ? `"${lower[0].replace(/"/g, '""')}".information_schema.columns` : "information_schema.columns"
+      return `SELECT column_name, column_default FROM ${infoSchema} WHERE ${conditions.join(" AND ")} ORDER BY ordinal_position`
+    }
+    // altimate_change end
     default: {
       // Postgres, Redshift, DuckDB, SQL Server, BigQuery, Databricks, etc.
       const conditions = [tableFilter]
@@ -621,7 +636,10 @@ export function buildPartitionWhereClause(
         return Number.isNaN(d.getTime()) ? trimmed : d.toISOString().slice(0, 10)
       })()
     : partitionValue
-  const escaped = normalized.replace(/'/g, "''")
+  // altimate_change start — Trino never coerces a varchar literal to a
+  // date/timestamp, so the literal is cast, from a zone-less ISO timestamp.
+  const escaped = (dialect === "trino" ? trinoTimestampLiteral(normalized) : normalized).replace(/'/g, "''")
+  // altimate_change end
 
   // Cast the literal appropriately per dialect
   switch (dialect) {
@@ -638,10 +656,33 @@ export function buildPartitionWhereClause(
     case "fabric":
       // Style 23 = ISO-8601 (yyyy-mm-dd), locale-safe
       return `${expr} = CONVERT(DATE, '${escaped}', 23)`
+    // altimate_change start — Trino: typed literal (DATE_TRUNC of a DATE
+    // column compares fine against a TIMESTAMP — Trino widens the date)
+    case "trino":
+      return `${expr} = CAST('${escaped}' AS TIMESTAMP)`
+    // altimate_change end
     default:
       return `${expr} = '${escaped}'`
   }
 }
+
+// altimate_change start — Trino partition literal normalization
+/**
+ * A partition value as a zone-less `yyyy-mm-dd[ hh:mm:ss[.fff]]` literal that
+ * `CAST(… AS TIMESTAMP)` accepts. The Trino driver can hand back
+ * `2024-01-01 00:00:00.000 UTC` (timestamp with time zone) or a JS Date string;
+ * both are reduced to the ISO prefix.
+ *
+ * Exported for targeted unit testing; not part of the stable public API.
+ */
+export function trinoTimestampLiteral(value: string): string {
+  const trimmed = value.trim()
+  const iso = trimmed.match(/^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)?/)
+  if (iso) return iso[0].replace("T", " ")
+  const d = new Date(trimmed)
+  return Number.isNaN(d.getTime()) ? trimmed : d.toISOString().slice(0, 23).replace("T", " ")
+}
+// altimate_change end
 
 /**
  * Extract DiffStats from a successful outcome (if present).

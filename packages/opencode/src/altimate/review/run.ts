@@ -1,5 +1,7 @@
 import path from "node:path"
-import { readFile, realpath, stat, access } from "node:fs/promises"
+import { readFile, realpath, stat, access, mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { jobsFromSelectors, readJobMap, resolveJobMap } from "../../cli/cmd/dbt-impact-jobs"
 import { Installation } from "../../installation"
 import { loadReviewConfig, resolveRubric } from "./config"
 import type { Severity } from "./finding"
@@ -409,7 +411,26 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // documented columns). Falls back to manifest-derived schema when absent.
   const catalogAbs = path.join(path.dirname(manifestAbs), "catalog.json")
   const catalogSchema = await buildCatalogSchemaContext(catalogAbs)
-  const runner = createDispatcherRunner({ manifestPath: manifestAbs, schemaContext: catalogSchema })
+  // altimate_change start — schema_lag lane: the job map, resolved lazily (dbt ls)
+  const projectAbs = path.dirname(path.dirname(manifestAbs))
+  const lag = config.schemaLag
+  let jobsMemo: Promise<unknown | undefined> | undefined
+  const jobs =
+    lag && (lag.jobs || lag.jobsFrom)
+      ? () =>
+          (jobsMemo ??= (async () => {
+            const map = lag.jobs ? readJobMap(path.resolve(projectAbs, lag.jobs)) : jobsFromSelectors(projectAbs)
+            if ("error" in map) return undefined
+            const tmp = await mkdtemp(path.join(tmpdir(), "review-ls-"))
+            try {
+              return (await resolveJobMap(map, { projectDir: projectAbs, targetPath: path.join(tmp, "target"), logPath: path.join(tmp, "logs") })).map
+            } finally {
+              await rm(tmp, { recursive: true, force: true })
+            }
+          })())
+      : undefined
+  const runner = createDispatcherRunner({ manifestPath: manifestAbs, schemaContext: catalogSchema, jobs })
+  // altimate_change end
   const mhash = await manifestHash(manifestAbs, opts.cwd)
 
   return runReview({

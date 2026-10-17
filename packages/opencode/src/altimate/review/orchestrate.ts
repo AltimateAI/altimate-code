@@ -163,7 +163,67 @@ export interface ReviewRunner {
     /** Warehouse connection name to diff against; omit for the default. */
     warehouse?: string,
   ): Promise<{ rowsOnlyInBase?: number; rowsOnlyInHead?: number; rowsChanged?: number; summary?: string } | null>
+  // altimate_change start — dbt impact past the dbt graph (analyzeDbtImpact)
+  /**
+   * Per-hop blast radius of one change — dbt models, loaders and served
+   * tables, each with a verdict. Returns null when the core build lacks the
+   * binding (the lanes then keep their dbt-graph-only behaviour).
+   */
+  dbtImpact?(change: { model: string; column?: string; kind: string }): Promise<ExternalImpactEntry[] | null>
+  /**
+   * Schema-lag findings for a base → head SQL change: readers that production
+   * can run against a relation that does not have the new column yet. Null
+   * when the core build lacks the binding.
+   */
+  schemaLag?(change: { model: string; kind: "sql"; base_sql: string; head_sql: string }): Promise<SchemaLagResult | null>
+  // altimate_change end
 }
+
+// altimate_change start — schema_lag lane
+export interface SchemaLagResult {
+  findings: Array<{
+    reason: string
+    verdict: string
+    consumer: string
+    column: string
+    producer: string
+    consumer_jobs?: string[]
+    producer_jobs?: string[]
+    window?: string
+    message: string
+    fix: string
+  }>
+  skipped: string[]
+}
+// altimate_change end
+
+// altimate_change start — impact evidence past the dbt graph
+export interface ExternalImpactEntry {
+  hop: number
+  node_type: string
+  name: string
+  verdict: string
+  reason?: string
+}
+
+/** BREAKING consumers outside dbt (a loader or a served table): the only
+ *  evidence that lets a MODIFIED model's lineage finding reach `critical`. */
+interface ExternalBreakEvidence {
+  breaks: Array<ExternalImpactEntry & { column?: string }>
+}
+
+function externalBreaks(entries: ExternalImpactEntry[], column?: string): ExternalBreakEvidence["breaks"] {
+  return entries
+    .filter((e) => e.verdict.toLowerCase() === "breaking" && !/^(model|dbt_)/i.test(e.node_type))
+    .map((e) => ({ ...e, column }))
+}
+
+function describeBreaks(b: ExternalBreakEvidence["breaks"]): string {
+  return b
+    .map((e) => `${e.node_type} \`${e.name}\`${e.column ? ` (column \`${e.column}\`)` : ""}${e.reason ? ` — ${e.reason}` : ""}`)
+    .join("; ")
+}
+// altimate_change end
 
 export interface OrchestrateInput {
   changedFiles: ChangedFile[]
@@ -237,6 +297,7 @@ const PROJECT_SCOPE_SKIPS: Record<string, string> = {
   schema_yml_test_removal: "detects `unique` / `not_null` / `relationships` tests REMOVED between two schema.yml versions",
   ai_review:
     "the advisory LLM lane is grounded in the diff and caps at 20 files — project-wide it would review an arbitrary subset at unbounded cost; run `altimate review` on a diff for it",
+  schema_lag: "compares a model's base and head output / source columns to find readers that run before the producer is rebuilt",
   "dbt_patterns:fanout_join":
     "fires when a join is ADDED to an aggregating model; with the whole model presented as added it degenerates to \"this model aggregates and has a join\", which describes most correct analytics SQL",
 }
@@ -296,7 +357,14 @@ function impactToSeverity(impact: ImpactResult): Severity | null {
   }
 }
 
-function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: ImpactResult, rubric: Rubric): Finding[] {
+function lineageBreakageLane(
+  file: ChangedFile & { kind: string },
+  impact: ImpactResult,
+  rubric: Rubric,
+  // altimate_change start — loader/served-table evidence from analyzeDbtImpact
+  external?: ExternalBreakEvidence,
+  // altimate_change end
+): Finding[] {
   const model = modelNameFromPath(file.path)
   const total = impact.directCount + impact.transitiveCount
   const degraded = !impact.hasManifest
@@ -323,6 +391,9 @@ function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: Impac
         body:
           `\`${model}\` is ${file.status} but ${total} downstream model${total !== 1 ? "s" : ""}` +
           ` (+${impact.testCount} test${impact.testCount !== 1 ? "s" : ""}) still depend on it.` +
+          // altimate_change start — consumers outside dbt, when analyzeDbtImpact named them
+          (external?.breaks.length ? ` Outside dbt it also breaks: ${describeBreaks(external.breaks)}.` : "") +
+          // altimate_change end
           (degraded ? "\n\n_No manifest available — verify the blast radius locally._" : ""),
         file: file.path,
         model,
@@ -334,13 +405,34 @@ function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: Impac
     ]
   }
 
+  // altimate_change start — a modified model whose change BREAKS a loader or a
+  // served table (analyzeDbtImpact, column-level) is a real break, not fan-out.
+  if (external?.breaks.length) {
+    return [
+      makeFinding({
+        severity: clampSeverity("lineage_breakage", "critical", degraded ? "unknown" : "high"),
+        category: "lineage_breakage",
+        title: `${model}: change breaks consumers outside dbt`,
+        body:
+          `This change to \`${model}\` breaks ${external.breaks.length} consumer(s) the dbt graph does not show: ` +
+          `${describeBreaks(external.breaks)}. Keep the column(s) or update those consumers in the same release.`,
+        file: file.path,
+        model,
+        confidence: degraded ? "unknown" : "high",
+        degraded,
+        evidence: { tool: "altimate_core.dbt_impact", result: { impact, external: external.breaks } },
+        ruleKey: "lineage_breakage:external-sink",
+      }),
+    ]
+  }
+  // altimate_change end
   const sev = impactToSeverity(impact)
   if (!sev) return []
   // For a MODIFIED model, blast radius alone is NOT a breaking change — a wide
-  // fan-out doesn't mean the edit broke anything (it may be additive/safe). Until
-  // a real column-drop classifier exists, cap modified-model lineage impact at
-  // `warning` so merely touching a popular model never blocks. Only delete/rename
-  // (handled above) is treated as a genuine break.
+  // fan-out doesn't mean the edit broke anything (it may be additive/safe). Cap
+  // modified-model lineage impact at `warning` so merely touching a popular model
+  // never blocks. Delete/rename (handled above) and a loader/served-table break
+  // proven by analyzeDbtImpact (also above) are the genuine breaks.
   const capped: Severity = sev === "critical" ? "warning" : sev
   const clamped = clampSeverity("lineage_breakage", capped, degraded ? "unknown" : "high")
   return [
@@ -518,6 +610,100 @@ function parseLineageSource(src: string): { table: string; col: string } {
   return { col: (parts.at(-1) ?? "").toLowerCase(), table: (parts.at(-2) ?? "").toLowerCase() }
 }
 
+// altimate_change start — analyzeDbtImpact evidence, memoized per model file
+const columnEvidenceMemo = new WeakMap<ModelContext, Promise<ExternalBreakEvidence>>()
+
+/** Loader/served-table breaks caused by dropping `removed` columns of the
+ *  model. Empty when the runner has no dbtImpact (or the core lacks it). */
+function columnImpactEvidence(ctx: ModelContext, runner: ReviewRunner, removed: string[]): Promise<ExternalBreakEvidence> {
+  const cached = columnEvidenceMemo.get(ctx)
+  if (cached) return cached
+  const p = (async (): Promise<ExternalBreakEvidence> => {
+    if (!runner.dbtImpact || !removed.length) return { breaks: [] }
+    const model = modelNameFromPath(ctx.file.path)
+    const breaks: ExternalBreakEvidence["breaks"] = []
+    for (const column of removed) {
+      const entries = await runner.dbtImpact({ model, column, kind: "drop" }).catch(() => null)
+      if (entries) breaks.push(...externalBreaks(entries, column))
+    }
+    return { breaks }
+  })()
+  columnEvidenceMemo.set(ctx, p)
+  return p
+}
+
+/** Evidence for the lineage lane: model-level for a delete/rename, removed
+ *  output columns (from column lineage on compiled SQL) for a modification. */
+async function lineageImpactEvidence(
+  ctx: ModelContext,
+  runner: ReviewRunner,
+  dialect: string,
+): Promise<ExternalBreakEvidence> {
+  if (!runner.dbtImpact) return { breaks: [] }
+  const { file } = ctx
+  if (file.status === "deleted" || file.status === "renamed") {
+    const model = modelNameFromPath(file.oldPath ?? file.path)
+    const entries = await runner.dbtImpact({ model, kind: "drop" }).catch(() => null)
+    return { breaks: entries ? externalBreaks(entries) : [] }
+  }
+  if (file.status !== "modified" || !runner.columnLineage || !ctx.engineOldSql || !ctx.engineNewSql)
+    return { breaks: [] }
+  const cols = async (sql: string) =>
+    new Set((await runner.columnLineage!(sql, dialect)).map((e) => e.target.toLowerCase()).filter(Boolean))
+  const [oldCols, newCols] = await Promise.all([cols(ctx.engineOldSql), cols(ctx.engineNewSql)])
+  const removed = [...oldCols].filter((c) => !newCols.has(c))
+  return columnImpactEvidence(ctx, runner, removed)
+}
+// altimate_change end
+
+// altimate_change start — schema_lag lane
+/**
+ * SCHEMA LAG — a reader of a column the change adds (or a newly declared
+ * source column) that production can run before the producer is rebuilt:
+ * another job builds it, it is incremental and never gains the column, or the
+ * loader has not landed it. CI builds everything at once, so it passes there.
+ * Triggered when the model's output columns change or a YAML file in the diff
+ * changes declared columns.
+ */
+export async function schemaLagLane(
+  ctx: ModelContext,
+  runner: ReviewRunner,
+  dialect: string,
+  sourceYamlChanged: boolean,
+): Promise<Finding[]> {
+  if (!runner.schemaLag) return []
+  const { file, engineOldSql, engineNewSql } = ctx
+  if (file.status !== "modified" || !engineOldSql || !engineNewSql || engineOldSql.trim() === engineNewSql.trim()) return []
+  let columnsChanged = sourceYamlChanged
+  if (!columnsChanged && runner.columnLineage) {
+    const cols = async (sql: string) =>
+      [...new Set((await runner.columnLineage!(sql, dialect)).map((e) => e.target.toLowerCase()).filter(Boolean))].sort()
+    const [o, n] = await Promise.all([cols(engineOldSql), cols(engineNewSql)])
+    columnsChanged = o.join(",") !== n.join(",")
+  } else if (!runner.columnLineage) columnsChanged = true
+  if (!columnsChanged) return []
+  const model = modelNameFromPath(file.path)
+  const r = await runner
+    .schemaLag({ model, kind: "sql", base_sql: engineOldSql, head_sql: engineNewSql })
+    .catch(() => null)
+  if (!r) return []
+  return r.findings.map((f) =>
+    makeFinding({
+      severity: clampSeverity("lineage_breakage", f.verdict === "breaking" ? "critical" : "warning", "high"),
+      category: "lineage_breakage",
+      title: `${f.reason}: \`${f.consumer}\` reads \`${f.producer}.${f.column}\` before it exists in production`,
+      body: `${f.message}. Suggested fix: ${f.fix}.`,
+      file: file.path,
+      model,
+      column: f.column,
+      confidence: "high",
+      evidence: { tool: "altimate_core.dbt_impact", result: { schema_lag: f, skipped: r.skipped } },
+      ruleKey: f.reason,
+    }),
+  )
+}
+// altimate_change end
+
 /**
  * COLUMN-LEVEL breakage — the real lineage differentiator a linter can't do.
  * When a PR removes/renames an OUTPUT column of a model, trace (via the engine's
@@ -558,6 +744,14 @@ async function columnBreakageLane(
       }
     }
   }
+  // altimate_change start — removed columns read by loaders / served tables
+  const external = await columnImpactEvidence(ctx, runner, removed)
+  for (const e of external.breaks) {
+    const key = e.column ?? "?"
+    if (!brokenBy.has(key)) brokenBy.set(key, new Set())
+    brokenBy.get(key)!.add(`${e.node_type}:${e.name}`)
+  }
+  // altimate_change end
   if (!brokenBy.size) return []
 
   const detail = [...brokenBy.entries()]
@@ -1251,6 +1445,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const runStructural = (runSemantic || runDbtPatterns) && !projectScope
   const runPiiExposure = lanes.has("pii_exposure")
   const runAi = lanes.has("ai_review") && !!input.aiReview && !projectScope
+  const runSchemaLag = lanes.has("schema_lag") && !projectScope
+  // Declared source columns changed: models reading sources may now read a
+  // column the loader has not landed yet.
+  const sourceYamlChanged = reviewable.some((f) => /\.ya?ml$/i.test(f.path) && /(^|\n)[+-]\s*-?\s*(\{\s*)?name:/.test(f.diff ?? ""))
   const notEnabled =
     `not enabled at \`${tier}\` tier` + (input.config.reviewers.length ? " / by the `reviewers` config" : "")
   if (projectScope) {
@@ -1301,8 +1499,19 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       }
     }
     if (runLineage && !projectScope) {
-      all.push(lineageBreakageLane(ctx.file, ctx.impact, input.rubric))
+      // altimate_change start — the lineage lane waits on analyzeDbtImpact evidence
+      const lineageCtx = ctx
+      tasks.push(
+        lineageImpactEvidence(lineageCtx, input.runner, dialect).then((external) =>
+          lineageBreakageLane(lineageCtx.file, lineageCtx.impact, input.rubric, external),
+        ),
+      )
+      // altimate_change end
       tasks.push(columnBreakageLane(ctx, input.runner, getCompiled, dialect))
+    }
+    if (runSchemaLag) {
+      laneRan("schema_lag")
+      tasks.push(schemaLagLane(ctx, input.runner, dialect, sourceYamlChanged))
     }
     if (runTestCoverage) tasks.push(missingGrainTestLane(ctx, input.runner))
     // PII classification always runs (cheap name-pattern check, diff-scoped to

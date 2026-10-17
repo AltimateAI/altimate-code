@@ -3,6 +3,10 @@ import { EngineCoerce } from "../native/engine-coerce"
 import { parseManifest } from "../native/dbt/manifest"
 import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
+// altimate_change start — analyzeDbtImpact normalization (shared with `altimate dbt-impact`)
+import path from "path"
+import { normalizeImpactReport } from "../../cli/cmd/dbt-impact-helpers"
+// altimate_change end
 
 /**
  * Production ReviewRunner backed by the native Dispatcher (the Rust core).
@@ -26,7 +30,21 @@ interface CachedManifest {
   children: Map<string, string[]> // unique_id -> direct child unique_ids
   testDeps: Map<string, Set<string>> // model unique_id -> set of test unique_ids depending on it
   schemaContext?: SchemaContext // model/source columns for equivalence resolution
+  /** Lower-cased names of every relation dbt knows (models, sources, seeds, snapshots). */
+  relationNames?: Set<string>
   ok: boolean
+}
+
+/**
+ * A validation error naming a relation dbt knows but the review schema lacks
+ * (a model whose columns are not documented) is the schema's gap, not an
+ * error in the SQL: drop it. Everything else is kept.
+ */
+export function isSchemaGapError(message: string, relationNames: Set<string> | undefined): boolean {
+  const m = /Table '([^']+)' not found/.exec(message)
+  if (!m || !relationNames) return false
+  const name = m[1].split(".").pop()!.replace(/"/g, "").toLowerCase()
+  return relationNames.has(name)
 }
 
 function asArray<T = any>(v: unknown): T[] {
@@ -96,6 +114,11 @@ function lintCategory(rule: string, code: string): string | undefined {
 
 export interface DispatcherRunnerOptions {
   manifestPath: string
+  // altimate_change start — sink map for analyzeDbtImpact (loaders / served tables)
+  sinksPath?: string
+  /** Resolved job map for the schema-lag lane's cross-job check (lazy). */
+  jobs?: () => Promise<unknown | undefined>
+  // altimate_change end
   /** Optional inline schema context to enable real equivalence proofs. */
   schemaContext?: Record<string, any>
 }
@@ -143,7 +166,16 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
             asArray(res.seeds),
             asArray((res as any).snapshots),
           )
-          return { models, byName, children, testDeps, schemaContext, ok: models.size > 0 }
+          const relationNames = new Set<string>()
+          for (const r of [
+            ...nodes,
+            ...asArray<any>(res.sources),
+            ...asArray<any>(res.seeds),
+          ]) {
+            for (const n of [r?.name, r?.alias, r?.identifier])
+              if (typeof n === "string" && n) relationNames.add(n.toLowerCase())
+          }
+          return { models, byName, children, testDeps, schemaContext, relationNames, ok: models.size > 0 }
         } catch {
           return {
             models: new Map(),
@@ -198,6 +230,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           ? { ...schema, dialect }
           : { tables: { _altimate_lint_: { columns: [{ name: "_", type: "string" }] } }, version: "1", dialect }
       const res = await Dispatcher.call("altimate_core.check", { sql, schema_context: schemaContext, base_sql: baseSql })
+      const relationNames = (await loadManifest()).relationNames
       const data = (res.data ?? {}) as Record<string, any>
       // `altimate_core.check` is a composite: { validation, lint, safety }.
       // The AST anti-pattern findings live at data.lint.findings (each a
@@ -210,7 +243,9 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           // in lint-only mode the throwaway `_altimate_lint_` schema makes
           // every real table "unknown" and would flood the review.
           hasTables
-            ? asArray(data.validation?.errors).map((e: any) => ({ ...e, rule: "validate", severity: "error" }))
+            ? asArray(data.validation?.errors)
+                .filter((e: any) => !isSchemaGapError(String(e?.message ?? ""), relationNames))
+                .map((e: any) => ({ ...e, rule: "validate", severity: "error" }))
             : [],
         )
         .concat(
@@ -454,6 +489,44 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         return null
       }
     },
+
+    // altimate_change start — per-hop impact incl. loaders / served tables.
+    // Null (not []) when the core build lacks analyzeDbtImpact, so the lanes
+    // know there was no evidence rather than evidence of nothing.
+    async dbtImpact(change: { model: string; column?: string; kind: string }) {
+      try {
+        const res = await Dispatcher.call("altimate_core.dbt_impact", {
+          // The manifest lives at <project>/target/manifest.json.
+          project_dir: path.dirname(path.dirname(path.resolve(opts.manifestPath))),
+          change_json: JSON.stringify(change),
+          options_json: opts.sinksPath ? JSON.stringify({ sinks: opts.sinksPath }) : undefined,
+        })
+        if (!res.success) return null
+        return normalizeImpactReport(res.data).entries
+      } catch {
+        return null
+      }
+    },
+
+    async schemaLag(change: { model: string; kind: "sql"; base_sql: string; head_sql: string }) {
+      try {
+        const jobs = opts.jobs ? await opts.jobs().catch(() => undefined) : undefined
+        const options: Record<string, unknown> = {}
+        if (opts.sinksPath) options.sinks = opts.sinksPath
+        if (jobs) options.jobs = jobs
+        const res = await Dispatcher.call("altimate_core.dbt_impact", {
+          project_dir: path.dirname(path.dirname(path.resolve(opts.manifestPath))),
+          change_json: JSON.stringify(change),
+          options_json: Object.keys(options).length ? JSON.stringify(options) : undefined,
+        })
+        if (!res.success) return null
+        const r = normalizeImpactReport(res.data)
+        return { findings: r.schema_lag, skipped: r.schema_lag_skipped }
+      } catch {
+        return null
+      }
+    },
+    // altimate_change end
 
     async columnLineage(sql: string, dialect?: string): Promise<Array<{ source: string; target: string }>> {
       try {

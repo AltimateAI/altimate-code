@@ -47,6 +47,12 @@ import { CheckCommand } from "./cli/cmd/check"
 // altimate_change start — dbt-perf: deterministic dbt performance analysis
 import { DbtPerfCommand } from "./cli/cmd/dbt-perf"
 // altimate_change end
+// altimate_change start — dbt mart optimizer: optimize / parity / impact / factor
+import { DbtOptimizeCommand } from "./cli/cmd/dbt-optimize"
+import { DbtParityCommand } from "./cli/cmd/dbt-parity"
+import { DbtImpactCommand } from "./cli/cmd/dbt-impact"
+import { DbtFactorCommand } from "./cli/cmd/dbt-factor"
+// altimate_change end
 // altimate_change end
 // altimate_change start — learn: playbook learning loop command
 import { LearnCommand } from "./cli/cmd/learn"
@@ -239,6 +245,12 @@ let cli = yargs(args)
   // altimate_change end
   // altimate_change start — dbt-perf: register deterministic dbt perf command
   .command(DbtPerfCommand)
+  // altimate_change end
+  // altimate_change start — dbt mart optimizer commands
+  .command(DbtOptimizeCommand)
+  .command(DbtParityCommand)
+  .command(DbtImpactCommand)
+  .command(DbtFactorCommand)
   // altimate_change end
 
 // altimate_change start — link and workspace: absent from --help when workspaces are turned off

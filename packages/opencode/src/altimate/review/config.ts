@@ -74,6 +74,20 @@ export const ReviewConfig = z.object({
   // like `stg__orders.sql` where two boundary chars are adjacent.
   // Cubic-review P2 on PR #1028.
   riskTierPathTokens: z.record(z.string(), z.array(z.string().min(1))).default({}),
+  // altimate_change start — schema_lag lane: which job builds what
+  /**
+   * Job map for the `schema_lag` lane's cross-job check: a file
+   * (`{"jobs": {name: {select, exclude, schedule}}}`) or `selectors` (one job
+   * per `selectors.yml` selector). Resolved with `dbt ls`. Empty = the project
+   * counts as one job, and cross-job lag is reported as skipped.
+   */
+  schemaLag: z
+    .object({
+      jobs: z.string().default(""),
+      jobsFrom: z.enum(["", "selectors"]).default(""),
+    })
+    .optional(),
+  // altimate_change end
 })
 export type ReviewConfig = z.infer<typeof ReviewConfig>
 

@@ -217,6 +217,12 @@ describe("Registration", () => {
     "altimate_core.dbt_config_diff",
     "altimate_core.structural_diff",
     "altimate_core.dbt_perf",
+    // altimate_change start — dbt mart optimizer bindings
+    "altimate_core.dbt_rewrites",
+    "altimate_core.dbt_parity_plan",
+    "altimate_core.dbt_impact",
+    "altimate_core.dbt_factoring",
+    // altimate_change end
   ] as const
 
   test("all altimate_core methods are registered", () => {
