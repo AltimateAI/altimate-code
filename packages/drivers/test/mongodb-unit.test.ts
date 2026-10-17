@@ -436,7 +436,7 @@ describe("MongoDB native command filters", () => {
       { queryTimeoutMs: 0 },
     )
     expect(result.rows).toEqual([[2]])
-    expect(counts).toEqual([{ filter: { status: "A" }, options: {} }])
+    expect(counts).toEqual([{ filter: { status: "A" }, options: { maxTimeMS: 120_000 } }])
   })
 
   test("count forwards the native query filter", async () => {

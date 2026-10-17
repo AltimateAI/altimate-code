@@ -278,10 +278,11 @@ describe("MongoDB materialization", () => {
 
 test("materializes a collection with an embedded find filter and projection", async () => {
   const command = { collection: "articles", find: {}, projection: { _id: 0, article_id: 1, title: 1, description: 1 } }
-  const seen = fakeMongo((_call, index) => (index === 0 ? result([[1]], ["n"]) : result([["body"]])))
+  const seen = fakeMongo(() => result([["body"]]))
   const materialized = await materialize({ ...input, sql: JSON.stringify(command) })
   expect(materialized.rows).toBe(1)
-  expect(seen[2].command).toEqual({
+  expect(seen).toHaveLength(1)
+  expect(seen[0].command).toEqual({
     collection: "articles",
     command: "find",
     filter: {},

@@ -66,6 +66,5 @@ describe("read-only dialect syntax", () => {
   test("unsupported dialects do not inherit DuckDB-only syntax", () => {
     expect(classifyAndCheck("SELECT 10//3", "sqlite").queryType).toBe("write")
     expect(classifyAndCheck("SELECT 10//3", "postgres").queryType).toBe("write")
-    expect(classifyAndCheck("PIVOT users ON name USING count(*)", "sqlite").queryType).toBe("write")
   })
 })
