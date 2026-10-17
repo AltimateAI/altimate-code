@@ -79,6 +79,18 @@ mcpTest("lists exactly five tools and executes warehouse, schema, SQL and checks
   }
 })
 
+// altimate_change start — warehouse discovery accepts strict-schema empty table fillers
+mcpTest("schema_inspect lists SQLite tables with protected counts when table is absent or empty", async () => {
+  const { call } = await fixture()
+  for (const args of [{ warehouse: "source" }, { warehouse: "source", table: "", schema_name: "", values: false }]) {
+    const result = await call("schema_inspect", args)
+    expect(result.isError).toBe(false)
+    expect(body(result)).toContain("main | items | table | 2")
+    expect(body(result)).toContain("Inspect one table with schema_inspect")
+  }
+})
+// altimate_change end
+
 mcpTest("source writes are denied by default and cannot modify the source", async () => {
   const { call } = await fixture()
   const denied = await call("sql_execute", { warehouse: "source", query: "INSERT INTO items VALUES (3, 'plum')" })
@@ -258,6 +270,9 @@ mcpTest("MCP forces database protection for every SQLite source query path", asy
         { warehouse: "source", query_from: { warehouse: "source", sql: "SELECT 'SELECT * FROM items' AS sql" } },
       ],
       ["schema_inspect", { warehouse: "source", table: "items", values: true }],
+      // altimate_change start — inventory counts also enforce database read-only
+      ["schema_inspect", { warehouse: "source" }],
+      // altimate_change end
       ["sql_check", { warehouse: "source", check: "nulls", sql: "SELECT * FROM items", columns: ["id"] }],
       ["sql_materialize", { source_warehouse: "source", sql: "SELECT * FROM items", target_table: "protected_copy" }],
     ] as const) {

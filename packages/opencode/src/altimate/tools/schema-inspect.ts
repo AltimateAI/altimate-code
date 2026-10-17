@@ -15,10 +15,11 @@ import * as Precedence from "../workspace/precedence"
 // altimate_change end
 
 export const SchemaInspectTool = Tool.define("schema_inspect", {
-  description: "Inspect database schema — list columns, types, and constraints for a table.",
+  description: "List tables/collections when table is omitted or empty; otherwise inspect columns, types, and constraints for one table.",
   parameters: z.object({
     table: z
       .string()
+      .optional()
       .describe(
         "Table name (optionally schema-qualified, e.g. public.orders); a warehouse qualifier such as scratch.orders resolves to that warehouse's default schema when no such schema exists",
       ),
@@ -35,7 +36,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
     // Pre-flight validation outranks the redirect, as it does for `sql_explain`: bad
     // input is answered here rather than forwarded to the engine tool, and an empty
     // warehouse string is never read as "the default" by the routing decision.
-    const inputError = validateTableName(args.table) ?? validateWarehouseName(args.warehouse)
+    const inputError = (args.table?.trim() ? validateTableName(args.table) : null) ?? validateWarehouseName(args.warehouse)
     if (inputError) {
       return {
         title: "Schema: INVALID INPUT",
@@ -60,6 +61,45 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       // Strict-schema callers send schema_name: "" for "not specified"; a blank qualifier
       // must mean the engine default, not a schema literally named "".
       const schemaName = args.schema_name?.trim() || undefined
+      if (!args.table?.trim()) {
+        precedence = await Precedence.check(ctx.sessionID, "schema_inspect", args.warehouse)
+        if (precedence.redirect) return precedence.redirect
+        await ctx.ask({
+          permission: "schema_inspect",
+          patterns: [args.warehouse ?? "*"],
+          always: ["*"],
+          metadata: { warehouse: args.warehouse, schema_name: schemaName },
+        })
+        const result = await Dispatcher.call(
+          "schema.list",
+          { warehouse: args.warehouse, schema_name: schemaName },
+          { signal: ctx.abort, sessionID: ctx.sessionID, forceReadOnly: true },
+        )
+        const lines = [
+          `Tables on warehouse "${result.warehouse}":`,
+          "",
+          "Schema | Name | Type | Rows",
+          "-------|------|------|-----",
+          ...result.tables.map((table) => `${table.schema} | ${table.name} | ${table.type} | ${table.row_count ?? ""}`),
+        ]
+        if (!result.tables.length) lines.push("No tables or collections found.")
+        if (result.truncated) lines.push("", "List truncated at 500 entries; pass schema_name to narrow the listing.")
+        lines.push(
+          "",
+          `Inspect one table with schema_inspect(warehouse="${result.warehouse}", schema_name="<schema>", table="<name>").`,
+        )
+        return Precedence.annotate(precedence, {
+          title: `Tables: ${result.warehouse}`,
+          metadata: {
+            success: true,
+            columnCount: 0,
+            rowCount: undefined,
+            tableCount: result.tables.length,
+            truncated: result.truncated,
+          },
+          output: lines.join("\n"),
+        })
+      }
       const target = await resolveInspectionTarget({
         table: args.table,
         schema_name: schemaName,

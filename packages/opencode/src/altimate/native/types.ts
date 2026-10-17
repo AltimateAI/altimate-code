@@ -106,6 +106,17 @@ export interface SqlOptimizeResult {
 
 // --- Schema ---
 
+export interface SchemaListParams {
+  schema_name?: string
+  warehouse?: string
+}
+
+export interface SchemaListResult {
+  warehouse: string
+  tables: Array<{ schema: string; name: string; type: string; row_count?: number }>
+  truncated: boolean
+}
+
 export interface SchemaInspectParams {
   table: string
   schema_name?: string
@@ -1208,6 +1219,7 @@ export const BridgeMethods = {
   "sql.format": {} as { params: SqlFormatParams; result: SqlFormatResult },
   "sql.fix": {} as { params: SqlFixParams; result: SqlFixResult },
   "sql.autocomplete": {} as { params: SqlAutocompleteParams; result: SqlAutocompleteResult },
+  "schema.list": {} as { params: SchemaListParams; result: SchemaListResult },
   "schema.inspect": {} as { params: SchemaInspectParams; result: SchemaInspectResult },
   "schema.index": {} as { params: SchemaIndexParams; result: SchemaIndexResult },
   "schema.search": {} as { params: SchemaSearchParams; result: SchemaSearchResult },

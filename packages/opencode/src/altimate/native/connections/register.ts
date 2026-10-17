@@ -7,6 +7,7 @@
  */
 
 import { register } from "../dispatcher"
+import { listSchemaTables } from "./schema-list"
 import * as Registry from "./registry"
 import { defaultInspectionSchema, resolveInspectionTable, resolveInspectionTarget } from "./inspection-target"
 import { discoverContainers } from "./docker-discovery"
@@ -744,6 +745,8 @@ register("warehouse.discover", async (): Promise<WarehouseDiscoverResult> => {
     }
   }
 })
+
+register("schema.list", listSchemaTables)
 
 // --- schema.inspect ---
 function schemaAddressingHint(): string {

@@ -87,6 +87,12 @@ jobs:
               - '.github/workflows/ci.yml'
             # altimate_change end
             drivers:
+              # altimate_change start — run real MCP drivers for MCP/tool-only changes
+              - 'packages/opencode/src/altimate/mcp-server/**'
+              - 'packages/opencode/test/altimate/mcp-server/**'
+              - 'packages/opencode/src/altimate/tools/schema-inspect.ts'
+              - 'packages/opencode/src/altimate/tools/schema-values.ts'
+              # altimate_change end
               - 'packages/drivers/src/**'
               - 'packages/opencode/src/altimate/native/connections/**'
               - 'packages/opencode/test/altimate/drivers-e2e.test.ts'
