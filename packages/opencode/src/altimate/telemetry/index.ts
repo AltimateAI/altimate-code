@@ -674,10 +674,24 @@ export namespace Telemetry {
         session_id: string
         /** Top-level CLI command, e.g. "tui", "serve", "run". */
         command: string
+        /** Same value as `command`, under the name dashboards query (Properties.surface). Shared
+         * with `client_connected`, which has no `command`, so the funnel joins on one key. */
+        surface: string
         /** Wall time from process start until the command could serve its first request or frame. */
         duration_ms: number
         /** True when this process emitted a non-upgrade first_launch, i.e. a brand-new machine. */
         fresh_install: boolean
+      }
+    | {
+        // First time a client attaches to a running server (once per process). Splits
+        // "backend launched but no client ever connected" from "connected but never sent a message".
+        type: "client_connected"
+        timestamp: number
+        session_id: string
+        /** Launching command/surface ("serve", "run", "tui"); IDE-funnel reads filter surface=="serve". */
+        surface: string
+        /** Process uptime when the first client attached. */
+        since_start_ms: number
       }
     | {
         type: "event_loop_stall"
@@ -2133,6 +2147,8 @@ export namespace Telemetry {
   const ANCHOR_EVENTS = new Set<Event["type"]>([
     "first_launch",
     "startup_ready",
+    // Once per process, and a short-lived extension host may die before the 5 s flush interval.
+    "client_connected",
     "event_loop_stall",
     "altimate_base_registration",
     "session_start",
@@ -2148,6 +2164,7 @@ export namespace Telemetry {
   let command = process.env[COMMAND_ENV] ?? "unknown"
   let freshInstall = false
   let startupReported = false
+  let clientConnectedReported = false
   let loopTimer: ReturnType<typeof setInterval> | undefined
   let loopExpectedAt = 0
   let loopStallsEmitted = 0
@@ -2172,8 +2189,22 @@ export namespace Telemetry {
       timestamp: Date.now(),
       session_id: sessionId,
       command,
+      surface: command,
       duration_ms: Math.round(performance.now()),
       fresh_install: freshInstall,
+    })
+  }
+
+  /** Emit client_connected once per process; called from the server's event-stream routes. */
+  export function clientConnected() {
+    if (clientConnectedReported) return
+    clientConnectedReported = true
+    Telemetry.track({
+      type: "client_connected",
+      timestamp: Date.now(),
+      session_id: sessionId,
+      surface: command,
+      since_start_ms: Math.round(performance.now()),
     })
   }
 
@@ -2252,6 +2283,7 @@ export namespace Telemetry {
     command = process.env[COMMAND_ENV] ?? "unknown"
     freshInstall = false
     startupReported = false
+    clientConnectedReported = false
     loopStallsEmitted = 0
     loopExpectedAt = 0
   }
