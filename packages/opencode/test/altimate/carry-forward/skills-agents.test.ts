@@ -39,6 +39,12 @@ const EXPECTED_SKILLS = [
   "teach",
   "train",
   "training-status",
+  // altimate_change start — dbt mart optimizer skills
+  "dbt-optimize",
+  "dbt-parity",
+  "dbt-impact",
+  "dbt-factor",
+  // altimate_change end
 ]
 
 function skillDirs(): string[] {

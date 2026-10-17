@@ -98,16 +98,32 @@ altimate dbt-perf --cwd <dbt project dir> --manifest target/manifest.json \
 ```
 
 - It prints `skipped_rules` for every rule that could not run, and a summary line
-  carrying `had_compiled_sql` / `had_sink_map`. Surface both: a rule that could not run
+  carrying `had_compiled_sql` / `had_sink_map` / `had_run_results` / `parse_failures`. Surface both: a rule that could not run
   is not a clean result.
-- Where a finding carries a `guardrail` of kind `MaterializationChange`, report its
+- Where a finding carries a `guardrail` of kind `materialization_change`, report its
   `delete_scope` and `reader_requirements` verbatim. Those fields exist because a past
   performance fix switched a materialization without dropping the old relation and
   caused a data incident. A recommendation to change a materialization that omits them
   is not a complete recommendation.
 - `--fail-on warning|error` for CI.
+- `--run-results target/run_results.json --sort cost` ranks findings by measured runtime;
+  `--sinks <map>` lets the column rules see loaders outside dbt.
 - If it reports that it needs a newer `@altimateai/altimate-core`, say so and stop —
   do not substitute a hand-rolled performance opinion for the engine's.
+
+## Acting on the findings
+
+This skill reports. To fix what it finds, use these skills, which work on one model
+or one change at a time:
+
+- Performance or cost findings → `dbt-optimize` (`altimate dbt-optimize --model X`):
+  rewrites with an equivalence proof, applied safely.
+- Logic repeated across models (P104 and similar) → `dbt-factor`
+  (`altimate dbt-factor --project`).
+- Before you drop, rename or retype a column, or change a materialization →
+  `dbt-impact` (`altimate dbt-impact --model X --column c`). It includes loaders and
+  served tables when you pass `--sinks`.
+- After any rewrite → `dbt-parity` to prove the rows are unchanged.
 
 ## 3. Reporting
 

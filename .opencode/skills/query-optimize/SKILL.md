@@ -11,6 +11,14 @@ description: Analyze and optimize SQL queries for better performance
 
 Analyze SQL queries for performance issues and suggest concrete optimizations including rewritten SQL.
 
+## dbt models: use `dbt-optimize` instead
+
+If the SQL is a **dbt model** (a file under `models/` or a model name), use the
+`dbt-optimize` skill. It reads the compiled project, ties rewrites to the project's
+perf findings, writes the proven rewrite back into the model while keeping its Jinja,
+and hands off to `dbt-parity` to prove the rows did not change. Use `dbt-factor` when
+the cost is logic repeated across models. This skill is for standalone SQL.
+
 ## Workflow
 
 1. **Get the SQL query** -- Either:
