@@ -8,6 +8,7 @@ import { MessageID, SessionID } from "../session/schema"
 import type { Skill } from "../skill"
 import type { Fingerprint } from "./fingerprint"
 import { Tracer } from "./observability/tracing"
+import { readStreamText } from "./llm/stream-text"
 
 const log = Log.create({ service: "skill-selector" })
 
@@ -195,11 +196,7 @@ async function runWithLLM(prompt: string, validNames: string[]): Promise<string[
       ],
     })
 
-    // Drain the stream
-    for await (const _ of stream.fullStream) {
-      // drain
-    }
-    const text = await stream.text
+    const text = await readStreamText(stream)
 
     // Parse: one skill name per line, filter to valid names
     const nameSet = new Set(validNames)
