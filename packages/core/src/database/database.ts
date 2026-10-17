@@ -2,7 +2,9 @@ export * as Database from "./database"
 
 import { EffectDrizzleSqlite } from "@opencode-ai/effect-drizzle-sqlite"
 import { layer as sqliteLayer } from "#sqlite"
+// altimate_change start — upstream_fix: cross-process first-run setup lock
 import * as SetupLock from "./setup-lock"
+// altimate_change end
 import { Context, Effect, Layer } from "effect"
 import { Global } from "../global"
 import { Flag } from "../flag/flag"
@@ -20,6 +22,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/v2/storage/Database") {}
 
+// altimate_change start — upstream_fix: set busy_timeout first and serialize first-run setup across processes (see setup-lock.ts)
 export const layer = (filename?: string) =>
   Layer.effect(
     Service,
@@ -27,7 +30,6 @@ export const layer = (filename?: string) =>
       const db = yield* makeDatabase
 
       yield* db.run("PRAGMA busy_timeout = 5000")
-      // altimate_change start — upstream_fix: serialize first-run setup across processes (see setup-lock.ts)
       const setup = Effect.gen(function* () {
         yield* db.run("PRAGMA journal_mode = WAL")
         yield* db.run("PRAGMA synchronous = NORMAL")
@@ -37,7 +39,6 @@ export const layer = (filename?: string) =>
         yield* DatabaseMigration.apply(db)
       })
       yield* filename ? SetupLock.hold(filename, setup) : setup
-      // altimate_change end
 
       return { db }
     }).pipe(Effect.orDie),
@@ -46,6 +47,7 @@ export const layer = (filename?: string) =>
 export function layerFromPath(filename: string) {
   return layer(filename).pipe(Layer.provide(sqliteLayer({ filename })))
 }
+// altimate_change end
 
 export function path() {
   if (Flag.OPENCODE_DB) {
