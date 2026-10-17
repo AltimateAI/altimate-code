@@ -65,6 +65,7 @@ import { pathToFileURL } from "url"
 // altimate_change start - import custom data engineering tools
 import { SqlExecuteTool } from "../altimate/tools/sql-execute"
 import { SqlMaterializeTool } from "../altimate/tools/sql-materialize"
+import { TextLabelTool } from "../altimate/tools/text-label"
 import { SqlCheckTool } from "../altimate/tools/sql-check"
 import { AnswerCommit } from "../altimate/tools/answer-commit"
 import { SchemaInspectTool } from "../altimate/tools/schema-inspect"
@@ -427,6 +428,8 @@ export namespace ToolRegistry {
       // altimate_change start - register custom data engineering tools
       SqlExecuteTool,
       SqlMaterializeTool,
+      // text_label is on by default; ALTIMATE_TEXT_LABEL=0 disables registration.
+      ...(process.env.ALTIMATE_TEXT_LABEL !== "0" ? [TextLabelTool] : []),
       SqlCheckTool,
       SchemaInspectTool,
       SqlAnalyzeTool,
