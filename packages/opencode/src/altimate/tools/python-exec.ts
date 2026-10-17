@@ -362,7 +362,8 @@ function run(
         execFile(
           "/bin/ps",
           ["-A", "-o", "pid=,ppid=,uid=,lstart=,comm="],
-          { encoding: "utf8", timeout: 2000 },
+          // A fixed C locale keeps `lstart` in the English format parseProcessTable expects.
+          { encoding: "utf8", timeout: 2000, env: { PATH: "/usr/bin:/bin", LC_ALL: "C", LANG: "C" } },
           (_error, out) => done(parseProcessTable(out ?? "")),
         )
       })
