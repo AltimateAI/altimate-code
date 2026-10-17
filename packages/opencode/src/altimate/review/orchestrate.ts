@@ -175,7 +175,10 @@ export interface ReviewRunner {
    * can run against a relation that does not have the new column yet. Null
    * when the core build lacks the binding.
    */
-  schemaLag?(change: { model: string; kind: "sql"; base_sql: string; head_sql: string }): Promise<SchemaLagResult | null>
+  schemaLag?(
+    change: { model: string; kind: "sql"; base_sql: string; head_sql: string },
+    manifests?: { manifest: string; base_manifest: string },
+  ): Promise<SchemaLagResult | null>
   // altimate_change end
 }
 
@@ -194,6 +197,18 @@ export interface SchemaLagResult {
     fix: string
   }>
   skipped: string[]
+}
+
+/**
+ * Compiled SQL of both sides for the schema_lag lane. One `target/` holds at
+ * most one side, so run.ts compiles base and head (or takes
+ * `--base-manifest` / `--head-manifest`); the head manifest is the DAG and node
+ * config (`materialized`, `on_schema_change`) the check reads.
+ */
+export interface LagSides {
+  sql(model: string, side: "old" | "new"): string | undefined
+  manifest: string
+  baseManifest: string
 }
 // altimate_change end
 
@@ -258,6 +273,10 @@ export interface OrchestrateInput {
   forceTier?: "trivial" | "lite" | "full"
   /** Manifest was stale relative to change-affecting files (see run.ts::detectStaleManifest). */
   staleManifest?: boolean
+  // altimate_change start — schema_lag lane: compiled base/head, produced on demand
+  /** Undefined result: no compiled sides, and the lane uses the engine SQL. */
+  lagSides?: () => Promise<LagSides | undefined>
+  // altimate_change end
   /** `diff` (default) reviews base..head; `project` reviews every model in the
    *  manifest with no base version. See {@link ReviewScope}. */
   scope?: ReviewScope
@@ -670,21 +689,31 @@ export async function schemaLagLane(
   runner: ReviewRunner,
   dialect: string,
   sourceYamlChanged: boolean,
+  lagSides?: () => Promise<LagSides | undefined>,
 ): Promise<Finding[]> {
   if (!runner.schemaLag) return []
   const { file, engineOldSql, engineNewSql } = ctx
   if (file.status !== "modified" || !engineOldSql || !engineNewSql || engineOldSql.trim() === engineNewSql.trim()) return []
+  const model = modelNameFromPath(file.path)
+  // The engine SQL can mix sides (raw Jinja base against a compiled head from a
+  // stale target/), so prefer the compiled base and head when they exist.
+  const sides = lagSides ? await lagSides().catch(() => undefined) : undefined
+  const oldSql = sides?.sql(model, "old") ?? engineOldSql
+  const newSql = sides?.sql(model, "new") ?? engineNewSql
+  if (oldSql.trim() === newSql.trim()) return []
   let columnsChanged = sourceYamlChanged
   if (!columnsChanged && runner.columnLineage) {
     const cols = async (sql: string) =>
       [...new Set((await runner.columnLineage!(sql, dialect)).map((e) => e.target.toLowerCase()).filter(Boolean))].sort()
-    const [o, n] = await Promise.all([cols(engineOldSql), cols(engineNewSql)])
+    const [o, n] = await Promise.all([cols(oldSql), cols(newSql)])
     columnsChanged = o.join(",") !== n.join(",")
   } else if (!runner.columnLineage) columnsChanged = true
   if (!columnsChanged) return []
-  const model = modelNameFromPath(file.path)
   const r = await runner
-    .schemaLag({ model, kind: "sql", base_sql: engineOldSql, head_sql: engineNewSql })
+    .schemaLag(
+      { model, kind: "sql", base_sql: oldSql, head_sql: newSql },
+      sides ? { manifest: sides.manifest, base_manifest: sides.baseManifest } : undefined,
+    )
     .catch(() => null)
   if (!r) return []
   return r.findings.map((f) =>
@@ -1511,7 +1540,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }
     if (runSchemaLag) {
       laneRan("schema_lag")
-      tasks.push(schemaLagLane(ctx, input.runner, dialect, sourceYamlChanged))
+      tasks.push(schemaLagLane(ctx, input.runner, dialect, sourceYamlChanged, input.lagSides))
     }
     if (runTestCoverage) tasks.push(missingGrainTestLane(ctx, input.runner))
     // PII classification always runs (cheap name-pattern check, diff-scoped to

@@ -80,6 +80,21 @@ export const ReviewCommand = cmd({
         type: "number",
         describe: "--all only: cap how many models are reviewed (0 = no cap; default 500)",
       })
+      // altimate_change start — schema_lag lane inputs
+      .option("jobs", {
+        type: "string",
+        describe: 'schema_lag: job map (JSON/YAML) {"jobs": {name: {"select", "exclude", "schedule"}}}, resolved with dbt ls',
+      })
+      .option("jobs-from", {
+        choices: ["selectors"] as const,
+        describe: "schema_lag: derive the job map (selectors = one job per selectors.yml selector)",
+      })
+      .option("base-manifest", { type: "string", describe: "schema_lag: compiled base manifest.json (skips compiling base)" })
+      .option("head-manifest", { type: "string", describe: "schema_lag: compiled head manifest.json (skips compiling head)" })
+      .option("dbt-bin", { type: "string", describe: "schema_lag: dbt executable (default $ALTIMATE_DBT_BIN, else dbt)" })
+      .option("profiles-dir", { type: "string", describe: "schema_lag: dbt profiles dir for dbt ls / compile" })
+      .option("dbt-target", { type: "string", describe: "schema_lag: dbt target for dbt ls / compile" })
+      // altimate_change end
       .option("cwd", { type: "string", describe: "project directory (default: current dir)" }),
   async handler(args) {
     const cwd = (args.cwd as string) || process.cwd()
@@ -94,6 +109,18 @@ export const ReviewCommand = cmd({
       process.exitCode = 1
       return
     }
+    // altimate_change start — schema_lag lane inputs
+    if (args.jobs && args.jobsFrom) {
+      process.stderr.write("Error: --jobs and --jobs-from are mutually exclusive.\n")
+      process.exitCode = 1
+      return
+    }
+    if (!!args.baseManifest !== !!args.headManifest) {
+      process.stderr.write("Error: --base-manifest and --head-manifest go together.\n")
+      process.exitCode = 1
+      return
+    }
+    // altimate_change end
     if (args.maxModels !== undefined && !args.all) {
       process.stderr.write("Error: --max-models only applies to --all.\n")
       process.exitCode = 1
@@ -138,6 +165,17 @@ export const ReviewCommand = cmd({
           forceTier: args.forceTier as "trivial" | "lite" | "full" | undefined,
           all: args.all === true,
           maxModels: args.maxModels,
+          // altimate_change start — schema_lag lane inputs
+          jobs: args.jobs as string | undefined,
+          jobsFrom: args.jobsFrom as "selectors" | undefined,
+          baseManifest: args.baseManifest as string | undefined,
+          headManifest: args.headManifest as string | undefined,
+          dbt: {
+            dbtBin: args.dbtBin as string | undefined,
+            profilesDir: args.profilesDir as string | undefined,
+            target: args.dbtTarget as string | undefined,
+          },
+          // altimate_change end
           // Stamp the CLI version into engine.cliVersion so an auditor can
           // reconstruct which policy version generated a stored verdict long
           // after the binary that ran it is gone.

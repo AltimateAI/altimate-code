@@ -1,7 +1,10 @@
 import path from "node:path"
 import { readFile, realpath, stat, access, mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
+import { existsSync } from "node:fs"
 import { jobsFromSelectors, readJobMap, resolveJobMap } from "../../cli/cmd/dbt-impact-jobs"
+import { compileSides } from "../../cli/cmd/dbt-impact-compiled"
+import { findModel, loadManifest } from "../../cli/cmd/dbt-mart-helpers"
 import { Installation } from "../../installation"
 import { loadReviewConfig, resolveRubric } from "./config"
 import type { Severity } from "./finding"
@@ -10,7 +13,7 @@ import { makeCompiledResolver, dbtProjectName } from "./compiled"
 import { parseManifest } from "../native/dbt/manifest"
 import { buildCatalogSchemaContext } from "./schema-context"
 import { createDispatcherRunner } from "./runner"
-import { runReview } from "./orchestrate"
+import { runReview, type LagSides } from "./orchestrate"
 import { runAiReview } from "./ai-review"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
@@ -59,6 +62,17 @@ export interface ReviewPullRequestOptions {
   /** `--all` only: cap the number of models reviewed. Omitted →
    *  {@link DEFAULT_ALL_MODEL_CAP}; `0` → no cap. */
   maxModels?: number
+  // altimate_change start — schema_lag lane inputs
+  /** Job map file (overrides config `schemaLag.jobs`). */
+  jobs?: string
+  /** `selectors`: one job per `selectors.yml` selector (overrides config `schemaLag.jobsFrom`). */
+  jobsFrom?: "selectors"
+  /** Compiled base / head manifests; when omitted the lane compiles both sides itself. */
+  baseManifest?: string
+  headManifest?: string
+  /** dbt executable, profiles dir and target for the lane's `dbt ls` / `dbt compile`. */
+  dbt?: { dbtBin?: string; profilesDir?: string; target?: string }
+  // altimate_change end
 }
 
 /** Default `--all` model cap. A 214-model project runs the whole lane set in
@@ -277,6 +291,11 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   if (opts.manifestPath) config.manifestPath = opts.manifestPath
   if (opts.mode) config.mode = opts.mode
   if (opts.severityThreshold) config.severityThreshold = opts.severityThreshold
+  // altimate_change start — schema_lag lane: CLI job map overrides config
+  if (opts.jobs || opts.jobsFrom)
+    config.schemaLag = { jobs: opts.jobs ? path.resolve(opts.cwd, opts.jobs) : "", jobsFrom: opts.jobsFrom ?? "" }
+  if (!!opts.baseManifest !== !!opts.headManifest) throw new Error("--base-manifest and --head-manifest go together")
+  // altimate_change end
   const rubric = resolveRubric(config)
 
   // Resolve the repo top-level once; used to root working-tree FS reads, the
@@ -413,6 +432,12 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   const catalogSchema = await buildCatalogSchemaContext(catalogAbs)
   // altimate_change start — schema_lag lane: the job map, resolved lazily (dbt ls)
   const projectAbs = path.dirname(path.dirname(manifestAbs))
+  const dbtOpts = {
+    dbtBin: opts.dbt?.dbtBin,
+    profilesDir:
+      opts.dbt?.profilesDir ?? (existsSync(path.join(projectAbs, "profiles.yml")) ? projectAbs : undefined),
+    target: opts.dbt?.target,
+  }
   const lag = config.schemaLag
   let jobsMemo: Promise<unknown | undefined> | undefined
   const jobs =
@@ -420,10 +445,20 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       ? () =>
           (jobsMemo ??= (async () => {
             const map = lag.jobs ? readJobMap(path.resolve(projectAbs, lag.jobs)) : jobsFromSelectors(projectAbs)
-            if ("error" in map) return undefined
+            if ("error" in map) {
+              process.stderr.write(`⚠️  schema_lag: ${map.error}; cross-job lag is skipped\n`)
+              return undefined
+            }
             const tmp = await mkdtemp(path.join(tmpdir(), "review-ls-"))
             try {
-              return (await resolveJobMap(map, { projectDir: projectAbs, targetPath: path.join(tmp, "target"), logPath: path.join(tmp, "logs") })).map
+              const r = await resolveJobMap(map, {
+                projectDir: projectAbs,
+                ...dbtOpts,
+                targetPath: path.join(tmp, "target"),
+                logPath: path.join(tmp, "logs"),
+              })
+              for (const e of r.errors) process.stderr.write(`⚠️  schema_lag: ${e}\n`)
+              return r.map
             } finally {
               await rm(tmp, { recursive: true, force: true })
             }
@@ -433,7 +468,41 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // altimate_change end
   const mhash = await manifestHash(manifestAbs, opts.cwd)
 
-  return runReview({
+  // altimate_change start — schema_lag lane: compiled base/head, built once on first use
+  const cleanups: Array<() => void> = []
+  let sidesMemo: Promise<LagSides | undefined> | undefined
+  const lagSides = () =>
+    (sidesMemo ??= (async (): Promise<LagSides | undefined> => {
+      let basePath = opts.baseManifest ? path.resolve(opts.cwd, opts.baseManifest) : undefined
+      let headPath = opts.headManifest ? path.resolve(opts.cwd, opts.headManifest) : undefined
+      if (!basePath && !opts.all && base && !opts.changedFiles) {
+        const models = [
+          ...new Set(
+            changedFiles
+              .filter((f) => f.status === "modified" && f.path.endsWith(".sql") && /(^|\/)models\//.test(f.path))
+              .map((f) => path.basename(f.path, ".sql")),
+          ),
+        ]
+        if (!models.length) return undefined
+        const sides = await compileSides({ projectDir: projectAbs, gitRoot, base, head: opts.head, changed: models, dbt: dbtOpts })
+        cleanups.push(sides.cleanup)
+        for (const note of sides.notes) process.stderr.write(`ℹ️  schema_lag: ${note}\n`)
+        basePath = sides.baseManifest
+        headPath = sides.headManifest
+      }
+      if (!basePath || !headPath) return undefined
+      const b = loadManifest(projectAbs, basePath)
+      const h = loadManifest(projectAbs, headPath)
+      if (!b.ok || !h.ok) return undefined
+      return {
+        sql: (model, side) => findModel(side === "old" ? b.manifest : h.manifest, model)?.compiled_code ?? undefined,
+        manifest: h.path,
+        baseManifest: b.path,
+      }
+    })())
+  try {
+  // altimate_change end
+  return await runReview({
     changedFiles,
     config,
     rubric,
@@ -458,5 +527,10 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     forceTier: opts.forceTier,
     staleManifest,
     scope: opts.all ? "project" : "diff",
+    lagSides,
   })
+  } finally {
+    for (const cleanup of cleanups) cleanup()
+  }
+  // altimate_change end
 }

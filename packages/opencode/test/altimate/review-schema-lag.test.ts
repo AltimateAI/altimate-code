@@ -94,6 +94,37 @@ describe("schema_lag review lane", () => {
     expect(f!.body).toContain("Suggested fix: build `account_status` in `hourly` too")
   })
 
+  test("compiled base/head sides win over mixed engine SQL and carry the manifests", async () => {
+    const calls: unknown[] = []
+    const base = runner(calls, { [BASE]: ["customer_key", "balance_status"], [HEAD]: ["customer_key", "balance_status", "is_priority"] })
+    const seen: unknown[] = []
+    const r: ReviewRunner = {
+      ...base,
+      async schemaLag(change, manifests) {
+        seen.push(manifests)
+        return base.schemaLag!(change, manifests)
+      },
+    }
+    // Raw Jinja base against a stale compiled head: the engine SQL alone would compare sides that never existed.
+    const env = await runReview({
+      changedFiles: files(),
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["schema_lag"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: r,
+      getContent: content("{% set x = 1 %}" + BASE, BASE + " "),
+      lagSides: async () => ({
+        sql: (_m, side) => (side === "old" ? BASE : HEAD),
+        manifest: "/h/manifest.json",
+        baseManifest: "/b/manifest.json",
+      }),
+      generatedAt: "2026-10-15T00:00:00Z",
+    })
+    expect(calls).toEqual([{ model: "account_status", kind: "sql", base_sql: BASE, head_sql: HEAD }])
+    expect(seen).toEqual([{ manifest: "/h/manifest.json", base_manifest: "/b/manifest.json" }])
+    expect(env.findings.some((x) => x.title.startsWith("schema_lag:cross_job"))).toBe(true)
+  })
+
   test("not triggered when output columns are unchanged and no source YAML changed", async () => {
     const calls: unknown[] = []
     const other = "select customer_key, upper(balance_status) as balance_status from stg"

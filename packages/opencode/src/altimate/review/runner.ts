@@ -508,10 +508,13 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       }
     },
 
-    async schemaLag(change: { model: string; kind: "sql"; base_sql: string; head_sql: string }) {
+    async schemaLag(
+      change: { model: string; kind: "sql"; base_sql: string; head_sql: string },
+      manifests?: { manifest: string; base_manifest: string },
+    ) {
       try {
         const jobs = opts.jobs ? await opts.jobs().catch(() => undefined) : undefined
-        const options: Record<string, unknown> = {}
+        const options: Record<string, unknown> = { ...manifests }
         if (opts.sinksPath) options.sinks = opts.sinksPath
         if (jobs) options.jobs = jobs
         const res = await Dispatcher.call("altimate_core.dbt_impact", {
