@@ -300,7 +300,7 @@ describe("schema_inspect richer value profiles", () => {
       useRichSchema()
       const result = await inspect({})
       expect(calls).toHaveLength(1)
-      expect(calls[0]).toContain("json_group_array(CAST(pn AS TEXT) || ':' || pv)")
+      expect(calls[0]).toContain("json_group_array(CAST(pn AS TEXT) || ':' || SUBSTR(pv, 1, 200))")
       expect(calls[0]).toContain("ORDER BY pn DESC, pv LIMIT 50")
       expectRichProfile(result.output)
     } finally {
@@ -319,8 +319,46 @@ describe("schema_inspect richer value profiles", () => {
       install("duckdb", async (sql) => (await conn.execute(sql, 1000)).rows as unknown[][], calls)
       useRichSchema()
       const result = await inspect({})
-      expect(calls[0]).toContain("array_agg(CAST(pn AS TEXT) || ':' || pv)")
+      expect(calls[0]).toContain("array_agg(CAST(pn AS TEXT) || ':' || SUBSTR(pv, 1, 200))")
       expectRichProfile(result.output)
+    } finally {
+      await conn.close()
+    }
+  })
+
+  const LONG_COLUMNS = [{ name: "id", data_type: "INTEGER", nullable: true, primary_key: false }, { name: "body", data_type: "TEXT", nullable: true, primary_key: false }]
+  const longSeed = () => [
+    "CREATE TABLE t (id INTEGER, body TEXT)",
+    ...Array.from({ length: 30 }, (_, i) => `INSERT INTO t VALUES (${i}, '${"p".repeat(200)}-${String(i).padStart(2, "0")}')`),
+  ]
+  const expectLongDistinct = (output: string) => {
+    const line = output.split("\n").find((l) => l.startsWith("body:"))!
+    expect(line).toStartWith("body: 30 distinct, unique in sample, e.g. ")
+    expect(line).not.toMatch(/\(\d+\)/)
+  }
+
+  test("sqlite: long values sharing a 200-char prefix stay distinct", async () => {
+    const db = new Database(":memory:")
+    try {
+      longSeed().forEach((q) => db.run(q))
+      install("sqlite", async (sql) => db.query(sql).values() as unknown[][], [])
+      Dispatcher.register("schema.inspect" as any, async () => ({ table: "t", schema_name: "main", columns: LONG_COLUMNS }))
+      expectLongDistinct((await inspect({})).output)
+    } finally {
+      db.close()
+    }
+  })
+
+  test("duckdb: long values sharing a 200-char prefix stay distinct", async () => {
+    const { connect } = await import("../../../../drivers/src/duckdb")
+    const dir = (await import("fs")).mkdtempSync((await import("os")).tmpdir() + "/schemavals-long-")
+    const conn = await connect({ type: "duckdb", path: dir + "/t.duckdb", create: true } as any)
+    try {
+      await conn.connect()
+      for (const q of longSeed()) await conn.execute(q, 1000)
+      install("duckdb", async (sql) => (await conn.execute(sql, 1000)).rows as unknown[][], [])
+      Dispatcher.register("schema.inspect" as any, async () => ({ table: "t", schema_name: "main", columns: LONG_COLUMNS }))
+      expectLongDistinct((await inspect({})).output)
     } finally {
       await conn.close()
     }
@@ -328,8 +366,9 @@ describe("schema_inspect richer value profiles", () => {
 
   test("postgres SQL uses standard aggregation and the same ranked subquery", () => {
     const sql = buildProfileSql('"public"."t"', [{ name: "status", data_type: "text" }], "postgres")
-    expect(sql).toContain("array_agg(CAST(pn AS TEXT) || ':' || pv)")
-    expect(sql).toContain("GROUP BY SUBSTR(CAST(\"status\" AS TEXT), 1, 200) ORDER BY pn DESC, pv LIMIT 50")
+    expect(sql).toContain("array_agg(CAST(pn AS TEXT) || ':' || SUBSTR(pv, 1, 200))")
+    expect(sql).toContain("GROUP BY CAST(\"status\" AS TEXT) ORDER BY pn DESC, pv LIMIT 50")
+    expect(sql).toContain("SUBSTR(pv, 1, 200)")
     expect(sql).not.toContain("json_group_array")
     expect(sql).not.toMatch(/FILTER|WITHIN GROUP|STRING_AGG|GROUP_CONCAT/i)
   })
@@ -420,6 +459,13 @@ describe("MongoDB value profile", () => {
     expect(out).toContain("tag.id: string (array element)")
     const line = out.slice(out.indexOf("Value samples")).split("\n").find((l) => l.startsWith("tag.id:"))!
     expect(line).not.toContain("unique in sample")
+  })
+
+  test("long values sharing a 200-char prefix stay distinct and unique", () => {
+    const docs = Array.from({ length: 30 }, (_, i) => ({ body: `${"p".repeat(200)}-${String(i).padStart(2, "0")}` }))
+    const line = profileDocuments(docs).split("\n").find((l) => l.startsWith("body:"))!
+    expect(line).toStartWith("body: 30 distinct, unique in sample, e.g. ")
+    expect(line).not.toMatch(/\(\d+\)/)
   })
 
   test("a field whose values are all null is NULL, one with unrenderable values is not", () => {

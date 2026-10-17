@@ -84,13 +84,13 @@ export function buildProfileSql(table: string, columns: ProfileColumn[], dialect
   const aggregate = dialect === "sqlite" ? "json_group_array" : "array_agg"
   const branches = columns.map((c) => {
     const col = `CAST(${quote(c.name)} AS TEXT)`
-    const clipped = `SUBSTR(${col}, 1, ${PROFILE_FETCH_CHARS})`
     const lit = `'${c.name.replace(/'/g, "''")}'`
+    // Values are grouped and ranked in full; only the selected entries are clipped for transfer.
     // Each entry is "<count>:<value>"; the count is digits only, so the first colon splits it.
     return (
       `SELECT ${lit} AS col, COUNT(*) AS total, COUNT(${col}) AS nonnull, COUNT(DISTINCT ${col}) AS ndistinct, ` +
-      `(SELECT ${aggregate}(CAST(pn AS TEXT) || ':' || pv) FROM (SELECT ${clipped} AS pv, COUNT(*) AS pn FROM s ` +
-      `WHERE ${col} IS NOT NULL GROUP BY ${clipped} ORDER BY pn DESC, pv LIMIT ${PROFILE_FETCHED_VALUES}) AS top_values) AS vals FROM s`
+      `(SELECT ${aggregate}(CAST(pn AS TEXT) || ':' || SUBSTR(pv, 1, ${PROFILE_FETCH_CHARS})) FROM (SELECT ${col} AS pv, COUNT(*) AS pn FROM s ` +
+      `WHERE ${col} IS NOT NULL GROUP BY ${col} ORDER BY pn DESC, pv LIMIT ${PROFILE_FETCHED_VALUES}) AS top_values) AS vals FROM s`
     )
   })
   return `${sample}\n${branches.join("\nUNION ALL\n")}`
@@ -387,8 +387,7 @@ function profileField(docs: Record<string, unknown>[], f: DocField): string | Co
       hasValue = true
       if (text === undefined) continue
       hasText = true
-      const key = text.slice(0, PROFILE_FETCH_CHARS)
-      counts.set(key, (counts.get(key) ?? 0) + 1)
+      counts.set(text, (counts.get(text) ?? 0) + 1)
     }
     if (hasValue) present++
     if (hasText) rendered++
@@ -402,7 +401,10 @@ function profileField(docs: Record<string, unknown>[], f: DocField): string | Co
     nonNull: rendered,
     nulls: docs.length - present,
     distinct: counts.size,
-    values: rank([...counts].map(([value, count]) => ({ value, count }))).slice(0, PROFILE_FETCHED_VALUES),
+    // Counted on the full text; only the kept values are clipped.
+    values: rank([...counts].map(([value, count]) => ({ value, count })))
+      .slice(0, PROFILE_FETCHED_VALUES)
+      .map((v) => ({ value: v.value.slice(0, PROFILE_FETCH_CHARS), count: v.count })),
     text: types.some((t) => t === "string" || t === "uuid"),
     multi: f.inArray,
     typed: types.length === 1 && types[0] === "uuid",
