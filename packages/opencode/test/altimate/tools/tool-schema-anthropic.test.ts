@@ -73,8 +73,8 @@ function schemaErrors(schema: object | boolean, rejectEmptySentinels = false): s
     // altimate_change start — reject empty sentinel schemas in model-facing tools.
     if (rejectEmptySentinels) {
       if (value.const === "") errors.push(`${location}/const must not be an empty string`)
-      if (Array.isArray(value.enum) && value.enum.length === 1 && value.enum[0] === "") {
-        errors.push(`${location}/enum must not contain only an empty string`)
+      if (Array.isArray(value.enum) && value.enum.includes("")) {
+        errors.push(`${location}/enum must not contain an empty string`)
       }
     }
     // altimate_change end
@@ -156,7 +156,9 @@ describe("Anthropic tool JSON schemas", () => {
               const tools = yield* registry.tools({ providerID, modelID: target.id, agent })
               expect(tools.map((tool) => tool.id)).toEqual(expect.arrayContaining(["sql_check", "sql_execute", "read"]))
               // altimate_change start — validate the labeling schema with each Anthropic provider.
-              expect(tools.some((tool) => tool.id === "text_label")).toBe(process.env.ALTIMATE_TEXT_LABEL !== "0")
+              expect(tools.some((tool) => tool.id === "text_label")).toBe(
+                name === "analyst" && process.env.ALTIMATE_TEXT_LABEL !== "0",
+              )
               // altimate_change end
               expect(tools.some((tool) => tool.id === "answer_commit")).toBe(name === "analyst")
 
@@ -209,6 +211,9 @@ describe("Anthropic tool JSON schemas", () => {
         const enabled = yield* registry.tools({ providerID: target.providerID, modelID: target.id, agent: analyst })
         expect(enabled.map((tool) => tool.id)).toContain("text_label")
         expect(PermissionNext.disabled(["text_label"], analyst.permission).has("text_label")).toBe(false)
+        const builder = yield* agents.get("builder")
+        const builderTools = yield* registry.tools({ providerID: target.providerID, modelID: target.id, agent: builder })
+        expect(builderTools.map((tool) => tool.id)).not.toContain("text_label")
 
         process.env.ALTIMATE_TEXT_LABEL = "0"
         expect(yield* registry.ids()).not.toContain("text_label")

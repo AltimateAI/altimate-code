@@ -428,8 +428,6 @@ export namespace ToolRegistry {
       // altimate_change start - register custom data engineering tools
       SqlExecuteTool,
       SqlMaterializeTool,
-      // text_label is on by default; ALTIMATE_TEXT_LABEL=0 disables registration.
-      ...(process.env.ALTIMATE_TEXT_LABEL !== "0" ? [TextLabelTool] : []),
       SqlCheckTool,
       SchemaInspectTool,
       SqlAnalyzeTool,
@@ -585,6 +583,12 @@ export namespace ToolRegistry {
     // use this reserved ID: all() excludes file/plugin collisions and MCP.tools excludes MCP collisions.
     if (agent?.name === "analyst" && process.env.ALTIMATE_ANSWER_COMMIT !== "0") {
       tools.push(await AppRuntime.runPromise(AnswerCommit.AnswerCommitTool))
+    }
+    // altimate_change end
+    // altimate_change start — text_label is analyst-scoped (and its read-only data-explorer delegate), on by
+    // default; ALTIMATE_TEXT_LABEL=0 disables registration. Other agents never receive it.
+    if ((agent?.name === "analyst" || agent?.name === "data-explorer") && process.env.ALTIMATE_TEXT_LABEL !== "0") {
+      tools.push(await AppRuntime.runPromise(Effect.scoped(Effect.provide(TextLabelTool, FetchHttpClient.layer))))
     }
     // altimate_change end
     const result = await Promise.all(

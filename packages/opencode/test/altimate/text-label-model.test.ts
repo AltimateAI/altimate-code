@@ -3,12 +3,11 @@ import { afterEach, expect, spyOn } from "bun:test"
 import { APICallError } from "ai"
 import { Effect, Layer } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
-import { ModelV2 } from "@opencode-ai/core/model"
-import { ProviderV2 } from "@opencode-ai/core/provider"
 import { Provider } from "../../src/provider/provider"
 import { ModelID, ProviderID } from "../../src/provider/schema"
 import { LLM } from "../../src/session/llm"
 import { Session } from "../../src/session/session"
+import { Session as LegacySession } from "../../src/session"
 import { MessageID } from "../../src/session/schema"
 import { closeScratch, getScratch } from "../../src/altimate/native/connections/scratch"
 import { TextLabelTool } from "../../src/altimate/tools/text-label"
@@ -54,20 +53,21 @@ it.instance("uses the turn's session model with small calls and preserves stream
     const sessions = yield* Session.Service
     const session = yield* sessions.create({})
     const messageID = MessageID.ascending()
-    yield* sessions.updateMessage({
+    // TextLabelTool reads the persisted legacy MessageV2 row, so persist through the legacy session API.
+    yield* Effect.promise(() => LegacySession.updateMessage({
       id: messageID,
       sessionID: session.id,
       role: "assistant",
       parentID: MessageID.ascending(),
-      providerID: ProviderV2.ID.make(model.providerID),
-      modelID: ModelV2.ID.make(model.id),
+      providerID: model.providerID,
+      modelID: model.id,
       agent: "analyst",
       mode: "analyst",
       path: { cwd: "/", root: "/" },
       time: { created: Date.now() },
       cost: 0,
       tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-    })
+    }))
 
     const error = new APICallError({
       message: "Provider rejected unsupported thinkingBudget",

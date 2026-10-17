@@ -344,7 +344,7 @@ export async function labelScratch(input: TextLabelInput, context: LabelContext,
       })
     }, context.sessionID)
     if (data.rows.length > MAX_ROWS || data.truncated)
-      return fail(`Input exceeds the ${MAX_ROWS} row limit; split the population into disjoint queries.`)
+      return fail(`Input exceeds the ${MAX_ROWS} row limit; split the population into disjoint, deterministic id ranges (one call per range, each into a distinct target_table), then combine the persisted result tables in SQL and verify combined coverage equals the population count before claiming results.`)
     const columns = data.columns.map((column) => column.toLowerCase())
     const idIndex = columns.indexOf(args.id_column.toLowerCase())
     const textIndex = columns.indexOf(args.text_column.toLowerCase())
