@@ -1,4 +1,4 @@
-import { cpSync, existsSync, readFileSync, writeFileSync } from "fs"
+import { cpSync, existsSync, readFileSync } from "fs"
 import { dirname, join } from "path"
 
 const dist = join(import.meta.dir, "..", "dist")
@@ -20,23 +20,16 @@ if (!existsSync(bridgePy)) {
 cpSync(bridgePy, join(dist, "node_python_bridge.py"))
 console.log(`Copied node_python_bridge.py → dist/`)
 
-// 3. Fix the hardcoded __dirname that bun bakes at compile time.
-//    Replace it with a runtime resolution so the bridge script is found
-//    relative to the built index.js, not the CI runner's node_modules.
+// 3. dbt-integration resolves node_python_bridge.py at runtime from its own
+//    location (`fileURLToPath(import.meta.url)`), which in this bundle is dist/,
+//    where step 2 put the script. Fail the build if the bundle ever carries a
+//    path baked in at build time instead.
 const indexPath = join(dist, "index.js")
-let code = readFileSync(indexPath, "utf8")
-const pattern = /var __dirname\s*=\s*"[^"]*python-bridge[^"]*"/
-if (pattern.test(code)) {
-  // import.meta.dirname is supported by Bun and Node >= 20.11.0.
-  // Fallback via __require handles older runtimes where import.meta.dirname is unavailable.
-  const replacement = `var __dirname = typeof import.meta.dirname === "string" ? import.meta.dirname : __require("path").dirname(__require("url").fileURLToPath(import.meta.url))`
-  code = code.replace(pattern, replacement)
-  writeFileSync(indexPath, code)
-  console.log(`Patched __dirname in dist/index.js`)
-} else {
-  const found = code.match(/var __dirname[^;]*/)?.[0] ?? "(not found)"
-  console.error(`ERROR: could not find python-bridge __dirname to patch — the bundle format may have changed`)
-  console.error(`  Pattern: ${pattern}`)
-  console.error(`  Nearest match: ${found}`)
+const code = readFileSync(indexPath, "utf8")
+const baked = /var __dirname\s*=\s*"(?:[A-Za-z]:\\\\|\/)/
+if (!code.includes("fileURLToPath(import.meta.url)") || !code.includes(`"node_python_bridge.py"`) || baked.test(code)) {
+  console.error(`ERROR: dist/index.js does not resolve node_python_bridge.py relative to itself at runtime`)
+  console.error(`  Has the @altimateai/dbt-integration bundle format changed?`)
   process.exit(1)
 }
+console.log(`Verified dist/index.js resolves node_python_bridge.py at runtime`)
