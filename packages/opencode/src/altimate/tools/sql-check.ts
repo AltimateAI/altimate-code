@@ -5,6 +5,8 @@ import * as Precedence from "../workspace/precedence"
 import * as Registry from "../native/connections/registry"
 import { classifyAndCheck, isSingleQuery } from "./sql-classify"
 import { maskSql, tokenizeSql } from "./sql-tokenize"
+import { sqlFunctionCalls } from "./sql-functions"
+import { hasSideEffectFunction } from "./sql-function-policy"
 import { executeQuery, type QueryContext } from "../native/query-execution"
 
 const column = z
@@ -120,9 +122,11 @@ export function readSql(sql: string, dialect?: string): string {
   // embedding user SQL, even when the parser reports a query category.
   const { tokens, complete } = tokenizeSql(sql, dialect)
   const masked = maskSql(tokens)
-  // SELECT alone does not make sequence setters, extension loaders or file writers read-only.
-  // Preserve quoted function identifiers while hiding string literals and comments.
-  const functions = maskSql(tokens, true)
+  // Keep sql_check's existing stricter ban on dynamic query(), even when the
+  // classifier can prove a literal body read-only. All calls use real code '(' tokens.
+  const unsafeFunction = sqlFunctionCalls(sql, dialect).some(
+    (call) => call.escaped || call.name === "query" || hasSideEffectFunction(call.name),
+  )
   const body = masked.trim().replace(/;$/, "").trim()
   let depth = 0
   let balanced = true
@@ -135,6 +139,7 @@ export function readSql(sql: string, dialect?: string): string {
     queryType !== "read" ||
     !isSingleQuery(sql, dialect) ||
     !complete ||
+    unsafeFunction ||
     !balanced ||
     depth !== 0 ||
     !/^(SELECT|WITH)\b/i.test(body) ||
@@ -142,17 +147,7 @@ export function readSql(sql: string, dialect?: string): string {
     /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|COPY|ATTACH|DETACH|PRAGMA|VACUUM|CALL|DO|INTO|INSTALL|LOAD|EXPORT|IMPORT|GRANT|REVOKE)\b/i.test(
       body,
     ) ||
-    /\bREPLACE\b(?!\s*\()/i.test(body) ||
-    /\b(nextval|setval|set_config|load_extension|writefile|dblink_exec|lo_import|lo_export|lo_create|lo_unlink|lo_put|pg_write_file|pg_append_file|pg_file_write|pg_file_rename|pg_file_unlink|pg_advisory_lock|pg_advisory_xact_lock)\s*\(/i.test(
-      functions,
-    ) ||
-    // PostgreSQL Unicode-escaped identifiers can spell a denied function without its literal name.
-    /\bU&/i.test(functions) ||
-    /\bSYSTEM\$\w+\s*\(/i.test(functions) ||
-    // Session-state, backend-signalling and replication functions are callable from a plain SELECT.
-    /\b(pg_try_advisory\w*|pg_advisory_unlock\w*|pg_advisory_lock\w*|pg_advisory_xact\w*|pg_terminate_backend|pg_cancel_backend|pg_reload_conf|pg_rotate_logfile|pg_promote|pg_switch_wal|pg_logical_emit_message|pg_create_\w*_replication_slot|pg_drop_replication_slot|pg_replication_slot_advance|pg_replication_origin_\w+|dblink|dblink_\w+|pg_notify|pg_stat_reset\w*|pg_wal_replay_\w+|pg_logical_slot_\w+|pg_replication_slot_\w+|get_lock|release_lock|release_all_locks|is_free_lock|is_used_lock|master_pos_wait|source_pos_wait|sleep|benchmark|pg_xlog_replay_\w+|pg_log_backend_memory_contexts|pg_create_restore_point|pg_backup_\w+|pg_start_backup|pg_stop_backup|lo_from_bytea)\s*\(/i.test(
-      functions,
-    )
+    /\bREPLACE\b(?!\s*\()/i.test(body)
   ) {
     throw new Error(
       "sql_check only accepts a single read-only SELECT (or WITH ... SELECT); it never writes or fixes data.",
@@ -174,7 +169,13 @@ export function checkSql(input: SqlCheckPublicInput, context?: QueryContext) {
 
 async function checkWithinDeadline(input: SqlCheckPublicInput, context: QueryContext) {
   context?.signal?.throwIfAborted()
-  const args = parameters.parse(dropEmpty(input))
+  const parsed = parameters.safeParse(dropEmpty(input))
+  if (!parsed.success) {
+    throw new Error(
+      `sql_check invalid input: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`,
+    )
+  }
+  const args = parsed.data
   if ([args.left_warehouse, args.right_warehouse].some((w) => w !== undefined && w !== args.warehouse)) {
     throw new Error("sql_check runs in one warehouse; use sql_materialize to put both sides in scratch first.")
   }
@@ -197,8 +198,8 @@ async function checkWithinDeadline(input: SqlCheckPublicInput, context: QueryCon
   async function run(query: string): Promise<Row[]> {
     const response = await executeQuery(Registry.getConfig(args.warehouse), {
       noLimit: true,
+      readOnly: true,
       queryTimeoutMs: args.query_timeout_ms,
-      ...(dialect === "postgres" ? { readOnly: true } : {}),
     }, context, (options) => connector.execute(query, undefined, undefined, options))
     if (response.truncated) throw new Error("sql_check received truncated aggregates; no verdict is available")
     return response.rows.map((row) => Object.fromEntries(response.columns.map((col, i) => [col, row[i]])))

@@ -31,7 +31,7 @@ export interface ExecuteOptions {
   maxResultBytes?: number
   // altimate_change end
   // altimate_change start — PostgreSQL source extraction uses a pinned, rolled-back transaction
-  /** PostgreSQL only: execute in a READ ONLY transaction and roll it back before releasing the client. */
+  /** PostgreSQL/DuckDB: rolled-back READ ONLY transaction; SQLite: scoped query_only pragma. */
   readOnly?: boolean
   // altimate_change end
   /** Cancel pending or active execution when the driver supports cancellation. */
