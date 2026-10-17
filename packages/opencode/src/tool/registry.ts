@@ -65,6 +65,9 @@ import { pathToFileURL } from "url"
 // altimate_change start - import custom data engineering tools
 import { SqlExecuteTool } from "../altimate/tools/sql-execute"
 import { SqlMaterializeTool } from "../altimate/tools/sql-materialize"
+// altimate_change start — analyst-only Python runtime availability.
+import { PythonExecTool, pythonExecAvailable } from "../altimate/tools/python-exec"
+// altimate_change end
 import { SqlCheckTool } from "../altimate/tools/sql-check"
 import { AnswerCommit } from "../altimate/tools/answer-commit"
 import { SchemaInspectTool } from "../altimate/tools/schema-inspect"
@@ -541,9 +544,11 @@ export namespace ToolRegistry {
     )
     // altimate_change end
     // altimate_change end
-    // altimate_change start — reserve the finalizer ID from file/plugin tools even when
-    // its native candidate is disabled or this catalogue is used without an analyst.
-    return [...resolved, ...custom, ...pluginCustom].filter((tool) => !Wildcard.match(tool.id, "answer_commit"))
+    // altimate_change start — reserve analyst-only IDs from file/plugin tools even when
+    // their native candidates are disabled or this catalogue is used without an analyst.
+    return [...resolved, ...custom, ...pluginCustom].filter(
+      (tool) => !Wildcard.match(tool.id, "answer_commit") && !Wildcard.match(tool.id, "python_exec"),
+    )
     // altimate_change end
   }
 
@@ -582,6 +587,15 @@ export namespace ToolRegistry {
     // use this reserved ID: all() excludes file/plugin collisions and MCP.tools excludes MCP collisions.
     if (agent?.name === "analyst" && process.env.ALTIMATE_ANSWER_COMMIT !== "0") {
       tools.push(await AppRuntime.runPromise(AnswerCommit.AnswerCommitTool))
+    }
+    // altimate_change end
+    // altimate_change start — expose sandboxed Python only to analysts with a usable runtime.
+    if (agent?.name === "analyst" && process.env.ALTIMATE_PYTHON_EXEC !== "0") {
+      if (await pythonExecAvailable()) {
+        tools.push(await AppRuntime.runPromise(PythonExecTool))
+      } else {
+        log.debug("python_exec not registered: no Python with pandas and duckdb is available")
+      }
     }
     // altimate_change end
     const result = await Promise.all(

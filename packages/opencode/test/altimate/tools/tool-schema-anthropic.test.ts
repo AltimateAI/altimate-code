@@ -15,6 +15,7 @@ import { ToolRegistry } from "@/tool/registry"
 import { TestConfig } from "../../fixture/config"
 import { disposeAllInstances } from "../../fixture/fixture"
 import { testEffect } from "../../lib/effect"
+import { pythonExecAvailable } from "../../../src/altimate/tools/python-exec"
 
 const fixture = (enableParallel: boolean) =>
   testEffect(
@@ -146,6 +147,8 @@ describe("Anthropic tool JSON schemas", () => {
               const tools = yield* registry.tools({ providerID, modelID: target.id, agent })
               expect(tools.map((tool) => tool.id)).toEqual(expect.arrayContaining(["sql_check", "sql_execute", "read"]))
               expect(tools.some((tool) => tool.id === "answer_commit")).toBe(name === "analyst")
+              const hasPython = yield* Effect.promise(() => pythonExecAvailable())
+              expect(tools.some((tool) => tool.id === "python_exec")).toBe(name === "analyst" && hasPython)
 
               // Match prompt.ts / session/tools.ts conversion. Both SDK providers forward this schema unchanged.
               // Also retain the legacy LLM.stream permission-filtered insertion order for offline diagnostics.
