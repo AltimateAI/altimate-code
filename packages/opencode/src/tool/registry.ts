@@ -65,6 +65,7 @@ import { pathToFileURL } from "url"
 // altimate_change start - import custom data engineering tools
 import { SqlExecuteTool } from "../altimate/tools/sql-execute"
 import { SqlMaterializeTool } from "../altimate/tools/sql-materialize"
+import { PythonExecTool, pythonExecAvailable } from "../altimate/tools/python-exec"
 import { TextLabelTool } from "../altimate/tools/text-label"
 import { SqlCheckTool } from "../altimate/tools/sql-check"
 import { AnswerCommit } from "../altimate/tools/answer-commit"
@@ -542,9 +543,11 @@ export namespace ToolRegistry {
     )
     // altimate_change end
     // altimate_change end
-    // altimate_change start — reserve the finalizer ID from file/plugin tools even when
-    // its native candidate is disabled or this catalogue is used without an analyst.
-    return [...resolved, ...custom, ...pluginCustom].filter((tool) => !Wildcard.match(tool.id, "answer_commit"))
+    // altimate_change start — reserve analyst-only IDs from file/plugin tools even when
+    // their native candidates are disabled or this catalogue is used without an analyst.
+    return [...resolved, ...custom, ...pluginCustom].filter(
+      (tool) => !Wildcard.match(tool.id, "answer_commit") && !Wildcard.match(tool.id, "python_exec"),
+    )
     // altimate_change end
   }
 
@@ -583,6 +586,12 @@ export namespace ToolRegistry {
     // use this reserved ID: all() excludes file/plugin collisions and MCP.tools excludes MCP collisions.
     if (agent?.name === "analyst" && process.env.ALTIMATE_ANSWER_COMMIT !== "0") {
       tools.push(await AppRuntime.runPromise(AnswerCommit.AnswerCommitTool))
+    }
+    // altimate_change end
+    // altimate_change start — expose sandboxed Python only to analysts whose host has a usable
+    // interpreter and passes the sandbox self-test; pythonExecAvailable logs the refusal reason.
+    if (agent?.name === "analyst" && process.env.ALTIMATE_PYTHON_EXEC !== "0" && (await pythonExecAvailable())) {
+      tools.push(await AppRuntime.runPromise(PythonExecTool))
     }
     // altimate_change end
     // altimate_change start — text_label is analyst-scoped (and its read-only data-explorer delegate), on by
