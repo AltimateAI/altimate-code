@@ -245,6 +245,60 @@ function extractFields(docs: Record<string, unknown>[]): Map<string, Set<string>
   return fieldTypes
 }
 
+/** Deepest dotted path reported by `extractNestedPaths`, counting `field[]` as part of its segment. */
+const NESTED_PATH_MAX_DEPTH = 3
+/** Cap on nested paths reported per collection. */
+const NESTED_PATH_MAX_COUNT = 100
+/** Documents sampled to infer a collection schema. */
+const SAMPLE_DOCUMENTS = 100
+
+export interface NestedPath {
+  types: Set<string>
+  /** Sampled documents containing the path. */
+  docs: number
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
+
+/**
+ * Extract dotted paths below the top level (`a.b`, `items[].sku`) up to depth 3, with
+ * the types seen and the number of documents containing each path. Arrays of objects
+ * contribute `field[]` followed by the element's keys.
+ */
+export function extractNestedPaths(docs: Record<string, unknown>[]): Map<string, NestedPath> {
+  const paths = new Map<string, NestedPath>()
+  for (const doc of docs) {
+    const seen = new Set<string>()
+    const visit = (value: unknown, path: string, depth: number) => {
+      if (depth >= NESTED_PATH_MAX_DEPTH) return
+      if (isPlainObject(value)) {
+        for (const [key, child] of Object.entries(value)) record(child, `${path}.${key}`, depth + 1)
+      } else if (Array.isArray(value)) {
+        for (const element of value) {
+          if (!isPlainObject(element)) continue
+          for (const [key, child] of Object.entries(element)) record(child, `${path}[].${key}`, depth + 1)
+        }
+      }
+    }
+    const record = (value: unknown, path: string, depth: number) => {
+      const entry = paths.get(path) ?? { types: new Set<string>(), docs: 0 }
+      entry.types.add(inferType(value))
+      if (!seen.has(path)) {
+        seen.add(path)
+        entry.docs++
+      }
+      paths.set(path, entry)
+      visit(value, path, depth)
+    }
+    for (const [key, value] of Object.entries(doc)) visit(value, key, 1)
+  }
+  return paths
+}
+
 /** Server error code for an operation stopped by `maxTimeMS`. */
 const MONGO_MAX_TIME_EXPIRED = 50
 
@@ -353,6 +407,17 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     }
     // Arrays, plain objects, and remaining BSON types — JSON-serialize for tabular display
     return JSON.stringify(val)
+  }
+
+  async function sampleDocuments(schema: string, table: string, limit = SAMPLE_DOCUMENTS): Promise<Record<string, unknown>[]> {
+    // altimate_change start — format the existing cursor chain
+    return client
+      .db(schema)
+      .collection(table)
+      .find({}, withMaxTime(resolveQueryTimeout(config).ms))
+      .limit(limit)
+      .toArray()
+    // altimate_change end
   }
 
   const connector: Connector & {
@@ -873,17 +938,11 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         .sort((a: { name: string }, b: { name: string }) => a.name.localeCompare(b.name))
     },
 
-    async describeTable(schema: string, table: string): Promise<SchemaColumn[]> {
-      const db = client.db(schema)
-      const coll = db.collection(table)
+    sampleDocuments,
 
+    async describeTable(schema: string, table: string): Promise<SchemaColumn[]> {
       // Sample up to 100 documents to infer schema
-      // altimate_change start — format the existing cursor chain
-      const docs = await coll
-        .find({}, withMaxTime(resolveQueryTimeout(config).ms))
-        .limit(100)
-        .toArray()
-      // altimate_change end
+      const docs = await sampleDocuments(schema, table)
 
       if (docs.length === 0) {
         return []
@@ -898,13 +957,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }
       }
 
+      const joinTypes = (types: Iterable<string>) => {
+        const nonNullTypes = Array.from(types).filter((t) => t !== "null")
+        return nonNullTypes.length === 0 ? "null" : nonNullTypes.length === 1 ? nonNullTypes[0] : nonNullTypes.join(" | ")
+      }
+
       const columns: SchemaColumn[] = []
       for (const [name, types] of fieldTypes) {
-        const typeArr = Array.from(types)
-        const hasNull = typeArr.includes("null")
-        const nonNullTypes = typeArr.filter((t) => t !== "null")
-        const dataType =
-          nonNullTypes.length === 0 ? "null" : nonNullTypes.length === 1 ? nonNullTypes[0] : nonNullTypes.join(" | ")
+        const hasNull = types.has("null")
+        const dataType = joinTypes(types)
 
         // Field is nullable if it has null values OR is missing from some documents
         const presentIn = fieldPresence.get(name) ?? 0
@@ -917,7 +978,18 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         })
       }
 
-      // Sort: _id first, then alphabetical
+      const nested = [...extractNestedPaths(docs)].sort(([a], [b]) => a.localeCompare(b)).slice(0, NESTED_PATH_MAX_COUNT)
+      for (const [name, info] of nested) {
+        const presence = info.docs / docs.length
+        columns.push({
+          name,
+          data_type: joinTypes(info.types),
+          nullable: info.types.has("null") || presence < 1,
+          presence,
+        })
+      }
+
+      // Sort: _id first, then alphabetical (nested paths land under their parent)
       columns.sort((a, b) => {
         if (a.name === "_id") return -1
         if (b.name === "_id") return 1

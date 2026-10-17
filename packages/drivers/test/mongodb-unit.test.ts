@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test"
 import { createRequire } from "node:module"
-import { normalizeMqlCommand } from "../src/mongodb"
+import { extractNestedPaths, normalizeMqlCommand } from "../src/mongodb"
 import { restoreModuleMocksAfterTests } from "./module-mock"
 
 await restoreModuleMocksAfterTests("mongodb")
@@ -458,5 +458,49 @@ describe("MongoDB native command filters", () => {
     const { connector, counts } = await fakeMongo()
     await connector.execute(JSON.stringify({ count: "orders", query: { status: "A" }, filter: { status: "B" } }), 1, undefined, { queryTimeoutMs: 0 })
     expect(counts).toEqual([{ filter: { status: "B" }, options: { maxTimeMS: 120_000 } }])
+  })
+})
+
+describe("MongoDB nested field paths", () => {
+  const docs = [
+    { _id: 1, user: { name: "a", geo: { lat: 1.5, deep: { too: "far" } } }, items: [{ sku: "x", qty: 1 }, { sku: "y" }], tags: ["t"] },
+    { _id: 2, user: { name: "b" }, items: [{ sku: "z", qty: null }], tags: [] },
+    { _id: 3, user: null, items: [] },
+  ]
+
+  test("extracts dotted and array paths to depth 3 with types and per-document presence", () => {
+    const paths = extractNestedPaths(docs)
+    expect([...paths.keys()].sort()).toEqual([
+      "items[].qty",
+      "items[].sku",
+      "user.geo",
+      "user.geo.deep",
+      "user.geo.lat",
+      "user.name",
+    ])
+    expect(paths.get("user.geo.deep")!.types).toEqual(new Set(["object"]))
+    // sku appears twice in document 1 but the document is counted once
+    expect(paths.get("items[].sku")!.docs).toBe(2)
+    expect([...paths.get("items[].qty")!.types].sort()).toEqual(["int32", "null"])
+    expect(paths.get("user.name")!.docs).toBe(2)
+  })
+
+  test("describeTable keeps top-level columns and adds nested paths with a presence share", async () => {
+    const { connector } = await fakeMongo(docs)
+    const columns = await connector.describeTable("test", "articles")
+    const byName = Object.fromEntries(columns.map((c) => [c.name, c]))
+    expect(byName.user).toEqual({ name: "user", data_type: "object", nullable: true })
+    expect(byName.items).toEqual({ name: "items", data_type: "array", nullable: false })
+    expect(byName["user.name"]).toEqual({ name: "user.name", data_type: "string", nullable: true, presence: 2 / 3 })
+    expect(byName["items[].sku"]).toMatchObject({ data_type: "string", presence: 2 / 3 })
+    expect(byName["items[].qty"]).toMatchObject({ data_type: "int32", nullable: true })
+    expect(columns[0]!.name).toBe("_id")
+    const names = columns.map((c) => c.name)
+    expect(names.slice(names.indexOf("user"))).toEqual(["user", "user.geo", "user.geo.deep", "user.geo.lat", "user.name"])
+  })
+
+  test("sampleDocuments returns the sampled documents", async () => {
+    const { connector } = await fakeMongo(docs)
+    expect(await connector.sampleDocuments!("test", "articles", 50)).toEqual(docs)
   })
 })

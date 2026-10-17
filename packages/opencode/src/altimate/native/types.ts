@@ -120,6 +120,8 @@ export interface SchemaColumn {
   nullable: boolean
   primary_key: boolean
   description?: string
+  /** Share (0-1) of sampled documents containing this field (MongoDB nested paths). */
+  presence?: number
 }
 
 export interface SchemaInspectResult {

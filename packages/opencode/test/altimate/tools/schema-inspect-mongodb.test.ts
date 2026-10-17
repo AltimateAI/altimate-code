@@ -75,4 +75,40 @@ describe("schema_inspect MongoDB collections", () => {
     expect(result.output).toContain('Collection "empty" has no documents to infer a schema')
     expect(result.output).not.toContain("was not found")
   })
+
+  test("profiles sampled documents instead of skipping, including nested paths", async () => {
+    const connector = configure("records")
+    const docs = Array.from({ length: 10 }, (_, i) => ({
+      id: `e${i}`,
+      status: i < 7 ? "open" : "closed",
+      meta: { source: i % 2 ? "web" : "api" },
+    }))
+    connector.describeTable.mockImplementation(async () => [
+      { name: "id", data_type: "string", nullable: false },
+      { name: "meta", data_type: "object", nullable: false },
+      { name: "meta.source", data_type: "string", nullable: true, presence: 0.9 },
+      { name: "status", data_type: "string", nullable: false },
+    ])
+    Object.assign(connector, { sampleDocuments: mock(async () => docs) })
+    const tool = await initTool(SchemaInspectTool)
+    const result = await tool.execute({ warehouse: "documents", table: "records.events" }, ctx)
+    expect(result.metadata.success).toBe(true)
+    expect(result.output).not.toContain("skipped")
+    expect(result.output).toContain("meta.source | string (in 90% of docs) | YES")
+    expect(result.output).toContain("id: 10 distinct, unique in sample — e0, e1")
+    expect(result.output).toContain("status: 2 distinct — open (7), closed (3)")
+    expect(result.output).toContain("meta.source: 2 distinct — api (5), web (5)")
+    expect(result.output).not.toContain("\nmeta:")
+    expect((connector as any).sampleDocuments.mock.calls).toEqual([["records", "events", 100]])
+  })
+
+  test("a failing document sample keeps the schema", async () => {
+    const connector = configure("records")
+    Object.assign(connector, { sampleDocuments: mock(async () => { throw new Error("not authorized") }) })
+    const tool = await initTool(SchemaInspectTool)
+    const result = await tool.execute({ warehouse: "documents", table: "records.events" }, ctx)
+    expect(result.metadata.success).toBe(true)
+    expect(result.output).toContain("id | STRING")
+    expect(result.output).toContain("Value samples unavailable: not authorized")
+  })
 })
