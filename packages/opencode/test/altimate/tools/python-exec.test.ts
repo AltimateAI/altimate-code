@@ -2,6 +2,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test"
 import { spawnSync } from "node:child_process"
 import * as fs from "node:fs/promises"
+import * as os from "node:os"
 import * as path from "node:path"
 import { SessionID, MessageID } from "../../../src/session/schema"
 import {
@@ -358,6 +359,24 @@ describe("python_exec", () => {
       expect(result.metadata.network).toBe(isolation.network)
       expect(result.output).toContain(isolation.network)
       if (isolation.network === "isolated") expect(result.output).toContain("BLOCKED")
+    },
+    15_000,
+  )
+
+  e2e(
+    "confines writes to the session workspace where the OS allows it",
+    async () => {
+      const confined = networkIsolation().prefix[0] === "sandbox-exec"
+      const outside = path.join(os.homedir(), `.pyexec-write-probe-${process.pid}`)
+      const tool = await initTool(PythonExecTool)
+      const code = `import os\ntry:\n    open(${JSON.stringify(outside)}, 'w').write('x')\n    print('WROTE')\nexcept OSError:\n    print('DENIED')\nopen('inside.txt', 'w').write('ok')\nprint('INSIDE_OK')`
+      try {
+        const result = await tool.execute({ code, inputs: [] }, ctx)
+        expect(result.output).toContain("INSIDE_OK")
+        expect(result.output).toContain(confined ? "DENIED" : "WROTE")
+      } finally {
+        await fs.rm(outside, { force: true })
+      }
     },
     15_000,
   )

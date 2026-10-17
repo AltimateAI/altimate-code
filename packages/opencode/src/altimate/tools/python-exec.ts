@@ -119,6 +119,20 @@ export function networkIsolation(): Isolation {
   return isolation
 }
 
+/**
+ * On macOS, also confine writes to the session's Python directory (plus the null/tty devices),
+ * so a cell cannot modify the user's files. Reads stay unrestricted. Linux relies on the
+ * network namespace only.
+ */
+export function confineWrites(iso: Isolation, writeRoot: string): string[] {
+  if (iso.prefix[0] !== "sandbox-exec") return iso.prefix
+  const root = writeRoot.replaceAll("\\", "\\\\").replaceAll('"', '\\"')
+  const profile =
+    "(version 1)(allow default)(deny network*)" +
+    `(deny file-write* (require-not (require-any (subpath "${root}") (literal "/dev/null") (literal "/dev/dtracehelper") (regex #"^/dev/tty"))))`
+  return ["sandbox-exec", "-p", profile]
+}
+
 let discovery: { key: string; result: Promise<string | undefined> } | undefined
 
 /** Resolve version-manager shims, then verify dependencies with the actual child environment. */
@@ -366,7 +380,7 @@ export const PythonExecTool = Tool.define("python_exec", {
           }
           const started = Date.now()
           const result = await run(
-            [...iso.prefix, python, "-I", path.join(callDirectory, "_bootstrap.py"), cell, callDirectory],
+            [...confineWrites(iso, await fs.realpath(privateDirectory)), python, "-I", path.join(callDirectory, "_bootstrap.py"), cell, callDirectory],
             workspace,
             { ...childEnv(workspace), TMPDIR: path.join(callDirectory, "tmp") },
             timeoutMs,
@@ -423,7 +437,7 @@ export const PythonExecTool = Tool.define("python_exec", {
           const stderr = clip(result.stderr, OUTPUT_LIMIT / 3)
           const parts = [
             `Python ${status}.`,
-            `Isolation: network ${iso.network}; minimal environment; filesystem access is not OS-isolated.`,
+            `Isolation: network ${iso.network}; minimal environment; reads are not OS-isolated${iso.prefix[0] === "sandbox-exec" ? "; writes are confined to the workspace" : "; writes are not OS-confined"}.`,
             `Workspace: ${workspace}`,
           ]
           if (result.workspaceError) parts.push(`${result.workspaceError} Workspace cleared; retry with smaller files.`)
