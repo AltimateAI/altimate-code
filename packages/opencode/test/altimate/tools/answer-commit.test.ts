@@ -1135,6 +1135,9 @@ test("answer_commit exposes a serializable object input schema", async () => {
     "basis",
     "answer_only",
     "readings",
+    // altimate_change start — the data fact that decides between disagreeing readings
+    "reading_evidence",
+    // altimate_change end
   ])
 })
 
