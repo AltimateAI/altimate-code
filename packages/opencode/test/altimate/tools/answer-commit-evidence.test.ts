@@ -5,7 +5,7 @@ import path from "path"
 import { tmpdir } from "../../fixture/fixture"
 import { initTool } from "../tool-fixture"
 import * as Registry from "../../../src/altimate/native/connections/registry"
-import { closeScratch, getScratch } from "../../../src/altimate/native/connections/scratch"
+import { closeScratch, getScratch, withScratchSession } from "../../../src/altimate/native/connections/scratch"
 import { AnswerCommit } from "../../../src/altimate/tools/answer-commit"
 import {
   alternativeColumns,
@@ -25,6 +25,7 @@ const setup = [
   "CREATE TABLE customers (id INTEGER, name TEXT)",
   "INSERT INTO customers VALUES (1, 'x'), (2, 'y'), (3, 'z'), (4, 'w')",
   "CREATE TABLE big AS SELECT range AS id FROM range(600000)",
+  "CREATE TABLE wide AS SELECT range AS id FROM range(2000)",
 ]
 
 let fixture: Awaited<ReturnType<typeof tmpdir>>
@@ -45,10 +46,9 @@ beforeEach(async () => {
   delete process.env.ALTIMATE_SQL_AUTO_CHECK
   Registry.setConfigs({ sqlite_orders: { type: "sqlite", path: sqlitePath } })
   await closeScratch()
-  for (const sessionID of ["", "test-session"]) {
-    const duckdb = await getScratch(sessionID)
-    for (const sql of setup) await duckdb.execute(sql, undefined, undefined, { noLimit: true })
-  }
+  // Only the committing session's scratch store holds the tables, so a check that reads another store finds nothing.
+  const duckdb = await getScratch("test-session")
+  for (const sql of setup) await duckdb.execute(sql, undefined, undefined, { noLimit: true })
 })
 
 afterEach(async () => {
@@ -73,6 +73,9 @@ const turn = (...parts: unknown[]) =>
     { info: { role: "assistant" }, parts },
   ] as never
 
+/** Direct helper calls run inside the session, as answer_commit runs them. */
+const inSession = (name: string, body: () => Promise<void>) => test(name, () => withScratchSession("test-session", body))
+
 const basis = "Counted orders at order grain using orders.id."
 const context = (messages: unknown) => ({
   sessionID: "test-session",
@@ -83,18 +86,18 @@ const context = (messages: unknown) => ({
 })
 
 describe("vacuous filters", () => {
-  test("flags a filter that removes no rows and keeps the effective one", async () => {
+  inSession("flags a filter that removes no rows and keeps the effective one", async () => {
     const found = await vacuousFilters("SELECT COUNT(*) FROM orders WHERE status = 'open' AND region = 'EU'", "scratch")
     expect(found).toHaveLength(1)
     expect(found![0]!.filter).toContain("region")
     expect(found![0]!.rows).toBe(3)
   })
 
-  test("reports nothing when every filter removes rows", async () => {
+  inSession("reports nothing when every filter removes rows", async () => {
     expect(await vacuousFilters("SELECT id FROM orders WHERE status = 'open' AND id < 4", "scratch")).toEqual([])
   })
 
-  test("skips IS NOT NULL guards and counts before GROUP BY", async () => {
+  inSession("skips IS NOT NULL guards and counts before GROUP BY", async () => {
     expect(
       await vacuousFilters(
         "SELECT status, COUNT(*) FROM orders WHERE id IS NOT NULL AND id < 3 GROUP BY status",
@@ -103,7 +106,7 @@ describe("vacuous filters", () => {
     ).toEqual([])
   })
 
-  test("skips SQLite, large tables, subqueries and joins without a condition", async () => {
+  inSession("skips SQLite, large tables, subqueries and joins without a condition", async () => {
     expect(await vacuousFilters("SELECT * FROM orders WHERE region = 'EU'", "sqlite_orders")).toBeUndefined()
     expect(await vacuousFilters("SELECT COUNT(*) FROM big WHERE id >= 0", "scratch")).toBeUndefined()
     expect(
@@ -112,9 +115,21 @@ describe("vacuous filters", () => {
     expect(
       await vacuousFilters("SELECT * FROM orders o, customers c WHERE o.id = c.id AND o.region = 'EU'", "scratch"),
     ).toBeUndefined()
+    expect(
+      await vacuousFilters(
+        "WITH huge AS (SELECT * FROM orders) SELECT COUNT(*) FROM huge WHERE status = 'open' AND region = 'EU'",
+        "scratch",
+      ),
+    ).toBeUndefined()
   })
 
-  test("checks an inner join with a condition", async () => {
+  inSession("skips a join whose row count passes the cap", async () => {
+    expect(
+      await vacuousFilters("SELECT COUNT(*) FROM wide a JOIN wide b ON a.id <= b.id WHERE a.id >= 0", "scratch"),
+    ).toBeUndefined()
+  })
+
+  inSession("checks an inner join with a condition", async () => {
     const found = await vacuousFilters(
       "SELECT c.name FROM orders o JOIN customers c ON o.id = c.id WHERE o.region = 'EU' AND o.status = 'open'",
       "scratch",
@@ -124,7 +139,7 @@ describe("vacuous filters", () => {
 })
 
 describe("readings", () => {
-  test("compares readings with SQL as unordered row sets", async () => {
+  inSession("compares readings with SQL as unordered row sets", async () => {
     const agree = await compareReadings(
       [
         { clause: "open", reading: "status", sql: "SELECT id FROM orders WHERE status = 'open' ORDER BY id" },
@@ -143,7 +158,20 @@ describe("readings", () => {
     expect(disagree).toEqual({ compared: 2, agree: false })
   })
 
-  test("does not compare fewer than two runnable readings or unsafe ones", async () => {
+  inSession("keeps NULL, text and numbers distinct", async () => {
+    const pair = (a: string, b: string) =>
+      compareReadings(
+        [
+          { clause: "x", reading: "a", sql: `SELECT ${a} AS v FROM orders WHERE id = 1` },
+          { clause: "x", reading: "b", sql: `SELECT ${b} AS v FROM orders WHERE id = 1` },
+        ],
+        "scratch",
+      )
+    expect(await pair("CAST(NULL AS TEXT)", "'null'")).toEqual({ compared: 2, agree: false })
+    expect(await pair("1", "'1'")).toEqual({ compared: 2, agree: false })
+  })
+
+  inSession("does not compare fewer than two runnable readings or unsafe ones", async () => {
     expect(await compareReadings([{ clause: "a", reading: "b", sql: "SELECT 1" }], "scratch")).toBeUndefined()
     expect(
       await compareReadings(
@@ -165,7 +193,7 @@ describe("readings", () => {
     ).toBeUndefined()
   })
 
-  test("lists other date-like columns of the tables the query filters", async () => {
+  inSession("lists other date-like columns of the tables the query filters", async () => {
     const lines = await alternativeColumns("SELECT COUNT(*) FROM orders WHERE month(created_at) = 4", "scratch")
     expect(lines).toEqual(["orders: uses created_at; other date-like columns: shipped_at"])
   })
@@ -232,7 +260,7 @@ describe("answer_commit review", () => {
   })
 
   test("records agreeing readings without a review", async () => {
-    const evidence = await gatherEvidence(turn(queryPart("SELECT id FROM orders WHERE id < 3")), [
+    const evidence = await gatherEvidence("test-session", turn(queryPart("SELECT id FROM orders WHERE id < 3")), [
       { clause: "a", reading: "b", sql: "SELECT id FROM orders WHERE id < 3" },
       { clause: "a", reading: "c", sql: "SELECT id FROM orders WHERE id IN (1, 2)" },
     ])
@@ -257,6 +285,14 @@ describe("answer_commit review", () => {
     )
     expect(result.status).not.toBe("error")
     expect(result.metadata.evidence).toMatchObject({ readings: { agree: true } })
+  })
+
+  test("reads the committing session's scratch store", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    const sql = "SELECT COUNT(*) FROM orders WHERE status = 'open' AND region = 'EU'"
+    expect(await gatherEvidence("other-session", turn(queryPart(sql)), undefined)).toBeUndefined()
+    const other = await tool.execute(commit, { ...context(turn(queryPart(sql))), sessionID: "other-session" })
+    expect(other.status).not.toBe("error")
   })
 
   test("does nothing when ALTIMATE_SQL_AUTO_CHECK=off or the query ran on SQLite", async () => {

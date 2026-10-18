@@ -2,7 +2,7 @@
 import { isLocalFilePath, type Connector } from "@altimateai/drivers"
 import type { Tool } from "../../tool/tool"
 import * as Registry from "../native/connections/registry"
-import { isScratch } from "../native/connections/scratch"
+import { isScratch, withScratchSession } from "../native/connections/scratch"
 
 /**
  * Evidence that answer_commit gathers before accepting an answer: requested filters that removed
@@ -10,14 +10,16 @@ import { isScratch } from "../native/connections/scratch"
  * local DuckDB only (the session scratch database or a local DuckDB file) and never calls a model.
  */
 
-/** Whole budget for each check. Past it the check is dropped and the commit proceeds unchanged. */
+/** Whole budget for each check. Past it no further query is sent and the commit proceeds unchanged. */
 export const EVIDENCE_BUDGET_MS = 250
 /**
  * Every base table a re-run reads must be a local DuckDB table with at most this many rows
  * (catalog estimate). Local queries are never interrupted (that restarts the engine and drops the
- * session's scratch tables), so this ceiling is what keeps the work short.
+ * session's scratch tables), so the ceiling and the row cap below keep each query short.
  */
 export const LOCAL_ROW_CEILING = 500_000
+/** Row counts stop at this many joined rows; a larger count cannot be compared and skips the check. */
+export const COUNT_CAP = 1_000_000
 /** More top-level filters than this skips the vacuous-filter check. */
 export const MAX_CONJUNCTS = 6
 /** Readings are compared on at most this many result rows; larger results are not compared. */
@@ -92,25 +94,45 @@ function localDuckdb(warehouse: string): boolean {
   )
 }
 
-async function rows(connector: Connector, sql: string): Promise<Record<string, unknown>[]> {
-  // No short timeout, deadline or abort: interrupting a local engine restarts its helper and drops
-  // session state. The row ceiling keeps the work far below the connection's own timeout.
-  const response = await connector.execute(sql, undefined, undefined, { noLimit: true, readOnly: true })
-  return response.rows.map((row: unknown[]) =>
-    Object.fromEntries(response.columns.map((col: string, i: number) => [col, row[i]])),
-  )
+/**
+ * A deadline-aware query runner. Once the budget has passed it refuses to send another query;
+ * queries already running are never interrupted (that would restart the local engine).
+ */
+type Run = (sql: string) => Promise<Record<string, unknown>[]>
+function runner(connector: Connector, deadline: number): Run {
+  return async (sql) => {
+    if (Date.now() >= deadline) throw new Error("evidence budget spent")
+    const response = await connector.execute(sql, undefined, undefined, { noLimit: true, readOnly: true })
+    return response.rows.map((row: unknown[]) =>
+      Object.fromEntries(response.columns.map((col: string, i: number) => [col, row[i]])),
+    )
+  }
 }
 
-async function serialize(connector: Connector, sql: string): Promise<Json | undefined> {
-  const [parsed] = await rows(connector, `SELECT json_serialize_sql(${literal(sql)}) AS j`)
+/** Runs the work within the budget; any error, refusal or overrun yields undefined. */
+async function withinBudget<T>(work: (deadline: number) => Promise<T | undefined>): Promise<T | undefined> {
+  const deadline = Date.now() + EVIDENCE_BUDGET_MS
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = setTimeout(() => resolve(undefined), EVIDENCE_BUDGET_MS)
+  })
+  try {
+    return await Promise.race([work(deadline).catch(() => undefined), timeout])
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function serialize(run: Run, sql: string): Promise<Json | undefined> {
+  const [parsed] = await run(`SELECT json_serialize_sql(${literal(sql)}) AS j`)
   // uint64 locations lose precision in JSON.parse; they are not needed.
   const statement = JSON.parse(String(parsed?.j ?? "").replace(/"query_location":\s*\d+/g, '"query_location":0'))
   if (statement?.error || statement?.statements?.length !== 1) return undefined
   return statement
 }
 
-async function deserialize(connector: Connector, statement: Json): Promise<string | undefined> {
-  const [row] = await rows(connector, `SELECT json_deserialize_sql(${literal(JSON.stringify(statement))}) AS s`)
+async function deserialize(run: Run, statement: Json): Promise<string | undefined> {
+  const [row] = await run(`SELECT json_deserialize_sql(${literal(JSON.stringify(statement))}) AS s`)
   return typeof row?.s === "string" && row.s ? row.s : undefined
 }
 
@@ -122,37 +144,35 @@ function* nodes(value: Json): Generator<Json> {
 }
 
 /**
- * Base-table references of a statement, or undefined when it reads anything else that could cost
- * more than a table scan or touch files (table functions such as `read_csv`), or joins without a
- * join condition (comma or CROSS joins), whose re-run without a WHERE filter would count a product.
+ * The single SELECT of a statement whose cost the checks can bound, with its base tables; undefined
+ * for anything else: set operations, CTEs, subqueries, table functions (which can read files) and
+ * joins without a join condition.
  */
-function baseTables(statement: Json): Json[] | undefined {
-  const ctes = new Set<string>()
-  for (const node of nodes(statement))
-    for (const entry of node?.cte_map?.map ?? []) ctes.add(String(entry.key).toLowerCase())
+function plainSelect(statement: Json): { node: Json; tables: Json[] } | undefined {
+  const node = statement?.statements?.[0]?.node
+  if (node?.type !== "SELECT_NODE") return undefined
   const tables: Json[] = []
-  for (const node of nodes(statement)) {
-    if (node?.type === "TABLE_FUNCTION") return undefined
-    if (node?.type === "JOIN" && (node.ref_type !== "REGULAR" || !node.condition)) return undefined
-    if (node?.type === "BASE_TABLE" && !ctes.has(String(node.table_name).toLowerCase())) tables.push(node)
+  for (const n of nodes(node)) {
+    if (n?.cte_map?.map?.length) return undefined
+    if (n?.class === "SUBQUERY" || n?.type === "SUBQUERY" || n?.type === "TABLE_FUNCTION") return undefined
+    if (n?.type === "JOIN" && (n.ref_type !== "REGULAR" || !n.condition)) return undefined
+    if (n?.type === "BASE_TABLE") tables.push(n)
   }
-  return tables
+  return tables.length ? { node, tables } : undefined
 }
 
 /** The relation resolves to exactly one local DuckDB base table under the ceiling, and no view shares its name. */
-async function smallLocalTable(connector: Connector, side: Json): Promise<boolean> {
+async function smallLocalTable(run: Run, side: Json): Promise<boolean> {
   const name = literal(String(side.table_name))
   const scope = [
     side.schema_name ? `AND lower(schema_name) = lower(${literal(side.schema_name)})` : "",
     side.catalog_name ? `AND lower(database_name) = lower(${literal(side.catalog_name)})` : "",
   ].join(" ")
-  const [views] = await rows(
-    connector,
+  const [views] = await run(
     `SELECT COUNT(*) AS n FROM duckdb_views() WHERE NOT internal AND lower(view_name) = lower(${name})`,
   )
   if (Number(views?.n) !== 0) return false
-  const tables = await rows(
-    connector,
+  const tables = await run(
     `SELECT d.type AS type, d.path AS path, t.estimated_size AS size
      FROM duckdb_tables() t JOIN duckdb_databases() d USING (database_name)
      WHERE lower(t.table_name) = lower(${name}) ${scope}`,
@@ -166,95 +186,109 @@ async function smallLocalTable(connector: Connector, side: Json): Promise<boolea
   )
 }
 
-async function allSmallLocal(connector: Connector, tables: Json[]): Promise<boolean> {
-  for (const table of tables) if (!(await smallLocalTable(connector, table))) return false
+async function allSmallLocal(run: Run, tables: Json[]): Promise<boolean> {
+  for (const table of tables) if (!(await smallLocalTable(run, table))) return false
   return true
 }
 
-/** Runs work within the budget; any error or overrun yields undefined. The work itself is not interrupted. */
-async function withinBudget<T>(work: () => Promise<T | undefined>): Promise<T | undefined> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<undefined>((resolve) => {
-    timer = setTimeout(() => resolve(undefined), EVIDENCE_BUDGET_MS)
-  })
-  try {
-    return await Promise.race([work().catch(() => undefined), timeout])
-  } finally {
-    clearTimeout(timer)
+const and = (filters: Json[]) =>
+  !filters.length
+    ? null
+    : filters.length === 1
+      ? filters[0]
+      : { class: "CONJUNCTION", type: "CONJUNCTION_AND", alias: "", query_location: 0, children: filters }
+
+/**
+ * Counts the rows of the query's FROM under the given filters, stopping at COUNT_CAP + 1 rows so a
+ * large join cannot run long. Grouping, HAVING, DISTINCT, ORDER and LIMIT are dropped: the count is
+ * of the rows the filters keep. Undefined at or above the cap.
+ */
+async function cappedCount(run: Run, statement: Json, node: Json, filters: Json[]): Promise<number | undefined> {
+  const [one] = (await serialize(run, "SELECT 1 AS __one"))?.statements[0]?.node?.select_list ?? []
+  if (!one) return undefined
+  const inner = {
+    ...statement,
+    statements: [
+      {
+        ...statement.statements[0],
+        node: {
+          ...node,
+          select_list: [one],
+          where_clause: and(filters),
+          group_expressions: [],
+          group_sets: [],
+          having: null,
+          qualify: null,
+          modifiers: [],
+        },
+      },
+    ],
   }
+  const text = await deserialize(run, inner)
+  if (!text) return undefined
+  const [row] = await run(`SELECT COUNT(*) AS __n FROM (${text} LIMIT ${COUNT_CAP + 1}) __capped`)
+  const n = Number(row?.__n)
+  return Number.isFinite(n) && n <= COUNT_CAP ? n : undefined
 }
 
 const isNotNull = (conjunct: Json) => conjunct?.class === "OPERATOR" && conjunct.type === "OPERATOR_IS_NOT_NULL"
 
 /**
- * Re-runs the counting core of the final query with each top-level WHERE filter removed in turn
- * and returns the filters whose removal keeps the same rows: they excluded nothing, which usually
- * means they target a different column than the question means. `IS NOT NULL` guards are skipped.
+ * Re-counts the final query's rows with each top-level WHERE filter removed in turn and returns
+ * the filters whose removal keeps the same rows: they excluded nothing, which usually means they
+ * target a different column than the question means. `IS NOT NULL` guards are skipped.
  */
 export async function vacuousFilters(sql: string, warehouse: string): Promise<VacuousFilter[] | undefined> {
   if (!localDuckdb(warehouse) || !/\bwhere\b/i.test(sql)) return undefined
-  return withinBudget(async () => {
-    const connector = await Registry.get(warehouse)
-    const statement = await serialize(connector, sql)
-    const node = statement?.statements[0]?.node
-    if (node?.type !== "SELECT_NODE" || !node.where_clause || node.cte_map?.map?.length) return undefined
-    const tables = baseTables({ from: node.from_table, where: node.where_clause })
-    // A subquery anywhere in the source or filters could cost more than the scans the ceiling bounds.
-    if (!tables?.length || [...nodes([node.from_table, node.where_clause])].some((n) => n?.class === "SUBQUERY"))
-      return undefined
-    const where = node.where_clause
+  return withinBudget(async (deadline) => {
+    const run = runner(await Registry.get(warehouse), deadline)
+    const statement = await serialize(run, sql)
+    const select = plainSelect(statement)
+    if (!select?.node.where_clause) return undefined
+    const where = select.node.where_clause
     const conjuncts: Json[] = where.type === "CONJUNCTION_AND" ? where.children : [where]
-    if (conjuncts.length > MAX_CONJUNCTS || !(await allSmallLocal(connector, tables))) return undefined
-
-    const [count] = (await serialize(connector, "SELECT COUNT(*) AS __n"))?.statements[0]?.node?.select_list ?? []
-    if (!count) return undefined
-    const counting = (filters: Json[]) => ({
-      ...statement,
-      statements: [
-        {
-          ...statement.statements[0],
-          node: {
-            ...node,
-            select_list: [count],
-            where_clause: !filters.length
-              ? null
-              : filters.length === 1
-                ? filters[0]
-                : { class: "CONJUNCTION", type: "CONJUNCTION_AND", alias: "", query_location: 0, children: filters },
-            group_expressions: [],
-            group_sets: [],
-            having: null,
-            qualify: null,
-            modifiers: [],
-          },
-        },
-      ],
-    })
-    const countOf = async (filters: Json[]) => {
-      const text = await deserialize(connector, counting(filters))
-      if (!text) throw new Error("count could not be rebuilt")
-      const [row] = await rows(connector, text)
-      return Number(row?.__n)
-    }
-    const kept = await countOf(conjuncts)
-    if (!Number.isFinite(kept) || kept === 0) return undefined
+    if (conjuncts.length > MAX_CONJUNCTS || !(await allSmallLocal(run, select.tables))) return undefined
+    const kept = await cappedCount(run, statement, select.node, conjuncts)
+    if (kept === undefined || kept === 0) return undefined
     const found: VacuousFilter[] = []
     for (const [index, conjunct] of conjuncts.entries()) {
       if (isNotNull(conjunct)) continue
-      const without = await countOf(conjuncts.filter((_, i) => i !== index))
+      const without = await cappedCount(
+        run,
+        statement,
+        select.node,
+        conjuncts.filter((_, i) => i !== index),
+      )
       if (without !== kept) continue
-      const text = await deserialize(connector, counting([conjunct]))
-      const filter = text?.slice(text.search(/\bWHERE\b/i) + "WHERE".length).trim()
+      const text = await deserialize(run, {
+        ...statement,
+        statements: [
+          { ...statement.statements[0], node: { ...select.node, where_clause: conjunct, modifiers: [] } },
+        ],
+      })
+      const at = text?.search(/\bWHERE\b/i) ?? -1
+      const filter = at >= 0 ? text!.slice(at + "WHERE".length).trim() : ""
       if (filter) found.push({ filter, rows: kept })
     }
     return found
   })
 }
 
+/** A cell with its type kept, so NULL, `'null'`, `1` and `'1'` stay distinct. */
+function canonical(value: unknown): string {
+  if (value === null || value === undefined) return "null"
+  if (typeof value === "bigint") return `n:${value.toString()}`
+  if (typeof value === "number") return `n:${value}`
+  if (typeof value === "string") return `s:${value}`
+  if (typeof value === "boolean") return `b:${value}`
+  if (value instanceof Date) return `d:${value.toISOString()}`
+  return `o:${JSON.stringify(value, (_, v) => (typeof v === "bigint" ? v.toString() : v))}`
+}
+
 /**
- * Executes each reading's SQL (bounded: local DuckDB, small base tables, at most MAX_READING_ROWS
- * rows) and compares the results as unordered row sets. Undefined when fewer than two readings carry
- * SQL or any of them cannot run under these limits.
+ * Executes each reading's SQL (bounded: plain SELECT on local DuckDB, small base tables, at most
+ * COUNT_CAP joined rows and MAX_READING_ROWS result rows) and compares the results as unordered row
+ * sets. Undefined when fewer than two readings carry SQL or any of them cannot run under these limits.
  */
 export async function compareReadings(
   readings: Reading[] | undefined,
@@ -262,24 +296,24 @@ export async function compareReadings(
 ): Promise<ReadingComparison | undefined> {
   const runnable = (readings ?? []).filter((r) => typeof r.sql === "string" && r.sql.trim())
   if (runnable.length < 2) return undefined
-  return withinBudget(async () => {
+  return withinBudget(async (deadline) => {
     const results: string[] = []
     for (const reading of runnable) {
       const warehouse = reading.warehouse || fallbackWarehouse
       if (!warehouse || !localDuckdb(warehouse)) return undefined
-      const connector = await Registry.get(warehouse)
-      const statement = await serialize(connector, reading.sql!)
-      const type = statement?.statements[0]?.node?.type
-      if (type !== "SELECT_NODE" && type !== "SET_OPERATION_NODE") return undefined
-      const tables = baseTables(statement)
-      if (!tables?.length || !(await allSmallLocal(connector, tables))) return undefined
-      const result = await rows(connector, `SELECT * FROM (${reading.sql}) __reading LIMIT ${MAX_READING_ROWS + 1}`)
+      const run = runner(await Registry.get(warehouse), deadline)
+      const statement = await serialize(run, reading.sql!)
+      const select = plainSelect(statement)
+      if (!select || !(await allSmallLocal(run, select.tables))) return undefined
+      const where = select.node.where_clause
+      const filters: Json[] = !where ? [] : where.type === "CONJUNCTION_AND" ? where.children : [where]
+      // Bound the rows the reading aggregates before running it.
+      if ((await cappedCount(run, statement, select.node, filters)) === undefined) return undefined
+      const text = await deserialize(run, statement)
+      if (!text) return undefined
+      const result = await run(`SELECT * FROM (${text}) __reading LIMIT ${MAX_READING_ROWS + 1}`)
       if (result.length > MAX_READING_ROWS) return undefined
-      results.push(
-        JSON.stringify(
-          result.map((row) => JSON.stringify(Object.values(row).map((value) => String(value)))).sort(),
-        ),
-      )
+      results.push(JSON.stringify(result.map((row) => Object.values(row).map(canonical).join("\u0001")).sort()))
     }
     return { compared: results.length, agree: results.every((result) => result === results[0]) }
   })
@@ -296,20 +330,16 @@ const kind = (name: string, type: string) =>
  */
 export async function alternativeColumns(sql: string, warehouse: string): Promise<string[] | undefined> {
   if (!localDuckdb(warehouse)) return undefined
-  return withinBudget(async () => {
-    const connector = await Registry.get(warehouse)
-    const statement = await serialize(connector, sql)
-    const node = statement?.statements[0]?.node
-    if (node?.type !== "SELECT_NODE") return undefined
-    const tables = baseTables({ from: node.from_table })
-    if (!tables?.length || tables.length > 4) return undefined
+  return withinBudget(async (deadline) => {
+    const run = runner(await Registry.get(warehouse), deadline)
+    const select = plainSelect(await serialize(run, sql))
+    if (!select || select.tables.length > 4) return undefined
     const used = new Set<string>()
-    for (const n of nodes([node.where_clause, node.group_expressions]))
+    for (const n of nodes([select.node.where_clause, select.node.group_expressions]))
       if (n?.class === "COLUMN_REF") used.add(String(n.column_names.at(-1)).toLowerCase())
     if (!used.size) return []
-    const names = tables.map((t) => literal(String(t.table_name).toLowerCase())).join(", ")
-    const columns = await rows(
-      connector,
+    const names = select.tables.map((t) => literal(String(t.table_name).toLowerCase())).join(", ")
+    const columns = await run(
       `SELECT table_name AS t, column_name AS c, data_type AS d FROM duckdb_columns()
        WHERE lower(table_name) IN (${names}) ORDER BY table_name, column_index`,
     )
@@ -344,11 +374,23 @@ export function needsEvidence(
   return (readings ?? []).filter((r) => typeof r.sql === "string" && r.sql.trim()).length >= 2
 }
 
-/** Gathers the evidence for a commit. Undefined when the checks are off or nothing could be checked. */
-export async function gatherEvidence(
+/**
+ * Gathers the evidence for a commit, with the scratch warehouse bound to the committing session.
+ * Undefined when the checks are off or nothing could be checked.
+ */
+export function gatherEvidence(
+  sessionID: string,
   messages: Tool.Context["messages"],
   readings: Reading[] | undefined,
   env: NodeJS.ProcessEnv = process.env,
+): Promise<Evidence | undefined> {
+  return withScratchSession(sessionID, () => evidenceFor(messages, readings, env))
+}
+
+async function evidenceFor(
+  messages: Tool.Context["messages"],
+  readings: Reading[] | undefined,
+  env: NodeJS.ProcessEnv,
 ): Promise<Evidence | undefined> {
   if (!autoCheckEnabled(env)) return undefined
   const query = lastQuery(messages)

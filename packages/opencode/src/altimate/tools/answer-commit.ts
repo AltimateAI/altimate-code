@@ -321,7 +321,7 @@ export const AnswerCommitTool = Tool.define(
         // altimate_change start — one-time review when re-run evidence contradicts the answer (local DuckDB only)
         const messages = ctx.messages ?? []
         const evidence = needsEvidence(messages, args.readings)
-          ? yield* Effect.promise(() => gatherEvidence(messages, args.readings))
+          ? yield* Effect.promise(() => gatherEvidence(ctx.sessionID, messages, args.readings))
           : undefined
         const review = reviewMessage(evidence, args.reading_evidence)
         if (review) {
