@@ -429,6 +429,7 @@ describe("correction turn start", () => {
     await capture.flush()
     expect(lookups).toBe(1)
     expect(recorded[0].turnStartedAt).toBe(new Date(2000).toISOString())
+    expect(recorded[0].correctedAt).toBe(new Date(5000).toISOString())
   })
   test("uncertain history omits the field and lookup failure preserves the signal", async () => {
     for (const fail of [false, true]) {

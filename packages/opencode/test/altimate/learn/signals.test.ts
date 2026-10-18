@@ -17,12 +17,15 @@ describe("signal store", () => {
   test("old signals parse and correction turn starts round-trip read-only", async () => {
     await Signals.appendSignal(root, { ...base, text: "No, keep original", messageID: "old" })
     const turnStartedAt = "2026-10-18T10:00:00.000Z"
-    await Signals.appendSignal(root, { ...base, text: "No, keep timestamps", messageID: "new", turnStartedAt })
+    const correctedAt = "2026-10-18T10:00:05.000Z"
+    await Signals.appendSignal(root, { ...base, text: "No, keep timestamps", messageID: "new", turnStartedAt, correctedAt })
     const records = await Signals.readSignalsSnapshot(root)
     expect(records[0].turnStartedAt).toBeUndefined()
-    expect(records[1].turnStartedAt).toBe(turnStartedAt)
+    expect(records[0].correctedAt).toBeUndefined()
+    expect(records[1]).toMatchObject({ turnStartedAt, correctedAt })
     const file = Signals.signalsFile(root)
     await fs.appendFile(file, JSON.stringify({ ...records[1], id: "invalid", turnStartedAt: 42 }) + "\n")
+    await fs.appendFile(file, JSON.stringify({ ...records[1], id: "invalid2", correctedAt: "never" }) + "\n")
     expect(await Signals.readSignalsSnapshot(root)).toHaveLength(2)
   })
 

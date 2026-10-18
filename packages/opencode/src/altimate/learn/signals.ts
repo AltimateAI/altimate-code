@@ -37,11 +37,13 @@ export interface Signal {
   reason: string
   at: string
   turnStartedAt?: string
+  /** Creation time of the correcting user message; lessons selected for it come after this. */
+  correctedAt?: string
   status: "open" | "consumed"
   consumedBy?: string
 }
 
-export type NewSignal = Pick<Signal, "kind" | "sessionID" | "text" | "reason" | "messageID" | "partID" | "source" | "provenance" | "resolved" | "turnStartedAt">
+export type NewSignal = Pick<Signal, "kind" | "sessionID" | "text" | "reason" | "messageID" | "partID" | "source" | "provenance" | "resolved" | "turnStartedAt" | "correctedAt">
 
 export function signalsFile(root: string, name = DEFAULT_NAME): string {
   validateName(name)
@@ -94,6 +96,7 @@ function parse(raw: string): { signals: Signal[]; malformed: boolean } {
         (s.status === "open" || s.status === "consumed") &&
         (s.messageID === undefined || typeof s.messageID === "string") &&
         (s.turnStartedAt === undefined || (typeof s.turnStartedAt === "string" && Number.isFinite(Date.parse(s.turnStartedAt)))) &&
+        (s.correctedAt === undefined || (typeof s.correctedAt === "string" && Number.isFinite(Date.parse(s.correctedAt)))) &&
         (s.partID === undefined || typeof s.partID === "string") &&
         (s.source === undefined || s.source === "bootstrap" || s.source === "import-reviews") &&
         (s.provenance === undefined || typeof s.provenance === "string") &&
@@ -231,6 +234,7 @@ export function appendSignals(root: string, inputs: readonly NewSignal[], name =
         messageID: input.messageID,
         partID: input.partID,
         turnStartedAt: input.turnStartedAt,
+        correctedAt: input.correctedAt,
         source: input.source,
         provenance: input.provenance === undefined ? undefined : redactProvenance(input.provenance),
         resolved: input.resolved,

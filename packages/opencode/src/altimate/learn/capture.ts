@@ -217,6 +217,7 @@ export class Capture {
     await this.deps.record({
       kind: "user_correction",
       ...(start !== undefined && Number.isFinite(start) ? { turnStartedAt: new Date(start).toISOString() } : {}),
+      ...(message.time?.created !== undefined && Number.isFinite(message.time.created) ? { correctedAt: new Date(message.time.created).toISOString() } : {}),
       sessionID: part.sessionID,
       messageID: part.messageID,
       text: part.text,

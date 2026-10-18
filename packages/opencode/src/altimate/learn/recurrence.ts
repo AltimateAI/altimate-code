@@ -74,7 +74,8 @@ export function attribute(signals: readonly Signal[], snapshots: readonly ShownS
     }
     // Only lessons this session saw in their current text before the correction compete; a lesson never
     // shown, or first shown afterwards, cannot explain it. Unparseable times stay in and resolve to unknown.
-    const correction = Date.parse(signal.at)
+    // Persistence can lag the message; lessons selected for the correction itself must not count as earlier.
+    const correction = Date.parse(signal.correctedAt ?? signal.at)
     const exposed = matches.flatMap((lesson) => {
       const counts = rows.get(key(lesson.name, lesson.id, lesson.textHash))?.counts
       const shown = sessions.get(signal.sessionID)!.filter((entry) => entry.name === lesson.name && entry.id === lesson.id &&

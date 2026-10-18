@@ -119,6 +119,14 @@ describe("recurrence attribution", () => {
     expect(text).toContain("1 earlier version")
   })
 
+  test("a lesson selected for the correction itself is not an earlier exposure, even if the signal is written later", () => {
+    // Correction message at t=4, request lesson selected at t=4.5, signal persisted at t=5.
+    const late = signal("s1", { correctedAt: time(4) })
+    expect(run([late], [snapshot("s1", { at: time(4.5) })]).lessons[0]).toMatchObject({ during: 0, unknown: 0, recurred: 0 })
+    expect(run([late], [snapshot("s1", { at: time(3) })]).lessons[0]).toMatchObject({ during: 1 })
+    expect(run([late]).lessons[0]).toMatchObject({ recurred: 1 })
+  })
+
   test("a lesson first shown after the correction is ignored and does not compete", () => {
     expect(run([signal()], [snapshot("s1", { at: time(6) })]).lessons[0]).toMatchObject({ unknown: 0, during: 0, recurred: 0 })
     const other = { ...lesson, name: "other-store" }
