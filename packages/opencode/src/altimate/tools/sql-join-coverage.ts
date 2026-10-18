@@ -1,5 +1,5 @@
 // altimate_change - new file
-import type { Connector } from "@altimateai/drivers"
+import { isLocalFilePath, type Connector } from "@altimateai/drivers"
 import * as Registry from "../native/connections/registry"
 import { isScratch } from "../native/connections/scratch"
 
@@ -38,8 +38,61 @@ type Key = { left: string; right: string; leftFirst: boolean }
 const literal = (text: string) => `'${text.replace(/'/g, "''")}'`
 // DuckDB resolves quoted identifiers case-insensitively, so quoting every part is safe.
 const ident = (name: string) => `"${name.replace(/"/g, '""')}"`
+/** A DuckDB path that names remote or extension storage; in-memory, empty and `file:` paths are local. */
 const isRemotePath = (path: unknown) =>
-  typeof path === "string" && (/^(md|motherduck):/i.test(path) || path.includes("://"))
+  typeof path === "string" && path !== "" && path !== ":memory:" && !/^file:/i.test(path) && !isLocalFilePath(path)
+
+const STAR = {
+  class: "STAR",
+  type: "STAR",
+  alias: "",
+  query_location: 0,
+  relation_name: "",
+  exclude_list: [],
+  replace_list: [],
+  columns: false,
+  expr: null,
+  qualified_exclude_list: [],
+  rename_list: [],
+}
+
+/** Qualifiers of every column reference in an expression, or undefined when it holds a subquery or a bare column. */
+function qualifiers(expr: Json, out = new Set<string>()): Set<string> | undefined {
+  if (Array.isArray(expr)) {
+    for (const item of expr) if (!qualifiers(item, out)) return undefined
+    return out
+  }
+  if (!expr || typeof expr !== "object") return out
+  if (expr.class === "SUBQUERY" || expr.type === "SUBQUERY") return undefined
+  if (expr.class === "COLUMN_REF") {
+    if (expr.column_names?.length !== 2) return undefined
+    out.add(String(expr.column_names[0]).toLowerCase())
+    return out
+  }
+  for (const value of Object.values(expr)) if (!qualifiers(value, out)) return undefined
+  return out
+}
+
+/**
+ * Splits the WHERE clause into the conjuncts that filter only the left or only the right side.
+ * Undefined when any conjunct spans both sides, another relation, a bare column or a subquery:
+ * the count could not reproduce the population the query actually used.
+ */
+function sideFilters(where: Json, leftAlias: string, rightAlias: string) {
+  const left: Json[] = []
+  const right: Json[] = []
+  if (!where) return { left, right }
+  const conjuncts = where.type === "CONJUNCTION_AND" ? where.children : [where]
+  for (const conjunct of conjuncts) {
+    const names = qualifiers(conjunct)
+    if (!names || names.size !== 1) return undefined
+    const [name] = names
+    if (name === leftAlias.toLowerCase()) left.push(conjunct)
+    else if (name === rightAlias.toLowerCase()) right.push(conjunct)
+    else return undefined
+  }
+  return { left, right }
+}
 
 /** Equality pairs between the two sides in their written order, or undefined for any other condition. */
 function equalityKeys(condition: Json, leftAlias: string, rightAlias: string): Key[] | undefined {
@@ -71,8 +124,9 @@ function tableJoins(ref: Json, out: Json[] = []): Json[] {
 }
 
 async function rows(connector: Connector, sql: string): Promise<Record<string, unknown>[]> {
-  // No timeout, session deadline or abort signal: interrupting a local engine restarts its helper
-  // and drops session state. The catalog-size gate bounds the work instead.
+  // No short timeout, session deadline or abort signal: interrupting a local engine restarts its
+  // helper and drops session state. Only the connection's own query timeout still applies; the
+  // catalog-size gate keeps the work far below it.
   const response = await connector.execute(sql, undefined, undefined, { noLimit: true, readOnly: true })
   return response.rows.map((row: unknown[]) =>
     Object.fromEntries(response.columns.map((col: string, i: number) => [col, row[i]])),
@@ -89,22 +143,58 @@ async function smallLocalTable(connector: Connector, side: Json): Promise<boolea
     side.schema_name ? `AND lower(schema_name) = lower(${literal(side.schema_name)})` : "",
     side.catalog_name ? `AND lower(database_name) = lower(${literal(side.catalog_name)})` : "",
   ].join(" ")
-  const [found] = await rows(
+  const [views] = await rows(
     connector,
-    `SELECT
-       (SELECT COUNT(*) FROM duckdb_views() WHERE NOT internal AND lower(view_name) = lower(${name})) AS views,
-       (SELECT COUNT(*) FROM duckdb_tables() WHERE lower(table_name) = lower(${name}) ${scope}) AS tables,
-       (SELECT MAX(t.estimated_size) FROM duckdb_tables() t WHERE lower(t.table_name) = lower(${name}) ${scope}) AS size,
-       (SELECT COUNT(*) FROM duckdb_tables() t JOIN duckdb_databases() d USING (database_name)
-          WHERE lower(t.table_name) = lower(${name}) ${scope}
-            AND (lower(d.type) <> 'duckdb' OR (d.path IS NOT NULL AND (d.path ILIKE 'md:%' OR d.path ILIKE 'motherduck:%' OR d.path LIKE '%://%')))) AS remote`,
+    `SELECT COUNT(*) AS n FROM duckdb_views() WHERE NOT internal AND lower(view_name) = lower(${name})`,
   )
+  if (Number(views?.n) !== 0) return false
+  const tables = await rows(
+    connector,
+    `SELECT d.type AS type, d.path AS path, t.estimated_size AS size
+     FROM duckdb_tables() t JOIN duckdb_databases() d USING (database_name)
+     WHERE lower(t.table_name) = lower(${name}) ${scope}`,
+  )
+  const [table] = tables
   return (
-    Number(found?.views) === 0 &&
-    Number(found?.tables) === 1 &&
-    Number(found?.remote) === 0 &&
-    Number(found?.size) <= LOCAL_ROW_CEILING
+    tables.length === 1 &&
+    String(table.type).toLowerCase() === "duckdb" &&
+    !isRemotePath(table.path) &&
+    Number(table.size) <= LOCAL_ROW_CEILING
   )
+}
+
+/** One side as SQL: the bare table, or the table with the WHERE conjuncts that apply to it alone. */
+async function sideSource(connector: Connector, statement: Json, side: Json, filters: Json[]): Promise<string> {
+  if (!filters.length)
+    return [side.catalog_name, side.schema_name, side.table_name].filter(Boolean).map(ident).join(".")
+  const where =
+    filters.length === 1
+      ? filters[0]
+      : { class: "CONJUNCTION", type: "CONJUNCTION_AND", alias: "", query_location: 0, children: filters }
+  const node = statement.statements[0].node
+  const synthetic = {
+    ...statement,
+    statements: [
+      {
+        ...statement.statements[0],
+        node: {
+          ...node,
+          select_list: [STAR],
+          from_table: side,
+          where_clause: where,
+          group_expressions: [],
+          group_sets: [],
+          having: null,
+          qualify: null,
+          modifiers: [],
+          cte_map: { map: [] },
+        },
+      },
+    ],
+  }
+  const [row] = await rows(connector, `SELECT json_deserialize_sql(${literal(JSON.stringify(synthetic))}) AS s`)
+  if (typeof row?.s !== "string" || !row.s) throw new Error("side could not be rebuilt")
+  return `(${row.s})`
 }
 
 /**
@@ -154,17 +244,20 @@ export async function joinCoverageNote(
         sides.some((s) => s.column_name_alias?.length || s.sample || cteNames.has(String(s.table_name).toLowerCase()))
       )
         continue
-      const keys = equalityKeys(
-        join.condition,
-        join.left.alias || join.left.table_name,
-        join.right.alias || join.right.table_name,
-      )
+      const leftAlias = join.left.alias || join.left.table_name
+      const rightAlias = join.right.alias || join.right.table_name
+      const keys = equalityKeys(join.condition, leftAlias, rightAlias)
       if (!keys?.length) continue
+      // The count must see the same left population as the query: WHERE filters are applied
+      // per side, and a WHERE that cannot be split that way skips the check.
+      const filters = sideFilters(node.where_clause, leftAlias, rightAlias)
+      if (!filters) continue
       if (!(await smallLocalTable(connector, join.left)) || !live()) continue
       if (!(await smallLocalTable(connector, join.right)) || !live()) continue
+      const leftSource = await sideSource(connector, statement, join.left, filters.left)
+      const rightSource = await sideSource(connector, statement, join.right, filters.right)
+      if (!live()) return undefined
 
-      const relation = (side: Json) =>
-        [side.catalog_name, side.schema_name, side.table_name].filter(Boolean).map(ident).join(".")
       const match = keys
         .map((k) =>
           k.leftFirst
@@ -175,8 +268,8 @@ export async function joinCoverageNote(
       const [row] = await rows(
         connector,
         `SELECT COUNT(*) AS n,
-           COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM ${relation(join.right)} __jc_r WHERE ${match}) THEN 1 ELSE 0 END), 0) AS matched
-         FROM ${relation(join.left)} __jc_l`,
+           COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM ${rightSource} __jc_r WHERE ${match}) THEN 1 ELSE 0 END), 0) AS matched
+         FROM ${leftSource} __jc_l`,
       )
       const n = Number(row?.n)
       const matched = Number(row?.matched)

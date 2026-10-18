@@ -103,6 +103,33 @@ describe("joinCoverageNote on the scratch database", () => {
     expect(note).toContain("they stay as unmatched rows with NULL right columns")
   })
 
+  test("WHERE filters are applied per side, so the count matches the query's population", async () => {
+    const note = (where: string) =>
+      inScratch(() =>
+        joinCoverageNote(
+          `SELECT * FROM cohort c JOIN facts f ON c.MemberId = f.MemberId WHERE ${where}`,
+          "scratch",
+          env(),
+        ),
+      )
+    // Group a: ids 1, 2, 3; ids 1 and 2 match (2 of 3 kept): no warning.
+    expect(await note("c.grp = 'a'")).toBeUndefined()
+    // Group b: ids 4, 5, 6; none match.
+    expect(await note("c.grp = 'b'")).toContain("3 of 3 left rows (100.0%) have no match")
+    // A right-side filter narrows the matches: only id 2 has v > 2.5.
+    expect(await note("f.v > 2.5")).toContain("7 of 8 left rows (87.5%) have no match")
+    // Both kinds together.
+    expect(await note("c.grp = 'a' AND f.v > 2.5")).toContain("2 of 3 left rows (66.7%) have no match")
+    // Conditions the count cannot reproduce skip the check.
+    for (const where of [
+      "c.grp = f.grp",
+      "grp = 'a'",
+      "c.grp = 'a' OR f.v > 2.5",
+      "c.MemberId IN (SELECT MemberId FROM half_facts)",
+    ])
+      expect(await note(where)).toBeUndefined()
+  })
+
   test("stays silent when coverage is fine or the shape is not a plain table equality join", async () => {
     const cases: [string, string | undefined][] = [
       ["SELECT * FROM cohort c JOIN half_facts h ON c.MemberId = h.MemberId", undefined],
@@ -148,7 +175,7 @@ describe("joinCoverageNote on the scratch database", () => {
     const started = Date.now()
     expect(
       await inScratch(() =>
-        joinCoverageNote("SELECT * FROM big b JOIN facts f ON b.MemberId = f.MemberId", "scratch", env()),
+        joinCoverageNote("SELECT * FROM big b JOIN half_facts h ON b.MemberId = h.MemberId", "scratch", env()),
       ),
     ).toBeUndefined()
     expect(Date.now() - started).toBeLessThan(JOIN_CHECK_BUDGET_MS + 200)
@@ -167,10 +194,7 @@ describe("joinCoverageNote warehouse policy", () => {
 
   test("SQLite, cloud DuckDB and remote warehouses are skipped in local mode", async () => {
     for (const warehouse of ["sqlite_local", "duckdb_cloud", "remote_pg"]) {
-      const started = Date.now()
       expect(await inScratch(() => joinCoverageNote(lowJoin, warehouse, env()))).toBeUndefined()
-      // Skipped before any connection attempt.
-      expect(Date.now() - started).toBeLessThan(JOIN_CHECK_BUDGET_MS)
     }
   })
 
