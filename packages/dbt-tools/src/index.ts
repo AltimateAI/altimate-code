@@ -194,10 +194,10 @@ async function main() {
         result = await (await import("./commands/graph")).parents(adapter, rest)
         break
       case "deps":
-        result = await (await import("./commands/deps")).deps(adapter)
+        result = await (await import("./commands/deps")).deps(adapter, cfg.projectRoot)
         break
       case "add-packages":
-        result = await (await import("./commands/deps")).add(adapter, rest)
+        result = await (await import("./commands/deps")).add(adapter, rest, cfg.projectRoot)
         break
       default:
         result = { error: `Unknown command: ${cmd}`, usage: USAGE }

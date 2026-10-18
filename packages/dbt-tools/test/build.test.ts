@@ -71,7 +71,8 @@ describe("build command", () => {
   })
 
   test("project-wide build collects per-model schema-verify mismatches", async () => {
-    // Mock manifest with 3 models: one matching spec, one mismatch (extra col), one no-spec.
+    // Mock manifest with 3 models: one matching spec, one mismatch (enforced contract violated), one no-spec.
+    // A column the YAML does not list is NOT a mismatch on its own (see schema-verify.test.ts).
     const matchingNode = {
       resource_type: "model",
       name: "users_dim",
@@ -80,6 +81,7 @@ describe("build command", () => {
     const mismatchNode = {
       resource_type: "model",
       name: "products_dim",
+      config: { contract: { enforced: true } },
       columns: { id: { name: "id", description: "", data_type: "INT" } },
     }
     const nospecNode = { resource_type: "model", name: "legacy_facts", columns: {} }
@@ -114,6 +116,30 @@ describe("build command", () => {
     expect(summary.errored).toBe(0)
     expect(summary.mismatches[0]?.model).toBe("products_dim")
     expect(summary.mismatches[0]?.columns_extra).toContain("extra_col")
+    expect((summary.mismatches[0] as unknown as { findings: Array<{ kind: string }> }).findings[0]?.kind).toBe("contract-extra-columns")
+  })
+
+  test("project-wide build does not report a model whose only difference is columns the YAML does not list", async () => {
+    const node = {
+      resource_type: "model",
+      name: "orders",
+      columns: { id: { name: "id", description: "", data_type: "" } },
+    }
+    const adapter = makeAdapter({
+      parseManifest: mock(() => Promise.resolve({
+        nodeMetaMap: {
+          lookupByBaseName: mock(() => node),
+          lookupByUniqueId: mock(() => undefined),
+          nodes: mock(() => [node][Symbol.iterator]()),
+        },
+      } as never)),
+      getColumnsOfModel: mock(() => Promise.resolve([{ column: "id", dtype: "INT" }, { column: "total", dtype: "INT" }])),
+    })
+    const result = await build(adapter, [])
+    const summary = (result as unknown as { schema_verify_summary: { match: number; mismatch: number; mismatches: unknown[] } }).schema_verify_summary
+    expect(summary.match).toBe(1)
+    expect(summary.mismatch).toBe(0)
+    expect(summary.mismatches).toEqual([])
   })
 
   test("build surfaces stderr as error", async () => {

@@ -107,6 +107,33 @@ models:
   test("validator surfaces the failing model name in the reason", async () => {
     if (!ENABLE_E2E) return
     await setupProject()
+    // `ghost` is declared with a test but the model does not produce it: the test reads a
+    // column that does not exist, which is an established problem.
+    await writeModel("foo", "select 1 as id")
+    await fs.writeFile(join(dir, "models", "schema.yml"), `version: 2
+models:
+  - name: foo
+    columns:
+      - name: id
+      - name: ghost
+        tests: [not_null]
+`)
+    spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
+    spawnSync(ALTIMATE_DBT_BIN, ["build", "--select", "foo"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
+    const r = await DbtSchemaVerifyValidator.check(ctx())
+    // altimate_change: the reason now names the affected model(s) in BOTH the
+    // mismatch path and the errored (spawn/tool-error) path — see
+    // dbt-schema-verify.ts erroredNames. So `foo` is surfaced regardless of which
+    // path the verifier takes in this environment.
+    expect(r.ok).toBe(false)
+    expect(r.reason ?? "").toContain("foo")
+    // The finding itself (not a tool error that merely mentions the model).
+    expect(r.fixHint ?? "").toContain("ghost")
+  }, E2E_TIMEOUT)
+
+  test("columns the YAML does not list are not reported (YAML documents only some columns)", async () => {
+    if (!ENABLE_E2E) return
+    await setupProject()
     await writeModel("foo", "select 1 as id, 'a' as extra")
     await fs.writeFile(join(dir, "models", "schema.yml"), `version: 2
 models:
@@ -117,11 +144,8 @@ models:
     spawnSync(ALTIMATE_DBT_BIN, ["init"], { cwd: dir, encoding: "utf8", timeout: 30_000 })
     spawnSync(ALTIMATE_DBT_BIN, ["build"], { cwd: dir, encoding: "utf8", timeout: 60_000 })
     const r = await DbtSchemaVerifyValidator.check(ctx())
-    // altimate_change: the reason now names the affected model(s) in BOTH the
-    // mismatch path and the errored (spawn/tool-error) path — see
-    // dbt-schema-verify.ts erroredNames. So `foo` is surfaced regardless of which
-    // path the verifier takes in this environment.
-    expect(r.reason ?? "").toContain("foo")
+    expect(r.ok).toBe(true)
+    expect(r.fixHint).toBeUndefined()
   }, E2E_TIMEOUT)
 
   test("validator result includes elapsed_ms field", async () => {
