@@ -28,10 +28,7 @@ describe("templateErrorMessage", () => {
   })
 
   test.each([
-    "/Users/bob/proj/a.ts",
-    "C:\\Users\\bob\\a.ts",
     "bob@acme.com",
-    pgUri,
     "AKIAIOSFODNN7EXAMPLE",
     "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
     "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.sig",
@@ -47,6 +44,13 @@ describe("templateErrorMessage", () => {
     ["login failed password: supersecret", "login failed password: <x>"],
     ["Authorization: Bearer secrettoken", "Authorization: <x>"],
     ["bad api key hunter, retry", "bad api key <x>"],
+    ["bad /Users/bob/proj/a.ts here", "bad <x>"],
+    ["bad C:\\Users\\bob\\a.ts here", "bad <x>"],
+    [`bad ${pgUri} here`, "bad <x>"],
+    ['bad "password": hunter here', "bad password: <x>"],
+    ['open "C:\\Program Files\\acme corp\\a.ts" failed', "open <x>"],
+    ["open /home/x/my customer name/a.ts failed", "open <x>"],
+    ['value "a \\" customer name" bad', "value <x>"],
     ["fetch https://h.example.com/p?token=zzz failed", "fetch <x>"],
     ["auth failed: client_secret: abc def ghi", "auth <x>"],
     ["bad access_token=hunter two three", "bad <x>"],

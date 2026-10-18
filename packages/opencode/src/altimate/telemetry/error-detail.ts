@@ -61,9 +61,25 @@ const isCredential = (token: string) =>
  * `@`, `=`, quoted content, capitalized names) becomes `<x>`. English-like words
  * that happen to spell a SQL statement are not recognised and can survive.
  */
+// The line is cut at the token holding the first of: a credential stem (also inside quotes or a
+// compound key), a path separator, or an escape. Everything from there on is masked, because a
+// value, path or escaped string can run on past whitespace and quote boundaries.
+const CUT = new RegExp(`${CREDENTIAL_STEMS.join("|")}|[\\\\/]`, "i")
+
+function cutAtUnsafe(line: string): string {
+  const hit = CUT.exec(line)
+  if (!hit) return line
+  const tokenStart = line.lastIndexOf(" ", hit.index) + 1
+  const lead = line.slice(0, tokenStart)
+  const token = line.slice(tokenStart).split(/\s/, 1)[0]
+  const unquoted = token.replace(/['"]/g, "")
+  const label = unquoted.replace(/[:=,]+$/, "")
+  // keep a plain credential label (`password:`) so the shape stays readable
+  return isCredential(label) && WORD.test(label) ? `${lead}${unquoted} ${PLACEHOLDER}` : `${lead}${PLACEHOLDER}`
+}
+
 export function templateErrorMessage(raw: string): string {
-  const first = raw
-    .split(/[\r\n]/, 1)[0]
+  const first = cutAtUnsafe(raw.split(/[\r\n]/, 1)[0])
     .replace(/'[^']*'|"[^"]*"/g, ` ${PLACEHOLDER} `)
     .replace(/['"].*$/, ` ${PLACEHOLDER}`)
   const out: string[] = []
