@@ -39,16 +39,6 @@ function resultLinks(metadata: Record<string, unknown>) {
   ]
 }
 
-const FINAL_ANSWER_PREFIX = "FINAL ANSWER: "
-const answerOutputSchema = {
-  type: "object" as const,
-  properties: { answer: { type: "string", description: "The committed answer text, without the FINAL ANSWER prefix" } },
-  required: ["answer"],
-}
-function structuredAnswer(output: string) {
-  return { answer: output.startsWith(FINAL_ANSWER_PREFIX) ? output.slice(FINAL_ANSWER_PREFIX.length) : output }
-}
-
 // Surfaces as a slash command in interactive clients.
 const analyzePrompt = {
   name: "analyze",
@@ -83,7 +73,6 @@ export async function createServer(options: ServeOptions = {}) {
       name,
       description: descriptions[name],
       inputSchema: tool.jsonSchema as McpTool["inputSchema"],
-      ...(name === "answer_commit" && { outputSchema: answerOutputSchema }),
     })),
   }))
   // Ask the user once per session when the model weighed two readings and the client can ask; any
@@ -129,8 +118,6 @@ export async function createServer(options: ServeOptions = {}) {
       const isError = result.status === "error" || (result.metadata.success !== true && Boolean(result.metadata.error))
       return {
         content: [{ type: "text" as const, text: result.output }, ...resultLinks(result.metadata)],
-        // The text above stays the fallback for clients that ignore structured output.
-        ...(request.params.name === "answer_commit" && !isError && { structuredContent: structuredAnswer(result.output) }),
         isError,
       }
     } catch (error) {
