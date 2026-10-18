@@ -249,6 +249,19 @@ describe("reflect (stubbed model)", () => {
     })
   })
 
+  test("splits the SDK's inclusive input count by its cache details instead of billing it as uncached", async () => {
+    const model = { cost: { input: 4, output: 20, cache: { read: 0.2, write: 5 } } }
+    const accounted = await accountUsage(model, {
+      inputTokens: 31_767,
+      outputTokens: 256,
+      cachedInputTokens: 29_128,
+      inputTokenDetails: { noCacheTokens: 4, cacheReadTokens: 29_128, cacheWriteTokens: 2_635 },
+      providerMetadata: { anthropic: { cacheCreationInputTokens: 2_635 } },
+    })
+    expect(accounted.inputTokens).toBe(31_767)
+    expect(accounted.estimatedCost).toBeCloseTo(0.0241366, 7)
+  })
+
   test("uses session metadata cache pricing and the active session's handling of provider metadata", async () => {
     const model = { cost: { input: 2, output: 8, cache: { read: 0.25, write: 3 } } }
     const usage = { inputTokens: 1_000, outputTokens: 200, cachedInputTokens: 300, reasoningTokens: 40 }

@@ -158,6 +158,26 @@ describe("Session.getUsage — AI SDK v6 usage (inclusive input with inputTokenD
     expect(result.tokens.inputTotal).toBe(31_767)
   })
 
+  test("full cache hit reports zero uncached input", () => {
+    const result = Session.getUsage({
+      model: fakeModel("@ai-sdk/anthropic"),
+      usage: { inputTokens: 8_000, inputTokenDetails: { noCacheTokens: 0, cacheReadTokens: 8_000, cacheWriteTokens: 0 }, outputTokens: 10 } as any,
+      metadata: { anthropic: { cacheCreationInputTokens: 0 } } as any,
+    })
+    expect(result.tokens.input).toBe(0)
+    expect(result.tokens.inputTotal).toBe(8_000)
+  })
+
+  test("OpenAI v6 shape without cache write matches the legacy subtraction", () => {
+    const result = Session.getUsage({
+      model: fakeModel("@ai-sdk/openai"),
+      usage: { inputTokens: 5_000, inputTokenDetails: { noCacheTokens: 3_000, cacheReadTokens: 2_000 }, outputTokens: 10, totalTokens: 5_010 } as any,
+    })
+    expect(result.tokens.input).toBe(3_000)
+    expect(result.tokens.cache.write).toBe(0)
+    expect(result.tokens.inputTotal).toBe(5_000)
+  })
+
   test("cache write comes from inputTokenDetails when provider metadata lacks it", () => {
     const result = Session.getUsage({
       model: fakeModel("@ai-sdk/anthropic"),
