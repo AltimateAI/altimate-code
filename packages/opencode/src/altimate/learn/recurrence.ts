@@ -50,7 +50,6 @@ export function attribute(signals: readonly Signal[], snapshots: readonly ShownS
       })
       const counts = rows.get(identity)!.counts
       counts.sessions_shown.add(snapshot.session)
-      if (current && shown.textHash !== current.textHash) counts.earlier_version.add(snapshot.session)
     }
   }
   const unmatched = new Map<string, { sessions: Set<string>; signals: Set<string> }>()
@@ -73,12 +72,16 @@ export function attribute(signals: readonly Signal[], snapshots: readonly ShownS
       }
       continue
     }
-    // Only lessons this session saw in their current text compete; one never shown cannot explain the correction.
+    // Only lessons this session saw in their current text before the correction compete; a lesson never
+    // shown, or first shown afterwards, cannot explain it. Unparseable times stay in and resolve to unknown.
+    const correction = Date.parse(signal.at)
     const exposed = matches.flatMap((lesson) => {
       const counts = rows.get(key(lesson.name, lesson.id, lesson.textHash))?.counts
-      const shown = sessions.get(signal.sessionID)!.filter((entry) =>
-        entry.name === lesson.name && entry.id === lesson.id && entry.textHash === lesson.textHash)
-      return counts && shown.length ? [{ counts, shown }] : []
+      const shown = sessions.get(signal.sessionID)!.filter((entry) => entry.name === lesson.name && entry.id === lesson.id &&
+        !(Number.isFinite(correction) && Date.parse(entry.at) >= correction))
+      const current = shown.filter((entry) => entry.textHash === lesson.textHash)
+      if (counts && !current.length && shown.length) counts.earlier_version.add(signal.sessionID)
+      return counts && current.length ? [{ counts, shown: current }] : []
     })
     for (const { counts, shown } of exposed) {
       if (exposed.length > 1) {
@@ -88,8 +91,7 @@ export function attribute(signals: readonly Signal[], snapshots: readonly ShownS
       for (const entry of shown) {
         const at = Date.parse(entry.at)
         const start = Date.parse(signal.turnStartedAt ?? "")
-        const correction = Date.parse(signal.at)
-        if (!Number.isFinite(at) || !Number.isFinite(start) || !Number.isFinite(correction) || start >= correction || at >= correction)
+        if (!Number.isFinite(at) || !Number.isFinite(start) || !Number.isFinite(correction) || start >= correction)
           counts.unknown.add(signal.sessionID)
         else if (at < start) counts.recurred.add(signal.sessionID)
         else counts.during.add(signal.sessionID)
@@ -141,7 +143,7 @@ export function recurrenceHint(result: Pick<ReturnType<typeof attribute>, "lesso
 }
 
 // Uncorrected lessons are summarized; a store can hold up to 1,000.
-const corrected = (lesson: LessonRecurrence) => lesson.recurred + lesson.during + lesson.unknown + lesson.ambiguous > 0
+const corrected = (lesson: LessonRecurrence) => lesson.recurred + lesson.during + lesson.unknown + lesson.ambiguous + lesson.earlier_version > 0
 
 export function formatRecurrence(result: Awaited<ReturnType<typeof analyzeRecurrence>>) {
   return [

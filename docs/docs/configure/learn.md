@@ -228,13 +228,13 @@ Shows whether learning is on, whether automatic promotion is on with its last pr
 
 | Count | Meaning |
 |---|---|
-| `recurred` | after the lesson was shown, at the start of the corrected request or earlier |
+| `recurred` | after the lesson was shown, before the agent started answering the corrected request |
 | `during` | while the agent was answering, for example a file-hook lesson added mid-turn; the lesson may have arrived too late |
 | `unknown` | in an order that cannot be told, for example older corrections or a request replayed after compaction |
-| `ambiguous` | when the correction matched more than one lesson the session was shown |
-| `earlier_version` | to a different version of the lesson text; it never counts for the current text |
+| `ambiguous` | when the correction matched more than one lesson the session was shown in its current text |
+| `earlier_version` | when the session was shown only an earlier version of the lesson text; it never counts for the current text |
 
-A correction matches a lesson when it names one of the lesson's backtick identifiers plus another word from the lesson, or contains most of the lesson's words. The text output lists only lessons with a matching correction and summarizes the rest as "no observed correction". That is not proof the agent followed them. Corrections are recorded only while capture is on. Status also lists up to 5 identifiers that were corrected in 2 or more sessions with no matching current lesson. They are taken from your local corrections and never leave the project. If the analysis fails, status shows `Recurrence unavailable` (`recurrence_error` in JSON), and the rest of the status still prints.
+A correction matches a lesson when it names one of the lesson's full backtick identifiers plus another word from the lesson, or contains at least 3 of the lesson's words and 60% of them. A prefix or suffix identifier such as `_at` or `stg_` never matches on its own. Lessons first shown after the correction are ignored for it. The text output lists only lessons with a matching correction and summarizes the rest as "no observed correction". That is not proof the agent followed them. Corrections are recorded only while capture is on. Status also lists up to 5 identifiers that were corrected in 2 or more sessions with no matching current lesson. They are taken from your local corrections and never leave the project. If the analysis fails, status shows `Recurrence unavailable` (`recurrence_error` in JSON), and the rest of the status still prints.
 
 When the current text of a lesson has `recurred` in 2 or more sessions, reflection marks it `r:N` in the playbook it sends the model. The model is asked to make the lesson clearer or more specific when the feedback shows the wording is unclear, and to keep it when the agent simply did not follow a correct rule. The result is a candidate like any other and goes through the same review or automatic-promotion gates.
 

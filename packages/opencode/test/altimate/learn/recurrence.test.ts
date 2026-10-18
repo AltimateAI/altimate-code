@@ -48,7 +48,9 @@ describe("recurrence attribution", () => {
   test("missing, invalid and impossible ordering stays unknown", () => {
     for (const turnStartedAt of [undefined, "bad", time(6)])
       expect(run([signal("s1", { turnStartedAt })]).lessons[0]).toMatchObject({ recurred: 0, unknown: 1 })
-    expect(run([signal()], [snapshot("s1", { at: time(5) })]).lessons[0]).toMatchObject({ recurred: 0, unknown: 1 })
+    // Shown at the correction's own instant cannot have shaped the corrected response.
+    expect(run([signal()], [snapshot("s1", { at: time(5) })]).lessons[0]).toMatchObject({ recurred: 0, unknown: 0 })
+    expect(run([signal()], [snapshot("s1", { at: "bad" })]).lessons[0]).toMatchObject({ recurred: 0, unknown: 1 })
   })
 
   test("a new convention or a shared identifier about a different property does not match", () => {
@@ -107,6 +109,24 @@ describe("recurrence attribution", () => {
     const result = run([signal("s1"), signal("s2")], [snapshot("s1"), snapshot("s2")], [lesson, added])
     expect(result.lessons.find((row) => row.id === lesson.lesson.id)).toMatchObject({ recurred: 2, ambiguous: 0 })
     expect(recurrenceHint(result, lesson.name, lesson.lesson)).toBe(2)
+  })
+
+  test("an earlier version counts only with a matching correction", () => {
+    const old = snapshot("s1", { textHash: lessonTextHash("Earlier text") })
+    expect(run([], [old]).lessons[0]).toMatchObject({ earlier_version: 0, sessions_shown: 1 })
+    const text = formatRecurrence({ ...run([signal()], [old]), coverage: { sessions_analyzed: 1, sessions_skipped_malformed: 0, truncated: false } })
+    expect(text).toContain("team-playbook/L-0001:")
+    expect(text).toContain("1 earlier version")
+  })
+
+  test("a lesson first shown after the correction is ignored and does not compete", () => {
+    expect(run([signal()], [snapshot("s1", { at: time(6) })]).lessons[0]).toMatchObject({ unknown: 0, during: 0, recurred: 0 })
+    const other = { ...lesson, name: "other-store" }
+    const shown = snapshot()
+    shown.shown.push({ ...shown.shown[0], name: other.name, at: time(6) })
+    const result = run([signal()], [shown], [lesson, other])
+    expect(result.lessons.find((row) => row.name === lesson.name)).toMatchObject({ recurred: 1, ambiguous: 0 })
+    expect(result.lessons.find((row) => row.name === other.name)).toMatchObject({ recurred: 0, ambiguous: 0, unknown: 0 })
   })
 
   test("earlier lesson version cannot supply current evidence", () => {
