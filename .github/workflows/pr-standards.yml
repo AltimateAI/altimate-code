@@ -268,8 +268,8 @@ jobs:
               const checklistContent = checklistMatch ? checklistMatch[1] : '';
               const unchecked = (checklistContent.match(/- \[ \]/g) || []).length;
               const checked = (checklistContent.match(/- \[x\]/gi) || []).length;
-              // altimate_change start — require every checklist box now that the template has three
-              if (unchecked > 0 || checked < 2) {
+              // altimate_change start — require all three checklist boxes; a deleted line must not pass
+              if (unchecked > 0 || checked < 3) {
                 issues.push('Not all checklist items are checked. Please confirm you have tested locally, have not included unrelated changes and have checked for cost side effects.');
               // altimate_change end
               }
