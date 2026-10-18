@@ -253,7 +253,7 @@ jobs:
             }
 
             // altimate_change start — every PR states its cost side effects, even when there are none
-            const costMatch = body.match(/### Cost side effects\s*\n([\s\S]*?)(?=###|$)/);
+            const costMatch = body.match(/^### Cost side effects[ \t]*\r?\n([\s\S]*?)(?=^#{1,3}[ \t]|(?![\s\S]))/m);
             const costContent = costMatch
               ? costMatch[1].replace(/<!--[\s\S]*?-->/g, '').replace(/^_Does this change add[\s\S]*?_\s*$/m, '').trim()
               : '';
@@ -268,8 +268,10 @@ jobs:
               const checklistContent = checklistMatch ? checklistMatch[1] : '';
               const unchecked = (checklistContent.match(/- \[ \]/g) || []).length;
               const checked = (checklistContent.match(/- \[x\]/gi) || []).length;
-              if (checked < 2) {
-                issues.push('Not all checklist items are checked. Please confirm you have tested locally and have not included unrelated changes.');
+              // altimate_change start — require every checklist box now that the template has three
+              if (unchecked > 0 || checked < 2) {
+                issues.push('Not all checklist items are checked. Please confirm you have tested locally, have not included unrelated changes and have checked for cost side effects.');
+              // altimate_change end
               }
             }
 
