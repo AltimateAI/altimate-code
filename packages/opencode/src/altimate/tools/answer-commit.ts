@@ -3,6 +3,9 @@ import { Decimal } from "decimal.js"
 import { Effect, Option, Schema, SchemaIssue } from "effect"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { Tool } from "../../tool/tool"
+// altimate_change start — commit-time join-coverage review on session scratch tables
+import { autoCheckEnabled, joinReview, reserveReview } from "./answer-commit-join-coverage"
+// altimate_change end
 
 /** Maximum rendered answer length, including Markdown and basis, before the model echoes it. */
 export const MAX_RENDERED_ANSWER_CHARACTERS = 60_000
@@ -304,6 +307,26 @@ export const AnswerCommitTool = Tool.define(
           return yield* Effect.die(new Error("answer_commit is only available to the analyst agent"))
         yield* ctx.ask({ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} })
         const output = renderAnswer(args)
+        // altimate_change start — one-time review when the answer's join drops most rows of a grouped side
+        const messages = ctx.messages ?? []
+        // Reserved synchronously, before any await, so concurrent commits of one turn get at most one review.
+        const release = args.unresolved || !autoCheckEnabled() ? undefined : reserveReview(ctx.sessionID, messages)
+        const review = release ? yield* Effect.promise(() => joinReview(ctx.sessionID, messages, args)) : undefined
+        if (review?.message) {
+          const rejected: Tool.ExecuteResult = {
+            title: "Answer not committed",
+            metadata: {
+              readings: args.readings ?? [],
+              truncated: false,
+              evidence: { joins: review.joins, final_query_part: review.part, join_check_ms: review.ms },
+            },
+            output: review.message,
+            status: "error",
+          }
+          return rejected
+        }
+        release?.()
+        // altimate_change end
         return {
           title: "Answer committed",
           // The processor caps model-facing output but preserves metadata for the final echo.
