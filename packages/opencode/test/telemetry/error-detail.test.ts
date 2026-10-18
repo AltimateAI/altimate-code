@@ -2,79 +2,82 @@ import { describe, expect, test } from "bun:test"
 import { Telemetry } from "../../src/altimate/telemetry"
 import { ErrorDetail } from "../../src/altimate/telemetry/error-detail"
 
-const { buildErrorFingerprintEvent, describeToolError, templateErrorMessage } = ErrorDetail
-// built at runtime so no credential-shaped literal is committed
-const basicAuth = Buffer.from(["adm", "pw"].join(":")).toString("base64")
-const pgUri = ["postgres:", "//", "u", ":", "p", "@db:5432/x"].join("")
+const { buildErrorFingerprintEvent, describeToolError, templateErrorMessage, ERROR_VOCABULARY } = ErrorDetail
+
+const CREDENTIAL_WORDS = [
+  "password",
+  "passwd",
+  "pwd",
+  "secret",
+  "token",
+  "key",
+  "auth",
+  "credential",
+  "bearer",
+  "cookie",
+  "session",
+]
 
 describe("templateErrorMessage", () => {
   test.each([
-    ["column ssn_number does not exist in table hr.salaries", "column <x> does not exist in table <x>"],
-    ["password: hunter2", "password: <x>"],
-    ["Cannot delete file: permission denied", "Cannot delete file: permission denied"],
-    ["failed (code 12)!", "failed (code <x>)!"],
-  ])("%s", (raw, expected) => {
+    ["Cannot delete file: permission denied", "cannot delete file permission denied"],
+    ["connection refused", "connection refused"],
+    ["column ssn_number does not exist in table hr.salaries", "column <x> number does not exist in table <x>"],
+    ["Request failed with status 502", "request failed with status"],
+  ])("readable: %s", (raw, expected) => {
     expect(templateErrorMessage(raw)).toBe(expected)
   })
 
-  test("Basic auth header keeps no secret", () => {
-    const out = templateErrorMessage(`Authorization: Basic ${basicAuth}`)
-    expect(out).toBe("Authorization: <x>")
+  const adversarial = [
+    "password: hunter",
+    "password: supersecret",
+    "Authorization: Bearer secrettoken",
+    "client_secret=abcdef api_key: zzz access-token hunter",
+    "the passphrase is correct horse battery",
+    "`password` is `hunter`",
+    "\u201cpassword\u201d: \u201chunter\u201d",
+    'say \\"password\\": \\"hunter\\"',
+    "cannot open /Users/bob smith/My Projects/Acme Corp/data.csv",
+    "C:\\Users\\bob smith\\a.ts failed",
+    "SELECT ssn FROM prod.hr.salaries WHERE id = 4417 AND name = Alice",
+    "Alice Bob Carol failed",
+    "ERROR FAILED CaNnOt",
+    "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0MTIzNDU2Nzg5",
+    "bob@acme.com not found",
+    "https://h.example.com/p?token=zzz failed",
+    "postgres://admin:S3cret@db:5432/x refused",
+    "\u00e9t\u00e9 \u4e2d\u6587 \u0434\u0430\u043d\u043d\u044b\u0435 failed",
+    "line one\nsecret line two",
+    "line one\u2028secret",
+    "AKIAIOSFODNN7EXAMPLE ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+  ]
+
+  test.each(adversarial)("only vocabulary words or <x> for %j", (raw) => {
+    const out = templateErrorMessage(raw)
+    expect(out).toMatch(/^[a-z<>x ]*$/)
+    for (const tok of out.split(" ").filter(Boolean)) {
+      expect(tok === "<x>" || ERROR_VOCABULARY.has(tok)).toBe(true)
+    }
+    expect(out).not.toContain("<x> <x>")
+    for (const w of CREDENTIAL_WORDS) expect(out).not.toContain(w)
   })
 
-  test("unquoted SQL keeps no identifiers, numbers or names", () => {
-    const out = templateErrorMessage("SELECT ssn FROM prod.hr.salaries WHERE id = 4417 AND name = Alice")
-    for (const leak of ["prod", "hr.salaries", "4417", "Alice"]) expect(out).not.toContain(leak)
+  test("user words never survive", () => {
+    const out = templateErrorMessage(adversarial.join(" "))
+    for (const leak of ["hunter", "supersecret", "bob", "smith", "acme", "alice", "salaries", "prod"]) {
+      expect(out).not.toContain(leak)
+    }
   })
 
-  test.each([
-    "bob@acme.com",
-    "AKIAIOSFODNN7EXAMPLE",
-    "ghp_abcdefghijklmnopqrstuvwxyz0123456789",
-    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.sig",
-    "deadbeefdeadbeefdeadbeefdeadbeef0123",
-    "'hunter2' \"s3cret\"",
-    "stg_salesforce_history_2024.sql",
-  ])("replaces identifier-like token in %s", (raw) => {
-    const out = templateErrorMessage(`bad ${raw} here`)
-    expect(out).toBe("bad <x> here")
-  })
-
-  test.each([
-    ["login failed password: supersecret", "login failed password: <x>"],
-    ["Authorization: Bearer secrettoken", "Authorization: <x>"],
-    ["bad api key hunter, retry", "bad api key <x>"],
-    ["unknown column `customer name` in field list", "unknown column <x>"],
-    ["bad value \u201cprivate customer phrase\u201d here", "bad value <x>"],
-    ["bad \u00abprivate phrase\u00bb here", "bad <x>"],
-    ["bad /Users/bob/proj/a.ts here", "bad <x>"],
-    ["bad C:\\Users\\bob\\a.ts here", "bad <x>"],
-    [`bad ${pgUri} here`, "bad <x>"],
-    ['bad "password": hunter here', "bad password: <x>"],
-    ['open "C:\\Program Files\\acme corp\\a.ts" failed', "open <x>"],
-    ["open /home/x/my customer name/a.ts failed", "open <x>"],
-    ['value "a \\" customer name" bad', "value <x>"],
-    ["fetch https://h.example.com/p?token=zzz failed", "fetch <x>"],
-    ["auth failed: client_secret: abc def ghi", "auth <x>"],
-    ["bad access_token=hunter two three", "bad <x>"],
-    ["password correct horse battery staple", "password <x>"],
-    ["login failed for passphrase correct horse battery staple", "login failed for passphrase <x>"],
-    ["client_secret: supersecret", "<x>"],
-    ["access_token: secrettoken", "<x>"],
-    ["api-key: secretvalue", "<x>"],
-    ["password: correct horse battery staple", "password: <x>"],
-    ["Alice does not have access", "<x> does not have access"],
-    ["failed\raccount alice unavailable", "failed"],
-    ["Error: value 'private customer phrase is invalid", "Error: value <x>"],
-    ["xKqPzLmNaBcD failed", "<x> failed"],
-    ["DROP TABLE prod.customer_records", "<x>"],
-  ])("masks alphabetic credential values in %s", (raw, expected) => {
-    expect(templateErrorMessage(raw)).toBe(expected)
+  test("vocabulary is sorted and holds no credential words", () => {
+    const list = [...ERROR_VOCABULARY]
+    expect(list).toEqual([...list].sort())
+    for (const w of CREDENTIAL_WORDS) expect(ERROR_VOCABULARY.has(w)).toBe(false)
   })
 
   test("only the first line, capped at 200 chars", () => {
     expect(templateErrorMessage("first line\nsecond line")).toBe("first line")
-    expect(templateErrorMessage("word ".repeat(200)).length).toBeLessThanOrEqual(200)
+    expect(templateErrorMessage("error ".repeat(200)).length).toBeLessThanOrEqual(200)
   })
 })
 
@@ -97,7 +100,7 @@ describe("error_fingerprint wiring", () => {
     }
     const ev: any = buildErrorFingerprintEvent("s1", base)
     expect(ev.type).toBe("error_fingerprint")
-    expect(ev.error_message).toBe("column <x> does not exist in table <x>")
+    expect(ev.error_message).toBe("column <x> number does not exist in table <x>")
     expect(ev.error_hash).toBe(d.errorHash)
     expect("stack" in ev).toBe(false)
   })
