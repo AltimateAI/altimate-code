@@ -7,12 +7,16 @@ import {
   COVERAGE_REJECTION_MARKER,
   MAX_COVERAGE_REJECTIONS,
   MAX_NUMBER_REJECTIONS,
+  MAX_READING_REJECTIONS,
   NUMBER_REJECTION_MARKER,
+  READING_REJECTION_MARKER,
   coverageRejection,
   missingAskedItems,
   numberRejection,
   priorRejections,
+  readingRejection,
   sessionNumbers,
+  sizeBasedRejections,
   unsourcedNumbers,
 } from "./answer-commit-checks"
 
@@ -139,8 +143,14 @@ const parameters = z
     ),
     basis: z
       .string({ error: basisRequired })
-      .max(MAX_BASIS_CHARACTERS, `basis must contain at most ${MAX_BASIS_CHARACTERS} characters`)
       .refine((value) => value.trim().length > 0, basisRequired)
+      // altimate_change start - trim an over-long basis instead of rejecting the commit (a rejected commit costs a retry turn)
+      .transform((value) => {
+        if (value.length <= MAX_BASIS_CHARACTERS) return value
+        const text = value.trim()
+        return text.length <= MAX_BASIS_CHARACTERS ? text : `${text.slice(0, MAX_BASIS_CHARACTERS - 1).trimEnd()}…`
+      })
+      // altimate_change end
       .describe(
         `basis is always required: one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats; never rendered with answer_only`,
       ),
@@ -316,6 +326,11 @@ function commitRejection(
   const missing = missingAskedItems(args)
   if (missing.length && priorRejections(messages, COVERAGE_REJECTION_MARKER) < MAX_COVERAGE_REJECTIONS)
     return coverageRejection(missing, args.asked!.map((item) => item.trim()).filter(Boolean))
+  // altimate_change start - challenge a reading rejected only because it yields a small result
+  const sizeBased = sizeBasedRejections(args.readings)
+  if (sizeBased.length && priorRejections(messages, READING_REJECTION_MARKER) < MAX_READING_REJECTIONS)
+    return readingRejection(sizeBased)
+  // altimate_change end
   if (priorRejections(messages, NUMBER_REJECTION_MARKER) >= MAX_NUMBER_REJECTIONS) return undefined
   const seen = sessionNumbers(messages)
   const unsourced = seen ? unsourcedNumbers(args, seen) : []
@@ -334,7 +349,7 @@ export const AnswerCommitTool = Tool.define(
   "answer_commit",
   Effect.succeed({
     // altimate_change start - expose format selection to the model before the terminal tool call
-    description: `Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Supply one field per item the request asks for, in the order asked: a request for 'the repository and the most copied file' needs two fields (one named for the repository, one for the file); never collapse a compound request into one field, and never add fields the request did not ask for. Always set \`asked\` to the requested items, in order, as short labels from the request, and name each field or rows column after its item; a commit that leaves an asked item without its own non-empty value is rejected. When the wording admits more than one reading, add one \`readings\` entry naming the chosen reading and the rejected one. Committed numbers should appear in query output (rounding is fine); compute derived numbers in SQL.Every named item (an entity AND a related item or count) must be its own field, because basis, notes and prose are not shown when the request asks for only the answer; an element found but kept only there is lost. Numbers use JavaScript precision; integers must be safe. Pass exact decimal values, trailing zeros, or currency strings as strings. For fields.precision and each rows.precision value, use an integer from 0 to 10 (inclusive). Set rows.precision by column name to display numeric cells with fixed decimal places, including integers; strings are never changed. Without explicit precision, each column uses the maximum decimal scale of its numeric cells. When the request names a tabular format, set rows.format accordingly: markdown (default), csv, tsv, or lines (one row per line with cells separated by a single space, without headers, for single-column or two-column plain lists). CSV/TSV include headers and quote cells containing the delimiter, quotes, or newlines, doubling embedded quotes; null cells are empty. Always supply \`basis\`; it is never shown when the request asks for only the answer. Supply one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in \`basis\` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. ${renderedLengthGuidance} This tool is not available for JSON-schema requests; use StructuredOutput instead.`,
+    description: `Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Supply one field per item the request asks for, in the order asked: a request for 'the repository and the most copied file' needs two fields (one named for the repository, one for the file); never collapse a compound request into one field, and never add fields the request did not ask for. Always set \`asked\` to the requested items, in order, as short labels from the request, and name each field or rows column after its item; a commit that leaves an asked item without its own non-empty value is rejected. When the wording admits more than one reading, add one \`readings\` entry naming the chosen reading and the rejected one; never reject a reading just because it returns few rows. When a sentence lists a related item alongside the entity as something to identify (for example 'the repository and the most copied file'), treat it as asked and commit both; an item that only selects or filters the answer ('the customer with the largest invoice') is not asked. Committed numbers should appear in query output (rounding is fine); compute derived numbers in SQL.Every named item (an entity AND a related item or count) must be its own field, because basis, notes and prose are not shown when the request asks for only the answer; an element found but kept only there is lost. Numbers use JavaScript precision; integers must be safe. Pass exact decimal values, trailing zeros, or currency strings as strings. For fields.precision and each rows.precision value, use an integer from 0 to 10 (inclusive). Set rows.precision by column name to display numeric cells with fixed decimal places, including integers; strings are never changed. Without explicit precision, each column uses the maximum decimal scale of its numeric cells. When the request names a tabular format, set rows.format accordingly: markdown (default), csv, tsv, or lines (one row per line with cells separated by a single space, without headers, for single-column or two-column plain lists). CSV/TSV include headers and quote cells containing the delimiter, quotes, or newlines, doubling embedded quotes; null cells are empty. Always supply \`basis\`; it is never shown when the request asks for only the answer. Supply one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in \`basis\` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. ${renderedLengthGuidance} This tool is not available for JSON-schema requests; use StructuredOutput instead.`,
     // altimate_change end
     parameters: Parameters,
     formatValidationError: (error: unknown) => (Schema.isSchemaError(error) ? error.message : String(error)),

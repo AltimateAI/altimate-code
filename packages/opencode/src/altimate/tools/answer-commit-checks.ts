@@ -4,10 +4,13 @@ import type { Tool } from "../../tool/tool"
 /** Markers that identify each check's rejections in this turn's history. */
 export const COVERAGE_REJECTION_MARKER = "answer_commit requested-items check:"
 export const NUMBER_REJECTION_MARKER = "answer_commit number check:"
+export const READING_REJECTION_MARKER = "answer_commit reading check:"
 /** Coverage rejections per user turn before a commit is accepted as is. */
 export const MAX_COVERAGE_REJECTIONS = 2
 /** Number-provenance warnings per user turn before a commit is accepted as is. */
 export const MAX_NUMBER_REJECTIONS = 1
+/** Reading-challenge warnings per user turn before a commit is accepted as is. */
+export const MAX_READING_REJECTIONS = 1
 /** Integers up to this magnitude are commonly counted from listed rows; they are not checked. */
 const SMALL_INTEGER_LIMIT = 10
 /** Bound the scan over prior tool output so a huge session cannot stall the commit. */
@@ -217,4 +220,19 @@ export function unsourcedNumbers(args: Committed, seen: Set<string>): string[] {
 
 export function numberRejection(unsourced: string[]): string {
   return `${NUMBER_REJECTION_MARKER} ${unsourced.join(", ")} did not appear in any query result this session and is not a rounding of one. Compute it in SQL and commit the queried value, or, if it is correct as is (for example derived from the question), call answer_commit again unchanged and say how it was derived in basis. This warning is shown once.`
+}
+
+/** A rejection reason that rests on how few rows a reading returns rather than on what the request says. */
+const RESULT_SIZE_REASON =
+  /\b(?:only (?:one|1|a single)\b(?![\d,.])|just (?:one|1)\b(?![\d,.])|(?:returns?|yields?|gives?|leaves?) (?:just |only )?(?:one|1|a single|no|zero|0)\b(?![\d,.])|single (?:row|record|result|match|value|candidate|opportunit\w*|entity|group)|no comparison|nothing to compare|too few|too small|trivial(?:ly)?|degenerate)/i
+/** decided_by that cites the request's own wording is a reasoned choice, not a size-based one. */
+const CITES_REQUEST = /\b(?:asks?|requests?|requested|explicit(?:ly)?|states?|stated|says?|defines?|defined)\b/i
+
+/** Entries whose decided_by rejects an alternative reading because it yields a small or trivial result. */
+export function sizeBasedRejections(readings: { clause: string; decided_by: string }[] | undefined): string[] {
+  return (readings ?? []).filter((entry) => RESULT_SIZE_REASON.test(entry.decided_by) && !CITES_REQUEST.test(entry.decided_by)).map((entry) => entry.clause)
+}
+
+export function readingRejection(clauses: string[]): string {
+  return `${READING_REJECTION_MARKER} your reading of ${clauses.map((clause) => JSON.stringify(clause)).join(", ")} rejected an alternative because it returns few or trivial rows. A result being small is not evidence against a reading: when the request, a policy or a definition it supplies states the rule, apply that text literally and accept a one-row answer. Choose the alternative only if the request's own wording supports it. Call answer_commit again with the reading the supplied text dictates, or unchanged with decided_by naming the wording that supports your choice. This warning is shown once.`
 }

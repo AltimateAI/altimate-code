@@ -68,7 +68,10 @@ describe("Tool name consistency in prompts", () => {
         expect(analyst).toBeDefined()
         expect(analyst!.prompt).not.toContain("sql_validate")
         expect(analyst!.prompt).toContain(
-          "keep that reasoning out of the final message, and record the chosen and rejected reading as one `answer_commit` `readings` entry. When a rule or policy decides the answer, read its full text (not a preview), enumerate each competing clause, and evaluate every condition as satisfied, violated or unknown against the row's own fields and dates before choosing.",
+          "keep that reasoning out of the final message, and record the chosen and rejected reading as one `answer_commit` `readings` entry. Never reject a reading only because it yields few rows; reject it on the question's own wording or the data's shape.",
+        )
+        expect(analyst!.prompt).toContain(
+          "When a rule or policy decides the answer, read its full text (not a preview), enumerate each competing clause, and evaluate every condition as satisfied, violated or unknown against the row's own fields and dates before choosing",
         )
       },
     })
