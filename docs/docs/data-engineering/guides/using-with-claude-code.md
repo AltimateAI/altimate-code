@@ -130,7 +130,7 @@ Claude Code reaches a workspace through Altimate Code: every task the plugin han
     altimate-code link
     ```
 
-    Pick the workspace, or create one. The picker needs an interactive terminal, so it does not run from Claude Code's `!` prompt or a script. There, list the workspaces with `altimate-code workspace list` and link with `altimate-code link --workspace <id or name>`, or create one with `altimate-code link --create`. Claude can run these for you: ask it to link the project to a workspace.
+    Pick the workspace, or create one. The picker needs an interactive terminal, so it does not run from Claude Code's `!` prompt or a script. There, list the workspaces with `altimate-code workspace list` and link with `altimate-code link --workspace <id or name>`, or create one with `altimate-code link --create`. Moving a linked project to a different workspace also needs `--yes`. Claude can run these for you: ask it to link the project to a workspace.
 
 3. **Check it.** `altimate-code workspace status` shows the linked workspace and when its skills last synced.
 

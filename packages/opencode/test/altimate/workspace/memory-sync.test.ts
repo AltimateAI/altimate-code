@@ -45,7 +45,7 @@ const {
   isEnabled,
   memoryEnabledCached,
   mirrorBlock,
-  failedMirrorCount,
+  mirrorWasRequested,
   flushPendingMirrors,
   overlayBlocks,
   refresh,
@@ -442,14 +442,11 @@ describe("blockTitle", () => {
 
 // ── write path ──────────────────────────────────────────────────────────────
 describe("mirrorBlock", () => {
-  test("a failed mirror is counted until the block is sent, so `run` can say it stayed local", async () => {
-    const before = failedMirrorCount()
+  test("a mirror to a linked workspace is recorded, failed or not, so `run`'s exit checks what stayed local", async () => {
     createFails = true
     await expect(mirrorBlock(block({ id: "unsent" }))).rejects.toThrow()
-    expect(failedMirrorCount()).toBe(before + 1)
     createFails = false
-    await mirrorBlock(block({ id: "unsent" }))
-    expect(failedMirrorCount()).toBe(before)
+    expect(mirrorWasRequested()).toBe(true)
   })
 
   test("flushPendingMirrors waits for a mirror a short-lived process would abandon (#1332)", async () => {

@@ -837,16 +837,16 @@ function serialize<T>(scope: "global" | "project", blockId: string, op: () => Pr
  * `skill-sync.flushPendingSyncs` holds it for a cold skill sync. */
 const mirrorsInFlight = syncState.mirrorsInFlight
 
-/** Blocks whose mirror failed in this process, by `<scope>/<id>`. Nothing retries them in a one-shot `run`
- * (the TUI and `serve` poll; `run` does not), so its exit reports them instead of letting the block stay on
- * this machine unannounced. Process-global for the same two-module-graph reason as `syncState`. */
-const failedMirrors: Set<string> = ((globalThis as unknown as Record<symbol, Set<string> | undefined>)[
-  Symbol.for("altimate.memory-sync.failed-mirrors")
-] ??= new Set())
+/** Whether this process tried to mirror a block to a linked workspace. A one-shot `run` checks it at exit
+ * and, only then, counts the memory still not in the workspace (`Manage.status`): nothing in `run` retries
+ * an upload, so without the check a block left behind stays on this machine unannounced. Process-global for
+ * the same two-module-graph reason as `syncState`. */
+const mirrorRequests: { count: number } = ((globalThis as unknown as Record<symbol, { count: number } | undefined>)[
+  Symbol.for("altimate.memory-sync.mirror-requests")
+] ??= { count: 0 })
 
-/** How many blocks this process saved locally but could not send to the workspace. */
-export function failedMirrorCount(): number {
-  return failedMirrors.size
+export function mirrorWasRequested(): boolean {
+  return mirrorRequests.count > 0
 }
 
 /** Hold a task in `mirrorsInFlight` for its lifetime. */
@@ -895,15 +895,10 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
     // binding governs only whether we upload at all.
     const binding = await currentBinding(directory)
     if (!binding) return
+    // Counted before the memory-setting check: a check that fails also leaves the block unsent.
+    mirrorRequests.count++
     if (!(await memoryEnabled(binding))) return
-    const key = `${block.scope}/${block.id}`
-    try {
-      await push(block, binding, undefined, directory)
-      failedMirrors.delete(key)
-    } catch (err) {
-      failedMirrors.add(key)
-      throw err
-    }
+    await push(block, binding, undefined, directory)
   })
   return tracked(task)
 }

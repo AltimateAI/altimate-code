@@ -3,7 +3,7 @@ import { readRunStdin, type StdinSource } from "../../../src/altimate/cli/run-st
 
 const encoder = new TextEncoder()
 
-/** A stdin whose stream yields `chunks`, each after `delayMs`, then ends unless `open` is set. */
+/** A stdin whose stream yields `chunks` (the first at once, each later one after `delayMs`), then ends unless `open` is set. */
 function source(opts: { chunks?: string[]; delayMs?: number; open?: boolean; file?: string }): StdinSource & {
   cancelled: () => boolean
 } {
@@ -15,8 +15,8 @@ function source(opts: { chunks?: string[]; delayMs?: number; open?: boolean; fil
     stream: () =>
       new ReadableStream<Uint8Array>({
         async start(controller) {
-          for (const chunk of opts.chunks ?? []) {
-            await Bun.sleep(opts.delayMs ?? 0)
+          for (const [i, chunk] of (opts.chunks ?? []).entries()) {
+            if (i > 0) await Bun.sleep(opts.delayMs ?? 0)
             if (cancelled) return
             controller.enqueue(encoder.encode(chunk))
           }
@@ -41,13 +41,16 @@ describe("readRunStdin", () => {
   })
 
   test("keeps reading after the first chunk even past the wait", async () => {
-    const result = await readRunStdin(source({ chunks: ["a", "b", "c"], delayMs: 30 }), 50)
+    // The first chunk is immediate, so only the later ones (160ms in all) outlast the 50ms wait.
+    const result = await readRunStdin(source({ chunks: ["a", "b", "c"], delayMs: 80 }), 50)
     expect(result).toEqual({ text: "abc", timedOut: false })
   })
 
   test("an empty stdin that closes returns at once", async () => {
-    const result = await readRunStdin(source({ chunks: [] }), 1000)
+    const started = Date.now()
+    const result = await readRunStdin(source({ chunks: [] }), 5000)
     expect(result).toEqual({ text: "", timedOut: false })
+    expect(Date.now() - started).toBeLessThan(1000)
   })
 
   test("a stdin left open with no data gives up after the wait and releases the stream", async () => {

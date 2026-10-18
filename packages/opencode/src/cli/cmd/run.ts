@@ -2108,16 +2108,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
             .then((m) => m.flushPendingMirrors())
             .catch(() => {}),
         ])
-        // A mirror that failed is not retried by this process, and nothing else
-        // tells the user the memory stayed on this machine.
-        const unsent = await import("../../altimate/workspace/memory-sync")
-          .then((m) => m.failedMirrorCount())
-          .catch(() => 0)
-        if (unsent > 0)
-          process.stderr.write(
-            `${unsent === 1 ? "1 memory was" : `${unsent} memories were`} saved here but could not be sent to the workspace. ` +
-              `Run \`altimate-code workspace sync\` to send ${unsent === 1 ? "it" : "them"}.${EOL}`,
-          )
+        // This process does not retry an upload, and nothing else tells the user
+        // that memory stayed on this machine.
+        const notice = await import("../../altimate/cli/unsent-memory")
+          .then((m) => m.unsentMemoryNoticeAfterRun(process.cwd()))
+          .catch(() => null)
+        if (notice) process.stderr.write(notice + EOL)
       }
       // altimate_change end
 

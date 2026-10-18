@@ -326,13 +326,13 @@ async function inProject(directory: string, json: boolean, run: () => Promise<nu
 const DIRECTORY = { alias: "d", type: "string", describe: "Project directory (defaults to cwd)" } as const
 const JSON_FLAG = { type: "boolean", default: false, describe: "Print the result as JSON" } as const
 
+// Account-scoped, so it runs without opening a project: no plugins, LSP or watchers just to list workspaces.
 const ListCommand = cmd({
   command: "list",
   describe: "list the workspaces this account can link to",
-  builder: (yargs) => yargs.option("directory", DIRECTORY).option("json", JSON_FLAG),
+  builder: (yargs) => yargs.option("json", JSON_FLAG),
   handler: async (args) => {
-    const directory = args.directory ?? process.cwd()
-    await inProject(directory, args.json, () => runList(args.json))
+    process.exitCode = await runList(args.json)
   },
 })
 
