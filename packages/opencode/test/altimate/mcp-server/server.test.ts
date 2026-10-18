@@ -26,7 +26,7 @@ afterEach(async () => {
   Registry.reset()
 })
 
-async function fixture(allowWrite = false, capabilities: Record<string, object> = {}) {
+async function fixture(allowWrite = false, capabilities: Record<string, object> = {}, elicitTimeoutMs?: number) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-tools-test-"))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const dbPath = path.join(dir, "source.sqlite")
@@ -36,7 +36,7 @@ async function fixture(allowWrite = false, capabilities: Record<string, object> 
   db.close()
   const config = path.join(dir, "connections.json")
   await Bun.write(config, JSON.stringify({ source: { type: "sqlite", path: "source.sqlite" } }))
-  const server = await createServer({ allowWrite, connections: config })
+  const server = await createServer({ allowWrite, connections: config, elicitTimeoutMs })
   const client = new Client({ name: "test", version: "1" }, { capabilities })
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   await server.connect(serverTransport)
@@ -582,6 +582,15 @@ mcpTest("answer_commit degrades silently when the client cancels or lacks elicit
   const cancelled = await fixture(false, { elicitation: {} })
   cancelled.client.setRequestHandler(ElicitRequestSchema, async () => ({ action: "cancel" }))
   expect((await cancelled.call("answer_commit", twoReadings)).isError).toBeFalsy()
+})
+
+mcpTest("answer_commit accepts the commit when the client never answers the reading question", async () => {
+  const silent = await fixture(false, { elicitation: {} }, 200)
+  silent.client.setRequestHandler(ElicitRequestSchema, () => new Promise(() => {}))
+  const started = Date.now()
+  const result = await silent.call("answer_commit", twoReadings)
+  expect(result.isError).toBeFalsy()
+  expect(Date.now() - started).toBeLessThan(5_000)
 })
 
 mcpTest("answer_commit without elicitation support or with one reading never asks", async () => {

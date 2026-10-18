@@ -59,7 +59,11 @@ const analyzePrompt = {
 export interface ServeOptions {
   connections?: string
   allowWrite?: boolean
+  // Bounds the reading question so an unanswered prompt cannot outlast the client's tool-call timeout.
+  elicitTimeoutMs?: number
 }
+
+const ELICIT_TIMEOUT_MS = 20_000
 
 export async function createServer(options: ServeOptions = {}) {
   if (options.connections) await Registry.loadFile(options.connections)
@@ -85,22 +89,26 @@ export async function createServer(options: ServeOptions = {}) {
   // Ask the user once per session when the model weighed two readings and the client can ask; any
   // failure, decline or cancel (headless clients cancel) leaves the commit as accepted.
   let elicited = false
-  const clarifyReading = async (args: Record<string, unknown> | undefined, result: { status?: string }) => {
+  const clarifyReading = async (
+    args: Record<string, unknown> | undefined,
+    result: { status?: string },
+    signal: AbortSignal,
+  ) => {
     const readings = Array.isArray(args?.readings) ? (args.readings as { reading?: unknown }[]) : []
-    const options = readings.map((item) => item.reading).filter((item): item is string => typeof item === "string" && !!item)
-    if (elicited || result.status === "error" || options.length < 2 || !server.getClientCapabilities()?.elicitation) return undefined
+    const choices = readings.map((item) => item.reading).filter((item): item is string => typeof item === "string" && !!item)
+    if (elicited || result.status === "error" || choices.length < 2 || !server.getClientCapabilities()?.elicitation) return undefined
     elicited = true
     try {
       const answer = await server.elicitInput({
         message: "The question can be read two ways. Which did you mean?",
         requestedSchema: {
           type: "object",
-          properties: { reading: { type: "string", enum: options, description: "Intended reading" } },
+          properties: { reading: { type: "string", enum: choices, description: "Intended reading" } },
           required: ["reading"],
         },
-      })
+      }, { signal, timeout: options.elicitTimeoutMs ?? ELICIT_TIMEOUT_MS })
       const chosen = answer.action === "accept" ? answer.content?.reading : undefined
-      if (typeof chosen !== "string" || chosen === options[0]) return undefined
+      if (typeof chosen !== "string" || chosen === choices[0]) return undefined
       return `The user chose this reading: ${JSON.stringify(chosen)}. Recompute under it and call answer_commit again.`
     } catch {
       return undefined
@@ -116,7 +124,7 @@ export async function createServer(options: ServeOptions = {}) {
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
       const result = await adapter.execute(request.params.name, request.params.arguments ?? {}, extra.signal)
-      const clarified = request.params.name === "answer_commit" ? await clarifyReading(request.params.arguments, result) : undefined
+      const clarified = request.params.name === "answer_commit" ? await clarifyReading(request.params.arguments, result, extra.signal) : undefined
       if (clarified) return { content: [{ type: "text" as const, text: clarified }], isError: true }
       const isError = result.status === "error" || (result.metadata.success !== true && Boolean(result.metadata.error))
       return {
