@@ -45,6 +45,7 @@ const {
   isEnabled,
   memoryEnabledCached,
   mirrorBlock,
+  failedMirrorCount,
   flushPendingMirrors,
   overlayBlocks,
   refresh,
@@ -81,6 +82,8 @@ let createResult: any = [{ id: "mem-new" }]
 let workspaces: any[] = [{ id: 42, name: "acme", memory_enabled: true }]
 /** When set, GET /list fails -- used to prove a failed lookup never creates. */
 let listFails = false
+/** When set, POST /datamates/memory/ fails, as a create that times out does. */
+let createFails = false
 
 function stubFetch() {
   globalThis.fetch = (async (input: any, init?: any) => {
@@ -88,6 +91,9 @@ function stubFetch() {
     const method = (init?.method ?? "GET").toUpperCase()
     captured.push({ method, url, body: init?.body ? JSON.parse(init.body) : undefined })
     if (listFails && url.includes("/datamates/memory/list")) {
+      return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
+    }
+    if (createFails && method === "POST" && url.includes("/datamates/memory/")) {
       return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
     }
     const payload = (() => {
@@ -164,6 +170,7 @@ beforeEach(() => {
   captured = []
   listResponse = []
   listFails = false
+  createFails = false
   createResult = [{ id: "mem-new" }]
   workspaces = [{ id: 42, name: "acme", memory_enabled: true }]
   serverBinding = null
@@ -435,6 +442,16 @@ describe("blockTitle", () => {
 
 // ── write path ──────────────────────────────────────────────────────────────
 describe("mirrorBlock", () => {
+  test("a failed mirror is counted until the block is sent, so `run` can say it stayed local", async () => {
+    const before = failedMirrorCount()
+    createFails = true
+    await expect(mirrorBlock(block({ id: "unsent" }))).rejects.toThrow()
+    expect(failedMirrorCount()).toBe(before + 1)
+    createFails = false
+    await mirrorBlock(block({ id: "unsent" }))
+    expect(failedMirrorCount()).toBe(before)
+  })
+
   test("flushPendingMirrors waits for a mirror a short-lived process would abandon (#1332)", async () => {
     // `MemoryStore.write` fires the mirror and forgets it; a one-shot `run` exits
     // when the turn ends, routinely before the upload lands. The flush holds the

@@ -15,7 +15,7 @@ import * as prompts from "@clack/prompts"
 import { cmd } from "./cmd"
 import { bootstrap } from "../bootstrap"
 import { UI } from "../ui"
-import { stripControlChars } from "./link"
+import { SIGN_IN_COMMAND, stripControlChars } from "./link"
 import { AltimateApi } from "@/altimate/api/client"
 import * as Manage from "@/altimate/workspace/manage"
 import { resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
@@ -162,7 +162,7 @@ function failure(deps: WorkspaceDeps, json: boolean, code: number, message: stri
 }
 
 /** Checked first in every subcommand, so each fails the same way with the same exit code. */
-const NOT_SIGNED_IN = "Not signed in to Altimate. Run altimate-code, sign in, then try again."
+const NOT_SIGNED_IN = `Not signed in to Altimate. Sign in with \`${SIGN_IN_COMMAND}\` (it opens your browser), then try again.`
 const NOT_LINKED_LINES = ["This project is not linked to a workspace.", "Link it with `altimate-code link`."]
 
 /**

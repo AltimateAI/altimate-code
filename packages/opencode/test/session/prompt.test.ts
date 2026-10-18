@@ -1885,6 +1885,71 @@ it.instance(
     ),
   30_000,
 )
+
+// A linked workspace that had no skills at the last sync leaves no snapshot, only the empty record. The
+// first skill added to it must reach the next `run`, which is a fresh process, so that turn waits for the
+// sync like a project with a snapshot does, before the turn's message is written.
+let emptyRecordFile: string | undefined
+it.instance(
+  "a turn waits for the workspace sync when the linked workspace had no skills at the last sync",
+  () =>
+    withWorkspacesOn(
+      Effect.gen(function* () {
+        const { llm } = yield* useServerConfig(providerCfg)
+        const { prompt, chat } = yield* boot()
+        const skillSync = yield* Effect.promise(() => import("../../src/altimate/workspace/skill-sync"))
+        let landedAt: number | undefined
+        let messageAt: number | undefined
+        // `prompt` touches the session right after it creates the user message, so this marks when the
+        // turn's message was written.
+        const realTouch = LegacySession.touch
+        const touch = spyOn(LegacySession, "touch").mockImplementation(((sessionID: SessionID) => {
+          messageAt ??= performance.now()
+          return realTouch(sessionID)
+        }) as typeof LegacySession.touch)
+        const recent = spyOn(skillSync, "recentlySynced").mockResolvedValue(false)
+        const sync = spyOn(skillSync, "syncSkills").mockImplementation(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(() => {
+                landedAt = performance.now()
+                resolve({ changed: false, skipped: [] } as unknown as Awaited<ReturnType<typeof skillSync.syncSkills>>)
+              }, 500),
+            ),
+        )
+        yield* Effect.gen(function* () {
+          yield* llm.text("done")
+          yield* prompt.prompt({
+            sessionID: chat.id, agent: "build", model: promptRef,
+            parts: [{ type: "text", text: "Hello." }],
+          })
+          expect(sync).toHaveBeenCalled()
+          expect(landedAt).toBeDefined()
+          expect(messageAt).toBeDefined()
+          expect(landedAt!).toBeLessThan(messageAt!)
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              recent.mockRestore()
+              sync.mockRestore()
+              touch.mockRestore()
+              if (emptyRecordFile) require("fs").rmSync(emptyRecordFile, { force: true })
+            }),
+          ),
+        )
+      }),
+    ),
+  {
+    init: (directory: string) =>
+      Effect.promise(async () => {
+        const { emptyRecordPath } = await import("../../src/altimate/workspace/empty-record-path")
+        emptyRecordFile = emptyRecordPath(path.resolve(directory))
+        require("fs").mkdirSync(path.dirname(emptyRecordFile), { recursive: true })
+        require("fs").writeFileSync(emptyRecordFile, "key\nwrite-id")
+      }),
+  },
+  30_000,
+)
 // altimate_change end
 it.instance.todo(
   "running task tool preserves metadata after tool-call transition",

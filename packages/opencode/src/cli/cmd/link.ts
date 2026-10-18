@@ -54,6 +54,10 @@ import {
   stripBidiControls,
 } from "@/altimate/workspace/workspace-name"
 
+/** The browser sign-in from a plain shell: the Altimate LLM Gateway method of the `altimate-backend`
+ * provider saves the credentials every workspace command reads. */
+export const SIGN_IN_COMMAND = "altimate-code auth login -p altimate-backend"
+
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
 
@@ -238,8 +242,10 @@ export const LinkCommand = cmd({
     if (!process.stdin.isTTY) {
       UI.error(
         "`altimate-code link` needs an interactive terminal (stdin must be a TTY). " +
-          "Run it directly in a shell, or use the TUI palette command " +
-          '"Link this project to a workspace".',
+          "Run it directly in a shell, use the TUI palette command " +
+          '"Link this project to a workspace", or link without prompts: ' +
+          "`altimate-code link --workspace <id or name>` for an existing workspace, " +
+          "`altimate-code link --create` for a new one.",
       )
       process.exitCode = 1
       return
@@ -247,7 +253,7 @@ export const LinkCommand = cmd({
 
     if (!(await AltimateApi.isConfigured())) {
       UI.error(
-        "Not signed in to Altimate. Run the TUI (altimate-code) and sign in first, then re-run `altimate-code link`.",
+        `Not signed in to Altimate. Sign in with \`${SIGN_IN_COMMAND}\` (it opens your browser), then re-run \`altimate-code link\`.`,
       )
       process.exitCode = 1
       return
@@ -1051,7 +1057,9 @@ export async function linkHeadless(
     return
   }
   if (!(await deps.isConfigured())) {
-    deps.printError("Not signed in to Altimate. Run altimate-code, sign in, then re-run `altimate-code link`.")
+    deps.printError(
+      `Not signed in to Altimate. Sign in with \`${SIGN_IN_COMMAND}\` (it opens your browser), then re-run \`altimate-code link\`.`,
+    )
     process.exitCode = EXIT_USAGE
     return
   }

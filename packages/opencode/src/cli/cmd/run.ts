@@ -552,8 +552,18 @@ export const RunCommand = cmd({
     // Earlier revision used `!process.stdin?.isTTY`, which turned the crash
     // into a stall: undefined stdin satisfied the guard and we then awaited
     // Bun.stdin.text() on a stream that would never EOF. Skip the read
-    // entirely when there is no stdin to read from.
-    if (process.stdin && !process.stdin.isTTY) message += "\n" + (await Bun.stdin.text())
+    // entirely when there is no stdin to read from. An agent's shell tool can
+    // also hand `run` a stdin it never writes to or closes, so the read is
+    // bounded: see `readRunStdin`.
+    if (process.stdin && !process.stdin.isTTY) {
+      const { readRunStdin, STDIN_WAIT_MS } = await import("../../altimate/cli/run-stdin")
+      const piped = await readRunStdin()
+      if (piped.timedOut)
+        process.stderr.write(
+          `No input on stdin after ${STDIN_WAIT_MS / 1000}s; continuing without it. Redirect stdin from /dev/null to skip the wait.${EOL}`,
+        )
+      message += "\n" + piped.text
+    }
     // altimate_change end
 
     if (message.trim().length === 0 && !args.command) {
@@ -2098,6 +2108,16 @@ You are speaking to a non-technical business executive. Follow these rules stric
             .then((m) => m.flushPendingMirrors())
             .catch(() => {}),
         ])
+        // A mirror that failed is not retried by this process, and nothing else
+        // tells the user the memory stayed on this machine.
+        const unsent = await import("../../altimate/workspace/memory-sync")
+          .then((m) => m.failedMirrorCount())
+          .catch(() => 0)
+        if (unsent > 0)
+          process.stderr.write(
+            `${unsent === 1 ? "1 memory was" : `${unsent} memories were`} saved here but could not be sent to the workspace. ` +
+              `Run \`altimate-code workspace sync\` to send ${unsent === 1 ? "it" : "them"}.${EOL}`,
+          )
       }
       // altimate_change end
 
