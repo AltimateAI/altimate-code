@@ -349,6 +349,28 @@ describe("correction turn start", () => {
     expect(correctedTurnStart([history[0], history[3]], "correction")).toBeUndefined()
     expect(correctedTurnStart(history.slice(1), "correction")).toBeUndefined()
   })
+  test("a synthetic continuation is not the corrected request's boundary", () => {
+    const continued = [
+      history[0], history[1],
+      { id: "continue", sessionID: "s", role: "user", synthetic: true, time: { created: 3000 } },
+      history[2], history[3],
+    ]
+    expect(correctedTurnStart(continued, "correction")).toBe(2000)
+    expect(correctedTurnStart(continued.map((m) => ({ ...m, synthetic: false })), "correction")).toBe(4000)
+  })
+  test("repeated updates of one correction look up history once", async () => {
+    let lookups = 0
+    const capture = new Capture({
+      hasPriorAssistant: async () => true,
+      turnStart: async (_, id) => { lookups++; return correctedTurnStart(history, id) },
+      record: async () => undefined,
+    })
+    for (const info of history) capture.onMessage(info)
+    for (const text of ["No, use UTC", "No, use UTC instead."])
+      await capture.onPart({ id: "part", messageID: "correction", sessionID: "s", type: "text", text })
+    await capture.flush()
+    expect(lookups).toBe(1)
+  })
   test("records the resolved turn start while preserving the eligibility shortcut", async () => {
     const recorded: Signals.NewSignal[] = []
     let lookups = 0

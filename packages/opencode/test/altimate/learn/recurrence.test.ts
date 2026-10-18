@@ -93,6 +93,15 @@ describe("recurrence attribution", () => {
     expect(result.lessons.find((row) => row.name === other.name)?.recurred).toBe(0)
   })
 
+  test("an earlier version shown with another matching lesson is not ambiguity evidence", () => {
+    const other = { ...lesson, name: "other-store" }
+    const shown = snapshot("s1", { textHash: lessonTextHash("Earlier text") })
+    shown.shown.push({ ...snapshot().shown[0], name: other.name })
+    const result = run([signal()], [shown], [lesson, other])
+    expect(result.lessons.find((row) => row.name === lesson.name)).toMatchObject({ ambiguous: 0, earlier_version: 1 })
+    expect(result.lessons.find((row) => row.name === other.name)).toMatchObject({ ambiguous: 1 })
+  })
+
   test("earlier lesson version cannot supply current evidence", () => {
     expect(run([signal()], [snapshot("s1", { textHash: lessonTextHash("Earlier text") })]).lessons[0])
       .toMatchObject({ earlier_version: 1, recurred: 0 })

@@ -76,14 +76,14 @@ export function attribute(signals: readonly Signal[], snapshots: readonly ShownS
     for (const lesson of matches) {
       const counts = rows.get(key(lesson.name, lesson.id, lesson.textHash))?.counts
       if (!counts) continue
-      const shown = sessions.get(signal.sessionID)!.filter((entry) => entry.name === lesson.name && entry.id === lesson.id)
+      const shown = sessions.get(signal.sessionID)!.filter((entry) =>
+        entry.name === lesson.name && entry.id === lesson.id && entry.textHash === lesson.textHash)
       if (!shown.length) continue
       if (matches.length > 1) {
         counts.ambiguous.add(signal.sessionID)
         continue
       }
       for (const entry of shown) {
-        if (entry.textHash !== lesson.textHash) continue
         const at = Date.parse(entry.at)
         const start = Date.parse(signal.turnStartedAt ?? "")
         const correction = Date.parse(signal.at)
@@ -115,10 +115,11 @@ export async function analyzeRecurrence(root: string, options: { limit?: number 
   })
   const lessons: NamedLesson[] = []
   const signals: Signal[] = []
+  const sessions = new Set(snapshots.map((snapshot) => snapshot.session))
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (!entry.isDirectory()) continue
     try { validateName(entry.name) } catch { continue }
-    signals.push(...await readSignalsSnapshot(root, entry.name))
+    if (sessions.size) signals.push(...(await readSignalsSnapshot(root, entry.name)).filter((signal) => sessions.has(signal.sessionID)))
     const file = Store.paths(root, entry.name).approved
     try {
       await SafeFS.assertSafePath(root, file)

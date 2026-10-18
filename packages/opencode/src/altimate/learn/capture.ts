@@ -92,10 +92,11 @@ export interface MessageLike {
   time?: { created?: number; completed?: number }
 }
 
-export function correctedTurnStart(messages: readonly MessageLike[], messageID: string): number | undefined {
+/** Start of the agent's response to the request the correction answers; synthetic continuations are not requests. */
+export function correctedTurnStart(messages: readonly (MessageLike & { synthetic?: boolean })[], messageID: string): number | undefined {
   const end = messages.findIndex((message) => message.id === messageID && message.role === "user")
   if (end < 0) return
-  const previous = messages.slice(0, end).findLastIndex((message) => message.role === "user")
+  const previous = messages.slice(0, end).findLastIndex((message) => message.role === "user" && !message.synthetic)
   if (previous < 0) return
   return messages.slice(previous + 1, end).find((message) => message.role === "assistant")?.time?.created
 }
@@ -123,6 +124,7 @@ export class Capture {
   private messages = new Map<string, MessageLike>()
   private pendingParts = new Map<string, PartLike>()
   private sessionsWithAssistant = new Map<string, number>()
+  private corrected = new Set<string>()
   private trackers = new Map<string, ToolRetryTracker>()
   private pending = new Set<Promise<unknown>>()
 
@@ -182,6 +184,9 @@ export class Capture {
     const prior = this.sessionsWithAssistant.get(part.sessionID)
     const known = prior !== undefined && message.time?.created !== undefined && prior < message.time.created
     if (!known && !(await this.deps.hasPriorAssistant(part.sessionID, part.messageID))) return
+    // Later updates of the same message deduplicate to the first signal; skip their history reads.
+    if (this.corrected.has(part.messageID)) return
+    remember(this.corrected, part.messageID, RECENT_ID_CAP)
     const start = await this.deps.turnStart?.(part.sessionID, part.messageID).catch((error) => {
       log.warn("learn turn start unavailable", { error })
       return undefined
@@ -255,7 +260,10 @@ export async function startCapture(ctx: { directory: string; worktree: string })
       record: (signal) => appendSignal(root, signal),
       turnStart: async (sessionID, messageID) => {
         const messages = await Session.messages({ sessionID: SessionID.make(sessionID) })
-        return correctedTurnStart(messages.map((message) => message.info), messageID)
+        return correctedTurnStart(messages.map((message) => {
+          const text = message.parts.filter((part) => part.type === "text")
+          return { ...message.info, synthetic: text.length > 0 && text.every((part) => part.synthetic) }
+        }), messageID)
       },
       hasPriorAssistant: async (sessionID, beforeMessageID) => {
         const messages = await Session.messages({ sessionID: SessionID.make(sessionID) })
