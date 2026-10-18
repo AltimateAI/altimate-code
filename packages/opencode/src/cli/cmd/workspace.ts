@@ -1,6 +1,6 @@
 // altimate_change - new file
 //
-// `altimate-code workspace status|refresh|sync|unlink`: the `/workspace` menu's actions for a shell,
+// `altimate-code workspace list|status|refresh|sync|unlink`: the `/workspace` menu's actions for a shell,
 // so a setup script, a devcontainer, CI or another agent can manage a project's workspace without
 // the TUI. Thin wrappers over `altimate/workspace/manage.ts` — the same code the menu and the
 // `serve` routes run — with plain-text output, `--json` for scripts, and exit codes a caller can
@@ -17,6 +17,7 @@ import { bootstrap } from "../bootstrap"
 import { UI } from "../ui"
 import { SIGN_IN_COMMAND, stripControlChars } from "./link"
 import { AltimateApi } from "@/altimate/api/client"
+import { WorkspaceApi, type DatamateRef } from "@/altimate/workspace/api-client"
 import * as Manage from "@/altimate/workspace/manage"
 import { resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
 
@@ -120,6 +121,7 @@ export function describeRefresh(report: Manage.RefreshReport): { lines: string[]
  * guards can be checked without a service, a terminal or a project. */
 export interface WorkspaceDeps {
   isConfigured(): Promise<boolean>
+  list(): Promise<DatamateRef[]>
   resolve(directory: string): Promise<BindingOutcome>
   status(directory: string, binding: CachedBinding): Promise<Manage.StatusReport>
   refresh(directory: string): Promise<Manage.RefreshReport>
@@ -135,6 +137,7 @@ export interface WorkspaceDeps {
 
 const defaultDeps: WorkspaceDeps = {
   isConfigured: () => AltimateApi.isConfigured().catch(() => false),
+  list: () => WorkspaceApi.listDatamates(),
   resolve: (directory) => resolveBindingOutcome(directory),
   status: (directory, binding) => Manage.status(directory, { poll: true, binding }),
   refresh: (directory) => Manage.refresh(directory),
@@ -185,6 +188,26 @@ async function linkOf(
   return {
     code: failure(deps, json, EXIT.FAILED, "Could not reach the workspace service to check whether this project is linked. Try again."),
   }
+}
+
+/** The workspaces this account can link to, so a caller without a terminal for the `link` picker can
+ * choose one and pass it to `link --workspace`. */
+export async function runList(json: boolean, deps: WorkspaceDeps = defaultDeps): Promise<number> {
+  if (!(await deps.isConfigured())) return failure(deps, json, EXIT.USAGE, NOT_SIGNED_IN)
+  let list: DatamateRef[]
+  try {
+    list = await deps.list()
+  } catch (err) {
+    return failure(deps, json, EXIT.FAILED, `Could not load workspaces: ${messageOf(err)}`)
+  }
+  const workspaces = list.map((w) => ({ id: w.id, name: w.name }))
+  const lines = workspaces.length
+    ? [
+        ...workspaces.map((w) => `${w.id}  ${stripControlChars(w.name)}`),
+        "Link this project to one with `altimate-code link --workspace <id or name>`.",
+      ]
+    : ["No workspaces yet. Create one for this project with `altimate-code link --create`."]
+  return report(deps, json, EXIT.OK, { workspaces }, lines)
 }
 
 export async function runStatus(directory: string, json: boolean, deps: WorkspaceDeps = defaultDeps): Promise<number> {
@@ -303,6 +326,16 @@ async function inProject(directory: string, json: boolean, run: () => Promise<nu
 const DIRECTORY = { alias: "d", type: "string", describe: "Project directory (defaults to cwd)" } as const
 const JSON_FLAG = { type: "boolean", default: false, describe: "Print the result as JSON" } as const
 
+const ListCommand = cmd({
+  command: "list",
+  describe: "list the workspaces this account can link to",
+  builder: (yargs) => yargs.option("directory", DIRECTORY).option("json", JSON_FLAG),
+  handler: async (args) => {
+    const directory = args.directory ?? process.cwd()
+    await inProject(directory, args.json, () => runList(args.json))
+  },
+})
+
 const StatusCommand = cmd({
   command: "status",
   describe: "show which workspace this project is linked to, and what has not synced",
@@ -349,8 +382,10 @@ const UnlinkCommand = cmd({
 
 export const WorkspaceCommand = cmd({
   command: "workspace",
-  describe: "manage this project's Altimate workspace (status, refresh, sync, unlink)",
+  describe: "manage this project's Altimate workspace (list, status, refresh, sync, unlink)",
   builder: (yargs) =>
-    yargs.command(StatusCommand).command(RefreshCommand).command(SyncCommand).command(UnlinkCommand).demandCommand(),
+    yargs
+      .command(ListCommand)
+      .command(StatusCommand).command(RefreshCommand).command(SyncCommand).command(UnlinkCommand).demandCommand(),
   async handler() {},
 })

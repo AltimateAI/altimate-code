@@ -55,8 +55,9 @@ import {
 } from "@/altimate/workspace/workspace-name"
 
 /** The browser sign-in from a plain shell: the Altimate LLM Gateway method of the `altimate-backend`
- * provider saves the credentials every workspace command reads. */
-export const SIGN_IN_COMMAND = "altimate-code auth login -p altimate-backend"
+ * provider saves the credentials every workspace command reads. `--method` skips the method picker,
+ * so the command also works where stdin is not a terminal (an agent's shell, Claude Code's `!`). */
+export const SIGN_IN_COMMAND = 'altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"'
 
 const CREATE_NEW_SENTINEL = "__create_new__"
 const SET_UP_IN_BROWSER_SENTINEL = "__browser_handoff__"
@@ -244,7 +245,7 @@ export const LinkCommand = cmd({
         "`altimate-code link` needs an interactive terminal (stdin must be a TTY). " +
           "Run it directly in a shell, use the TUI palette command " +
           '"Link this project to a workspace", or link without prompts: ' +
-          "`altimate-code link --workspace <id or name>` for an existing workspace, " +
+          "`altimate-code link --workspace <id or name>` for an existing workspace (`altimate-code workspace list` shows them), " +
           "`altimate-code link --create` for a new one.",
       )
       process.exitCode = 1

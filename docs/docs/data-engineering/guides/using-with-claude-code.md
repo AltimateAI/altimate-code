@@ -119,10 +119,10 @@ Claude Code reaches a workspace through Altimate Code: every task the plugin han
 1. **Sign in to Altimate.** In a terminal:
 
     ```bash
-    altimate-code auth login -p altimate-backend
+    altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"
     ```
 
-    Choose **Altimate LLM Gateway**. It opens your browser; sign in and return to the terminal. (Inside the TUI, `/connect` does the same.)
+    It opens your browser; sign in and return to the terminal. (Inside the TUI, `/connect` does the same.) The command also works from Claude Code: type it after `!` in the prompt.
 
 2. **Link the project.** In the project folder:
 
@@ -130,7 +130,7 @@ Claude Code reaches a workspace through Altimate Code: every task the plugin han
     altimate-code link
     ```
 
-    Pick the workspace, or create one. Linking needs an interactive terminal; from a script or an agent, use `altimate-code link --workspace <id or name>` or `altimate-code link --create`.
+    Pick the workspace, or create one. The picker needs an interactive terminal, so it does not run from Claude Code's `!` prompt or a script. There, list the workspaces with `altimate-code workspace list` and link with `altimate-code link --workspace <id or name>`, or create one with `altimate-code link --create`. Claude can run these for you: ask it to link the project to a workspace.
 
 3. **Check it.** `altimate-code workspace status` shows the linked workspace and when its skills last synced.
 

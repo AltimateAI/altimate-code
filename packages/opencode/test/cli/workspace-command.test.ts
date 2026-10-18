@@ -6,6 +6,7 @@ import {
   describeRefresh,
   describeStatus,
   describeSync,
+  runList,
   runRefresh,
   runStatus,
   runSync,
@@ -131,6 +132,7 @@ function fakeDeps(over: Partial<WorkspaceDeps> = {}) {
   const json: any[] = []
   const deps: WorkspaceDeps = {
     isConfigured: async () => true,
+    list: async () => (calls.push("list"), [{ id: 35, name: "Growth" }, { id: 9, name: "Fin\u001b]8;;x\u0007ance" }]),
     resolve: async () => ({ status: "bound", binding }),
     status: async () => (calls.push("status"), statusReport),
     refresh: async () => (calls.push("refresh"), { skillsChanged: false, skillsSkipped: [], errors: [] } as any),
@@ -149,6 +151,7 @@ function fakeDeps(over: Partial<WorkspaceDeps> = {}) {
 describe("workspace subcommands", () => {
   test("not signed in: every subcommand exits 2 and touches nothing", async () => {
     for (const run of [
+      (d: WorkspaceDeps) => runList(false, d),
       (d: WorkspaceDeps) => runStatus("/p", false, d),
       (d: WorkspaceDeps) => runRefresh("/p", false, d),
       (d: WorkspaceDeps) => runSync("/p", false, d),
@@ -158,6 +161,24 @@ describe("workspace subcommands", () => {
       expect(await run(f.deps)).toBe(EXIT.USAGE)
       expect(f.calls).toEqual([])
     }
+  })
+
+  test("list prints each workspace's id and name, and how to link to one", async () => {
+    const f = fakeDeps()
+    expect(await runList(false, f.deps)).toBe(EXIT.OK)
+    expect(f.out).toEqual(["35  Growth", "9  Fin]8;;xance", "Link this project to one with `altimate-code link --workspace <id or name>`."])
+    const j = fakeDeps()
+    expect(await runList(true, j.deps)).toBe(EXIT.OK)
+    expect(j.json[0]).toEqual({ ok: true, workspaces: [{ id: 35, name: "Growth" }, { id: 9, name: "Fin\u001b]8;;x\u0007ance" }] })
+  })
+
+  test("list with no workspaces points at --create; a failed request exits 1", async () => {
+    const empty = fakeDeps({ list: async () => [] })
+    expect(await runList(false, empty.deps)).toBe(EXIT.OK)
+    expect(empty.out.join("\n")).toContain("link --create")
+    const down = fakeDeps({ list: async () => Promise.reject(new Error("503")) })
+    expect(await runList(true, down.deps)).toBe(EXIT.FAILED)
+    expect(down.json[0]).toMatchObject({ ok: false, error: "Could not load workspaces: 503" })
   })
 
   test("a service that cannot be reached is a failure (1), never 'not linked' (3)", async () => {
