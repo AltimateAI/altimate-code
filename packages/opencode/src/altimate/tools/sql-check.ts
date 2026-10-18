@@ -110,6 +110,22 @@ const display = (value: unknown) =>
   JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v))?.slice(0, 180)
 const ratio = (value: number | null) => (value === null ? "n/a (empty input)" : value.toFixed(2))
 
+// altimate_change start — warn when a join keeps under half of the left side
+/** Below this matched share of the left side, a join loses most of the population it started from. */
+export const LOW_COVERAGE_SHARE = 0.5
+
+/** A leading warning when most of the left side has no match, so a large silent loss is not reported as fact. */
+function coverageLoss(matched: number, total: number, unit: string, effect: string): string[] {
+  if (!total || matched / total >= LOW_COVERAGE_SHARE) return []
+  const lost = total - matched
+  return [
+    `WARNING coverage loss: ${lost} of ${total} ${unit} (${((lost / total) * 100).toFixed(1)}%) have no match; ${effect}. ` +
+      "Before reporting results over the joined rows, confirm this loss is expected (e.g. the other table covers only some entities) " +
+      "and state it in the answer, or look for a different key, column or source that covers the population the question asks about.",
+  ]
+}
+// altimate_change end
+
 function required<T>(value: T | undefined, name: string): T {
   if (value === undefined) throw new Error(`sql_check requires ${name} for this check`)
   return value
@@ -223,7 +239,8 @@ async function checkWithinDeadline(input: SqlCheckPublicInput, context: QueryCon
         FROM ${scope}lk l LEFT JOIN ${scope}rk r ON ${equality} GROUP BY ${names.map((n) => `l.${n}`).join(", ")}, l.n),
       ${scope}summary AS (SELECT (SELECT COUNT(*) FROM ${scope}lhs) AS left_rows, (SELECT COUNT(*) FROM ${scope}rhs) AS right_rows,
         COALESCE(SUM(left_n * ${args.join === "left" ? "CASE WHEN right_n = 0 THEN 1 ELSE right_n END" : "right_n"}), 0) AS joined_rows,
-        COUNT(*) AS left_keys, COALESCE(SUM(CASE WHEN right_n > 1 THEN 1 ELSE 0 END), 0) AS multiplying_keys FROM ${scope}matches),
+        COUNT(*) AS left_keys, COALESCE(SUM(CASE WHEN right_n > 1 THEN 1 ELSE 0 END), 0) AS multiplying_keys,
+        COALESCE(SUM(CASE WHEN right_n = 0 THEN left_n ELSE 0 END), 0) AS unmatched_left_rows FROM ${scope}matches),
       ${scope}samples AS (SELECT ${keys}, right_n FROM ${scope}matches WHERE right_n > 1 ORDER BY right_n DESC, ${keys} LIMIT 5)
       SELECT summary.*, samples.* FROM ${scope}summary summary LEFT JOIN ${scope}samples samples ON 1 = 1`)
     const first = rows[0]
@@ -239,11 +256,20 @@ async function checkWithinDeadline(input: SqlCheckPublicInput, context: QueryCon
       fanout_ratio: share(number(first.joined_rows), leftRows),
       left_keys: number(first.left_keys),
       multiplying_keys: multiplying,
+      unmatched_left_rows: number(first.unmatched_left_rows),
+      matched_left_share: share(leftRows - number(first.unmatched_left_rows), leftRows),
       samples,
     }
+    const loss = coverageLoss(
+      leftRows - metadata.unmatched_left_rows,
+      leftRows,
+      "left rows",
+      args.join === "left" ? "they stay as unmatched rows with NULL right columns" : "the inner join drops them",
+    )
     return result(args.check, metadata, [
+      ...loss,
       `fan-out: ${ratio(metadata.fanout_ratio)} (${multiplying ? `${multiplying} of ${metadata.left_keys} left keys match multiple right rows` : "no multiplication"})`,
-      `rows: left ${leftRows}; right ${metadata.right_rows}; ${args.join} joined ${metadata.joined_rows}`,
+      `rows: left ${leftRows}; right ${metadata.right_rows}; ${args.join} joined ${metadata.joined_rows}; left rows without a match ${metadata.unmatched_left_rows}`,
       `multiplying keys (up to 5): ${samples.map(display).join(", ") || "none"}`,
     ])
   }
@@ -436,6 +462,7 @@ async function checkKeys(
       ? "left coverage complete"
       : "unmatched left keys found"
   return result("keys", metadata, [
+    ...coverageLoss(metadata.matched_exact, metadata.distinct_left, "distinct left keys", "a join on these keys drops them"),
     `keys: ${verdict}${diffs.includes("type") ? "; type differences require review" : ""}; distinct non-null text left ${metadata.distinct_left}, right ${metadata.distinct_right}`,
     `exact text coverage: left ${metadata.matched_exact}/${metadata.distinct_left}; right ${metadata.matched_exact}/${metadata.distinct_right}; shares: left ${ratio(metadata.left_coverage)}, right ${ratio(metadata.right_coverage)}`,
     `matched left keys: exact text ${metadata.matched_exact}; trim/lower ${metadata.matched_trim_lower}; normalized ${metadata.matched_normalized}; normalized + leading-zero removal ${metadata.matched_without_leading_zeros}`,

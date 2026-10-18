@@ -580,6 +580,61 @@ for (const warehouse of ["sqlite_fixture", "scratch"] as const) {
       compact(result)
     })
 
+    // altimate_change start — a join that keeps under half of the left side leads with a coverage-loss warning
+    test("warns when most left rows or keys have no match, and stays quiet at or above half", async () => {
+      // 7 left keys; only ids 1 and 2 exist on the right: 5 of 7 lost.
+      const sparse = "SELECT 1 AS id UNION ALL SELECT 2"
+      const inner = await checkSql({
+        warehouse,
+        check: "fanout",
+        left_sql: sevenKeys,
+        right_sql: sparse,
+        on: [["id", "id"]],
+      })
+      expect(inner.metadata).toMatchObject({ left_rows: 7, joined_rows: 2, unmatched_left_rows: 5 })
+      expect(inner.metadata.matched_left_share).toBeCloseTo(2 / 7, 6)
+      expect(inner.output.split("\n")[0]).toMatch(
+        /^WARNING coverage loss: 5 of 7 left rows \(71\.4%\) have no match; the inner join drops them\./,
+      )
+
+      const left = await checkSql({
+        warehouse,
+        check: "fanout",
+        left_sql: sevenKeys,
+        right_sql: sparse,
+        on: [["id", "id"]],
+        join: "left",
+      })
+      expect(left.output.split("\n")[0]).toContain("they stay as unmatched rows with NULL right columns")
+
+      const keys = await checkSql({
+        warehouse,
+        check: "keys",
+        left_sql: sevenKeys,
+        left_col: "id",
+        right_sql: sparse,
+        right_col: "id",
+      })
+      expect(keys.output.split("\n")[0]).toMatch(
+        /^WARNING coverage loss: 5 of 7 distinct left keys \(71\.4%\) have no match/,
+      )
+
+      // Exactly half matched (4 of 8 rows) is not a warning.
+      const halfLeft =
+        "SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8"
+      const halfRight = "SELECT 1 AS id UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4"
+      for (const check of ["fanout", "keys"] as const) {
+        const half = await checkSql(
+          check === "fanout"
+            ? { warehouse, check, left_sql: halfLeft, right_sql: halfRight, on: [["id", "id"]] }
+            : { warehouse, check, left_sql: halfLeft, left_col: "id", right_sql: halfRight, right_col: "id" },
+        )
+        expect(half.output).not.toContain("WARNING coverage loss")
+      }
+      for (const result of [inner, left, keys]) compact(result)
+    })
+    // altimate_change end
+
     test("handles empty inputs without inventing a perfect ratio or coverage share", async () => {
       const sql = "SELECT * FROM orders WHERE 1 = 0"
       const grain = await checkSql({ warehouse, check: "grain", sql, columns: ["id"] })
