@@ -5,6 +5,9 @@ import { Truncate } from "../../tool/truncate"
 import { legacyToInit, type LegacyToolDef } from "../tool-zod-compat"
 import { formatSqlResult, SQL_MAX_PREVIEW_BYTES } from "./sql-result-format"
 import { lintSqlResult } from "./sql-result-lint"
+// altimate_change start — automatic join-coverage note
+import { joinCoverageNote } from "./sql-join-coverage"
+// altimate_change end
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { SqlExecuteResult } from "../native/types"
@@ -359,6 +362,12 @@ export const SqlExecuteTool = Tool.define(
               const routingClipped = routingPrefix !== routingNotice
               const suggestion = ctx.agent === "analyst" ? null : PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
               const lint = await lintSqlResult(sql, args.warehouse, ctx.sessionID)
+              // altimate_change start — advisory join-coverage note on successful reads; never alters the rows
+              const coverage =
+                !mongo && queryType === "read"
+                  ? await joinCoverageNote(sql, args.warehouse, { signal: ctx.abort, sessionID: ctx.sessionID })
+                  : undefined
+              // altimate_change end
               const formatted = await formatSqlResult(result, {
                 limit,
                 fullTextColumns: args.full_text_columns,
@@ -368,6 +377,9 @@ export const SqlExecuteTool = Tool.define(
                 notes: [
                   fullText ? "" : (precedence.notice ?? ""),
                   limitNote,
+                  // altimate_change start — join-coverage note leads the advisory notes
+                  coverage ?? "",
+                  // altimate_change end
                   lint?.output ?? "",
                   suggestion ?? "",
                 ].filter(Boolean),
@@ -392,6 +404,9 @@ export const SqlExecuteTool = Tool.define(
                     ...formatted.metadata,
                     ...(routingClipped && { output_truncated: true, truncated: true }),
                     ...(lint && { lint_rules: lint.rules }),
+                    // altimate_change start — record that the coverage note fired
+                    ...(coverage && { join_coverage_warning: true }),
+                    // altimate_change end
                   },
                 }),
                 output: routingPrefix + formatted.output,
