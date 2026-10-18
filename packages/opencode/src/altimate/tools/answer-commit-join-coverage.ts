@@ -29,6 +29,10 @@ export const MIN_SIDE_ROWS = 20
 const MAX_TABLES = 3
 const MAX_KEY_ARITY = 2
 const MAX_NESTING = 3
+/** Each side keeps at most this many WHERE conjuncts. */
+const MAX_SIDE_CONJUNCTS = 8
+/** All key and filter expressions together hold at most this many AST expression nodes. */
+const MAX_EXPRESSION_NODES = 64
 const MAX_VARCHAR_CONSTANT = 64
 const MAX_INTEGER_CONSTANT = 4096
 /** Fixed-width key types count as this many characters in the byte bound. */
@@ -238,6 +242,13 @@ const CAST_TYPES = new Set([
 ])
 const FIXED_WIDTH = /^(TINYINT|SMALLINT|INTEGER|BIGINT|HUGEINT|UTINYINT|USMALLINT|UINTEGER|UBIGINT|DATE|TIMESTAMP|UUID|BOOLEAN)$/i
 const FUNCTION_SCHEMAS = new Set(["", "main", "pg_catalog"])
+
+/** Expression nodes (objects with a `class`) across the given expressions. */
+function expressionNodes(expressions: Json[]): number {
+  let count = 0
+  for (const n of nodes(expressions)) if (n && typeof n === "object" && !Array.isArray(n) && "class" in n) count++
+  return count
+}
 
 /** Every node of a parsed statement, depth first. */
 function* nodes(value: Json): Generator<Json> {
@@ -451,6 +462,10 @@ export function extractJoins(statement: Json, columns: Catalog): Extracted | und
     return true
   }
   if (!walk(node.from_table) || !pairs.length) return undefined
+  // Probe work grows with expression size, not only with rows: cap it structurally before measuring.
+  const keyExpressions = pairs.flatMap((pair) => pair.keys.flat())
+  const filterExpressions = where.filter((c) => !used.has(c))
+  if (expressionNodes([...keyExpressions, ...filterExpressions]) > MAX_EXPRESSION_NODES) return undefined
   const filters = new Map<number, Json[]>(tables.map((t) => [t.index, []]))
   for (const c of where) {
     if (used.has(c)) continue
@@ -458,7 +473,9 @@ export function extractJoins(statement: Json, columns: Catalog): Extracted | und
     // A conjunct over constants only (`1 = 0`) can change the population; it is not attributed to a side.
     if (!result.ok || result.tables.size !== 1) return undefined
     for (const name of result.functions) functions.add(name)
-    filters.get([...result.tables][0]!)!.push(c)
+    const side = filters.get([...result.tables][0]!)!
+    side.push(c)
+    if (side.length > MAX_SIDE_CONJUNCTS) return undefined
   }
   return { tables, pairs, filters, functions }
 }
@@ -471,8 +488,13 @@ export function extractJoins(statement: Json, columns: Catalog): Extracted | und
 export function entityTables(node: Json, tables: Table[]): Set<number> | undefined {
   const groups: Json[] = node?.group_expressions ?? []
   const all = new Set(tables.map((t) => t.index))
+  const select: Json[] = node?.select_list ?? []
+  // GROUP BY ALL, SELECT DISTINCT and window functions group implicitly; the entity side is not
+  // read from them, so the check abstains instead of treating every table as an entity.
+  if (node?.aggregate_handling && node.aggregate_handling !== "STANDARD_HANDLING") return undefined
+  if ((node?.modifiers ?? []).some((m: Json) => m?.type === "DISTINCT_MODIFIER")) return undefined
+  if (select.some((item) => [...nodes(item)].some((n) => n?.class === "WINDOW"))) return undefined
   if (!groups.length) return all
-  const select: Json[] = node.select_list ?? []
   const aliases = new Map(select.filter((s) => s?.alias).map((s) => [String(s.alias).toLowerCase(), s]))
   const found = new Set<number>()
   const visit = (expr: Json): boolean => {
