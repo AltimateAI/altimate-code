@@ -499,3 +499,25 @@ mcpTest("answer_commit accepts a number that appeared in query output", async ()
   expect((await call("answer_commit", commit([{ name: "n", value: 4321 }], ["n"]))).isError).toBeFalsy()
 })
 // altimate_change end
+
+// altimate_change start — spilled sql_execute results carry a resource_link beside the text fallback
+mcpTest("sql_execute spill returns text with the path plus a resource_link to the saved rows", async () => {
+  const { call } = await fixture()
+  const result = await call("sql_execute", {
+    warehouse: "source",
+    query: "SELECT id, name FROM items",
+    full_text_columns: ["name"],
+  })
+  const content = result.content as { type: string; text?: string; uri?: string }[]
+  const link = content.find((item) => item.type === "resource_link")
+  expect(link?.uri?.startsWith("file://")).toBe(true)
+  expect(content[0]!.type).toBe("text")
+  expect(content[0]!.text).toContain("saved to")
+})
+
+mcpTest("sql_execute without a spill returns text only", async () => {
+  const { call } = await fixture()
+  const result = await call("sql_execute", { warehouse: "source", query: "SELECT id FROM items" })
+  expect((result.content as { type: string }[]).map((item) => item.type)).toEqual(["text"])
+})
+// altimate_change end

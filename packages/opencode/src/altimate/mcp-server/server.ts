@@ -1,9 +1,17 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
-import { CallToolRequestSchema, ListToolsRequestSchema, type Tool as McpTool } from "@modelcontextprotocol/sdk/types.js"
+import {
+  CallToolRequestSchema,
+  GetPromptRequestSchema,
+  ListPromptsRequestSchema,
+  ListToolsRequestSchema,
+  type Tool as McpTool,
+} from "@modelcontextprotocol/sdk/types.js"
 import * as Registry from "../native/connections/registry"
 import { createAdapter, descriptions } from "./adapter"
 import { readOnlyCaveat } from "../native/connections/read-only"
+import path from "node:path"
+import { pathToFileURL } from "node:url"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 export const SERVER_INSTRUCTIONS = [
@@ -16,6 +24,20 @@ export const SERVER_INSTRUCTIONS = [
   "6. Check that every condition in the question actually filters something.",
   "7. Finish with answer_commit: `asked` lists the requested items, one field per item; reply with exactly the FINAL ANSWER text it returns.",
 ].join("\n")
+
+/** Spilled results: a resource_link next to the text, which keeps the preview, row count and path. */
+function resultLinks(metadata: Record<string, unknown>) {
+  const file = [metadata.result_path, metadata.outputPath].find((value) => typeof value === "string" && value)
+  if (typeof file !== "string") return []
+  return [
+    {
+      type: "resource_link" as const,
+      uri: pathToFileURL(file).href,
+      name: path.basename(file),
+      mimeType: file.endsWith(".jsonl") ? "application/x-ndjson" : "text/plain",
+    },
+  ]
+}
 
 export interface ServeOptions {
   connections?: string
@@ -46,7 +68,7 @@ export async function createServer(options: ServeOptions = {}) {
     try {
       const result = await adapter.execute(request.params.name, request.params.arguments ?? {}, extra.signal)
       const isError = result.status === "error" || (result.metadata.success !== true && Boolean(result.metadata.error))
-      return { content: [{ type: "text" as const, text: result.output }], isError }
+      return { content: [{ type: "text" as const, text: result.output }, ...resultLinks(result.metadata)], isError }
     } catch (error) {
       return {
         content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }],
