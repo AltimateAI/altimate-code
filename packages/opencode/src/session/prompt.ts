@@ -113,6 +113,7 @@ import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-sourc
 // altimate_change end
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
+import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
 import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
 // altimate_change start — keyless public Zen predicate (flat module)
@@ -801,6 +802,7 @@ export namespace SessionPrompt {
       toolCategory: string
       errorClass: string
       errorHash: string
+      errorMessage: string
       recovered: boolean
       recoveryTool: string
     }
@@ -2176,12 +2178,11 @@ export namespace SessionPrompt {
           lastToolWasError = true
           const errorMsg =
             part.state.status === "error" && typeof part.state.error === "string" ? part.state.error : "unknown"
-          const masked = Telemetry.maskString(errorMsg).slice(0, 500)
           pendingError = {
             toolName: part.tool,
             toolCategory,
             errorClass: Telemetry.classifyError(errorMsg),
-            errorHash: Telemetry.hashError(masked),
+            ...ErrorDetail.describeToolError(errorMsg),
           }
         } else {
           if (lastToolWasError && pendingError) {
@@ -2533,17 +2534,7 @@ export namespace SessionPrompt {
     }
     // Error fingerprints — one event per unique error (capped at 20)
     for (const err of errorRecords.slice(0, 20)) {
-      Telemetry.track({
-        type: "error_fingerprint",
-        timestamp: Date.now(),
-        session_id: sessionID,
-        error_hash: err.errorHash,
-        error_class: err.errorClass,
-        tool_name: err.toolName,
-        tool_category: err.toolCategory,
-        recovery_successful: err.recovered,
-        recovery_tool: err.recoveryTool,
-      })
+      Telemetry.track(ErrorDetail.buildErrorFingerprintEvent(sessionID, err))
     }
     // altimate_change end — emit quality signal, tool chain, and error fingerprint events
     // altimate_change start — populate agent_outcome diagnostic fields
