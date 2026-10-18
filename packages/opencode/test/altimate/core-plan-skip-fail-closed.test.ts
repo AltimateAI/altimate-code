@@ -1,6 +1,7 @@
 import { describe, expect, test, beforeAll, afterAll } from "bun:test"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { registerAll } from "../../src/altimate/native/altimate-core"
+import { registerAllSql } from "../../src/altimate/native/sql/register"
 import { formatSemantics } from "../../src/altimate/tools/altimate-core-semantics"
 
 // Pins altimate-core 0.9.0: statements rewritten around table-valued functions have no
@@ -10,6 +11,7 @@ import { formatSemantics } from "../../src/altimate/tools/altimate-core-semantic
 beforeAll(() => {
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
   registerAll()
+  registerAllSql()
 })
 afterAll(() => {
   delete process.env.ALTIMATE_TELEMETRY_DISABLED
@@ -62,5 +64,21 @@ describe("altimate_core.semantics reports skipped analysis", () => {
     const r = await Dispatcher.call("altimate_core.semantics", { sql: "SELECT id FROM t", schema_context })
     expect(r.data.skipped).toBeUndefined()
     expect(formatSemantics(r.data)).toBe("No semantic issues found.")
+  })
+})
+
+describe("sql.analyze does not report skipped semantics as evaluated", () => {
+  test("TVF query: skipped issue, semantics not credited", async () => {
+    const r: any = await Dispatcher.call("sql.analyze", { sql: "SELECT id FROM TABLE(my_fn()) LIMIT 10", schema_context })
+    expect(r.issues.some((i: any) => i.type === "semantic" && String(i.message).includes("semantic analysis skipped"))).toBe(true)
+    expect(r.confidence_factors).not.toContain("semantics")
+    expect(r.confidence).toBe("medium")
+  })
+
+  test("normal query is unaffected", async () => {
+    const r: any = await Dispatcher.call("sql.analyze", { sql: "SELECT id FROM t", schema_context })
+    expect(r.issues.some((i: any) => i.type === "semantic")).toBe(false)
+    expect(r.confidence_factors).toContain("semantics")
+    expect(r.confidence).toBe("high")
   })
 })
