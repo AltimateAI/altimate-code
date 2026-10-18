@@ -46,21 +46,14 @@ const SENTENCE_STARTERS = new Set([
   "too",
   "failed",
 ])
-const CREDENTIAL_WORDS = new Set([
-  "password",
-  "passwd",
-  "pwd",
-  "secret",
-  "token",
-  "key",
-  "auth",
-  "authorization",
-  "credential",
-  "credentials",
-  "apikey",
-  "bearer",
-])
-const CREDENTIAL_SPAN = 2
+// A token with a part starting with one of these stems (password, passphrase, client_secret,
+// access_token=..., apikey, Authorization, ...) ends the readable part of the line.
+const CREDENTIAL_STEMS = ["pass", "pwd", "secret", "token", "key", "auth", "credential", "bearer", "cookie", "session"]
+const isCredential = (token: string) =>
+  token
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .some((part) => CREDENTIAL_STEMS.some((stem) => part.startsWith(stem)))
 
 /**
  * Allowlist template of an error's first line. Only short plain-letter words and
@@ -75,8 +68,6 @@ export function templateErrorMessage(raw: string): string {
     .replace(/['"].*$/, ` ${PLACEHOLDER}`)
   const out: string[] = []
   let position = 0
-  let secretSpan = 0
-  let secretToEol = false
   for (const chunk of first.split(/\s+/)) {
     if (!chunk) continue
     if (chunk === PLACEHOLDER) {
@@ -85,26 +76,15 @@ export function templateErrorMessage(raw: string): string {
       continue
     }
     const [, lead, core, trail] = PEEL.exec(chunk)!
-    // the tokens after a credential keyword are values, however plain they look
-    if (secretSpan > 0 && core !== "") {
-      out.push(lead + PLACEHOLDER + trail)
-      position++
-      secretSpan = secretToEol ? 1 : /[,.)!?]/.test(trail) ? 0 : secretSpan - 1
-      continue
-    }
-    if (
-      core
-        .toLowerCase()
-        .split(/[_\-.]/)
-        .some((part) => CREDENTIAL_WORDS.has(part))
-    ) {
-      secretSpan = CREDENTIAL_SPAN
-      // `label: value` / `label=value`: the value may be a multi-word passphrase, so mask to end of line
-      secretToEol = /[:=]/.test(trail) || /[:=]/.test(lead)
+    // everything after a credential label is a value, however plain it looks: mask to end of line
+    if (isCredential(core)) {
+      const label = WORD.test(core) ? lead + core + trail : lead + PLACEHOLDER + trail
+      out.push(label, PLACEHOLDER)
+      break
     }
     const plainWord = WORD.test(core) && !(core.length > 3 && core === core.toUpperCase())
     const lower = core.toLowerCase()
-    const name = /^[A-Z]/.test(core) && (position > 0 || !(SENTENCE_STARTERS.has(lower) || CREDENTIAL_WORDS.has(lower)))
+    const name = /^[A-Z]/.test(core) && (position > 0 || !SENTENCE_STARTERS.has(lower))
     out.push(core === "" || (plainWord && !name) ? chunk : lead + PLACEHOLDER + trail)
     position++
   }
