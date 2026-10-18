@@ -6,6 +6,17 @@ import { createAdapter, descriptions } from "./adapter"
 import { readOnlyCaveat } from "../native/connections/read-only"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
+export const SERVER_INSTRUCTIONS = [
+  "Analyst method for data questions:",
+  "1. Start with warehouse_list, then schema_inspect without `table` to see the tables.",
+  "2. Read schema_inspect's value profile (ranked values, distinct/null counts, unique flag, value shapes) before choosing columns or join keys; formats often differ across databases.",
+  "3. Compute in the database.",
+  "4. For joins across connections, sql_materialize the smaller filtered side into `scratch` and join there.",
+  "5. Run sql_check when keys, fan-out, grain or nulls could change the answer.",
+  "6. Check that every condition in the question actually filters something.",
+  "7. Report only the requested values.",
+].join("\n")
+
 export interface ServeOptions {
   connections?: string
   allowWrite?: boolean
@@ -20,7 +31,10 @@ export async function createServer(options: ServeOptions = {}) {
     }
   }
   const adapter = await createAdapter(options)
-  const server = new Server({ name: "altimate-code", version: InstallationVersion }, { capabilities: { tools: {} } })
+  const server = new Server({ name: "altimate-code", version: InstallationVersion }, {
+    capabilities: { tools: {} },
+    instructions: SERVER_INSTRUCTIONS,
+  })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [...adapter.tools].map(([name, tool]) => ({
       name,

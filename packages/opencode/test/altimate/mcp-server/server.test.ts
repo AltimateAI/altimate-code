@@ -6,7 +6,7 @@ import os from "node:os"
 import path from "node:path"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
-import { createServer } from "../../../src/altimate/mcp-server/server"
+import { createServer, SERVER_INSTRUCTIONS } from "../../../src/altimate/mcp-server/server"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { Dispatcher } from "../../../src/altimate/native"
 import type { Connector } from "@altimateai/drivers/types"
@@ -52,6 +52,16 @@ async function fixture(allowWrite = false) {
 function text(result: Awaited<ReturnType<Client["callTool"]>>) {
   return JSON.stringify(result.content)
 }
+
+mcpTest("initialize result carries short analyst-method instructions", async () => {
+  const { client } = await fixture()
+  const instructions = client.getInstructions()
+  expect(instructions).toBe(SERVER_INSTRUCTIONS)
+  expect(instructions!.split(/\s+/).length).toBeLessThanOrEqual(120)
+  for (const tool of ["warehouse_list", "schema_inspect", "sql_materialize", "sql_check"]) {
+    expect(instructions).toContain(tool)
+  }
+})
 
 mcpTest("lists exactly five tools and executes warehouse, schema, SQL and checks without routing notices", async () => {
   const { client, call } = await fixture()
