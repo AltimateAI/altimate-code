@@ -469,8 +469,12 @@ mcpTest("answer_commit returns the canonical FINAL ANSWER text and trims a long 
   const result = await call("answer_commit", commit([{ name: "", value: "apple" }], ["item"], "x".repeat(900)))
   expect(result.isError).toBeFalsy()
   const out = (result.content as { text: string }[])[0]!.text
-  expect(out.startsWith("FINAL ANSWER: ")).toBe(true)
-  expect(out).toContain("apple")
+  // altimate_change start — the FINAL ANSWER line is answer-only; the trimmed basis sits above it
+  expect(out).toMatch(/(^|\n\n)FINAL ANSWER: /)
+  const answer = out.slice(out.indexOf("FINAL ANSWER: "))
+  expect(answer).toContain("apple")
+  expect(answer).not.toContain("xxx")
+  // altimate_change end
 })
 
 mcpTest("answer_commit rejects a missing asked item at most twice, then accepts", async () => {
@@ -530,7 +534,7 @@ mcpTest("answer_commit returns the FINAL ANSWER text without structured output",
   expect(tool?.outputSchema).toBeUndefined()
   const result = await call("answer_commit", commit([{ name: "", value: "apple" }], ["item"]))
   expect(result.structuredContent).toBeUndefined()
-  expect((result.content as { text: string }[])[0]!.text).toStartWith("FINAL ANSWER: ")
+  expect((result.content as { text: string }[])[0]!.text).toMatch(/(^|\n\n)FINAL ANSWER: /)
 })
 // altimate_change end
 
