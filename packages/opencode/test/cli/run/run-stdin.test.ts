@@ -3,15 +3,16 @@ import { readRunStdin, type StdinSource } from "../../../src/altimate/cli/run-st
 
 const encoder = new TextEncoder()
 
-/** A stdin whose stream yields `chunks` (the first at once, each later one after `delayMs`), then ends unless `open` is set. */
-function source(opts: { chunks?: string[]; delayMs?: number; open?: boolean; file?: string }): StdinSource & {
+/** A socket stdin (unless `file` or `fifo` is set) whose stream yields `chunks` (the first at once, each later one after `delayMs`), then ends unless `open` is set. */
+function source(opts: { chunks?: string[]; delayMs?: number; open?: boolean; file?: string; fifo?: string }): StdinSource & {
   cancelled: () => boolean
 } {
   let cancelled = false
   return {
     cancelled: () => cancelled,
     isFile: () => opts.file !== undefined,
-    readAll: async () => opts.file ?? "",
+    isSocket: () => opts.file === undefined && opts.fifo === undefined,
+    readAll: async () => opts.file ?? opts.fifo ?? "",
     stream: () =>
       new ReadableStream<Uint8Array>({
         async start(controller) {
@@ -33,6 +34,11 @@ describe("readRunStdin", () => {
   test("reads a file in full without the wait", async () => {
     const result = await readRunStdin(source({ file: "from a file\n" }), 10)
     expect(result).toEqual({ text: "from a file\n", timedOut: false })
+  })
+
+  test("a shell pipeline (not a socket) is read to EOF however long its producer takes", async () => {
+    const result = await readRunStdin(source({ fifo: "dbt build output\n" }), 10)
+    expect(result).toEqual({ text: "dbt build output\n", timedOut: false })
   })
 
   test("reads piped text to EOF", async () => {

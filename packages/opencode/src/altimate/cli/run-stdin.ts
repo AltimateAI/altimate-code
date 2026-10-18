@@ -1,11 +1,15 @@
+// altimate_change - new file
 import { fstatSync } from "fs"
 
-/** How long `run` waits for the first byte on a stdin that is not a TTY or a file. */
+/** How long `run` waits for the first byte on a socket stdin. */
 export const STDIN_WAIT_MS = 3000
 
 export interface StdinSource {
   /** True when fd 0 is a regular file (`run < prompt.txt`), which always reaches EOF. */
   isFile(): boolean
+  /** True when fd 0 is a socket: what an agent's shell tool or a Node `spawn` hands a child. A shell
+   * pipeline (`cmd | altimate-code run`) is a FIFO instead. */
+  isSocket(): boolean
   readAll(): Promise<string>
   stream(): ReadableStream<Uint8Array>
 }
@@ -18,6 +22,13 @@ export const bunStdin: StdinSource = {
       return false
     }
   },
+  isSocket() {
+    try {
+      return fstatSync(0).isSocket()
+    } catch {
+      return false
+    }
+  },
   readAll: () => Bun.stdin.text(),
   stream: () => Bun.stdin.stream(),
 }
@@ -26,15 +37,16 @@ export const bunStdin: StdinSource = {
  * Read text piped into `altimate-code run`, without waiting on a stdin that never sends anything.
  *
  * Agents that shell out to `run` (Claude Code's Bash tool, a Node `spawn` with default stdio) hand
- * it a pipe or socket they never write to or close. Reading that to EOF blocks forever, so a
- * delegated task hangs before it starts. A file is read in full; any other stdin is read only if
- * its first chunk arrives within `waitMs`, and then to EOF.
+ * it a socket they never write to or close. Reading that to EOF blocks forever, so a delegated task
+ * hangs before it starts. A socket is read only if its first chunk arrives within `waitMs`, and then
+ * to EOF. Anything else (a file, or a shell pipeline whose producer may take minutes, like
+ * `dbt build | altimate-code run`) is read to EOF as before.
  */
 export async function readRunStdin(
   source: StdinSource = bunStdin,
   waitMs: number = STDIN_WAIT_MS,
 ): Promise<{ text: string; timedOut: boolean }> {
-  if (source.isFile()) return { text: await source.readAll(), timedOut: false }
+  if (source.isFile() || !source.isSocket()) return { text: await source.readAll(), timedOut: false }
   const reader = source.stream().getReader()
   let timer: ReturnType<typeof setTimeout> | undefined
   try {

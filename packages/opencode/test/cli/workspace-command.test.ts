@@ -13,7 +13,8 @@ import {
   runUnlink,
   type WorkspaceDeps,
 } from "../../src/cli/cmd/workspace"
-import { linkHeadless, matchWorkspace, type LinkHeadlessDeps } from "../../src/cli/cmd/link"
+import { SIGN_IN_COMMAND, linkHeadless, matchWorkspace, type LinkHeadlessDeps } from "../../src/cli/cmd/link"
+import { AltimateAuthPlugin } from "../../src/altimate/plugin/altimate"
 
 const binding = {
   datamateId: 35,
@@ -22,6 +23,17 @@ const binding = {
   projectPath: null,
   linkedAt: 0,
 } as any
+
+describe("SIGN_IN_COMMAND", () => {
+  test("names a login method the altimate-backend provider has, so --method skips the picker", async () => {
+    const hooks = await AltimateAuthPlugin({} as any)
+    expect(hooks.auth?.provider).toBe("altimate-backend")
+    const labels = hooks.auth!.methods.map((m) => m.label)
+    const named = SIGN_IN_COMMAND.match(/--method "([^"]+)"/)?.[1]
+    expect(named).toBeDefined()
+    expect(labels).toContain(named!)
+  })
+})
 
 describe("workspace status wording", () => {
   test("an unlinked project says so and how to link", () => {

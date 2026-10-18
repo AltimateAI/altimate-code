@@ -553,8 +553,8 @@ export const RunCommand = cmd({
     // into a stall: undefined stdin satisfied the guard and we then awaited
     // Bun.stdin.text() on a stream that would never EOF. Skip the read
     // entirely when there is no stdin to read from. An agent's shell tool can
-    // also hand `run` a stdin it never writes to or closes, so the read is
-    // bounded: see `readRunStdin`.
+    // also hand `run` a socket stdin it never writes to or closes, so that
+    // read is bounded: see `readRunStdin`.
     if (process.stdin && !process.stdin.isTTY) {
       const { readRunStdin, STDIN_WAIT_MS } = await import("../../altimate/cli/run-stdin")
       const piped = await readRunStdin()
