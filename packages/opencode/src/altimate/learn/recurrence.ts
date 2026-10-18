@@ -109,9 +109,12 @@ export function attribute(signals: readonly Signal[], snapshots: readonly ShownS
   }
 }
 
-/** With `name`, only that store's lessons and signals are attributed. */
+/** With `name`, only that store's lessons, signals and exposures are attributed. */
 export async function analyzeRecurrence(root: string, options: { limit?: number; name?: string } = {}) {
-  const { snapshots, coverage } = await readShownSnapshots(root, options)
+  const read = await readShownSnapshots(root, options)
+  const { coverage } = read
+  const snapshots = options.name === undefined ? read.snapshots
+    : read.snapshots.map((snapshot) => ({ ...snapshot, shown: snapshot.shown.filter((entry) => entry.name === options.name) }))
   const dir = path.join(root, ".altimate-code", "learn")
   await SafeFS.assertSafePath(root, dir)
   const entries = await fs.readdir(dir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {

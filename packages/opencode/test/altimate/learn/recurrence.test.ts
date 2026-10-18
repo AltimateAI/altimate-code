@@ -216,7 +216,7 @@ test("snapshot analysis is bounded, skips malformed files and never repairs any 
     await fs.copyFile(good, path.join(dir, Store.sha256("copy") + ".json"))
     expect((await readShownSnapshots(root)).coverage).toMatchObject({ sessions_analyzed: 2, sessions_skipped_malformed: 2 })
     // Another store's lessons and signals stay out of a named analysis.
-    expect((await analyzeRecurrence(root, { name: "other-store" })).lessons.every((row) => row.recurred === 0)).toBe(true)
+    expect((await analyzeRecurrence(root, { name: "other-store" })).lessons).toEqual([])
     // Unbounded, both valid sessions ("old" and "s1") carry a matching correction after exposure.
     expect((await analyzeRecurrence(root, { name: lesson.name })).lessons[0]).toMatchObject({ recurred: 2 })
     // An unsafe snapshot path fails closed instead of counting as malformed.

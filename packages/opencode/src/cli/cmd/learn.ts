@@ -380,8 +380,6 @@ const StatusCommand = effectCmd({
           candidate: (await Store.loadCandidateLessons(root, name))?.length ?? 0,
           retired: (await Store.loadRetired(root, name)).length,
           open_signals: signals.length,
-          // Attribution is advisory; its failure must not hide the rest of the status.
-          ...await analyzeRecurrence(root, { name }).then((recurrence) => ({ recurrence }), (error) => ({ recurrence_error: error instanceof Error ? error.message : String(error) })),
           pending_recoveries: sessions.length,
           pending_replacements: (await Store.readPendingReplacements(root, name)).length,
           backoff_sessions: sessions.filter((session) => (state.recoveries[session]?.retryAt ?? 0) > Date.now()).length,
@@ -390,7 +388,11 @@ const StatusCommand = effectCmd({
           limits: { ...resolveLimits(learn), max_stored: learnMaxStored(learn?.max_stored), ...resolveRecoveryLimits(learn), ...resolveAutoPromoteLimits(learn) },
           // altimate_change end
         }
-      })
+      }).then(async (base) => ({
+        ...base,
+        // Read-only and advisory: runs after the lock is released; its failure must not hide the rest of the status.
+        ...await analyzeRecurrence(root, { name }).then((recurrence) => ({ recurrence }), (error) => ({ recurrence_error: error instanceof Error ? error.message : String(error) })),
+      }))
       if (args.json) return out(JSON.stringify(status, null, 2))
       out(`Learning enabled: ${status.enabled ? "yes" : "no"}`)
       // altimate_change start — surface the learning kill switch in human-readable status
