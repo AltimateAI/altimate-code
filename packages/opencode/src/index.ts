@@ -45,6 +45,9 @@ import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change start — check: deterministic SQL check command
 import { CheckCommand } from "./cli/cmd/check"
 // altimate_change end
+// altimate_change start — fault-injection: deterministic dbt test-gap command
+import { FaultInjectionCommand } from "./cli/cmd/fault-injection"
+// altimate_change end
 // altimate_change start — learn: playbook learning loop command
 import { LearnCommand } from "./cli/cmd/learn"
 // altimate_change end
@@ -89,6 +92,7 @@ const CLI_COMMAND_NAMES = new Set([
   "acp", "mcp", "attach", "run", "generate", "debug", "console", "providers", "auth", "agent",
   "upgrade", "uninstall", "serve", "web", "models", "stats", "export", "import", "github", "gitlab",
   "review", "pr", "session", "plugin", "plug", "db", "trace", "recap", "skill", "check", "completion",
+  "fault-injection",
   // altimate_change start — attribute learning commands to their CLI entry point
   "learn",
   // altimate_change end
@@ -230,6 +234,9 @@ let cli = yargs(args)
   // altimate_change end
   // altimate_change start — check: register deterministic SQL check command
   .command(CheckCommand)
+  // altimate_change end
+  // altimate_change start — fault-injection: register deterministic dbt test-gap command
+  .command(FaultInjectionCommand)
   // altimate_change end
   // altimate_change start — learn: register playbook learning command
   .command(LearnCommand)

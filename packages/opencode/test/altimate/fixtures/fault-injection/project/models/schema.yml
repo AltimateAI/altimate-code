@@ -1,0 +1,35 @@
+version: 2
+
+seeds:
+  - name: raw_customers
+    columns:
+      - name: id
+        data_tests:
+          - unique
+          - not_null
+  - name: raw_orders
+    columns:
+      - name: id
+        data_tests:
+          - unique
+          - not_null
+
+models:
+  - name: stg_orders
+    columns:
+      - name: order_id
+        data_tests:
+          - unique
+          - not_null
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('raw_customers')
+              field: id
+  - name: customer_orders
+    columns:
+      - name: customer_id
+        data_tests:
+          - unique
+          - not_null
