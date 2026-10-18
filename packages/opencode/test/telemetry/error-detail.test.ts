@@ -45,6 +45,8 @@ describe("templateErrorMessage", () => {
     ["Authorization: Bearer secrettoken", "Authorization: <x>"],
     ["bad api key hunter, retry", "bad api key <x>"],
     ["unknown column `customer name` in field list", "unknown column <x>"],
+    ["bad value \u201cprivate customer phrase\u201d here", "bad value <x>"],
+    ["bad \u00abprivate phrase\u00bb here", "bad <x>"],
     ["bad /Users/bob/proj/a.ts here", "bad <x>"],
     ["bad C:\\Users\\bob\\a.ts here", "bad <x>"],
     [`bad ${pgUri} here`, "bad <x>"],

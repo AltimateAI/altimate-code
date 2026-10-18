@@ -62,9 +62,9 @@ const isCredential = (token: string) =>
  * that happen to spell a SQL statement are not recognised and can survive.
  */
 // The line is cut at the token holding the first of: a credential stem (also inside quotes or a
-// compound key), a path separator, an escape, or a backtick-quoted span. Everything from there on is masked, because a
+// compound key), a path separator, an escape, a backtick, or any non-ASCII character (typographic quotes and the like). Everything from there on is masked, because a
 // value, path or escaped string can run on past whitespace and quote boundaries.
-const CUT = new RegExp(`${CREDENTIAL_STEMS.join("|")}|[\\\\/\x60]`, "i")
+const CUT = new RegExp(`${CREDENTIAL_STEMS.join("|")}|[\\\\/\x60]|[^\\x20-\\x7e]`, "i")
 
 function cutAtUnsafe(line: string): string {
   const hit = CUT.exec(line)
