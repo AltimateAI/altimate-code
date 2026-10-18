@@ -1,27 +1,24 @@
 // altimate_change - new file
 import type { Connector } from "@altimateai/drivers"
 import * as Registry from "../native/connections/registry"
-import { SCRATCH_NAME, isScratch } from "../native/connections/scratch"
-import { executeQuery, type QueryContext } from "../native/query-execution"
+import { isScratch } from "../native/connections/scratch"
 
 /** Below this matched share of the left side, a join loses most of the population it started from. */
 export const LOW_COVERAGE_SHARE = 0.5
-/** Whole-check budget: parse, catalog lookups, count and format. Over budget, nothing is added. */
+/** Whole-check budget. Past it the note is dropped and the query result is returned unchanged. */
 export const JOIN_CHECK_BUDGET_MS = 250
-/** Local DuckDB counts run only when each side's catalog estimate is at most this many rows. */
-export const LOCAL_ROW_CEILING = 2_000_000
-/** Remote warehouses (`all` mode) count at most this many left rows. */
-export const REMOTE_ROW_CEILING = 100_000
+/**
+ * Each side must be a local DuckDB base table with at most this many rows (catalog estimate).
+ * The check never interrupts the engine, so this ceiling is what keeps its work short (a
+ * semi-join at this size takes milliseconds) even when the budget has already passed.
+ */
+export const LOCAL_ROW_CEILING = 500_000
 const MAX_JOINS = 2
 
-export type AutoCheckMode = "off" | "local" | "all"
-
-/** `ALTIMATE_SQL_AUTO_CHECK`: off, local (default: the scratch database and local DuckDB files) or all. */
-export function autoCheckMode(env: NodeJS.ProcessEnv = process.env): AutoCheckMode {
+/** `ALTIMATE_SQL_AUTO_CHECK=off` disables the check; any other value keeps it on for local DuckDB only. */
+export function autoCheckEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   const value = env["ALTIMATE_SQL_AUTO_CHECK"]?.trim().toLowerCase()
-  if (value === "off" || value === "0" || value === "false") return "off"
-  if (value === "all") return "all"
-  return "local"
+  return value !== "off" && value !== "0" && value !== "false"
 }
 
 /** A leading warning when most of the left side has no match, so a large silent loss is not reported as fact. */
@@ -39,9 +36,8 @@ type Json = any
 type Key = { left: string; right: string; leftFirst: boolean }
 
 const literal = (text: string) => `'${text.replace(/'/g, "''")}'`
-const quoted = (name: string) => `"${name.replace(/"/g, '""')}"`
-// Remote engines fold unquoted names differently; keep simple names unquoted as users usually write them.
-const remoteIdent = (name: string) => (/^[A-Za-z_][A-Za-z0-9_$]*$/.test(name) ? name : quoted(name))
+// DuckDB resolves quoted identifiers case-insensitively, so quoting every part is safe.
+const ident = (name: string) => `"${name.replace(/"/g, '""')}"`
 const isRemotePath = (path: unknown) =>
   typeof path === "string" && (/^(md|motherduck):/i.test(path) || path.includes("://"))
 
@@ -65,7 +61,7 @@ function equalityKeys(condition: Json, leftAlias: string, rightAlias: string): K
   return keys
 }
 
-/** Join nodes whose two inputs are both plain base tables, in left-to-right order. */
+/** Join nodes whose two inputs are both plain base-table references, in left-to-right order. */
 function tableJoins(ref: Json, out: Json[] = []): Json[] {
   if (ref?.type !== "JOIN") return out
   tableJoins(ref.left, out)
@@ -74,60 +70,74 @@ function tableJoins(ref: Json, out: Json[] = []): Json[] {
   return out
 }
 
+async function rows(connector: Connector, sql: string): Promise<Record<string, unknown>[]> {
+  // No timeout, session deadline or abort signal: interrupting a local engine restarts its helper
+  // and drops session state. The catalog-size gate bounds the work instead.
+  const response = await connector.execute(sql, undefined, undefined, { noLimit: true, readOnly: true })
+  return response.rows.map((row: unknown[]) =>
+    Object.fromEntries(response.columns.map((col: string, i: number) => [col, row[i]])),
+  )
+}
+
 /**
- * Advisory note for a successful read: when an equality join between two base tables keeps
- * under half of its left side, say so. One counting query per join (at most two), only where
- * policy allows and only when it is cheap by construction. Every failure, ambiguity or budget
- * overrun returns undefined, so the query result is never altered.
+ * The relation is admitted only when its name resolves to exactly one local DuckDB base table
+ * under the size ceiling, and no view anywhere shares the name (a temporary view could shadow it).
+ */
+async function smallLocalTable(connector: Connector, side: Json): Promise<boolean> {
+  const name = literal(String(side.table_name))
+  const scope = [
+    side.schema_name ? `AND lower(schema_name) = lower(${literal(side.schema_name)})` : "",
+    side.catalog_name ? `AND lower(database_name) = lower(${literal(side.catalog_name)})` : "",
+  ].join(" ")
+  const [found] = await rows(
+    connector,
+    `SELECT
+       (SELECT COUNT(*) FROM duckdb_views() WHERE NOT internal AND lower(view_name) = lower(${name})) AS views,
+       (SELECT COUNT(*) FROM duckdb_tables() WHERE lower(table_name) = lower(${name}) ${scope}) AS tables,
+       (SELECT MAX(t.estimated_size) FROM duckdb_tables() t WHERE lower(t.table_name) = lower(${name}) ${scope}) AS size,
+       (SELECT COUNT(*) FROM duckdb_tables() t JOIN duckdb_databases() d USING (database_name)
+          WHERE lower(t.table_name) = lower(${name}) ${scope}
+            AND (lower(d.type) <> 'duckdb' OR (d.path IS NOT NULL AND (d.path ILIKE 'md:%' OR d.path ILIKE 'motherduck:%' OR d.path LIKE '%://%')))) AS remote`,
+  )
+  return (
+    Number(found?.views) === 0 &&
+    Number(found?.tables) === 1 &&
+    Number(found?.remote) === 0 &&
+    Number(found?.size) <= LOCAL_ROW_CEILING
+  )
+}
+
+/**
+ * Advisory note for a successful read on the session scratch database or a local DuckDB file:
+ * when an equality join between two small base tables keeps under half of its left side, say
+ * so. Every failure, ambiguity or budget overrun returns undefined, so the result is never altered.
  */
 export async function joinCoverageNote(
   sql: string,
   warehouse: string | undefined,
-  context: QueryContext = {},
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<string | undefined> {
-  const mode = autoCheckMode(env)
-  if (mode === "off" || !/\bjoin\b/i.test(sql)) return undefined
-  const name = warehouse ?? Registry.list().warehouses[0]?.name
-  if (!name) return undefined
-  const config = Registry.getConfig(name)
-  const scratch = isScratch(name)
+  // Without an explicit warehouse the query may have run through another adapter; skip.
+  if (!warehouse || !autoCheckEnabled(env) || !/\bjoin\b/i.test(sql)) return undefined
+  const config = Registry.getConfig(warehouse)
+  const scratch = isScratch(warehouse)
   const type = scratch ? "duckdb" : Registry.canonicalType(config?.type)
-  // Local means a DuckDB engine on this machine: the session scratch or a local DuckDB file.
-  const local = type === "duckdb" && (scratch || !isRemotePath((config as { path?: unknown } | undefined)?.path))
-  if (!local && (mode !== "all" || type === "duckdb" || type === "sqlite")) return undefined
+  if (type !== "duckdb" || (!scratch && isRemotePath((config as { path?: unknown } | undefined)?.path)))
+    return undefined
 
   const started = Date.now()
-  const remaining = () => JOIN_CHECK_BUDGET_MS - (Date.now() - started)
-  const live = () => remaining() > 0
+  const live = () => Date.now() - started < JOIN_CHECK_BUDGET_MS
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<undefined>((resolve) => {
     timer = setTimeout(() => resolve(undefined), JOIN_CHECK_BUDGET_MS)
   })
-  // Local DuckDB queries never get a short timeout: a timeout restarts the engine helper and would
-  // drop the session's scratch state. They are bounded by the catalog-size gate instead. Remote
-  // queries get the remaining budget as their own timeout.
-  const query = async (connector: Connector, target: typeof config, text: string, remote: boolean) => {
-    if (!live()) throw new Error("join coverage budget spent")
-    const options = remote
-      ? { noLimit: true, readOnly: true, queryTimeoutMs: Math.max(1, remaining()) }
-      : { noLimit: true, readOnly: true }
-    const response = await executeQuery(target, options, context, (opts) =>
-      connector.execute(text, undefined, undefined, opts),
-    )
-    return response.rows.map((row: unknown[]) =>
-      Object.fromEntries(response.columns.map((col: string, i: number) => [col, row[i]])),
-    )
-  }
 
   const work = async () => {
-    const target = await Registry.get(name)
-    const parser = local ? target : await Registry.get(SCRATCH_NAME)
-    const parserConfig = { type: "duckdb" } as typeof config
-    const [parsedRow] = await query(parser, parserConfig, `SELECT json_serialize_sql(${literal(sql)}) AS j`, false)
+    const connector = await Registry.get(warehouse)
+    if (!live()) return undefined
+    const [parsed] = await rows(connector, `SELECT json_serialize_sql(${literal(sql)}) AS j`)
     // uint64 locations lose precision in JSON.parse; they are not needed.
-    const text = String(parsedRow?.j ?? "").replace(/"query_location":\s*\d+/g, '"query_location":0')
-    const statement = JSON.parse(text)
+    const statement = JSON.parse(String(parsed?.j ?? "").replace(/"query_location":\s*\d+/g, '"query_location":0'))
     if (statement?.error || statement?.statements?.length !== 1) return undefined
     const node = statement.statements[0].node
     if (node?.type !== "SELECT_NODE") return undefined
@@ -135,7 +145,7 @@ export async function joinCoverageNote(
 
     const lines: string[] = []
     for (const join of tableJoins(node.from_table).slice(0, MAX_JOINS)) {
-      if (!live()) break
+      if (!live()) return undefined
       const kind = String(join.join_type).toUpperCase()
       if ((kind !== "INNER" && kind !== "LEFT") || join.ref_type !== "REGULAR") continue
       const sides = [join.left, join.right]
@@ -144,47 +154,17 @@ export async function joinCoverageNote(
         sides.some((s) => s.column_name_alias?.length || s.sample || cteNames.has(String(s.table_name).toLowerCase()))
       )
         continue
-      const leftAlias = join.left.alias || join.left.table_name
-      const rightAlias = join.right.alias || join.right.table_name
-      const keys = equalityKeys(join.condition, leftAlias, rightAlias)
+      const keys = equalityKeys(
+        join.condition,
+        join.left.alias || join.left.table_name,
+        join.right.alias || join.right.table_name,
+      )
       if (!keys?.length) continue
+      if (!(await smallLocalTable(connector, join.left)) || !live()) continue
+      if (!(await smallLocalTable(connector, join.right)) || !live()) continue
 
-      if (local) {
-        // Count only local base tables (not views, not remote attachments) under the size ceiling.
-        let small = true
-        for (const side of sides) {
-          const where = [
-            `lower(t.table_name) = lower(${literal(side.table_name)})`,
-            side.schema_name ? `lower(t.schema_name) = lower(${literal(side.schema_name)})` : "",
-            side.catalog_name ? `lower(t.database_name) = lower(${literal(side.catalog_name)})` : "",
-          ].filter(Boolean)
-          const found = await query(
-            target,
-            config,
-            `SELECT d.type AS type, d.path AS path, t.estimated_size AS size
-             FROM duckdb_tables() t JOIN duckdb_databases() d USING (database_name) WHERE ${where.join(" AND ")}`,
-            false,
-          )
-          const [table] = found
-          if (
-            found.length !== 1 ||
-            String(table.type).toLowerCase() !== "duckdb" ||
-            isRemotePath(table.path) ||
-            !(Number(table.size) <= LOCAL_ROW_CEILING)
-          ) {
-            small = false
-            break
-          }
-        }
-        if (!small) continue
-      }
-
-      const ident = local ? quoted : remoteIdent
       const relation = (side: Json) =>
         [side.catalog_name, side.schema_name, side.table_name].filter(Boolean).map(ident).join(".")
-      const leftSource = local
-        ? `SELECT * FROM ${relation(join.left)}`
-        : `SELECT * FROM ${relation(join.left)} LIMIT ${REMOTE_ROW_CEILING}`
       const match = keys
         .map((k) =>
           k.leftFirst
@@ -192,22 +172,22 @@ export async function joinCoverageNote(
             : `__jc_r.${ident(k.right)} = __jc_l.${ident(k.left)}`,
         )
         .join(" AND ")
-      const count = `SELECT COUNT(*) AS n,
-          COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM ${relation(join.right)} __jc_r WHERE ${match}) THEN 1 ELSE 0 END), 0) AS matched
-        FROM (${leftSource}) __jc_l`
-      const [row] = await query(target, config, count, !local)
-      if (!live()) break
+      const [row] = await rows(
+        connector,
+        `SELECT COUNT(*) AS n,
+           COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM ${relation(join.right)} __jc_r WHERE ${match}) THEN 1 ELSE 0 END), 0) AS matched
+         FROM ${relation(join.left)} __jc_l`,
+      )
       const n = Number(row?.n)
       const matched = Number(row?.matched)
       if (!Number.isFinite(n) || !Number.isFinite(matched)) continue
       const plain = (side: Json) => [side.catalog_name, side.schema_name, side.table_name].filter(Boolean).join(".")
       const label = `join ${plain(join.left)} → ${plain(join.right)} on ${keys.map((k) => `${k.left} = ${k.right}`).join(", ")}`
-      const unit = local || n < REMOTE_ROW_CEILING ? "left rows" : `left rows (first ${REMOTE_ROW_CEILING} counted)`
       const effect =
         kind === "LEFT" ? "they stay as unmatched rows with NULL right columns" : "the inner join drops them"
-      for (const line of coverageLoss(matched, n, unit, effect)) lines.push(`${label}: ${line}`)
+      for (const line of coverageLoss(matched, n, "left rows", effect)) lines.push(`${label}: ${line}`)
     }
-    return lines.length ? lines.join("\n") : undefined
+    return lines.length && live() ? lines.join("\n") : undefined
   }
   try {
     return await Promise.race([work().catch(() => undefined), timeout])

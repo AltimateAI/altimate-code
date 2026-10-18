@@ -363,10 +363,7 @@ export const SqlExecuteTool = Tool.define(
               const suggestion = ctx.agent === "analyst" ? null : PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
               const lint = await lintSqlResult(sql, args.warehouse, ctx.sessionID)
               // altimate_change start — advisory join-coverage note on successful reads; never alters the rows
-              const coverage =
-                !mongo && queryType === "read"
-                  ? await joinCoverageNote(sql, args.warehouse, { signal: ctx.abort, sessionID: ctx.sessionID })
-                  : undefined
+              const coverage = !mongo && queryType === "read" ? await joinCoverageNote(sql, args.warehouse) : undefined
               // altimate_change end
               const formatted = await formatSqlResult(result, {
                 limit,

@@ -7,7 +7,7 @@ import { closeScratch, getScratch, withScratchSession } from "../../../src/altim
 import {
   JOIN_CHECK_BUDGET_MS,
   LOCAL_ROW_CEILING,
-  autoCheckMode,
+  autoCheckEnabled,
   coverageLoss,
   joinCoverageNote,
 } from "../../../src/altimate/tools/sql-join-coverage"
@@ -64,13 +64,12 @@ afterAll(async () => {
   await fixture?.[Symbol.asyncDispose]()
 })
 
-describe("autoCheckMode", () => {
-  test("defaults to local and accepts off/all", () => {
-    expect(autoCheckMode({})).toBe("local")
-    expect(autoCheckMode({ ALTIMATE_SQL_AUTO_CHECK: "nonsense" })).toBe("local")
+describe("autoCheckEnabled", () => {
+  test("on by default; off, 0 or false disable it", () => {
+    expect(autoCheckEnabled({})).toBe(true)
+    expect(autoCheckEnabled({ ALTIMATE_SQL_AUTO_CHECK: "all" })).toBe(true)
     for (const off of ["off", "0", "false", " OFF "])
-      expect(autoCheckMode({ ALTIMATE_SQL_AUTO_CHECK: off })).toBe("off")
-    expect(autoCheckMode({ ALTIMATE_SQL_AUTO_CHECK: "all" })).toBe("all")
+      expect(autoCheckEnabled({ ALTIMATE_SQL_AUTO_CHECK: off })).toBe(false)
   })
 })
 
@@ -86,7 +85,7 @@ describe("coverageLoss", () => {
 
 describe("joinCoverageNote on the scratch database", () => {
   test("inner join keeping under half leads with the counts; NULL keys never match", async () => {
-    const note = await inScratch(() => joinCoverageNote(lowJoin, "scratch", {}, env()))
+    const note = await inScratch(() => joinCoverageNote(lowJoin, "scratch", env()))
     expect(note).toContain("join cohort → facts on MemberId = MemberId")
     expect(note).toContain("WARNING coverage loss: 6 of 8 left rows (75.0%) have no match; the inner join drops them.")
   })
@@ -96,7 +95,6 @@ describe("joinCoverageNote on the scratch database", () => {
       joinCoverageNote(
         "SELECT * FROM cohort c LEFT JOIN facts f ON f.MemberId = c.MemberId AND c.grp = f.grp",
         "scratch",
-        {},
         env(),
       ),
     )
@@ -125,7 +123,7 @@ describe("joinCoverageNote on the scratch database", () => {
       ["SELEC broken JOIN", undefined],
     ]
     for (const [sql, mode] of cases) {
-      expect(await inScratch(() => joinCoverageNote(sql, "scratch", {}, env(mode)))).toBeUndefined()
+      expect(await inScratch(() => joinCoverageNote(sql, "scratch", env(mode)))).toBeUndefined()
     }
   })
 
@@ -140,13 +138,17 @@ describe("joinCoverageNote on the scratch database", () => {
     )
     expect(
       await inScratch(() =>
-        joinCoverageNote("SELECT * FROM cohort_view c JOIN facts f ON c.MemberId = f.MemberId", "scratch", {}, env()),
+        joinCoverageNote("SELECT * FROM cohort_view c JOIN facts f ON c.MemberId = f.MemberId", "scratch", env()),
       ),
     ).toBeUndefined()
+    // A view elsewhere sharing a table's name could be what DuckDB resolves: skip the join.
+    await duckdb.execute("CREATE SCHEMA shadow", undefined, undefined, { noLimit: true })
+    await duckdb.execute("CREATE VIEW shadow.facts AS SELECT * FROM big", undefined, undefined, { noLimit: true })
+    expect(await inScratch(() => joinCoverageNote(lowJoin, "scratch", env()))).toBeUndefined()
     const started = Date.now()
     expect(
       await inScratch(() =>
-        joinCoverageNote("SELECT * FROM big b JOIN facts f ON b.MemberId = f.MemberId", "scratch", {}, env()),
+        joinCoverageNote("SELECT * FROM big b JOIN facts f ON b.MemberId = f.MemberId", "scratch", env()),
       ),
     ).toBeUndefined()
     expect(Date.now() - started).toBeLessThan(JOIN_CHECK_BUDGET_MS + 200)
@@ -160,28 +162,30 @@ describe("joinCoverageNote warehouse policy", () => {
   test("a local DuckDB file is checked in local mode", async () => {
     const connector = await Registry.get("duckdb_local")
     for (const sql of statements) await connector.execute(sql, undefined, undefined, { noLimit: true })
-    expect(await inScratch(() => joinCoverageNote(lowJoin, "duckdb_local", {}, env()))).toContain("6 of 8 left rows")
+    expect(await inScratch(() => joinCoverageNote(lowJoin, "duckdb_local", env()))).toContain("6 of 8 left rows")
   })
 
   test("SQLite, cloud DuckDB and remote warehouses are skipped in local mode", async () => {
     for (const warehouse of ["sqlite_local", "duckdb_cloud", "remote_pg"]) {
       const started = Date.now()
-      expect(await inScratch(() => joinCoverageNote(lowJoin, warehouse, {}, env()))).toBeUndefined()
+      expect(await inScratch(() => joinCoverageNote(lowJoin, warehouse, env()))).toBeUndefined()
       // Skipped before any connection attempt.
       expect(Date.now() - started).toBeLessThan(JOIN_CHECK_BUDGET_MS)
     }
   })
 
-  test("all mode never counts SQLite or cloud DuckDB, and an unreachable remote returns undefined", async () => {
+  test("no setting enables SQLite, cloud DuckDB or remote warehouses", async () => {
     for (const warehouse of ["sqlite_local", "duckdb_cloud", "remote_pg"]) {
-      expect(await inScratch(() => joinCoverageNote(lowJoin, warehouse, {}, env("all")))).toBeUndefined()
+      expect(await inScratch(() => joinCoverageNote(lowJoin, warehouse, env("all")))).toBeUndefined()
     }
   })
 
   test("missing tables return undefined", async () => {
     expect(
-      await inScratch(() => joinCoverageNote("SELECT * FROM nope a JOIN nada b ON a.id = b.id", "scratch", {}, env())),
+      await inScratch(() => joinCoverageNote("SELECT * FROM nope a JOIN nada b ON a.id = b.id", "scratch", env())),
     ).toBeUndefined()
+    // Without an explicit warehouse the query may have run elsewhere (e.g. dbt): skip.
+    expect(await inScratch(() => joinCoverageNote(lowJoin, undefined, env()))).toBeUndefined()
   })
 })
 
