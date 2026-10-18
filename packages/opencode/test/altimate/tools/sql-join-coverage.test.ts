@@ -126,8 +126,24 @@ describe("joinCoverageNote on the scratch database", () => {
       "grp = 'a'",
       "c.grp = 'a' OR f.v > 2.5",
       "c.MemberId IN (SELECT MemberId FROM half_facts)",
+      // Function calls (LIKE is one) are not rebuilt: the count must stay a cheap scan.
+      "c.grp LIKE 'b%'",
+      "lower(c.grp) = 'b'",
     ])
       expect(await note(where)).toBeUndefined()
+    // Simple comparisons, BETWEEN, IN lists and IS NULL are applied.
+    expect(await note("c.MemberId BETWEEN 4 AND 6")).toContain("3 of 3 left rows")
+    expect(await note("c.grp IN ('b', 'c') AND c.MemberId IS NOT NULL")).toContain("4 of 4 left rows")
+    // A right-side WHERE on a LEFT JOIN drops the unmatched rows after the join: skipped.
+    expect(
+      await inScratch(() =>
+        joinCoverageNote(
+          "SELECT * FROM cohort c LEFT JOIN facts f ON c.MemberId = f.MemberId WHERE f.v > 2.5",
+          "scratch",
+          env(),
+        ),
+      ),
+    ).toBeUndefined()
   })
 
   test("stays silent when coverage is fine or the shape is not a plain table equality join", async () => {

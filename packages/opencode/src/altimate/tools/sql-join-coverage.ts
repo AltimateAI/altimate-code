@@ -56,20 +56,35 @@ const STAR = {
   rename_list: [],
 }
 
-/** Qualifiers of every column reference in an expression, or undefined when it holds a subquery or a bare column. */
+// Expression classes a rebuilt filter may contain: plain comparisons of columns and constants. No
+// function calls (including LIKE), CASE or subqueries, so a filtered side costs one cheap scan and
+// the uncancellable count stays as short as the size ceiling makes it.
+const SIMPLE_CLASSES = new Set(["COMPARISON", "BETWEEN", "OPERATOR", "CAST", "COLUMN_REF", "CONSTANT"])
+const SIMPLE_OPERATORS = new Set([
+  "COMPARE_IN",
+  "COMPARE_NOT_IN",
+  "OPERATOR_IS_NULL",
+  "OPERATOR_IS_NOT_NULL",
+  "OPERATOR_CAST",
+])
+
+/**
+ * Qualifiers of every column reference in a simple expression, or undefined when it holds anything
+ * else (a function, subquery, CASE, bare column...).
+ */
 function qualifiers(expr: Json, out = new Set<string>()): Set<string> | undefined {
-  if (Array.isArray(expr)) {
-    for (const item of expr) if (!qualifiers(item, out)) return undefined
-    return out
-  }
-  if (!expr || typeof expr !== "object") return out
-  if (expr.class === "SUBQUERY" || expr.type === "SUBQUERY") return undefined
+  if (!expr || typeof expr !== "object" || Array.isArray(expr)) return undefined
+  if (!SIMPLE_CLASSES.has(expr.class)) return undefined
+  if (expr.class === "OPERATOR" && !SIMPLE_OPERATORS.has(expr.type)) return undefined
+  if (expr.class === "CONSTANT") return out
   if (expr.class === "COLUMN_REF") {
     if (expr.column_names?.length !== 2) return undefined
     out.add(String(expr.column_names[0]).toLowerCase())
     return out
   }
-  for (const value of Object.values(expr)) if (!qualifiers(value, out)) return undefined
+  const children = [expr.left, expr.right, expr.input, expr.lower, expr.upper, expr.child, ...(expr.children ?? [])]
+  for (const child of children.filter((c) => c !== undefined && c !== null))
+    if (!qualifiers(child, out)) return undefined
   return out
 }
 
@@ -252,6 +267,9 @@ export async function joinCoverageNote(
       // per side, and a WHERE that cannot be split that way skips the check.
       const filters = sideFilters(node.where_clause, leftAlias, rightAlias)
       if (!filters) continue
+      // A right-side WHERE on a LEFT JOIN runs after the join and drops the NULL-extended rows,
+      // which a pre-filtered count cannot describe.
+      if (kind === "LEFT" && filters.right.length) continue
       if (!(await smallLocalTable(connector, join.left)) || !live()) continue
       if (!(await smallLocalTable(connector, join.right)) || !live()) continue
       const leftSource = await sideSource(connector, statement, join.left, filters.left)
