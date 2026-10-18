@@ -44,6 +44,7 @@ describe("templateErrorMessage", () => {
     ["login failed password: supersecret", "login failed password: <x>"],
     ["Authorization: Bearer secrettoken", "Authorization: <x>"],
     ["bad api key hunter, retry", "bad api key <x>"],
+    ["unknown column `customer name` in field list", "unknown column <x>"],
     ["bad /Users/bob/proj/a.ts here", "bad <x>"],
     ["bad C:\\Users\\bob\\a.ts here", "bad <x>"],
     [`bad ${pgUri} here`, "bad <x>"],
