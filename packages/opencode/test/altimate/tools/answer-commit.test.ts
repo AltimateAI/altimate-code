@@ -1012,17 +1012,35 @@ describe("renderAnswer basis length bound", () => {
     expect((await tool.execute(payload, context)).output).toBe(expected)
   })
 
-  test.each(["x".repeat(401), ` ${"x".repeat(399)} `])(
-    "rejects 401 raw basis characters with the named bound",
+  test.each(["x".repeat(401), "x".repeat(1200), ` ${"x".repeat(400)}`])(
+    "trims an over-long basis to the bound instead of rejecting the commit",
     async (basis) => {
       const tool = await initTool(AnswerCommit.AnswerCommitTool)
       for (const answer_only of [false, true]) {
         const payload = { basis, answer_only, fields: [{ name: "", value: 2 }] }
-        expect(() => AnswerCommit.renderAnswer(payload)).toThrow(/basis.*400 characters/i)
-        await rejects(tool.execute(payload, context), /basis.*400 characters/i)
+        const result = await tool.execute(payload, context)
+        expect(result.status).toBeUndefined()
+        const shown = String(result.output)
+        if (answer_only) expect(shown).toBe("2")
+        else {
+          const trimmed = shown.split("\n\n**Answer:** 2")[0]!
+          expect(trimmed.length).toBeLessThanOrEqual(400)
+          expect(trimmed.endsWith("…")).toBe(basis.trim().length > 400)
+        }
       }
     },
   )
+
+  test("keeps substantive basis text that follows leading whitespace", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    const payload = { basis: `${" ".repeat(450)}real caveat`, fields: [{ name: "", value: 2 }] }
+    expect(String((await tool.execute(payload, context)).output)).toContain("real caveat")
+  })
+
+  test("still requires a non-blank basis", async () => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    await rejects(tool.execute({ basis: "   ", fields: [{ name: "", value: 2 }] }, context), /basis is always required/i)
+  })
 })
 
 describe("renderAnswer structural validation", () => {
@@ -1356,6 +1374,37 @@ describe("answer_commit commit-time checks", () => {
     expect((await run({ fields: [{ name: "", value: 81 }] }, [user("q")])).status).toBeUndefined()
     const history = [user("q"), assistant(sql("a\nb\nc"))]
     expect((await run({ fields: [{ name: "", value: 3 }] }, history)).status).toBeUndefined()
+  })
+
+  const sized = (decided_by: string) => ({
+    answer_only: true,
+    fields: [{ name: "agent", value: "A1" }],
+    readings: [{ clause: "closed in April", reading: "close date", result_summary: "3 agents", decided_by }],
+  })
+
+  test("challenges a reading rejected only for returning a single row, once", async () => {
+    const payload = sized("Rejected the signed-date reading because it yields only one opportunity, no comparison")
+    const warned = await run(payload, [user("q")])
+    expect(warned.status).toBe("error")
+    expect(warned.output).toContain("answer_commit reading check:")
+    expect(warned.output).toContain('"closed in April"')
+    const accepted = await run(payload, [user("q"), assistant(failedCommit(warned.output))])
+    expect(accepted.status).toBeUndefined()
+    expect(accepted.output).toBe("A1")
+  })
+
+  test("challenges a reading rejected because it returns 1 row", async () => {
+    const result = await run(sized("Rejected the second reading since it returns 1 row"), [user("q")])
+    expect(result.output).toContain("answer_commit reading check:")
+  })
+
+  test.each([
+    "Rejected the signed-date reading because the policy defines closing as the close date",
+    "Rejected summing orders: the question asks for distinct customers",
+    "The request explicitly asks for one row",
+    "Rejected the 100-customer subset: only 100 customers matched the stated filter",
+  ])("does not challenge a reading rejected on the request's wording: %s", async (decided_by) => {
+    expect((await run(sized(decided_by), [user("q")])).status).toBeUndefined()
   })
 
   test("checks numeric row cells", async () => {
