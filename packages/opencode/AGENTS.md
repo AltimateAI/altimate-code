@@ -14,7 +14,7 @@
 
 # Cost side effects
 
-Check every feature for spend that grows with user data instead of with the conversation, and flag it in the PR body in a "Cost side effects" section (the PR template's checklist asks for it), even when the answer is "none". Examples: model calls per row, batch, file or item inside a tool; hidden model calls (sub-calls in tools, background or automatic calls); unbounded warehouse queries, scans or exports; starting cloud resources. Users' tables can hold millions of rows, so a per-row design that looks cheap in a test can cost thousands of dollars per question.
+Check every feature for spend that grows with user data instead of with the conversation, and flag it in the PR template's "Cost side effects" section, even when the answer is "None". The PR-standards check flags a missing or empty section on contributor PRs (it skips team members), and the review bots check every PR against `REVIEW.md` focus area 12. Examples: model calls per row, batch, file or item inside a tool; hidden model calls (sub-calls in tools, background or automatic calls); unbounded warehouse queries, scans or exports; starting cloud resources. Users' tables can hold millions of rows, so a per-row design that looks cheap in a test can cost thousands of dollars per question.
 
 Such a path must be:
 

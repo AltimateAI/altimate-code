@@ -183,14 +183,15 @@ describe("Anthropic tool JSON schemas", () => {
                 )
               }
               // Validate every registered tool, including ones hidden by this agent's permissions.
-              const errors = schemas.flatMap((tool) => schemaErrors(tool.schema).map((error) => `${tool.name}: ${error}`))
+              const errors = schemas.flatMap((tool) =>
+                schemaErrors(tool.schema).map((error) => `${tool.name}: ${error}`),
+              )
               expect(errors).toEqual([])
             }),
         )
       }
     }
   }
-
 
   test.each(["@ai-sdk/anthropic", "@ai-sdk/amazon-bedrock", "@ai-sdk/google-vertex/anthropic"])(
     "%s removes only the root dialect declaration without mutating the input",

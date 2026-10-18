@@ -17,6 +17,12 @@ Please provide a description of the issue, the changes you made to fix it, and w
 
 ### How did you verify your code works?
 
+<!-- altimate_change start — required cost side-effects section (see packages/opencode/AGENTS.md) -->
+### Cost side effects
+
+_Does this change add model calls, warehouse queries or cloud resources whose cost grows with user data (rows, files, items)? Describe each one and how it is capped, estimated and confirmed, or write "None"._
+
+<!-- altimate_change end -->
 ### Screenshots / recordings
 
 _If this is a UI change, please include a screenshot or recording._

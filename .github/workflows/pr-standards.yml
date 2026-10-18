@@ -252,6 +252,16 @@ jobs:
               }
             }
 
+            // altimate_change start — every PR states its cost side effects, even when there are none
+            const costMatch = body.match(/### Cost side effects\s*\n([\s\S]*?)(?=###|$)/);
+            const costContent = costMatch
+              ? costMatch[1].replace(/<!--[\s\S]*?-->/g, '').replace(/^_Does this change add[\s\S]*?_\s*$/m, '').trim()
+              : '';
+            if (!costContent) {
+              issues.push('"Cost side effects" section is missing or empty. Describe any model calls, queries or cloud resources whose cost grows with user data, or write "None".');
+            }
+            // altimate_change end
+
             // Check: checklist boxes are checked
             if (hasChecklistSection) {
               const checklistMatch = body.match(/### Checklist\s*\n([\s\S]*?)(?=###|$)/);
