@@ -9,7 +9,7 @@
 import * as core from "@altimateai/altimate-core"
 import { register } from "../dispatcher"
 import { prepareSql } from "../schema-resolver"
-import { preprocessIff, postprocessQualify } from "../altimate-core"
+import { preprocessIff, postprocessQualify, applySemanticsSkipGuard } from "../altimate-core"
 import { EngineCoerce } from "../engine-coerce"
 import type {
   SqlAnalyzeResult,
@@ -37,7 +37,10 @@ export function registerAllSql(): void {
       ])
 
       const lint = JSON.parse(JSON.stringify(lintRaw))
-      const semantics = JSON.parse(JSON.stringify(semanticsRaw))
+      // altimate_change start — a skipped semantic analysis (no plan) is not a clean result
+      const semantics = applySemanticsSkipGuard(JSON.parse(JSON.stringify(semanticsRaw))) as any
+      const semanticsSkipped = semantics.skipped === true
+      // altimate_change end
       // Redact raw-input echoes (multi_statement quotes the input verbatim).
       const safety = EngineCoerce.redactScan(JSON.parse(JSON.stringify(safetyRaw))) as any
 
@@ -65,6 +68,16 @@ export function registerAllSql(): void {
         })
       }
 
+      if (semanticsSkipped) {
+        issues.push({
+          type: "semantic",
+          severity: "warning",
+          message: String(semantics.skip_reason),
+          recommendation: "",
+          confidence: "high",
+        })
+      }
+
       for (const t of safety.threats ?? []) {
         issues.push({
           type: "safety",
@@ -80,8 +93,8 @@ export function registerAllSql(): void {
         success: true,
         issues,
         issue_count: issues.length,
-        confidence: "high",
-        confidence_factors: ["lint", "semantics", "safety"],
+        confidence: semanticsSkipped ? "medium" : "high",
+        confidence_factors: semanticsSkipped ? ["lint", "safety"] : ["lint", "semantics", "safety"],
       } satisfies SqlAnalyzeResult
     } catch (e) {
       return {

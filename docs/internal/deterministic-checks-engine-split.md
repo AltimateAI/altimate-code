@@ -34,7 +34,7 @@ Relevant because it sets the cost of "add something engine-side".
   layer), `altimate-core-node` (napi-rs), plus `polyglot-sql` for multi-dialect parse and
   transpile.
 - Published as the npm package `@altimateai/altimate-core` (per-platform native addon).
-  altimate-code pins it exactly: `packages/opencode/package.json` → `"@altimateai/altimate-core": "0.8.0"`.
+  altimate-code pins it exactly: `packages/opencode/package.json` → `"@altimateai/altimate-core": "0.9.0"`.
 - Consumer binding: `packages/opencode/src/altimate/native/altimate-core.ts` registers 42
   `altimate_core.*` handlers on the dispatcher. Registration is lazy — the napi binary loads
   on the first `Dispatcher.call()` (`packages/opencode/src/altimate/native/index.ts`), so a

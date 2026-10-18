@@ -263,8 +263,20 @@ async function runSemantic(sql: string, file: string, schemaPath?: string): Prom
     if (!result.success && issues.length === 0) {
       return [dispatcherErrorFinding("semantic", file, result.error ?? "altimate_core.semantics failed")]
     }
+    // altimate_change start — skipped analysis (no plan) must not read as zero findings
+    const skippedFinding: Finding[] = result.data.skipped
+      ? [
+          {
+            file,
+            rule: "semantic",
+            severity: schemaPath ? ("error" as const) : ("warning" as const),
+            message: String(result.data.skip_reason ?? "semantic analysis skipped (no plan available)"),
+          },
+        ]
+      : []
+    // altimate_change end
     if (issues.length > 0) {
-      return issues.map((f) => ({
+      const issueFindings = issues.map((f) => ({
         file,
         line: f.line as number | undefined,
         column: f.column as number | undefined,
@@ -274,7 +286,9 @@ async function runSemantic(sql: string, file: string, schemaPath?: string): Prom
         message: (f.message ?? f.description ?? "") as string,
         suggestion: f.suggestion as string | undefined,
       }))
+      return [...skippedFinding, ...issueFindings]
     }
+    if (skippedFinding.length > 0) return skippedFinding
     if (result.data.valid === false) {
       // SemanticResult.validation_errors carries the reason the query is
       // unplannable — surface it instead of a bare generic message. With a
