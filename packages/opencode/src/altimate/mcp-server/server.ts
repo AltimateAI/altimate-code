@@ -49,6 +49,13 @@ function structuredAnswer(output: string) {
   return { answer: output.startsWith(FINAL_ANSWER_PREFIX) ? output.slice(FINAL_ANSWER_PREFIX.length) : output }
 }
 
+// Surfaces as a slash command in interactive clients.
+const analyzePrompt = {
+  name: "analyze",
+  description: "Answer a data question with the analyst method: inspect, compute in the database, then answer_commit.",
+  arguments: [{ name: "question", description: "The data question to answer", required: false }],
+}
+
 export interface ServeOptions {
   connections?: string
   allowWrite?: boolean
@@ -64,7 +71,7 @@ export async function createServer(options: ServeOptions = {}) {
   }
   const adapter = await createAdapter(options)
   const server = new Server({ name: "altimate-code", version: InstallationVersion }, {
-    capabilities: { tools: {} },
+    capabilities: { tools: {}, prompts: {} },
     instructions: SERVER_INSTRUCTIONS,
   })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -75,9 +82,42 @@ export async function createServer(options: ServeOptions = {}) {
       ...(name === "answer_commit" && { outputSchema: answerOutputSchema }),
     })),
   }))
+  // Ask the user once per session when the model weighed two readings and the client can ask; any
+  // failure, decline or cancel (headless clients cancel) leaves the commit as accepted.
+  let elicited = false
+  const clarifyReading = async (args: Record<string, unknown> | undefined, result: { status?: string }) => {
+    const readings = Array.isArray(args?.readings) ? (args.readings as { reading?: unknown }[]) : []
+    const options = readings.map((item) => item.reading).filter((item): item is string => typeof item === "string" && !!item)
+    if (elicited || result.status === "error" || options.length < 2 || !server.getClientCapabilities()?.elicitation) return undefined
+    elicited = true
+    try {
+      const answer = await server.elicitInput({
+        message: "The question can be read two ways. Which did you mean?",
+        requestedSchema: {
+          type: "object",
+          properties: { reading: { type: "string", enum: options, description: "Intended reading" } },
+          required: ["reading"],
+        },
+      })
+      const chosen = answer.action === "accept" ? answer.content?.reading : undefined
+      if (typeof chosen !== "string" || chosen === options[0]) return undefined
+      return `The user chose this reading: ${JSON.stringify(chosen)}. Recompute under it and call answer_commit again.`
+    } catch {
+      return undefined
+    }
+  }
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts: [analyzePrompt] }))
+  server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    if (request.params.name !== analyzePrompt.name) throw new Error(`Unknown prompt: ${request.params.name}`)
+    const question = request.params.arguments?.question?.trim()
+    const text = [SERVER_INSTRUCTIONS, ...(question ? ["", `Question: ${question}`] : [])].join("\n")
+    return { description: analyzePrompt.description, messages: [{ role: "user" as const, content: { type: "text" as const, text } }] }
+  })
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
       const result = await adapter.execute(request.params.name, request.params.arguments ?? {}, extra.signal)
+      const clarified = request.params.name === "answer_commit" ? await clarifyReading(request.params.arguments, result) : undefined
+      if (clarified) return { content: [{ type: "text" as const, text: clarified }], isError: true }
       const isError = result.status === "error" || (result.metadata.success !== true && Boolean(result.metadata.error))
       return {
         content: [{ type: "text" as const, text: result.output }, ...resultLinks(result.metadata)],

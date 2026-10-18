@@ -5,6 +5,7 @@ import { mkdtemp, rm, stat, readFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
+import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { createServer, SERVER_INSTRUCTIONS } from "../../../src/altimate/mcp-server/server"
 import * as Registry from "../../../src/altimate/native/connections/registry"
@@ -25,7 +26,7 @@ afterEach(async () => {
   Registry.reset()
 })
 
-async function fixture(allowWrite = false) {
+async function fixture(allowWrite = false, capabilities: Record<string, object> = {}) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-tools-test-"))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const dbPath = path.join(dir, "source.sqlite")
@@ -36,7 +37,7 @@ async function fixture(allowWrite = false) {
   const config = path.join(dir, "connections.json")
   await Bun.write(config, JSON.stringify({ source: { type: "sqlite", path: "source.sqlite" } }))
   const server = await createServer({ allowWrite, connections: config })
-  const client = new Client({ name: "test", version: "1" })
+  const client = new Client({ name: "test", version: "1" }, { capabilities })
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   await server.connect(serverTransport)
   await client.connect(clientTransport)
@@ -538,5 +539,53 @@ mcpTest("a rejected answer_commit has no structuredContent", async () => {
   const rejected = await call("answer_commit", commit([{ name: "item", value: "apple" }], ["item", "count"]))
   expect(rejected.isError).toBe(true)
   expect(rejected.structuredContent).toBeUndefined()
+})
+// altimate_change end
+
+// altimate_change start — the analyze prompt carries the analyst method for interactive clients
+mcpTest("analyze prompt returns the analyst method and the question", async () => {
+  const { client } = await fixture()
+  expect((await client.listPrompts()).prompts.map((item) => item.name)).toEqual(["analyze"])
+  const prompt = await client.getPrompt({ name: "analyze", arguments: { question: "How many items?" } })
+  const body = (prompt.messages[0]!.content as { text: string }).text
+  expect(body).toContain(SERVER_INSTRUCTIONS)
+  expect(body).toContain("Question: How many items?")
+  await expect(client.getPrompt({ name: "nope" })).rejects.toThrow()
+})
+// altimate_change end
+
+// altimate_change start — answer_commit asks which reading was meant only when two exist and the client can ask
+const twoReadings = {
+  ...commit([{ name: "", value: "apple" }], ["item"]),
+  readings: [
+    { clause: "c", reading: "by name", result_summary: "apple", decided_by: "x" },
+    { clause: "c", reading: "by id", result_summary: "pear", decided_by: "y" },
+  ],
+}
+
+mcpTest("answer_commit elicits a reading and asks for a recompute when another is chosen", async () => {
+  const { client, call } = await fixture(false, { elicitation: {} })
+  let asked = 0
+  client.setRequestHandler(ElicitRequestSchema, async () => {
+    asked++
+    return { action: "accept", content: { reading: "by id" } }
+  })
+  const first = await call("answer_commit", twoReadings)
+  expect(first.isError).toBe(true)
+  expect(text(first)).toContain("by id")
+  // Asked once per session: the follow-up commit is accepted.
+  expect((await call("answer_commit", twoReadings)).isError).toBeFalsy()
+  expect(asked).toBe(1)
+})
+
+mcpTest("answer_commit degrades silently when the client cancels or lacks elicitation", async () => {
+  const cancelled = await fixture(false, { elicitation: {} })
+  cancelled.client.setRequestHandler(ElicitRequestSchema, async () => ({ action: "cancel" }))
+  expect((await cancelled.call("answer_commit", twoReadings)).isError).toBeFalsy()
+})
+
+mcpTest("answer_commit without elicitation support or with one reading never asks", async () => {
+  const plain = await fixture()
+  expect((await plain.call("answer_commit", twoReadings)).isError).toBeFalsy()
 })
 // altimate_change end
