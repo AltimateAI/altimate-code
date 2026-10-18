@@ -192,6 +192,9 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
             table: ref,
             columns: schemaResult.columns!,
             warehouse: schemaResult.warehouse ?? target.warehouse,
+            ...(schemaResult.schema_name
+              ? { document: { database: schemaResult.schema_name, collection: schemaResult.table ?? args.table } }
+              : {}),
           },
           ctx,
         )

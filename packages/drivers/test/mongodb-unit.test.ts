@@ -10,9 +10,10 @@ const { Binary } = createRequire(import.meta.resolve("mongodb"))("bson")
 
 async function fakeMongo(
   docs?: Record<string, unknown>[],
-  metadata: { collections?: Record<string, string[]>; error?: Error } = {},
+  metadata: { collections?: Record<string, string[]>; error?: Error; read?: () => Promise<Record<string, unknown>[]> } = {},
 ) {
   const finds: unknown[] = []
+  const findOptions: unknown[] = []
   const pipelines: Record<string, unknown>[][] = []
   const aggregateOptions: unknown[] = []
   const counts: { filter: unknown; options: unknown }[] = []
@@ -57,9 +58,10 @@ async function fakeMongo(
               collections[database].push(name)
             },
             collection: () => ({
-              find: (filter: unknown) => {
+              find: (filter: unknown, options: unknown) => {
                 finds.push(filter)
-                return { limit: () => ({ toArray: async () => docs ?? [], async *[Symbol.asyncIterator]() { yield* docs ?? [] } }) }
+                findOptions.push(options)
+                return { limit: () => ({ toArray: () => (metadata.read ? metadata.read() : Promise.resolve(docs ?? [])), async *[Symbol.asyncIterator]() { yield* docs ?? [] } }) }
               },
               aggregate: (pipeline: Record<string, unknown>[], options: unknown) => {
                 pipelines.push(pipeline)
@@ -88,7 +90,7 @@ async function fakeMongo(
   const connector = await connect({ type: "mongodb", database: "test" })
   await connector.connect()
   const query = (command: string, extra: object = {}) => JSON.stringify({ collection: "articles", command, ...extra })
-  return { connector, query, collections, finds, pipelines, aggregateOptions, counts, distincts, collectionLists, databaseLists, estimates }
+  return { connector, query, collections, finds, findOptions, pipelines, aggregateOptions, counts, distincts, collectionLists, databaseLists, estimates }
 }
 
 describe("MongoDB read command shapes", () => {
@@ -479,6 +481,57 @@ describe("MongoDB native command filters", () => {
     const { connector, counts } = await fakeMongo()
     await connector.execute(JSON.stringify({ count: "orders", query: { status: "A" }, filter: { status: "B" } }), 1, undefined, { queryTimeoutMs: 0 })
     expect(counts).toEqual([{ filter: { status: "B" }, options: { maxTimeMS: 120_000 } }])
+  })
+})
+
+describe("MongoDB nested documents", () => {
+  const docs = [
+    { _id: 1, user: { name: "a", geo: { lat: 1.5 } }, items: [{ sku: "x" }], "a.b": 1 },
+    { _id: 2, user: null, items: [] },
+  ]
+
+  test("describeTable stays top-level: nested objects are 'object', arrays 'array', no nested paths", async () => {
+    const { connector } = await fakeMongo(docs)
+    expect(await connector.describeTable("test", "articles")).toEqual([
+      { name: "_id", data_type: "int32", nullable: false },
+      { name: "a.b", data_type: "int32", nullable: true },
+      { name: "items", data_type: "array", nullable: false },
+      { name: "user", data_type: "object", nullable: true },
+    ])
+  })
+
+  test("sampleDocuments returns raw documents under the smaller of the caller and connection deadlines", async () => {
+    const { connector, findOptions } = await fakeMongo(docs)
+    expect(await connector.sampleDocuments!("test", "articles", 50, { maxTimeMS: 15_000 })).toEqual(docs)
+    expect(findOptions).toEqual([{ maxTimeMS: 15_000 }])
+  })
+
+  test("sampleDocuments honours an aborted signal", async () => {
+    const { connector } = await fakeMongo(docs)
+    await expect(connector.sampleDocuments!("test", "articles", 50, { signal: AbortSignal.abort(new Error("stop")) })).rejects.toThrow("stop")
+  })
+
+  test("a read rejecting after the abort is handled and the abort reason wins", async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on("unhandledRejection", onUnhandled)
+    try {
+      let rejectRead!: (e: Error) => void
+      const { connector, findOptions } = await fakeMongo(docs, {
+        read: () => new Promise((_, reject) => { rejectRead = reject }),
+      })
+      const controller = new AbortController()
+      const pending = connector.sampleDocuments!("test", "articles", 50, { signal: controller.signal })
+      const abortReason = new Error("cancelled")
+      controller.abort(abortReason)
+      await expect(pending).rejects.toBe(abortReason)
+      rejectRead(new Error("cursor closed"))
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      expect(unhandled).toEqual([])
+      expect(findOptions[0]).toMatchObject({ signal: controller.signal })
+    } finally {
+      process.off("unhandledRejection", onUnhandled)
+    }
   })
 })
 
