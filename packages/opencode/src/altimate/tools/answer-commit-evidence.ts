@@ -143,22 +143,31 @@ function* nodes(value: Json): Generator<Json> {
   for (const child of Array.isArray(value) ? value : Object.values(value)) yield* nodes(child)
 }
 
+const isEquality = (n: Json) =>
+  n?.type === "COMPARE_EQUAL" && n.left?.class === "COLUMN_REF" && n.right?.class === "COLUMN_REF"
+/** A join condition with a column equality, so DuckDB hash-joins it and the row cap stops the work. */
+const equiJoin = (condition: Json) =>
+  isEquality(condition) || (condition?.type === "CONJUNCTION_AND" && condition.children.some(isEquality))
+
+type PlainSelect = { node: Json; tables: Json[]; functions: Set<string> }
 /**
- * The single SELECT of a statement whose cost the checks can bound, with its base tables; undefined
- * for anything else: set operations, CTEs, subqueries, table functions (which can read files) and
- * joins without a join condition.
+ * The single SELECT of a statement whose cost the checks can bound, with its base tables and called
+ * functions; undefined for anything else: set operations, CTEs, subqueries, table functions (which
+ * can read files) and joins without a column equality (a nested-loop join is not bounded by the cap).
  */
-function plainSelect(statement: Json): { node: Json; tables: Json[] } | undefined {
+function plainSelect(statement: Json): PlainSelect | undefined {
   const node = statement?.statements?.[0]?.node
   if (node?.type !== "SELECT_NODE") return undefined
   const tables: Json[] = []
+  const functions = new Set<string>()
   for (const n of nodes(node)) {
     if (n?.cte_map?.map?.length) return undefined
     if (n?.class === "SUBQUERY" || n?.type === "SUBQUERY" || n?.type === "TABLE_FUNCTION") return undefined
-    if (n?.type === "JOIN" && (n.ref_type !== "REGULAR" || !n.condition)) return undefined
+    if (n?.type === "JOIN" && (n.ref_type !== "REGULAR" || !equiJoin(n.condition))) return undefined
     if (n?.type === "BASE_TABLE") tables.push(n)
+    if (n?.class === "FUNCTION" && !n.is_operator) functions.add(String(n.function_name).toLowerCase())
   }
-  return tables.length ? { node, tables } : undefined
+  return tables.length ? { node, tables, functions } : undefined
 }
 
 /** The relation resolves to exactly one local DuckDB base table under the ceiling, and no view shares its name. */
@@ -186,8 +195,19 @@ async function smallLocalTable(run: Run, side: Json): Promise<boolean> {
   )
 }
 
-async function allSmallLocal(run: Run, tables: Json[]): Promise<boolean> {
-  for (const table of tables) if (!(await smallLocalTable(run, table))) return false
+/**
+ * Every table is small and local, and every function is built in: a user macro can hide a large
+ * read or an attached remote warehouse behind a function call.
+ */
+async function bounded(run: Run, select: PlainSelect): Promise<boolean> {
+  if (select.functions.size) {
+    const names = [...select.functions].map(literal).join(", ")
+    const [user] = await run(
+      `SELECT COUNT(*) AS n FROM duckdb_functions() WHERE NOT internal AND lower(function_name) IN (${names})`,
+    )
+    if (Number(user?.n) !== 0) return false
+  }
+  for (const table of select.tables) if (!(await smallLocalTable(run, table))) return false
   return true
 }
 
@@ -247,7 +267,7 @@ export async function vacuousFilters(sql: string, warehouse: string): Promise<Va
     if (!select?.node.where_clause) return undefined
     const where = select.node.where_clause
     const conjuncts: Json[] = where.type === "CONJUNCTION_AND" ? where.children : [where]
-    if (conjuncts.length > MAX_CONJUNCTS || !(await allSmallLocal(run, select.tables))) return undefined
+    if (conjuncts.length > MAX_CONJUNCTS || !(await bounded(run, select))) return undefined
     const kept = await cappedCount(run, statement, select.node, conjuncts)
     if (kept === undefined || kept === 0) return undefined
     const found: VacuousFilter[] = []
@@ -262,9 +282,7 @@ export async function vacuousFilters(sql: string, warehouse: string): Promise<Va
       if (without !== kept) continue
       const text = await deserialize(run, {
         ...statement,
-        statements: [
-          { ...statement.statements[0], node: { ...select.node, where_clause: conjunct, modifiers: [] } },
-        ],
+        statements: [{ ...statement.statements[0], node: { ...select.node, where_clause: conjunct, modifiers: [] } }],
       })
       const at = text?.search(/\bWHERE\b/i) ?? -1
       const filter = at >= 0 ? text!.slice(at + "WHERE".length).trim() : ""
@@ -304,7 +322,7 @@ export async function compareReadings(
       const run = runner(await Registry.get(warehouse), deadline)
       const statement = await serialize(run, reading.sql!)
       const select = plainSelect(statement)
-      if (!select || !(await allSmallLocal(run, select.tables))) return undefined
+      if (!select || !(await bounded(run, select))) return undefined
       const where = select.node.where_clause
       const filters: Json[] = !where ? [] : where.type === "CONJUNCTION_AND" ? where.children : [where]
       // Bound the rows the reading aggregates before running it.

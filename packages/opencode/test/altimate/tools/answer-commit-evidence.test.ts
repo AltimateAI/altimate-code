@@ -74,7 +74,8 @@ const turn = (...parts: unknown[]) =>
   ] as never
 
 /** Direct helper calls run inside the session, as answer_commit runs them. */
-const inSession = (name: string, body: () => Promise<void>) => test(name, () => withScratchSession("test-session", body))
+const inSession = (name: string, body: () => Promise<void>) =>
+  test(name, () => withScratchSession("test-session", body))
 
 const basis = "Counted orders at order grain using orders.id."
 const context = (messages: unknown) => ({
@@ -123,10 +124,38 @@ describe("vacuous filters", () => {
     ).toBeUndefined()
   })
 
-  inSession("skips a join whose row count passes the cap", async () => {
+  inSession("skips joins the row cap cannot bound", async () => {
+    // A join without a column equality runs as a nested loop that the cap does not stop.
     expect(
       await vacuousFilters("SELECT COUNT(*) FROM wide a JOIN wide b ON a.id <= b.id WHERE a.id >= 0", "scratch"),
     ).toBeUndefined()
+    // An equi-join that passes the cap: 2000 x 2000 rows on the constant key.
+    expect(
+      await vacuousFilters(
+        "SELECT COUNT(*) FROM wide a JOIN wide b ON a.id % 1 = b.id % 1 AND a.id = a.id WHERE a.id >= 0",
+        "scratch",
+      ),
+    ).toBeUndefined()
+  })
+
+  inSession("skips queries that call a user macro", async () => {
+    const duckdb = await getScratch("test-session")
+    await duckdb.execute("CREATE MACRO hidden(x) AS x", undefined, undefined, { noLimit: true })
+    expect(
+      await vacuousFilters("SELECT COUNT(*) FROM orders WHERE hidden(status) = 'open' AND region = 'EU'", "scratch"),
+    ).toBeUndefined()
+    expect(
+      await compareReadings(
+        [
+          { clause: "a", reading: "b", sql: "SELECT hidden(id) FROM orders WHERE id = 1" },
+          { clause: "a", reading: "c", sql: "SELECT id FROM orders WHERE id = 1" },
+        ],
+        "scratch",
+      ),
+    ).toBeUndefined()
+    expect(
+      await vacuousFilters("SELECT COUNT(*) FROM orders WHERE upper(status) = 'OPEN' AND region = 'EU'", "scratch"),
+    ).toHaveLength(1)
   })
 
   inSession("checks an inner join with a condition", async () => {
@@ -271,7 +300,13 @@ describe("answer_commit review", () => {
         fields: [{ name: "", value: 2 }],
         basis,
         readings: [
-          { clause: "a", reading: "b", result_summary: "2", decided_by: "x", sql: "SELECT id FROM orders WHERE id < 3" },
+          {
+            clause: "a",
+            reading: "b",
+            result_summary: "2",
+            decided_by: "x",
+            sql: "SELECT id FROM orders WHERE id < 3",
+          },
           {
             clause: "a",
             reading: "c",
