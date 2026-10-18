@@ -149,8 +149,10 @@ describe("measurement", () => {
     expect(Date.now() - started).toBeLessThan(1000)
   })
 
-  test("skips wide keys, pending updates, large tables and low timeouts", async () => {
+  test("skips wide keys, wide filter columns, pending updates, large tables and low timeouts", async () => {
     expect(await measure("SELECT count(*) FROM wide w JOIN wide_b v ON w.k = v.k")).toBeUndefined()
+    expect(await measure("SELECT count(*) FROM wide w JOIN fan_a a ON a.id = w.n WHERE upper(w.k) LIKE '%Z%'")).toBeUndefined()
+    expect(await measure("SELECT count(*) FROM wide w JOIN fan_a a ON a.id = w.n WHERE w.n < 50")).toBeDefined()
     expect(
       await measure("SELECT u.cohort, count(*) FROM updated u JOIN labs l ON l.patient_id = u.pid GROUP BY 1"),
     ).toBeUndefined()
@@ -173,6 +175,7 @@ describe("measurement", () => {
       "SELECT p.cohort, avg(l.reading) FROM patients p JOIN labs l ON l.patient_id LIKE '%' || p.pid || '%' GROUP BY 1",
       "SELECT p.cohort, avg(l.reading) FROM patients p JOIN labs l ON l.patient_id = p.pid AND l.reading = p.cohort AND l.patient_id = p.cohort GROUP BY 1",
       "SELECT p.cohort, avg(l.reading) FROM patients p JOIN labs l ON l.patient_id = p.pid WHERE l.reading = 9007199254740993 GROUP BY 1",
+      "SELECT p.cohort, avg(l.reading) FROM patients p JOIN labs l ON l.patient_id = p.pid WHERE 1 = 0 GROUP BY 1",
     ])
       expect(await measure(sql)).toBeUndefined()
   })
@@ -243,6 +246,10 @@ describe("final query location", () => {
     expect(finalQuery(turn(queryPart(SPARSE_SQL, "5")), { fields: [{ value: 5 }] })).toBeUndefined()
     expect(
       finalQuery(turn(queryPart(SPARSE_SQL, SPARSE_OUTPUT), queryPart(`${SPARSE_SQL} ORDER BY 2`, SPARSE_OUTPUT)), sparseCommit),
+    ).toBeUndefined()
+    const literalCase = "SELECT p.cohort, avg(l.reading) FROM patients p JOIN labs l ON l.patient_id = p.pid WHERE p.cohort <> 'X' GROUP BY 1"
+    expect(
+      finalQuery(turn(queryPart(literalCase, SPARSE_OUTPUT), queryPart(literalCase.replace("'X'", "'x'"), SPARSE_OUTPUT)), sparseCommit),
     ).toBeUndefined()
     expect(
       finalQuery(turn(queryPart(SPARSE_SQL, SPARSE_OUTPUT), queryPart(`  ${SPARSE_SQL};`, SPARSE_OUTPUT)), sparseCommit)?.sql,

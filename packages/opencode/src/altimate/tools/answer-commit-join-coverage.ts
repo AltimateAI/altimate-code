@@ -156,7 +156,8 @@ function showsNumber(tokens: Decimal[], committed: string): boolean {
   )
 }
 
-const normalizeSql = (sql: string) => normalize(sql).replace(/;\s*$/, "")
+// Literal text is kept as written: queries differing only inside a literal are different queries.
+const normalizeSql = (sql: string) => sql.trim().replace(/;\s*$/, "").trimEnd()
 
 /**
  * The completed `sql_execute` of the current turn whose output shows every committed value.
@@ -454,9 +455,10 @@ export function extractJoins(statement: Json, columns: Catalog): Extracted | und
   for (const c of where) {
     if (used.has(c)) continue
     const result = scan(c, tables, true)
-    if (!result.ok || result.tables.size > 1) return undefined
+    // A conjunct over constants only (`1 = 0`) can change the population; it is not attributed to a side.
+    if (!result.ok || result.tables.size !== 1) return undefined
     for (const name of result.functions) functions.add(name)
-    if (result.tables.size === 1) filters.get([...result.tables][0]!)!.push(c)
+    filters.get([...result.tables][0]!)!.push(c)
   }
   return { tables, pairs, filters, functions }
 }
@@ -580,10 +582,16 @@ async function scratchTable(run: Run, ref: Json): Promise<TableInfo | undefined>
  * FIXED_WIDTH_CHARS; VARCHAR needs a known `Max String Length` for every segment covering every
  * row, with no pending in-place updates (whose statistics are not yet merged). Undefined otherwise.
  */
-async function keyWidth(run: Run, table: Json, info: TableInfo, column: string): Promise<number | undefined> {
+async function keyWidth(
+  run: Run,
+  table: Json,
+  info: TableInfo,
+  column: string,
+  numeric = false,
+): Promise<number | undefined> {
   const type = info.columns.get(column)
   if (!type) return undefined
-  if (FIXED_WIDTH.test(type)) return FIXED_WIDTH_CHARS
+  if (FIXED_WIDTH.test(type) || (numeric && /^(DOUBLE|FLOAT|REAL|DECIMAL)/.test(type))) return FIXED_WIDTH_CHARS
   if (type !== "VARCHAR") return undefined
   const segments = await run(
     `SELECT count AS n, stats AS s, has_updates AS u FROM pragma_storage_info(${literal(`scratch.main.${String(table.table_name)}`)})
@@ -680,6 +688,9 @@ export async function measureJoins(sql: string, sessionID: string, env: NodeJS.P
           width += w
         }
         if (info.rows * width > KEY_CHAR_BUDGET) return undefined
+        // Filter columns are read for every row too; they need the same bounded width.
+        for (const column of new Set(columnOf(extracted.filters.get(table.index)!)))
+          if ((await keyWidth(run, table.node, info, column, true)) === undefined) return undefined
       }
       const left = await projection(run, template, pair.left, pair.keys.map((k) => k[0]), extracted.filters.get(pair.left.index)!)
       const right = await projection(run, template, pair.right, pair.keys.map((k) => k[1]), extracted.filters.get(pair.right.index)!)
