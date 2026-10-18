@@ -1,11 +1,48 @@
 // altimate_change start — standalone MCP policy and middleware regressions
 import { expect, test } from "bun:test"
-import { Client } from "@modelcontextprotocol/sdk/client/index.js"
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { mkdtemp, rm } from "node:fs/promises"
 import path from "node:path"
 import os from "node:os"
 import { Database } from "bun:sqlite"
+
+// Minimal newline-delimited JSON-RPC client over the child's stdio. The full suite shares one Bun process and
+// test/mcp/* mock the MCP SDK client modules (never restored), so using the SDK here would talk to those mocks.
+function rpcClient(child: ReturnType<typeof Bun.spawn>) {
+  const pending = new Map<number, (message: any) => void>()
+  let id = 0
+  void (async () => {
+    let buffer = ""
+    for await (const chunk of child.stdout as unknown as AsyncIterable<Uint8Array>) {
+      buffer += Buffer.from(chunk).toString()
+      for (let nl = buffer.indexOf("\n"); nl >= 0; nl = buffer.indexOf("\n")) {
+        const line = buffer.slice(0, nl).trim()
+        buffer = buffer.slice(nl + 1)
+        if (!line) continue
+        const message = JSON.parse(line)
+        pending.get(message.id)?.(message)
+      }
+    }
+  })()
+  const write = (message: object) => (child.stdin as import("bun").FileSink).write(JSON.stringify(message) + "\n")
+  const request = (method: string, params: object = {}) =>
+    new Promise<any>((resolve, reject) => {
+      const n = ++id
+      pending.set(n, (message) => (message.error ? reject(new Error(JSON.stringify(message.error))) : resolve(message.result)))
+      write({ jsonrpc: "2.0", id: n, method, params })
+    })
+  return {
+    async connect() {
+      await request("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "stdio-test", version: "1" } })
+      write({ jsonrpc: "2.0", method: "notifications/initialized" })
+    },
+    listTools: () => request("tools/list"),
+    callTool: (params: { name: string; arguments: object }) => request("tools/call", params),
+    async close() {
+      ;(child.stdin as import("bun").FileSink).end()
+      await child.exited
+    },
+  }
+}
 
 for (const allowWrite of [false, true]) {
   test(`CLI stdio handshake, read and write policy (allow-write=${allowWrite})`, async () => {
@@ -21,9 +58,9 @@ for (const allowWrite of [false, true]) {
       guard,
       'globalThis.fetch = (() => { process.stderr.write("UNEXPECTED_NETWORK_CALL\\n"); throw new Error("No network allowed") }) as typeof fetch\n',
     )
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: [
+    const child = Bun.spawn(
+      [
+        process.execPath,
         "run",
         "--conditions=browser",
         "--preload",
@@ -35,18 +72,22 @@ for (const allowWrite of [false, true]) {
         connections,
         ...(allowWrite ? ["--allow-write"] : []),
       ],
-      cwd: path.resolve(import.meta.dir, "../../.."),
-      stderr: "pipe",
-      env: { ...process.env, ALTIMATE_TELEMETRY_DISABLED: "1" } as Record<string, string>,
-    })
+      {
+        cwd: path.resolve(import.meta.dir, "../../.."),
+        env: { ...process.env, ALTIMATE_TELEMETRY_DISABLED: "1" },
+        stdin: "pipe",
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    )
     let stderr = ""
-    transport.stderr?.on("data", (data) => {
-      stderr += data.toString()
-    })
-    const client = new Client({ name: "stdio-test", version: "1" })
+    void (async () => {
+      for await (const chunk of child.stderr as unknown as AsyncIterable<Uint8Array>) stderr += Buffer.from(chunk).toString()
+    })()
+    const client = rpcClient(child)
     let spill: string | undefined
     try {
-      await client.connect(transport)
+      await client.connect()
       expect((await client.listTools()).tools).toHaveLength(6)
       const write = await client.callTool({
         name: "sql_execute",
