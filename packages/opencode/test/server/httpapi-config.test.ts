@@ -55,6 +55,7 @@ describe("config HttpApi", () => {
           auto_promote: true,
           auto_promote_max_changes: 11,
           auto_promote_daily: 12,
+          sync: true,
           model: "test/model",
           core_lessons: 2,
           retrieved_lessons: 3,

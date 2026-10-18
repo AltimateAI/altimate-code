@@ -556,6 +556,14 @@ export interface PromoteOptions {
   keepCandidate?: boolean
   /** Called once the approved set has been replaced, so a caller can tell a later failure from a refusal. */
   onPublished?: () => void
+  /**
+   * Called under the lock after every check passes and before anything is written, with the approved set and
+   * the set about to be published. Lesson sync derives the promotion's proposals here. A failure aborts the
+   * promotion.
+   */
+  beforePublish?: (approved: Lessons.Lesson[], publish: Lessons.Lesson[]) => Promise<void>
+  /** Called under the lock once the approved set has been replaced: lesson sync queues the promotion's proposals here. */
+  afterPublish?: () => Promise<void>
 }
 
 /** Re-checks the candidate. It is a plain file a person can edit, and it is about to be published. */
@@ -650,6 +658,7 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     const current = await readPromoted(root, name)
     if (current !== undefined && Lessons.canonical(Lessons.parse(current)) === publish)
       throw new StoreError(`Candidate is identical to the approved lessons; nothing to promote.`)
+    await opts.beforePublish?.(current === undefined ? [] : Lessons.parse(current), Lessons.parse(publish))
     // A person's promote ends automatic ownership before anything is written; auto-promote's own publish does not.
     if (opts.history?.action !== "auto-promote") await voidAutoOwnership(root, name)
     let archived: number | undefined
@@ -667,6 +676,7 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     await SafeFS.mkdir(root, p.learnDir)
     await writeAtomic(root, p.approved, publish)
     opts.onPublished?.()
+    await opts.afterPublish?.()
     // The candidate is consumed: left in place it would read as a pending edit and a later `rollback` +
     // `promote` would silently re-publish it. `keepCandidate` is for a partial publish (auto-promote keeps
     // counter updates staged), where the remaining difference still needs review.

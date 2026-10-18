@@ -567,6 +567,25 @@ export namespace Telemetry {
         tags_count: number
       }
     | {
+        // Lesson sync (learn/sync.ts): outcomes and counts only, never lesson text.
+        type: "learn_sync"
+        timestamp: number
+        session_id: string
+        operation: "pull" | "push"
+        outcome: string
+        latency_ms?: number
+        error_kind?: string
+        lessons?: number
+        tombstones?: number
+        submitted?: number
+        duplicate?: number
+        conflict?: number
+        deferred?: number
+        dropped?: number
+        usage_batches?: number
+        queue_age_ms?: number
+      }
+    | {
         type: "memory_injection"
         timestamp: number
         session_id: string

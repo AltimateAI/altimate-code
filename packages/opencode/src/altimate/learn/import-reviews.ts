@@ -5,7 +5,7 @@ import fs from "node:fs/promises"
 import { bootstrapSince, DEFAULT_MAX_REFLECTIONS, type BootstrapModel, type BootstrapSummary } from "./bootstrap"
 import { buildDigest, redactSecrets } from "./digest"
 import { buildPrompt, FEEDBACK_CAP, DEFAULT_TIMEOUT_MS, type GenerateUsage } from "./reflect"
-import { reflectSessionSignals, errText } from "./session-reflect"
+import { reflectSessionSignals, errText, type ReflectSync } from "./session-reflect"
 import * as Signals from "./signals"
 import * as Store from "./store"
 import { DEFAULT_NAME, validateName } from "./playbook"
@@ -33,6 +33,8 @@ export interface ImportReviewsOptions {
   maxStored?: number
   yes?: boolean
   dryRun?: boolean
+  /** Lesson sync is on: curate against team lessons and queue proposals. */
+  sync?: ReflectSync
 }
 
 export interface ImportReviewsDeps {
@@ -228,7 +230,7 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
       deps.out(`Reflecting PR #${plan.pr.number}: ${open.length} open signal(s) (${summary.reflectionsRun + 1}/${maxReflections})...`)
       try {
         const result = await reflectSessionSignals({
-          root: options.root, name, sessionID: plan.sessionID, maxStored: options.maxStored,
+          root: options.root, name, sync: options.sync, sessionID: plan.sessionID, maxStored: options.maxStored,
           signalIDs: batch.map((s) => s.id), modelLabel: label, recoverPending: false,
           loadSource: async () => ({ prompts: [], calls: [] }),
           getGenerate: async () => {

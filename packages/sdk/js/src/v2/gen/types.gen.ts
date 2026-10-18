@@ -2064,6 +2064,10 @@ export type Config = {
      */
     auto_promote?: boolean
     /**
+     * Sync lessons with the bound workspace: pull approved team lessons at session start and push staged and promoted lessons to the owner's review queue (default: false; needs a workspace link and a git remote). Signals are never uploaded. Env: ALTIMATE_LEARN_SYNC overrides in both directions.
+     */
+    sync?: boolean
+    /**
      * Maximum lessons added, edited or removed by one automatic promotion; larger candidates stay staged for review (default: 3). Env: ALTIMATE_LEARN_AUTO_PROMOTE_MAX_CHANGES.
      */
     auto_promote_max_changes?: number

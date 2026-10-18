@@ -10,19 +10,16 @@ import { EOL } from "os"
 import fs from "node:fs/promises"
 import path from "node:path"
 // altimate_change start — reject symlinks in learning configuration writes
-import { constants } from "node:fs"
 import * as SafeFS from "../../altimate/learn/safe-fs"
-// altimate_change end
-// altimate_change start — unique sibling files for atomic project config updates
-import { randomUUID } from "node:crypto"
 // altimate_change end
 import * as prompts from "@clack/prompts"
 import { Cause, Effect } from "effect"
-import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
+import { parse } from "jsonc-parser"
 import { cmd } from "./cmd"
 import { effectCmd, fail } from "../effect-cmd"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import * as Playbook from "../../altimate/learn/playbook"
+import { writeProjectLearning } from "../../altimate/learn/project-config"
 import * as Store from "../../altimate/learn/store"
 import { MAX_TEXT, summarize, describeApplied, describeRejected } from "../../altimate/learn/curator"
 import { sourceFromTrajectory, redactSecrets, type DigestSource } from "../../altimate/learn/digest"
@@ -34,7 +31,7 @@ import { autoReflectEnabled, captureEnabled } from "../../altimate/learn/capture
 import { learnEnabled } from "../../altimate/learn/config"
 // altimate_change end
 // altimate_change start — opt-in automatic promotion
-import { autoPromoteEnabled, resolveAutoPromoteLimits } from "../../altimate/learn/config"
+import { autoPromoteEnabled, resolveAutoPromoteLimits, syncEnabled } from "../../altimate/learn/config"
 import { autoPromotedIds, lastCompletedPromotion, readAutoPromoteState, type AutoPromoteState } from "../../altimate/learn/auto-promote"
 // altimate_change end
 import { fileHookEnabled, resolveLimits } from "../../altimate/learn/select"
@@ -61,6 +58,10 @@ const nameOption = (yargs: Argv) =>
   })
 
 /** The project root: where `.altimate-code/` lives and what `skill publish` treats as the boundary. */
+async function cwd() {
+  return (await import("@/project/instance")).Instance.directory
+}
+
 async function projectRoot() {
   const { Instance } = await import("@/project/instance")
   return Instance.worktree !== "/" ? Instance.worktree : Instance.directory
@@ -82,79 +83,44 @@ const LEARN_DISABLED_HINT =
   "Learning stays disabled; set learn.enabled=true or ALTIMATE_LEARN=1 to re-enable (ALTIMATE_LEARN overrides config)."
 // altimate_change end
 
-/** Match the project locations loaded by Config, never the user's global configuration. */
-// altimate_change start — `autoPromote` writes learn.auto_promote; `false` only clears a key the file already sets
-async function writeProjectLearning(root: string, enabled: boolean, autoPromote?: boolean): Promise<string> {
-// altimate_change end
-  // altimate_change start — match discovered project config precedence from the current directory
-  const [{ Instance }, { Filesystem }] = await Promise.all([
-    import("@/project/instance"), import("@/util/filesystem"),
-  ])
-  // Config merges in the opposite order. Edit the highest-precedence existing project file
-  // so a second supported config cannot silently override the new opt-in setting.
-  const names = ["opencode.jsonc", "opencode.json", "altimate-code.jsonc", "altimate-code.json"]
-  const directories: string[] = []
-  for await (const dir of Filesystem.up({ targets: [".altimate-code", ".opencode"], start: Instance.directory, stop: root }))
-    directories.push(dir)
-  const candidates = directories.reverse().flatMap((dir) => names.map((name) => path.join(dir, name)))
-  for await (const file of Filesystem.up({ targets: ["opencode.jsonc", "opencode.json"], start: Instance.directory, stop: root }))
-    candidates.push(file)
-  // altimate_change end
-  let file = path.join(root, ".altimate-code", "altimate-code.json")
-  let text = "{}\n"
-  for (const candidate of candidates) {
-    // altimate_change start — reject linked project config files and their ancestors before reading
-    await SafeFS.assertSafePath(root, candidate, root)
-    // altimate_change end
-    const current = await fs.readFile(candidate, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return undefined
-      throw error
-    })
-    if (current === undefined) continue
-    file = candidate
-    text = current
-    break
-  }
-  const errors: ParseError[] = []
-  const config = parse(text, errors, { allowTrailingComma: true })
-  if (errors.length || !config || typeof config !== "object" || Array.isArray(config))
-    throw new Error(`Cannot update ${file}: expected a JSON configuration object.`)
-  const indent = /^([ \t]+)"/m.exec(text)?.[1]
-  const formattingOptions = {
-    insertSpaces: !indent?.includes("\t"),
-    tabSize: indent?.length ?? 2,
-    eol: text.includes("\r\n") ? "\r\n" : "\n",
-  }
-  // Like the MCP config writer, patch JSONC without expanding variables or rewriting other keys.
-  for (const key of ["capture", "auto_reflect"])
-    text = applyEdits(text, modify(text, ["learn", key], enabled, { formattingOptions }))
-  // altimate_change start — automatic promotion is a separate opt-in; disable turns it off where it is set
-  if (autoPromote === true || (autoPromote === false && config.learn?.auto_promote !== undefined))
-    text = applyEdits(text, modify(text, ["learn", "auto_promote"], autoPromote, { formattingOptions }))
-  // altimate_change end
-  // altimate_change start — preserve regular config permissions without following linked targets or ancestors
-  await SafeFS.mkdir(root, path.dirname(file), root)
-  await SafeFS.assertSafePath(root, file, root)
-  const mode = await fs.lstat(file).then((stat) => stat.mode & 0o777).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return 0o600
-    throw error
-  })
-  const temporary = `${file}.${randomUUID()}.tmp`
-  try {
-    const handle = await SafeFS.open(root, temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, mode, root)
-    try {
-      await handle.writeFile(text)
-      await handle.chmod(mode)
-    } finally {
-      await handle.close()
-    }
-    await SafeFS.rename(root, temporary, file, root)
-  } finally {
-    await SafeFS.remove(root, temporary, root)
-  }
-  // altimate_change end
-  return file
+// altimate_change start — lesson sync with the bound workspace
+type LearnSettings = Parameters<typeof syncEnabled>[0]
+
+/** The sync scope reflection and promote record proposals for (see `Sync.proposalScope`). */
+async function syncScope(root: string, learn: LearnSettings) {
+  if (!syncEnabled(learn)) return undefined
+  const [{ Instance }, Sync] = await Promise.all([import("@/project/instance"), import("../../altimate/learn/sync")])
+  return Sync.proposalScope(root, Instance.directory, learn)
 }
+
+/** After a command changed lessons: push its proposals, bounded, and say what happened. Never fails the command. */
+async function pushAfter(root: string, learn: LearnSettings) {
+  if (!syncEnabled(learn)) return
+  try {
+    const [{ Instance }, Sync] = await Promise.all([import("@/project/instance"), import("../../altimate/learn/sync")])
+    const report = await Sync.run(root, Instance.directory, learn, { pull: false, deadline: Date.now() + Sync.PUSH_BUDGET_MS })
+    const line = describePushes(report.pushes)
+    if (line) out(`Lesson sync: ${line}`)
+  } catch (error) {
+    log.warn("learn sync push failed", { error: errText(error) })
+  }
+}
+
+
+function describePushes(pushes: { submitted: number; duplicate: number; conflict: number; deferred: number; dropped: number; held: number; heldOtherScope: number; backfilled: number; error?: string }[]): string {
+  const sum = (key: "submitted" | "duplicate" | "conflict" | "deferred" | "dropped" | "held" | "heldOtherScope" | "backfilled") =>
+    pushes.reduce((total, push) => total + push[key], 0)
+  const parts = [
+    `${sum("submitted")} submitted for review`, `${sum("duplicate")} already submitted`, `${sum("conflict")} conflicts`,
+    `${sum("deferred")} deferred`, `${sum("dropped")} dropped`, `${sum("held")} held`,
+  ]
+  if (sum("heldOtherScope")) parts.push(`${sum("heldOtherScope")} held for another workspace or account`)
+  if (sum("backfilled")) parts.push(`${sum("backfilled")} existing lessons queued (first sync)`)
+  const errors = [...new Set(pushes.flatMap((push) => (push.error ? [push.error] : [])))]
+  return parts.join(", ") + (errors.length ? `; ${errors.join("; ")}` : "")
+}
+// altimate_change end
+
 
 // altimate_change start — explain effective capture overrides after project opt-in
 async function captureOverrideHint(): Promise<string> {
@@ -197,12 +163,20 @@ const EnableCommand = effectCmd({
     yargs.option("auto-promote", {
       type: "boolean",
       describe: "also promote automatically reflected candidates without review when every safety gate passes (undo with `learn rollback`)",
-    }),
+    })
+      // altimate_change start — lesson sync switch
+      .option("sync", {
+        type: "boolean",
+        describe: "turn lesson sync with the linked workspace back on (it is on by default): receive approved team lessons, send yours to the owner's review queue",
+      }),
+      // altimate_change end
   handler: Effect.fn("Cli.learn.enable")(function* (args) {
     yield* run("", async () => {
       const root = await projectRoot()
       const requested = args["auto-promote"] as boolean | undefined
-      const file = await writeProjectLearning(root, true, requested)
+      // altimate_change start — lesson sync switch
+      const file = await writeProjectLearning(root, await cwd(), true, requested, args.sync === true ? true : undefined)
+      // altimate_change end
       // altimate_change end
       // altimate_change start — explicit capture opt-in checks effective config and preserves the learning kill switch
       try {
@@ -239,6 +213,13 @@ const EnableCommand = effectCmd({
         out("Automatic reflection stages candidates; review with `altimate-code learn show`, then `learn promote`.")
       }
       // altimate_change end
+      // altimate_change start — report the effective lesson sync setting
+      if (syncEnabled(learn)) {
+        out("Lesson sync: on. Approved team lessons are delivered; staged and promoted lessons go to the workspace owner's review queue.")
+        out("Run `altimate-code learn sync` to sync now; `altimate-code learn status` shows the sync state.")
+      } else if (args.sync === true && learnEnabled(learn))
+        out("Lesson sync stays off: ALTIMATE_LEARN_SYNC=0 or ALTIMATE_DISABLE_WORKSPACE overrides config.")
+      // altimate_change end
       if (process.stdin.isTTY && process.stdout.isTTY) {
         out("Next steps:")
         out("  altimate-code learn bootstrap")
@@ -251,10 +232,32 @@ const EnableCommand = effectCmd({
 const DisableCommand = effectCmd({
   command: "disable",
   describe: "disable learning capture and automatic reflection for this project",
-  handler: Effect.fn("Cli.learn.disable")(function* () {
+  // altimate_change start — `disable --sync` turns off only lesson sync
+  builder: (yargs: Argv) =>
+    yargs.option("sync", {
+      type: "boolean",
+      describe: "turn off only lesson sync with the workspace (capture and local lessons are unchanged)",
+    }),
+  handler: Effect.fn("Cli.learn.disable")(function* (args) {
+    if (args.sync === true) {
+      return yield* run("", async () => {
+        const root = await projectRoot()
+        const file = await writeProjectLearning(root, await cwd(), undefined, undefined, false)
+        const { Config } = await import("@/config/config")
+        await Config.invalidate()
+        const learn = (await Config.get()).learn
+        if (syncEnabled(learn))
+          throw new Error(`Wrote project config: ${file}, but lesson sync remains on (ALTIMATE_LEARN_SYNC or a higher-precedence config sets it). Unset ALTIMATE_LEARN_SYNC or set learn.sync=false there.`)
+        // The pulled team lessons are a cache: drop it so nothing remote is delivered.
+        await (await import("../../altimate/learn/sync")).invalidate(root)
+        out("Lesson sync disabled: learn.sync=false. Team lessons are no longer delivered; local lessons are unchanged.")
+        out(`Project config: ${file}`)
+      })
+    }
+    // altimate_change end
     yield* run("", async () => {
       // altimate_change start — disable also turns automatic promotion off
-      const file = await writeProjectLearning(await projectRoot(), false, false)
+      const file = await writeProjectLearning(await projectRoot(), await cwd(), false, false)
       // altimate_change end
       // altimate_change start — verify effective settings before reporting learning disabled
       const { Config } = await import("@/config/config")
@@ -386,6 +389,9 @@ const StatusCommand = effectCmd({
           // altimate_change start — include automatic promotion limits
           limits: { ...resolveLimits(learn), max_stored: learnMaxStored(learn?.max_stored), ...resolveRecoveryLimits(learn), ...resolveAutoPromoteLimits(learn) },
           // altimate_change end
+          // altimate_change start — lesson sync state (local files only, no network)
+          sync: await (await import("../../altimate/learn/sync")).status(root, name, learn),
+          // altimate_change end
         }
       })
       if (args.json) return out(JSON.stringify(status, null, 2))
@@ -414,6 +420,25 @@ const StatusCommand = effectCmd({
         ? `Last reflection: ${status.last_reflection.at} - ${status.last_reflection.result}: ${status.last_reflection.summary}`
         : "Last reflection: never")
       out(`Limits: ${Object.entries(status.limits).map(([key, value]) => `${key}=${value}`).join(", ")}`)
+      // altimate_change start — lesson sync state
+      const sync = status.sync
+      out(`Lesson sync: ${sync.enabled ? "on" : "off"}`)
+      if (sync.enabled || sync.workspace) {
+        out(sync.workspace
+          ? `  Workspace ${sync.workspace.id} (${sync.workspace.repo_remote}); revision ${sync.revision}, pulled ${sync.pulled_at}`
+          : "  Not pulled yet. Run `altimate-code learn sync`.")
+        out(`  Team lessons: ${sync.team_lessons}; retired here: ${sync.tombstones}; waiting for owner review: ${sync.pending_review}`)
+        out(`  Outbox: ${sync.outbox.queued} queued${sync.outbox.oldest_queued_at ? ` (oldest ${sync.outbox.oldest_queued_at})` : ""}, ${sync.outbox.held.length} held, ${sync.outbox.usage_batches} usage batch(es)` +
+          (sync.outbox.other_scope ? `, ${sync.outbox.other_scope} held for another workspace or account` : ""))
+        for (const held of sync.outbox.held) out(`    held ${held.change_type} ${held.lesson_key}: ${held.reason}`)
+        if (sync.last_pull) out(`  Last pull: ${sync.last_pull.at} - ${sync.last_pull.outcome}${sync.last_pull.error ? `: ${sync.last_pull.error}` : ""}`)
+        if (sync.last_push) out(`  Last push: ${sync.last_push.at} - ${sync.last_push.submitted} submitted, ${sync.last_push.duplicate} duplicate, ${sync.last_push.conflict} conflict, ${sync.last_push.deferred} deferred${sync.last_push.error ? `: ${sync.last_push.error}` : ""}`)
+        if (sync.unsupported_until) out(`  The workspace server does not support lesson sync yet; next try after ${sync.unsupported_until}.`)
+        if (sync.workspace && !sync.backfill.complete) out(`  First sync: ${sync.backfill.uploaded} existing lessons processed so far.`)
+        for (const lesson of sync.not_syncable) out(`  ${lesson.lesson_key}: ${lesson.reason}`)
+        for (const lesson of sync.hidden_local) out(`  ${lesson.lesson_key}: ${lesson.reason}`)
+      }
+      // altimate_change end
     })
   }),
 })
@@ -440,8 +465,13 @@ const BootstrapCommand = effectCmd({
       const context = Instance.current
       const modelArg = args.model || learnModel(config.learn?.model)
       if (modelArg && !/^[^/\s]+\/\S+$/.test(modelArg)) throw new Error("Invalid model (expected provider/model).")
+      // altimate_change start — lesson sync: curate against team lessons and queue proposals
+      const root = await projectRoot()
+      const scope = await syncScope(root, config.learn)
+      // altimate_change end
       return bootstrap({
-        root: await projectRoot(), projectID: context.project.id, directory: context.directory,
+        root, projectID: context.project.id, directory: context.directory,
+        ...(scope ? { sync: { scope, origin: "bootstrap" as const } } : {}),
         name: args.name, since: args.since, limit: args.limit, maxReflections: args["max-reflections"],
         maxSeconds: args["max-seconds"], maxStored: learnMaxStored(config.learn?.max_stored),
         yes: args.yes, dryRun: args["dry-run"],
@@ -466,6 +496,12 @@ const BootstrapCommand = effectCmd({
         },
       })
     })
+    // altimate_change start — send proposals to the workspace review queue
+    if (!args["dry-run"]) yield* Effect.promise(async () => {
+      const { Config } = await import("@/config/config")
+      await pushAfter(await projectRoot(), (await Config.get()).learn)
+    })
+    // altimate_change end
     if (result?.failures) return yield* fail("Bootstrap reflection failed; signals remain queued. Rerun `learn bootstrap` to continue.")
   }),
 })
@@ -497,8 +533,13 @@ const ImportReviewsCommand = effectCmd({
       const context = Instance.current
       const modelArg = args.model || learnModel(config.learn?.model)
       if (modelArg && !/^[^/\s]+\/\S+$/.test(modelArg)) throw new Error("Invalid model (expected provider/model).")
+      // altimate_change start — lesson sync: curate against team lessons and queue proposals
+      const root = await projectRoot()
+      const scope = await syncScope(root, config.learn)
+      // altimate_change end
       return importReviews({
-        root: await projectRoot(), name: args.name, repo: args.repo, since: args.since, limit: args.limit,
+        root, name: args.name, repo: args.repo, since: args.since, limit: args.limit,
+        ...(scope ? { sync: { scope, origin: "import_reviews" as const } } : {}),
         // altimate_change start — normalize every repeated bot flag's comma list
         includeBots: args["include-bots"], anyAuthor: args["any-author"], bots: args.bots?.flatMap((value) => value.split(",")).map((login) => login.trim()).filter(Boolean),
         // altimate_change end
@@ -525,6 +566,12 @@ const ImportReviewsCommand = effectCmd({
         },
       })
     })
+    // altimate_change start — send proposals to the workspace review queue
+    if (!args["dry-run"]) yield* Effect.promise(async () => {
+      const { Config } = await import("@/config/config")
+      await pushAfter(await projectRoot(), (await Config.get()).learn)
+    })
+    // altimate_change end
     if (result?.failures) return yield* fail("Review reflection failed; signals remain queued. Rerun `learn import-reviews` to continue.")
   }),
 })
@@ -584,6 +631,10 @@ const ReflectCommand = effectCmd({
     const maxStored = yield* run("", async () => learnMaxStored(config.learn?.max_stored))
     const modelArg = (args.model as string | undefined) || learnModel(config.learn?.model)
     const overrideLabel = modelArg ? `${args.model ? "--model" : "model"} ${modelArg}` : undefined
+    // altimate_change start — lesson sync: curate against team lessons and queue proposals
+    const syncScopeValue = yield* run("", () => syncScope(root, config.learn))
+    const sync = syncScopeValue ? { scope: syncScopeValue, origin: "manual" as const } : undefined
+    // altimate_change end
 
     const resolveGenerate = Effect.fn("Cli.learn.generate")(function* (source: DigestSource) {
       yield* run("", () => prepareReflection(root, name, applyPaths))
@@ -645,7 +696,7 @@ const ReflectCommand = effectCmd({
         const attempt = yield* Effect.tryPromise({
           try: () =>
             reflectSessionSignals({
-              root, name, sessionID, applyPaths, maxStored, modelLabel: overrideLabel,
+              root, name, sessionID, applyPaths, maxStored, modelLabel: overrideLabel, sync,
               getGenerate: async (source) => (await AppRuntime.runPromise(resolveGenerate(source))).generate,
             }),
           catch: (e) => e,
@@ -675,6 +726,9 @@ const ReflectCommand = effectCmd({
         if (json) reports.push(json)
       }
       if (args.json) out(JSON.stringify(pending ? reports : (reports[0] ?? null), null, 2))
+      // altimate_change start — send proposals to the workspace review queue
+      else yield* Effect.promise(() => pushAfter(root, config.learn))
+      // altimate_change end
       if (failures > 0) return yield* fail(`${failures} of ${sessions.length} session(s) failed; their signals stay open.`)
       return
     }
@@ -721,6 +775,7 @@ const ReflectCommand = effectCmd({
         applyPaths,
         maxStored,
         modelLabel,
+        sync,
       }),
     )
     // altimate_change start — direct session feedback also clears committed reflection backoff
@@ -733,6 +788,9 @@ const ReflectCommand = effectCmd({
     // altimate_change end
     const json = report(result)
     if (json) out(JSON.stringify(json, null, 2))
+    // altimate_change start — send proposals to the workspace review queue
+    else yield* Effect.promise(() => pushAfter(root, config.learn))
+    // altimate_change end
   }),
 })
 
@@ -807,6 +865,11 @@ const ShowCommand = effectCmd({
     yield* run("", async () => {
       const root = await projectRoot()
       // altimate_change start — mark lessons that went live through automatic promotion
+      // altimate_change start — lesson sync markers
+      const { Config } = await import("@/config/config")
+      const learn = (await Config.get()).learn
+      const team = syncEnabled(learn) ? await (await import("../../altimate/learn/sync")).markers(root, name).catch(() => undefined) : undefined
+      // altimate_change end
       const { approved, candidate, diff, pending, hasApproved, auto } = await Store.transaction(root, async () => {
         const approved = await Store.loadApproved(root, name)
         return {
@@ -820,7 +883,7 @@ const ShowCommand = effectCmd({
       })
       const show = (lessons: typeof approved, marked = new Set<string>()) => {
         for (const lesson of lessons) {
-          const labels = [lesson.pinned ? "pinned" : "", marked.has(lesson.id) ? "auto-promoted" : "", lesson.text.length > MAX_TEXT ? "long (shorten when next edited)" : ""].filter(Boolean)
+          const labels = [team?.mark(lesson.id, lesson.text) ?? "", lesson.pinned ? "pinned" : "", marked.has(lesson.id) ? "auto-promoted" : "", lesson.text.length > MAX_TEXT ? "long (shorten when next edited)" : ""].filter(Boolean)
       // altimate_change end
           out(`[${lesson.id}] ${lesson.text}${labels.length ? ` (${labels.join("; ")})` : ""}`)
           out(`  helpful: ${lesson.helpful}; harmful: ${lesson.harmful}; applied: ${lesson.applied}${lesson.tags.length ? `; tags: ${lesson.tags.join(", ")}` : ""}`)
@@ -830,6 +893,15 @@ const ShowCommand = effectCmd({
       out(`# Approved${hasApproved ? "" : " (none)"}`)
       // altimate_change start — mark lessons that went live through automatic promotion
       show(approved, auto)
+      // altimate_change end
+      // altimate_change start — approved team lessons from the workspace (read-only here)
+      if (team) {
+        out(`\n# Team${team.team.length ? "" : " (none)"}`)
+        for (const lesson of team.team) {
+          out(`[${lesson.lesson_key}] ${lesson.text} (team${lesson.pinned ? "; pinned" : ""}${lesson.repo_identity === null ? "; workspace-wide" : ""})`)
+          out(`  helpful: ${lesson.helpful}; harmful: ${lesson.harmful}; applied: ${lesson.applied}${lesson.tags.length ? `; tags: ${lesson.tags.join(", ")}` : ""}`)
+        }
+      }
       // altimate_change end
       out(`\n# Candidate${candidate === undefined ? " (none)" : ""}`)
       if (candidate !== undefined) show(candidate)
@@ -898,6 +970,14 @@ const PromoteCommand = effectCmd({
       Playbook.validateName(name)
       return projectRoot()
     })
+    // altimate_change start — with lesson sync on, the workspace review queue replaces skill publishing
+    const { Config } = yield* Effect.promise(() => import("@/config/config"))
+    const learn = (yield* Effect.promise(() => Config.get())).learn
+    if (args.publish && syncEnabled(learn))
+      return yield* fail("`--publish` is not used with lesson sync: promoted lessons go to the workspace owner's review queue, " +
+        "and approved team lessons reach every member. Promote without `--publish` (or turn sync off with `learn disable --sync`).")
+    const scope = yield* run("", () => syncScope(root, learn))
+    // altimate_change end
     const { diff, candidateHash } = yield* run("", () => Store.reviewCandidate(root, name))
     if (!diff) {
       const hasCandidate = yield* run("", async () => (await Store.readCandidate(root, name)) !== undefined)
@@ -920,11 +1000,17 @@ const PromoteCommand = effectCmd({
       )
       if (ok !== true) return yield* fail("Cancelled.", 130)
     }
-    const { archived } = yield* run("", () => Store.promote(root, name, {
+    const { archived } = yield* run("", async () => Store.promote(root, name, {
       expectedCandidateHash: candidateHash,
       allowFlagged: !args.yes || args["allow-flagged"] === true,
+      // altimate_change start — queue the promotion's proposals once it has published
+      ...(scope ? (await import("../../altimate/learn/proposals")).promotionHooks(root, name, scope, "manual") : {}),
+      // altimate_change end
     }))
     out(`Promoted "${name}"${archived ? ` (previous version archived as v${archived})` : ""}.`)
+    // altimate_change start — send the promotion to the workspace review queue
+    yield* Effect.promise(() => pushAfter(root, learn))
+    // altimate_change end
     if (!args.publish) return
     // altimate_change start — identify name conflicts for a direct publish retry
     const { publishSkill, describePublish, explainPublishError, SkillNameConflictError } = yield* Effect.promise(
@@ -992,6 +1078,67 @@ const RejectCommand = effectCmd({
   }),
 })
 
+// altimate_change start — lesson sync commands
+const SyncCommand = effectCmd({
+  command: "sync",
+  describe: "pull approved team lessons from the linked workspace and send queued proposals for review",
+  builder: (yargs: Argv) => yargs.option("json", { type: "boolean", default: false, describe: "machine-readable output" }),
+  handler: Effect.fn("Cli.learn.sync")(function* (args) {
+    yield* run("", async () => {
+      const root = await projectRoot()
+      const [{ Config }, { Instance }, Sync] = await Promise.all([
+        import("@/config/config"), import("@/project/instance"), import("../../altimate/learn/sync"),
+      ])
+      const learn = (await Config.get()).learn
+      if (!syncEnabled(learn))
+        throw new Error("Lesson sync is off for this project (learn.sync=false or ALTIMATE_LEARN_SYNC=0). Turn it back on with `altimate-code learn enable --sync`.")
+      const report = await Sync.run(root, Instance.directory, learn)
+      const legacy = report.context.status === "ready" ? await Sync.legacyPlaybookSkills(Instance.directory) : []
+      if (args.json) out(JSON.stringify({ ...report, context: report.context.status === "ready" ? { status: "ready", scope: report.context.scope } : report.context, legacy_playbook_skills: legacy }, null, 2))
+      if (report.context.status !== "ready")
+        throw new Error(`Lesson sync skipped: ${report.context.status === "skipped" ? report.context.reason : "sync is off"}.`)
+      if (!args.json) {
+        for (const pull of report.pulls)
+          out(`Pull ${pull.store}: ${pull.outcome}${pull.lessons !== undefined ? ` (${pull.lessons} team lessons, ${pull.tombstones ?? 0} retired here)` : ""}${pull.error ? ` - ${pull.error}` : ""}`)
+        const pushed = describePushes(report.pushes)
+        if (pushed) out(`Push: ${pushed}`)
+        // Retirement is guaranteed only after a learn-managed playbook skill is detached from the workspace.
+        for (const skill of legacy)
+          out(`Warning: the workspace still serves the learn-managed playbook skill "${skill}" (published with \`learn promote --publish\`). ` +
+            "Lessons retired in review stay in that skill until the workspace owner detaches it in the workspace's Skills page.")
+      }
+      if (report.pulls.some((pull) => pull.outcome === "error" || pull.outcome === "unsupported")) throw new Error("Lesson sync did not complete; see above.")
+      if (report.pushes.some((push) => push.error)) throw new Error("Some proposals were not sent; see the push summary above.")
+    })
+  }),
+})
+
+const PushCommand = effectCmd({
+  command: "push",
+  describe: "send queued lesson proposals and usage to the linked workspace",
+  builder: (yargs: Argv) => yargs.option("resubmit", {
+    type: "string",
+    describe: "resend held proposals for this lesson key against the workspace's current versions (after you reviewed the conflict)",
+  }),
+  handler: Effect.fn("Cli.learn.push")(function* (args) {
+    yield* run("", async () => {
+      const root = await projectRoot()
+      const [{ Config }, { Instance }, Sync] = await Promise.all([
+        import("@/config/config"), import("@/project/instance"), import("../../altimate/learn/sync"),
+      ])
+      const learn = (await Config.get()).learn
+      if (!syncEnabled(learn))
+        throw new Error("Lesson sync is off for this project (learn.sync=false or ALTIMATE_LEARN_SYNC=0). Turn it back on with `altimate-code learn enable --sync`.")
+      const report = await Sync.run(root, Instance.directory, learn, { pull: !!args.resubmit, resubmit: args.resubmit })
+      if (report.context.status !== "ready")
+        throw new Error(`Lesson sync skipped: ${report.context.status === "skipped" ? report.context.reason : "sync is off"}.`)
+      out(`Push: ${describePushes(report.pushes)}`)
+      if (report.pushes.some((push) => push.error)) throw new Error("Some proposals were not sent; see the push summary above.")
+    })
+  }),
+})
+// altimate_change end
+
 const LEARN_HELP = [
   "Concepts:",
   "  approved   the live lesson set in .altimate-code/learn/<name>/approved.json",
@@ -1030,6 +1177,12 @@ const LEARN_HELP = [
   "  (default 3) and learn.auto_promote_daily promotions per 24 hours (default 5); `learn status` shows the limits in effect.",
   "  Undo with `learn rollback`.",
   // altimate_change end
+  // altimate_change start — lesson sync
+  "Sync with the linked workspace (on by default, every few minutes in a session): `learn disable --sync` to turn it off, `learn enable --sync` to turn it back on (env ALTIMATE_LEARN_SYNC).",
+  "  Approved team lessons are delivered in every session; staged and promoted lessons go to the owner's review queue.",
+  "  altimate-code learn sync                      pull team lessons and send queued proposals",
+  "  altimate-code learn push [--resubmit <key>]   send queued proposals; resend a held one after reviewing its conflict",
+  // altimate_change end
   "Stored lesson cap: learn.max_stored or ALTIMATE_LEARN_MAX_STORED (default: 1000; pinned lessons are retained).",
   // altimate_change start — distinguish capture opt-out from disabling automatic learning and delivery
   "Disable all automatic learning and lesson delivery: learn.enabled=false or ALTIMATE_LEARN=0 (explicit learn commands still run).",
@@ -1066,6 +1219,10 @@ export const LearnCommand = cmd({
       .command(PromoteCommand)
       .command(RollbackCommand)
       .command(RejectCommand)
+      // altimate_change start — lesson sync commands
+      .command(SyncCommand)
+      .command(PushCommand)
+      // altimate_change end
       .demandCommand(),
   async handler() {},
 })

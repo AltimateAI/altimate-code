@@ -5,6 +5,7 @@ interface LearnConfig {
   capture?: boolean
   auto_reflect?: boolean
   auto_promote?: boolean
+  sync?: boolean
   model?: string
 }
 
@@ -32,6 +33,22 @@ export function autoReflectEnabled(cfg?: LearnConfig, env: NodeJS.ProcessEnv = p
 /** Auto-promote needs automatic reflection: it only promotes candidates that reflection just staged. */
 export function autoPromoteEnabled(cfg?: LearnConfig, env: NodeJS.ProcessEnv = process.env): boolean {
   return autoReflectEnabled(cfg, env) && (booleanFlag(env["ALTIMATE_LEARN_AUTO_PROMOTE"]) ?? cfg?.auto_promote === true)
+}
+
+/** The workspace kill switch fails closed like `Flag.ALTIMATE_DISABLE_WORKSPACE`: any value but empty, 0 or false. */
+function workspaceDisabled(env: NodeJS.ProcessEnv): boolean {
+  const value = env["ALTIMATE_DISABLE_WORKSPACE"]?.trim().toLowerCase()
+  return value !== undefined && value !== "" && value !== "0" && value !== "false"
+}
+
+/**
+ * Lesson sync with the bound workspace (sync.ts) is on by default, like workspace skills, and independent of
+ * capture: approved team lessons are delivered whether or not this project records signals. It does anything only
+ * for a project linked to a workspace. `learn.sync: false`, `ALTIMATE_LEARN_SYNC=0`, and the learning and workspace
+ * kill switches turn it off.
+ */
+export function syncEnabled(cfg?: LearnConfig, env: NodeJS.ProcessEnv = process.env): boolean {
+  return learnEnabled(cfg, env) && !workspaceDisabled(env) && (booleanFlag(env["ALTIMATE_LEARN_SYNC"]) ?? cfg?.sync !== false)
 }
 
 export interface AutoPromoteLimits {

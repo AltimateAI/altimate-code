@@ -263,6 +263,10 @@ export const Info = Schema.Struct({
         description:
           "Promote a candidate staged by automatic reflection without review when every safety gate passes (default: false; requires capture and auto_reflect). Undo with `learn rollback`. Env: ALTIMATE_LEARN_AUTO_PROMOTE overrides in both directions.",
       }),
+      sync: Schema.optional(Schema.Boolean).annotate({
+        description:
+          "Sync lessons with the bound workspace: pull approved team lessons at session start and push staged and promoted lessons to the owner's review queue (default: false; needs a workspace link and a git remote). Signals are never uploaded. Env: ALTIMATE_LEARN_SYNC overrides in both directions.",
+      }),
       auto_promote_max_changes: Schema.optional(NonNegativeInt).annotate({
         description:
           "Maximum lessons added, edited or removed by one automatic promotion; larger candidates stay staged for review (default: 3). Env: ALTIMATE_LEARN_AUTO_PROMOTE_MAX_CHANGES.",

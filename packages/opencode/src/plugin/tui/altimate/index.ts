@@ -17,6 +17,7 @@ import TraceViewer from "./trace-viewer"
 import Workspace from "./workspace"
 import WorkspaceSidebar from "./workspace-sidebar"
 import LearnNudge from "./learn-nudge"
+import LearnMenu from "./learn-menu"
 import WorkspaceWelcome from "./workspace-welcome"
 
 // Feature plugins are registered here as they are ported from the pre-merge sources on `main`
@@ -28,7 +29,7 @@ import WorkspaceWelcome from "./workspace-welcome"
 //   import TraceViewer from "./trace-viewer"
 //   import Workspace from "./workspace"
 export function altimateTuiPlugins(_flags: Pick<RuntimeFlags.Info, "experimentalEventSystem">): BuiltinTuiPlugin[] {
-  const base = [ProviderCredentials, PromptEnhance, SkillOps, TraceViewer, LearnNudge]
+  const base = [ProviderCredentials, PromptEnhance, SkillOps, TraceViewer, LearnNudge, LearnMenu]
   // Workspace TUI plugin and right-pane sidebar tile are left out entirely under
   // ALTIMATE_DISABLE_WORKSPACE, so the post-scan dialog, the
   // altimate.workspace.link palette command and the sidebar's 30s poll are gone.
