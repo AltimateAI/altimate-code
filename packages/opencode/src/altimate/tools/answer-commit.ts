@@ -3,6 +3,18 @@ import { Decimal } from "decimal.js"
 import { Effect, Option, Schema, SchemaIssue } from "effect"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { Tool } from "../../tool/tool"
+import {
+  COVERAGE_REJECTION_MARKER,
+  MAX_COVERAGE_REJECTIONS,
+  MAX_NUMBER_REJECTIONS,
+  NUMBER_REJECTION_MARKER,
+  coverageRejection,
+  missingAskedItems,
+  numberRejection,
+  priorRejections,
+  sessionNumbers,
+  unsourcedNumbers,
+} from "./answer-commit-checks"
 
 /** Maximum rendered answer length, including Markdown and basis, before the model echoes it. */
 export const MAX_RENDERED_ANSWER_CHARACTERS = 60_000
@@ -114,6 +126,9 @@ const parameters = z
         })
       }),
     ).describe("One entry per item the request asks for, in the order asked."),
+    asked: optional(z.array(z.string())).describe(
+      "The items the user's request asks for, in order, as short labels taken from the request (e.g. ['repository', 'most copied file']); name each field or rows column after its item. Never rendered.",
+    ),
     rows: optional(rows),
     unresolved: optional(
       z
@@ -141,7 +156,9 @@ const parameters = z
           })
           .strict(),
       ),
-    ).describe("Advisory readings recorded only in metadata, never in the answer text"),
+    ).describe(
+      "Required when the request's wording admits more than one reading (population, threshold unit, which status or date column) and you weighed alternatives: one entry whose reading names the chosen interpretation and whose decided_by names the rejected one and why. Recorded only in metadata, never in the answer text",
+    ),
   })
   .strict()
   .refine(
@@ -279,6 +296,32 @@ export function renderAnswer(payload: unknown): string {
   return limitRenderedAnswer(args.answer_only ? unresolved : `${basis}**Answer:** ${unresolved}`)
 }
 
+type CommitMetadata = {
+  readings: NonNullable<z.output<typeof parameters>["readings"]>
+  asked: string[]
+  truncated: boolean
+  committed_text?: string
+}
+
+/**
+ * Commit-time checks, each bounded per user turn so a commit is always accepted eventually:
+ * every asked item needs its own non-empty field or column (two rejections), and numbers should
+ * come from query output (one warning). Earlier rejections are counted from this turn's history.
+ */
+function commitRejection(
+  args: z.output<typeof parameters>,
+  messages: Tool.Context["messages"],
+): string | undefined {
+  if (args.unresolved) return undefined
+  const missing = missingAskedItems(args)
+  if (missing.length && priorRejections(messages, COVERAGE_REJECTION_MARKER) < MAX_COVERAGE_REJECTIONS)
+    return coverageRejection(missing, args.asked!.map((item) => item.trim()).filter(Boolean))
+  if (priorRejections(messages, NUMBER_REJECTION_MARKER) >= MAX_NUMBER_REJECTIONS) return undefined
+  const seen = sessionNumbers(messages)
+  const unsourced = seen ? unsourcedNumbers(args, seen) : []
+  return unsourced.length ? numberRejection(unsourced) : undefined
+}
+
 // Keep the renderer and native Effect tool on the same parser, including filler normalization.
 const Parameters = Schema.declareConstructor<z.output<typeof parameters>, AnswerCommitInput>()([], () => (input) => {
   const parsed = parser.safeParse(input)
@@ -291,7 +334,7 @@ export const AnswerCommitTool = Tool.define(
   "answer_commit",
   Effect.succeed({
     // altimate_change start - expose format selection to the model before the terminal tool call
-    description: `Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Supply one field per item the request asks for, in the order asked: a request for 'the repository and the most copied file' needs two fields (one named for the repository, one for the file); never collapse a compound request into one field, and never add fields the request did not ask for. Every named item (an entity AND a related item or count) must be its own field, because basis, notes and prose are not shown when the request asks for only the answer; an element found but kept only there is lost. Numbers use JavaScript precision; integers must be safe. Pass exact decimal values, trailing zeros, or currency strings as strings. For fields.precision and each rows.precision value, use an integer from 0 to 10 (inclusive). Set rows.precision by column name to display numeric cells with fixed decimal places, including integers; strings are never changed. Without explicit precision, each column uses the maximum decimal scale of its numeric cells. When the request names a tabular format, set rows.format accordingly: markdown (default), csv, tsv, or lines (one row per line with cells separated by a single space, without headers, for single-column or two-column plain lists). CSV/TSV include headers and quote cells containing the delimiter, quotes, or newlines, doubling embedded quotes; null cells are empty. Always supply \`basis\`; it is never shown when the request asks for only the answer. Supply one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in \`basis\` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. ${renderedLengthGuidance} This tool is not available for JSON-schema requests; use StructuredOutput instead.`,
+    description: `Deterministically finalize a data-question answer. Call this as the LAST tool call, once the answer is decided and all queries are finished. After it returns, reply with exactly the returned text and nothing else. Supply exactly one of fields, rows, or unresolved. Supply one field per item the request asks for, in the order asked: a request for 'the repository and the most copied file' needs two fields (one named for the repository, one for the file); never collapse a compound request into one field, and never add fields the request did not ask for. Always set \`asked\` to the requested items, in order, as short labels from the request, and name each field or rows column after its item; a commit that leaves an asked item without its own non-empty value is rejected. When the wording admits more than one reading, add one \`readings\` entry naming the chosen reading and the rejected one. Committed numbers should appear in query output (rounding is fine); compute derived numbers in SQL.Every named item (an entity AND a related item or count) must be its own field, because basis, notes and prose are not shown when the request asks for only the answer; an element found but kept only there is lost. Numbers use JavaScript precision; integers must be safe. Pass exact decimal values, trailing zeros, or currency strings as strings. For fields.precision and each rows.precision value, use an integer from 0 to 10 (inclusive). Set rows.precision by column name to display numeric cells with fixed decimal places, including integers; strings are never changed. Without explicit precision, each column uses the maximum decimal scale of its numeric cells. When the request names a tabular format, set rows.format accordingly: markdown (default), csv, tsv, or lines (one row per line with cells separated by a single space, without headers, for single-column or two-column plain lists). CSV/TSV include headers and quote cells containing the delimiter, quotes, or newlines, doubling embedded quotes; null cells are empty. Always supply \`basis\`; it is never shown when the request asks for only the answer. Supply one or two sentences, at most ${MAX_BASIS_CHARACTERS} characters, naming population, grain, the source object/column that supplies the requested entity or value, and caveats. Resolve policy eligibility separately from metric and entity attribution: a rule about a related object does not change which object supplies the requested entity. Say in \`basis\` which source object and column supply it. When the request names N, rows.values must contain exactly N concrete rows, even with a tie at the top-N boundary; note the tie briefly in rows.note. Use answer_only when the request asks for only the answer or a specific format: the reply is exactly the value(s) or table, with no basis, field names, note, or answer label. An unresolved answer retains its unable-to-determine status. Omit unused optional properties. ${renderedLengthGuidance} This tool is not available for JSON-schema requests; use StructuredOutput instead.`,
     // altimate_change end
     parameters: Parameters,
     formatValidationError: (error: unknown) => (Schema.isSchemaError(error) ? error.message : String(error)),
@@ -304,10 +347,20 @@ export const AnswerCommitTool = Tool.define(
           return yield* Effect.die(new Error("answer_commit is only available to the analyst agent"))
         yield* ctx.ask({ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} })
         const output = renderAnswer(args)
+        const rejection = commitRejection(args, ctx.messages ?? [])
+        if (rejection) {
+          const rejected: Tool.ExecuteResult<CommitMetadata> = {
+            title: "Answer not committed",
+            metadata: { readings: args.readings ?? [], asked: args.asked ?? [], truncated: false },
+            output: rejection,
+            status: "error",
+          }
+          return rejected
+        }
         return {
           title: "Answer committed",
           // The processor caps model-facing output but preserves metadata for the final echo.
-          metadata: { readings: args.readings ?? [], truncated: false, committed_text: output },
+          metadata: { readings: args.readings ?? [], asked: args.asked ?? [], truncated: false, committed_text: output },
           output,
         }
       }),

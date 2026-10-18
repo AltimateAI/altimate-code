@@ -1130,6 +1130,7 @@ test("answer_commit exposes a serializable object input schema", async () => {
   expect(tool.jsonSchema?.type).toBe("object")
   expect(Object.keys(tool.jsonSchema?.properties ?? {})).toEqual([
     "fields",
+    "asked",
     "rows",
     "unresolved",
     "basis",
@@ -1239,4 +1240,128 @@ test("answer_commit guidance requires every named item as its own field because 
       fields: [...payload.fields, { name: "file", value: "src/a.swift" }, { name: "copies", value: 23 }],
     }),
   ).toBe("repo-a; src/a.swift; 23")
+})
+
+describe("answer_commit commit-time checks", () => {
+  type Part = Record<string, unknown>
+  const user = (text: string) => ({ info: { role: "user" }, parts: [{ type: "text", text }] })
+  const assistant = (...parts: Part[]) => ({ info: { role: "assistant" }, parts })
+  const sql = (output: string) => ({ type: "tool", tool: "sql_execute", state: { status: "completed", output } })
+  const failedCommit = (error: string) => ({ type: "tool", tool: "answer_commit", state: { status: "error", error } })
+  const run = async (payload: Record<string, unknown>, messages: unknown[]) => {
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    return tool.execute({ basis: recordBasis, ...payload }, { ...context, messages })
+  }
+  const compound = {
+    answer_only: true,
+    asked: ["repository", "most copied file"],
+    fields: [{ name: "repository", value: "repo-a" }],
+  }
+
+  test("rejects a commit that leaves the second asked item in basis only", async () => {
+    const result = await run(compound, [user("Which repository, and its most copied file?")])
+    expect(result.status).toBe("error")
+    expect(result.output).toContain("answer_commit requested-items check:")
+    expect(result.output).toContain('"most copied file"')
+    expect(result.output).not.toContain('supplies "repository"')
+    expect(result.metadata.committed_text).toBeUndefined()
+  })
+
+  test("accepts full coverage and keeps asked out of the answer", async () => {
+    const result = await run(
+      { ...compound, fields: [...compound.fields, { name: "file", value: "src/a.swift" }] },
+      [user("Which repository, and its most copied file?")],
+    )
+    expect(result.status).toBeUndefined()
+    expect(result.output).toBe("repo-a; src/a.swift")
+    expect(result.metadata.asked).toEqual(compound.asked)
+  })
+
+  test("rows columns cover asked items and an all-empty column does not", async () => {
+    const rows = { columns: ["package", "version"], values: [["a", null], ["b", ""]] }
+    const asked = ["package name", "version"]
+    expect((await run({ asked, rows }, [])).output).toContain('supplies "version"')
+    const filled = { ...rows, values: [["a", "1.0"], ["b", null]] }
+    expect((await run({ asked, rows: filled }, [])).status).toBeUndefined()
+  })
+
+  test.each([[[]], [""], [null], [["only item"]], [["", " "]]])("ignores asked filler %j", async (asked) => {
+    const result = await run({ asked, fields: [{ name: "", value: "repo-a" }], answer_only: true }, [])
+    expect(result.status).toBeUndefined()
+    expect(result.output).toBe("repo-a")
+  })
+
+  test("accepts after two coverage rejections in the same turn", async () => {
+    const rejection = (await run(compound, [])).output
+    const once = [user("q"), assistant(failedCommit(rejection))]
+    expect((await run(compound, once)).status).toBe("error")
+    const twice = [user("q"), assistant(failedCommit(rejection)), assistant(failedCommit(rejection))]
+    const accepted = await run(compound, twice)
+    expect(accepted.status).toBeUndefined()
+    expect(accepted.output).toBe("repo-a")
+    // A new user turn starts a fresh allowance.
+    expect((await run(compound, [...twice, user("next question")])).status).toBe("error")
+  })
+
+  test("legacy calls without asked behave as before", async () => {
+    const payload = { answer_only: true, fields: [{ name: "repository", value: "repo-a" }] }
+    const result = await run(payload, [user("Which repository and file?")])
+    expect(result).toEqual({
+      title: "Answer committed",
+      metadata: { readings: [], asked: [], truncated: false, committed_text: "repo-a" },
+      output: "repo-a",
+    })
+  })
+
+  test("readings stay in metadata and out of answer-only text", async () => {
+    const readings = [
+      {
+        clause: "over $5",
+        reading: "quantity over 5 units",
+        result_summary: "line 3 violates",
+        decided_by: "rejected the dollar reading: every line satisfies it, so the clause would not bite",
+      },
+    ]
+    const result = await run({ answer_only: true, fields: [{ name: "", value: "Volume tiers" }], readings }, [])
+    expect(result.output).toBe("Volume tiers")
+    expect(result.metadata.readings).toEqual(readings)
+    for (const reading of Object.values(readings[0]!)) expect(result.output).not.toContain(reading)
+  })
+
+  test("warns once about a number that no query returned, then accepts", async () => {
+    const history = [user("Fastest average cycle?"), assistant(sql("owner | days\nA | 79\nB | 84\nC | 95"))]
+    const payload = { answer_only: true, fields: [{ name: "days", value: 81 }] }
+    const warned = await run(payload, history)
+    expect(warned.status).toBe("error")
+    expect(warned.output).toContain("answer_commit number check: 81")
+    const accepted = await run(payload, [...history, assistant(failedCommit(warned.output))])
+    expect(accepted.status).toBeUndefined()
+    expect(accepted.output).toBe("81")
+  })
+
+  test.each([
+    ["rounded", 0.16, "ratio\n0.1621"],
+    ["truncated", 12.3, "avg 12.39"],
+    ["percentage of a ratio", "16.2%", "share 0.1621"],
+    ["grouped", "$1,234.50", '{"total": 1234.5}'],
+    ["float noise", 0.1 + 0.2, "0.3"],
+    ["from the question", 2015, ""],
+  ])("accepts a %s number", async (_, value, output) => {
+    const history = [user("Articles in 2015?"), assistant(sql(output || "count\n42"))]
+    const result = await run({ answer_only: true, fields: [{ name: "", value }] }, history)
+    expect(result.status).toBeUndefined()
+  })
+
+  test("skips the number check without prior SQL output and for small counts", async () => {
+    expect((await run({ fields: [{ name: "", value: 81 }] }, [user("q")])).status).toBeUndefined()
+    const history = [user("q"), assistant(sql("a\nb\nc"))]
+    expect((await run({ fields: [{ name: "", value: 3 }] }, history)).status).toBeUndefined()
+  })
+
+  test("checks numeric row cells", async () => {
+    const history = [user("q"), assistant(sql("name,score\nx,10.5\ny,9.25"))]
+    const rows = { columns: ["name", "score"], values: [["x", 10.5], ["y", 47.75]] }
+    const result = await run({ rows }, history)
+    expect(result.output).toContain("number check: 47.75")
+  })
 })
