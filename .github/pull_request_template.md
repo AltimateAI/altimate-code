@@ -25,5 +25,8 @@ _If this is a UI change, please include a screenshot or recording._
 
 - [ ] I have tested my changes locally
 - [ ] I have not included unrelated changes in this PR
+<!-- altimate_change start — cost side-effects check (see packages/opencode/AGENTS.md) -->
+- [ ] I checked for cost side effects (model calls, queries or cloud resources that grow with user data) and described them, or wrote "none"
+<!-- altimate_change end -->
 
 _If you do not follow this template your PR will be automatically rejected._
