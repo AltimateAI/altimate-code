@@ -92,16 +92,22 @@ export interface MessageLike {
   time?: { created?: number; completed?: number }
 }
 
-export type TurnMessage = MessageLike & { synthetic?: boolean; compaction?: boolean }
+export type TurnMessage = MessageLike & { synthetic?: boolean; compaction?: boolean; replay?: boolean }
 
-/** Session history as turn boundaries: all-synthetic text continues a turn; a compaction part marks compaction. */
-export function turnMessages(messages: readonly { info: MessageLike; parts: readonly { type: string; synthetic?: boolean }[] }[]): TurnMessage[] {
+type TurnPart = { type: string; synthetic?: boolean; metadata?: Record<string, unknown> }
+
+/**
+ * Session history as turn boundaries. All-synthetic text continues a turn unless the message carries user input
+ * (an attachment or agent mention, whose text companions are synthetic). Compaction and its replay are marked.
+ */
+export function turnMessages(messages: readonly { info: MessageLike; parts: readonly TurnPart[] }[]): TurnMessage[] {
   return messages.map(({ info, parts }) => {
     const text = parts.filter((part) => part.type === "text")
     return {
       ...info,
-      synthetic: text.length > 0 && text.every((part) => part.synthetic),
+      synthetic: text.length > 0 && text.every((part) => part.synthetic) && !parts.some((part) => part.type === "file" || part.type === "agent"),
       compaction: parts.some((part) => part.type === "compaction"),
+      replay: text.some((part) => typeof part.metadata?.learnOriginalMessage === "string"),
     }
   })
 }
@@ -114,7 +120,7 @@ export function correctedTurnStart(messages: readonly TurnMessage[], messageID: 
   const end = messages.findIndex((message) => message.id === messageID && message.role === "user")
   if (end < 0) return
   const previous = messages.slice(0, end).findLastIndex((message) => message.role === "user" && !message.synthetic && !message.compaction)
-  if (previous < 0) return
+  if (previous < 0 || messages[previous].replay) return
   if (messages.slice(0, previous).findLast((message) => message.role === "user")?.compaction) return
   return messages.slice(previous + 1, end).find((message) => message.role === "assistant")?.time?.created
 }

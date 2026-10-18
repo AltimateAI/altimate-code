@@ -15,7 +15,7 @@ describe("buildPrompt", () => {
     for (const recurred of [undefined, 0, 1, 2, 3]) {
       const { prompt, system } = buildPrompt({ digest: "d", feedback: "f", kind: "user", bullets: [{ ...bullets[0], recurred }] })
       expect(prompt.includes(` r:${recurred}`)).toBe((recurred ?? 0) >= 2)
-      expect(system).toContain("never weaker")
+      expect(system).toContain("If the agent simply did not follow a correct rule, keep it.")
     }
   })
 

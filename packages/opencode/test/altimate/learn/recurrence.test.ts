@@ -150,7 +150,9 @@ describe("recurrence attribution", () => {
   })
 
   test("human status reports coverage, uncertainty and no matching current lesson", () => {
-    const text = formatRecurrence({ ...run([]), coverage: { sessions_analyzed: 1, sessions_skipped_malformed: 0, truncated: false } })
+    const unmatched = (session: string) => signal(session, { id: `sig_u_${session}`, text: "No, filter out _is_deleted rows" })
+    const text = formatRecurrence({ ...run([unmatched("s1"), unmatched("s2")], [snapshot("s1"), snapshot("s2")]), coverage: { sessions_analyzed: 2, sessions_skipped_malformed: 0, truncated: false } })
+    expect(text).toContain("    _is_deleted: 2 sessions (sig_u_s1, sig_u_s2)")
     expect(text).toContain("Recurrence")
     expect(text).toContain("no observed correction")
     expect(text).toContain("counts need capture on")
@@ -168,8 +170,8 @@ test("snapshot analysis is bounded, skips malformed files and never repairs any 
       name: lesson.name, lesson: { ...lesson.lesson, tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0, created: time(0), updated: time(0) },
       tier: "file", at: time(1), queryHash: "hash",
     }], requests: [], compactions: [], counted: [] })
-    const old = path.join(dir, "old.json")
-    const good = path.join(dir, "good.json")
+    const old = path.join(dir, Store.sha256("old") + ".json")
+    const good = path.join(dir, Store.sha256("s1") + ".json")
     const bad = path.join(dir, "bad.json")
     await fs.writeFile(old, JSON.stringify(state("old")))
     await fs.writeFile(good, JSON.stringify(state("s1")))
@@ -190,5 +192,15 @@ test("snapshot analysis is bounded, skips malformed files and never repairs any 
     expect(await fs.readFile(signals, "utf8")).toBe(raw)
     expect((await fs.readdir(p.learnDir)).sort()).toEqual([path.basename(p.approved), "signals.jsonl"].sort())
     expect((await readShownSnapshots(root, { limit: 0 })).coverage).toMatchObject({ sessions_analyzed: 0, truncated: true })
+    // A copied snapshot under another session's file name is not that session's evidence.
+    await fs.copyFile(good, path.join(dir, Store.sha256("copy") + ".json"))
+    expect((await readShownSnapshots(root)).coverage).toMatchObject({ sessions_analyzed: 2, sessions_skipped_malformed: 2 })
+    // Another store's lessons and signals stay out of a named analysis.
+    expect((await analyzeRecurrence(root, { name: "other-store" })).lessons.every((row) => row.recurred === 0)).toBe(true)
+    // Unbounded, both valid sessions ("old" and "s1") carry a matching correction after exposure.
+    expect((await analyzeRecurrence(root, { name: lesson.name })).lessons[0]).toMatchObject({ recurred: 2 })
+    // An unsafe snapshot path fails closed instead of counting as malformed.
+    await fs.symlink(good, path.join(dir, Store.sha256("link") + ".json"))
+    await expect(readShownSnapshots(root)).rejects.toThrow()
   } finally { await fs.rm(root, { recursive: true, force: true }) }
 })

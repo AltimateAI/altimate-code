@@ -103,10 +103,12 @@ export async function readShownSnapshots(root: string, options: { limit?: number
   for (const { file } of files.sort((a, b) => b.mtime - a.mtime || a.file.localeCompare(b.file)).slice(0, limit)) {
     try {
       const state = State.parse(JSON.parse((await read(root, file)) ?? ""))
+      if (path.basename(file) !== Store.sha256(state.session) + ".json") throw new Error("Learn session state belongs to another session")
       snapshots.push({ session: state.session, shown: state.shown.map(({ name, lesson, tier, at }) => ({
         name, id: lesson.id, textHash: lessonTextHash(lesson.text), tier, at,
       })) })
     } catch (error) {
+      if (error instanceof SafeFS.UnsafeLearnPathError) throw error
       coverage.sessions_skipped_malformed++
       log.warn("learn session snapshot skipped", { file, error })
     }

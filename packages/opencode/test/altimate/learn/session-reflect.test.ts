@@ -1,6 +1,7 @@
 // altimate_change - new file
 //
 // `reflect --session` from captured signals, with the model call and the session source stubbed.
+import { analyzeRecurrence } from "../../../src/altimate/learn/recurrence"
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
@@ -825,6 +826,7 @@ describe("reflection recurrence evidence", () => {
     const target = path.join(root, "snapshots")
     await fs.rename(dir, target)
     await fs.symlink(target, dir)
+    await expect(analyzeRecurrence(root, { name: NAME })).rejects.toThrow()
     let called = false
     await reflectCore({
       root, name: NAME, source: { prompts: [], calls: [] }, feedback: "No, use UTC.", kind: "user", origin: "test",

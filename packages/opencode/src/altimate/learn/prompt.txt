@@ -36,4 +36,4 @@ Bullet text rules (deterministic checks reject unsafe content and flag verificat
 Output: a JSON object {"deltas": [...]}. Each delta is {"op": "ADD"|"EDIT"|"REMOVE"|"HELPFUL"|"HARMFUL", "id": "<bullet id, for every op except ADD>", "text": "<bullet text, for ADD and EDIT>", "reason": "<one short sentence citing the feedback>"}.
 Optional fields: "supersedes": "<existing bullet id>" for ADD, and "coexists": ["<existing bullet id>", ...] for ADD or EDIT. Omit these fields when they do not apply.
 
-r = sessions where this rule was shown and the user still corrected the same topic; consider making it more specific or clearer (EDIT), never weaker
+r = sessions where this rule was shown and the user still corrected the same topic. If the feedback shows the wording is unclear or incomplete, EDIT it to be clearer or more specific. If the agent simply did not follow a correct rule, keep it. Narrow a rule only when the feedback shows it is too broad; never drop the behavior it requires.

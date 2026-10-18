@@ -236,7 +236,7 @@ Shows whether learning is on, whether automatic promotion is on with its last pr
 
 A correction matches a lesson when it names one of the lesson's backtick identifiers plus another word from the lesson, or contains most of the lesson's words. The text output lists only lessons with a matching correction and summarizes the rest as "no observed correction". That is not proof the agent followed them. Corrections are recorded only while capture is on. Status also lists up to 5 identifiers that were corrected in 2 or more sessions with no matching current lesson. They are taken from your local corrections and never leave the project. If the analysis fails, status shows `Recurrence unavailable` (`recurrence_error` in JSON), and the rest of the status still prints.
 
-When the current text of a lesson has `recurred` in 2 or more sessions, reflection marks it `r:N` in the playbook it sends the model. The model is asked to make the lesson clearer or more specific, never weaker. The result is a candidate like any other and goes through the same review or automatic-promotion gates.
+When the current text of a lesson has `recurred` in 2 or more sessions, reflection marks it `r:N` in the playbook it sends the model. The model is asked to make the lesson clearer or more specific when the feedback shows the wording is unclear, and to keep it when the agent simply did not follow a correct rule. The result is a candidate like any other and goes through the same review or automatic-promotion gates.
 
 ```bash
 altimate-code learn status

@@ -176,7 +176,7 @@ describe("learn opt-in and status", () => {
       lessons: [], unmatched_topics: [],
       coverage: { sessions_analyzed: 0, sessions_skipped_malformed: 0, truncated: false },
     })
-    const shown = await learn(dir.path, "status")
+    const shown = await runLearn(dir.path, ["status"], undefined, { ALTIMATE_LEARN: "0" })
     expect(shown.stdout).toContain("Recurrence (observed counts need capture on)")
     expect(shown.stdout).toContain("no matching current lesson")
   })

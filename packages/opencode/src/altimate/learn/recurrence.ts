@@ -107,7 +107,8 @@ export function attribute(signals: readonly Signal[], snapshots: readonly ShownS
   }
 }
 
-export async function analyzeRecurrence(root: string, options: { limit?: number } = {}) {
+/** With `name`, only that store's lessons and signals are attributed. */
+export async function analyzeRecurrence(root: string, options: { limit?: number; name?: string } = {}) {
   const { snapshots, coverage } = await readShownSnapshots(root, options)
   const dir = path.join(root, ".altimate-code", "learn")
   await SafeFS.assertSafePath(root, dir)
@@ -121,6 +122,7 @@ export async function analyzeRecurrence(root: string, options: { limit?: number 
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (!entry.isDirectory()) continue
     try { validateName(entry.name) } catch { continue }
+    if (options.name !== undefined && entry.name !== options.name) continue
     if (sessions.size) signals.push(...(await readSignalsSnapshot(root, entry.name)).filter((signal) => sessions.has(signal.sessionID)))
     const file = Store.paths(root, entry.name).approved
     try {

@@ -108,7 +108,7 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
   const digest = buildDigest(input.source)
   const snapshot = await prepareReflection(root, name, input.applyPaths)
   const originalText = new Map(Playbook.bullets(snapshot).map((b) => [b.id, b.text]))
-  const recurrence = await analyzeRecurrence(root).catch((error) => {
+  const recurrence = await analyzeRecurrence(root, { name }).catch((error) => {
     log.warn("learn recurrence unavailable", { error })
     return undefined
   })

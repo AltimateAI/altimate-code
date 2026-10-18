@@ -370,6 +370,11 @@ describe("correction turn start", () => {
     expect(mapped.map(({ synthetic, compaction }) => [synthetic, compaction])).toEqual([
       [false, false], [false, false], [true, false], [false, true], [false, false],
     ])
+    const [attachment, replay] = turnMessages([
+      { info: info("attach", "user", 4000), parts: [{ type: "text", synthetic: true }, { type: "file" }] },
+      { info: info("replay", "user", 4100), parts: [{ type: "text", metadata: { learnOriginalMessage: "u1" } }] },
+    ])
+    expect([attachment.synthetic, replay.synthetic, replay.replay]).toEqual([false, false, true])
   })
   test("a replayed request after compaction has no known turn start", () => {
     const at = (id: string, role: string, created: number, extra = {}) => ({ id, sessionID: "s", role, time: { created, completed: created + 1 }, ...extra })
@@ -379,6 +384,9 @@ describe("correction turn start", () => {
       at("replay", "user", 3200), at("final", "assistant", 4000), at("correction", "user", 5000),
     ]
     expect(correctedTurnStart(compacted, "correction")).toBeUndefined()
+    // A replay marked by its text metadata is unknown even when no marker precedes it.
+    const marked = compacted.filter((m) => m.id !== "marker").map((m) => m.id === "replay" ? { ...m, replay: true } : m)
+    expect(correctedTurnStart(marked, "correction")).toBeUndefined()
     // A manual compaction without a replay leaves the original request as the boundary.
     expect(correctedTurnStart(compacted.filter((m) => m.id !== "replay"), "correction")).toBe(2000)
   })

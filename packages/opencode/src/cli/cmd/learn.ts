@@ -381,7 +381,7 @@ const StatusCommand = effectCmd({
           retired: (await Store.loadRetired(root, name)).length,
           open_signals: signals.length,
           // Attribution is advisory; its failure must not hide the rest of the status.
-          ...await analyzeRecurrence(root).then((recurrence) => ({ recurrence }), (error) => ({ recurrence_error: error instanceof Error ? error.message : String(error) })),
+          ...await analyzeRecurrence(root, { name }).then((recurrence) => ({ recurrence }), (error) => ({ recurrence_error: error instanceof Error ? error.message : String(error) })),
           pending_recoveries: sessions.length,
           pending_replacements: (await Store.readPendingReplacements(root, name)).length,
           backoff_sessions: sessions.filter((session) => (state.recoveries[session]?.retryAt ?? 0) > Date.now()).length,
