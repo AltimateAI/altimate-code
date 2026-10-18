@@ -489,6 +489,43 @@ describe("check command E2E", () => {
     expect(j.summary.total_findings).toBe(0)
   })
 
+  test("policy check reports a skipped evaluation as a blocking finding", async () => {
+    const file = await writeSql(tmpDir.dir, "m.sql", "SELECT * FROM TABLE(my_fn());")
+    const policyFile = path.join(tmpDir.dir, "policy.json")
+    await fs.writeFile(policyFile, JSON.stringify({ rules: [] }))
+
+    // Shape produced by the native handler when core returns plan_unavailable (0.9.0).
+    setDispatcherResponse("altimate_core.policy", () => ({
+      success: true,
+      data: {
+        allowed: false,
+        policy_skipped: true,
+        violations: [{ rule: "policy_not_evaluated", severity: "error", message: "policy could not be evaluated" }],
+        warnings: [{ rule: "plan_unavailable", message: "Policy check skipped: no plan is available." }],
+      },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "policy", policy: policyFile }))
+    const j = parseJson(r.stdout)
+    expect(j.summary.total_findings).toBe(1)
+    expect(j.summary.errors).toBe(1)
+  })
+
+  test("semantic check reports skipped analysis instead of zero findings", async () => {
+    const file = await writeSql(tmpDir.dir, "m.sql", "SELECT * FROM TABLE(my_fn());")
+    setDispatcherResponse("altimate_core.semantics", () => ({
+      success: true,
+      data: { findings: [], valid: true, skipped: true, skip_reason: "semantic analysis skipped (no plan available)" },
+    }))
+    installDispatcherMocks()
+
+    const r = await runHandler(baseArgs({ files: [file], checks: "semantic" }))
+    const j = parseJson(r.stdout)
+    expect(j.summary.total_findings).toBe(1)
+    expect(JSON.stringify(j)).toContain("semantic analysis skipped")
+  })
+
   // --- Unknown checks ---
 
   test("warns on unknown check names", async () => {
