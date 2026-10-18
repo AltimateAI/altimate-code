@@ -36,11 +36,12 @@ export interface Signal {
   text: string
   reason: string
   at: string
+  turnStartedAt?: string
   status: "open" | "consumed"
   consumedBy?: string
 }
 
-export type NewSignal = Pick<Signal, "kind" | "sessionID" | "text" | "reason" | "messageID" | "partID" | "source" | "provenance" | "resolved">
+export type NewSignal = Pick<Signal, "kind" | "sessionID" | "text" | "reason" | "messageID" | "partID" | "source" | "provenance" | "resolved" | "turnStartedAt">
 
 export function signalsFile(root: string, name = DEFAULT_NAME): string {
   validateName(name)
@@ -92,6 +93,7 @@ function parse(raw: string): { signals: Signal[]; malformed: boolean } {
         SIGNAL_KINDS.includes(s.kind) && typeof s.reason === "string" && typeof s.at === "string" &&
         (s.status === "open" || s.status === "consumed") &&
         (s.messageID === undefined || typeof s.messageID === "string") &&
+        (s.turnStartedAt === undefined || (typeof s.turnStartedAt === "string" && Number.isFinite(Date.parse(s.turnStartedAt)))) &&
         (s.partID === undefined || typeof s.partID === "string") &&
         (s.source === undefined || s.source === "bootstrap" || s.source === "import-reviews") &&
         (s.provenance === undefined || typeof s.provenance === "string") &&
@@ -228,6 +230,7 @@ export function appendSignals(root: string, inputs: readonly NewSignal[], name =
         sessionID: input.sessionID,
         messageID: input.messageID,
         partID: input.partID,
+        turnStartedAt: input.turnStartedAt,
         source: input.source,
         provenance: input.provenance === undefined ? undefined : redactProvenance(input.provenance),
         resolved: input.resolved,

@@ -92,6 +92,14 @@ export interface MessageLike {
   time?: { created?: number; completed?: number }
 }
 
+export function correctedTurnStart(messages: readonly MessageLike[], messageID: string): number | undefined {
+  const end = messages.findIndex((message) => message.id === messageID && message.role === "user")
+  if (end < 0) return
+  const previous = messages.slice(0, end).findLastIndex((message) => message.role === "user")
+  if (previous < 0) return
+  return messages.slice(previous + 1, end).find((message) => message.role === "assistant")?.time?.created
+}
+
 export interface PartLike {
   id: string
   sessionID: string
@@ -107,6 +115,7 @@ export interface PartLike {
 export interface CaptureDeps {
   /** True when the session has a completed assistant message before the user message being classified. */
   hasPriorAssistant: (sessionID: string, beforeMessageID: string) => Promise<boolean>
+  turnStart?: (sessionID: string, messageID: string) => Promise<number | undefined>
   record: (signal: NewSignal) => Promise<Signal | undefined>
 }
 
@@ -173,8 +182,13 @@ export class Capture {
     const prior = this.sessionsWithAssistant.get(part.sessionID)
     const known = prior !== undefined && message.time?.created !== undefined && prior < message.time.created
     if (!known && !(await this.deps.hasPriorAssistant(part.sessionID, part.messageID))) return
+    const start = await this.deps.turnStart?.(part.sessionID, part.messageID).catch((error) => {
+      log.warn("learn turn start unavailable", { error })
+      return undefined
+    })
     await this.deps.record({
       kind: "user_correction",
+      ...(start !== undefined && Number.isFinite(start) ? { turnStartedAt: new Date(start).toISOString() } : {}),
       sessionID: part.sessionID,
       messageID: part.messageID,
       text: part.text,
@@ -239,6 +253,10 @@ export async function startCapture(ctx: { directory: string; worktree: string })
     const { SessionID } = await import("../../session/schema")
     const capture = new Capture({
       record: (signal) => appendSignal(root, signal),
+      turnStart: async (sessionID, messageID) => {
+        const messages = await Session.messages({ sessionID: SessionID.make(sessionID) })
+        return correctedTurnStart(messages.map((message) => message.info), messageID)
+      },
       hasPriorAssistant: async (sessionID, beforeMessageID) => {
         const messages = await Session.messages({ sessionID: SessionID.make(sessionID) })
         const before = messages.findIndex((message) => message.info.id === beforeMessageID)

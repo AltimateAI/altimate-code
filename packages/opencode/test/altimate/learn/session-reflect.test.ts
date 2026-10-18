@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { Delivery } from "../../../src/altimate/learn/delivery"
 import * as Signals from "../../../src/altimate/learn/signals"
 import * as Store from "../../../src/altimate/learn/store"
 import * as Playbook from "../../../src/altimate/learn/playbook"
@@ -786,5 +787,49 @@ describe("opt-in switches", () => {
     expect(() => learnMaxStored(0, {})).toThrow("positive integer")
     for (const value of ["0", "-1", "1.5", "oops", "Infinity"])
       expect(() => learnMaxStored(75, { ALTIMATE_LEARN_MAX_STORED: value })).toThrow("positive integer")
+  })
+})
+
+describe("reflection recurrence evidence", () => {
+  test("adds repeated evidence only to the same store, id and current text", async () => {
+    const bullet = { id: "L-0001", text: "Convert `event_at` timestamps with `to_utc`.", helpful: 0, harmful: 0 }
+    await Store.saveCandidate(root, NAME, Playbook.withBullets(Playbook.create({ name: NAME }), [bullet]))
+    await Store.promote(root, NAME)
+    const delivery = new Delivery(root)
+    for (const sessionID of ["ses_one", "ses_two"]) {
+      await delivery.prepare(sessionID, "m1", "Convert event_at timestamps to_utc")
+      await Signals.appendSignal(root, {
+        kind: "user_correction", sessionID, text: "No, convert event_at timestamps with to_utc.", reason: "correction",
+        turnStartedAt: new Date(Date.now() + 1000).toISOString(),
+      })
+    }
+    // Signal capture is later than the corrected turn; make that ordering deterministic.
+    const file = Signals.signalsFile(root)
+    const signals = await Signals.readSignalsSnapshot(root)
+    await fs.writeFile(file, signals.map((signal) => JSON.stringify({ ...signal, at: new Date(Date.now() + 2000).toISOString() }) + "\n").join(""))
+    const prompts: string[] = []
+    const reflect = () => reflectCore({
+      root, name: NAME, source: { prompts: [], calls: [] }, feedback: "No, convert timestamps.", kind: "user", origin: "test",
+      generate: async ({ prompt }) => { prompts.push(prompt); return { deltas: [] } },
+    })
+    await reflect()
+    expect(prompts[0]).toContain("[L-0001] (h:0 x:0 r:2)")
+    await Store.saveCandidate(root, NAME, Playbook.withBullets(Playbook.create({ name: NAME }), [{ ...bullet, text: "Convert `event_at` timestamps before storage." }]))
+    await reflect()
+    expect(prompts[1]).not.toContain(" r:")
+  })
+
+  test("analyzer failure does not prevent reflection", async () => {
+    const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+    await fs.mkdir(dir, { recursive: true })
+    const target = path.join(root, "snapshots")
+    await fs.rename(dir, target)
+    await fs.symlink(target, dir)
+    let called = false
+    await reflectCore({
+      root, name: NAME, source: { prompts: [], calls: [] }, feedback: "No, use UTC.", kind: "user", origin: "test",
+      generate: async ({ prompt }) => { called = true; expect(prompt).not.toContain(" r:"); return { deltas: [] } },
+    })
+    expect(called).toBe(true)
   })
 })

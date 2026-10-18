@@ -11,6 +11,14 @@ import { accountUsage, type UsageSummary } from "../../../src/altimate/learn/usa
 const bullets = [{ id: "L-0001", text: "Staging models are prefixed stg_.", helpful: 2, harmful: 0 }]
 
 describe("buildPrompt", () => {
+  test("recurrence hints appear only at two distinct sessions", () => {
+    for (const recurred of [undefined, 0, 1, 2, 3]) {
+      const { prompt, system } = buildPrompt({ digest: "d", feedback: "f", kind: "user", bullets: [{ ...bullets[0], recurred }] })
+      expect(prompt.includes(` r:${recurred}`)).toBe((recurred ?? 0) >= 2)
+      expect(system).toContain("never weaker")
+    }
+  })
+
   test("requires backticks around generated identifiers and naming patterns", () => {
     const { system } = buildPrompt({ digest: "d", feedback: "f", kind: "ci", bullets })
     expect(system).toContain("Wrap every code identifier and naming pattern (including prefixes and suffixes) in backticks.")

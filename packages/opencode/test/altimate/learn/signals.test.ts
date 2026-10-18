@@ -14,6 +14,18 @@ afterEach(() => fs.rm(root, { recursive: true, force: true }))
 const base = { kind: "user_correction", sessionID: "ses_1", reason: "r" } as const
 
 describe("signal store", () => {
+  test("old signals parse and correction turn starts round-trip read-only", async () => {
+    await Signals.appendSignal(root, { ...base, text: "No, keep original", messageID: "old" })
+    const turnStartedAt = "2026-10-18T10:00:00.000Z"
+    await Signals.appendSignal(root, { ...base, text: "No, keep timestamps", messageID: "new", turnStartedAt })
+    const records = await Signals.readSignalsSnapshot(root)
+    expect(records[0].turnStartedAt).toBeUndefined()
+    expect(records[1].turnStartedAt).toBe(turnStartedAt)
+    const file = Signals.signalsFile(root)
+    await fs.appendFile(file, JSON.stringify({ ...records[1], id: "invalid", turnStartedAt: 42 }) + "\n")
+    expect(await Signals.readSignalsSnapshot(root)).toHaveLength(2)
+  })
+
   test("records the documented fields under the default named lesson store", async () => {
     const s = await Signals.appendSignal(root, { ...base, messageID: "msg_1", text: "no, use ref()" })
     expect(s).toMatchObject({ kind: "user_correction", sessionID: "ses_1", messageID: "msg_1", text: "no, use ref()", status: "open" })
