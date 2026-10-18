@@ -158,6 +158,17 @@ describe("Session.getUsage — AI SDK v6 usage (inclusive input with inputTokenD
     expect(result.tokens.inputTotal).toBe(31_767)
   })
 
+  test("cache writes count toward the over-200K price tier", () => {
+    const tiered = { input: 1, output: 1, cache: { read: 0, write: 1 }, experimentalOver200K: { input: 2, output: 2, cache: { read: 0, write: 2 } } }
+    const result = Session.getUsage({
+      model: { ...fakeModel("@ai-sdk/anthropic"), cost: tiered },
+      usage: { inputTokens: 210_000, inputTokenDetails: { noCacheTokens: 10_000, cacheReadTokens: 0, cacheWriteTokens: 200_000 }, outputTokens: 0 } as any,
+      metadata: { anthropic: { cacheCreationInputTokens: 200_000 } } as any,
+    })
+    // 10K uncached + 200K cache write at the over-200K rates of $2/M each.
+    expect(result.cost).toBeCloseTo(0.42, 10)
+  })
+
   test("full cache hit reports zero uncached input", () => {
     const result = Session.getUsage({
       model: fakeModel("@ai-sdk/anthropic"),

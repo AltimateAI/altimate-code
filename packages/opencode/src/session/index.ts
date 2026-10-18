@@ -938,7 +938,9 @@ export namespace Session {
       }
 
       const costInfo =
-        input.model.cost?.experimentalOver200K && tokens.input + tokens.cache.read > 200_000
+        // altimate_change start — upstream_fix: the long-context tier counts all prompt tokens, cache writes included
+        input.model.cost?.experimentalOver200K && tokens.input + tokens.cache.read + tokens.cache.write > 200_000
+        // altimate_change end
           ? input.model.cost.experimentalOver200K
           : input.model.cost
       return {
