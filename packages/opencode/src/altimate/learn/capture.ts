@@ -92,12 +92,30 @@ export interface MessageLike {
   time?: { created?: number; completed?: number }
 }
 
-/** Start of the agent's response to the request the correction answers; synthetic continuations are not requests. */
-export function correctedTurnStart(messages: readonly (MessageLike & { synthetic?: boolean })[], messageID: string): number | undefined {
+export type TurnMessage = MessageLike & { synthetic?: boolean; compaction?: boolean }
+
+/** Session history as turn boundaries: all-synthetic text continues a turn; a compaction part marks compaction. */
+export function turnMessages(messages: readonly { info: MessageLike; parts: readonly { type: string; synthetic?: boolean }[] }[]): TurnMessage[] {
+  return messages.map(({ info, parts }) => {
+    const text = parts.filter((part) => part.type === "text")
+    return {
+      ...info,
+      synthetic: text.length > 0 && text.every((part) => part.synthetic),
+      compaction: parts.some((part) => part.type === "compaction"),
+    }
+  })
+}
+
+/**
+ * Start of the agent's response to the request the correction answers. Synthetic continuations are not
+ * requests. A request right after a compaction may be its replay, so its turn start is unknown.
+ */
+export function correctedTurnStart(messages: readonly TurnMessage[], messageID: string): number | undefined {
   const end = messages.findIndex((message) => message.id === messageID && message.role === "user")
   if (end < 0) return
-  const previous = messages.slice(0, end).findLastIndex((message) => message.role === "user" && !message.synthetic)
+  const previous = messages.slice(0, end).findLastIndex((message) => message.role === "user" && !message.synthetic && !message.compaction)
   if (previous < 0) return
+  if (messages.slice(0, previous).findLast((message) => message.role === "user")?.compaction) return
   return messages.slice(previous + 1, end).find((message) => message.role === "assistant")?.time?.created
 }
 
@@ -181,12 +199,11 @@ export class Capture {
     if (message.role !== "user") return
     const reason = correctionReason(part.text)
     if (!reason) return
+    // Later updates of a recorded correction deduplicate to its first signal; skip their history reads.
+    if (this.corrected.has(part.messageID)) return
     const prior = this.sessionsWithAssistant.get(part.sessionID)
     const known = prior !== undefined && message.time?.created !== undefined && prior < message.time.created
     if (!known && !(await this.deps.hasPriorAssistant(part.sessionID, part.messageID))) return
-    // Later updates of the same message deduplicate to the first signal; skip their history reads.
-    if (this.corrected.has(part.messageID)) return
-    remember(this.corrected, part.messageID, RECENT_ID_CAP)
     const start = await this.deps.turnStart?.(part.sessionID, part.messageID).catch((error) => {
       log.warn("learn turn start unavailable", { error })
       return undefined
@@ -199,6 +216,7 @@ export class Capture {
       text: part.text,
       reason,
     })
+    remember(this.corrected, part.messageID, RECENT_ID_CAP)
   }
 
   private async toolPart(part: PartLike) {
@@ -260,10 +278,7 @@ export async function startCapture(ctx: { directory: string; worktree: string })
       record: (signal) => appendSignal(root, signal),
       turnStart: async (sessionID, messageID) => {
         const messages = await Session.messages({ sessionID: SessionID.make(sessionID) })
-        return correctedTurnStart(messages.map((message) => {
-          const text = message.parts.filter((part) => part.type === "text")
-          return { ...message.info, synthetic: text.length > 0 && text.every((part) => part.synthetic) }
-        }), messageID)
+        return correctedTurnStart(turnMessages(messages), messageID)
       },
       hasPriorAssistant: async (sessionID, beforeMessageID) => {
         const messages = await Session.messages({ sessionID: SessionID.make(sessionID) })

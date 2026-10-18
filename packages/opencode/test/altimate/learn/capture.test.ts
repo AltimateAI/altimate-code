@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { correctedTurnStart, Capture, RETRY_THRESHOLD, ToolRetryTracker, type PartLike } from "../../../src/altimate/learn/capture"
+import { correctedTurnStart, turnMessages, Capture, RETRY_THRESHOLD, ToolRetryTracker, type PartLike } from "../../../src/altimate/learn/capture"
 import * as Signals from "../../../src/altimate/learn/signals"
 
 const call = (id: string, tool: string, status: "error" | "completed" | "running", error = "boom", messageID = "m1") => ({
@@ -357,6 +357,43 @@ describe("correction turn start", () => {
     ]
     expect(correctedTurnStart(continued, "correction")).toBe(2000)
     expect(correctedTurnStart(continued.map((m) => ({ ...m, synthetic: false })), "correction")).toBe(4000)
+  })
+  test("history parts mark synthetic continuations and compaction markers", () => {
+    const info = (id: string, role: string, created: number) => ({ id, sessionID: "s", role, time: { created, completed: created + 1 } })
+    const mapped = turnMessages([
+      { info: info("u1", "user", 1000), parts: [{ type: "text" }, { type: "file" }] },
+      { info: info("a1", "assistant", 2000), parts: [{ type: "text" }] },
+      { info: info("continue", "user", 3000), parts: [{ type: "text", synthetic: true }] },
+      { info: info("marker", "user", 3500), parts: [{ type: "compaction" }] },
+      { info: info("files", "user", 3600), parts: [{ type: "file" }] },
+    ])
+    expect(mapped.map(({ synthetic, compaction }) => [synthetic, compaction])).toEqual([
+      [false, false], [false, false], [true, false], [false, true], [false, false],
+    ])
+  })
+  test("a replayed request after compaction has no known turn start", () => {
+    const at = (id: string, role: string, created: number, extra = {}) => ({ id, sessionID: "s", role, time: { created, completed: created + 1 }, ...extra })
+    const compacted = [
+      at("u1", "user", 1000), at("step", "assistant", 2000),
+      at("marker", "user", 3000, { compaction: true }), at("summary", "assistant", 3100),
+      at("replay", "user", 3200), at("final", "assistant", 4000), at("correction", "user", 5000),
+    ]
+    expect(correctedTurnStart(compacted, "correction")).toBeUndefined()
+    // A manual compaction without a replay leaves the original request as the boundary.
+    expect(correctedTurnStart(compacted.filter((m) => m.id !== "replay"), "correction")).toBe(2000)
+  })
+  test("a failed record is retried by a later update", async () => {
+    let attempts = 0
+    const capture = new Capture({
+      hasPriorAssistant: async () => true,
+      turnStart: async (_, id) => correctedTurnStart(history, id),
+      record: async () => { if (attempts++ === 0) throw new Error("lock timeout"); return undefined },
+    })
+    for (const info of history) capture.onMessage(info)
+    for (const text of ["No, use UTC", "No, use UTC instead."])
+      await capture.onPart({ id: "part", messageID: "correction", sessionID: "s", type: "text", text })
+    await capture.flush()
+    expect(attempts).toBe(2)
   })
   test("repeated updates of one correction look up history once", async () => {
     let lookups = 0

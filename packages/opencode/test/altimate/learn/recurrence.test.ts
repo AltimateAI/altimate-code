@@ -99,7 +99,14 @@ describe("recurrence attribution", () => {
     shown.shown.push({ ...snapshot().shown[0], name: other.name })
     const result = run([signal()], [shown], [lesson, other])
     expect(result.lessons.find((row) => row.name === lesson.name)).toMatchObject({ ambiguous: 0, earlier_version: 1 })
-    expect(result.lessons.find((row) => row.name === other.name)).toMatchObject({ ambiguous: 1 })
+    expect(result.lessons.find((row) => row.name === other.name)).toMatchObject({ ambiguous: 0, recurred: 1 })
+  })
+
+  test("a matching lesson the session never saw does not hide recurrence", () => {
+    const added: NamedLesson = { name: "team-playbook", lesson: { id: "L-0003", text: "Always convert `event_at` timestamps with `to_utc` first." } }
+    const result = run([signal("s1"), signal("s2")], [snapshot("s1"), snapshot("s2")], [lesson, added])
+    expect(result.lessons.find((row) => row.id === lesson.lesson.id)).toMatchObject({ recurred: 2, ambiguous: 0 })
+    expect(recurrenceHint(result, lesson.name, lesson.lesson)).toBe(2)
   })
 
   test("earlier lesson version cannot supply current evidence", () => {

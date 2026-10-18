@@ -73,13 +73,15 @@ export function attribute(signals: readonly Signal[], snapshots: readonly ShownS
       }
       continue
     }
-    for (const lesson of matches) {
+    // Only lessons this session saw in their current text compete; one never shown cannot explain the correction.
+    const exposed = matches.flatMap((lesson) => {
       const counts = rows.get(key(lesson.name, lesson.id, lesson.textHash))?.counts
-      if (!counts) continue
       const shown = sessions.get(signal.sessionID)!.filter((entry) =>
         entry.name === lesson.name && entry.id === lesson.id && entry.textHash === lesson.textHash)
-      if (!shown.length) continue
-      if (matches.length > 1) {
+      return counts && shown.length ? [{ counts, shown }] : []
+    })
+    for (const { counts, shown } of exposed) {
+      if (exposed.length > 1) {
         counts.ambiguous.add(signal.sessionID)
         continue
       }
