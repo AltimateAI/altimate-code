@@ -156,7 +156,7 @@ Two escape hatches exist for reporting from a test run deliberately:
 
 We take your privacy seriously. Altimate Code telemetry **never** collects:
 
-- SQL queries or query results
+- SQL queries or query results (except that the `error_fingerprint` template can keep a fragment made only of plain words, see below)
 - Code content, file contents, or file paths
 - Credentials, API keys, or tokens
 - Database connection strings or hostnames
