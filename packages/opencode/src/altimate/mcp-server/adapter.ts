@@ -14,7 +14,7 @@ import { SchemaInspectTool } from "../tools/schema-inspect"
 import { SqlExecuteTool } from "../tools/sql-execute"
 import { SqlCheckTool } from "../tools/sql-check"
 import { SqlMaterializeTool } from "../tools/sql-materialize"
-import { AnswerCommitTool, renderAnswer } from "../tools/answer-commit"
+import { AnswerCommitTool } from "../tools/answer-commit"
 import * as Precedence from "../workspace/precedence"
 import { closeScratch } from "../native/connections/scratch"
 import type { SessionID, MessageID } from "@/session/schema"
@@ -36,22 +36,6 @@ const MCP_ONLY_TOOLS = new Set(["answer_commit"])
 
 /** Session-level record the native commit checks read: tool outputs and rejections of the current turn. */
 type TurnMessage = Tool.Context["messages"][number]
-/**
- * The FINAL ANSWER line carries only the answer, rendered as answer_only would, so the
- * explanation never becomes part of the answer text a client copies. The basis is kept,
- * above that line, as context for the user.
- */
-export function finalAnswerText(args: Record<string, unknown>, committed: string): string {
-  let answer = committed
-  try {
-    answer = renderAnswer({ ...args, answer_only: true })
-  } catch {
-    // Rendering already succeeded once inside the tool; keep its text if this variant fails.
-  }
-  const basis = typeof args.basis === "string" && args.answer_only !== true ? args.basis.trim() : ""
-  return basis ? `Basis: ${basis}\n\nFINAL ANSWER: ${answer}` : `FINAL ANSWER: ${answer}`
-}
-
 function userMessage(): TurnMessage {
   return { info: { role: "user" }, parts: [] } as unknown as TurnMessage
 }
@@ -127,7 +111,7 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
   const shutdown = new AbortController()
   const active = new Set<Promise<Tool.ExecuteResult>>()
   // Feed the native commit checks: completed tool output and rejections, with a new turn after an accepted commit.
-  const record = (name: string, result: Tool.ExecuteResult, args: Record<string, unknown>) => {
+  const record = (name: string, result: Tool.ExecuteResult) => {
     if (name !== "answer_commit") {
       if (result.status !== "error") messages.push(toolMessage(name, { status: "completed", output: result.output }))
       return result
@@ -137,7 +121,7 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
       return result
     }
     messages.push(userMessage())
-    return { ...result, output: finalAnswerText(args, result.metadata.committed_text ?? result.output) }
+    return { ...result, output: `FINAL ANSWER: ${result.metadata.committed_text ?? result.output}` }
   }
   return {
     tools,
@@ -168,7 +152,7 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
       active.add(pending)
       try {
         const result = await pending
-        return record(name, result, args)
+        return record(name, result)
       } catch (error) {
         if (name === "answer_commit") messages.push(toolMessage(name, { status: "error", error: String(error) }))
         throw error
