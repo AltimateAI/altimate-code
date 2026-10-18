@@ -14,7 +14,7 @@ export const SERVER_INSTRUCTIONS = [
   "4. For joins across connections, sql_materialize the smaller filtered side into `scratch` and join there.",
   "5. Run sql_check when keys, fan-out, grain or nulls could change the answer.",
   "6. Check that every condition in the question actually filters something.",
-  "7. Report only the requested values.",
+  "7. Finish with answer_commit: `asked` lists the requested items, one field per item; reply with exactly the FINAL ANSWER text it returns.",
 ].join("\n")
 
 export interface ServeOptions {

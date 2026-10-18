@@ -47,7 +47,7 @@ for (const allowWrite of [false, true]) {
     let spill: string | undefined
     try {
       await client.connect(transport)
-      expect((await client.listTools()).tools).toHaveLength(5)
+      expect((await client.listTools()).tools).toHaveLength(6)
       const write = await client.callTool({
         name: "sql_execute",
         arguments: { warehouse: "source", query: "INSERT INTO items VALUES (7)" },

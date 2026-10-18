@@ -63,10 +63,11 @@ mcpTest("initialize result carries short analyst-method instructions", async () 
   }
 })
 
-mcpTest("lists exactly five tools and executes warehouse, schema, SQL and checks without routing notices", async () => {
+mcpTest("lists exactly six tools and executes warehouse, schema, SQL and checks without routing notices", async () => {
   const { client, call } = await fixture()
   const listed = await client.listTools()
   expect(listed.tools.map((t) => t.name).sort()).toEqual([
+    "answer_commit",
     "schema_inspect",
     "sql_check",
     "sql_execute",
@@ -232,7 +233,7 @@ mcpTest("server startup and tool listing make no network calls", async () => {
   )
   try {
     const { client } = await fixture()
-    expect((await client.listTools()).tools).toHaveLength(5)
+    expect((await client.listTools()).tools).toHaveLength(6)
     expect(fetch).not.toHaveBeenCalled()
   } finally {
     fetch.mockRestore()
@@ -452,5 +453,49 @@ mcpTest("server close aborts active source queries before cleanup", async () => 
     expect(signal.aborted).toBe(true)
     await pending
   } finally { get.mockRestore() }
+})
+// altimate_change end
+
+// altimate_change start — answer_commit over MCP: requested-item coverage, number provenance, basis trimming
+const commit = (fields: { name: string; value: string | number }[], asked: string[], basis = "Counted items.") => ({
+  fields,
+  asked,
+  basis,
+})
+
+mcpTest("answer_commit returns the canonical FINAL ANSWER text and trims a long basis", async () => {
+  const { call } = await fixture()
+  const result = await call("answer_commit", commit([{ name: "", value: "apple" }], ["item"], "x".repeat(900)))
+  expect(result.isError).toBeFalsy()
+  const out = (result.content as { text: string }[])[0]!.text
+  expect(out.startsWith("FINAL ANSWER: ")).toBe(true)
+  expect(out).toContain("apple")
+})
+
+mcpTest("answer_commit rejects a missing asked item at most twice, then accepts", async () => {
+  const { call } = await fixture()
+  const args = commit([{ name: "item", value: "apple" }], ["item", "count"])
+  for (let i = 0; i < 2; i++) {
+    const rejected = await call("answer_commit", args)
+    expect(rejected.isError).toBe(true)
+    expect(text(rejected)).toContain("requested-items check")
+  }
+  expect((await call("answer_commit", args)).isError).toBeFalsy()
+})
+
+mcpTest("answer_commit warns once about a number absent from query output", async () => {
+  const { call } = await fixture()
+  await call("sql_execute", { warehouse: "source", query: "SELECT COUNT(*) AS n FROM items" })
+  const args = commit([{ name: "total", value: 98765 }], ["total"])
+  const warned = await call("answer_commit", args)
+  expect(warned.isError).toBe(true)
+  expect(text(warned)).toContain("number check")
+  expect((await call("answer_commit", args)).isError).toBeFalsy()
+})
+
+mcpTest("answer_commit accepts a number that appeared in query output", async () => {
+  const { call } = await fixture()
+  await call("sql_execute", { warehouse: "source", query: "SELECT 4321 AS n" })
+  expect((await call("answer_commit", commit([{ name: "n", value: 4321 }], ["n"]))).isError).toBeFalsy()
 })
 // altimate_change end
