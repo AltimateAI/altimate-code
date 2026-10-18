@@ -39,6 +39,16 @@ function resultLinks(metadata: Record<string, unknown>) {
   ]
 }
 
+const FINAL_ANSWER_PREFIX = "FINAL ANSWER: "
+const answerOutputSchema = {
+  type: "object" as const,
+  properties: { answer: { type: "string", description: "The committed answer text, without the FINAL ANSWER prefix" } },
+  required: ["answer"],
+}
+function structuredAnswer(output: string) {
+  return { answer: output.startsWith(FINAL_ANSWER_PREFIX) ? output.slice(FINAL_ANSWER_PREFIX.length) : output }
+}
+
 export interface ServeOptions {
   connections?: string
   allowWrite?: boolean
@@ -62,13 +72,19 @@ export async function createServer(options: ServeOptions = {}) {
       name,
       description: descriptions[name],
       inputSchema: tool.jsonSchema as McpTool["inputSchema"],
+      ...(name === "answer_commit" && { outputSchema: answerOutputSchema }),
     })),
   }))
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
       const result = await adapter.execute(request.params.name, request.params.arguments ?? {}, extra.signal)
       const isError = result.status === "error" || (result.metadata.success !== true && Boolean(result.metadata.error))
-      return { content: [{ type: "text" as const, text: result.output }, ...resultLinks(result.metadata)], isError }
+      return {
+        content: [{ type: "text" as const, text: result.output }, ...resultLinks(result.metadata)],
+        // The text above stays the fallback for clients that ignore structured output.
+        ...(request.params.name === "answer_commit" && !isError && { structuredContent: structuredAnswer(result.output) }),
+        isError,
+      }
     } catch (error) {
       return {
         content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }],

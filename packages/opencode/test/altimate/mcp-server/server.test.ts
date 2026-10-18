@@ -521,3 +521,22 @@ mcpTest("sql_execute without a spill returns text only", async () => {
   expect((result.content as { type: string }[]).map((item) => item.type)).toEqual(["text"])
 })
 // altimate_change end
+
+// altimate_change start — answer_commit advertises an output schema and returns structuredContent beside the text
+mcpTest("answer_commit returns structuredContent and keeps the FINAL ANSWER text", async () => {
+  const { client, call } = await fixture()
+  const tool = (await client.listTools()).tools.find((item) => item.name === "answer_commit")
+  expect(tool?.outputSchema?.required).toEqual(["answer"])
+  const result = await call("answer_commit", commit([{ name: "", value: "apple" }], ["item"]))
+  const structured = result.structuredContent as { answer: string }
+  expect(structured.answer).toContain("apple")
+  expect((result.content as { text: string }[])[0]!.text).toBe(`FINAL ANSWER: ${structured.answer}`)
+})
+
+mcpTest("a rejected answer_commit has no structuredContent", async () => {
+  const { call } = await fixture()
+  const rejected = await call("answer_commit", commit([{ name: "item", value: "apple" }], ["item", "count"]))
+  expect(rejected.isError).toBe(true)
+  expect(rejected.structuredContent).toBeUndefined()
+})
+// altimate_change end
