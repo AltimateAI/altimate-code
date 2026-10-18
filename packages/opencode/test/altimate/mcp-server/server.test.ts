@@ -469,8 +469,12 @@ mcpTest("answer_commit returns the canonical FINAL ANSWER text and trims a long 
   const result = await call("answer_commit", commit([{ name: "", value: "apple" }], ["item"], "x".repeat(900)))
   expect(result.isError).toBeFalsy()
   const out = (result.content as { text: string }[])[0]!.text
-  expect(out.startsWith("FINAL ANSWER: ")).toBe(true)
-  expect(out).toContain("apple")
+  // altimate_change start — the FINAL ANSWER line is answer-only; the trimmed basis sits above it
+  expect(out).toMatch(/(^|\n\n)FINAL ANSWER: /)
+  const answer = out.slice(out.indexOf("FINAL ANSWER: "))
+  expect(answer).toContain("apple")
+  expect(answer).not.toContain("xxx")
+  // altimate_change end
 })
 
 mcpTest("answer_commit rejects a missing asked item at most twice, then accepts", async () => {
@@ -498,6 +502,52 @@ mcpTest("answer_commit accepts a number that appeared in query output", async ()
   const { call } = await fixture()
   await call("sql_execute", { warehouse: "source", query: "SELECT 4321 AS n" })
   expect((await call("answer_commit", commit([{ name: "n", value: 4321 }], ["n"]))).isError).toBeFalsy()
+})
+// altimate_change end
+
+// altimate_change start — conjunction check over MCP: the request arrives as an MCP-only argument
+mcpTest("answer_commit exposes a required request argument over MCP", async () => {
+  const { client } = await fixture()
+  const tool = (await client.listTools()).tools.find((item) => item.name === "answer_commit")
+  expect(Object.keys(tool!.inputSchema.properties ?? {})).toContain("request")
+  expect(tool!.inputSchema.required).toContain("request")
+})
+
+mcpTest("answer_commit rejects an under-asked commit on a compound request once, then accepts", async () => {
+  const { call } = await fixture()
+  const args = { ...commit([{ name: "item", value: "apple" }], ["item"]), request: "Which item and its id?" }
+  const rejected = await call("answer_commit", args)
+  expect(rejected.isError).toBe(true)
+  expect(text(rejected)).toContain("answer_commit conjunction check:")
+  const accepted = await call("answer_commit", args)
+  expect(accepted.isError).toBeFalsy()
+  // An under-asked commit keeps the basis on the FINAL ANSWER line.
+  const out = (accepted.content as { text: string }[])[0]!.text
+  expect(out.startsWith("FINAL ANSWER: Counted items.")).toBe(true)
+  expect(out).toContain("**Answer:**")
+  expect(out).toContain("apple")
+})
+
+mcpTest("answer_commit accepts a single-item request and a commit without request", async () => {
+  const { call } = await fixture()
+  const single = { ...commit([{ name: "item", value: "apple" }], ["item"]), request: "Which item sorts first?" }
+  expect((await call("answer_commit", single)).isError).toBeFalsy()
+  expect((await call("answer_commit", commit([{ name: "item", value: "apple" }], ["item"]))).isError).toBeFalsy()
+})
+
+mcpTest("answer_commit accepts a compound request committed with both items", async () => {
+  const { call } = await fixture()
+  const both = {
+    ...commit(
+      [
+        { name: "item", value: "apple" },
+        { name: "id", value: "one" },
+      ],
+      ["item", "id"],
+    ),
+    request: "Which item and its id?",
+  }
+  expect((await call("answer_commit", both)).isError).toBeFalsy()
 })
 // altimate_change end
 
@@ -530,7 +580,7 @@ mcpTest("answer_commit returns the FINAL ANSWER text without structured output",
   expect(tool?.outputSchema).toBeUndefined()
   const result = await call("answer_commit", commit([{ name: "", value: "apple" }], ["item"]))
   expect(result.structuredContent).toBeUndefined()
-  expect((result.content as { text: string }[])[0]!.text).toStartWith("FINAL ANSWER: ")
+  expect((result.content as { text: string }[])[0]!.text).toMatch(/(^|\n\n)FINAL ANSWER: /)
 })
 // altimate_change end
 

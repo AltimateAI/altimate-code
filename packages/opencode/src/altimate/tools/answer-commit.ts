@@ -19,6 +19,9 @@ import {
   sizeBasedRejections,
   unsourcedNumbers,
 } from "./answer-commit-checks"
+// altimate_change start — one-time conjunction review
+import { conjunctionRejection } from "./answer-commit-conjunction"
+// altimate_change end
 
 /** Maximum rendered answer length, including Markdown and basis, before the model echoes it. */
 export const MAX_RENDERED_ANSWER_CHARACTERS = 60_000
@@ -362,7 +365,10 @@ export const AnswerCommitTool = Tool.define(
           return yield* Effect.die(new Error("answer_commit is only available to the analyst agent"))
         yield* ctx.ask({ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} })
         const output = renderAnswer(args)
-        const rejection = commitRejection(args, ctx.messages ?? [])
+        // altimate_change start — one-time conjunction review of under-asked commits
+        const rejection =
+          commitRejection(args, ctx.messages ?? []) ?? conjunctionRejection(args, ctx.messages ?? [], ctx.sessionID)
+        // altimate_change end
         if (rejection) {
           const rejected: Tool.ExecuteResult<CommitMetadata> = {
             title: "Answer not committed",

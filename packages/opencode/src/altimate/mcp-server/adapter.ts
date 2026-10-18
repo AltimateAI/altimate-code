@@ -14,7 +14,8 @@ import { SchemaInspectTool } from "../tools/schema-inspect"
 import { SqlExecuteTool } from "../tools/sql-execute"
 import { SqlCheckTool } from "../tools/sql-check"
 import { SqlMaterializeTool } from "../tools/sql-materialize"
-import { AnswerCommitTool } from "../tools/answer-commit"
+import { AnswerCommitTool, renderAnswer } from "../tools/answer-commit"
+import { requestedItemCount } from "../tools/answer-commit-conjunction"
 import * as Precedence from "../workspace/precedence"
 import { closeScratch } from "../native/connections/scratch"
 import type { SessionID, MessageID } from "@/session/schema"
@@ -36,6 +37,29 @@ const MCP_ONLY_TOOLS = new Set(["answer_commit"])
 
 /** Session-level record the native commit checks read: tool outputs and rejections of the current turn. */
 type TurnMessage = Tool.Context["messages"][number]
+/**
+ * The FINAL ANSWER line carries only the answer, rendered as answer_only would, so the
+ * explanation never becomes part of the answer text a client copies. The basis is kept,
+ * above that line, as context for the user.
+ */
+export function finalAnswerText(args: Record<string, unknown>, committed: string, request?: unknown): string {
+  // Answer-only only for a complete commit: rows, or fields covering every item the request names.
+  // Otherwise keep the committed text (basis on the line) so an item kept only in the basis is not lost.
+  const fields = Array.isArray(args.fields) ? args.fields.length : 0
+  const complete =
+    Boolean(args.rows) ||
+    (fields > 0 && fields >= requestedItemCount(typeof request === "string" ? request : ""))
+  if (!complete) return `FINAL ANSWER: ${committed}`
+  let answer = committed
+  try {
+    answer = renderAnswer({ ...args, answer_only: true })
+  } catch {
+    // Rendering already succeeded once inside the tool; keep its text if this variant fails.
+  }
+  const basis = typeof args.basis === "string" && args.answer_only !== true ? args.basis.trim() : ""
+  return basis ? `Basis: ${basis}\n\nFINAL ANSWER: ${answer}` : `FINAL ANSWER: ${answer}`
+}
+
 function userMessage(): TurnMessage {
   return { info: { role: "user" }, parts: [] } as unknown as TurnMessage
 }
@@ -64,6 +88,30 @@ function services(directory: string, limits: Awaited<ReturnType<typeof outputLim
         `The tool call ${outcome === "error" ? "failed" : "succeeded"} but the output was truncated. Full output saved to: ${file}\nOpen this path with any file reader to inspect the remaining output.`,
     }).pipe(Layer.provide(FSUtil.defaultLayer), Layer.provide(NodePath.layer)),
   )
+}
+
+/**
+ * MCP clients do not forward the user's message, so answer_commit takes the request as an MCP-only
+ * argument; the adapter records it as the current turn's user text for the commit checks.
+ */
+function withRequest<T>(schema: T): T {
+  const copy = JSON.parse(JSON.stringify(schema)) as { properties?: Record<string, unknown>; required?: string[] }
+  copy.properties = {
+    ...copy.properties,
+    request: {
+      type: "string",
+      description:
+        "The user's question, copied verbatim: only the question itself, without database descriptions or other context.",
+    },
+  }
+  copy.required = [...(copy.required ?? []), "request"]
+  return copy as T
+}
+
+function recordRequest(messages: TurnMessage[], request: unknown) {
+  if (typeof request !== "string" || !request.trim()) return
+  const turn = messages.findLast((message) => message.info.role === "user")
+  if (turn) (turn as { parts: unknown[] }).parts = [{ type: "text", text: request.trim() }]
 }
 
 function relaxBasis<T>(schema: T): T {
@@ -95,7 +143,7 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
               ),
             )
           }
-          if (tool.jsonSchema && info.id === "answer_commit") tool.jsonSchema = relaxBasis(tool.jsonSchema)
+          if (tool.jsonSchema && info.id === "answer_commit") tool.jsonSchema = withRequest(relaxBasis(tool.jsonSchema))
           result.set(info.id, tool)
         }
         return result
@@ -111,7 +159,7 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
   const shutdown = new AbortController()
   const active = new Set<Promise<Tool.ExecuteResult>>()
   // Feed the native commit checks: completed tool output and rejections, with a new turn after an accepted commit.
-  const record = (name: string, result: Tool.ExecuteResult) => {
+  const record = (name: string, result: Tool.ExecuteResult, args: Record<string, unknown>, request?: unknown) => {
     if (name !== "answer_commit") {
       if (result.status !== "error") messages.push(toolMessage(name, { status: "completed", output: result.output }))
       return result
@@ -121,7 +169,7 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
       return result
     }
     messages.push(userMessage())
-    return { ...result, output: `FINAL ANSWER: ${result.metadata.committed_text ?? result.output}` }
+    return { ...result, output: finalAnswerText(args, result.metadata.committed_text ?? result.output, request) }
   }
   return {
     tools,
@@ -148,11 +196,18 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
       }
       if (MCP_ONLY_TOOLS.has(name) && typeof args.basis === "string" && args.basis.length > BASIS_LIMIT)
         args = { ...args, basis: args.basis.slice(0, BASIS_LIMIT) }
+      let request: unknown
+      if (name === "answer_commit") {
+        const { request: text, ...rest } = args
+        request = text
+        recordRequest(messages, request)
+        args = rest
+      }
       const pending = Effect.runPromise(tool.execute(args, ctx))
       active.add(pending)
       try {
         const result = await pending
-        return record(name, result)
+        return record(name, result, args, request)
       } catch (error) {
         if (name === "answer_commit") messages.push(toolMessage(name, { status: "error", error: String(error) }))
         throw error
