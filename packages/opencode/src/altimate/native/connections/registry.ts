@@ -233,8 +233,13 @@ export function load(): void {
 let injected = false
 /** Fingerprint of the sources behind the last load. */
 let loadedSignature = ""
-/** Connections added in this process, with the credentials the sanitized file no longer holds. */
-const sessionAdded = new Map<string, ConnectionConfig>()
+/** Bumped whenever a refresh changes a connection's config, so an in-flight connect can tell it is obsolete. */
+let configGeneration = 0
+/**
+ * Connections added in this process: the full config (with credentials the sanitized file no longer holds) and
+ * the sanitized form that was written, so a later edit of the file is not overridden by the older in-memory copy.
+ */
+const sessionAdded = new Map<string, { full: ConnectionConfig; written: ConnectionConfig }>()
 
 function statSignature(filePath: string): string {
   try {
@@ -257,10 +262,15 @@ function sourceSignature(): string {
 function refresh(): void {
   const previous = new Map(configs)
   load()
-  for (const [name, config] of sessionAdded) {
-    // A project file or env var defining the name outranks what this process added to the global file.
+  for (const [name, { full, written }] of sessionAdded) {
+    // Only while the file still holds what add() wrote: a project file or env var defining the name outranks it,
+    // and a later edit of the global entry must win over the older in-memory copy.
     const overridden = Object.hasOwn(loadFromFile(localConfigPath()), name) || Object.hasOwn(loadFromEnv(), name)
-    if (!overridden && configs.has(name)) configs.set(name, config)
+    if (!overridden && JSON.stringify(configs.get(name)) === JSON.stringify(written)) configs.set(name, full)
+    else if (!overridden) sessionAdded.delete(name)
+  }
+  for (const name of new Set([...previous.keys(), ...configs.keys()])) {
+    if (JSON.stringify(configs.get(name)) !== JSON.stringify(previous.get(name))) configGeneration++
   }
   for (const [name, connector] of [...connectors]) {
     if (JSON.stringify(configs.get(name)) === JSON.stringify(previous.get(name))) continue
@@ -600,6 +610,9 @@ export async function get(name: string): Promise<Connector> {
     })
   } catch {}
   // altimate_change end
+  // altimate_change start
+  const generation = configGeneration
+  // altimate_change end
   const promise = (async () => {
     try {
       const connector = await createConnector(name, config)
@@ -610,6 +623,13 @@ export async function get(name: string): Promise<Connector> {
         closeTunnel(name)
         throw connectErr
       }
+      // altimate_change start — the config changed while this connected; caching it would pin the old target
+      if (generation !== configGeneration && JSON.stringify(configs.get(name)) !== JSON.stringify(config)) {
+        await connector.close().catch(() => {})
+        closeTunnel(name)
+        throw new Error(`Connection "${name}" changed while it was connecting; retry.`)
+      }
+      // altimate_change end
       connectors.set(name, connector)
       fileLog("INFO", "warehouse-connect", "connected", { name, type: config.type, auth: authMethod, duration_ms: Date.now() - startTime })
       try {
@@ -799,7 +819,7 @@ export async function add(
     // file uses the sanitized version (credentials stripped).
     configs.set(name, normalized)
     // altimate_change start — our own write is not an external edit, and the credentials stay in memory
-    sessionAdded.set(name, normalized)
+    sessionAdded.set(name, { full: normalized, written: sanitized })
     loadedSignature = sourceSignature()
     // altimate_change end
 

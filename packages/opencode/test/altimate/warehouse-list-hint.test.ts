@@ -103,4 +103,19 @@ describe("warehouse_list no-connections hint", () => {
     expect(Registry.names()).toEqual(["injected"])
     expect(Registry.names()).toEqual(["injected"])
   })
+
+  test("a connection added in-process yields to a later edit of its global entry", async () => {
+    const added = await Registry.add("edit-me", { type: "postgres", host: "old-host", database: "d" })
+    expect(added.success).toBe(true)
+    try {
+      expect(Registry.getConfig("edit-me")?.host).toBe("old-host")
+      const globalPath = Registry.globalConfigPath()
+      const onDisk = JSON.parse(fs.readFileSync(globalPath, "utf-8"))
+      onDisk["edit-me"].host = "new-host"
+      fs.writeFileSync(globalPath, JSON.stringify(onDisk))
+      expect(Registry.getConfig("edit-me")?.host).toBe("new-host")
+    } finally {
+      await Registry.remove("edit-me")
+    }
+  })
 })
