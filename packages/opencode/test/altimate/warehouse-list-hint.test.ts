@@ -89,11 +89,13 @@ describe("warehouse_list no-connections hint", () => {
     const tool = await initTool(WarehouseListTool)
     const ctx = toolCtx()
     await tool.execute({}, ctx)
+    const previous = process.env.ALTIMATE_CODE_CONN_ENVLATE
     process.env.ALTIMATE_CODE_CONN_ENVLATE = JSON.stringify({ type: "postgres", host: "h" })
     try {
       expect((await tool.execute({}, ctx)).output).toContain("envlate")
     } finally {
-      delete process.env.ALTIMATE_CODE_CONN_ENVLATE
+      if (previous === undefined) delete process.env.ALTIMATE_CODE_CONN_ENVLATE
+      else process.env.ALTIMATE_CODE_CONN_ENVLATE = previous
     }
   })
 
@@ -124,6 +126,36 @@ describe("warehouse_list no-connections hint", () => {
       expect(Registry.names()).toEqual(["proj-a"])
     } finally {
       process.chdir(project)
+      fs.rmSync(other, { recursive: true, force: true })
+    }
+  })
+
+  test("an empty registry first loaded for one project does not pick up another project's file", () => {
+    expect(Registry.names()).toEqual([])
+    const dirA = project
+    const other = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "whl-hint-b-")))
+    try {
+      fs.mkdirSync(path.join(other, ".altimate-code"))
+      fs.writeFileSync(
+        path.join(other, ".altimate-code", "connections.json"),
+        JSON.stringify({ "proj-b": { type: "postgres" } }),
+      )
+      process.chdir(other)
+      expect(Registry.names()).toEqual([])
+      expect(Registry.projectConfigApplies()).toBe(false)
+      expect(noConnectionsMessage()).not.toContain(Registry.localConfigPath())
+      expect(noConnectionsMessage()).toContain(Registry.globalConfigPath())
+      process.chdir(dirA)
+      expect(Registry.projectConfigApplies()).toBe(true)
+      // the same project still picks up its own file after an empty answer
+      fs.mkdirSync(path.join(dirA, ".altimate-code"))
+      fs.writeFileSync(
+        path.join(dirA, ".altimate-code", "connections.json"),
+        JSON.stringify({ "proj-a": { type: "postgres" } }),
+      )
+      expect(Registry.names()).toEqual(["proj-a"])
+    } finally {
+      process.chdir(dirA)
       fs.rmSync(other, { recursive: true, force: true })
     }
   })

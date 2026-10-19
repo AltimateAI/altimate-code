@@ -197,14 +197,17 @@ function loadFromEnv(): Record<string, ConnectionConfig> {
 }
 
 /** Load all connection configs. Local overrides global; env overrides both. */
-export function load(): void {
+export function load(includeProjectConfig = true): void {
   configs.clear()
 
   // altimate_change start — absolutize store paths against the directory that
   // declared them, so a later process.chdir() (--dir) cannot move the store.
   const base = projectRoot()
   const global = resolveStorePaths(loadFromFile(globalConfigPath()), path.dirname(globalConfigPath()))
-  const local = resolveStorePaths(loadFromFile(localConfigPath()), base)
+  // altimate_change start — see ensureLoaded(): a later reload must not pull in another project's file
+  const local = includeProjectConfig ? resolveStorePaths(loadFromFile(localConfigPath()), base) : {}
+  if (includeProjectConfig) loadedProjectDir = base
+  // altimate_change end
   const env = resolveStorePaths(loadFromEnv(), base)
   // altimate_change end
 
@@ -229,9 +232,22 @@ function ensureLoaded(): void {
   // altimate_change start — the registry latches on first load, so a connections file created after an empty
   // answer (the `warehouse_list` hint) was never seen. Re-read only while nothing is loaded: there is no state to
   // replace or close, and a populated registry never changes under a running session.
-  else if (configs.size === 0 && !injected) load()
+  else if (configs.size === 0 && !injected) load(projectConfigApplies())
   // altimate_change end
 }
+
+// altimate_change start — the registry is process-global; this is the project whose local file it was loaded with
+let loadedProjectDir: string | undefined
+
+/**
+ * Whether the current project's local connections file is the one this registry reads. A server serving several
+ * directories shares one registry (pre-existing: the first load's project-local file applies process-wide), so a
+ * later empty-registry reload must not load another project's file into it.
+ */
+export function projectConfigApplies(): boolean {
+  return loadedProjectDir === undefined || loadedProjectDir === projectRoot()
+}
+// altimate_change end
 
 // altimate_change start — set by setConfigs() (tests): an injected empty registry is not a stale one
 let injected = false
@@ -876,6 +892,7 @@ export function reset(): void {
   censusSent = false
   // altimate_change start
   injected = false
+  loadedProjectDir = undefined
   // altimate_change end
 }
 
