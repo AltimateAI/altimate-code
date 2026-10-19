@@ -153,7 +153,7 @@ export function formatRecurrence(result: Awaited<ReturnType<typeof analyzeRecurr
   return [
     "Recurrence (observed counts need capture on):",
     `  Coverage: ${result.coverage.sessions_analyzed} sessions; ${result.coverage.sessions_skipped_malformed} malformed skipped; truncated: ${result.coverage.truncated ? "yes" : "no"}`,
-    ...result.lessons.filter(corrected).map((lesson) => `  ${lesson.name}/${lesson.id}: ${lesson.sessions_shown} sessions shown; ${lesson.recurred ? `${lesson.recurred} matching correction after exposure` : "no observed correction"}; ${lesson.during} during turn; ${lesson.unknown} unknown order; ${lesson.ambiguous} ambiguous; ${lesson.earlier_version} earlier version`),
+    ...result.lessons.filter(corrected).map((lesson) => `  ${lesson.name}/${lesson.id}: ${lesson.sessions_shown} sessions shown; ${lesson.recurred} matching correction after exposure; ${lesson.during} during turn; ${lesson.unknown} unknown order; ${lesson.ambiguous} ambiguous; ${lesson.earlier_version} earlier version`),
     `  ${result.lessons.filter((lesson) => !corrected(lesson)).length} other shown lessons: no observed correction`,
     "  Topics with no matching current lesson:",
     ...result.unmatched_topics.map((topic) => `    ${topic.identifier}: ${topic.sessions} sessions (${topic.signal_ids.join(", ")})`),

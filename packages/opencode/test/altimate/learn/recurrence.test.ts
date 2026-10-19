@@ -167,6 +167,13 @@ describe("recurrence attribution", () => {
       .toEqual(["a_id", "b_id", "c_id", "d_id", "e_id"])
   })
 
+  test("a row with only mid-turn evidence does not claim no correction", () => {
+    const text = formatRecurrence({ ...run([signal()], [snapshot("s1", { at: time(3) })]), coverage: { sessions_analyzed: 1, sessions_skipped_malformed: 0, truncated: false } })
+    const row = text.split("\n").find((line) => line.includes("team-playbook/L-0001"))!
+    expect(row).toContain("0 matching correction after exposure; 1 during turn")
+    expect(row).not.toContain("no observed correction")
+  })
+
   test("human status lists corrected lessons and summarizes the rest", () => {
     const quiet: NamedLesson = { name: "team-playbook", lesson: { id: "L-0002", text: "Name staging models `stg_<source>__<entity>`." } }
     const shown = snapshot()
