@@ -340,6 +340,29 @@ Run local models through [LM Studio](https://lmstudio.ai)'s OpenAI-compatible se
 
 Access 150+ models through a single API key.
 
+## Requesty
+
+```json
+{
+  "provider": {
+    "requesty": {
+      "options": {
+        "apiKey": "{env:REQUESTY_API_KEY}"
+      },
+      "models": {
+        "openai/gpt-4o-mini": {
+          "name": "GPT-4o mini",
+          "limit": { "context": 128000, "output": 16384 }
+        }
+      }
+    }
+  },
+  "model": "requesty/openai/gpt-4o-mini"
+}
+```
+
+[Requesty](https://docs.requesty.ai) is an OpenAI-compatible router. It is already in the models.dev catalog, so `/connect` or `altimate-code auth login` lists it, and setting `REQUESTY_API_KEY` is enough to use its catalog models (for example `requesty/gpt-5.4-mini`) with no config. Any other `vendor/model` id from Requesty's `/v1/models` can be added under `models` as shown above. Get a key at [app.requesty.ai/api-keys](https://app.requesty.ai/api-keys).
+
 ## Copilot
 
 ```json
