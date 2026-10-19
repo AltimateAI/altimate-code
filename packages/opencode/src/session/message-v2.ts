@@ -27,6 +27,79 @@ interface FetchDecompressionError extends Error {
   path: string
 }
 
+// altimate_change start — keep committed-echo parsing helpers private at module scope
+const echoNetworkCodes = new Set([
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "ESOCKETTIMEDOUT",
+  "EPIPE",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "UND_ERR_SOCKET",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_HEADERS_TIMEOUT",
+  "UND_ERR_BODY_TIMEOUT",
+])
+
+const echoPolicyCodes = new Set([
+  "policy_violation",
+  "content_filter",
+  "content_policy",
+  "content_policy_violation",
+  "guardrail_intervened",
+])
+
+function isEchoPolicyCode(code: string | undefined): boolean {
+  if (!code) return false
+  return echoPolicyCodes.has(code.toLowerCase()) || /^(content_policy.*|(safety|moderation)_.+)$/i.test(code)
+}
+
+function responseErrorCode(responseBody: string | undefined, matches: (code: string) => boolean): string | undefined {
+  if (!responseBody) return undefined
+  const find = (value: unknown): string | undefined => {
+    if (!value || typeof value !== "object") return undefined
+    for (const [key, child] of Object.entries(value)) {
+      if (key === "code" && typeof child === "string" && matches(child)) return child
+      const nested = find(child)
+      if (nested) return nested
+    }
+  }
+  try {
+    return find(JSON.parse(responseBody))
+  } catch {
+    return undefined
+  }
+}
+
+function echoPolicyCode(responseBody: string | undefined): string | undefined {
+  return responseErrorCode(responseBody, isEchoPolicyCode)
+}
+
+/**
+ * The provider's own error code: `error.code`, the root `code`, or the upstream code that the
+ * LiteLLM / Altimate Base gateway wraps under `error.provider_specific_fields.error.code`.
+ * Arbitrary nested diagnostic fields are never consulted.
+ */
+function providerErrorCode(responseBody: string | undefined): string | undefined {
+  if (!responseBody) return undefined
+  try {
+    const body = JSON.parse(responseBody) as {
+      code?: unknown
+      error?: { code?: unknown; provider_specific_fields?: { error?: { code?: unknown } } }
+    }
+    const candidates = [body?.error?.provider_specific_fields?.error?.code, body?.error?.code, body?.code]
+    return candidates.find((code): code is string => typeof code === "string")
+  } catch {
+    return undefined
+  }
+}
+
+function isOverflowCode(code: string | undefined): boolean {
+  return !!code && ["context_length_exceeded", "content_length_exceeded"].includes(code.toLowerCase())
+}
+// altimate_change end
+
 export namespace MessageV2 {
   export function isMedia(mime: string) {
     return mime.startsWith("image/") || mime === "application/pdf"
@@ -511,6 +584,9 @@ export namespace MessageV2 {
     structured: z.any().optional(),
     variant: z.string().optional(),
     finish: z.string().optional(),
+    // altimate_change start — retain recovered committed-answer echo failures on the assistant message
+    metadata: z.record(z.string(), z.unknown()).optional(),
+    // altimate_change end
   }).meta({
     ref: "AssistantMessage",
   })
@@ -1143,10 +1219,14 @@ export namespace MessageV2 {
           },
           { cause: e },
         ).toObject()
-      case (e as SystemError)?.code === "ECONNRESET":
+      // altimate_change start — retain structured network codes for echo recovery
+      case echoNetworkCodes.has((e as SystemError)?.code ?? ""):
+      // altimate_change end
         return new MessageV2.APIError(
           {
-            message: "Connection reset by server",
+            // altimate_change start — preserve the established reset message and other transport details
+            message: (e as SystemError).code === "ECONNRESET" ? "Connection reset by server" : errorMessage(e),
+            // altimate_change end
             isRetryable: true,
             metadata: {
               code: (e as SystemError).code ?? "",
@@ -1171,12 +1251,56 @@ export namespace MessageV2 {
           },
           { cause: e },
         ).toObject()
+      // altimate_change start — a request the provider never answered (no response headers before the
+      // first-byte deadline) is a transient stall: classify it as a retryable APIError that names the
+      // problem instead of surfacing it as an opaque UnknownError that ends the session. Nothing was
+      // streamed for that attempt, so re-issuing the request is safe. Mirrors upstream OpenCode
+      // (dev: message-v2.ts HeaderTimeoutError case) with clearer wording.
+      case e instanceof ProviderError.HeaderTimeoutError:
+        return new MessageV2.APIError(
+          {
+            message: `${ProviderError.MODEL_STOPPED_RESPONDING}: response headers timed out after ${Math.round(e.ms / 1000)}s`,
+            isRetryable: true,
+            metadata: { code: e.name, timeoutMs: String(e.ms) },
+          },
+          { cause: e },
+        ).toObject()
+      // altimate_change end
+      // altimate_change start — retry idle streams only before output can persist or execute tools
+      case e instanceof ProviderError.StreamIdleTimeoutError:
+        return new MessageV2.APIError(
+          {
+            message: `${ProviderError.MODEL_STOPPED_RESPONDING}: ${e.message}`,
+            isRetryable: !e.emitted,
+            metadata: { code: e.name, timeoutMs: String(e.ms) },
+          },
+          { cause: e },
+        ).toObject()
+      // altimate_change end
       case APICallError.isInstance(e):
         const parsed = ProviderError.parseAPICallError({
           providerID: ctx.providerID,
           error: e,
         })
-        if (parsed.type === "context_overflow") {
+        // altimate_change start — structured policy decisions override overflow text, while explicit overflow codes win
+        // Only the provider's own code decides overflow; a nested diagnostic code must not mask a policy denial.
+        // An explicit policy code also beats a 413 status: a policy denial must stay fatal, never a recoverable overflow.
+        const overflowCode = isOverflowCode(providerErrorCode(e.responseBody))
+        const policyCode = echoPolicyCode(e.responseBody)
+        if (policyCode && !overflowCode) {
+          return new MessageV2.APIError(
+            {
+              message: parsed.message,
+              statusCode: e.statusCode,
+              isRetryable: parsed.type === "api_error" ? parsed.isRetryable : e.isRetryable,
+              responseHeaders: parsed.type === "api_error" ? parsed.responseHeaders : e.responseHeaders,
+              responseBody: parsed.responseBody,
+              metadata: { ...(parsed.type === "api_error" ? parsed.metadata : undefined), code: policyCode },
+            },
+            { cause: e },
+          ).toObject()
+        }
+        if (parsed.type === "context_overflow" || overflowCode) {
           return new MessageV2.ContextOverflowError(
             {
               message: parsed.message,
@@ -1185,6 +1309,7 @@ export namespace MessageV2 {
             { cause: e },
           ).toObject()
         }
+        // altimate_change end
 
         return new MessageV2.APIError(
           {
@@ -1193,7 +1318,11 @@ export namespace MessageV2 {
             isRetryable: parsed.isRetryable,
             responseHeaders: parsed.responseHeaders,
             responseBody: parsed.responseBody,
-            metadata: parsed.metadata,
+            // altimate_change start — SDK-wrapped socket failures retain their structural transport code
+            metadata: echoNetworkCodes.has((e.cause as SystemError)?.code ?? "")
+              ? { ...parsed.metadata, code: (e.cause as SystemError).code ?? "" }
+              : parsed.metadata,
+            // altimate_change end
           },
           { cause: e },
         ).toObject()
@@ -1236,3 +1365,22 @@ export namespace MessageV2 {
     }
   }
 }
+
+// altimate_change start — recover committed echoes only from transient transport failures
+export function isEchoTransportError(error: MessageV2.Assistant["error"]): boolean {
+  if (error?.name !== "APIError") return false
+  const { statusCode, responseBody, metadata, isRetryable } = error.data
+  // Provider decisions can be wrapped by a gateway with a transient HTTP status.
+  // Inspect structured codes, never prose in a message or response body.
+  if (echoPolicyCode(responseBody) || isEchoPolicyCode(metadata?.code)) return false
+  if (statusCode !== undefined)
+    return (statusCode >= 500 && statusCode < 600) || statusCode === 429 || statusCode === 408
+  const code = metadata?.code
+  return (
+    (code !== undefined &&
+      (echoNetworkCodes.has(code) ||
+        ["ZlibError", "ProviderHeaderTimeoutError", "ProviderStreamIdleTimeoutError"].includes(code))) ||
+    (isRetryable && metadata?.url !== undefined && !responseBody)
+  )
+}
+// altimate_change end

@@ -25,7 +25,15 @@ function toEffectContext(ctx: LegacyContext, callID: string): Tool.Context {
     callID,
     extra: ctx.extra,
     messages: ctx.messages,
-    metadata: (input) => Effect.sync(() => ctx.metadata(input)),
+    // altimate_change start — preserve search result permissions in nested batch tools
+    permissions: ctx.permissions,
+    // altimate_change end
+    // altimate_change start — upstream_fix: preserve asynchronous metadata publication through legacy tool contexts.
+    metadata: (input) =>
+      Effect.promise(async () => {
+        await ctx.metadata(input)
+      }),
+    // altimate_change end
     ask: (input) => Effect.promise(() => ctx.ask(input)),
   }
 }
@@ -109,6 +117,9 @@ export const BatchTool = Tool.define("batch", {
         // altimate_change start — append file lessons before persisting each inner result
         const lessons = ctx.extra?.lessons as LessonDelivery | undefined
         await lessons?.appendFileLessons(ctx.sessionID, call.tool, call.parameters, result)
+        // altimate_change end
+        // altimate_change start — match direct-call ordering: append lessons before checking the result
+        Tool.assertSuccess(result)
         // altimate_change end
         const attachments = result.attachments?.map((attachment) => ({
           ...attachment,

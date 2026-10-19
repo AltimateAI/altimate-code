@@ -55,6 +55,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, promptOps: input.promptOps },
     agent: input.agent.name,
     messages: input.messages,
+    // altimate_change start — pass effective permission rules to search result filtering
+    permissions: Permission.merge(input.agent.permission, input.session.permission ?? []),
+    // altimate_change end
     metadata: (val) =>
       input.processor.updateToolCall(options.toolCallId, (match) => {
         if (!["running", "pending"].includes(match.state.status)) return match
@@ -75,7 +78,9 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           ...req,
           sessionID: input.session.id,
           tool: { messageID: input.processor.message.id, callID: options.toolCallId },
-          ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
+          // altimate_change start — preserve scoped search read approvals
+          ruleset: req.ruleset ?? Permission.merge(input.agent.permission, input.session.permission ?? []),
+          // altimate_change end
         })
         .pipe(Effect.orDie),
   })
@@ -137,6 +142,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             if (options.abortSignal?.aborted) {
               yield* input.processor.completeToolCall(options.toolCallId, stamped)
             }
+            Tool.assertSuccess(stamped)
             return stamped
             // altimate_change end
           }),

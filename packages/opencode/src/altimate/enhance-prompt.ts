@@ -6,6 +6,7 @@ import { Config } from "@/config/config"
 import { Log } from "@/altimate/util/log"
 import { MessageV2 } from "@/session/message-v2"
 import { MessageID, SessionID } from "@/session/schema"
+import { readStreamText } from "./llm/stream-text"
 
 const ENHANCE_NAME = "enhance-prompt"
 const ENHANCE_TIMEOUT_MS = 15_000
@@ -132,15 +133,7 @@ export async function enhancePrompt(text: string): Promise<string> {
       ],
     })
 
-    // Consume the stream explicitly to avoid potential SDK hangs where
-    // .text never resolves if the stream isn't drained (Vercel AI SDK caveat)
-    for await (const _ of stream.fullStream) {
-      // drain
-    }
-    const result = await Promise.resolve(stream.text).catch((err: unknown) => {
-      log.error("failed to enhance prompt", { error: err })
-      return undefined
-    })
+    const result = await readStreamText(stream)
 
     if (!result) return text
 

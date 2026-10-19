@@ -520,8 +520,13 @@ describe("Live trace viewer — /api/trace", () => {
     })
 
     try {
-      // startTrace writes initial snapshot — file should exist immediately
-      await new Promise((r) => setTimeout(r, 50))
+      // altimate_change start — wait for asynchronous snapshots, not a fixed write deadline
+      await pollTrace(
+        tracer,
+        (snapshot) => snapshot.spans.filter((span) => span.kind === "session").length === 1,
+        "the live viewer's initial session span",
+      )
+      // altimate_change end
       const r1 = await fetch(`http://localhost:${server.port}/api/trace`)
       expect(r1.status).toBe(200)
       const data1 = await r1.json() as TraceFile
@@ -533,7 +538,13 @@ describe("Live trace viewer — /api/trace", () => {
         tool: "bash", callID: "c1",
         state: { status: "completed", input: {}, output: "ok", time: { start: 1, end: 2 } },
       })
-      await new Promise((r) => setTimeout(r, 50))
+      // altimate_change start — the writer may still be draining an earlier snapshot
+      await pollTrace(
+        tracer,
+        (snapshot) => snapshot.spans.filter((span) => span.kind === "tool").length === 1,
+        "the live viewer's first tool span",
+      )
+      // altimate_change end
 
       const r2 = await fetch(`http://localhost:${server.port}/api/trace`)
       expect(r2.status).toBe(200)
@@ -545,7 +556,13 @@ describe("Live trace viewer — /api/trace", () => {
         tool: "read", callID: "c2",
         state: { status: "completed", input: {}, output: "content", time: { start: 3, end: 4 } },
       })
-      await new Promise((r) => setTimeout(r, 50))
+      // altimate_change start — assert eventual live updates without forcing a trace flush
+      await pollTrace(
+        tracer,
+        (snapshot) => snapshot.spans.filter((span) => span.kind === "tool").length === 2,
+        "the live viewer's second tool span",
+      )
+      // altimate_change end
 
       const r3 = await fetch(`http://localhost:${server.port}/api/trace`)
       const data3 = await r3.json() as TraceFile

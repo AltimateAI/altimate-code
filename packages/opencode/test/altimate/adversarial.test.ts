@@ -7,7 +7,14 @@
 
 import { describe, expect, test, beforeEach, beforeAll, afterAll, mock } from "bun:test"
 
-// Mock DuckDB driver so tests don't require the native duckdb package
+// Mock DuckDB driver so tests don't require the native duckdb package.
+// Bun's mock.module leaks across test files: snapshot the genuine exports before
+// mocking and restore them in afterAll so later DuckDB-backed tests see the real driver.
+import * as realDuckdb from "@altimateai/drivers/duckdb"
+const genuineDuckdb = { ...realDuckdb }
+afterAll(() => {
+  mock.module("@altimateai/drivers/duckdb", () => genuineDuckdb)
+})
 mock.module("@altimateai/drivers/duckdb", () => ({
   connect: async (config: any) => ({
     execute: async (sql: string) => ({
@@ -261,7 +268,9 @@ describe("Adversarial: Connection Registry", () => {
     }
     Registry.setConfigs(configs)
     const result = Registry.list()
-    expect(result.warehouses.length).toBe(1000)
+    // list() appends the implicit session-scoped `scratch` warehouse when any
+    // real warehouse is configured; count only the configured ones here.
+    expect(result.warehouses.filter((w: any) => w.name !== "scratch").length).toBe(1000)
   })
 
   test("remove() non-existent connection returns success", async () => {

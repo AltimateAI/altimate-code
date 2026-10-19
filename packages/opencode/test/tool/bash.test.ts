@@ -5,7 +5,7 @@ import path from "path"
 import { BashTool } from "../../src/tool/bash"
 import { Instance } from "../../src/project/instance"
 import { Filesystem } from "../../src/util/filesystem"
-import { tmpdir, provideTestInstance } from "../fixture/fixture"
+import { tmpdir, provideTestInstance, provideTmpdirInstance } from "../fixture/fixture"
 import type { PermissionNext } from "../../src/permission/next"
 import { Truncate } from "../../src/tool/truncation"
 import { SessionID, MessageID } from "../../src/session/schema"
@@ -14,6 +14,18 @@ import { Effect, Layer, ManagedRuntime } from "effect"
 import { Agent } from "../../src/agent/agent"
 import { Truncate as TruncateService } from "../../src/tool/truncate"
 import { InstanceRef } from "../../src/effect/instance-ref"
+import { PermissionEvaluate } from "../../src/permission/evaluate"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { testEffect } from "../lib/effect"
+
+const evaluateRequest = PermissionEvaluate.evaluateRequest
+const it = testEffect(CrossSpawnSpawner.defaultLayer)
+import { Tool } from "../../src/tool/tool"
+// altimate_change start — shell outcome signals at the shared tool wrapper
+import { spyOn } from "bun:test"
+import { Telemetry } from "../../src/altimate/telemetry"
+import * as DebugMode from "../../src/altimate/debug/mode"
+// altimate_change end
 
 // The shared tool fixture stubs Truncate with a no-op so most tool tests don't
 // truncate. Truncation tests need the REAL Truncate service, so build the tool
@@ -69,118 +81,465 @@ async function provideInstance<T>(directory: string, fn: () => Promise<T>): Prom
 }
 
 describe("tool.bash", () => {
+  it.live("keeps tool definitions identical across working directories", () =>
+    Effect.gen(function* () {
+      const definitions = []
+      for (let i = 0; i < 2; i++) {
+        definitions.push(
+          yield* provideTmpdirInstance((directory) =>
+            Effect.gen(function* () {
+              const instance = yield* InstanceRef
+              const bash = yield* Effect.promise(() => Instance.restore(instance!, () => initTool(BashTool)))
+              expect(bash.jsonSchema).toBeDefined()
+              return { directory, description: bash.description, parameters: JSON.stringify(bash.jsonSchema) }
+            }),
+          ),
+        )
+      }
+      expect(definitions[0].description).toBe(definitions[1].description)
+      expect(definitions[0].parameters).toBe(definitions[1].parameters)
+      for (const definition of definitions) {
+        expect(definition.description).not.toContain(definition.directory)
+        expect(definition.parameters).not.toContain(definition.directory)
+      }
+    }),
+  )
+
+  test("resolves the default working directory at execution and honors workdir", async () => {
+    await using first = await tmpdir({
+      init: (dir) => Bun.write(path.join(dir, "location.txt"), "first directory"),
+    })
+    await using second = await tmpdir({
+      init: (dir) => Bun.write(path.join(dir, "location.txt"), "second directory"),
+    })
+    for (const [directory, expected] of [
+      [first.path, "first directory"],
+      [second.path, "second directory"],
+    ]) {
+      await provideInstance(directory, async () => {
+        const bash = await initTool(BashTool)
+        const result = await bash.execute({ command: "cat location.txt", description: "Read directory fixture" }, ctx)
+        expect(result.metadata.exit).toBe(0)
+        expect(result.output).toBe(expected)
+      })
+    }
+    await provideInstance(first.path, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute(
+        { command: "cat location.txt", workdir: second.path, description: "Read directory fixture" },
+        ctx,
+      )
+      expect(result.metadata.exit).toBe(0)
+      expect(result.output).toBe("second directory")
+    })
+  })
+
   test("basic", async () => {
     await provideInstance(projectRoot, async () => {
-        const bash = await initTool(BashTool)
-        const result = await bash.execute(
-          {
-            command: "echo 'test'",
-            description: "Echo test message",
-          },
-          ctx,
-        )
-        expect(result.metadata.exit).toBe(0)
-        expect(result.metadata.output).toContain("test")
-      })
+      const bash = await initTool(BashTool)
+      const result = await bash.execute(
+        {
+          command: "echo 'test'",
+          description: "Echo test message",
+        },
+        ctx,
+      )
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.output).toContain("test")
+    })
   })
 })
 
 describe("tool.bash permissions", () => {
+  test.each([
+    ["cat ../sibling/output.md", "cat", "sibling/output.md"],
+    ['cat "../sibling/output.md"', "cat", "sibling/output.md"],
+    ["cd ../sibling && cat output.md", "cat", "sibling/output.md"],
+    ["cd ../sibling; cat output.md", "cat", "sibling/output.md"],
+    ["ls ..", "ls", ""],
+    ["ls; ls ..", "ls", ""],
+    ["cd .. && ls", "ls", ""],
+    ["cd ../sibling || exit 1; cat output.md", "cat", "sibling/output.md"],
+    ["cd -- ../sibling && cat output.md", "cat", "sibling/output.md"],
+    ["cd -P ../sibling && cat output.md", "cat", "sibling/output.md"],
+    ["cd ../sibling && cat output.md &", "cat", "sibling/output.md"],
+    ["cat -- ../sibling/output.md", "cat", "sibling/output.md"],
+    ["chmod -w ../sibling/output.md", "chmod -w", "sibling/output.md"],
+    ["cd ../sibling; cd a; cd b; cd c; cd d; cd e; cd f; cat output.md", "cat", "sibling/a/b/c/d/e/f/output.md"],
+    ["cd missing; cd ../sibling; cat output.md", "cat", "sibling/output.md"],
+  ])("denies normalized paths in %s", async (command, executable, target) => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "workspace"))
+    await fs.mkdir(path.join(tmp.path, "sibling"))
+    await Bun.write(path.join(tmp.path, "sibling", "output.md"), "private content")
+    await provideInstance(path.join(tmp.path, "workspace"), async () => {
+      const bash = await initTool(BashTool)
+      const absolute = `${executable} ${path.join(tmp.path, target)}`
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "*", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: absolute, action: "deny" },
+      ]
+      const testCtx = {
+        ...ctx,
+        ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          for (const pattern of request.patterns) {
+            if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+          }
+        },
+      }
+      for (const spelling of [absolute, command]) {
+        await expect(bash.execute({ command: spelling, description: "Inspect path" }, testCtx)).rejects.toThrow(
+          "Path denied",
+        )
+      }
+    })
+  })
+
+  test.each([
+    ["cd nested & cat local.txt", "cat nested/local.txt"],
+    ["cat 'one two'", "cat one two"],
+  ])("does not let an allow rule for a normalized spelling cover %s", async (command, allowedSpelling) => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "nested"))
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const absolute = (value: string) => value.replace(/(\S+)$/, (_, last) => path.join(tmp.path, last))
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "*", pattern: "*", action: "deny" },
+        { permission: "bash", pattern: absolute(allowedSpelling), action: "allow" },
+        { permission: "bash", pattern: "cd *", action: "allow" },
+      ]
+      const testCtx = {
+        ...ctx,
+        ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          for (const pattern of request.patterns) {
+            if (evaluateRequest(request, pattern, ruleset).action !== "allow") throw new Error("Path denied")
+          }
+        },
+      }
+      await expect(bash.execute({ command, description: "Read file" }, testCtx)).rejects.toThrow("Path denied")
+    })
+  })
+
+  test("denies the operand of a command when an option consumes a separate value", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const exact = `mkdir -m 700 ${path.join(tmp.path, "private")}`
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "*", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: exact, action: "deny" },
+      ]
+      const testCtx = {
+        ...ctx,
+        ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          for (const pattern of request.patterns) {
+            if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+          }
+        },
+      }
+      await expect(bash.execute({ command: "mkdir -m 700 private", description: "Make" }, testCtx)).rejects.toThrow(
+        "Path denied",
+      )
+    })
+  })
+
+  test("denies mixed authored and absolute operand spellings and numeric cd targets", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const deny = async (rule: string, command: string) => {
+        const ruleset: PermissionNext.Ruleset = [
+          { permission: "*", pattern: "*", action: "allow" },
+          { permission: "bash", pattern: rule, action: "deny" },
+        ]
+        const testCtx = {
+          ...ctx,
+          ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+            for (const pattern of request.patterns) {
+              if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+            }
+          },
+        }
+        await expect(bash.execute({ command, description: "Probe" }, testCtx)).rejects.toThrow("Path denied")
+      }
+      await deny(`cp public.txt ${path.join(tmp.path, "private.txt")}`, "cp public.txt private.txt")
+      await deny(`cat ${path.join(tmp.path, "123", "secret")}`, "cd 123 && cat secret")
+      await deny(`cp a b c ${path.join(tmp.path, "dest")}`, "cp a b c dest")
+      await deny(`cp a ${path.join(tmp.path, "b")} c d e`, "cp a b c d e")
+      await deny(`cat ${path.join(tmp.path, "secret")}`, "cat  secret")
+      await deny(`cat ${path.join(tmp.path, "secret$")}`, "cat secret\\$")
+      await fs.symlink(os.tmpdir(), path.join(tmp.path, "elsewhere"))
+      await deny(`cp * ${path.join(await fs.realpath(os.tmpdir()), "fresh-target")}`, "cp local elsewhere/fresh-target")
+    })
+  })
+
+  test("denies a symlinked operand by its resolved destination", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "real"))
+    await Bun.write(path.join(tmp.path, "real", "key"), "secret")
+    await fs.symlink(path.join(tmp.path, "real"), path.join(tmp.path, "link"))
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "*", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: `cat ${await fs.realpath(path.join(tmp.path, "real"))}/key`, action: "deny" },
+      ]
+      const testCtx = {
+        ...ctx,
+        ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          for (const pattern of request.patterns) {
+            if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+          }
+        },
+      }
+      await expect(bash.execute({ command: "cat link/key", description: "Read" }, testCtx)).rejects.toThrow(
+        "Path denied",
+      )
+    })
+  })
+
+  test("keeps directory changes inside subshells and substitutions", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "nested"))
+    await Bun.write(path.join(tmp.path, "local.txt"), "local content")
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      for (const command of ["(cd nested); cat local.txt", 'echo "$(cd nested)"; cat local.txt']) {
+        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+        await bash.execute(
+          { command, description: "Read local file" },
+          {
+            ...ctx,
+            ask: async (req: (typeof requests)[number]) => {
+              requests.push(req)
+            },
+          },
+        )
+        const request = requests.find((req) => req.permission === "bash")!
+        const ruleset: PermissionNext.Ruleset = [
+          { permission: "bash", pattern: "*", action: "allow" },
+          { permission: "bash", pattern: `cat ${path.join(tmp.path, "local.txt")}`, action: "deny" },
+        ]
+        expect(request.patterns.some((pattern) => evaluateRequest(request, pattern, ruleset).action === "deny")).toBe(
+          true,
+        )
+      }
+    })
+  })
+
+  test("retains exact relative command allow rules", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Bun.write(path.join(tmp.path, "local.txt"), "local content")
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "bash", pattern: "*", action: "deny" },
+        { permission: "bash", pattern: "cat local.txt", action: "allow" },
+      ]
+      const result = await bash.execute(
+        { command: "cat local.txt", description: "Read local file" },
+        {
+          ...ctx,
+          ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+            for (const pattern of request.patterns)
+              expect(evaluateRequest(request, pattern, ruleset).action).toBe("allow")
+          },
+        },
+      )
+      expect(result.output).toContain("local content")
+    })
+  })
+
+  test("keeps repeated commands in different directories as separate accesses", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "nested"))
+    await Bun.write(path.join(tmp.path, "local.txt"), "private content")
+    await Bun.write(path.join(tmp.path, "nested", "local.txt"), "public content")
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "bash", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: `cat ${path.join(tmp.path, "local.txt")}`, action: "deny" },
+        { permission: "bash", pattern: `cat ${path.join(tmp.path, "nested", "local.txt")}`, action: "allow" },
+      ]
+      await expect(
+        bash.execute(
+          {
+            command: "cat local.txt; cd nested && cat local.txt",
+            description: "Read files in two directories",
+          },
+          {
+            ...ctx,
+            ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+              for (const pattern of request.patterns) {
+                if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+              }
+            },
+          },
+        ),
+      ).rejects.toThrow("Path denied")
+    })
+  })
+
+  test("checks external_directory for parent listings", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      await expect(
+        bash.execute(
+          { command: "ls ..", description: "List parent directory" },
+          {
+            ...ctx,
+            ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+              if (request.permission === "external_directory") throw new Error("External directory denied")
+            },
+          },
+        ),
+      ).rejects.toThrow("External directory denied")
+    })
+  })
+
+  test("does not merge distinct raw rules for the same absolute command", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await Bun.write(path.join(tmp.path, "local.txt"), "private content")
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const ruleset: PermissionNext.Ruleset = [
+        { permission: "bash", pattern: "*", action: "allow" },
+        { permission: "bash", pattern: "cat local.txt", action: "deny" },
+        { permission: "bash", pattern: "cat ./local.txt", action: "allow" },
+      ]
+      await expect(
+        bash.execute(
+          { command: "cat local.txt; cat ./local.txt", description: "Read local file twice" },
+          {
+            ...ctx,
+            ask: async (request: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+              for (const pattern of request.patterns) {
+                if (evaluateRequest(request, pattern, ruleset).action === "deny") throw new Error("Path denied")
+              }
+            },
+          },
+        ),
+      ).rejects.toThrow("Path denied")
+    })
+  })
+
+  test("resolves relative workdir from the instance directory", async () => {
+    await using tmp = await tmpdir({ git: true })
+    await fs.mkdir(path.join(tmp.path, "nested"))
+    await Bun.write(path.join(tmp.path, "nested", "local.txt"), "nested content")
+    await provideInstance(tmp.path, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute(
+        {
+          command: "cat local.txt",
+          workdir: "nested",
+          description: "Read nested file",
+        },
+        ctx,
+      )
+      expect(result.metadata.exit).toBe(0)
+      expect(result.output).toContain("nested content")
+    })
+  })
+
   test("asks for bash permission with correct pattern", async () => {
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-        const testCtx = {
-          ...ctx,
-          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
-            requests.push(req)
-          },
-        }
-        await bash.execute(
-          {
-            command: "echo hello",
-            description: "Echo hello",
-          },
-          testCtx,
-        )
-        expect(requests.length).toBe(1)
-        expect(requests[0].permission).toBe("bash")
-        expect(requests[0].patterns).toContain("echo hello")
-      })
+      const bash = await initTool(BashTool)
+      const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+      const testCtx = {
+        ...ctx,
+        ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          requests.push(req)
+        },
+      }
+      await bash.execute(
+        {
+          command: "echo hello",
+          description: "Echo hello",
+        },
+        testCtx,
+      )
+      expect(requests.length).toBe(1)
+      expect(requests[0].permission).toBe("bash")
+      expect(requests[0].patterns).toContain("echo hello")
+    })
   })
 
   test("asks for bash permission with multiple commands", async () => {
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-        const testCtx = {
-          ...ctx,
-          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
-            requests.push(req)
-          },
-        }
-        await bash.execute(
-          {
-            command: "echo foo && echo bar",
-            description: "Echo twice",
-          },
-          testCtx,
-        )
-        expect(requests.length).toBe(1)
-        expect(requests[0].permission).toBe("bash")
-        expect(requests[0].patterns).toContain("echo foo")
-        expect(requests[0].patterns).toContain("echo bar")
-      })
+      const bash = await initTool(BashTool)
+      const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+      const testCtx = {
+        ...ctx,
+        ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          requests.push(req)
+        },
+      }
+      await bash.execute(
+        {
+          command: "echo foo && echo bar",
+          description: "Echo twice",
+        },
+        testCtx,
+      )
+      expect(requests.length).toBe(1)
+      expect(requests[0].permission).toBe("bash")
+      expect(requests[0].patterns).toContain("echo foo")
+      expect(requests[0].patterns).toContain("echo bar")
+    })
   })
 
   test("asks for external_directory permission when cd to parent", async () => {
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-        const testCtx = {
-          ...ctx,
-          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
-            requests.push(req)
-          },
-        }
-        await bash.execute(
-          {
-            command: "cd ../",
-            description: "Change to parent directory",
-          },
-          testCtx,
-        )
-        const extDirReq = requests.find((r) => r.permission === "external_directory")
-        expect(extDirReq).toBeDefined()
-      })
+      const bash = await initTool(BashTool)
+      const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+      const testCtx = {
+        ...ctx,
+        ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          requests.push(req)
+        },
+      }
+      await bash.execute(
+        {
+          command: "cd ../",
+          description: "Change to parent directory",
+        },
+        testCtx,
+      )
+      const extDirReq = requests.find((r) => r.permission === "external_directory")
+      expect(extDirReq).toBeDefined()
+    })
   })
 
   test("asks for external_directory permission when workdir is outside project", async () => {
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-        const testCtx = {
-          ...ctx,
-          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
-            requests.push(req)
-          },
-        }
-        await bash.execute(
-          {
-            command: "ls",
-            workdir: os.tmpdir(),
-            description: "List temp dir",
-          },
-          testCtx,
-        )
-        const extDirReq = requests.find((r) => r.permission === "external_directory")
-        expect(extDirReq).toBeDefined()
-        expect(extDirReq!.patterns).toContain(path.join(os.tmpdir(), "*"))
-      })
+      const bash = await initTool(BashTool)
+      const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+      const testCtx = {
+        ...ctx,
+        ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          requests.push(req)
+        },
+      }
+      await bash.execute(
+        {
+          command: "ls",
+          workdir: os.tmpdir(),
+          description: "List temp dir",
+        },
+        testCtx,
+      )
+      const extDirReq = requests.find((r) => r.permission === "external_directory")
+      expect(extDirReq).toBeDefined()
+      expect(extDirReq!.patterns).toContain(path.join(os.tmpdir(), "*"))
+    })
   })
 
   test("asks for external_directory permission when file arg is outside project", async () => {
@@ -191,215 +550,215 @@ describe("tool.bash permissions", () => {
     })
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-        const testCtx = {
-          ...ctx,
-          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
-            requests.push(req)
-          },
-        }
-        const filepath = path.join(outerTmp.path, "outside.txt")
-        await bash.execute(
-          {
-            command: `cat ${filepath}`,
-            description: "Read external file",
-          },
-          testCtx,
-        )
-        const extDirReq = requests.find((r) => r.permission === "external_directory")
-        const expected = path.join(outerTmp.path, "*")
-        expect(extDirReq).toBeDefined()
-        expect(extDirReq!.patterns).toContain(expected)
-        expect(extDirReq!.always).toContain(expected)
-      })
+      const bash = await initTool(BashTool)
+      const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+      const testCtx = {
+        ...ctx,
+        ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          requests.push(req)
+        },
+      }
+      const filepath = path.join(outerTmp.path, "outside.txt")
+      await bash.execute(
+        {
+          command: `cat ${filepath}`,
+          description: "Read external file",
+        },
+        testCtx,
+      )
+      const extDirReq = requests.find((r) => r.permission === "external_directory")
+      const expected = path.join(outerTmp.path, "*")
+      expect(extDirReq).toBeDefined()
+      expect(extDirReq!.patterns).toContain(expected)
+      expect(extDirReq!.always).toContain(expected)
+    })
   })
 
   test("does not ask for external_directory permission when rm inside project", async () => {
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-        const testCtx = {
-          ...ctx,
-          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
-            requests.push(req)
-          },
-        }
+      const bash = await initTool(BashTool)
+      const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+      const testCtx = {
+        ...ctx,
+        ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          requests.push(req)
+        },
+      }
 
-        await Bun.write(path.join(tmp.path, "tmpfile"), "x")
+      await Bun.write(path.join(tmp.path, "tmpfile"), "x")
 
-        await bash.execute(
-          {
-            command: `rm -rf ${path.join(tmp.path, "nested")}`,
-            description: "remove nested dir",
-          },
-          testCtx,
-        )
+      await bash.execute(
+        {
+          command: `rm -rf ${path.join(tmp.path, "nested")}`,
+          description: "remove nested dir",
+        },
+        testCtx,
+      )
 
-        const extDirReq = requests.find((r) => r.permission === "external_directory")
-        expect(extDirReq).toBeUndefined()
-      })
+      const extDirReq = requests.find((r) => r.permission === "external_directory")
+      expect(extDirReq).toBeUndefined()
+    })
   })
 
   test("includes always patterns for auto-approval", async () => {
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-        const testCtx = {
-          ...ctx,
-          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
-            requests.push(req)
-          },
-        }
-        await bash.execute(
-          {
-            command: "git log --oneline -5",
-            description: "Git log",
-          },
-          testCtx,
-        )
-        expect(requests.length).toBe(1)
-        expect(requests[0].always.length).toBeGreaterThan(0)
-        expect(requests[0].always.some((p) => p.endsWith("*"))).toBe(true)
-      })
+      const bash = await initTool(BashTool)
+      const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+      const testCtx = {
+        ...ctx,
+        ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          requests.push(req)
+        },
+      }
+      await bash.execute(
+        {
+          command: "git log --oneline -5",
+          description: "Git log",
+        },
+        testCtx,
+      )
+      expect(requests.length).toBe(1)
+      expect(requests[0].always.length).toBeGreaterThan(0)
+      expect(requests[0].always.some((p) => p.endsWith("*"))).toBe(true)
+    })
   })
 
   test("does not ask for bash permission when command is cd only", async () => {
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-        const testCtx = {
-          ...ctx,
-          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
-            requests.push(req)
-          },
-        }
-        await bash.execute(
-          {
-            command: "cd .",
-            description: "Stay in current directory",
-          },
-          testCtx,
-        )
-        const bashReq = requests.find((r) => r.permission === "bash")
-        expect(bashReq).toBeUndefined()
-      })
+      const bash = await initTool(BashTool)
+      const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+      const testCtx = {
+        ...ctx,
+        ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          requests.push(req)
+        },
+      }
+      await bash.execute(
+        {
+          command: "cd .",
+          description: "Stay in current directory",
+        },
+        testCtx,
+      )
+      const bashReq = requests.find((r) => r.permission === "bash")
+      expect(bashReq).toBeUndefined()
+    })
   })
 
   test("matches redirects in permission pattern", async () => {
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-        const testCtx = {
-          ...ctx,
-          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
-            requests.push(req)
-          },
-        }
-        await bash.execute({ command: "cat > /tmp/output.txt", description: "Redirect ls output" }, testCtx)
-        const bashReq = requests.find((r) => r.permission === "bash")
-        expect(bashReq).toBeDefined()
-        expect(bashReq!.patterns).toContain("cat > /tmp/output.txt")
-      })
+      const bash = await initTool(BashTool)
+      const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+      const testCtx = {
+        ...ctx,
+        ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          requests.push(req)
+        },
+      }
+      await bash.execute({ command: "cat > /tmp/output.txt", description: "Redirect ls output" }, testCtx)
+      const bashReq = requests.find((r) => r.permission === "bash")
+      expect(bashReq).toBeDefined()
+      expect(bashReq!.patterns).toContain("cat > /tmp/output.txt")
+    })
   })
 
   test("always pattern has space before wildcard to not include different commands", async () => {
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
-        const testCtx = {
-          ...ctx,
-          ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
-            requests.push(req)
-          },
-        }
-        await bash.execute({ command: "ls -la", description: "List" }, testCtx)
-        const bashReq = requests.find((r) => r.permission === "bash")
-        expect(bashReq).toBeDefined()
-        const pattern = bashReq!.always[0]
-        expect(pattern).toBe("ls *")
-      })
+      const bash = await initTool(BashTool)
+      const requests: Array<Omit<PermissionNext.Request, "id" | "sessionID" | "tool">> = []
+      const testCtx = {
+        ...ctx,
+        ask: async (req: Omit<PermissionNext.Request, "id" | "sessionID" | "tool">) => {
+          requests.push(req)
+        },
+      }
+      await bash.execute({ command: "ls -la", description: "List" }, testCtx)
+      const bashReq = requests.find((r) => r.permission === "bash")
+      expect(bashReq).toBeDefined()
+      const pattern = bashReq!.always[0]
+      expect(pattern).toBe("ls *")
+    })
   })
 })
 
 describe("tool.bash truncation", () => {
   test("truncates output exceeding line limit", async () => {
     await provideInstance(projectRoot, async () => {
-        const bash = await initToolWithTruncate(BashTool)
-        const lineCount = Truncate.MAX_LINES + 500
-        const result = await bash.execute(
-          {
-            command: `seq 1 ${lineCount}`,
-            description: "Generate lines exceeding limit",
-          },
-          ctx,
-        )
-        expect((result.metadata as any).truncated).toBe(true)
-        expect(result.output).toContain("truncated")
-        expect(result.output).toContain("The tool call succeeded but the output was truncated")
-      })
+      const bash = await initToolWithTruncate(BashTool)
+      const lineCount = Truncate.MAX_LINES + 500
+      const result = await bash.execute(
+        {
+          command: `seq 1 ${lineCount}`,
+          description: "Generate lines exceeding limit",
+        },
+        ctx,
+      )
+      expect((result.metadata as any).truncated).toBe(true)
+      expect(result.output).toContain("truncated")
+      expect(result.output).toContain("The tool call succeeded but the output was truncated")
+    })
   })
 
   test("truncates output exceeding byte limit", async () => {
     await provideInstance(projectRoot, async () => {
-        const bash = await initToolWithTruncate(BashTool)
-        const byteCount = Truncate.MAX_BYTES + 10000
-        const result = await bash.execute(
-          {
-            command: `head -c ${byteCount} /dev/zero | tr '\\0' 'a'`,
-            description: "Generate bytes exceeding limit",
-          },
-          ctx,
-        )
-        expect((result.metadata as any).truncated).toBe(true)
-        expect(result.output).toContain("truncated")
-        expect(result.output).toContain("The tool call succeeded but the output was truncated")
-      })
+      const bash = await initToolWithTruncate(BashTool)
+      const byteCount = Truncate.MAX_BYTES + 10000
+      const result = await bash.execute(
+        {
+          command: `head -c ${byteCount} /dev/zero | tr '\\0' 'a'`,
+          description: "Generate bytes exceeding limit",
+        },
+        ctx,
+      )
+      expect((result.metadata as any).truncated).toBe(true)
+      expect(result.output).toContain("truncated")
+      expect(result.output).toContain("The tool call succeeded but the output was truncated")
+    })
   })
 
   test("does not truncate small output", async () => {
     await provideInstance(projectRoot, async () => {
-        const bash = await initTool(BashTool)
-        const result = await bash.execute(
-          {
-            command: "echo hello",
-            description: "Echo hello",
-          },
-          ctx,
-        )
-        expect((result.metadata as any).truncated).toBe(false)
-        const eol = process.platform === "win32" ? "\r\n" : "\n"
-        expect(result.output).toBe(`hello${eol}`)
-      })
+      const bash = await initTool(BashTool)
+      const result = await bash.execute(
+        {
+          command: "echo hello",
+          description: "Echo hello",
+        },
+        ctx,
+      )
+      expect((result.metadata as any).truncated).toBe(false)
+      const eol = process.platform === "win32" ? "\r\n" : "\n"
+      expect(result.output).toBe(`hello${eol}`)
+    })
   })
 
   test("full output is saved to file when truncated", async () => {
     await provideInstance(projectRoot, async () => {
-        const bash = await initToolWithTruncate(BashTool)
-        const lineCount = Truncate.MAX_LINES + 100
-        const result = await bash.execute(
-          {
-            command: `seq 1 ${lineCount}`,
-            description: "Generate lines for file check",
-          },
-          ctx,
-        )
-        expect((result.metadata as any).truncated).toBe(true)
+      const bash = await initToolWithTruncate(BashTool)
+      const lineCount = Truncate.MAX_LINES + 100
+      const result = await bash.execute(
+        {
+          command: `seq 1 ${lineCount}`,
+          description: "Generate lines for file check",
+        },
+        ctx,
+      )
+      expect((result.metadata as any).truncated).toBe(true)
 
-        const filepath = (result.metadata as any).outputPath
-        expect(filepath).toBeTruthy()
+      const filepath = (result.metadata as any).outputPath
+      expect(filepath).toBeTruthy()
 
-        const saved = await Filesystem.readText(filepath)
-        const lines = saved.trim().split("\n")
-        expect(lines.length).toBe(lineCount)
-        expect(lines[0]).toBe("1")
-        expect(lines[lineCount - 1]).toBe(String(lineCount))
-      })
+      const saved = await Filesystem.readText(filepath)
+      const lines = saved.trim().split("\n")
+      expect(lines.length).toBe(lineCount)
+      expect(lines[0]).toBe("1")
+      expect(lines[lineCount - 1]).toBe(String(lineCount))
+    })
   })
 })
 
@@ -409,48 +768,44 @@ describe("tool.bash PATH injection", () => {
     await using tmp = await tmpdir({ git: true })
     const toolsDir = path.join(tmp.path, ".opencode", "tools")
     await fs.mkdir(toolsDir, { recursive: true })
-    await fs.writeFile(
-      path.join(toolsDir, "my-custom-tool"),
-      '#!/usr/bin/env bash\necho "custom-tool-output"',
-      { mode: 0o755 },
-    )
+    await fs.writeFile(path.join(toolsDir, "my-custom-tool"), '#!/usr/bin/env bash\necho "custom-tool-output"', {
+      mode: 0o755,
+    })
 
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const result = await bash.execute(
-          {
-            command: "my-custom-tool",
-            description: "Run custom tool from .opencode/tools/",
-          },
-          ctx,
-        )
-        expect(result.metadata.exit).toBe(0)
-        expect(result.metadata.output).toContain("custom-tool-output")
-      })
+      const bash = await initTool(BashTool)
+      const result = await bash.execute(
+        {
+          command: "my-custom-tool",
+          description: "Run custom tool from .opencode/tools/",
+        },
+        ctx,
+      )
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.output).toContain("custom-tool-output")
+    })
   })
 
   test(".altimate-code/tools/ is prepended to PATH so user tools are executable", async () => {
     await using tmp = await tmpdir({ git: true })
     const toolsDir = path.join(tmp.path, ".altimate-code", "tools")
     await fs.mkdir(toolsDir, { recursive: true })
-    await fs.writeFile(
-      path.join(toolsDir, "my-altimate-tool"),
-      '#!/usr/bin/env bash\necho "altimate-tool-output"',
-      { mode: 0o755 },
-    )
+    await fs.writeFile(path.join(toolsDir, "my-altimate-tool"), '#!/usr/bin/env bash\necho "altimate-tool-output"', {
+      mode: 0o755,
+    })
 
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const result = await bash.execute(
-          {
-            command: "my-altimate-tool",
-            description: "Run custom tool from .altimate-code/tools/",
-          },
-          ctx,
-        )
-        expect(result.metadata.exit).toBe(0)
-        expect(result.metadata.output).toContain("altimate-tool-output")
-      })
+      const bash = await initTool(BashTool)
+      const result = await bash.execute(
+        {
+          command: "my-altimate-tool",
+          description: "Run custom tool from .altimate-code/tools/",
+        },
+        ctx,
+      )
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.output).toContain("altimate-tool-output")
+    })
   })
 
   test("PATH does not contain duplicate .opencode/tools/ entries", async () => {
@@ -459,44 +814,290 @@ describe("tool.bash PATH injection", () => {
     await fs.mkdir(toolsDir, { recursive: true })
 
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const result = await bash.execute(
-          {
-            command: 'echo "$PATH"',
-            description: "Print PATH",
-          },
-          ctx,
-        )
-        const pathValue = result.metadata.output.trim()
-        const sep = process.platform === "win32" ? ";" : ":"
-        const entries = pathValue.split(sep)
-        const count = entries.filter((e: string) => e === toolsDir).length
-        expect(count).toBeLessThanOrEqual(1)
-      })
+      const bash = await initTool(BashTool)
+      const result = await bash.execute(
+        {
+          command: 'echo "$PATH"',
+          description: "Print PATH",
+        },
+        ctx,
+      )
+      const pathValue = result.metadata.output.trim()
+      const sep = process.platform === "win32" ? ";" : ":"
+      const entries = pathValue.split(sep)
+      const count = entries.filter((e: string) => e === toolsDir).length
+      expect(count).toBeLessThanOrEqual(1)
+    })
   })
 
   test("ALTIMATE_BIN_DIR is on PATH with higher priority than system dirs", async () => {
     await using tmp = await tmpdir({ git: true })
     await provideInstance(tmp.path, async () => {
-        const bash = await initTool(BashTool)
-        const result = await bash.execute(
-          {
-            command: 'echo "$PATH"',
-            description: "Print PATH to check ALTIMATE_BIN_DIR",
-          },
-          ctx,
-        )
-        const pathValue = result.metadata.output.trim()
-        const binDir = process.env.ALTIMATE_BIN_DIR
-        if (binDir) {
-          const sep = process.platform === "win32" ? ";" : ":"
-          const entries = pathValue.split(sep)
-          const binIdx = entries.indexOf(binDir)
-          // ALTIMATE_BIN_DIR should appear early in PATH (prepended, not appended)
-          expect(binIdx).toBeGreaterThanOrEqual(0)
-          expect(binIdx).toBeLessThan(5)
-        }
-      })
+      const bash = await initTool(BashTool)
+      const result = await bash.execute(
+        {
+          command: 'echo "$PATH"',
+          description: "Print PATH to check ALTIMATE_BIN_DIR",
+        },
+        ctx,
+      )
+      const pathValue = result.metadata.output.trim()
+      const binDir = process.env.ALTIMATE_BIN_DIR
+      if (binDir) {
+        const sep = process.platform === "win32" ? ";" : ":"
+        const entries = pathValue.split(sep)
+        const binIdx = entries.indexOf(binDir)
+        // ALTIMATE_BIN_DIR should appear early in PATH (prepended, not appended)
+        expect(binIdx).toBeGreaterThanOrEqual(0)
+        expect(binIdx).toBeLessThan(5)
+      }
+    })
   })
 })
+// altimate_change end
+
+// altimate_change start — shell failures are telemetry, not SDK tool errors
+describe("tool.bash failure telemetry", () => {
+  const traceback = `Traceback (most recent call last):
+  File "/tmp/ema.py", line 13, in <module>
+    else: g,f,cls=r['grant_date'],r['filing_date'],r['cls']
+                  ~^^^^^^^^^^^^^^
+KeyError: 'grant_date'
+`
+  const missingModule = `Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+ModuleNotFoundError: No module named 'sklearn'
+`
+
+  test("records a nonzero exit without an SDK error and preserves output", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({ command: "echo 'failed command'; exit 7", description: "Fail a command" }, ctx)
+      expect(result.metadata.exit).toBe(7)
+      expect(result.metadata.exit_code).toBe(7)
+      expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBeUndefined()
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+      expect(result.output).toBe("failed command\n")
+    })
+  })
+
+  test.each([
+    ["grep no match", "printf 'haystack\\n' | grep needle"],
+    ["diff differences", "diff <(printf 'left\\n') <(printf 'right\\n')"],
+  ])("records %s exit one without an SDK error", async (_, command) => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({ command, description: "Compare ordinary command results" }, ctx)
+      expect(result.metadata.exit_code).toBe(1)
+      expect(result.metadata.success).toBe(false)
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+    })
+  })
+
+  test("treats a trailing Python traceback on stdout with exit zero as data", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({ command: `cat <<'TRACEBACK'\n${traceback}TRACEBACK`, description: "Show traceback" }, ctx)
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(result.output).toBe(traceback)
+    })
+  })
+
+  test("keeps a stderr traceback followed by successful stdout successful at exit zero", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `cat >&2 <<'TRACEBACK'\n${missingModule}TRACEBACK\necho 'next command succeeded'`,
+        description: "Show missing module and subsequent output",
+      }, ctx)
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(result.output).toContain("next command succeeded")
+    })
+  })
+
+  test("records a final stderr traceback with empty stdout as failure telemetry at exit zero", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `cat >&2 <<'TRACEBACK'\n${missingModule}TRACEBACK`,
+        description: "Show a final stderr traceback",
+      }, ctx)
+      expect(result.metadata.exit_code).toBe(0)
+      expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBe("stderr_traceback")
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+    })
+  })
+
+  test("records a stderr traceback and nonzero exit despite stdout output", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `echo 'command started'; cat >&2 <<'TRACEBACK'\n${traceback}TRACEBACK\nexit 1`,
+        description: "Fail after stdout and stderr output",
+      }, ctx)
+      expect(result.metadata.exit_code).toBe(1)
+      expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBe("stderr_traceback")
+      expect(result.status).not.toBe("error")
+      expect(result.metadata.error).toBeUndefined()
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+    })
+  })
+
+  test("keeps a recovered stderr traceback successful at exit zero", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `cat >&2 <<'TRACEBACK'\n${traceback}Recovered successfully\nTRACEBACK`,
+        description: "Show a recovered stderr traceback",
+      }, ctx)
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.status).not.toBe("error")
+    })
+  })
+
+  test("successful output mentioning errors or a recovered stdout traceback stays successful", async () => {
+    await provideInstance(projectRoot, async () => {
+      const bash = await initTool(BashTool)
+      const result = await bash.execute({
+        command: `cat <<'TRACEBACK'\n${traceback}Recovered successfully\nTRACEBACK`,
+        description: "Show a recovered traceback",
+      }, ctx)
+      expect(result.metadata.exit).toBe(0)
+      expect(result.status).not.toBe("error")
+    })
+  })
+})
+// altimate_change end
+
+// altimate_change start — ordinary shell exits and execution failures have distinct signals
+test.each([
+  {
+    name: "grep no-match has a success hint and trace without core_failure",
+    command: `seq 1 ${Truncate.MAX_LINES + 10}; printf 'haystack\\n' | grep needle`,
+    timeout: undefined,
+    failureKind: undefined,
+    outcome: "success",
+    exitCode: 1,
+  },
+  {
+    name: "timeout retains a failed hint, error trace, and core_failure",
+    command: `seq 1 ${Truncate.MAX_LINES + 10}; sleep 30`,
+    timeout: 1000,
+    failureKind: "timeout",
+    outcome: "error",
+    exitCode: null,
+  },
+])("tool.bash $name", async ({ command, timeout, failureKind, outcome, exitCode }) => {
+  await provideInstance(projectRoot, async () => {
+    const bash = await initToolWithTruncate(BashTool)
+    const events: Telemetry.Event[] = []
+    const traces: string[] = []
+    const track = spyOn(Telemetry, "track").mockImplementation((event) => {
+      events.push(event)
+    })
+    const trace = spyOn(DebugMode, "traceToolCall").mockReturnValue((status) => {
+      traces.push(status)
+    })
+    try {
+      const result = await bash.execute({ command, timeout, description: "Generate output then finish the command" }, ctx)
+      expect(result.metadata.exit_code).toBe(exitCode)
+      expect(result.metadata.success).toBe(false)
+      expect(result.metadata.failure_kind).toBe(failureKind)
+      expect(result.status).not.toBe("error")
+      expect(() => Tool.assertSuccess(result)).not.toThrow()
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain(outcome === "error"
+        ? "The tool call failed but the output was truncated"
+        : "The tool call succeeded but the output was truncated")
+      expect(result.output).not.toContain(outcome === "error" ? "The tool call succeeded" : "The tool call failed")
+      expect(traces).toEqual([outcome])
+      expect(events.some((event) => event.type === "tool_call" && event.tool_name === "bash" && event.status === "error"))
+        .toBe(outcome === "error")
+      expect(events.some((event) => event.type === "core_failure" && event.tool_name === "bash")).toBe(outcome === "error")
+      expect(await Filesystem.readText(result.metadata.outputPath)).toContain(`${Truncate.MAX_LINES + 10}\n`)
+    } finally {
+      trace.mockRestore()
+      track.mockRestore()
+    }
+  })
+})
+// altimate_change end
+
+// altimate_change start — draining pipes must remain bounded after the shell exits
+test("tool.bash returns promptly after shell exit while a background child holds output open", async () => {
+  await using tmp = await tmpdir()
+  await provideInstance(tmp.path, async () => {
+    const bash = await initTool(BashTool)
+    const started = Date.now()
+    try {
+      const result = await bash.execute({
+        command: "sh -c 'sleep 30 & echo done; echo $! > background.pid'",
+        description: "Leave a child holding the output pipe",
+        timeout: 1000,
+      }, ctx)
+      expect(result.output).toBe("done\n")
+      expect(result.metadata.exit).toBe(0)
+      expect(result.metadata.exit_code).toBe(0)
+      expect(result.metadata.success).not.toBe(false)
+      expect(result.metadata.error).toBeUndefined()
+      expect(result.status).not.toBe("error")
+      expect(Date.now() - started).toBeLessThan(1500)
+    } finally {
+      const pid = Number(await fs.readFile(path.join(tmp.path, "background.pid"), "utf8").catch(() => ""))
+      if (pid) {
+        try {
+          process.kill(pid, "SIGTERM")
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error
+        }
+      }
+    }
+  })
+})
+
+test("tool.bash still terminates a foreground command after its timeout", async () => {
+  await provideInstance(projectRoot, async () => {
+    const bash = await initTool(BashTool)
+    const result = await bash.execute({ command: "sleep 30", description: "Time out a command", timeout: 20 }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.failure_kind).toBe("timeout")
+    expect(result.metadata.exit_code).toBeNull()
+    expect(result.metadata.error).toBeUndefined()
+    expect(result.status).not.toBe("error")
+    expect(result.output).toContain("exceeding timeout 20 ms")
+    expect(() => Tool.assertSuccess(result)).not.toThrow()
+  })
+}, 3000)
+
+test("tool.bash handles an already-aborted command without losing the exit event", async () => {
+  await provideInstance(projectRoot, async () => {
+    const bash = await initTool(BashTool)
+    const result = await bash.execute({ command: "sleep 2", description: "Abort a command", timeout: 20 }, {
+      ...ctx, abort: AbortSignal.abort(),
+    })
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.failure_kind).toBe("abort")
+    expect(result.metadata.exit_code).toBeNull()
+    expect(result.metadata.error).toBeUndefined()
+    expect(result.status).not.toBe("error")
+    expect(result.output).toContain("User aborted the command")
+    expect(() => Tool.assertSuccess(result)).not.toThrow()
+  })
+}, 3000)
 // altimate_change end

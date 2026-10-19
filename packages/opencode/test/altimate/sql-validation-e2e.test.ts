@@ -67,6 +67,9 @@ describe("Tool name consistency in prompts", () => {
         const analyst = await Agent.get("analyst")
         expect(analyst).toBeDefined()
         expect(analyst!.prompt).not.toContain("sql_validate")
+        expect(analyst!.prompt).toContain(
+          "keep that reasoning out of the final message. When a rule or policy decides the answer, read its full text (not a preview), enumerate each competing clause, and evaluate every condition as satisfied, violated or unknown against the row's own fields and dates before choosing.",
+        )
       },
     })
   })
@@ -83,16 +86,50 @@ describe("Tool name consistency in prompts", () => {
     })
   })
 
-  test("analyst prompt references altimate_core_validate (the real tool)", async () => {
+  test("analyst prompt references only real tool names", async () => {
+    // The mandatory validate/analyze ritual was removed (an A/B showed no demonstrated
+    // score benefit); the prompt no longer names altimate_core_validate.
+    // It still names the tools it relies on; each must be a registered tool id.
     await using tmp = await tmpdir()
     await Instance.provide({
       directory: tmp.path,
       fn: async () => {
         const analyst = await Agent.get("analyst")
         expect(analyst).toBeDefined()
-        expect(analyst!.prompt).toContain("altimate_core_validate")
+        for (const name of ["sql_analyze", "sql_materialize", "answer_commit", "task", "skill", "read"]) {
+          expect(analyst!.prompt).toContain(name)
+        }
+        expect(analyst!.prompt).not.toContain("altimate_core_validate")
       },
     })
+  })
+
+  test("analyst prompt requires deterministic answer finalization", async () => {
+    const prompt = await Bun.file(path.join(import.meta.dir, "../../src/altimate/prompts/analyst.txt")).text()
+    const paragraph = prompt.trim().split("\n\n").at(-1)
+    // altimate_change start - require one field for each requested answer item
+    expect(paragraph).toContain(
+      "Finish by calling `answer_commit` with the single chosen value(s) with one field per item the request asks for (every named item, such as an entity and its related item or count, must be its own field: when the request asks for only the answer, anything left in the basis or prose is dropped), a one-or-two-sentence basis (population, grain, source object/column), or `unresolved` with the reason, then reply with exactly the text it returns and nothing else.",
+    )
+    // altimate_change end
+    expect(paragraph).toContain("Always supply `basis`, even when unresolved")
+    expect(paragraph).toContain("it is never shown when the request asks for only the answer")
+    expect(paragraph).toContain("Never list excluded candidates or alternative answers")
+    expect(paragraph).toContain("when the request asks for only the answer or a specific format, set `answer_only`")
+  })
+
+  test("analyst prompt preserves the top-N boundary-tie contract", async () => {
+    const prompt = await Bun.file(path.join(import.meta.dir, "../../src/altimate/prompts/analyst.txt")).text()
+    expect(prompt.trim().split("\n\n").at(-1)).toContain(
+      "a top-N with a tie at the boundary still returns N concrete rows (note the tie briefly in `rows.note`)",
+    )
+  })
+
+  test("analyst prompt unavailable-tool fallback omits the answer_only label and basis", async () => {
+    const prompt = await Bun.file(path.join(import.meta.dir, "../../src/altimate/prompts/analyst.txt")).text()
+    expect(prompt.trim().split("\n\n").at(-1)).toContain(
+      "If `answer_commit` is unavailable, finish with one or two sentences of basis and a final line `**Answer:** <requested value(s), with units>`, or `**Answer:** unable to determine — <why>`; when the request asks for only the answer or a specific format, the final message is exactly the requested value(s) or table in the requested format, with no label and no basis (or `unable to determine — <why>` if unresolved); never guess.",
+    )
   })
 
   test("builder prompt contains pre-execution protocol with correct tool names", async () => {

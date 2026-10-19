@@ -41,6 +41,19 @@ import type { LLMEvent } from "@opencode-ai/llm"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change end
+// altimate_change start — capture effective request inputs through identity-bearing trace events
+import { asSchema } from "ai"
+import { normalizeBigInts } from "@/altimate/util/json"
+import { randomUUIDv7 } from "bun"
+import { Bus } from "@/bus"
+import { LLMRequestEvent } from "@/altimate/observability/tracing"
+// altimate_change end
+// altimate_change start — run deadlines override reasoning effort for each remaining request
+import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
+import { activeRun, effortOverride, hasActiveRuns, toolsDisabled } from "@/altimate/session/run-budget-effort"
+import { Session } from "@/session"
+import { SessionID } from "@/session/schema"
+// altimate_change end
 
 export namespace LLM {
   const log = Log.create({ service: "llm" })
@@ -48,10 +61,16 @@ export namespace LLM {
 
   export type StreamInput = {
     user: MessageV2.User
+    // altimate_change start — identify the assistant generation independently of its user turn
+    messageID?: string
+    // altimate_change end
     sessionID: string
     model: Provider.Model
     agent: Agent.Info
     system: string[]
+    // altimate_change start — upstream_fix: keep ambient context outside the reusable system prefix
+    environment?: string[]
+    // altimate_change end
     abort: AbortSignal
     messages: ModelMessage[]
     small?: boolean
@@ -61,6 +80,20 @@ export namespace LLM {
   }
 
   export type StreamOutput = StreamTextResult<ToolSet, never>
+
+  // altimate_change start — task subagents inherit a live ancestor's run effort without retaining state
+  async function sessionRunBudget(sessionID: string) {
+    if (!hasActiveRuns()) return undefined
+    const visited = new Set<string>()
+    let current: string | undefined = sessionID
+    while (current && !visited.has(current)) {
+      if (activeRun(current)) return { effort: effortOverride(current), toolsDisabled: toolsDisabled(current) }
+      visited.add(current)
+      current = (await Session.get(SessionID.make(current)).catch(() => undefined))?.parentID
+    }
+    return undefined
+  }
+  // altimate_change end
 
   // altimate_change start — Altimate Base gateway session-scoped abuse control
   export function withManagedSessionHeaders(
@@ -77,6 +110,10 @@ export namespace LLM {
   // altimate_change end
 
   export async function stream(input: StreamInput) {
+    // altimate_change start — normalize native tool values before estimation and SDK serialization
+    // Keep the stored tool result untouched and preserve binary/URL media objects.
+    input = { ...input, messages: normalizeBigInts(input.messages) }
+    // altimate_change end
     const l = log
       .clone()
       .tag("providerID", input.model.providerID)
@@ -119,6 +156,16 @@ export namespace LLM {
         .join("\n"),
     )
 
+    // altimate_change start — upstream_fix: keep per-session environment last. Providers with explicit
+    // cache breakpoints get it as its own trailing message (after the marked prefix); others keep a
+    // single system message with the environment at the end. Either way plugins still see it.
+    const environment = input.environment?.length ? input.environment.join("\n") : undefined
+    const splitEnvironment = environment !== undefined && ProviderTransform.usesExplicitCacheBreakpoints(input.model)
+    if (environment !== undefined) {
+      if (splitEnvironment) system.push(environment)
+      else system[0] = [system[0], environment].filter((x) => x).join("\n")
+    }
+
     const header = system[0]
     await Plugin.trigger(
       "experimental.chat.system.transform",
@@ -128,9 +175,12 @@ export namespace LLM {
     // rejoin to maintain 2-part structure for caching if header unchanged
     if (system.length > 2 && system[0] === header) {
       const rest = system.slice(1)
+      const at = splitEnvironment ? rest.lastIndexOf(environment!) : -1
+      if (at >= 0) rest.splice(at, 1)
       system.length = 0
-      system.push(header, rest.join("\n"))
+      system.push(header, ...(rest.length ? [rest.join("\n")] : []), ...(at >= 0 ? [environment!] : []))
     }
+    // altimate_change end
 
     const variant =
       !input.small && input.model.variants && input.user.variant ? input.model.variants[input.user.variant] : {}
@@ -214,7 +264,11 @@ export namespace LLM {
     )
     // altimate_change end
 
-    const tools = await resolveTools(input)
+    // altimate_change start — finalization must have no executable catalog, even for unsolicited tool calls
+    const runBudget = await sessionRunBudget(input.sessionID)
+    const tools: Record<string, Tool> = runBudget?.toolsDisabled ? {} : await resolveTools(input)
+    const toolChoice = runBudget?.toolsDisabled ? "none" : input.toolChoice
+    // altimate_change end
 
     // altimate_change start — ensure tool definitions exist for all tool_use blocks in history
     // The Anthropic API (and proxies like LiteLLM) require every tool_use block in
@@ -223,7 +277,7 @@ export namespace LLM {
     // tools absent from the current set. Add stub definitions for any missing tools.
     // Fixes: https://github.com/AltimateAI/altimate-code/issues/678
     const referencedTools = toolNamesFromMessages(input.messages)
-    addHistoricalToolStubs(tools, referencedTools, input.toolChoice)
+    addHistoricalToolStubs(tools, referencedTools, toolChoice)
     // altimate_change end
 
     // altimate_change start — tool retrieval
@@ -270,11 +324,54 @@ export namespace LLM {
           instructions: params.options.instructions,
         }),
     })
-    const requestOptions = clampReasoningBudget(params.options, maxOutputTokens)
+    // altimate_change start — deadline effort wins configured variants and plugin overrides
+    const requestOptions = clampReasoningBudget(
+      runBudget?.effort ? applyBudgetEffort(input.model, params.options) : params.options,
+      maxOutputTokens,
+    )
+    const requestMessages = budgetMessages(input.messages, input.model, requestOptions)
+    // altimate_change end
     // altimate_change end
 
     // altimate_change start — detect a toolless request once, for the message flattening below
     const declaresNoTools = Object.keys(tools).filter((x) => x !== "invalid").length === 0
+    // altimate_change end
+
+    // altimate_change start — record final system text and resolved tools before provider middleware
+    // Restrict capture to these fields: provider options/auth/headers never enter the event.
+    if (cfg.tracing?.enabled !== false) {
+      try {
+        await Bus.publish(LLMRequestEvent, {
+          requestID: randomUUIDv7(),
+          sessionID: input.sessionID,
+          messageID: input.messageID ?? input.user.id,
+          userMessageID: input.user.id,
+          agent: input.agent.name,
+          providerID: input.model.providerID,
+          modelID: input.model.id,
+          variant: input.small ? undefined : input.user.variant,
+          startTime: Date.now(),
+          system: [
+            ...system,
+            ...input.messages.filter((message) => message.role === "system").map((message) => message.content),
+          ].join("\n\n"),
+          instructions: typeof requestOptions.instructions === "string" ? requestOptions.instructions : undefined,
+          tools: await Promise.all(
+            Object.entries(tools)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(async ([name, definition]) => ({
+                name,
+                description: definition.description,
+                inputSchema: await asSchema(definition.inputSchema).jsonSchema,
+                active: name !== "invalid",
+                providerToolID: definition.type === "provider" ? definition.id : undefined,
+              })),
+          ),
+        })
+      } catch {
+        l.debug("failed to capture LLM request inputs")
+      }
+    }
     // altimate_change end
 
     return streamText({
@@ -316,7 +413,9 @@ export namespace LLM {
       // altimate_change end
       activeTools: Object.keys(tools).filter((x) => x !== "invalid"),
       tools,
-      toolChoice: input.toolChoice,
+      // altimate_change start — the finalization no-tools contract also suppresses historical stubs
+      toolChoice,
+      // altimate_change end
       // altimate_change start — use the plugin-selected reservation after context clamping
       maxOutputTokens,
       // altimate_change end
@@ -342,7 +441,9 @@ export namespace LLM {
         // history, so they would otherwise send tool calls referencing functions the request
         // never declares. The Altimate gateway fails every provider in its fallback chain on
         // that shape and reports one generic error; see ProviderTransform.flattenToolParts.
-        ...(declaresNoTools ? ProviderTransform.flattenToolParts(input.messages) : input.messages),
+        // altimate_change start — keep interrupted reasoning in storage without sending empty disabled-thinking turns
+        ...(declaresNoTools ? ProviderTransform.flattenToolParts(requestMessages) : requestMessages),
+        // altimate_change end
         // altimate_change end
       ],
       model: wrapLanguageModel({

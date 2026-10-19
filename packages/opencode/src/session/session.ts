@@ -1,3 +1,9 @@
+// altimate_change start — release session-owned scratch stores on deletion
+import { closeScratch } from "@/altimate/native/connections/scratch"
+// altimate_change end
+// altimate_change start — upstream_fix: normalize native integers before part persistence and events
+import { normalizeBigInts } from "@/altimate/util/json"
+// altimate_change end
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Slug } from "@opencode-ai/core/util/slug"
@@ -669,6 +675,9 @@ export const layer: Layer.Layer<
           yield* remove(child.id)
         }
 
+        // altimate_change start — release only the deleted session's scratch store
+        yield* Effect.promise(() => closeScratch(sessionID))
+        // altimate_change end
         yield* events.publish(SessionV1.Event.Deleted, { sessionID, info: session })
         yield* events.remove(sessionID)
       } catch (error) {
@@ -684,6 +693,9 @@ export const layer: Layer.Layer<
 
     const updatePart = <T extends SessionV1.Part>(part: T): Effect.Effect<T> =>
       Effect.gen(function* () {
+        // altimate_change start — upstream_fix: keep stored, published, and returned parts JSON-safe
+        part = normalizeBigInts(part, "safe-number")
+        // altimate_change end
         yield* events.publish(SessionV1.Event.PartUpdated, {
           sessionID: part.sessionID,
           part: structuredClone(part),

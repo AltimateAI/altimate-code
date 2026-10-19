@@ -15,6 +15,7 @@ import { RuntimeFlags } from "@/effect/runtime-flags"
 import { BackgroundJob } from "@/background/job"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { GlobalBus } from "@/bus/global"
+import { closeScratch, getScratch, scratchOpened } from "@/altimate/native/connections/scratch"
 
 const it = testEffect(
   Layer.mergeAll(
@@ -38,6 +39,19 @@ const awaitDeferred = <T>(deferred: Deferred.Deferred<T>, message: string) =>
   )
 
 const remove = (id: SessionID) => SessionNs.use.remove(id)
+
+it.instance("removing a session closes only its scratch store", () => Effect.gen(function* () {
+  const sessions = yield* SessionNs.Service
+  const a = yield* sessions.create({})
+  const b = yield* sessions.create({})
+  yield* Effect.addFinalizer(() => Effect.promise(() => closeScratch()))
+  yield* Effect.promise(() => Promise.all([getScratch(a.id), getScratch(b.id)]))
+  yield* sessions.remove(a.id)
+  expect(scratchOpened(a.id)).toBe(false)
+  expect(scratchOpened(b.id)).toBe(true)
+  yield* sessions.remove(b.id)
+  expect(scratchOpened(b.id)).toBe(false)
+}))
 
 describe("session.created event", () => {
   it.instance("should emit session.created event when session is created", () =>
@@ -201,6 +215,73 @@ describe("step-finish token propagation via event", () => {
 })
 
 describe("Session", () => {
+  it.instance("normalizes BigInt tool progress and results before persistence and events", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const events = yield* EventV2Bridge.Service
+      const info = yield* Effect.acquireRelease(session.create({}), (created) =>
+        session.remove(created.id).pipe(Effect.orDie),
+      )
+      const messageID = MessageID.ascending()
+      yield* session.updateMessage({
+        id: messageID,
+        sessionID: info.id,
+        role: "user",
+        time: { created: Date.now() },
+        agent: "user",
+        model: { providerID: "test", modelID: "test" },
+      } as SessionV1.Info)
+
+      const metadata = {
+        rows: [{ counts: [0n, 42n, -42n, 9007199254740991n, -9007199254740991n, 9007199254740992n, -9007199254740992n] }],
+      }
+      const expected = {
+        rows: [{ counts: [0, 42, -42, 9007199254740991, -9007199254740991, "9007199254740992", "-9007199254740992"] }],
+      }
+      const id = PartID.ascending()
+      const input = { warehouse: "scratch", query: "SELECT COUNT(*) AS count FROM items" }
+      const states: SessionV1.ToolState[] = [
+        { status: "running", input, metadata, time: { start: 1 } },
+        { status: "completed", input, metadata, title: "Count", output: "count\n42", time: { start: 1, end: 2 } },
+      ]
+
+      for (const state of states) {
+        const received = yield* Deferred.make<SessionV1.Part>()
+        const unsub = yield* events.listen((event) => {
+          if (event.type === MessageV2.Event.PartUpdated.type) {
+            const part = (event.data as { part: SessionV1.Part }).part
+            if (part.id === id && part.type === "tool" && part.state.status === state.status)
+              Deferred.doneUnsafe(received, Effect.succeed(part))
+          }
+          return Effect.void
+        })
+        yield* Effect.addFinalizer(() => unsub)
+
+        const part: SessionV1.ToolPart = {
+          id,
+          messageID,
+          sessionID: info.id,
+          type: "tool",
+          tool: "sql_execute",
+          callID: "count-items",
+          state,
+        }
+        const updated = yield* session.updatePart(part)
+        const published = yield* awaitDeferred(received, "timed out waiting for normalized tool part")
+        const persisted = yield* session.getPart({ sessionID: info.id, messageID, partID: id })
+
+        for (const value of [updated, published, persisted]) {
+          expect(value).toMatchObject({ state: { status: state.status, metadata: expected } })
+          expect(() => JSON.stringify(value)).not.toThrow()
+        }
+        expect(updated).not.toBe(part)
+        expect(metadata.rows[0].counts).toEqual([
+          0n, 42n, -42n, 9007199254740991n, -9007199254740991n, 9007199254740992n, -9007199254740992n,
+        ])
+      }
+    }),
+  )
+
   it.live("remove works without an instance", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service

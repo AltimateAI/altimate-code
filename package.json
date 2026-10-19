@@ -141,7 +141,9 @@
     "@opentui/keymap": "catalog:",
     "@opentui/solid": "catalog:",
     "@types/bun": "catalog:",
-    "@types/node": "catalog:"
+    "@types/node": "catalog:",
+    "@smithy/is-array-buffer": "4.2.2",
+    "@smithy/util-buffer-from": "4.2.2"
   },
   "patchedDependencies": {
     "@ff-labs/fff-bun@0.9.4": "patches/@ff-labs%2Ffff-bun@0.9.4.patch",

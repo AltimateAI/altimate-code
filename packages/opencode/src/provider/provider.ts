@@ -138,46 +138,218 @@ export namespace Provider {
     return Number(match[1]) >= 5 && !modelID.startsWith("gpt-5-mini")
   }
 
-  function wrapSSE(res: Response, ms: number, ctl: AbortController) {
-    if (typeof ms !== "number" || ms <= 0) return res
-    if (!res.body) return res
-    if (!res.headers.get("content-type")?.includes("text/event-stream")) return res
+  // altimate_change start — one provider-agnostic idle watchdog, including Bedrock event streams
+  function modelOutputDetector(contentType: string) {
+    const decoder = new TextDecoder()
+    let prefix = ""
+    let prefixBytes = 0
+    let truncated = false
+    let firstChar = true
+    let carriageReturn = false
+    let data = false
+    let ping = false
+    let otherData = false
+    let eventOutput: boolean | undefined
+    let pending: Uint8Array = new Uint8Array()
+    let headersLength: number | undefined
+    let remaining = 0
+    let frameOutput = false
+    return (chunk: Uint8Array) => {
+      let output = false
+      if (contentType.includes("text/event-stream")) {
+        // SSE fields apply to the whole block, even when event follows data.
+        // Ignore leading value whitespace and retain at most 64 bytes per line.
+        // Beyond that prefix, only remember whether non-whitespace arrived.
+        for (const char of decoder.decode(chunk, { stream: true })) {
+          if (firstChar) {
+            firstChar = false
+            if (char === "\uFEFF") continue
+          }
+          if (carriageReturn && char === "\n") {
+            carriageReturn = false
+            continue
+          }
+          carriageReturn = char === "\r"
+          if (char === "\n" || char === "\r") {
+            if (!prefix) {
+              if (data && (eventOutput ?? (!ping || otherData))) output = true
+              data = ping = otherData = false
+              eventOutput = undefined
+            } else if (prefix === "data" || prefix.startsWith("data:")) {
+              const value = prefix.slice(5).trim()
+              data = true
+              // Multiple nonempty data lines cannot be exactly one ping object.
+              otherData ||= truncated || (value !== "" && (value !== '{"type":"ping"}' || ping))
+              ping ||= value === '{"type":"ping"}'
+            } else if (prefix === "event" || prefix.startsWith("event:")) {
+              eventOutput = truncated || !/^(ping|keepalive|heartbeat)$/i.test(prefix.slice(6).trim())
+            }
+            prefix = ""
+            prefixBytes = 0
+            truncated = false
+          } else if ((prefix === "data:" || prefix === "event:") && !char.trim()) {
+            continue
+          } else if (prefixBytes < 64) {
+            const code = char.codePointAt(0)!
+            prefixBytes += code <= 0x7f ? 1 : code <= 0x7ff ? 2 : code <= 0xffff ? 3 : 4
+            if (prefixBytes <= 64) prefix += char
+            else truncated ||= !!char.trim()
+          } else {
+            truncated ||= !!char.trim()
+          }
+        }
+        return output
+      }
+
+      let offset = 0
+      while (offset < chunk.length) {
+        if (headersLength === undefined && remaining > 0) {
+          // Skip payload and CRC bytes without retaining or decoding them.
+          const count = Math.min(remaining, chunk.length - offset)
+          remaining -= count
+          offset += count
+          if (frameOutput) output = true
+          continue
+        }
+        const length = headersLength ?? 12
+        const count = Math.min(length - pending.length, chunk.length - offset)
+        const bytes = new Uint8Array(pending.length + count)
+        bytes.set(pending)
+        bytes.set(chunk.subarray(offset, offset + count), pending.length)
+        pending = bytes
+        offset += count
+        if (pending.length < length) break
+        if (headersLength === undefined) {
+          const prelude = new DataView(pending.buffer, pending.byteOffset, pending.byteLength)
+          const total = prelude.getUint32(0)
+          const headers = prelude.getUint32(4)
+          if (total < 16 || headers > total - 16) {
+            // Framing is unknown: let the SDK handle it and conservatively count output.
+            pending = new Uint8Array()
+            return true
+          }
+          headersLength = headers
+          remaining = total - 12 - headers
+        } else {
+          frameOutput = eventStreamFrameHasOutput(pending)
+          if (frameOutput) output = true
+          headersLength = undefined
+        }
+        pending = new Uint8Array()
+      }
+      return output
+    }
+  }
+
+  function eventStreamFrameHasOutput(headers: Uint8Array) {
+    const view = new DataView(headers.buffer, headers.byteOffset, headers.byteLength)
+    const decoder = new TextDecoder("utf-8", { fatal: true })
+    let offset = 0
+    let eventType: string | undefined
+    try {
+      while (offset < headers.length) {
+        const nameLength = view.getUint8(offset++)
+        if (!nameLength || offset + nameLength >= headers.length) return true
+        const name = decoder.decode(headers.subarray(offset, offset + nameLength))
+        offset += nameLength
+        const type = view.getUint8(offset++)
+        let length: number
+        if (type === 6 || type === 7) {
+          length = view.getUint16(offset)
+          offset += 2
+        } else {
+          const fixed = [0, 0, 1, 2, 4, 8, undefined, undefined, 8, 16][type]
+          if (fixed === undefined) return true
+          length = fixed
+        }
+        if (offset + length > headers.length) return true
+        if (name === ":event-type") {
+          if (type !== 7 || eventType !== undefined) return true
+          eventType = decoder.decode(headers.subarray(offset, offset + length))
+        }
+        offset += length
+      }
+    } catch {
+      return true
+    }
+    return !/^(heartbeat|ping|keepalive|metadata)$/i.test(eventType ?? "")
+  }
+
+  function wrapModelStream(res: Response, ms: number, ctl: AbortController, signal: AbortSignal | null) {
+    if (typeof ms !== "number" || ms <= 0 || !res.body) return res
+    const contentType = (res.headers.get("content-type") ?? "").toLowerCase()
+    if (!contentType.includes("text/event-stream") && !contentType.includes("application/vnd.amazon.eventstream"))
+      return res
 
     const reader = res.body.getReader()
+    const hasModelOutput = modelOutputDetector(contentType)
+    let deadline: number | undefined
+    let cancelled = false
+    // Once bytes reach the SDK, they may emit text, reasoning, or execute a tool.
+    // Be conservative even for protocol-only chunks: replay is no longer safe.
+    let emitted = false
+    let cancelPending: (() => void) | undefined
+    const cancelReader = (reason: unknown) => reader.cancel(reason).catch(() => {})
     const body = new ReadableStream<Uint8Array>({
       async pull(ctrl) {
+        const remaining = deadline === undefined ? ms : deadline - performance.now()
+        deadline ??= performance.now() + ms
         const part = await new Promise<Awaited<ReturnType<typeof reader.read>>>((resolve, reject) => {
-          const id = setTimeout(() => {
-            // altimate_change start — surface stalled SSE reads as ProviderError.ResponseStreamError
-            const err = new ProviderError.ResponseStreamError("SSE read timed out")
-            // altimate_change end
-            ctl.abort(err)
-            void reader.cancel(err)
-            reject(err)
-          }, ms)
-
-          reader.read().then(
-            (part) => {
-              clearTimeout(id)
-              resolve(part)
-            },
-            (err) => {
-              clearTimeout(id)
-              reject(err)
-            },
-          )
+          const cleanup = () => {
+            clearTimeout(id)
+            signal?.removeEventListener("abort", abort)
+            cancelPending = undefined
+          }
+          const fail = (error: unknown) => {
+            cleanup()
+            reject(error)
+          }
+          const abort = () => {
+            fail(signal?.reason)
+            void cancelReader(signal?.reason)
+          }
+          const expire = () => {
+            const error = new ProviderError.StreamIdleTimeoutError(ms, emitted)
+            // Preserve the timeout cause and replay safety before aborting the underlying fetch.
+            fail(error)
+            ctl.abort(error)
+            void cancelReader(error)
+          }
+          const id = setTimeout(expire, Math.max(0, remaining))
+          cancelPending = () => {
+            cleanup()
+            resolve({ done: true, value: undefined })
+          }
+          signal?.addEventListener("abort", abort, { once: true })
+          if (signal?.aborted) {
+            abort()
+            return
+          }
+          // Already-buffered protocol traffic must not starve a zero-delay timer.
+          if (remaining <= 0) {
+            expire()
+            return
+          }
+          reader.read().then((part) => {
+            cleanup()
+            resolve(part)
+          }, fail)
         })
 
+        if (cancelled) return
         if (part.done) {
           ctrl.close()
           return
         }
-
+        if (part.value.byteLength > 0) emitted = true
+        if (hasModelOutput(part.value)) deadline = performance.now() + ms
         ctrl.enqueue(part.value)
       },
       async cancel(reason) {
+        cancelled = true
+        cancelPending?.()
         ctl.abort(reason)
-        await reader.cancel(reason)
+        await cancelReader(reason)
       },
     })
 
@@ -187,6 +359,7 @@ export namespace Provider {
       statusText: res.statusText,
     })
   }
+  // altimate_change end
 
   // altimate_change start — abort fetches when response headers do not arrive in time
   function timeoutController(ms: number) {
@@ -1963,8 +2136,17 @@ export namespace Provider {
       if (existing) return existing
 
       const customFetch = options["fetch"]
-      const chunkTimeout = options["chunkTimeout"] || DEFAULT_CHUNK_TIMEOUT
+      // altimate_change start — environment override controls the single stream watchdog (0 disables)
+      // Precedence: valid ALTIMATE_STREAM_IDLE_TIMEOUT_MS (0 disables), provider chunkTimeout, then 300000ms.
+      const idleOverride = Env.get("ALTIMATE_STREAM_IDLE_TIMEOUT_MS")?.trim()
+      const parsedIdle = idleOverride ? Number(idleOverride) : NaN
+      const chunkTimeout = Number.isFinite(parsedIdle) && parsedIdle >= 0 && parsedIdle <= 2_147_483_647
+        ? parsedIdle === 0 ? 0 : Math.max(1, Math.floor(parsedIdle))
+        : options["chunkTimeout"] || DEFAULT_CHUNK_TIMEOUT
+      // altimate_change end
+      // altimate_change start — first-byte deadlines are opt-in unless the provider supplies a default
       const headerTimeout = options["headerTimeout"]
+      // altimate_change end
       delete options["chunkTimeout"]
       delete options["headerTimeout"]
 
@@ -2014,15 +2196,34 @@ export namespace Provider {
           }
         }
 
-        const res = await (async () =>
-          fetchFn(input, {
-            ...opts,
-            // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
-            timeout: false,
-          }))().finally(() => headerTimeoutCtl?.clear())
+        // altimate_change start — hooks may ignore cancellation while refreshing authentication
+        const res = await new Promise<Response>((resolve, reject) => {
+          const abort = () => reject(combined?.reason)
+          if (combined?.aborted) {
+            abort()
+            return
+          }
+          combined?.addEventListener("abort", abort, { once: true })
+          void Promise.resolve()
+            .then(() =>
+              fetchFn(input, {
+                ...opts,
+                // @ts-ignore see here: https://github.com/oven-sh/bun/issues/16682
+                timeout: false,
+              }),
+            )
+            .then((response) => {
+              if (combined?.aborted) void response.body?.cancel(combined.reason).catch(() => {})
+              resolve(response)
+            }, reject)
+            .finally(() => combined?.removeEventListener("abort", abort))
+        }).finally(() => headerTimeoutCtl?.clear())
+        // altimate_change end
 
         if (!chunkAbortCtl) return res
-        return wrapSSE(res, chunkTimeout, chunkAbortCtl)
+        // altimate_change start — streaming provider response bodies share the same idle watchdog
+        return wrapModelStream(res, chunkTimeout, chunkAbortCtl, combined)
+        // altimate_change end
       }
 
       const bundledFn = BUNDLED_PROVIDERS[model.api.npm]
@@ -2094,8 +2295,61 @@ export namespace Provider {
       const language = s.modelLoaders[model.providerID]
         ? await s.modelLoaders[model.providerID](sdk, model.api.id, { ...provider.options, ...model.options }, model)
         : sdk.languageModel(model.api.id)
-      s.models.set(key, language)
-      return language
+      // altimate_change start — replay safety follows decoded model output, never SSE heartbeat bytes
+      const wrapped: LanguageModelV2 = {
+        get specificationVersion() {
+          return language.specificationVersion
+        },
+        get provider() {
+          return language.provider
+        },
+        get modelId() {
+          return language.modelId
+        },
+        get supportedUrls() {
+          return language.supportedUrls
+        },
+        doGenerate: (options) => language.doGenerate(options),
+        doStream: async (options) => {
+          const result = await language.doStream(options)
+          const reader = result.stream.getReader()
+          let emitted = false
+          const failure = (error: unknown) =>
+            error instanceof ProviderError.StreamIdleTimeoutError
+              ? new ProviderError.StreamIdleTimeoutError(error.ms, emitted)
+              : error
+          return {
+            ...result,
+            stream: new ReadableStream({
+              async pull(controller) {
+                try {
+                  const part = await reader.read()
+                  if (part.done) {
+                    controller.close()
+                    return
+                  }
+                  const value = part.value
+                  if (
+                    ((value.type === "text-delta" || value.type === "reasoning-delta") && value.delta.length > 0) ||
+                    value.type === "tool-call" ||
+                    value.type === "tool-input-start"
+                  )
+                    emitted = true
+                  controller.enqueue(value.type === "error" ? { ...value, error: failure(value.error) } : value)
+                } catch (error) {
+                  controller.error(failure(error))
+                }
+              },
+              cancel(reason) {
+                return reader.cancel(reason)
+              },
+            }),
+          }
+        },
+      }
+      s.models.set(key, wrapped)
+      return wrapped
+      // altimate_change end
     } catch (e) {
       if (e instanceof NoSuchModelError)
         throw new ModelNotFoundError(

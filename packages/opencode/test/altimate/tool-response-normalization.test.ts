@@ -4,6 +4,7 @@ import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { SqlAnalyzeTool } from "../../src/altimate/tools/sql-analyze"
 import { SchemaInspectTool } from "../../src/altimate/tools/schema-inspect"
 import { LineageCheckTool } from "../../src/altimate/tools/lineage-check"
+import { SchemaCacheStatusTool } from "../../src/altimate/tools/schema-cache-status"
 import { AltimateCoreColumnLineageTool } from "../../src/altimate/tools/altimate-core-column-lineage"
 
 const ctx = {
@@ -158,6 +159,18 @@ describe("tool response normalization", () => {
 
     expect(result.metadata.success).toBe(false)
     expect(result.metadata.error).toContain("ECONNREFUSED")
+    expect(result.output).not.toContain("Ensure the dispatcher is running")
+  })
+
+  test("schema_cache_status preserves native failures without dispatcher startup advice", async () => {
+    Dispatcher.register("schema.cache_status", async () => {
+      throw new Error("Schema cache is unavailable")
+    })
+    const tool = await initTool(SchemaCacheStatusTool)
+    const result = await tool.execute({}, ctx as any)
+
+    expect(result.metadata.error).toBe("Schema cache is unavailable")
+    expect(result.output).toBe("Failed to get cache status: Schema cache is unavailable")
   })
 
   test("altimate_core_column_lineage unwraps data envelopes and errors cleanly", async () => {

@@ -59,7 +59,7 @@ function lineageError(msg: string) {
   return {
     title: "Lineage: ERROR",
     metadata: { success: false, error: msg },
-    output: `Failed to check lineage: ${msg}\n\nEnsure the dispatcher is running and altimate-core is initialized.`,
+    output: `Failed to check lineage: ${msg}`,
   }
 }
 

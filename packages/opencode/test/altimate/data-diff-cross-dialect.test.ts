@@ -24,7 +24,7 @@
  * (zero coupling to NAPI availability / Registry state) and more reliable in a
  * single-process test runner.
  */
-import { describe, test, expect, beforeAll, afterAll, beforeEach } from "bun:test"
+import { describe, test, expect, beforeAll, afterAll, beforeEach, mock, spyOn } from "bun:test"
 
 import {
   buildPartitionWhereClause,
@@ -229,4 +229,38 @@ describe("joindiff + cross-warehouse guard", () => {
       expect(result.error).not.toMatch(/joindiff requires both tables in the same warehouse/i)
     }
   })
+})
+
+describe("data.diff read-only warehouse probes", () => {
+  test.each(["postgres", "postgresql", "sqlite"])(
+    "partition discovery protects PostgreSQL reads and preserves other connector options (%s)",
+    async (type) => {
+      Registry.setConfigs({ probe: { type } })
+      const execute = mock(async () => ({ columns: ["partition_value"], rows: [], row_count: 0, truncated: false }))
+      const get = spyOn(Registry, "get").mockResolvedValue({ execute } as any)
+      try {
+        const result = await runDataDiff({
+          source: "public.orders",
+          target: "public.orders_copy",
+          key_columns: ["id"],
+          partition_column: "region",
+        })
+        expect(result.success).toBe(true)
+        expect(execute).toHaveBeenCalledTimes(2)
+        expect(get).toHaveBeenCalledWith("probe")
+        for (const call of execute.mock.calls) {
+          const [sql, limit, binds, options] = call as unknown as [string, unknown, unknown, { noLimit: boolean; readOnly?: boolean }]
+          expect(sql).toContain("SELECT DISTINCT")
+          expect(limit).toBeUndefined()
+          expect(binds).toBeUndefined()
+          expect(options.noLimit).toBe(true)
+          if (type === "sqlite") expect(options).not.toHaveProperty("readOnly")
+          else expect(options.readOnly).toBe(true)
+        }
+      } finally {
+        get.mockRestore()
+        Registry.reset()
+      }
+    },
+  )
 })

@@ -49,7 +49,7 @@ We collect the following categories of events:
 | `task_outcome_signal` | Behavioral quality signal at session end — accepted, error, abandoned, or cancelled. Includes tool count, step count, duration, and last tool category. No user content. |
 | `task_classified` | Intent classification of the first user message using keyword matching — category (e.g. `debug_dbt`, `write_sql`, `optimize_query`), confidence score, and detected warehouse type. No user text is sent — only the classified category. |
 | `tool_chain_outcome` | Aggregated tool execution sequence at session end — ordered tool names (capped at 50), error count, recovery count, final outcome, duration, and cost. No tool arguments or outputs. |
-| `error_fingerprint` | Hashed error pattern for anonymous grouping — SHA-256 hash of masked error message, error class, tool name, and whether recovery succeeded. Raw error content is never sent. |
+| `error_fingerprint` | Error pattern for grouping — SHA-256 hash of the masked error message, error class, tool name, whether recovery succeeded, plus `error_message`. `error_message` contains only words from a fixed list of common error terms taken from the first line of the error; every other word is replaced with `<x>`, so no user text, identifiers, paths, values or SQL can appear (max 200 characters). |
 | `sql_fingerprint` | SQL structural shape via AST parsing — statement types, table count, function count, subquery/aggregation/window function presence, and AST node count. No table names, column names, or SQL content. |
 | `schema_complexity` | Warehouse schema structural metrics from introspection — bucketed table, column, and schema counts plus average columns per table. No schema names or content. |
 | `validator_check` | A completion-gate validator ran on session end — validator name, `ok` boolean, step, retry count, `enforced` flag (false in shadow mode), and structured `details` (model counts, elapsed time, concurrency limit — no SQL or model content). Only emitted when `ALTIMATE_VALIDATORS_ENABLED=1` or `ALTIMATE_VALIDATORS_SHADOW=1`. See [Validators](../data-engineering/validators.md). |
@@ -210,7 +210,7 @@ Event type names use **snake_case** with a `domain_action` pattern:
 - `error_recovered` for error recovery events
 - `task_outcome_signal`, `task_classified` for session quality signals
 - `tool_chain_outcome` for tool execution chain aggregation
-- `error_fingerprint` for anonymous error pattern grouping
+- `error_fingerprint` for error pattern grouping, with a one-line error message built from a fixed vocabulary of common error words
 - `sql_fingerprint` for SQL structural analysis
 - `schema_complexity` for warehouse schema metrics
 

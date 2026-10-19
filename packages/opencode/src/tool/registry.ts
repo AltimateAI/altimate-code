@@ -33,6 +33,9 @@ import { WebSearchTool } from "./websearch"
 import { CodeSearchTool } from "./codesearch"
 import { Flag } from "@/flag/flag"
 import { Log } from "@/util/log"
+// altimate_change start — reserved tool IDs must use the permission matcher's platform semantics.
+import { Wildcard } from "@/util/wildcard"
+// altimate_change end
 import { LspTool } from "./lsp"
 // altimate_change start — bridge legacy plugin tools to the Effect Tool API (v1.17.9)
 import { Effect } from "effect"
@@ -42,6 +45,11 @@ import { AppRuntime } from "@/effect/app-runtime"
 // altimate_change end
 // altimate_change start — upstream_fix: task.background schema follows RuntimeFlags.
 import { RuntimeFlags } from "@/effect/runtime-flags"
+// altimate_change end
+// altimate_change start — upstream_fix: plugin tools share the optional filler contract
+import { Result, Schema } from "effect"
+import { fillerSafeParameters } from "./filler-parameters"
+import { ToolJsonSchema } from "./json-schema"
 // altimate_change end
 // altimate_change start — Effect Context.Service facade so v1.17.9 consumers that compose
 // ToolRegistry into the Effect runtime (yield* ToolRegistry.Service / .defaultLayer / .node)
@@ -56,6 +64,9 @@ import { pathToFileURL } from "url"
 
 // altimate_change start - import custom data engineering tools
 import { SqlExecuteTool } from "../altimate/tools/sql-execute"
+import { SqlMaterializeTool } from "../altimate/tools/sql-materialize"
+import { SqlCheckTool } from "../altimate/tools/sql-check"
+import { AnswerCommit } from "../altimate/tools/answer-commit"
 import { SchemaInspectTool } from "../altimate/tools/schema-inspect"
 import { SqlAnalyzeTool } from "../altimate/tools/sql-analyze"
 import { SqlOptimizeTool } from "../altimate/tools/sql-optimize"
@@ -153,6 +164,30 @@ import { TrainingImportTool } from "../altimate/tools/training-import"
 // altimate_change end
 // altimate_change start - import dbt PR review tool
 import { DbtPrReviewTool } from "../altimate/tools/dbt-pr-review"
+// altimate_change end
+
+// altimate_change start — upstream_fix: plugin tools share the optional filler contract
+function fillerSafePlugin(tool: Tool.DefWithoutID): Tool.DefWithoutID {
+  const schema = ToolJsonSchema.fromTool({ ...tool, id: "plugin" })
+  const parameters = fillerSafeParameters(tool.parameters, schema)
+  const decode = Schema.decodeUnknownResult(parameters)
+  const known = new Set(Object.keys(schema.properties ?? {}))
+  return {
+    ...tool,
+    parameters,
+    // Plugin handlers historically received raw arguments: use the normalized form only when it
+    // validates, and keep any arguments the schema does not list.
+    execute: (args, ctx) => {
+      const decoded = decode(args)
+      if (Result.isFailure(decoded) || !decoded.success || typeof decoded.success !== "object")
+        return tool.execute(args, ctx)
+      const extra = Object.fromEntries(
+        Object.entries(args as Record<string, unknown>).filter(([key]) => !known.has(key)),
+      )
+      return tool.execute({ ...extra, ...(decoded.success as object) }, ctx)
+    },
+  }
+}
 // altimate_change end
 
 export namespace ToolRegistry {
@@ -273,7 +308,7 @@ export namespace ToolRegistry {
               ...(result.attachments ? { attachments: result.attachments as any } : {}),
             }
           },
-        }),
+        }).pipe(Effect.map(fillerSafePlugin)),
     }
   }
   // altimate_change end
@@ -391,6 +426,8 @@ export namespace ToolRegistry {
       ...(Flag.OPENCODE_EXPERIMENTAL_PLAN_MODE && Flag.OPENCODE_CLIENT === "cli" ? [PlanExitTool] : []),
       // altimate_change start - register custom data engineering tools
       SqlExecuteTool,
+      SqlMaterializeTool,
+      SqlCheckTool,
       SchemaInspectTool,
       SqlAnalyzeTool,
       SqlOptimizeTool,
@@ -504,8 +541,9 @@ export namespace ToolRegistry {
     )
     // altimate_change end
     // altimate_change end
-    // altimate_change start — include plugin-provided custom tools
-    return [...resolved, ...custom, ...pluginCustom]
+    // altimate_change start — reserve the finalizer ID from file/plugin tools even when
+    // its native candidate is disabled or this catalogue is used without an analyst.
+    return [...resolved, ...custom, ...pluginCustom].filter((tool) => !Wildcard.match(tool.id, "answer_commit"))
     // altimate_change end
   }
 
@@ -518,10 +556,7 @@ export namespace ToolRegistry {
     return all(plugins, configInput)
   }
 
-  export async function ids(
-    plugins?: Awaited<ReturnType<typeof Plugin.list>>,
-    configInput?: RegistryConfigInput,
-  ) {
+  export async function ids(plugins?: Awaited<ReturnType<typeof Plugin.list>>, configInput?: RegistryConfigInput) {
     return all(plugins, configInput).then((x) => x.map((t) => t.id))
   }
   // altimate_change end
@@ -541,6 +576,13 @@ export namespace ToolRegistry {
     // A project linked to a workspace gets its integrations from the workspace's
     // engine only; the older datamate route is not offered there.
     const hidden = await hiddenToolIds()
+    // altimate_change end
+    // altimate_change start — analyst-only finalization is a gated candidate, never a tool_lookup catalogue entry.
+    // A configured agent named analyst intentionally retains access. External tools cannot
+    // use this reserved ID: all() excludes file/plugin collisions and MCP.tools excludes MCP collisions.
+    if (agent?.name === "analyst" && process.env.ALTIMATE_ANSWER_COMMIT !== "0") {
+      tools.push(await AppRuntime.runPromise(AnswerCommit.AnswerCommitTool))
+    }
     // altimate_change end
     const result = await Promise.all(
       tools
@@ -641,10 +683,7 @@ export namespace ToolRegistry {
             })
           : Effect.succeed(undefined)
       const bridgeWithPlugins = <T>(
-        fn: (
-          plugins?: Awaited<ReturnType<typeof Plugin.list>>,
-          configInput?: RegistryConfigInput,
-        ) => Promise<T>,
+        fn: (plugins?: Awaited<ReturnType<typeof Plugin.list>>, configInput?: RegistryConfigInput) => Promise<T>,
       ): Effect.Effect<T> =>
         Effect.gen(function* () {
           const plugins = yield* resolvePlugins()

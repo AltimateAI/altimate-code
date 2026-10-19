@@ -484,6 +484,9 @@ export const Assistant = Schema.Struct({
   structured: Schema.optional(Schema.Any),
   variant: Schema.optional(Schema.String),
   finish: Schema.optional(Schema.String),
+  // altimate_change start — preserve committed-answer echo diagnostics across Effect message events
+  metadata: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  // altimate_change end
 }).annotate({ identifier: "AssistantMessage" })
 export type Assistant = Omit<Types.DeepMutable<Schema.Schema.Type<typeof Assistant>>, "error"> & {
   error?: AssistantError

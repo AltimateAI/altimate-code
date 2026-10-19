@@ -47,6 +47,45 @@ describe("first-run health telemetry", () => {
     }
   })
 
+  test("startup_ready carries surface as a top-level property", () => {
+    const events: Telemetry.Event[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((event) => {
+      events.push(event)
+    })
+    try {
+      Telemetry.startupReady("serve")
+      const event = events.find((e) => e.type === "startup_ready") as Extract<
+        Telemetry.Event,
+        { type: "startup_ready" }
+      >
+      expect(event.surface).toBe("serve")
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test("client_connected is emitted exactly once per process with surface", () => {
+    const events: Telemetry.Event[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((event) => {
+      events.push(event)
+    })
+    try {
+      Telemetry.setCommand("serve")
+      Telemetry.clientConnected()
+      Telemetry.clientConnected()
+      Telemetry.clientConnected()
+      const connected = events.filter((e) => e.type === "client_connected") as Extract<
+        Telemetry.Event,
+        { type: "client_connected" }
+      >[]
+      expect(connected).toHaveLength(1)
+      expect(connected[0].surface).toBe("serve")
+      expect(connected[0].since_start_ms).toBeGreaterThan(0)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   test("loopStallFor reports only lags beyond the threshold", () => {
     expect(Telemetry.loopStallFor(1_000, 900, 500, "main")).toBeUndefined()
     const stall = Telemetry.loopStallFor(2_000, 500, 1_000, "worker")

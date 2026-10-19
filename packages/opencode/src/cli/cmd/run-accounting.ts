@@ -33,6 +33,41 @@ export type Termination = {
 // Timeout classification for why_harness_stopped="timeout" and retry decisions.
 const TIMEOUT_PATTERN = /\btimed?\s*out\b|\bETIMEDOUT\b|TimeoutError/i
 
+/** Request ownership from the ordered message/request event stream. */
+export function createRequestOwnership() {
+  let activeRequestID: string | undefined
+  const users = new Map<string, string | undefined>()
+  const assistants = new Map<string, string | undefined>()
+  const seenRequests = new Set<string>()
+  return {
+    get activeRequestID() {
+      return activeRequestID
+    },
+    beginRequest(messageID: string) {
+      if (seenRequests.has(messageID)) return false
+      seenRequests.add(messageID)
+      users.set(messageID, messageID)
+      activeRequestID = messageID
+      return true
+    },
+    onUserMessage(messageID: string, parentID?: string) {
+      // Internal rows have no parentID in their message schema. The prompt loop
+      // reports their origin separately, before creating the next assistant.
+      // A persisted real request always retains its own boundary.
+      if (seenRequests.has(messageID)) return
+      if (parentID !== undefined) users.set(messageID, users.get(parentID))
+      else if (!users.has(messageID)) users.set(messageID, activeRequestID)
+    },
+    onAssistantMessage(info: { id: string; parentID: string }) {
+      if (assistants.has(info.id)) return
+      assistants.set(info.id, users.get(info.parentID))
+    },
+    ownerOf(messageID: string) {
+      return assistants.get(messageID)
+    },
+  }
+}
+
 /** Holds only overflow errors whose trace status depends on later recovery. */
 export function createRecoverableOverflowTraceErrors() {
   let pending: string[] = []
@@ -57,6 +92,9 @@ export function createRecoverableOverflowTraceErrors() {
 export function create() {
   const summaryMessages = new Set<string>()
   let turnCount = 0
+  // altimate_change start — track the active request's committed echo turn allowance
+  let committedAnswer = false
+  // altimate_change end
   let lastFinishReason: string | undefined
   // altimate_change start — upstream_fix: onText and onStepFinish are
   // independently overwritten by whichever message last emitted a text/finish
@@ -71,6 +109,17 @@ export function create() {
   let lastTextExplicitDone = false
   let lastTextFromChallenge = false
   let budgetExhausted = false
+  // altimate_change start — an answered time-budget finalization recovers the exit status only
+  let timeBudgetExhausted = false
+  let budgetFinalizationAnswered = false
+  // altimate_change end
+  // altimate_change start — track one-shot budget finalization state
+  // The deliberate budget abort can arrive on both SSE and the POST result.
+  // Suppress each channel once, only before the one-shot finalization is sent.
+  let budgetAbortSuppressed = false
+  let budgetResultSuppressed = false
+  let budgetFinalizationSent = false
+  // altimate_change end
   let fatalError: { name: string; timeout: boolean } | undefined
   // An overflow is recoverable only after compaction actually completes. In
   // particular, compaction can be disabled or its own summarizer can fail.
@@ -100,6 +149,17 @@ export function create() {
   }
 
   return {
+    // altimate_change start — only a successful commit exempts the request's echo from its turn budget
+    resetCommittedAnswer() {
+      committedAnswer = false
+    },
+    onAnswerCommit(status: "completed" | "error") {
+      committedAnswer = status === "completed"
+    },
+    get committedAnswer() {
+      return committedAnswer
+    },
+    // altimate_change end
     /** Record whether an assistant message is actual compaction machinery. */
     onAssistantMessage(info: { id: string; agent?: string; summary?: boolean }) {
       if (info.summary === true) summaryMessages.add(info.id)
@@ -145,8 +205,23 @@ export function create() {
       challengeReplyActive = false
     },
     // altimate_change end
-    onSessionError(name: unknown, message?: string) {
+    // altimate_change start — account for intentional budget aborts by source
+    onSessionError(name: unknown, message?: string, source: "event" | "prompt" = "event") {
       const errorName = typeof name === "string" && name.length > 0 ? name : "UnknownError"
+      if (budgetExhausted && !budgetFinalizationSent && errorName === "MessageAbortedError") {
+        if (source === "event" && !budgetAbortSuppressed) {
+          budgetAbortSuppressed = true
+          // altimate_change start — let the CLI report intentional cancellation as a warning
+          return "budget-abort" as const
+          // altimate_change end
+        }
+        if (source === "prompt" && !budgetResultSuppressed) {
+          budgetResultSuppressed = true
+          // altimate_change start — same intentional cancellation on the synchronous prompt channel
+          return "budget-abort" as const
+          // altimate_change end
+        }
+      }
       if (errorName === "ContextOverflowError") {
         pendingContextOverflow = true
         return
@@ -157,6 +232,7 @@ export function create() {
       // Exactly ONE such abort exists per challenge — later aborts are real.
       if (
         idleDoneChallengeIssued &&
+        !budgetFinalizationSent &&
         !challengeAbortSuppressed &&
         !challengeReplySent &&
         errorName === "MessageAbortedError"
@@ -169,13 +245,32 @@ export function create() {
         timeout: TIMEOUT_PATTERN.test(errorName) || TIMEOUT_PATTERN.test(message ?? ""),
       }
     },
+    // altimate_change end
     /** Confirm that a previously reported context overflow recovered. */
     onCompactionRecovered() {
       pendingContextOverflow = false
     },
-    onBudgetExhausted() {
+    // altimate_change start — retain turn-limit behavior while allowing an answered time-limit finalization
+    onBudgetExhausted(kind: "turn" | "time" = "turn") {
       budgetExhausted = true
+      timeBudgetExhausted = kind === "time"
+      budgetFinalizationAnswered = false
     },
+    completeBudgetFinalization(answered: boolean): boolean {
+      if (!timeBudgetExhausted || !budgetFinalizationSent || !answered || fatalError || pendingContextOverflow) return false
+      budgetFinalizationAnswered = true
+      return true
+    },
+    // altimate_change end
+    // altimate_change start — allow one final response after budget exhaustion
+    /** Consume a local allowance only when the intentional abort is the sole fatal cause. */
+    takeBudgetFinalizationAllowance(): number | undefined {
+      if (!budgetExhausted || fatalError || pendingContextOverflow || budgetFinalizationSent) return undefined
+      budgetFinalizationSent = true
+      return turnCount + 1
+    },
+    // altimate_change end
+    // altimate_change start — distinguish budget abort results from finalization failures
     /**
      * Inspect the prompt call's returned terminal assistant message. Transport
      * failures can be swallowed upstream into a clean-looking idle (observed: a
@@ -189,20 +284,25 @@ export function create() {
       if (!info) return
       if (info.error) {
         const data = (info.error.data ?? {}) as Record<string, unknown>
-        this.onSessionError(info.error.name, typeof data.message === "string" ? data.message : undefined)
+        this.onSessionError(info.error.name, typeof data.message === "string" ? data.message : undefined, "prompt")
         return
       }
       if (info.finish === "error" || info.finish === "other") {
+        if (budgetExhausted && !budgetFinalizationSent && !budgetResultSuppressed) {
+          budgetResultSuppressed = true
+          return
+        }
         // the terminal message of the ONE prompt the idle-done fallback
         // aborted (to deliver its challenge) finishes abnormally by design;
         // any further abnormal finish is a real failure.
-        if (idleDoneChallengeIssued && !challengeFinishSuppressed && !challengeReplySent) {
+        if (idleDoneChallengeIssued && !budgetFinalizationSent && !challengeFinishSuppressed && !challengeReplySent) {
           challengeFinishSuppressed = true
           return
         }
         fatalError ??= { name: `AbnormalFinish:${info.finish}`, timeout: false }
       }
     },
+    // altimate_change end
     /** A non-2xx SDK response can carry `error` without a terminal message. */
     onPromptSendError(error: unknown, status?: number) {
       const detail = serializeSessionError(error)
@@ -210,7 +310,9 @@ export function create() {
     },
     /** True when the run ended by fatal abort — the process must exit nonzero. */
     get fatal() {
-      return budgetExhausted || fatalError !== undefined || pendingContextOverflow
+      // altimate_change start — keep budget attribution even after a final answer recovers the run
+      return (budgetExhausted && !budgetFinalizationAnswered) || fatalError !== undefined || pendingContextOverflow
+      // altimate_change end
     },
     /** Dual-attribution fields + done_reason for the run record/output. */
     termination(): Termination {

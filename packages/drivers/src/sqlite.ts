@@ -1,19 +1,30 @@
 /**
  * SQLite driver using Bun's built-in `bun:sqlite`.
- * Synchronous API wrapped in async interface.
+ *
+ * `bun:sqlite` is synchronous and has no interrupt, so the handle lives in a
+ * supervised helper process (see `local-engine.ts`) that the driver can kill to
+ * enforce the query execution deadline.
  */
 
-import { Database } from "bun:sqlite"
-import { allowsCreate, assertStoreExists, requireStorePath } from "./file-store"
+import { LocalEngine } from "./local-engine"
+import * as path from "path"
+import { resolveQueryTimeout } from "./query-timeout"
+import { allowsCreate, assertStoreExists, isLocalFilePath, requireStorePath } from "./file-store"
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   // altimate_change start — a missing path must fail loudly, not become :memory:
-  const dbPath = requireStorePath(config, "SQLite")
+  const cwd = process.cwd()
+  const configuredPath = requireStorePath(config, "SQLite")
+  const dbPath = isLocalFilePath(configuredPath) ? path.resolve(cwd, configuredPath) : configuredPath
   // altimate_change end
-  let db: Database | null = null
+  const engine = new LocalEngine({ engine: "sqlite", label: "SQLite", storePath: dbPath, cwd })
+  let opened = false
 
   return {
+    // altimate_change start — helper checks rows as the SQLite iterator advances
+    supportsResultByteLimit: true,
+    // altimate_change end
     async connect() {
       const isReadonly = config.readonly === true
       // altimate_change start — never conjure an empty store on open.
@@ -21,22 +32,24 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       // missing file there; the guard is told the effective decision.
       const willCreate = !isReadonly && allowsCreate(config)
       assertStoreExists(config, dbPath, "SQLite", willCreate)
-      db = new Database(dbPath, {
+      await engine.open({
+        path: dbPath,
         readonly: isReadonly,
         // `create` alone is no longer implied by "not readonly", so the
         // read-write flag has to be explicit — bun:sqlite rejects an options
         // object that sets no open flag at all.
         readwrite: !isReadonly,
         create: willCreate,
+        wal: !isReadonly,
       })
+      engine.registerSession()
+      opened = true
       // altimate_change end
-      if (!isReadonly) {
-        db.exec("PRAGMA journal_mode = WAL")
-      }
     },
 
     async execute(sql: string, limit?: number, _binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
-      if (!db) throw new Error("SQLite connection not open")
+      if (!opened) throw new Error("SQLite connection not open")
+      const timeoutMs = resolveQueryTimeout(config, options).ms
       const effectiveLimit = options?.noLimit ? 0 : (limit ?? 1000)
 
       // Determine if this is a SELECT-like statement
@@ -61,7 +74,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
       if (!isSelect) {
         // Non-SELECT statements (INSERT, UPDATE, DELETE, CREATE, etc.)
-        const info = db.prepare(sql).run()
+        // altimate_change start — report dispatch so callers can order follow-up work
+        const info = await engine.call<{ changes: number; lastInsertRowid: number | bigint }>(
+          "run",
+          { sql, readOnly: options?.readOnly },
+          timeoutMs,
+          options?.onDispatch,
+          options?.signal,
+        )
+        // altimate_change end
         return {
           columns: ["changes", "lastInsertRowid"],
           rows: [[info.changes, info.lastInsertRowid]],
@@ -70,8 +91,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         }
       }
 
-      const stmt = db.prepare(query)
-      const rows = stmt.all() as any[]
+      // altimate_change start — forward the budget before the helper collects rows
+      const rows = await engine.call<any[]>("all", { sql: query, maxResultBytes: options?.maxResultBytes, readOnly: options?.readOnly }, timeoutMs, options?.onDispatch, options?.signal)
+      // altimate_change end
       const columns = rows.length > 0 ? Object.keys(rows[0]) : []
       const truncated = effectiveLimit > 0 && rows.length > effectiveLimit
       const limitedRows = truncated ? rows.slice(0, effectiveLimit) : rows
@@ -94,12 +116,14 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     async listTables(
       _schema: string,
     ): Promise<Array<{ name: string; type: string }>> {
-      if (!db) throw new Error("SQLite connection not open")
-      const rows = db
-        .prepare(
-          "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
-        )
-        .all() as any[]
+      if (!opened) throw new Error("SQLite connection not open")
+      const rows = await engine.call<any[]>(
+        "all",
+        {
+          sql: "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        },
+        resolveQueryTimeout(config).ms,
+      )
       return rows.map((r: any) => ({
         name: r.name as string,
         type: r.type as string,
@@ -110,8 +134,12 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       _schema: string,
       table: string,
     ): Promise<SchemaColumn[]> {
-      if (!db) throw new Error("SQLite connection not open")
-      const rows = db.prepare('SELECT * FROM pragma_table_info(?) ORDER BY cid').all(table) as any[]
+      if (!opened) throw new Error("SQLite connection not open")
+      const rows = await engine.call<any[]>(
+        "all",
+        { sql: "SELECT * FROM pragma_table_info(?) ORDER BY cid", params: [table] },
+        resolveQueryTimeout(config).ms,
+      )
       return rows.map((r: any) => ({
         name: r.name as string,
         data_type: r.type as string,
@@ -120,9 +148,9 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     },
 
     async close() {
-      if (db) {
-        db.close()
-        db = null
+      if (opened) {
+        opened = false
+        await engine.close()
       }
     },
   }
