@@ -224,6 +224,9 @@ export function load(includeProjectConfig = true): void {
 
   if (configs.has(SCRATCH_NAME)) Log.Default.warn(SCRATCH_NAME_CONFLICT)
   loaded = true
+  // altimate_change start — real sources were read, so the registry is no longer test-injected
+  injected = false
+  // altimate_change end
 }
 
 /** Ensure configs are loaded. */

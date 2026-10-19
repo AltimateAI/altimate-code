@@ -23,8 +23,16 @@ function toolCtx() {
 
 let project: string
 let prevCwd: string
+let ambientConnEnv: Record<string, string>
 
 beforeEach(() => {
+  // Ambient connection env vars would make the empty-registry assertions depend on the caller's shell.
+  ambientConnEnv = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (!key.startsWith(Registry.CONN_ENV_PREFIX) || value === undefined) continue
+    ambientConnEnv[key] = value
+    delete process.env[key]
+  }
   prevCwd = process.cwd()
   project = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "whl-hint-")))
   process.chdir(project)
@@ -36,6 +44,7 @@ afterEach(() => {
   process.chdir(prevCwd)
   Registry.reset()
   fs.rmSync(project, { recursive: true, force: true })
+  Object.assign(process.env, ambientConnEnv)
 })
 
 describe("warehouse_list no-connections hint", () => {
