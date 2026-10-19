@@ -36,17 +36,68 @@ import { fileLog } from "@/altimate/util/file-log"
 import { SCRATCH_CONFIG, SCRATCH_DESCRIPTION, SCRATCH_NAME, closeScratch, getScratch, isScratch } from "./scratch"
 // altimate_change end
 
-/** In-memory config store. */
-let configs = new Map<string, ConnectionConfig>()
+// altimate_change start — registry state per project directory
+/**
+ * One project's registry. A server serves several project directories from one process (each request carries its
+ * own `Instance.directory`), so configs, connectors, in-flight connects and the load latch are kept per project:
+ * project A never sees project B's project-local entries, and switching projects never closes another project's
+ * connectors. The global file and `ALTIMATE_CODE_CONN_*` env are shared sources merged into each project's state.
+ */
+interface State {
+  /** The project directory this state was loaded for; scopes SSH tunnel keys. */
+  dir: string
+  /** In-memory config store. */
+  configs: Map<string, ConnectionConfig>
+  /** Cached connector instances. */
+  connectors: Map<string, Connector>
+  /** In-flight connector creation promises to prevent race conditions. */
+  pending: Map<string, Promise<Connector>>
+  /** Whether this state has been loaded from its sources. */
+  loaded: boolean
+}
 
-/** Cached connector instances. */
-const connectors = new Map<string, Connector>()
+function createState(dir: string): State {
+  return { dir, configs: new Map(), connectors: new Map(), pending: new Map(), loaded: false }
+}
 
-/** In-flight connector creation promises to prevent race conditions. */
-const pending = new Map<string, Promise<Connector>>()
+/** Registry state per resolved project directory. */
+const states = new Map<string, State>()
 
-/** Whether the registry has been loaded. */
-let loaded = false
+/**
+ * Set by setConfigs() (tests, benchmarks): one injected registry that every project uses until reset() or load(),
+ * so a test that injects outside an instance still sees its configs from inside one. load() only deactivates it,
+ * so connectors it cached stay reachable by closeAll().
+ */
+let injectedState: State | undefined
+let injectionActive = false
+
+/** The registry state the current request uses: the injected one while active, else its project's. */
+function state(): State {
+  if (injectionActive && injectedState) return injectedState
+  return projectState()
+}
+
+/** The registry state of the project the current request is working in. */
+function projectState(): State {
+  const dir = path.resolve(projectRoot())
+  let s = states.get(dir)
+  if (!s) {
+    s = createState(dir)
+    states.set(dir, s)
+  }
+  return s
+}
+
+/** Every state that may hold connectors, for process-wide teardown. */
+function allStates(): State[] {
+  return injectedState ? [...states.values(), injectedState] : [...states.values()]
+}
+
+/** SSH tunnels are keyed by connection name process-wide; scope the key to the project that owns the connection. */
+function tunnelKey(s: State, name: string): string {
+  return `${s.dir}\u0000${name}`
+}
+// altimate_change end
 
 const SCRATCH_NAME_CONFLICT =
   `Connection "${SCRATCH_NAME}" conflicts with the reserved built-in scratch warehouse name. ` +
@@ -77,12 +128,7 @@ export function globalConfigPath(): string {
  * context — early CLI paths and unit tests — and the working directory is the
  * right answer in exactly those cases, since `run --dir` has already chdir'd.
  *
- * The registry itself is still process-global: `loaded` latches on first
- * access, so one server process serving two projects keeps the first project's
- * configs for both. That predates this change — the base was simply the launch
- * directory for everyone — and making the registry per-instance is a larger
- * change than this fix. What this does guarantee is that whichever project
- * loads resolves against itself, not against wherever the server was started.
+ * It is also the key of the per-project registry state (see `state()`).
  */
 function projectRoot(): string {
   try {
@@ -196,20 +242,18 @@ function loadFromEnv(): Record<string, ConnectionConfig> {
   return result
 }
 
-/** Load all connection configs. Local overrides global; env overrides both. */
-export function load(includeProjectConfig = true): void {
+// altimate_change start — load into one project's state
+/** Read the sources into `s`. Local overrides global; env overrides both. */
+function loadInto(s: State): void {
+  const configs = s.configs
   configs.clear()
 
-  // altimate_change start — absolutize store paths against the directory that
-  // declared them, so a later process.chdir() (--dir) cannot move the store.
-  const base = projectRoot()
+  // absolutize store paths against the directory that declared them, so a later process.chdir() (--dir) cannot
+  // move the store. `s.dir` is the project this state belongs to.
+  const base = s.dir
   const global = resolveStorePaths(loadFromFile(globalConfigPath()), path.dirname(globalConfigPath()))
-  // altimate_change start — see ensureLoaded(): a later reload must not pull in another project's file
-  const local = includeProjectConfig ? resolveStorePaths(loadFromFile(localConfigPath()), base) : {}
-  if (includeProjectConfig) loadedProjectDir = base
-  // altimate_change end
+  const local = resolveStorePaths(loadFromFile(path.join(base, ".altimate-code", "connections.json")), base)
   const env = resolveStorePaths(loadFromEnv(), base)
-  // altimate_change end
 
   // Merge: global < local < env
   for (const [name, config] of Object.entries(global)) {
@@ -223,37 +267,25 @@ export function load(includeProjectConfig = true): void {
   }
 
   if (configs.has(SCRATCH_NAME)) Log.Default.warn(SCRATCH_NAME_CONFLICT)
-  loaded = true
-  // altimate_change start — real sources were read, so the registry is no longer test-injected
-  injected = false
-  // altimate_change end
+  s.loaded = true
 }
 
-/** Ensure configs are loaded. */
-function ensureLoaded(): void {
-  if (!loaded) load()
-  // altimate_change start — the registry latches on first load, so a connections file created after an empty
-  // answer (the `warehouse_list` hint) was never seen. Re-read only while nothing is loaded: there is no state to
-  // replace or close, and a populated registry never changes under a running session.
-  else if (configs.size === 0 && !injected) load(projectConfigApplies())
-  // altimate_change end
+/** Load the current project's connection configs from their sources, ending any setConfigs() injection. */
+export function load(): void {
+  injectionActive = false
+  loadInto(projectState())
 }
 
-// altimate_change start — the registry is process-global; this is the project whose local file it was loaded with
-let loadedProjectDir: string | undefined
-
-/**
- * Whether the current project's local connections file is the one this registry reads. A server serving several
- * directories shares one registry (pre-existing: the first load's project-local file applies process-wide), so a
- * later empty-registry reload must not load another project's file into it.
- */
-export function projectConfigApplies(): boolean {
-  return loadedProjectDir === undefined || loadedProjectDir === projectRoot()
+/** Ensure the current project's configs are loaded; returns its state. */
+function ensureLoaded(): State {
+  const s = state()
+  if (!s.loaded) loadInto(s)
+  // A connections file created after an empty answer (the `warehouse_list` hint) must be seen. Re-read only while
+  // this project's registry is empty: there is nothing to replace or close, and a populated registry never changes
+  // under a running session. An injected registry (setConfigs) is never re-read.
+  else if (s.configs.size === 0 && s !== injectedState) loadInto(s)
+  return s
 }
-// altimate_change end
-
-// altimate_change start — set by setConfigs() (tests): an injected empty registry is not a stale one
-let injected = false
 // altimate_change end
 
 // ---------------------------------------------------------------------------
@@ -304,7 +336,9 @@ export function canonicalType(type: string | undefined | null): string | null {
 }
 // altimate_change end
 
-async function createConnector(name: string, config: ConnectionConfig): Promise<Connector> {
+// altimate_change start — `tunnel` is the project-scoped SSH tunnel key
+async function createConnector(name: string, config: ConnectionConfig, tunnel: string): Promise<Connector> {
+  // altimate_change end
   const driverPath = DRIVER_MAP[config.type.toLowerCase()]
   if (!driverPath) {
     // altimate_change start — friendlier error for known-but-unsupported databases
@@ -360,12 +394,14 @@ async function createConnector(name: string, config: ConnectionConfig): Promise<
   // Handle SSH tunnel
   const sshConfig = extractSshConfig(resolvedConfig)
   if (sshConfig) {
-    const tunnel = await startTunnel(name, sshConfig)
+    // altimate_change start — project-scoped tunnel key
+    const tunnelInfo = await startTunnel(tunnel, sshConfig)
+    // altimate_change end
     // Rewrite host/port to use the local tunnel
     resolvedConfig = {
       ...resolvedConfig,
       host: "127.0.0.1",
-      port: tunnel.localPort,
+      port: tunnelInfo.localPort,
     }
   }
 
@@ -420,7 +456,9 @@ async function createConnector(name: string, config: ConnectionConfig): Promise<
   } catch (e) {
     // Clean up SSH tunnel if driver creation fails
     if (sshConfig) {
-      closeTunnel(name)
+      // altimate_change start — project-scoped tunnel key
+      closeTunnel(tunnel)
+      // altimate_change end
     }
     throw e
   }
@@ -528,14 +566,17 @@ function accountOf(config: ConnectionConfig | undefined): string {
 
 // altimate_change start — connection names without the census `list()` sends (used by `debug bundle`)
 export function names(): string[] {
-  ensureLoaded()
-  return [...configs.keys()]
+  return [...ensureLoaded().configs.keys()]
 }
 // altimate_change end
 
 /** Get a connector instance (creates lazily). */
 export async function get(name: string): Promise<Connector> {
-  ensureLoaded()
+  // altimate_change start — captured once, so a connect that finishes later lands in the project that started it
+  const s = ensureLoaded()
+  const { configs, connectors, pending } = s
+  const tunnel = tunnelKey(s, name)
+  // altimate_change end
   if (isScratch(name)) {
     if (configs.has(name)) throw new Error(SCRATCH_NAME_CONFLICT)
     return getScratch()
@@ -578,16 +619,30 @@ export async function get(name: string): Promise<Connector> {
     })
   } catch {}
   // altimate_change end
+  // altimate_change start — this attempt's pending slot; reload()/remove()/add() drop it to invalidate the attempt
+  const attempt: { promise?: Promise<Connector> } = {}
+  const current = () => attempt.promise !== undefined && pending.get(name) === attempt.promise
+  // altimate_change end
   const promise = (async () => {
     try {
-      const connector = await createConnector(name, config)
+      // altimate_change start — project-scoped tunnel key
+      const connector = await createConnector(name, config, tunnel)
       try {
         await connector.connect()
       } catch (connectErr) {
         // If connect() fails after tunnel was started, clean up the tunnel
-        closeTunnel(name)
+        closeTunnel(tunnel)
         throw connectErr
       }
+      // reload()/remove()/add() dropped this attempt while it was connecting: its config is gone or replaced, so
+      // it must not be cached over the current one.
+      if (!current()) {
+        await connector.close().catch(() => {})
+        // a newer attempt under this name owns the tunnel key now
+        if (!pending.has(name) && !connectors.has(name)) closeTunnel(tunnel)
+        throw new Error(`Connection "${name}" was reloaded or removed while it was connecting. Retry the request.`)
+      }
+      // altimate_change end
       connectors.set(name, connector)
       fileLog("INFO", "warehouse-connect", "connected", { name, type: config.type, auth: authMethod, duration_ms: Date.now() - startTime })
       try {
@@ -626,10 +681,15 @@ export async function get(name: string): Promise<Connector> {
       } catch {}
       throw e
     } finally {
-      pending.delete(name)
+      // altimate_change start — a newer attempt for this name may already own the slot
+      if (current()) pending.delete(name)
+      // altimate_change end
     }
   })()
 
+  // altimate_change start
+  attempt.promise = promise
+  // altimate_change end
   pending.set(name, promise)
   return promise
 }
@@ -639,7 +699,9 @@ let censusSent = false
 
 /** List all configured connections. */
 export function list(): { warehouses: (WarehouseInfo & { conflict?: string })[] } {
-  ensureLoaded()
+  // altimate_change start — the current project's registry
+  const { configs } = ensureLoaded()
+  // altimate_change end
   const warehouses: (WarehouseInfo & { conflict?: string })[] = []
   for (const [name, config] of configs) {
     const type = typeof config.type === "string" ? config.type.toLowerCase() : ""
@@ -700,8 +762,11 @@ export async function test(
   recoverable?: boolean
 }> {
   try {
+    // altimate_change start — the same project's state get() used
+    const s = state()
     const connector = await get(name)
-    const config = configs.get(name)
+    const config = s.configs.get(name)
+    // altimate_change end
     const dbType = config?.type?.toLowerCase()
     if (dbType === "mongodb" || dbType === "mongo") {
       // MongoDB doesn't support SQL — use the standard ping command
@@ -742,7 +807,10 @@ export async function add(
   }
   // altimate_change end
   try {
-    ensureLoaded()
+    // altimate_change start — act on the current project's state, captured before any await
+    const s = ensureLoaded()
+    const { configs, connectors, pending } = s
+    // altimate_change end
 
     // Normalize field names before saving so sensitive fields under alias
     // names (e.g., keyfileJson → credentials_json) are properly detected
@@ -776,6 +844,9 @@ export async function add(
     // session can connect even when keytar is unavailable. Only the disk
     // file uses the sanitized version (credentials stripped).
     configs.set(name, normalized)
+    // altimate_change start — a connect still in flight for the old config must not be cached over the new one
+    pending.delete(name)
+    // altimate_change end
 
     // Clear cached connector
     const cached = connectors.get(name)
@@ -808,7 +879,16 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
   if (isScratch(name)) return { success: false, error: `"${SCRATCH_NAME}" is built in and cannot be removed.` }
   // altimate_change end
   try {
-    ensureLoaded()
+    // altimate_change start — act on the current project's state, captured before any await
+    const s = ensureLoaded()
+    const { configs, connectors, pending } = s
+    const projectConfigPath = localConfigPath()
+    // A connect still in flight for this name will finish and keep its name in use; forgetting it now would let a
+    // later reconnect on that account be put down to another connection that shares it.
+    const inflight = pending.has(name)
+    // that connect must not be cached once the connection is gone
+    pending.delete(name)
+    // altimate_change end
 
     // Close connector if cached
     const cached = connectors.get(name)
@@ -822,10 +902,10 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
     }
 
     // Close SSH tunnel if active
-    closeTunnel(name)
-    // A connect still in flight for this name will finish and keep its name in use; forgetting it now would let a
-    // later reconnect on that account be put down to another connection that shares it.
-    if (!pending.has(name)) ReconnectLog.forget(name)
+    // altimate_change start — project-scoped tunnel key
+    closeTunnel(tunnelKey(s, name))
+    if (!inflight) ReconnectLog.forget(name)
+    // altimate_change end
 
     // Remove from global config file
     const globalPath = globalConfigPath()
@@ -839,7 +919,7 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
     // altimate_change start — remove its secrets from the OS credential store too. Entries are keyed by name
     // only, so they are kept while this project's config or an env var still defines a connection by that name.
     // (Own properties only: a connection named "constructor" must not count as defined.)
-    const stillDefined = Object.hasOwn(loadFromFile(localConfigPath()), name) || Object.hasOwn(loadFromEnv(), name)
+    const stillDefined = Object.hasOwn(loadFromFile(projectConfigPath), name) || Object.hasOwn(loadFromEnv(), name)
     const notRemoved = stillDefined ? [] : await forgetCredentials(name)
     if (notRemoved.length > 0) return { success: true, warnings: [notRemovedWarning(name, notRemoved)] }
     // altimate_change end
@@ -851,64 +931,79 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
 }
 
 // altimate_change start — a way to release native handles without reloading
-/**
- * Close every cached connector and drop it from the cache.
- *
- * `reset()` cannot do this: it is synchronous, and `close()` is not. Callers
- * that create real connectors (tests, and `reload()` below) must await this,
- * otherwise the native handle behind each connector stays open — on Windows
- * that also blocks deleting the file underneath it.
- */
-export async function closeAll(): Promise<void> {
-  await closeScratch()
-  for (const [, connector] of connectors) {
+/** Close one project's cached connectors and their SSH tunnels, and drop its in-flight connects. */
+async function closeState(s: State): Promise<void> {
+  s.pending.clear()
+  for (const [name, connector] of s.connectors) {
     try {
       await connector.close()
     } catch {
       // ignore
     }
+    closeTunnel(tunnelKey(s, name))
   }
-  connectors.clear()
+  s.connectors.clear()
+}
+
+/**
+ * Close every project's cached connectors (and the scratch warehouse) and drop them from the cache — process-wide
+ * teardown.
+ *
+ * `reset()` cannot do this: it is synchronous, and `close()` is not. Callers
+ * that create real connectors (tests) must await this,
+ * otherwise the native handle behind each connector stays open — on Windows
+ * that also blocks deleting the file underneath it.
+ */
+export async function closeAll(): Promise<void> {
+  await closeScratch()
+  for (const s of allStates()) await closeState(s)
 }
 // altimate_change end
 
-/** Reload all configs and clear cached connectors. */
+/** Reload the current project's configs and clear its cached connectors; other projects are untouched. */
 export async function reload(): Promise<void> {
-  await closeAll()
-  loaded = false
-  load()
+  // altimate_change start — only this project's connectors; states captured before the await
+  const s = state()
+  const target = projectState()
+  await closeState(s)
+  injectionActive = false
+  loadInto(target)
+  // altimate_change end
 }
 
 /** Get the raw config for a connection (for testing). */
 export function getConfig(name: string): ConnectionConfig | undefined {
-  ensureLoaded()
+  // altimate_change start — the current project's registry
+  const { configs } = ensureLoaded()
+  // altimate_change end
   if (isScratch(name) && !configs.has(name)) return { ...SCRATCH_CONFIG }
   return configs.get(name)
 }
 
-/** Reset the registry state (for testing). */
+/** Reset the registry state of every project (for testing). */
 export function reset(): void {
-  configs.clear()
-  connectors.clear()
-  pending.clear()
-  loaded = false
-  censusSent = false
   // altimate_change start
-  injected = false
-  loadedProjectDir = undefined
+  states.clear()
+  injectedState = undefined
+  injectionActive = false
   // altimate_change end
+  censusSent = false
 }
 
 /**
- * Set configs directly (for testing without file system).
+ * Set configs directly (for testing without file system). Every project uses them until reset() or load().
  */
 export function setConfigs(newConfigs: Record<string, ConnectionConfig>): void {
+  // altimate_change start — one injected state shared by every project; its cached connectors are kept, as before
+  injectedState ??= createState("")
+  injectionActive = true
+  const configs = injectedState.configs
+  // altimate_change end
   configs.clear()
   for (const [name, config] of Object.entries(newConfigs)) {
     configs.set(name, config)
   }
-  loaded = true
   // altimate_change start
-  injected = true
+  injectedState.loaded = true
   // altimate_change end
 }

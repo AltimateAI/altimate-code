@@ -22,7 +22,10 @@ export interface SshConfig {
   port: number
 }
 
-/** Active tunnels keyed by connection name. */
+/**
+ * Active tunnels keyed by an opaque tunnel key. The connection registry passes a key scoped to the project that
+ * owns the connection, so two projects with the same connection name never share or close each other's tunnel.
+ */
 const activeTunnels = new Map<string, TunnelInfo>()
 
 /** Clean up all tunnels on process exit. */
@@ -119,7 +122,8 @@ export async function startTunnel(
             } catch {
               // ignore
             }
-            activeTunnels.delete(name)
+            // a newer tunnel may already be registered under this key
+            if (activeTunnels.get(name) === tunnelInfo) activeTunnels.delete(name)
           },
         }
 
