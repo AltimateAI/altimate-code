@@ -2,7 +2,8 @@ import { describe, expect, test } from "bun:test"
 import { RunBudget } from "../../../src/altimate/run-budget"
 import { begin, downgradeEffort } from "../../../src/altimate/session/run-budget-effort"
 import { AnswerCommitTool, renderAnswer } from "../../../src/altimate/tools/answer-commit"
-import { CONJUNCTION_REJECTION_MARKER, requestedItems } from "../../../src/altimate/tools/answer-commit-conjunction"
+import { AnswerCommitConjunction } from "../../../src/altimate/tools/answer-commit-conjunction"
+const { CONJUNCTION_REJECTION_MARKER, requestedItems } = AnswerCommitConjunction
 import type { Tool } from "../../../src/tool/tool"
 import { initTool } from "../tool-fixture"
 

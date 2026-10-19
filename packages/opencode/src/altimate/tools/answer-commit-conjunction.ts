@@ -131,3 +131,5 @@ export function conjunctionRejection(
   const fields = `${names.length} field${names.length === 1 ? "" : "s"}`
   return `${CONJUNCTION_REJECTION_MARKER} the request appears to ask for ${count} items, but this commit has ${fields} (${JSON.stringify(names)}). The request also asks for ${joins.map((join) => `"${join}"`).join(", ")}. Call answer_commit again with each requested item as its own field, named after it. If the request asks for fewer items, recommit unchanged; the next commit is accepted.`
 }
+
+export * as AnswerCommitConjunction from "./answer-commit-conjunction"

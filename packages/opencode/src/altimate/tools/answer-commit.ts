@@ -4,7 +4,7 @@ import { Effect, Option, Schema, SchemaIssue } from "effect"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { Tool } from "../../tool/tool"
 // altimate_change start — one-time conjunction review
-import { conjunctionRejection } from "./answer-commit-conjunction"
+import { AnswerCommitConjunction } from "./answer-commit-conjunction"
 // altimate_change end
 
 /** Maximum rendered answer length, including Markdown and basis, before the model echoes it. */
@@ -308,7 +308,7 @@ export const AnswerCommitTool = Tool.define(
         yield* ctx.ask({ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} })
         const output = renderAnswer(args)
         // altimate_change start — one-time conjunction review of under-asked commits
-        const rejection = conjunctionRejection(args, ctx.messages ?? [], ctx.sessionID)
+        const rejection = AnswerCommitConjunction.conjunctionRejection(args, ctx.messages ?? [], ctx.sessionID)
         if (rejection) {
           const rejected: Tool.ExecuteResult = {
             title: "Answer not committed",
