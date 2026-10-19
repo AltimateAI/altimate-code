@@ -4,6 +4,7 @@ import { Database } from "bun:sqlite"
 import { mkdtemp, rm, stat, readFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+import { fileURLToPath } from "node:url"
 import { Client } from "@modelcontextprotocol/sdk/client/index.js"
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
@@ -207,9 +208,22 @@ mcpTest("spill output gives MCP-compatible file-reader instructions", async () =
     full_text_columns: ["name"],
   })
   expect(result.isError).toBe(false)
-  expect(text(result)).toContain("any file reader")
+  expect(text(result)).toContain("scratch table result_1")
   expect(text(result)).not.toContain("char_offset")
   expect(text(result)).not.toContain("Task tool")
+  // When the scratch table cannot be stored, the file stays the documented fallback.
+  const original = Registry.get
+  const get = spyOn(Registry, "get").mockImplementation(async (name) => {
+    if (name === "scratch") throw new Error("scratch unavailable")
+    return original(name)
+  })
+  try {
+    const fallback = await call("sql_execute", { warehouse: "source", query: "SELECT name FROM items", full_text_columns: ["name"] })
+    expect(text(fallback)).toContain("any file reader")
+    expect(text(fallback)).not.toContain("scratch table")
+  } finally {
+    get.mockRestore()
+  }
 })
 
 mcpTest("generic truncation saves output with client-neutral hints", async () => {
@@ -581,7 +595,7 @@ mcpTest("sql_execute spill returns text with the path plus a resource_link to th
   const link = content.find((item) => item.type === "resource_link")
   expect(link?.uri?.startsWith("file://")).toBe(true)
   expect(content[0]!.type).toBe("text")
-  expect(content[0]!.text).toContain("saved to")
+  expect(content[0]!.text).toContain(`File copy: ${fileURLToPath(link!.uri!)}`)
 })
 
 mcpTest("sql_execute without a spill returns text only", async () => {
@@ -752,6 +766,56 @@ mcpTest("sql_execute queries keeps the whole envelope inside one shared budget",
   const links = (result.content as { type: string; uri?: string }[]).filter((item) => item.type === "resource_link")
   expect(links).toHaveLength(2)
   expect(new Set(links.map((link) => link.uri)).size).toBe(2)
+})
+// altimate_change end
+
+// altimate_change start — spilled results become a scratch table to query, with a short preview
+const spillRows = (db: Database) => {
+  db.run("CREATE TABLE events (id INTEGER, code TEXT, note TEXT, ratio REAL)")
+  const insert = db.prepare("INSERT INTO events VALUES (?, ?, ?, ?)")
+  for (let i = 1; i <= 200; i++) {
+    insert.run(i, `00${i}`, i % 3 === 0 ? null : i % 3 === 1 ? "" : `a,"b"\nc ${"x".repeat(300)}`, i / 8)
+  }
+}
+
+mcpTest("a spilled result is queryable as a scratch table with exact values", async () => {
+  const { call } = await fixture(false, {}, undefined, spillRows)
+  const result = await call("sql_execute", { warehouse: "source", query: "SELECT * FROM events ORDER BY id", limit: 500 })
+  expect(result.isError).toBe(false)
+  const out = body(result)
+  expect(out).toContain("Preview: 10 of 200 returned rows.")
+  expect(out).toContain('scratch table result_1: query it with sql_execute(warehouse: "scratch"')
+  // Cells in the preview are clipped; the table keeps them whole.
+  expect(out).toContain("[cell clipped")
+  expect(out).not.toContain("x".repeat(300))
+  const check = await call("sql_execute", {
+    warehouse: "scratch",
+    query:
+      "SELECT COUNT(*) AS n, SUM(id) AS total, COUNT(note) AS non_null, SUM(CASE WHEN note = '' THEN 1 ELSE 0 END) AS empty, " +
+      "MIN(code) AS first_code, MAX(length(note)) AS longest, SUM(ratio) AS ratios, typeof(ANY_VALUE(code)) AS code_type FROM result_1",
+  })
+  // Text codes keep their leading zeros, NULL stays distinct from '', and long cells are whole.
+  expect(body(check)).toContain("200 | 20100 | 134 | 67 | 001 | 308 | 2512.5 | VARCHAR")
+  const longest = await call("sql_execute", {
+    warehouse: "scratch",
+    query: "SELECT note FROM result_1 WHERE id = 2",
+  })
+  expect(body(longest)).toContain('a,\\"b\\"\\nc ')
+})
+
+mcpTest("spill tables are numbered per session and skip a name the client already used", async () => {
+  const { call } = await fixture(false, {}, undefined, spillRows)
+  const created = await call("sql_materialize", {
+    source_warehouse: "source",
+    sql: "SELECT 1 AS taken",
+    target_table: "result_2",
+  })
+  expect(created.isError).toBe(false)
+  const first = body(await call("sql_execute", { warehouse: "source", query: "SELECT * FROM events", limit: 500 }))
+  const second = body(await call("sql_execute", { warehouse: "source", query: "SELECT id FROM events", limit: 500 }))
+  expect(first).toContain("scratch table result_1")
+  expect(second).toContain("scratch table result_3")
+  expect(body(await call("sql_execute", { warehouse: "scratch", query: "SELECT taken FROM result_2" }))).toContain("1")
 })
 // altimate_change end
 

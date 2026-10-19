@@ -15,7 +15,13 @@ interface FormatOptions {
   /** The executed statement; enables the empty-result hint. */
   sql?: string
   write: (text: string) => Promise<string>
+  /** MCP: called when the result spills; stores every returned row as a scratch table and returns its name. */
+  store?: () => Promise<string | undefined>
 }
+
+/** MCP spills show a short preview; the full rows are queryable in scratch. */
+const MCP_SPILL_PREVIEW_ROWS = 10
+const MCP_SPILL_CELL_BYTES = 160
 
 function lineCount(text: string): number {
   let lines = 1
@@ -158,17 +164,25 @@ function displayCell(value: unknown, ancestors = new Set<unknown>()): { text: st
   return { text: value === null ? "NULL" : String(value), clipped: false }
 }
 
-function previewRows(rows: unknown[][], maxBytes: number, maxLines: number, columns: number) {
+function previewRows(
+  rows: unknown[][],
+  maxBytes: number,
+  maxLines: number,
+  columns: number,
+  maxRows = SQL_MAX_PREVIEW_ROWS,
+  cellCap?: number,
+) {
   if (!columns) return { body: "", rows: 0, clipped: rows.length > 0 }
   const shown: string[] = []
   let bytes = 0
   let lines = 0
   let clipped = false
-  for (const row of rows.slice(0, SQL_MAX_PREVIEW_ROWS)) {
+  for (const row of rows.slice(0, maxRows)) {
     const values = row.slice(0, columns).map((v) => {
       const cell = displayCell(v)
-      clipped ||= cell.clipped
-      return cell.text
+      const text = cellCap === undefined ? cell.text : clipCell(cell.text, cellCap, 1)!
+      clipped ||= cell.clipped || text !== cell.text
+      return text
     })
     const remainingBytes = maxBytes - bytes - (shown.length ? 1 : 0)
     const remainingLines = maxLines - lines
@@ -467,6 +481,7 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     row_limited: result.truncated || excess,
     output_truncated: false,
     result_path: undefined as string | undefined,
+    scratch_table: undefined as string | undefined,
     // This tool owns clipping; the generic truncator must not clip away the envelope.
     truncated: false,
   }
@@ -481,7 +496,7 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     return { output: bounded(withHint(footer + note)), metadata }
   }
 
-  const rowsFor = (bytes: number, lines: number, indices: number[]) =>
+  const rowsFor = (bytes: number, lines: number, indices: number[], maxRows?: number, cellBytes?: number) =>
     fullText
       ? fullTextRows(
           rows.map((row) => indices.map((index) => (index in row ? row[index] : null))),
@@ -490,7 +505,7 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
           bytes,
           lines,
         )
-      : previewRows(rows, bytes, lines, indices.length)
+      : previewRows(rows, bytes, lines, indices.length, maxRows, cellBytes)
   // Ordinary, complete results retain their compact presentation. Full-text mode
   // always takes the spill path, even for empty results or unknown selected names.
   if (!fullText) {
@@ -517,34 +532,49 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
   }
 
   let spill: string
+  // MCP: a short preview, with every returned row queryable as a scratch table instead of a file to read.
+  const mcp = options.mcpClient === true
+  const previewLimit = mcp && !fullText ? MCP_SPILL_PREVIEW_ROWS : SQL_MAX_PREVIEW_ROWS
   try {
     const chunks: string[] = []
     serializeRows(result, (chunk) => chunks.push(chunk))
     metadata.result_path = await options.write(chunks.join(""))
-    const reader = options.mcpClient
+    const table = mcp && result.rows.length ? await options.store?.().catch(() => undefined) : undefined
+    metadata.scratch_table = table
+    const reader = mcp
       ? "Open this path with any file reader to recover clipped text."
       : "Use read with char_offset/max_chars to recover any clipped text."
-    spill = `All ${result.rows.length} returned rows saved to ${metadata.result_path}. JSONL text: columns/values per row; $bigint, $date (ISO), $bytes (base64) tags; strings unchanged. ${reader}`
+    spill = table
+      ? `All ${result.rows.length} returned rows are in scratch table ${table}: query it with sql_execute(warehouse: "scratch", query: "SELECT ... FROM ${table}") instead of reading the file. File copy: ${metadata.result_path}.`
+      : `All ${result.rows.length} returned rows saved to ${metadata.result_path}. JSONL text: columns/values per row; $bigint, $date (ISO), $bytes (base64) tags; strings unchanged. ${reader}`
   } catch {
     spill = `Spill failed (write/serialization error or ${SQL_MAX_SPILL_BYTES / 1024 / 1024} MiB size limit); returned rows were not saved.`
   }
   const envelope = (shown: number, clipped: boolean) =>
-    `Preview: ${shown} of ${result.rows.length} returned rows shown. ` +
-    (excess
-      ? `Note: connector returned ${result.rows.length} rows; showing at most ${limit} (requested row limit). `
-      : result.truncated
-        ? "Result may be row-limited (connector reported a limit; total unknown). More rows may exist. "
-        : "Row-limited: no. ") +
-    `Output truncated: ${clipped ? "yes" : "no"}. ${spill}` +
-    (clipped && !fullText ? " Prioritize specific cells with full_text_columns; omit limit to use the default." : "") +
-    "\n"
+    mcp
+      ? `Preview: ${shown} of ${result.rows.length} returned rows. ` +
+        (excess
+          ? `The connector returned more rows than the limit (${limit}). `
+          : result.truncated
+            ? "Row limit reached; more rows may exist. "
+            : "") +
+        `${spill}\n`
+      : `Preview: ${shown} of ${result.rows.length} returned rows shown. ` +
+        (excess
+          ? `Note: connector returned ${result.rows.length} rows; showing at most ${limit} (requested row limit). `
+          : result.truncated
+            ? "Result may be row-limited (connector reported a limit; total unknown). More rows may exist. "
+            : "Row-limited: no. ") +
+        `Output truncated: ${clipped ? "yes" : "no"}. ${spill}` +
+        (clipped && !fullText ? " Prioritize specific cells with full_text_columns; omit limit to use the default." : "") +
+        "\n"
 
   // Notes share the output budget, including missing names and tool annotations.
   // Keep room for the result contract even when a note is much larger than the cap.
   const shownNote =
     clipText(note, Math.floor(maxBytes / 4), Math.max(1, Math.floor(maxLines / 4)), "…[note clipped]") ?? ""
   const notesClipped = shownNote !== note
-  const essentials = envelope(Math.min(rows.length, SQL_MAX_PREVIEW_ROWS), true) + footer + shownNote
+  const essentials = envelope(Math.min(rows.length, previewLimit), true) + footer + shownNote
   if (!fits(essentials)) {
     metadata.schema_truncated = result.columns.length > 0
     metadata.output_truncated = metadata.truncated = true
@@ -558,11 +588,13 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
         fullText ? fullTextColumns : undefined,
       )
     : { text: "", indices: [], columns: 0, clipped: false }
-  const reserved = envelope(Math.min(rows.length, SQL_MAX_PREVIEW_ROWS), true) + schema.text + footer + shownNote
+  const reserved = envelope(Math.min(rows.length, previewLimit), true) + schema.text + footer + shownNote
   const preview = rowsFor(
     Math.max(0, maxBytes - Buffer.byteLength(reserved)),
     Math.max(0, maxLines - lineCount(reserved) + 1),
     schema.indices,
+    previewLimit,
+    mcp ? MCP_SPILL_CELL_BYTES : undefined,
   )
   metadata.preview_rows = preview.rows
   metadata.preview_columns = schema.columns

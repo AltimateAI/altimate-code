@@ -35,6 +35,7 @@ import * as Precedence from "../workspace/precedence"
 import { normalizeError } from "./response-normalization"
 // altimate_change end
 import { readSql } from "./sql-check"
+import { MaterializeError, storeRows } from "./sql-materialize"
 
 const MAX_SQL_ROWS = 10_000
 const LIMIT_ERROR = "limit must be a finite positive integer"
@@ -408,6 +409,10 @@ export const SqlExecuteTool = Tool.define(
                 maxBytes: routingClipped ? 0 : maxBytes - routingBytes,
                 maxLines: limits.maxLines - routingLines,
                 write: (text) => bridge.promise(truncate.write(text)),
+                store:
+                  ctx.extra?.mcpClient === true
+                    ? () => storeSpill(result, { signal: ctx.abort, sessionID: ctx.sessionID })
+                    : undefined,
               })
               // altimate_change start — progressive disclosure suggestions
               if (suggestion && formatted.output.includes(suggestion)) {
@@ -451,6 +456,34 @@ export const SqlExecuteTool = Tool.define(
       })
   }),
 )
+
+/** Next spill table number per session; names are sequential, so outputs stay reproducible. */
+const spillCounters = new Map<string, number>()
+const MAX_SPILL_SESSIONS = 1_000
+const SPILL_NAME_ATTEMPTS = 5
+
+/**
+ * Stores a spilled result's returned rows as scratch table result_N, so the client queries them
+ * instead of reading the file. Undefined when storing fails; the file remains the fallback.
+ */
+async function storeSpill(result: SqlExecuteResult, context: { signal: AbortSignal; sessionID: string }) {
+  for (let attempt = 0; attempt < SPILL_NAME_ATTEMPTS; attempt++) {
+    const next = (spillCounters.get(context.sessionID) ?? 0) + 1
+    spillCounters.delete(context.sessionID)
+    spillCounters.set(context.sessionID, next)
+    if (spillCounters.size > MAX_SPILL_SESSIONS) spillCounters.delete(spillCounters.keys().next().value!)
+    const table = `result_${next}`
+    try {
+      await storeRows(table, result, context)
+      return table
+    } catch (error) {
+      context.signal.throwIfAborted()
+      // A table the client created under this name: try the next number.
+      if (!(error instanceof MaterializeError && error.message.includes("already exists"))) return undefined
+    }
+  }
+  return undefined
+}
 
 type BatchItem = { label?: string | null; query: string; warehouse?: string | null }
 
