@@ -101,7 +101,10 @@ mcpTest("lists exactly six tools and executes warehouse, schema, SQL and checks 
 // altimate_change start — warehouse discovery accepts strict-schema empty table fillers
 mcpTest("schema_inspect lists schemas, then SQLite tables with protected counts", async () => {
   const { call } = await fixture()
-  for (const args of [{ warehouse: "source" }, { warehouse: "source", table: "", schema_name: "", values: false }]) {
+  for (const [index, args] of [
+    { warehouse: "source" },
+    { warehouse: "source", table: "", schema_name: "", values: false },
+  ].entries()) {
     const result = await call("schema_inspect", args)
     expect(result.isError).toBe(false)
     // altimate_change start — discovery starts with schema counts
@@ -111,7 +114,11 @@ mcpTest("schema_inspect lists schemas, then SQLite tables with protected counts"
     expect(tables.isError).toBe(false)
     expect(body(tables)).toContain("main | items | table | 2")
     // altimate_change end
-    expect(body(result)).toContain("Inspect one table with schema_inspect")
+    // The usage hint is shown once per session; the table rule line is gone over MCP.
+    if (index === 0) expect(body(result)).toContain("Inspect one table with schema_inspect")
+    else expect(body(result)).not.toContain("Inspect one table with schema_inspect")
+    expect(body(result)).not.toContain("-------|")
+    expect(body(tables)).not.toContain("-------|")
   }
 })
 // altimate_change end
@@ -381,7 +388,7 @@ mcpTest("private spill directory and its files are removed on server close", asy
     query: "SELECT name FROM items",
     full_text_columns: ["name"],
   })
-  const saved = body(result).match(/(\/[^\s`]+\/tool_[A-Za-z0-9]+)/)?.[1]
+  const saved = body(result).match(/(\/[^\s`()]+\/result-\d+\.csv)/)?.[1]
   expect(saved).toBeDefined()
   expect((await stat(path.dirname(saved!))).mode & 0o777).toBe(0o700)
   expect(await readFile(saved!, "utf8")).toContain("apple")
@@ -595,7 +602,7 @@ mcpTest("sql_execute spill returns text with the path plus a resource_link to th
   const link = content.find((item) => item.type === "resource_link")
   expect(link?.uri?.startsWith("file://")).toBe(true)
   expect(content[0]!.type).toBe("text")
-  expect(content[0]!.text).toContain(`File copy: ${fileURLToPath(link!.uri!)}`)
+  expect(content[0]!.text).toContain(`CSV copy: ${fileURLToPath(link!.uri!)}`)
 })
 
 mcpTest("sql_execute without a spill returns text only", async () => {
@@ -784,7 +791,7 @@ mcpTest("a spilled result is queryable as a scratch table with exact values", as
   expect(result.isError).toBe(false)
   const out = body(result)
   expect(out).toContain("Preview: 10 of 200 returned rows.")
-  expect(out).toContain('scratch table result_1: query it with sql_execute(warehouse: "scratch"')
+  expect(out).toContain('scratch table result_1 (typed like sql_materialize): query it with sql_execute(warehouse: "scratch"')
   // Cells in the preview are clipped; the table keeps them whole.
   expect(out).toContain("[cell clipped")
   expect(out).not.toContain("x".repeat(300))
@@ -932,4 +939,45 @@ mcpTest("warehouse_list discovery stops starting calls once its deadline passes"
     dispatch.mockRestore()
   }
 }, 15_000)
+// altimate_change end
+
+// altimate_change start — compact MCP output: CSV spills, no rule lines, hints once, short receipts
+mcpTest("an MCP spill file is CSV with the column names once and NULL distinct from an empty string", async () => {
+  const { call } = await fixture(false, {}, undefined, spillRows)
+  const result = await call("sql_execute", {
+    warehouse: "source",
+    query: "SELECT id, code, note FROM events WHERE id <= 3 ORDER BY id",
+    full_text_columns: ["note"],
+  })
+  const file = body(result).match(/(\/[^\s`()]+\/result-1\.csv)/)?.[1]
+  expect(file).toBeDefined()
+  const csv = await readFile(file!, "utf8")
+  const lines = csv.split("\n")
+  expect(lines[0]).toBe("id,code,note")
+  expect(lines[1]).toBe('1,001,""')
+  expect(lines[2]).toBe(`2,002,"a,""b""`)
+  expect(csv).toContain(`\n3,003,\n`)
+  expect(csv.match(/id,code,note/g)).toHaveLength(1)
+})
+
+mcpTest("MCP inline results, listings and receipts drop the rule line and repeat no tutorial", async () => {
+  const { call } = await fixture(false, {}, undefined, spillRows)
+  const inline = body(await call("sql_execute", { warehouse: "source", query: "SELECT id, name FROM items ORDER BY id" }))
+  expect(inline).toBe("id | name\n1 | apple\n2 | pear\n\n(2 rows)")
+  expect(body(await call("warehouse_list", {}))).not.toMatch(/^-+\|/m)
+  const first = body(await call("sql_execute", { warehouse: "source", query: "SELECT * FROM events", limit: 500 }))
+  const second = body(await call("sql_execute", { warehouse: "source", query: "SELECT id FROM events", limit: 500 }))
+  expect(first).toContain("instead of reading the file")
+  expect(second).not.toContain("instead of reading the file")
+  expect(second).toContain("All 200 returned rows are in scratch table result_2 (CSV copy:")
+  const sql = "SELECT id, code FROM events WHERE id < 5"
+  const made = body(await call("sql_materialize", { source_warehouse: "source", sql, target_table: "small" }))
+  expect(made).toStartWith("scratch.small: 4 rows, 2 columns (create) from source.\nColumns: id BIGINT, code VARCHAR")
+  expect(made).not.toContain(sql)
+  expect(made).toContain("Join it in scratch")
+  const again = body(
+    await call("sql_materialize", { source_warehouse: "source", sql, target_table: "small", mode: "replace" }),
+  )
+  expect(again).not.toContain("Join it in scratch")
+})
 // altimate_change end

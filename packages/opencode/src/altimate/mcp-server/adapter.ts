@@ -1,7 +1,7 @@
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { NodePath } from "@effect/platform-node"
 import { Effect, Layer } from "effect"
-import { mkdtemp, chmod, rm } from "node:fs/promises"
+import { mkdtemp, chmod, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
@@ -301,6 +301,13 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
   })
 
   const messages: TurnMessage[] = [userMessage()]
+  // Sequential spill names keep model-visible paths stable across runs, apart from the private directory.
+  let spills = 0
+  const writeSpill = async (text: string, extension: string) => {
+    const file = path.join(directory, `result-${++spills}.${extension}`)
+    await writeFile(file, text, { mode: 0o600, flag: "wx" })
+    return file
+  }
   const shutdown = new AbortController()
   const active = new Set<Promise<Tool.ExecuteResult>>()
   // Feed the native commit checks: completed tool output and rejections, with a new turn after an accepted commit.
@@ -328,7 +335,7 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
         messageID: `mcp-${randomUUID()}` as MessageID,
         agent: "analyst",
         abort: signal,
-        extra: { mcpClient: true, forceReadOnly: !options.allowWrite },
+        extra: { mcpClient: true, forceReadOnly: !options.allowWrite, writeSpill },
         messages,
         metadata: () => Effect.void,
         // Fail closed for new permission kinds. sql_execute is the validated source-read permission.

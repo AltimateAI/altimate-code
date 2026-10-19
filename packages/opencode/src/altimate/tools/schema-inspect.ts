@@ -10,6 +10,7 @@ import * as Registry from "../native/connections/registry"
 import { profileValues } from "./schema-values"
 import { isRecord, normalizeError } from "./response-normalization"
 import { validateTableName, validateWarehouseName } from "./input-validation"
+import { firstTime } from "./session-hints"
 // altimate_change start — workspace precedence
 import * as Precedence from "../workspace/precedence"
 // altimate_change end
@@ -78,19 +79,23 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
           { signal: ctx.abort, sessionID: ctx.sessionID, forceReadOnly: true },
         )
         const schemas = result.schemas
+        // altimate_change start — MCP: compact tables, usage hints once per session
+        const mcp = ctx.extra?.mcpClient === true
+        const rule = (text: string) => (mcp ? [] : [text])
+        const hint = (key: string, text: string) => (!mcp || firstTime(ctx.sessionID, key) ? ["", text] : [])
         const lines = schemas
           ? [
               `Schemas on warehouse "${result.warehouse}":`,
               "",
               "Schema | Tables/collections",
-              "-------|-------------------",
+              ...rule("-------|-------------------"),
               ...schemas.map((schema) => `${schema.name} | ${schema.table_count ?? "unavailable"}`),
             ]
           : [
               `Tables on warehouse "${result.warehouse}":`,
               "",
               "Schema | Name | Type | Rows",
-              "-------|------|------|-----",
+              ...rule("-------|------|------|-----"),
               ...result.tables.map(
                 (table) =>
                   `${table.schema} | ${table.name} | ${table.type} | ${table.row_count === undefined ? (table.row_count_status ?? "") : `${table.row_count}${table.row_count_estimated ? " (estimate)" : ""}`}`,
@@ -107,11 +112,16 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
           )
         if (result.fallback) lines.push("", "Driver fallback: table list may be truncated by the driver.")
         if (schemas)
-          lines.push("", `List tables with schema_inspect(warehouse="${result.warehouse}", schema_name="<schema>").`)
+          lines.push(
+            ...hint("list-tables", `List tables with schema_inspect(warehouse="${result.warehouse}", schema_name="<schema>").`),
+          )
         lines.push(
-          "",
-          `Inspect one table with schema_inspect(warehouse="${result.warehouse}", schema_name="<schema>", table="<name>").`,
+          ...hint(
+            "inspect-table",
+            `Inspect one table with schema_inspect(warehouse="${result.warehouse}", schema_name="<schema>", table="<name>").`,
+          ),
         )
+        // altimate_change end
         return Precedence.annotate(precedence, {
           title: `${schemas ? "Schemas" : "Tables"}: ${result.warehouse}`,
           metadata: {
@@ -178,7 +188,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       }
 
       // altimate_change start — progressive disclosure suggestions
-      let output = formatSchema(schemaResult)
+      let output = formatSchema(schemaResult, ctx.extra?.mcpClient !== true)
       if (schemaResult.resolution) output = `${schemaResult.resolution}\n\n${output}`
       if (args.values !== false) {
         const resolvedTable = schemaResult.table ?? args.table
@@ -233,7 +243,7 @@ function schemaError(msg: string) {
   }
 }
 
-function formatSchema(result: Partial<SchemaInspectResult>): string {
+function formatSchema(result: Partial<SchemaInspectResult>, rule = true): string {
   const lines: string[] = []
   const table = result.table ?? "unknown"
   const qualified = result.schema_name ? `${result.schema_name}.${table}` : table
@@ -243,7 +253,7 @@ function formatSchema(result: Partial<SchemaInspectResult>): string {
   }
   lines.push("")
   lines.push("Column | Type | Nullable | PK")
-  lines.push("-------|------|----------|---")
+  if (rule) lines.push("-------|------|----------|---")
   for (const col of result.columns ?? []) {
     lines.push(
       `${col.name} | ${col.data_type ?? "unknown"} | ${col.nullable ? "YES" : "NO"} | ${col.primary_key ? "YES" : ""}`,

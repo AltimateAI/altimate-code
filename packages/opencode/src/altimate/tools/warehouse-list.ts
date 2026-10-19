@@ -31,12 +31,14 @@ export const WarehouseListTool = Tool.define("warehouse_list", {
       // re-linked project is not told its rows are served by the old workspace.
       const notes = await Precedence.warehouseListNotes(ctx.sessionID, warehouses)
       const shadowedCount = notes.size
-      // altimate_change start — MCP: one-call catalog discovery
+      // altimate_change start — MCP: compact table and one-call catalog discovery
       const mcp = ctx.extra?.mcpClient === true
 
       const lines: string[] = shadowedCount
         ? ["Name | Type | Database | Served by", "-----|------|----------|----------"]
         : ["Name | Type | Database", "-----|------|--------"]
+      // The rule line only decorates the header.
+      if (mcp) lines.pop()
       for (const wh of warehouses) {
         const row = `${wh.name} | ${wh.type} | ${wh.database ?? "-"}`
         lines.push(shadowedCount ? `${row} | ${notes.get(wh.name) ?? "local"}` : row)

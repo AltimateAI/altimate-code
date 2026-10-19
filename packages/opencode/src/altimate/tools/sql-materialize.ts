@@ -11,6 +11,7 @@ import { readSql } from "./sql-check"
 import { lintSqlResult } from "./sql-result-lint"
 import * as Precedence from "../workspace/precedence"
 import { executeQuery, type QueryContext } from "../native/query-execution"
+import { firstTime } from "./session-hints"
 
 /** Default and hard ceilings, see the tool description. */
 export const DEFAULT_MAX_ROWS = 2_000_000
@@ -561,6 +562,19 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       }
       const cols = r.columns.map((c) => `${c.name} ${c.type}`).join(", ")
       const rowsLine = r.mode === "append" ? `${r.rows} rows appended (${r.total_rows} total)` : `${r.rows} rows`
+      // altimate_change start — MCP: the client already has its SQL; the join hint is shown once per session
+      const mcp = ctx.extra?.mcpClient === true
+      const joinHint = `Join it in scratch with sql_execute(warehouse: "${SCRATCH_NAME}", query: "SELECT ... FROM ${r.table} ...") `
+      const source = isScratch(args.source_warehouse) ? SCRATCH_NAME : args.source_warehouse
+      const receipt = mcp
+        ? `${label}: ${rowsLine}, ${r.columns.length} columns (${r.mode}) from ${source}.\nColumns: ${cols}` +
+          (firstTime(ctx.sessionID, "materialize-join") ? `\n\n${joinHint.trimEnd()}.` : "")
+        : `${label}: ${rowsLine}, ${r.columns.length} columns (${r.mode === "append" ? "append" : r.mode}).\n` +
+          `Columns: ${cols}\n` +
+          `Source: ${source}. SQL run:\n${args.sql}\n\n` +
+          joinHint +
+          `(the table is also addressable as ${label}).`
+      // altimate_change end
       return Precedence.annotate(verdict, {
         title: `Materialize ${label}: ${r.rows} rows`,
         metadata: {
@@ -571,14 +585,7 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
           mode: r.mode,
           ...lintMetadata,
         },
-        output:
-          warning +
-          `${label}: ${rowsLine}, ${r.columns.length} columns (${r.mode === "append" ? "append" : r.mode}).\n` +
-          `Columns: ${cols}\n` +
-          `Source: ${isScratch(args.source_warehouse) ? SCRATCH_NAME : args.source_warehouse}. SQL run:\n${args.sql}\n\n` +
-          `Join it in scratch with sql_execute(warehouse: "${SCRATCH_NAME}", query: "SELECT ... FROM ${r.table} ...") ` +
-          `(the table is also addressable as ${label}).` +
-          checks,
+        output: warning + receipt + checks,
       })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)

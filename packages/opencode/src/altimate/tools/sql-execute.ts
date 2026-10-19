@@ -36,6 +36,7 @@ import { normalizeError } from "./response-normalization"
 // altimate_change end
 import { readSql } from "./sql-check"
 import { MaterializeError, storeRows } from "./sql-materialize"
+import { firstTime } from "./session-hints"
 
 const MAX_SQL_ROWS = 10_000
 const LIMIT_ERROR = "limit must be a finite positive integer"
@@ -408,11 +409,16 @@ export const SqlExecuteTool = Tool.define(
                 ].filter(Boolean),
                 maxBytes: routingClipped ? 0 : maxBytes - routingBytes,
                 maxLines: limits.maxLines - routingLines,
-                write: (text) => bridge.promise(truncate.write(text)),
+                // The MCP adapter names its spill files itself (sequential, private directory).
+                write: (text) =>
+                  typeof ctx.extra?.writeSpill === "function"
+                    ? ctx.extra.writeSpill(text, "csv")
+                    : bridge.promise(truncate.write(text)),
                 store:
                   ctx.extra?.mcpClient === true
                     ? () => storeSpill(result, { signal: ctx.abort, sessionID: ctx.sessionID })
                     : undefined,
+                firstHint: ctx.extra?.mcpClient === true ? (key) => firstTime(ctx.sessionID, key) : undefined,
               })
               // altimate_change start — progressive disclosure suggestions
               if (suggestion && formatted.output.includes(suggestion)) {

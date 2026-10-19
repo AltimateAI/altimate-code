@@ -22,21 +22,26 @@ const ctx = {
 }
 let restore: (() => void) | undefined
 let directory: string | undefined
+// MCP usage hints are shown once per session; each call gets its own session so outputs compare equal.
+let calls = 0
+const sessions: string[] = []
 
 afterEach(async () => {
   restore?.()
   restore = undefined
   await Registry.closeAll()
   Registry.reset()
-  Precedence.releaseLocalSession(ctx.sessionID)
+  for (const session of sessions.splice(0)) Precedence.releaseLocalSession(session)
   if (directory) await rm(directory, { recursive: true, force: true })
   directory = undefined
 })
 
 async function inspect(args: Record<string, unknown> = {}, ask = async (_input: unknown) => {}) {
-  Precedence.bindLocalSession(ctx.sessionID)
+  const sessionID = `${ctx.sessionID}-${++calls}`
+  sessions.push(sessionID)
+  Precedence.bindLocalSession(sessionID)
   const tool = await initTool(SchemaInspectTool)
-  return tool.execute(args, { ...ctx, ask })
+  return tool.execute(args, { ...ctx, sessionID, ask })
 }
 
 for (const type of ["sqlite", "duckdb"] as const) {
@@ -73,7 +78,8 @@ for (const type of ["sqlite", "duckdb"] as const) {
       title: "Schema: empty",
       metadata: { success: true, columnCount: 1, rowCount: undefined, truncated: false },
       output:
-        "Table: main.empty\n\nColumn | Type | Nullable | PK\n-------|------|----------|---\nid | INTEGER | YES | ",
+        // MCP output drops the table rule line.
+        "Table: main.empty\n\nColumn | Type | Nullable | PK\nid | INTEGER | YES | ",
     })
   })
 }

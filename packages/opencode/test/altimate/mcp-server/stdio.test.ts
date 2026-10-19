@@ -107,7 +107,7 @@ for (const allowWrite of [false, true]) {
         name: "sql_execute",
         arguments: { warehouse: "source", query: "SELECT 'private server output' AS value", full_text_columns: ["value"] },
       })
-      spill = JSON.stringify(output.content).match(/(\/[^\s`"\\]+\/tool_[A-Za-z0-9]+)/)?.[1]
+      spill = JSON.stringify(output.content).match(/(\/[^\s`"\\()]+\/result-\d+\.csv)/)?.[1]
       expect(spill).toBeDefined()
       expect(await Bun.file(spill!).exists()).toBe(true)
     } finally {
