@@ -497,14 +497,23 @@ mcpTest("answer_commit rejects a missing asked item at most twice, then accepts"
   expect((await call("answer_commit", args)).isError).toBeFalsy()
 })
 
-mcpTest("answer_commit warns once about a number absent from query output", async () => {
+// The server cannot see numbers the client computed in its own shell or code, so over MCP a number
+// absent from this server's query output is accepted on the first commit (native sessions still check).
+mcpTest("answer_commit accepts a client-computed number absent from query output on the first commit", async () => {
   const { call } = await fixture()
   await call("sql_execute", { warehouse: "source", query: "SELECT COUNT(*) AS n FROM items" })
-  const args = commit([{ name: "total", value: 98765 }], ["total"])
-  const warned = await call("answer_commit", args)
-  expect(warned.isError).toBe(true)
-  expect(text(warned)).toContain("number check")
-  expect((await call("answer_commit", args)).isError).toBeFalsy()
+  const accepted = await call("answer_commit", commit([{ name: "total", value: 98765 }], ["total"]))
+  expect(accepted.isError).toBeFalsy()
+  expect(text(accepted)).not.toContain("number check")
+  expect(text(accepted)).toContain("98765")
+})
+
+mcpTest("answer_commit over MCP still runs the requested-items check before accepting a computed number", async () => {
+  const { call } = await fixture()
+  await call("sql_execute", { warehouse: "source", query: "SELECT COUNT(*) AS n FROM items" })
+  const rejected = await call("answer_commit", commit([{ name: "total", value: 98765 }], ["total", "item"]))
+  expect(rejected.isError).toBe(true)
+  expect(text(rejected)).toContain("requested-items check")
 })
 
 mcpTest("answer_commit accepts a number that appeared in query output", async () => {

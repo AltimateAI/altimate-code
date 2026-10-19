@@ -1357,6 +1357,22 @@ describe("answer_commit commit-time checks", () => {
     expect(accepted.output).toBe("81")
   })
 
+  test("an MCP client's computed number is accepted without the number check", async () => {
+    const history = [user("Fastest average cycle?"), assistant(sql("owner | days\nA | 79\nB | 84\nC | 95"))]
+    const payload = { basis: recordBasis, answer_only: true, fields: [{ name: "days", value: 81 }] }
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    const accepted = await tool.execute(payload, { ...context, messages: history, extra: { mcpClient: true } })
+    expect(accepted.status).toBeUndefined()
+    expect(accepted.output).toBe("81")
+    // The requested-items check still applies over MCP.
+    const missing = await tool.execute(
+      { ...payload, asked: ["days", "owner"] },
+      { ...context, messages: history, extra: { mcpClient: true } },
+    )
+    expect(missing.status).toBe("error")
+    expect(missing.output).toContain("answer_commit requested-items check:")
+  })
+
   test.each([
     ["rounded", 0.16, "ratio\n0.1621"],
     ["truncated", 12.3, "avg 12.39"],

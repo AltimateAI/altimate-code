@@ -29,7 +29,7 @@ export const descriptions: Record<string, string> = {
   sql_check: "Run a read-only SQL data quality check against a connected warehouse.",
   sql_materialize: "Copy a read-only source query into a session-local scratch table for further analysis.",
   answer_commit:
-    "Finish a data question. Call this last, with one field (or rows column) per item the request asks for and `asked` listing those items in order; the call is rejected when an asked item has no value of its own or a number was not seen in query output. Reply with exactly the returned FINAL ANSWER text.",
+    "Finish a data question. Call this last, with one field (or rows column) per item the request asks for and `asked` listing those items in order; the call is rejected when an asked item has no value of its own. Numbers may come from SQL or from your own computation. Reply with exactly the returned FINAL ANSWER text.",
 }
 
 // The native tool caps `basis` at 400 characters; over the MCP boundary the text is trimmed instead of rejected.

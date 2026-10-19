@@ -324,6 +324,7 @@ type CommitMetadata = {
 function commitRejection(
   args: z.output<typeof parameters>,
   messages: Tool.Context["messages"],
+  checkNumbers: boolean,
 ): string | undefined {
   if (args.unresolved) return undefined
   const missing = missingAskedItems(args)
@@ -334,6 +335,7 @@ function commitRejection(
   if (sizeBased.length && priorRejections(messages, READING_REJECTION_MARKER) < MAX_READING_REJECTIONS)
     return readingRejection(sizeBased)
   // altimate_change end
+  if (!checkNumbers) return undefined
   if (priorRejections(messages, NUMBER_REJECTION_MARKER) >= MAX_NUMBER_REJECTIONS) return undefined
   const seen = sessionNumbers(messages)
   const unsourced = seen ? unsourcedNumbers(args, seen) : []
@@ -366,8 +368,12 @@ export const AnswerCommitTool = Tool.define(
         yield* ctx.ask({ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} })
         const output = renderAnswer(args)
         // altimate_change start — one-time conjunction review of under-asked commits
+        // An MCP server sees only its own tool output, never the numbers a client computed in its own
+        // shell or code, so the number-provenance check would reject correct derived values there.
+        const checkNumbers = ctx.extra?.mcpClient !== true
         const rejection =
-          commitRejection(args, ctx.messages ?? []) ?? conjunctionRejection(args, ctx.messages ?? [], ctx.sessionID)
+          commitRejection(args, ctx.messages ?? [], checkNumbers) ??
+          conjunctionRejection(args, ctx.messages ?? [], ctx.sessionID)
         // altimate_change end
         if (rejection) {
           const rejected: Tool.ExecuteResult<CommitMetadata> = {
