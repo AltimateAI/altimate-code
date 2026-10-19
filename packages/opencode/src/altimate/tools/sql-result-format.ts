@@ -599,7 +599,7 @@ export async function formatSqlResult(result: SqlExecuteResult, options: FormatO
     const first = (key: string) => options.firstHint?.(key) ?? true
     if (table) {
       spill = first("spill-table")
-        ? `All ${result.rows.length} returned rows are in scratch table ${table} (typed like sql_materialize): query it with sql_execute(warehouse: "scratch", query: "SELECT ... FROM ${table}") instead of reading the file. Exact-value CSV copy: ${metadata.result_path}.`
+        ? `All ${result.rows.length} returned rows are in scratch table ${table} (typed like sql_materialize): query it with sql_execute(warehouse: "scratch", query: "SELECT ... FROM ${table}") instead of reading the file. CSV copy: ${metadata.result_path}.`
         : `All ${result.rows.length} returned rows are in scratch table ${table} (CSV copy: ${metadata.result_path}).`
     } else if (mcp) {
       spill = first("spill-csv")
