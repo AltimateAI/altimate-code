@@ -5,6 +5,29 @@ import { Dispatcher } from "../native"
 import * as Precedence from "../workspace/precedence"
 // altimate_change end
 
+// altimate_change start — point at the locations the registry actually reads
+import { CONN_ENV_PREFIX, globalConfigPath, localConfigPath } from "../native/connections/registry"
+
+/** The no-connections hint. Paths come from the registry's own helpers so it cannot drift from what is loaded. */
+export function noConnectionsMessage(): string {
+  return [
+    "No warehouse connections configured.",
+    "",
+    "Connections are read from these sources (later ones override earlier ones):",
+    `  1. ${globalConfigPath()} (global)`,
+    `  2. ${localConfigPath()} (this project)`,
+    `  3. ${CONN_ENV_PREFIX}<NAME> environment variables, each holding one connection's config as JSON`,
+    "",
+    "Use the warehouse_add tool to add one, or create a connections.json at one of the paths above with:",
+    "{",
+    '  "my-db": { "type": "postgres", "host": "localhost", "port": 5432, "database": "mydb", "user": "user", "password": "pass" }',
+    "}",
+    "",
+    "Do not put connections.json in .opencode/; it is not read from there.",
+  ].join("\n")
+}
+// altimate_change end
+
 export const WarehouseListTool = Tool.define("warehouse_list", {
   description: "List all configured warehouse connections. Shows connection name, type, and database.",
   parameters: z.object({}),
@@ -17,7 +40,7 @@ export const WarehouseListTool = Tool.define("warehouse_list", {
         return {
           title: "Warehouses: none configured",
           metadata: { count: 0 },
-          output: "No warehouse connections configured.\n\nTo add a connection, create a connections.json file in .opencode/ with:\n{\n  \"my-db\": { \"type\": \"postgres\", \"host\": \"localhost\", \"port\": 5432, \"database\": \"mydb\", \"user\": \"user\", \"password\": \"pass\" }\n}",
+          output: noConnectionsMessage(),
         }
       }
 

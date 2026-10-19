@@ -58,7 +58,7 @@ const SCRATCH_NAME_CONFLICT =
 // Config file paths
 // ---------------------------------------------------------------------------
 
-function globalConfigPath(): string {
+export function globalConfigPath(): string {
   // altimate_change start — the same home Global.Path uses, so the test preload's OPENCODE_TEST_HOME keeps the
   // suite out of the developer's real connections (Bun caches os.homedir(), so changing HOME does not).
   return path.join(Global.Path.home, ".altimate-code", "connections.json")
@@ -93,7 +93,7 @@ function projectRoot(): string {
 }
 // altimate_change end
 
-function localConfigPath(): string {
+export function localConfigPath(): string {
   // altimate_change start — resolve against the project, not the launch cwd
   return path.join(projectRoot(), ".altimate-code", "connections.json")
   // altimate_change end
@@ -172,9 +172,13 @@ function loadFromFile(filePath: string): Record<string, ConnectionConfig> {
   }
 }
 
+// altimate_change start — exported so user-facing hints name the variable the loader reads
+export const CONN_ENV_PREFIX = "ALTIMATE_CODE_CONN_"
+// altimate_change end
+
 function loadFromEnv(): Record<string, ConnectionConfig> {
   const result: Record<string, ConnectionConfig> = {}
-  const prefix = "ALTIMATE_CODE_CONN_"
+  const prefix = CONN_ENV_PREFIX
 
   for (const [key, value] of Object.entries(process.env)) {
     if (!key.startsWith(prefix) || !value) continue
