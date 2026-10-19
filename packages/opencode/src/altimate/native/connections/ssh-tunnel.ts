@@ -3,12 +3,25 @@
  *
  * Uses the `ssh2` package (dynamic import). If ssh2 is not installed,
  * throws a clear error message.
+ *
+ * Tunnels are not keyed by connection name. Each `openTunnel()` call returns a
+ * handle owned by the caller (the connection registry's connect attempt), and
+ * only that handle closes it: an attempt that was superseded can never register
+ * over, or close, a newer attempt's tunnel.
  */
 
 import type { ConnectionConfig } from "@altimateai/drivers"
+import type { Server, Socket } from "net"
 
 export interface TunnelInfo {
   localPort: number
+  close(): void
+}
+
+/** A tunnel being opened. `close()` works before or after `ready` settles and is idempotent. */
+export interface TunnelHandle {
+  /** Resolves once the local forwarding port listens; rejects on failure or when closed first. */
+  readonly ready: Promise<TunnelInfo>
   close(): void
 }
 
@@ -22,165 +35,148 @@ export interface SshConfig {
   port: number
 }
 
-/**
- * Active tunnels keyed by an opaque tunnel key. The connection registry passes a key scoped to the project that
- * owns the connection, so two projects with the same connection name never share or close each other's tunnel.
- */
-const activeTunnels = new Map<string, TunnelInfo>()
+/** Every tunnel opened and not yet closed, for process-exit cleanup and `closeAllTunnels()`. */
+const openTunnels = new Set<TunnelHandle>()
 
 /** Clean up all tunnels on process exit. */
 let cleanupRegistered = false
 function ensureCleanup(): void {
   if (cleanupRegistered) return
   cleanupRegistered = true
-  const cleanup = () => {
-    for (const [, tunnel] of activeTunnels) {
-      try {
-        tunnel.close()
-      } catch {
-        // best-effort cleanup
-      }
-    }
-    activeTunnels.clear()
-  }
-  process.once("exit", cleanup)
+  process.once("exit", closeAllTunnels)
   process.once("SIGINT", () => {
-    cleanup()
+    closeAllTunnels()
     process.exit(0)
   })
   process.once("SIGTERM", () => {
-    cleanup()
+    closeAllTunnels()
     process.exit(0)
   })
 }
 
 /**
- * Start an SSH tunnel for a connection.
- * Returns a TunnelInfo with the local port to connect to.
+ * Open an SSH tunnel that forwards a local port to `config.host:config.port`.
+ *
+ * One terminal state covers every path: an error, a close before `ready`, or a
+ * late `ready`/listen callback after either closes the client, the local server
+ * and forwarded sockets, and never publishes a tunnel.
  */
-export async function startTunnel(
-  name: string,
-  config: SshConfig,
-): Promise<TunnelInfo> {
-  // Close existing tunnel for this name
-  const existing = activeTunnels.get(name)
-  if (existing) {
-    existing.close()
-    activeTunnels.delete(name)
+export function openTunnel(config: SshConfig): TunnelHandle {
+  let closed = false
+  let client: any
+  let server: Server | undefined
+  const sockets = new Set<Socket>()
+  let rejectReady: ((e: Error) => void) | undefined
+
+  const close = () => {
+    if (closed) return
+    closed = true
+    openTunnels.delete(handle)
+    for (const socket of sockets) socket.destroy()
+    try {
+      server?.close()
+    } catch {
+      // ignore
+    }
+    try {
+      client?.end()
+    } catch {
+      // ignore
+    }
+    rejectReady?.(new Error("SSH tunnel was closed before it was ready"))
   }
 
-  let ssh2: any
-  try {
-    // @ts-expect-error — optional dependency
-    ssh2 = await import("ssh2")
-  } catch {
-    throw new Error(
-      "SSH tunnel requires the ssh2 package. Run: bun add ssh2 @types/ssh2",
-    )
-  }
+  const ready = (async (): Promise<TunnelInfo> => {
+    let ssh2: any
+    try {
+      // @ts-expect-error — optional dependency
+      ssh2 = await import("ssh2")
+    } catch {
+      throw new Error("SSH tunnel requires the ssh2 package. Run: bun add ssh2 @types/ssh2")
+    }
+    const net = await import("net")
+    if (closed) throw new Error("SSH tunnel was closed before it was ready")
+    ensureCleanup()
 
-  ensureCleanup()
+    return new Promise<TunnelInfo>((resolve, reject) => {
+      rejectReady = reject
+      client = new ssh2.Client()
 
-  const net = await import("net")
-
-  return new Promise<TunnelInfo>((resolve, reject) => {
-    const client = new ssh2.Client()
-
-    client.on("ready", () => {
-      // Create a local TCP server that forwards to remote host:port via SSH
-      const server = net.createServer((localSocket) => {
-        client.forwardOut(
-          "127.0.0.1",
-          0,
-          config.host,
-          config.port,
-          (err: Error | undefined, stream: any) => {
-            if (err) {
+      client.on("ready", () => {
+        if (closed) return
+        // Create a local TCP server that forwards to remote host:port via SSH
+        server = net.createServer((localSocket) => {
+          if (closed) {
+            localSocket.destroy()
+            return
+          }
+          sockets.add(localSocket)
+          localSocket.on("close", () => sockets.delete(localSocket))
+          client.forwardOut("127.0.0.1", 0, config.host, config.port, (err: Error | undefined, stream: any) => {
+            if (err || closed) {
               localSocket.destroy()
               return
             }
             localSocket.pipe(stream).pipe(localSocket)
-          },
-        )
+          })
+        })
+
+        server.on("error", (err: Error) => {
+          reject(new Error(`SSH tunnel local server error: ${err.message}`))
+          close()
+        })
+
+        server.listen(0, "127.0.0.1", () => {
+          if (closed) return
+          const addr = server?.address()
+          const localPort = typeof addr === "object" && addr ? addr.port : 0
+          resolve({ localPort, close })
+        })
       })
 
-      server.listen(0, "127.0.0.1", () => {
-        const addr = server.address()
-        const localPort =
-          typeof addr === "object" && addr ? addr.port : 0
-
-        const tunnelInfo: TunnelInfo = {
-          localPort,
-          close() {
-            try {
-              server.close()
-            } catch {
-              // ignore
-            }
-            try {
-              client.end()
-            } catch {
-              // ignore
-            }
-            // a newer tunnel may already be registered under this key
-            if (activeTunnels.get(name) === tunnelInfo) activeTunnels.delete(name)
-          },
-        }
-
-        activeTunnels.set(name, tunnelInfo)
-        resolve(tunnelInfo)
+      client.on("error", (err: Error) => {
+        reject(new Error(`SSH connection error: ${err.message}`))
+        close()
       })
 
-      server.on("error", (err: Error) => {
-        client.end()
-        reject(new Error(`SSH tunnel local server error: ${err.message}`))
-      })
+      const connectOptions: Record<string, unknown> = {
+        host: config.ssh_host,
+        port: config.ssh_port ?? 22,
+        username: config.ssh_user ?? "root",
+      }
+
+      if (config.ssh_private_key) {
+        connectOptions.privateKey = config.ssh_private_key
+      } else if (config.ssh_password) {
+        connectOptions.password = config.ssh_password
+      }
+
+      client.connect(connectOptions)
     })
+  })()
 
-    client.on("error", (err: Error) => {
-      reject(new Error(`SSH connection error: ${err.message}`))
-    })
-
-    const connectOptions: Record<string, unknown> = {
-      host: config.ssh_host,
-      port: config.ssh_port ?? 22,
-      username: config.ssh_user ?? "root",
-    }
-
-    if (config.ssh_private_key) {
-      connectOptions.privateKey = config.ssh_private_key
-    } else if (config.ssh_password) {
-      connectOptions.password = config.ssh_password
-    }
-
-    client.connect(connectOptions)
-  })
+  const handle: TunnelHandle = { ready, close }
+  openTunnels.add(handle)
+  // Any failure ends in the terminal state; the caller still observes the rejection through `ready`.
+  ready.catch(() => close())
+  return handle
 }
 
-/** Get an active tunnel by connection name. */
-export function getActiveTunnel(name: string): TunnelInfo | undefined {
-  return activeTunnels.get(name)
-}
-
-/** Close a specific tunnel by name. */
-export function closeTunnel(name: string): void {
-  const tunnel = activeTunnels.get(name)
-  if (tunnel) {
-    tunnel.close()
-    activeTunnels.delete(name)
-  }
-}
-
-/** Close all active tunnels. */
+/** Close every open tunnel (process teardown and tests). */
 export function closeAllTunnels(): void {
-  for (const [, tunnel] of activeTunnels) {
+  for (const tunnel of [...openTunnels]) {
     try {
       tunnel.close()
     } catch {
       // best-effort
     }
   }
-  activeTunnels.clear()
+  openTunnels.clear()
+}
+
+/** Number of tunnels currently open or opening (diagnostics and tests). */
+export function openTunnelCount(): number {
+  return openTunnels.size
 }
 
 /**

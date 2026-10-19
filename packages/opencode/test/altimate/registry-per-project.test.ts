@@ -7,13 +7,38 @@
  * process, through `process.chdir` (the CLI path) and through `Instance.provide` (the server path).
  */
 
-import { describe, test, expect, beforeEach, afterEach, mock } from "bun:test"
+import { describe, test, expect, beforeEach, afterEach, afterAll, mock } from "bun:test"
 import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
 
-// ssh2 is an optional dependency that is not installed for tests; a fake client lets the real tunnel module run.
+// ssh2 is an optional dependency, normally not installed for tests; a fake client lets the real tunnel module run.
+// Bun's mock.module leaks across test files, so the genuine module (or its absence) is restored in afterAll.
+let genuineSsh2: unknown
+try {
+  // @ts-expect-error — optional dependency
+  genuineSsh2 = await import("ssh2")
+} catch {
+  genuineSsh2 = undefined
+}
+afterAll(() => {
+  // Absent: a module cannot be un-mocked, so later files get a client that fails loudly instead of this fake.
+  mock.module("ssh2", () =>
+    genuineSsh2
+      ? (genuineSsh2 as Record<string, unknown>)
+      : {
+          Client: class {
+            constructor() {
+              throw new Error("Cannot find package 'ssh2'")
+            }
+          },
+        },
+  )
+})
+
 const sshClients: { host: string; ended: boolean }[] = []
+/** Hosts whose SSH `ready` is held until the test releases it. */
+const heldReady = new Map<string, () => void>()
 mock.module("ssh2", () => ({
   Client: class {
     private handlers = new Map<string, (...args: unknown[]) => void>()
@@ -25,7 +50,9 @@ mock.module("ssh2", () => ({
     connect(options: { host: string }) {
       this.record.host = options.host
       sshClients.push(this.record)
-      queueMicrotask(() => this.handlers.get("ready")?.())
+      const ready = () => this.handlers.get("ready")?.()
+      if (options.host.startsWith("held-")) heldReady.set(options.host, ready)
+      else queueMicrotask(ready)
     }
     forwardOut(_a: string, _b: number, _c: string, _d: number, cb: (err?: Error) => void) {
       cb(new Error("no forwarding in tests"))
@@ -37,8 +64,21 @@ mock.module("ssh2", () => ({
 }))
 
 import * as Registry from "../../src/altimate/native/connections/registry"
-import { closeAllTunnels } from "../../src/altimate/native/connections/ssh-tunnel"
+import { closeAllTunnels, openTunnelCount } from "../../src/altimate/native/connections/ssh-tunnel"
 import { Instance } from "../../src/project/instance"
+import { disposeInstance } from "../../src/effect/instance-registry"
+
+/** Wait (bounded) until the fake SSH client for `host` has connected. */
+async function sshConnected(host: string) {
+  for (let i = 0; i < 500 && !sshClients.some((c) => c.host === host); i++) await new Promise((r) => setTimeout(r, 2))
+  expect(sshClients.some((c) => c.host === host)).toBe(true)
+}
+
+const ended = (host: string) => sshClients.filter((c) => c.host === host).map((c) => c.ended)
+
+function sshStore(sshHost: string, extra: Record<string, unknown> = {}) {
+  return { type: "sqlite", path: "store.sqlite", create: true, ssh_host: sshHost, host: "db", port: 5432, ...extra }
+}
 
 let projectA: string
 let projectB: string
@@ -77,6 +117,7 @@ beforeEach(() => {
   projectA = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rpp-a-")))
   projectB = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rpp-b-")))
   sshClients.length = 0
+  heldReady.clear()
   Registry.reset()
 })
 
@@ -217,6 +258,117 @@ describe("connectors are per project", () => {
     await expect(inflight).rejects.toThrow("reloaded or removed while it was connecting")
     const fresh = await inProject(projectA, () => Registry.get("store"))
     expect((await fresh.execute("SELECT 1 AS one")).rows).toEqual([[1]])
+  })
+})
+
+describe("each connect attempt owns its SSH tunnel", () => {
+  test("a stale tunnel start that finishes after a newer start never publishes or closes the newer tunnel", async () => {
+    writeLocal(projectA, { store: sshStore("held-old") })
+    const stale = inProject(projectA, () => Registry.get("store"))
+    await sshConnected("held-old")
+
+    // replace the config while the old tunnel is still opening; the new attempt connects through its own tunnel
+    const added = await inProject(projectA, () => Registry.add("store", sshStore("new") as any))
+    expect(added.success).toBe(true)
+    await expect(stale).rejects.toThrow()
+    const fresh = await inProject(projectA, () => Registry.get("store"))
+
+    // the old SSH handshake completes late: nothing is registered, the newer tunnel stays open
+    heldReady.get("held-old")?.()
+    await new Promise((r) => setTimeout(r, 5))
+    expect(ended("held-old")).toEqual([true])
+    expect(ended("new")).toEqual([false])
+    expect(openTunnelCount()).toBe(1)
+    expect((await fresh.execute("SELECT 1 AS one")).rows).toEqual([[1]])
+  })
+
+  test("a failing attempt closes only the tunnel it opened", async () => {
+    writeLocal(projectB, { store: sshStore("b-host") })
+    await inProject(projectB, () => Registry.get("store"))
+    // same name in A, store missing and not creatable: the driver fails after A's tunnel opened
+    writeLocal(projectA, { store: sshStore("a-host", { create: false, path: "missing.sqlite" }) })
+    await expect(inProject(projectA, () => Registry.get("store"))).rejects.toThrow("not found")
+    expect(ended("a-host")).toEqual([true])
+    expect(ended("b-host")).toEqual([false])
+    expect(openTunnelCount()).toBe(1)
+  })
+
+  test("replacing an SSH connection with a non-SSH one closes the old tunnel (cached and in flight)", async () => {
+    writeLocal(projectA, { store: sshStore("cached-host"), other: sshStore("held-pending", { path: "other.sqlite" }) })
+    await inProject(projectA, () => Registry.get("store"))
+    const pending = inProject(projectA, () => Registry.get("other"))
+    await sshConnected("held-pending")
+
+    const plain = { type: "sqlite", path: "plain.sqlite", create: true } as any
+    await inProject(projectA, () => Registry.add("store", plain))
+    await inProject(projectA, () => Registry.add("other", plain))
+    await expect(pending).rejects.toThrow()
+    expect(ended("cached-host")).toEqual([true])
+    expect(ended("held-pending")).toEqual([true])
+    expect(openTunnelCount()).toBe(0)
+    const store = await inProject(projectA, () => Registry.get("store"))
+    expect((await store.execute("SELECT 1 AS one")).rows).toEqual([[1]])
+    expect(openTunnelCount()).toBe(0)
+  })
+
+  test("reload with a pending SSH connect closes that attempt's tunnel", async () => {
+    writeLocal(projectA, { store: sshStore("held-reload") })
+    const pending = inProject(projectA, () => Registry.get("store"))
+    await sshConnected("held-reload")
+    await inProject(projectA, () => Registry.reload())
+    await expect(pending).rejects.toThrow()
+    expect(ended("held-reload")).toEqual([true])
+    expect(openTunnelCount()).toBe(0)
+  })
+})
+
+describe("instance disposal", () => {
+  test("disposing a project's instance closes its connectors and tunnels only", async () => {
+    writeLocal(projectA, { store: sshStore("a-host") })
+    writeLocal(projectB, { store: sshStore("b-host") })
+    const a = await inProject(projectA, () => Registry.get("store"))
+    const b = await inProject(projectB, () => Registry.get("store"))
+
+    await disposeInstance(projectA)
+    expect(ended("a-host")).toEqual([true])
+    expect(ended("b-host")).toEqual([false])
+    await expect(a.execute("SELECT 1")).rejects.toThrow()
+    expect((await b.execute("SELECT 1 AS one")).rows).toEqual([[1]])
+
+    // reopening A loads a fresh state
+    const a2 = await inProject(projectA, () => Registry.get("store"))
+    expect(a2).not.toBe(a)
+    expect((await a2.execute("SELECT 1 AS one")).rows).toEqual([[1]])
+  })
+})
+
+describe("credentials of a removed connection", () => {
+  test("are kept while another served project's local config still names the connection", async () => {
+    const { setSecretBackendForTests } = await import("../../src/altimate/native/connections/credential-store")
+    const store = new Map<string, string>()
+    setSecretBackendForTests({
+      name: "test",
+      get: async (k: string) => store.get(k) ?? null,
+      set: async (k: string, v: string) => void store.set(k, v),
+      delete: async (k: string) => store.delete(k),
+    } as any)
+    try {
+      writeLocal(projectB, { shared: { type: "postgres", host: "b" } })
+      expect(inProject(projectB, () => Registry.names())).toEqual(["shared"])
+      await inProject(projectA, () => Registry.add("shared", { type: "postgres", host: "g", password: "pw-test" } as any))
+      expect(store.get("shared/password")).toBe("pw-test")
+
+      await inProject(projectA, () => Registry.remove("shared"))
+      expect(store.get("shared/password")).toBe("pw-test")
+
+      // with no served project naming it, removal forgets the secret
+      fs.rmSync(path.join(projectB, ".altimate-code"), { recursive: true })
+      await inProject(projectA, () => Registry.add("shared", { type: "postgres", host: "g", password: "pw-test" } as any))
+      await inProject(projectA, () => Registry.remove("shared"))
+      expect(store.has("shared/password")).toBe(false)
+    } finally {
+      setSecretBackendForTests(undefined)
+    }
   })
 })
 

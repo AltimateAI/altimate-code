@@ -26,7 +26,10 @@ import { forgetCredentials, notRemovedWarning, resolveConfig, saveConnection } f
 // altimate_change start — the shared home, which honours the test-isolation override
 import { Global } from "@/global"
 // altimate_change end
-import { startTunnel, extractSshConfig, closeTunnel } from "./ssh-tunnel"
+// altimate_change start — tunnels are owned by the connect attempt that opened them; instance disposal hook
+import { openTunnel, extractSshConfig, type TunnelHandle } from "./ssh-tunnel"
+import { registerDisposer } from "@/effect/instance-registry"
+// altimate_change end
 import type { WarehouseInfo } from "../types"
 import { Telemetry } from "../../../telemetry"
 import * as SignInNotice from "./sign-in-notice"
@@ -44,24 +47,70 @@ import { SCRATCH_CONFIG, SCRATCH_DESCRIPTION, SCRATCH_NAME, closeScratch, getScr
  * connectors. The global file and `ALTIMATE_CODE_CONN_*` env are shared sources merged into each project's state.
  */
 interface State {
-  /** The project directory this state was loaded for; scopes SSH tunnel keys. */
+  /** The project directory this state was loaded for. */
   dir: string
   /** In-memory config store. */
   configs: Map<string, ConnectionConfig>
   /** Cached connector instances. */
   connectors: Map<string, Connector>
-  /** In-flight connector creation promises to prevent race conditions. */
-  pending: Map<string, Promise<Connector>>
+  /** SSH tunnels of cached connectors, owned by the attempt that created each connector. */
+  tunnels: Map<string, TunnelHandle>
+  /** In-flight connects. An attempt is current only while it occupies its name's slot. */
+  pending: Map<string, Attempt>
   /** Whether this state has been loaded from its sources. */
   loaded: boolean
 }
 
+/**
+ * One connect attempt. Its SSH tunnel is its own handle, never looked up by name, so a superseded attempt can only
+ * close the tunnel it opened. Dropping the attempt from `pending` (reload, remove, add, dispose, reset) closes that
+ * tunnel and makes the attempt discard whatever it finishes creating.
+ */
+interface Attempt {
+  promise?: Promise<Connector>
+  tunnel?: TunnelHandle
+}
+
 function createState(dir: string): State {
-  return { dir, configs: new Map(), connectors: new Map(), pending: new Map(), loaded: false }
+  return { dir, configs: new Map(), connectors: new Map(), tunnels: new Map(), pending: new Map(), loaded: false }
 }
 
 /** Registry state per resolved project directory. */
 const states = new Map<string, State>()
+
+/** Invalidate the in-flight connect for `name`, closing the tunnel it opened. Synchronous. */
+function dropAttempt(s: State, name: string): void {
+  const attempt = s.pending.get(name)
+  s.pending.delete(name)
+  attempt?.tunnel?.close()
+}
+
+/** Synchronously detach the cached connector and tunnel for `name`; returns a task that closes them. */
+function detachCached(s: State, name: string): () => Promise<void> {
+  const connector = s.connectors.get(name)
+  const tunnel = s.tunnels.get(name)
+  s.connectors.delete(name)
+  s.tunnels.delete(name)
+  return async () => {
+    // The tunnel is closed first so a hanging connector close cannot keep it open.
+    tunnel?.close()
+    await connector?.close().catch(() => {})
+  }
+}
+
+let disposerRegistered = false
+/** Close a project's connectors and tunnels when its instance is disposed (`/instance/dispose`, reload). */
+function ensureDisposer(): void {
+  if (disposerRegistered) return
+  disposerRegistered = true
+  registerDisposer(async (directory) => {
+    const key = path.resolve(directory)
+    const s = states.get(key)
+    if (!s) return
+    states.delete(key)
+    await closeState(s)
+  })
+}
 
 /**
  * Set by setConfigs() (tests, benchmarks): one injected registry that every project uses until reset() or load(),
@@ -82,6 +131,7 @@ function projectState(): State {
   const dir = path.resolve(projectRoot())
   let s = states.get(dir)
   if (!s) {
+    ensureDisposer()
     s = createState(dir)
     states.set(dir, s)
   }
@@ -91,11 +141,6 @@ function projectState(): State {
 /** Every state that may hold connectors, for process-wide teardown. */
 function allStates(): State[] {
   return injectedState ? [...states.values(), injectedState] : [...states.values()]
-}
-
-/** SSH tunnels are keyed by connection name process-wide; scope the key to the project that owns the connection. */
-function tunnelKey(s: State, name: string): string {
-  return `${s.dir}\u0000${name}`
 }
 // altimate_change end
 
@@ -141,9 +186,15 @@ function projectRoot(): string {
 
 export function localConfigPath(): string {
   // altimate_change start — resolve against the project, not the launch cwd
-  return path.join(projectRoot(), ".altimate-code", "connections.json")
+  return localConfigPathFor(projectRoot())
   // altimate_change end
 }
+
+// altimate_change start — one definition of a project's connections file
+function localConfigPathFor(projectDir: string): string {
+  return path.join(projectDir, ".altimate-code", "connections.json")
+}
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // Store path resolution
@@ -252,7 +303,7 @@ function loadInto(s: State): void {
   // move the store. `s.dir` is the project this state belongs to.
   const base = s.dir
   const global = resolveStorePaths(loadFromFile(globalConfigPath()), path.dirname(globalConfigPath()))
-  const local = resolveStorePaths(loadFromFile(path.join(base, ".altimate-code", "connections.json")), base)
+  const local = resolveStorePaths(loadFromFile(localConfigPathFor(base)), base)
   const env = resolveStorePaths(loadFromEnv(), base)
 
   // Merge: global < local < env
@@ -336,8 +387,16 @@ export function canonicalType(type: string | undefined | null): string | null {
 }
 // altimate_change end
 
-// altimate_change start — `tunnel` is the project-scoped SSH tunnel key
-async function createConnector(name: string, config: ConnectionConfig, tunnel: string): Promise<Connector> {
+// altimate_change start — the attempt owns the SSH tunnel it opens
+const SUPERSEDED = (name: string) =>
+  new Error(`Connection "${name}" was reloaded or removed while it was connecting. Retry the request.`)
+
+async function createConnector(
+  name: string,
+  config: ConnectionConfig,
+  attempt: Attempt,
+  isCurrent: () => boolean,
+): Promise<Connector> {
   // altimate_change end
   const driverPath = DRIVER_MAP[config.type.toLowerCase()]
   if (!driverPath) {
@@ -394,8 +453,15 @@ async function createConnector(name: string, config: ConnectionConfig, tunnel: s
   // Handle SSH tunnel
   const sshConfig = extractSshConfig(resolvedConfig)
   if (sshConfig) {
-    // altimate_change start — project-scoped tunnel key
-    const tunnelInfo = await startTunnel(tunnel, sshConfig)
+    // altimate_change start — a superseded attempt opens nothing; a tunnel that finishes opening after its attempt
+    // was dropped is closed by its own handle (dropAttempt closed it already) and never published
+    if (!isCurrent()) throw SUPERSEDED(name)
+    attempt.tunnel = openTunnel(sshConfig)
+    const tunnelInfo = await attempt.tunnel.ready
+    if (!isCurrent()) {
+      attempt.tunnel.close()
+      throw SUPERSEDED(name)
+    }
     // altimate_change end
     // Rewrite host/port to use the local tunnel
     resolvedConfig = {
@@ -455,11 +521,9 @@ async function createConnector(name: string, config: ConnectionConfig, tunnel: s
     connector = await mod.connect(resolvedConfig)
   } catch (e) {
     // Clean up SSH tunnel if driver creation fails
-    if (sshConfig) {
-      // altimate_change start — project-scoped tunnel key
-      closeTunnel(tunnel)
-      // altimate_change end
-    }
+    // altimate_change start — this attempt's own tunnel, never another attempt's
+    attempt.tunnel?.close()
+    // altimate_change end
     throw e
   }
   return connector
@@ -574,8 +638,7 @@ export function names(): string[] {
 export async function get(name: string): Promise<Connector> {
   // altimate_change start — captured once, so a connect that finishes later lands in the project that started it
   const s = ensureLoaded()
-  const { configs, connectors, pending } = s
-  const tunnel = tunnelKey(s, name)
+  const { configs, connectors, tunnels, pending } = s
   // altimate_change end
   if (isScratch(name)) {
     if (configs.has(name)) throw new Error(SCRATCH_NAME_CONFLICT)
@@ -591,8 +654,10 @@ export async function get(name: string): Promise<Connector> {
   }
 
   // If a connector is already being created, await the same Promise
-  const inflight = pending.get(name)
+  // altimate_change start — the slot holds the attempt
+  const inflight = pending.get(name)?.promise
   if (inflight) return inflight
+  // altimate_change end
 
   const config = configs.get(name)
   if (!config) {
@@ -619,31 +684,33 @@ export async function get(name: string): Promise<Connector> {
     })
   } catch {}
   // altimate_change end
-  // altimate_change start — this attempt's pending slot; reload()/remove()/add() drop it to invalidate the attempt
-  const attempt: { promise?: Promise<Connector> } = {}
-  const current = () => attempt.promise !== undefined && pending.get(name) === attempt.promise
+  // altimate_change start — this attempt occupies the slot before any await; reload()/remove()/add()/dispose drop it
+  const attempt: Attempt = {}
+  pending.set(name, attempt)
+  const current = () => pending.get(name) === attempt
   // altimate_change end
   const promise = (async () => {
     try {
-      // altimate_change start — project-scoped tunnel key
-      const connector = await createConnector(name, config, tunnel)
+      // altimate_change start — the attempt closes only the tunnel it opened
+      const connector = await createConnector(name, config, attempt, current)
       try {
         await connector.connect()
       } catch (connectErr) {
-        // If connect() fails after tunnel was started, clean up the tunnel
-        closeTunnel(tunnel)
+        // If connect() fails after tunnel was started, clean up the tunnel (first, so a hanging close cannot hold it)
+        attempt.tunnel?.close()
+        await connector.close().catch(() => {})
         throw connectErr
       }
       // reload()/remove()/add() dropped this attempt while it was connecting: its config is gone or replaced, so
       // it must not be cached over the current one.
       if (!current()) {
+        attempt.tunnel?.close()
         await connector.close().catch(() => {})
-        // a newer attempt under this name owns the tunnel key now
-        if (!pending.has(name) && !connectors.has(name)) closeTunnel(tunnel)
-        throw new Error(`Connection "${name}" was reloaded or removed while it was connecting. Retry the request.`)
+        throw SUPERSEDED(name)
       }
-      // altimate_change end
       connectors.set(name, connector)
+      if (attempt.tunnel) tunnels.set(name, attempt.tunnel)
+      // altimate_change end
       fileLog("INFO", "warehouse-connect", "connected", { name, type: config.type, auth: authMethod, duration_ms: Date.now() - startTime })
       try {
         Telemetry.track({
@@ -690,7 +757,6 @@ export async function get(name: string): Promise<Connector> {
   // altimate_change start
   attempt.promise = promise
   // altimate_change end
-  pending.set(name, promise)
   return promise
 }
 
@@ -809,7 +875,7 @@ export async function add(
   try {
     // altimate_change start — act on the current project's state, captured before any await
     const s = ensureLoaded()
-    const { configs, connectors, pending } = s
+    const { configs } = s
     // altimate_change end
 
     // Normalize field names before saving so sensitive fields under alias
@@ -844,20 +910,12 @@ export async function add(
     // session can connect even when keytar is unavailable. Only the disk
     // file uses the sanitized version (credentials stripped).
     configs.set(name, normalized)
-    // altimate_change start — a connect still in flight for the old config must not be cached over the new one
-    pending.delete(name)
+    // altimate_change start — in the same synchronous step: a connect still in flight for the old config must not be
+    // cached over the new one, and the old connector's tunnel closes with it
+    dropAttempt(s, name)
+    const release = detachCached(s, name)
+    await release()
     // altimate_change end
-
-    // Clear cached connector
-    const cached = connectors.get(name)
-    if (cached) {
-      try {
-        await cached.close()
-      } catch {
-        // ignore
-      }
-      connectors.delete(name)
-    }
 
     const result: { success: boolean; name: string; type: string; warnings?: string[] } = {
       success: true,
@@ -881,29 +939,17 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
   try {
     // altimate_change start — act on the current project's state, captured before any await
     const s = ensureLoaded()
-    const { configs, connectors, pending } = s
-    const projectConfigPath = localConfigPath()
     // A connect still in flight for this name will finish and keep its name in use; forgetting it now would let a
     // later reconnect on that account be put down to another connection that shares it.
-    const inflight = pending.has(name)
-    // that connect must not be cached once the connection is gone
-    pending.delete(name)
-    // altimate_change end
-
-    // Close connector if cached
-    const cached = connectors.get(name)
-    if (cached) {
-      try {
-        await cached.close()
-      } catch {
-        // ignore
-      }
-      connectors.delete(name)
-    }
-
-    // Close SSH tunnel if active
-    // altimate_change start — project-scoped tunnel key
-    closeTunnel(tunnelKey(s, name))
+    const inflight = s.pending.has(name)
+    // One synchronous step before any await: the in-flight connect is invalidated (and its tunnel closed), the
+    // config is gone so no new connect can start against it, and the cached connector and tunnel are detached.
+    dropAttempt(s, name)
+    s.configs.delete(name)
+    const release = detachCached(s, name)
+    // Every served project's local file, read now: the state map can change during the awaits below.
+    const projectConfigPaths = [localConfigPath(), ...[...states.keys()].map(localConfigPathFor)]
+    await release()
     if (!inflight) ReconnectLog.forget(name)
     // altimate_change end
 
@@ -913,13 +959,12 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
     delete existing[name]
     fs.writeFileSync(globalPath, JSON.stringify(existing, null, 2), "utf-8")
 
-    // Remove from in-memory
-    configs.delete(name)
-
     // altimate_change start — remove its secrets from the OS credential store too. Entries are keyed by name
-    // only, so they are kept while this project's config or an env var still defines a connection by that name.
-    // (Own properties only: a connection named "constructor" must not count as defined.)
-    const stillDefined = Object.hasOwn(loadFromFile(projectConfigPath), name) || Object.hasOwn(loadFromEnv(), name)
+    // only, so they are kept while an env var or the local config of a project this process serves still defines a
+    // connection by that name (see forgetCredentials). (Own properties only: a connection named "constructor" must
+    // not count as defined.)
+    const stillDefined =
+      projectConfigPaths.some((file) => Object.hasOwn(loadFromFile(file), name)) || Object.hasOwn(loadFromEnv(), name)
     const notRemoved = stillDefined ? [] : await forgetCredentials(name)
     if (notRemoved.length > 0) return { success: true, warnings: [notRemovedWarning(name, notRemoved)] }
     // altimate_change end
@@ -933,18 +978,11 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
 // altimate_change start — a way to release native handles without reloading
 /** Close one project's cached connectors and their SSH tunnels, and drop its in-flight connects. */
 async function closeState(s: State): Promise<void> {
-  // Detach synchronously, so nothing started during the awaits below is dropped or reuses a closing connector.
-  const cached = [...s.connectors]
-  s.connectors.clear()
-  s.pending.clear()
-  for (const [name, connector] of cached) {
-    try {
-      await connector.close()
-    } catch {
-      // ignore
-    }
-    closeTunnel(tunnelKey(s, name))
-  }
+  // Detach everything synchronously, so nothing started during the awaits below is dropped or reuses a closing
+  // connector. In-flight attempts are invalidated and their tunnels closed by their own handles.
+  for (const name of [...s.pending.keys()]) dropAttempt(s, name)
+  const releases = [...s.connectors.keys()].map((name) => detachCached(s, name))
+  for (const release of releases) await release()
 }
 
 /**
@@ -987,7 +1025,7 @@ export function getConfig(name: string): ConnectionConfig | undefined {
 /** Reset the registry state of every project (for testing). */
 export function reset(): void {
   // altimate_change start — invalidate in-flight connects first, so none is cached into a dropped state
-  for (const s of allStates()) s.pending.clear()
+  for (const s of allStates()) for (const name of [...s.pending.keys()]) dropAttempt(s, name)
   states.clear()
   injectedState = undefined
   injectionActive = false
