@@ -257,6 +257,13 @@ describe("test helpers", () => {
     expect(inProject(projectA, () => Registry.names())).toEqual([])
   })
 
+  test("a connect in flight across reset() is not cached into the dropped state", async () => {
+    writeLocal(projectA, { store: { type: "sqlite", path: "store.sqlite", create: true } })
+    const inflight = inProject(projectA, () => Registry.get("store"))
+    Registry.reset()
+    await expect(inflight).rejects.toThrow("reloaded or removed while it was connecting")
+  })
+
   test("closeAll releases connectors cached under setConfigs after load()", async () => {
     Registry.setConfigs({ mem: { type: "sqlite", path: ":memory:" } })
     const injected = await Registry.get("mem")

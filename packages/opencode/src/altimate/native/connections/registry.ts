@@ -933,8 +933,11 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
 // altimate_change start — a way to release native handles without reloading
 /** Close one project's cached connectors and their SSH tunnels, and drop its in-flight connects. */
 async function closeState(s: State): Promise<void> {
+  // Detach synchronously, so nothing started during the awaits below is dropped or reuses a closing connector.
+  const cached = [...s.connectors]
+  s.connectors.clear()
   s.pending.clear()
-  for (const [name, connector] of s.connectors) {
+  for (const [name, connector] of cached) {
     try {
       await connector.close()
     } catch {
@@ -942,7 +945,6 @@ async function closeState(s: State): Promise<void> {
     }
     closeTunnel(tunnelKey(s, name))
   }
-  s.connectors.clear()
 }
 
 /**
@@ -962,12 +964,14 @@ export async function closeAll(): Promise<void> {
 
 /** Reload the current project's configs and clear its cached connectors; other projects are untouched. */
 export async function reload(): Promise<void> {
-  // altimate_change start — only this project's connectors; states captured before the await
+  // altimate_change start — only this project's connectors. The new configs are in place before the first await,
+  // so no connect can start against the old ones while the old connectors close.
   const s = state()
   const target = projectState()
-  await closeState(s)
+  const closing = closeState(s)
   injectionActive = false
   loadInto(target)
+  await closing
   // altimate_change end
 }
 
@@ -982,7 +986,8 @@ export function getConfig(name: string): ConnectionConfig | undefined {
 
 /** Reset the registry state of every project (for testing). */
 export function reset(): void {
-  // altimate_change start
+  // altimate_change start — invalidate in-flight connects first, so none is cached into a dropped state
+  for (const s of allStates()) s.pending.clear()
   states.clear()
   injectedState = undefined
   injectionActive = false
