@@ -27,6 +27,7 @@ import * as Store from "../../altimate/learn/store"
 import { MAX_TEXT, summarize, describeApplied, describeRejected } from "../../altimate/learn/curator"
 import { sourceFromTrajectory, redactSecrets, type DigestSource } from "../../altimate/learn/digest"
 import { DEFAULT_TIMEOUT_MS, FEEDBACK_KINDS, providerGenerate, type FeedbackKind, type Generate } from "../../altimate/learn/reflect"
+import { analyzeRecurrence, formatRecurrence } from "../../altimate/learn/recurrence"
 import * as Signals from "../../altimate/learn/signals"
 import { learnMaxStored, learnModel } from "../../altimate/learn/auto"
 import { autoReflectEnabled, captureEnabled } from "../../altimate/learn/capture"
@@ -387,7 +388,11 @@ const StatusCommand = effectCmd({
           limits: { ...resolveLimits(learn), max_stored: learnMaxStored(learn?.max_stored), ...resolveRecoveryLimits(learn), ...resolveAutoPromoteLimits(learn) },
           // altimate_change end
         }
-      })
+      }).then(async (base) => ({
+        ...base,
+        // Read-only and advisory: runs after the lock is released; its failure must not hide the rest of the status.
+        ...await analyzeRecurrence(root, { name }).then((recurrence) => ({ recurrence }), (error) => ({ recurrence_error: error instanceof Error ? error.message : String(error) })),
+      }))
       if (args.json) return out(JSON.stringify(status, null, 2))
       out(`Learning enabled: ${status.enabled ? "yes" : "no"}`)
       // altimate_change start — surface the learning kill switch in human-readable status
@@ -408,6 +413,7 @@ const StatusCommand = effectCmd({
       out(`Lessons: ${status.approved} approved, ${status.candidate} candidate, ${status.retired} retired`)
       out(`Pinned lessons: ${status.pinned.length}${status.pinned.length ? ` (${status.pinned.join(", ")})` : ""}`)
       out(`Open signals: ${status.open_signals}`)
+      out("recurrence" in status ? formatRecurrence(status.recurrence) : `Recurrence unavailable: ${status.recurrence_error}`)
       out(`Pending recoveries: ${status.pending_recoveries} session(s); ${status.backoff_sessions} in backoff`)
       out(`Pending replacements: ${status.pending_replacements}`)
       out(status.last_reflection
