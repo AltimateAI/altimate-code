@@ -221,11 +221,61 @@ export function load(): void {
 
   if (configs.has(SCRATCH_NAME)) Log.Default.warn(SCRATCH_NAME_CONFLICT)
   loaded = true
+  // altimate_change start
+  injected = false
+  loadedSignature = sourceSignature()
+  // altimate_change end
 }
+
+// altimate_change start — pick up config edited after the first load (e.g. an agent following the
+// `warehouse_list` hint) without a restart. Stat-based: two stats plus the env scan per access.
+/** True once configs were injected with setConfigs(); they have no on-disk source to compare. */
+let injected = false
+/** Fingerprint of the sources behind the last load. */
+let loadedSignature = ""
+/** Connections added in this process, with the credentials the sanitized file no longer holds. */
+const sessionAdded = new Map<string, ConnectionConfig>()
+
+function statSignature(filePath: string): string {
+  try {
+    const st = fs.statSync(filePath)
+    return `${filePath}:${st.mtimeMs}:${st.size}`
+  } catch {
+    return `${filePath}:-`
+  }
+}
+
+function sourceSignature(): string {
+  const env = Object.entries(process.env)
+    .filter(([key, value]) => key.startsWith(CONN_ENV_PREFIX) && value)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+  return [statSignature(globalConfigPath()), statSignature(localConfigPath()), ...env].join("\n")
+}
+
+/** Re-read the sources, keeping this process's own added connections and dropping stale connectors. */
+function refresh(): void {
+  const previous = new Map(configs)
+  load()
+  for (const [name, config] of sessionAdded) {
+    // A project file or env var defining the name outranks what this process added to the global file.
+    const overridden = Object.hasOwn(loadFromFile(localConfigPath()), name) || Object.hasOwn(loadFromEnv(), name)
+    if (!overridden && configs.has(name)) configs.set(name, config)
+  }
+  for (const [name, connector] of [...connectors]) {
+    if (JSON.stringify(configs.get(name)) === JSON.stringify(previous.get(name))) continue
+    connectors.delete(name)
+    connector.close().catch(() => {})
+  }
+}
+// altimate_change end
 
 /** Ensure configs are loaded. */
 function ensureLoaded(): void {
   if (!loaded) load()
+  // altimate_change start
+  else if (!injected && sourceSignature() !== loadedSignature) refresh()
+  // altimate_change end
 }
 
 // ---------------------------------------------------------------------------
@@ -748,6 +798,10 @@ export async function add(
     // session can connect even when keytar is unavailable. Only the disk
     // file uses the sanitized version (credentials stripped).
     configs.set(name, normalized)
+    // altimate_change start — our own write is not an external edit, and the credentials stay in memory
+    sessionAdded.set(name, normalized)
+    loadedSignature = sourceSignature()
+    // altimate_change end
 
     // Clear cached connector
     const cached = connectors.get(name)
@@ -807,6 +861,10 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
 
     // Remove from in-memory
     configs.delete(name)
+    // altimate_change start
+    sessionAdded.delete(name)
+    loadedSignature = sourceSignature()
+    // altimate_change end
 
     // altimate_change start — remove its secrets from the OS credential store too. Entries are keyed by name
     // only, so they are kept while this project's config or an env var still defines a connection by that name.
@@ -865,6 +923,10 @@ export function reset(): void {
   pending.clear()
   loaded = false
   censusSent = false
+  // altimate_change start
+  injected = false
+  sessionAdded.clear()
+  // altimate_change end
 }
 
 /**
@@ -876,4 +938,8 @@ export function setConfigs(newConfigs: Record<string, ConnectionConfig>): void {
     configs.set(name, config)
   }
   loaded = true
+  // altimate_change start
+  injected = true
+  sessionAdded.clear()
+  // altimate_change end
 }
