@@ -221,72 +221,21 @@ export function load(): void {
 
   if (configs.has(SCRATCH_NAME)) Log.Default.warn(SCRATCH_NAME_CONFLICT)
   loaded = true
-  // altimate_change start
-  injected = false
-  loadedSignature = sourceSignature()
-  // altimate_change end
 }
-
-// altimate_change start — pick up config edited after the first load (e.g. an agent following the
-// `warehouse_list` hint) without a restart. Stat-based: two stats plus the env scan per access.
-/** True once configs were injected with setConfigs(); they have no on-disk source to compare. */
-let injected = false
-/** Fingerprint of the sources behind the last load. */
-let loadedSignature = ""
-/** Bumped whenever a refresh changes a connection's config, so an in-flight connect can tell it is obsolete. */
-let configGeneration = 0
-/**
- * Connections added in this process: the full config (with credentials the sanitized file no longer holds) and
- * the sanitized form that was written, so a later edit of the file is not overridden by the older in-memory copy.
- */
-const sessionAdded = new Map<string, { full: ConnectionConfig; written: ConnectionConfig }>()
-
-function statSignature(filePath: string): string {
-  try {
-    const st = fs.statSync(filePath)
-    return `${filePath}:${st.mtimeMs}:${st.size}`
-  } catch {
-    return `${filePath}:-`
-  }
-}
-
-function sourceSignature(): string {
-  const env = Object.entries(process.env)
-    .filter(([key, value]) => key.startsWith(CONN_ENV_PREFIX) && value)
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([key, value]) => `${key}=${value}`)
-  return [statSignature(globalConfigPath()), statSignature(localConfigPath()), ...env].join("\n")
-}
-
-/** Re-read the sources, keeping this process's own added connections and dropping stale connectors. */
-function refresh(): void {
-  const previous = new Map(configs)
-  load()
-  for (const [name, { full, written }] of sessionAdded) {
-    // Only while the file still holds what add() wrote: a project file or env var defining the name outranks it,
-    // and a later edit of the global entry must win over the older in-memory copy.
-    const overridden = Object.hasOwn(loadFromFile(localConfigPath()), name) || Object.hasOwn(loadFromEnv(), name)
-    if (!overridden && JSON.stringify(configs.get(name)) === JSON.stringify(written)) configs.set(name, full)
-    else if (!overridden) sessionAdded.delete(name)
-  }
-  for (const name of new Set([...previous.keys(), ...configs.keys()])) {
-    if (JSON.stringify(configs.get(name)) !== JSON.stringify(previous.get(name))) configGeneration++
-  }
-  for (const [name, connector] of [...connectors]) {
-    if (JSON.stringify(configs.get(name)) === JSON.stringify(previous.get(name))) continue
-    connectors.delete(name)
-    connector.close().catch(() => {})
-  }
-}
-// altimate_change end
 
 /** Ensure configs are loaded. */
 function ensureLoaded(): void {
   if (!loaded) load()
-  // altimate_change start
-  else if (!injected && sourceSignature() !== loadedSignature) refresh()
+  // altimate_change start — the registry latches on first load, so a connections file created after an empty
+  // answer (the `warehouse_list` hint) was never seen. Re-read only while nothing is loaded: there is no state to
+  // replace or close, and a populated registry never changes under a running session.
+  else if (configs.size === 0 && !injected) load()
   // altimate_change end
 }
+
+// altimate_change start — set by setConfigs() (tests): an injected empty registry is not a stale one
+let injected = false
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // Driver factory
@@ -610,9 +559,6 @@ export async function get(name: string): Promise<Connector> {
     })
   } catch {}
   // altimate_change end
-  // altimate_change start
-  const generation = configGeneration
-  // altimate_change end
   const promise = (async () => {
     try {
       const connector = await createConnector(name, config)
@@ -623,13 +569,6 @@ export async function get(name: string): Promise<Connector> {
         closeTunnel(name)
         throw connectErr
       }
-      // altimate_change start — the config changed while this connected; caching it would pin the old target
-      if (generation !== configGeneration && JSON.stringify(configs.get(name)) !== JSON.stringify(config)) {
-        await connector.close().catch(() => {})
-        closeTunnel(name)
-        throw new Error(`Connection "${name}" changed while it was connecting; retry.`)
-      }
-      // altimate_change end
       connectors.set(name, connector)
       fileLog("INFO", "warehouse-connect", "connected", { name, type: config.type, auth: authMethod, duration_ms: Date.now() - startTime })
       try {
@@ -818,10 +757,6 @@ export async function add(
     // session can connect even when keytar is unavailable. Only the disk
     // file uses the sanitized version (credentials stripped).
     configs.set(name, normalized)
-    // altimate_change start — our own write is not an external edit, and the credentials stay in memory
-    sessionAdded.set(name, { full: normalized, written: sanitized })
-    loadedSignature = sourceSignature()
-    // altimate_change end
 
     // Clear cached connector
     const cached = connectors.get(name)
@@ -881,10 +816,6 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
 
     // Remove from in-memory
     configs.delete(name)
-    // altimate_change start
-    sessionAdded.delete(name)
-    loadedSignature = sourceSignature()
-    // altimate_change end
 
     // altimate_change start — remove its secrets from the OS credential store too. Entries are keyed by name
     // only, so they are kept while this project's config or an env var still defines a connection by that name.
@@ -945,7 +876,6 @@ export function reset(): void {
   censusSent = false
   // altimate_change start
   injected = false
-  sessionAdded.clear()
   // altimate_change end
 }
 
@@ -960,6 +890,5 @@ export function setConfigs(newConfigs: Record<string, ConnectionConfig>): void {
   loaded = true
   // altimate_change start
   injected = true
-  sessionAdded.clear()
   // altimate_change end
 }

@@ -85,7 +85,7 @@ describe("warehouse_list no-connections hint", () => {
     expect(Registry.getConfig("late-db")?.type).toBe("postgres")
   })
 
-  test("an env var set after an empty answer is picked up, and removing a file drops its connection", async () => {
+  test("an env var set after an empty answer is picked up", async () => {
     const tool = await initTool(WarehouseListTool)
     const ctx = toolCtx()
     await tool.execute({}, ctx)
@@ -95,27 +95,41 @@ describe("warehouse_list no-connections hint", () => {
     } finally {
       delete process.env.ALTIMATE_CODE_CONN_ENVLATE
     }
-    expect((await tool.execute({}, ctx)).output).toContain("No warehouse connections")
   })
 
-  test("setConfigs-injected connections are not discarded by the staleness check", () => {
+  test("with a connection loaded, editing the file does not replace the configs", () => {
+    const named = Registry.localConfigPath()
+    fs.mkdirSync(path.dirname(named), { recursive: true })
+    fs.writeFileSync(named, JSON.stringify({ "db-a": { type: "postgres", host: "old" } }))
+    expect(Registry.getConfig("db-a")?.host).toBe("old")
+    fs.writeFileSync(named, JSON.stringify({ "db-a": { type: "postgres", host: "new" }, "db-b": { type: "postgres" } }))
+    expect(Registry.getConfig("db-a")?.host).toBe("old")
+    expect(Registry.names()).toEqual(["db-a"])
+  })
+
+  test("a populated registry is not clobbered when the working project changes", () => {
+    const named = Registry.localConfigPath()
+    fs.mkdirSync(path.dirname(named), { recursive: true })
+    fs.writeFileSync(named, JSON.stringify({ "proj-a": { type: "postgres" } }))
+    expect(Registry.names()).toEqual(["proj-a"])
+
+    const other = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "whl-hint-b-")))
+    try {
+      fs.mkdirSync(path.join(other, ".altimate-code"))
+      fs.writeFileSync(
+        path.join(other, ".altimate-code", "connections.json"),
+        JSON.stringify({ "proj-b": { type: "postgres" } }),
+      )
+      process.chdir(other)
+      expect(Registry.names()).toEqual(["proj-a"])
+    } finally {
+      process.chdir(project)
+      fs.rmSync(other, { recursive: true, force: true })
+    }
+  })
+
+  test("setConfigs-injected connections are kept", () => {
     Registry.setConfigs({ injected: { type: "postgres" } })
     expect(Registry.names()).toEqual(["injected"])
-    expect(Registry.names()).toEqual(["injected"])
-  })
-
-  test("a connection added in-process yields to a later edit of its global entry", async () => {
-    const added = await Registry.add("edit-me", { type: "postgres", host: "old-host", database: "d" })
-    expect(added.success).toBe(true)
-    try {
-      expect(Registry.getConfig("edit-me")?.host).toBe("old-host")
-      const globalPath = Registry.globalConfigPath()
-      const onDisk = JSON.parse(fs.readFileSync(globalPath, "utf-8"))
-      onDisk["edit-me"].host = "new-host"
-      fs.writeFileSync(globalPath, JSON.stringify(onDisk))
-      expect(Registry.getConfig("edit-me")?.host).toBe("new-host")
-    } finally {
-      await Registry.remove("edit-me")
-    }
   })
 })

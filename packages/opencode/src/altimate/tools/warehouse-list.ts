@@ -20,7 +20,7 @@ export function noConnectionsMessage(): string {
     `  2. ${localConfigPath()} (this project)`,
     `  3. ${CONN_ENV_PREFIX}<NAME> environment variables, each holding one connection's config as JSON`,
     "",
-    "Changes to these sources are picked up on the next call; no restart is needed. Example connections.json:",
+    "After adding the first connection, call warehouse_list again. Edits to an existing connections.json take effect after a restart. Example connections.json:",
     "{",
     '  "my-db": { "type": "postgres", "host": "localhost", "port": 5432, "database": "mydb", "user": "user", "password": "pass" }',
     "}",
