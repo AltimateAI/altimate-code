@@ -942,27 +942,29 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
     // A connect still in flight for this name will finish and keep its name in use; forgetting it now would let a
     // later reconnect on that account be put down to another connection that shares it.
     const inflight = s.pending.has(name)
+    const projectConfigPath = localConfigPath()
     // One synchronous step before any await: the in-flight connect is invalidated (and its tunnel closed), the
-    // config is gone so no new connect can start against it, and the cached connector and tunnel are detached.
+    // config is gone from memory and from the global file, so no connect or empty-registry re-read can bring it back,
+    // and the cached connector and tunnel are detached.
     dropAttempt(s, name)
     s.configs.delete(name)
     const release = detachCached(s, name)
-    // Every served project's local file, read now: the state map can change during the awaits below.
-    const projectConfigPaths = [localConfigPath(), ...[...states.keys()].map(localConfigPathFor)]
+    const globalPath = globalConfigPath()
+    const existing = loadFromFile(globalPath)
+    // Only a file that holds the entry is rewritten (a missing global directory is not an error).
+    if (Object.hasOwn(existing, name)) {
+      delete existing[name]
+      fs.writeFileSync(globalPath, JSON.stringify(existing, null, 2), "utf-8")
+    }
     await release()
     if (!inflight) ReconnectLog.forget(name)
     // altimate_change end
 
-    // Remove from global config file
-    const globalPath = globalConfigPath()
-    const existing = loadFromFile(globalPath)
-    delete existing[name]
-    fs.writeFileSync(globalPath, JSON.stringify(existing, null, 2), "utf-8")
-
     // altimate_change start — remove its secrets from the OS credential store too. Entries are keyed by name
     // only, so they are kept while an env var or the local config of a project this process serves still defines a
-    // connection by that name (see forgetCredentials). (Own properties only: a connection named "constructor" must
-    // not count as defined.)
+    // connection by that name (see forgetCredentials); the served set is read now, after the awaits above. (Own
+    // properties only: a connection named "constructor" must not count as defined.)
+    const projectConfigPaths = [projectConfigPath, ...[...states.keys()].map(localConfigPathFor)]
     const stillDefined =
       projectConfigPaths.some((file) => Object.hasOwn(loadFromFile(file), name)) || Object.hasOwn(loadFromEnv(), name)
     const notRemoved = stillDefined ? [] : await forgetCredentials(name)
@@ -982,7 +984,8 @@ async function closeState(s: State): Promise<void> {
   // connector. In-flight attempts are invalidated and their tunnels closed by their own handles.
   for (const name of [...s.pending.keys()]) dropAttempt(s, name)
   const releases = [...s.connectors.keys()].map((name) => detachCached(s, name))
-  for (const release of releases) await release()
+  // Started together: each release closes its tunnel synchronously, so one hanging connector close holds no tunnel.
+  await Promise.all(releases.map((release) => release()))
 }
 
 /**

@@ -139,6 +139,12 @@ export function openTunnel(config: SshConfig): TunnelHandle {
         close()
       })
 
+      // A clean remote disconnect ends the tunnel too: before ready it rejects, after it closes the listener.
+      client.on("close", () => {
+        reject(new Error("SSH connection closed"))
+        close()
+      })
+
       const connectOptions: Record<string, unknown> = {
         host: config.ssh_host,
         port: config.ssh_port ?? 22,

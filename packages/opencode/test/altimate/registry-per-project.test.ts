@@ -39,6 +39,8 @@ afterAll(() => {
 const sshClients: { host: string; ended: boolean }[] = []
 /** Hosts whose SSH `ready` is held until the test releases it. */
 const heldReady = new Map<string, () => void>()
+/** Simulates the SSH server closing the connection cleanly (no error event). */
+const remoteClose = new Map<string, () => void>()
 mock.module("ssh2", () => ({
   Client: class {
     private handlers = new Map<string, (...args: unknown[]) => void>()
@@ -51,6 +53,7 @@ mock.module("ssh2", () => ({
       this.record.host = options.host
       sshClients.push(this.record)
       const ready = () => this.handlers.get("ready")?.()
+      remoteClose.set(options.host, () => this.handlers.get("close")?.())
       if (options.host.startsWith("held-")) heldReady.set(options.host, ready)
       else queueMicrotask(ready)
     }
@@ -118,6 +121,7 @@ beforeEach(() => {
   projectB = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rpp-b-")))
   sshClients.length = 0
   heldReady.clear()
+  remoteClose.clear()
   Registry.reset()
 })
 
@@ -308,6 +312,15 @@ describe("each connect attempt owns its SSH tunnel", () => {
     expect(openTunnelCount()).toBe(0)
     const store = await inProject(projectA, () => Registry.get("store"))
     expect((await store.execute("SELECT 1 AS one")).rows).toEqual([[1]])
+    expect(openTunnelCount()).toBe(0)
+  })
+
+  test("a clean SSH disconnect before ready fails the connect and leaves no tunnel", async () => {
+    writeLocal(projectA, { store: sshStore("held-closing") })
+    const pending = inProject(projectA, () => Registry.get("store"))
+    await sshConnected("held-closing")
+    remoteClose.get("held-closing")?.()
+    await expect(pending).rejects.toThrow("SSH connection closed")
     expect(openTunnelCount()).toBe(0)
   })
 
