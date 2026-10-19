@@ -16,13 +16,12 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 export const SERVER_INSTRUCTIONS = [
   "Analyst method for data questions:",
-  "1. Start with warehouse_list; it also shows local tables with columns and a sample row.",
-  "2. Read schema_inspect's value profile (ranked values, distinct/null counts, unique flag, value shapes) before choosing columns or join keys; formats often differ across databases.",
+  "1. Start with warehouse_list; it shows local tables, columns and a sample row.",
+  "2. Check stored value formats (schema_inspect value profile) before filtering or joining on a column; formats differ across databases.",
   "3. Compute in the database; batch independent queries in one sql_execute call (`queries`).",
-  "4. For joins across connections, sql_materialize the smaller filtered side into `scratch` and join there.",
-  "5. Run sql_check when keys, fan-out, grain or nulls could change the answer.",
-  "6. Check that every condition in the question actually filters something.",
-  "7. Finish with answer_commit: `asked` lists the requested items, one field per item; reply with exactly the FINAL ANSWER text it returns.",
+  "4. Cross-connection joins: sql_materialize the smaller filtered side into `scratch` and join there.",
+  "5. Use sql_check when keys, fan-out, grain or nulls could change the answer; make sure every condition filters something.",
+  "6. Finish with answer_commit (`asked` = the requested items, one field each); reply with exactly its FINAL ANSWER text.",
 ].join("\n")
 
 /** Spilled results: a resource_link next to the text, which keeps the preview, row count and path. */

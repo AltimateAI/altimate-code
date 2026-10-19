@@ -755,6 +755,52 @@ mcpTest("sql_execute queries keeps the whole envelope inside one shared budget",
 })
 // altimate_change end
 
+// altimate_change start — compact tool definitions: re-sent with every model request
+mcpTest("tool definitions stay compact and keep their required properties", async () => {
+  const { client } = await fixture()
+  const { tools } = await client.listTools()
+  const size = (tool: (typeof tools)[number]) =>
+    JSON.stringify({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }).length
+  const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]))
+  expect(size(byName.answer_commit!)).toBeLessThanOrEqual(2_000)
+  expect(tools.reduce((total, tool) => total + size(tool), 0)).toBeLessThan(6_000)
+  expect(client.getInstructions()!.length).toBeLessThanOrEqual(723)
+  const declared = JSON.stringify(tools)
+  expect(declared).not.toContain("$schema")
+  expect(declared).not.toContain('"const":""')
+  expect(byName.answer_commit!.inputSchema.required).toEqual(["basis", "request"])
+  expect(byName.sql_check!.inputSchema.required).toEqual(["warehouse", "check"])
+  expect(byName.sql_materialize!.inputSchema.required).toEqual(["source_warehouse", "sql", "target_table"])
+  // A nullable table cell keeps its null member; only optional-property fillers collapse.
+  expect(JSON.stringify(byName.answer_commit!.inputSchema.properties!.rows)).toContain('{"type":"null"}')
+})
+
+mcpTest("strict-schema filler values are still accepted after the schema is compacted", async () => {
+  const { call } = await fixture()
+  const executed = await call("sql_execute", {
+    warehouse: "source",
+    query: "SELECT name FROM items WHERE id = 1",
+    queries: null,
+    query_from: null,
+    full_text_columns: [],
+  })
+  expect(executed.isError).toBe(false)
+  expect(body(executed)).toContain("apple")
+  const committed = await call("answer_commit", {
+    fields: [{ name: "", value: "apple", units: "", precision: null }],
+    rows: null,
+    unresolved: {},
+    asked: [],
+    readings: [],
+    answer_only: "",
+    basis: "Read items.name for id 1.",
+    request: "Which item has id 1?",
+  })
+  expect(committed.isError).toBeFalsy()
+  expect(body(committed)).toContain("FINAL ANSWER: apple")
+})
+// altimate_change end
+
 // altimate_change start — warehouse_list discovery: local tables with columns and a sample in one call
 mcpTest("warehouse_list lists local tables with columns and one sample row", async () => {
   const { call } = await fixture(false, {}, undefined, (db) => {

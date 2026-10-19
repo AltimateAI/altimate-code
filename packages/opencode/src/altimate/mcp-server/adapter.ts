@@ -21,15 +21,158 @@ import { closeScratch } from "../native/connections/scratch"
 import type { SessionID, MessageID } from "@/session/schema"
 
 export const descriptions: Record<string, string> = {
-  warehouse_list:
-    "List warehouse connections; for local databases also their tables, columns and a sample row (small catalogs).",
-  schema_inspect: "List tables/collections when table is omitted or empty; otherwise inspect one table, with optional sample values.",
+  warehouse_list: "List connections; for local databases also tables, columns and a sample row.",
+  schema_inspect: "List tables when table is omitted; otherwise one table's columns and value profile.",
   sql_execute:
-    "Execute SQL against a connected warehouse and return rows. Run independent queries together in one call with `queries`. Source writes require the server's --allow-write option.",
-  sql_check: "Run a read-only SQL data quality check against a connected warehouse.",
-  sql_materialize: "Copy a read-only source query into a session-local scratch table for further analysis.",
+    "Run SQL and return rows. Put independent queries in one call with `queries`. Source writes need --allow-write.",
+  sql_check: "Read-only data check: fanout, keys, grain, nulls or coverage.",
+  sql_materialize: "Store a read-only query's rows as a scratch table, to join across connections.",
   answer_commit:
-    "Finish a data question. Call this last, with one field (or rows column) per item the request asks for and `asked` listing those items in order; the call is rejected when an asked item has no value of its own. Numbers may come from SQL or from your own computation. Reply with exactly the returned FINAL ANSWER text.",
+    "Finish a data question; call last, then reply with exactly its FINAL ANSWER text. Use one of fields, rows or unresolved, with a field (or rows column) per asked item, named after it. Numbers may be your own computation; exact decimals as strings.",
+}
+
+/**
+ * Short MCP property descriptions, keyed by property path (`a.b` nests, `a[]` is an array's items).
+ * Every tool definition is re-sent on each model request, so the advertised schema keeps only what a
+ * caller needs to choose and fill a property; `null` drops the description, `DROP` the property.
+ */
+const DROP = Symbol("drop")
+const PROPERTY_DESCRIPTIONS: Record<string, Record<string, string | null | typeof DROP>> = {
+  schema_inspect: {
+    table: "Table, optionally schema-qualified; omit to list tables",
+    schema_name: null,
+    warehouse: null,
+    values: "Include the value profile (default true)",
+  },
+  sql_execute: {
+    query: "SQL, or a MongoDB JSON command",
+    queries: "Up to 8 independent read-only queries; each gets its own labeled result",
+    "queries[].label": "Default q1, q2, ...",
+    "queries[].query": null,
+    "queries[].warehouse": "Default: warehouse",
+    query_from: "Run the SQL string this read-only SELECT returns, without copying it",
+    "query_from.warehouse": null,
+    "query_from.sql": "SELECT returning one row with one SQL string column",
+    warehouse: null,
+    limit: "Max rows (default 100, max 10000)",
+    full_text_columns: "Columns whose full text to prioritize (at most 20 rows; all rows are saved)",
+    query_timeout_ms: null,
+  },
+  sql_check: {
+    sql: "SELECT for grain, nulls or coverage",
+    columns: "Columns for grain or nulls",
+    column: "Column for coverage",
+    pattern: "Regex (SQLite: LIKE pattern)",
+    left_sql: "SELECT for fanout or keys",
+    right_sql: "SELECT for fanout or keys",
+    on: "fanout: [left, right] column pairs",
+    join: null,
+    left_col: "keys: left column",
+    right_col: "keys: right column",
+    left_warehouse: DROP,
+    right_warehouse: DROP,
+    query_timeout_ms: null,
+  },
+  sql_materialize: {
+    source_warehouse: "Warehouse to read, or scratch",
+    sql: "Read-only SELECT; every returned row is stored",
+    target_table: "New scratch table: letters, digits, underscores",
+    mode: "create (default), replace or append",
+    max_rows: "Row cap (default 2000000)",
+    max_bytes: null,
+    query_timeout_ms: null,
+  },
+  answer_commit: {
+    fields: null,
+    "fields[].name": null,
+    // Units can be part of a string value; the field stays accepted.
+    "fields[].units": DROP,
+    "fields[].precision": "Decimals",
+    asked: "Requested items, in order",
+    "rows.format": "lines: no header",
+    "rows.values": "N rows if N is asked, even with ties",
+    "rows.precision": "Decimals by column",
+    "rows.note": "Tie or caveat",
+    basis: "1-2 sentences: population, grain, source column, caveats",
+    answer_only: "Reply is only the value(s)/table",
+    readings: "If two readings fit: the chosen one; decided_by: the rejected one and why",
+    request: "The question, verbatim",
+  },
+}
+
+type JsonNode = Record<string, unknown>
+const isNode = (value: unknown): value is JsonNode => typeof value === "object" && value !== null && !Array.isArray(value)
+
+/** Strict-schema fillers the parsers accept for unused optional properties: null, "", [] and {}. */
+function isFiller(node: unknown): boolean {
+  if (!isNode(node)) return false
+  if (node.type === "null") return true
+  if (node.const === "" && node.type === "string") return true
+  if (node.type === "array" && node.maxItems === 0) return true
+  return node.type === "object" && isNode(node.properties) && Object.keys(node.properties).length === 0 && node.additionalProperties === false
+}
+
+/**
+ * Collapses an optional property's filler union to its value schema (omitting the property means the
+ * same to the parsers) and drops keys that only restate what the parsers enforce. Unions elsewhere,
+ * such as nullable table cells, keep every member.
+ */
+function collapse(node: unknown, property = false): unknown {
+  if (Array.isArray(node)) return node.map((item) => collapse(item))
+  if (!isNode(node)) return node
+  let copy: JsonNode = { ...node }
+  if (property && Array.isArray(copy.anyOf)) {
+    const kept = copy.anyOf.filter((member) => !isFiller(member))
+    if (kept.length === 1 && isNode(kept[0])) {
+      const { anyOf: _, ...rest } = copy
+      copy = { ...(kept[0] as JsonNode), ...rest }
+    } else copy.anyOf = kept
+  }
+  for (const key of ["$schema", "default", "propertyNames", "minItems", "additionalProperties"]) {
+    if (key !== "additionalProperties" || copy[key] === false) delete copy[key]
+  }
+  if (copy.maximum === Number.MAX_SAFE_INTEGER) delete copy.maximum
+  for (const [key, value] of Object.entries(copy)) {
+    if (key === "properties" && isNode(value)) {
+      copy.properties = Object.fromEntries(Object.entries(value).map(([name, child]) => [name, collapse(child, true)]))
+    } else if (key === "items" || key === "prefixItems" || key === "anyOf" || (key === "additionalProperties" && isNode(value))) {
+      copy[key] = collapse(value)
+    }
+  }
+  return copy
+}
+
+/** The property schema at a description path, or undefined when the path does not exist. */
+function propertyAt(schema: JsonNode, pathText: string): { owner: JsonNode; parent: JsonNode; name: string } | undefined {
+  let node: unknown = schema
+  const segments = pathText.split(".")
+  for (const [index, segment] of segments.entries()) {
+    const array = segment.endsWith("[]")
+    const name = array ? segment.slice(0, -2) : segment
+    const properties = isNode(node) ? node.properties : undefined
+    if (!isNode(node) || !isNode(properties) || !isNode(properties[name])) return undefined
+    if (index === segments.length - 1 && !array) return { owner: node, parent: properties, name }
+    node = array ? (properties[name] as JsonNode).items : properties[name]
+  }
+  return undefined
+}
+
+/** The advertised MCP input schema: fillers collapsed and descriptions shortened. Parsing is unchanged. */
+export function compactSchema<T>(name: string, schema: T): T {
+  const copy = collapse(schema) as JsonNode
+  for (const [pathText, description] of Object.entries(PROPERTY_DESCRIPTIONS[name] ?? {})) {
+    const target = propertyAt(copy, pathText)
+    if (!target) throw new Error(`MCP schema for ${name} has no property ${pathText}`)
+    const property = target.parent[target.name] as JsonNode
+    if (description === DROP) {
+      // Only optional properties are dropped; a required one would make every call fail.
+      if (Array.isArray(target.owner.required) && target.owner.required.includes(target.name))
+        throw new Error(`MCP schema for ${name} cannot drop required property ${pathText}`)
+      delete target.parent[target.name]
+    } else if (description === null) delete property.description
+    else property.description = description
+  }
+  return copy as T
 }
 
 // The native tool caps `basis` at 400 characters; over the MCP boundary the text is trimmed instead of rejected.
@@ -145,6 +288,7 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
             )
           }
           if (tool.jsonSchema && info.id === "answer_commit") tool.jsonSchema = withRequest(relaxBasis(tool.jsonSchema))
+          if (tool.jsonSchema) tool.jsonSchema = compactSchema(info.id, tool.jsonSchema)
           result.set(info.id, tool)
         }
         return result
