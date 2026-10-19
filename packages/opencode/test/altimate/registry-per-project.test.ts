@@ -348,10 +348,44 @@ describe("instance disposal", () => {
     await expect(a.execute("SELECT 1")).rejects.toThrow()
     expect((await b.execute("SELECT 1 AS one")).rows).toEqual([[1]])
 
-    // reopening A loads a fresh state
+    // reopening A connects again with a new connector
     const a2 = await inProject(projectA, () => Registry.get("store"))
     expect(a2).not.toBe(a)
     expect((await a2.execute("SELECT 1 AS one")).rows).toEqual([[1]])
+  })
+
+  test("session-only credentials from warehouse_add survive disposal", async () => {
+    // The test preload disables the OS credential store, so the password exists only in memory.
+    await inProject(projectA, () => Registry.add("pg", { type: "postgres", host: "h", password: "s3cret-test" } as any))
+    await disposeInstance(projectA)
+    expect(inProject(projectA, () => Registry.getConfig("pg")?.password)).toBe("s3cret-test")
+  })
+
+  test("a connect dropped while its tunnel is opening fails as superseded, with the retry hint", async () => {
+    writeLocal(projectA, { store: sshStore("held-dispose") })
+    const pending = inProject(projectA, () => Registry.get("store"))
+    await sshConnected("held-dispose")
+    await disposeInstance(projectA)
+    await expect(pending).rejects.toThrow("reloaded or removed while it was connecting. Retry the request.")
+  })
+})
+
+describe("remove()", () => {
+  test("a failed global file write leaves the project's connection usable", async () => {
+    writeGlobal({ g: { type: "sqlite", path: path.join(projectA, "g.sqlite"), create: true } })
+    const connector = await inProject(projectA, () => Registry.get("g"))
+    const globalDir = path.join(home, ".altimate-code")
+    fs.chmodSync(globalDir, 0o500)
+    fs.chmodSync(path.join(globalDir, "connections.json"), 0o400)
+    try {
+      const result = await inProject(projectA, () => Registry.remove("g"))
+      expect(result.success).toBe(false)
+      expect(inProject(projectA, () => Registry.names())).toContain("g")
+      expect(await inProject(projectA, () => Registry.get("g"))).toBe(connector)
+    } finally {
+      fs.chmodSync(globalDir, 0o700)
+      fs.chmodSync(path.join(globalDir, "connections.json"), 0o600)
+    }
   })
 })
 

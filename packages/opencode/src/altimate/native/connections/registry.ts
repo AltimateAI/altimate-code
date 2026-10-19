@@ -99,16 +99,17 @@ function detachCached(s: State, name: string): () => Promise<void> {
 }
 
 let disposerRegistered = false
-/** Close a project's connectors and tunnels when its instance is disposed (`/instance/dispose`, reload). */
+/**
+ * Close a project's connectors, in-flight connects and tunnels when its instance is disposed (`/instance/dispose`,
+ * config updates, reload). Its configs stay: they may hold session-only credentials from `warehouse_add` (no OS
+ * credential store), which must last for the process, and a populated registry is never re-read anyway.
+ */
 function ensureDisposer(): void {
   if (disposerRegistered) return
   disposerRegistered = true
   registerDisposer(async (directory) => {
-    const key = path.resolve(directory)
-    const s = states.get(key)
-    if (!s) return
-    states.delete(key)
-    await closeState(s)
+    const s = states.get(path.resolve(directory))
+    if (s) await closeState(s)
   })
 }
 
@@ -724,7 +725,11 @@ export async function get(name: string): Promise<Connector> {
         })
       } catch {}
       return connector
-    } catch (e) {
+    } catch (caught) {
+      // altimate_change start — an attempt dropped by reload/remove/add/dispose fails with whatever its closed tunnel
+      // or socket raised; report it as superseded (with the retry hint), not as a broken connection
+      const e = current() ? caught : SUPERSEDED(name)
+      // altimate_change end
       fileLog("WARN", "warehouse-connect", "connect failed", {
         name,
         type: config?.type,
@@ -943,19 +948,19 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
     // later reconnect on that account be put down to another connection that shares it.
     const inflight = s.pending.has(name)
     const projectConfigPath = localConfigPath()
-    // One synchronous step before any await: the in-flight connect is invalidated (and its tunnel closed), the
-    // config is gone from memory and from the global file, so no connect or empty-registry re-read can bring it back,
-    // and the cached connector and tunnel are detached.
-    dropAttempt(s, name)
-    s.configs.delete(name)
-    const release = detachCached(s, name)
+    // One synchronous step before any await. The global file is written first, so a failed write leaves this
+    // project's state untouched. Then the in-flight connect is invalidated (and its tunnel closed), the config is
+    // gone so no connect or empty-registry re-read can bring it back, and the cached connector and tunnel are
+    // detached. Only a file that holds the entry is rewritten (a missing global directory is not an error).
     const globalPath = globalConfigPath()
     const existing = loadFromFile(globalPath)
-    // Only a file that holds the entry is rewritten (a missing global directory is not an error).
     if (Object.hasOwn(existing, name)) {
       delete existing[name]
       fs.writeFileSync(globalPath, JSON.stringify(existing, null, 2), "utf-8")
     }
+    dropAttempt(s, name)
+    s.configs.delete(name)
+    const release = detachCached(s, name)
     await release()
     if (!inflight) ReconnectLog.forget(name)
     // altimate_change end
