@@ -1229,6 +1229,76 @@ for (const mode of [
 }
 // altimate_change end
 
+// altimate_change start - the conjunction check reads the request from the session's own user message
+noLLMServer.instance(
+  "answer_commit rejects an under-asked commit once using the session's user message",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat, sessions } = yield* boot()
+      const requests: Record<string, unknown>[] = []
+      const args = {
+        fields: [{ name: "repository", value: "repo-a" }],
+        basis: "Selected repositories at repository grain from repositories.name.",
+      }
+      const committed = `${args.basis}\n\n**Answer:** repository: repo-a`
+      const language = createOpenAICompatible({
+        name: "test",
+        baseURL: "https://unused.invalid/v1",
+        fetch: Object.assign(
+          async (_url: string | URL | Request, init?: RequestInit) => {
+            if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+            const request = JSON.parse(init.body)
+            requests.push(request)
+            if (requests.length > 3) throw new Error("answer_commit exceeded its generation budget")
+            // The first commit is rejected and the unchanged recommit accepted, then the answer is echoed.
+            const response =
+              requests.length < 3
+                ? reply().tool("answer_commit", args).usage({ input: 1, output: 1 }).item()
+                : reply().text(committed).stop().item()
+            if (response.type !== "sse") throw new Error("expected SSE response")
+            return new Response(
+              [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              { headers: { "Content-Type": "text/event-stream" } },
+            )
+          },
+          { preconnect: () => undefined },
+        ),
+      }).chatModel("test-model")
+      const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+      try {
+        const result = yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "analyst",
+          model: promptRef,
+          parts: [{ type: "text", text: "Which repository has the most forks, and its most copied file?" }],
+        })
+        expect(result.info).not.toHaveProperty("error")
+        expect(requests).toHaveLength(3)
+        const commits = (yield* sessions.messages({ sessionID: chat.id }))
+          .flatMap((message) => message.parts)
+          .filter((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "answer_commit")
+        expect(commits.map((part) => part.state.status)).toEqual(["error", "completed"])
+        const rejection = commits[0]!.state.status === "error" ? commits[0]!.state.error : ""
+        expect(rejection).toContain("answer_commit conjunction check:")
+        expect(rejection).toContain('"and its most copied file"')
+        expect(JSON.stringify(requests[1]!.messages)).toContain("answer_commit conjunction check:")
+        expect(commits[1]!.state.status === "completed" && commits[1]!.state.metadata.committed_text).toBe(committed)
+        expect(
+          result.parts
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join(""),
+        ).toBe(committed)
+      } finally {
+        languageSpy.mockRestore()
+      }
+    }),
+  { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
+  30_000,
+)
+// altimate_change end
+
 noLLMServer.instance(
   "loop exits immediately when last assistant has stop finish",
   () =>

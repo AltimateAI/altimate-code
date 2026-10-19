@@ -3,6 +3,9 @@ import { Decimal } from "decimal.js"
 import { Effect, Option, Schema, SchemaIssue } from "effect"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { Tool } from "../../tool/tool"
+// altimate_change start — one-time conjunction review
+import { conjunctionRejection } from "./answer-commit-conjunction"
+// altimate_change end
 
 /** Maximum rendered answer length, including Markdown and basis, before the model echoes it. */
 export const MAX_RENDERED_ANSWER_CHARACTERS = 60_000
@@ -304,6 +307,19 @@ export const AnswerCommitTool = Tool.define(
           return yield* Effect.die(new Error("answer_commit is only available to the analyst agent"))
         yield* ctx.ask({ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} })
         const output = renderAnswer(args)
+        // altimate_change start — one-time conjunction review of under-asked commits
+        const rejection = conjunctionRejection(args, ctx.messages ?? [], ctx.sessionID)
+        if (rejection) {
+          const rejected: Tool.ExecuteResult = {
+            title: "Answer not committed",
+            // failure_kind separates this advisory from real commit failures in telemetry.
+            metadata: { readings: args.readings ?? [], truncated: false, failure_kind: "conjunction_check" },
+            output: rejection,
+            status: "error",
+          }
+          return rejected
+        }
+        // altimate_change end
         return {
           title: "Answer committed",
           // The processor caps model-facing output but preserves metadata for the final echo.
