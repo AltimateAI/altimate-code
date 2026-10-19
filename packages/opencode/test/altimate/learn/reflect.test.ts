@@ -19,6 +19,13 @@ describe("buildPrompt", () => {
     }
   })
 
+  test("a missed but correct bullet earns no helpful vote", () => {
+    const { system } = buildPrompt({ digest: "d", feedback: "f", kind: "user", bullets })
+    expect(system).toContain("HELPFUL only when the DIGEST shows the agent followed it")
+    expect(system).toContain("it is neither HELPFUL nor HARMFUL")
+    expect(system).not.toContain("(the last is HELPFUL)")
+  })
+
   test("requires backticks around generated identifiers and naming patterns", () => {
     const { system } = buildPrompt({ digest: "d", feedback: "f", kind: "ci", bullets })
     expect(system).toContain("Wrap every code identifier and naming pattern (including prefixes and suffixes) in backticks.")
