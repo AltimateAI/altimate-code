@@ -489,6 +489,7 @@ async function executeBatch(
           query: item.query,
           warehouse: item.warehouse?.trim() || args.warehouse,
           limit: args.limit,
+          full_text_columns: args.full_text_columns,
           query_timeout_ms: args.query_timeout_ms,
         },
         budget,

@@ -22,6 +22,7 @@ const SAMPLE_BUDGET = 15
 const MAX_COLUMNS_SHOWN = 40
 const SAMPLE_CELL_CHARS = 40
 const OUTPUT_BYTES = 8 * 1024
+const NOTICE_RESERVE_BYTES = 256
 const DEADLINE_MS = 4_000
 const SAMPLE_TIMEOUT_MS = 1_000
 const MONGO_SYSTEM_DATABASES = new Set(["admin", "config", "local"])
@@ -88,7 +89,8 @@ export async function discoverCatalog(warehouses: { name: string; type: string }
   let skipped = 0
   const push = (line: string) => {
     const size = Buffer.byteLength(line, "utf8") + 1
-    if (full || bytes + size > OUTPUT_BYTES) {
+    // The two trailing notices are pushed unconditionally; keep room for them inside the cap.
+    if (full || bytes + size > OUTPUT_BYTES - NOTICE_RESERVE_BYTES) {
       full = true
       return false
     }
