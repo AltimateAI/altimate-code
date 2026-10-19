@@ -16,9 +16,9 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 export const SERVER_INSTRUCTIONS = [
   "Analyst method for data questions:",
-  "1. Start with warehouse_list, then schema_inspect without `table` to see the tables.",
+  "1. Start with warehouse_list; it also shows local tables with columns and a sample row.",
   "2. Read schema_inspect's value profile (ranked values, distinct/null counts, unique flag, value shapes) before choosing columns or join keys; formats often differ across databases.",
-  "3. Compute in the database.",
+  "3. Compute in the database; batch independent queries in one sql_execute call (`queries`).",
   "4. For joins across connections, sql_materialize the smaller filtered side into `scratch` and join there.",
   "5. Run sql_check when keys, fan-out, grain or nulls could change the answer.",
   "6. Check that every condition in the question actually filters something.",
@@ -27,16 +27,18 @@ export const SERVER_INSTRUCTIONS = [
 
 /** Spilled results: a resource_link next to the text, which keeps the preview, row count and path. */
 function resultLinks(metadata: Record<string, unknown>) {
-  const file = [metadata.result_path, metadata.outputPath].find((value) => typeof value === "string" && value)
-  if (typeof file !== "string") return []
-  return [
-    {
-      type: "resource_link" as const,
-      uri: pathToFileURL(file).href,
-      name: path.basename(file),
-      mimeType: file.endsWith(".jsonl") ? "application/x-ndjson" : "text/plain",
-    },
-  ]
+  // A batched sql_execute call reports one saved file per spilled query.
+  const batch = Array.isArray(metadata.result_paths) ? metadata.result_paths : []
+  const single = [metadata.result_path, metadata.outputPath].find((value) => typeof value === "string" && value)
+  const files = [...new Set([...batch, ...(batch.length ? [] : [single])])].filter(
+    (file): file is string => typeof file === "string" && !!file,
+  )
+  return files.map((file) => ({
+    type: "resource_link" as const,
+    uri: pathToFileURL(file).href,
+    name: path.basename(file),
+    mimeType: file.endsWith(".jsonl") ? "application/x-ndjson" : file.endsWith(".csv") ? "text/csv" : "text/plain",
+  }))
 }
 
 // Surfaces as a slash command in interactive clients.

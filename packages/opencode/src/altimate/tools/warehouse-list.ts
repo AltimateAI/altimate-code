@@ -5,6 +5,7 @@ import { Dispatcher } from "../native"
 // altimate_change start — workspace precedence
 import * as Precedence from "../workspace/precedence"
 // altimate_change end
+import { discoverCatalog } from "./warehouse-discovery"
 
 export const WarehouseListTool = Tool.define("warehouse_list", {
   description: "List all configured warehouse connections. Shows connection name, type, and database.",
@@ -30,6 +31,8 @@ export const WarehouseListTool = Tool.define("warehouse_list", {
       // re-linked project is not told its rows are served by the old workspace.
       const notes = await Precedence.warehouseListNotes(ctx.sessionID, warehouses)
       const shadowedCount = notes.size
+      // altimate_change start — MCP: one-call catalog discovery
+      const mcp = ctx.extra?.mcpClient === true
 
       const lines: string[] = shadowedCount
         ? ["Name | Type | Database | Served by", "-----|------|----------|----------"]
@@ -43,6 +46,13 @@ export const WarehouseListTool = Tool.define("warehouse_list", {
         const caveats = warehouses.map(readOnlyCaveat).filter((note): note is string => !!note)
         if (caveats.length) lines.push("", ...caveats)
       }
+
+      // Workspace-routed connections are served elsewhere; their local catalog is not the one queried.
+      if (mcp && !shadowedCount) {
+        const catalog = await discoverCatalog(warehouses, { signal: ctx.abort, sessionID: ctx.sessionID })
+        if (catalog) lines.push("", "Tables (name: columns; e.g. = one sample row):", catalog)
+      }
+      // altimate_change end
 
       return {
         title: `Warehouses: ${warehouses.length} configured`,

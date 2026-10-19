@@ -21,10 +21,11 @@ import { closeScratch } from "../native/connections/scratch"
 import type { SessionID, MessageID } from "@/session/schema"
 
 export const descriptions: Record<string, string> = {
-  warehouse_list: "List configured warehouse connections and their database types.",
+  warehouse_list:
+    "List warehouse connections; for local databases also their tables, columns and a sample row (small catalogs).",
   schema_inspect: "List tables/collections when table is omitted or empty; otherwise inspect one table, with optional sample values.",
   sql_execute:
-    "Execute SQL against a connected warehouse and return rows. Source writes require the server's --allow-write option.",
+    "Execute SQL against a connected warehouse and return rows. Run independent queries together in one call with `queries`. Source writes require the server's --allow-write option.",
   sql_check: "Run a read-only SQL data quality check against a connected warehouse.",
   sql_materialize: "Copy a read-only source query into a session-local scratch table for further analysis.",
   answer_commit:

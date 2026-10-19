@@ -26,13 +26,19 @@ afterEach(async () => {
   Registry.reset()
 })
 
-async function fixture(allowWrite = false, capabilities: Record<string, object> = {}, elicitTimeoutMs?: number) {
+async function fixture(
+  allowWrite = false,
+  capabilities: Record<string, object> = {},
+  elicitTimeoutMs?: number,
+  setup?: (db: Database) => void,
+) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-tools-test-"))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
   const dbPath = path.join(dir, "source.sqlite")
   const db = new Database(dbPath)
   db.run("CREATE TABLE items (id INTEGER, name TEXT)")
   db.run("INSERT INTO items VALUES (1, 'apple'), (2, 'pear')")
+  setup?.(db)
   db.close()
   const config = path.join(dir, "connections.json")
   await Bun.write(config, JSON.stringify({ source: { type: "sqlite", path: "source.sqlite" } }))
@@ -291,6 +297,9 @@ mcpTest("MCP forces database protection for every SQLite source query path", asy
       // altimate_change start — inventory counts also enforce database read-only
       ["schema_inspect", { warehouse: "source" }],
       // altimate_change end
+      // Discovery's counts and sample rows go through the same protection.
+      ["warehouse_list", {}],
+      ["sql_execute", { warehouse: "source", queries: [{ query: "SELECT * FROM items" }, { query: "SELECT 1 AS one" }] }],
       ["sql_check", { warehouse: "source", check: "nulls", sql: "SELECT * FROM items", columns: ["id"] }],
       ["sql_materialize", { source_warehouse: "source", sql: "SELECT * FROM items", target_table: "protected_copy" }],
     ] as const) {
@@ -639,4 +648,169 @@ mcpTest("answer_commit without elicitation support or with one reading never ask
   const plain = await fixture()
   expect((await plain.call("answer_commit", twoReadings)).isError).toBeFalsy()
 })
+// altimate_change end
+
+// altimate_change start — batched sql_execute: one call, one labeled block per independent query
+mcpTest("sql_execute queries runs every item and keeps going past a failing one", async () => {
+  const { call } = await fixture()
+  const result = await call("sql_execute", {
+    warehouse: "source",
+    queries: [
+      { label: "count", query: "SELECT COUNT(*) AS n FROM items" },
+      { label: "broken", query: "SELECT nope FROM missing_table" },
+      { query: "SELECT name FROM items WHERE id = 2" },
+    ],
+  })
+  expect(result.isError).toBe(false)
+  const out = body(result)
+  const count = out.indexOf("[count]\n")
+  const broken = out.indexOf("[broken]\n")
+  const third = out.indexOf("[q3]\n")
+  expect(count).toBe(0)
+  expect(broken).toBeGreaterThan(count)
+  expect(third).toBeGreaterThan(broken)
+  expect(out.slice(count, broken)).toContain("2")
+  expect(out.slice(broken, third)).toContain("Failed to execute SQL")
+  expect(out.slice(third)).toContain("pear")
+})
+
+mcpTest("sql_execute queries refuses writes per item, even with --allow-write", async () => {
+  const { call } = await fixture(true)
+  const result = await call("sql_execute", {
+    warehouse: "source",
+    queries: [{ query: "INSERT INTO items VALUES (3, 'plum')" }, { query: "SELECT COUNT(*) AS n FROM items" }],
+  })
+  expect(result.isError).toBe(false)
+  expect(body(result)).toContain("Batched queries must be read-only")
+  const rows = await call("sql_execute", { warehouse: "source", query: "SELECT COUNT(*) AS n FROM items" })
+  expect(body(rows)).toMatch(/\b2\b/)
+  expect(body(rows)).not.toContain("plum")
+})
+
+mcpTest("sql_execute queries is an error only when every item fails", async () => {
+  const { call } = await fixture()
+  const result = await call("sql_execute", {
+    warehouse: "source",
+    queries: [{ query: "SELECT a FROM nowhere" }, { query: "SELECT b FROM nowhere_else" }],
+  })
+  expect(result.isError).toBe(true)
+  expect(body(result)).toContain("[q1]")
+  expect(body(result)).toContain("[q2]")
+})
+
+mcpTest("sql_execute queries is exclusive with query and capped at eight items", async () => {
+  const { call } = await fixture()
+  const both = await call("sql_execute", {
+    warehouse: "source",
+    query: "SELECT 1",
+    queries: [{ query: "SELECT 2" }],
+  })
+  expect(both.isError).toBe(true)
+  expect(body(both)).toContain("not both")
+  const many = await call("sql_execute", {
+    warehouse: "source",
+    queries: Array.from({ length: 9 }, (_, i) => ({ query: `SELECT ${i}` })),
+  })
+  expect(many.isError).toBe(true)
+  expect(body(many)).toContain("at most 8")
+})
+
+mcpTest("sql_execute queries keeps the whole envelope inside one shared budget", async () => {
+  const { call } = await fixture(false, {}, undefined, (db) => {
+    db.run("CREATE TABLE wide (id INTEGER, payload TEXT)")
+    const insert = db.prepare("INSERT INTO wide VALUES (?, ?)")
+    for (let i = 0; i < 400; i++) insert.run(i, `${"é".repeat(60)}-${i}`)
+  })
+  const label = "L".repeat(500)
+  const result = await call("sql_execute", {
+    warehouse: "source",
+    limit: 400,
+    queries: [
+      { label, query: "SELECT * FROM wide" },
+      { query: "SELECT * FROM wide ORDER BY id DESC" },
+      { query: `SELECT '${"x".repeat(30_000)}' AS huge FROM nowhere` },
+    ],
+  })
+  const out = body(result)
+  expect(Buffer.byteLength((result.content as { type: string; text?: string }[])[0]!.text!, "utf8")).toBeLessThanOrEqual(
+    24 * 1024,
+  )
+  expect(out).toContain(`[${"L".repeat(60)}]`)
+  expect(out).not.toContain("L".repeat(61))
+  expect(out).toContain("[q2]")
+  expect(out).toContain("[q3]")
+  // Both large results were saved; each gets its own resource link.
+  const links = (result.content as { type: string; uri?: string }[]).filter((item) => item.type === "resource_link")
+  expect(links).toHaveLength(2)
+  expect(new Set(links.map((link) => link.uri)).size).toBe(2)
+})
+// altimate_change end
+
+// altimate_change start — warehouse_list discovery: local tables with columns and a sample in one call
+mcpTest("warehouse_list lists local tables with columns and one sample row", async () => {
+  const { call } = await fixture(false, {}, undefined, (db) => {
+    db.run("CREATE VIEW item_names AS SELECT name FROM items")
+  })
+  const out = body(await call("warehouse_list", {}))
+  expect(out).toContain("source: main.items (2 rows): id INTEGER, name TEXT")
+  expect(out).toMatch(/source: main\.items[^\n]*\n {2}e\.g\. 1 \| apple/)
+  // Views are listed but never sampled: a view may run arbitrary work.
+  expect(out).toMatch(/source: main\.item_names: name/)
+  expect(out).not.toMatch(/item_names[^\n]*\n {2}e\.g\./)
+})
+
+mcpTest("warehouse_list runs no discovery queries on remote connections", async () => {
+  const { call } = await fixture()
+  Registry.setConfigs({ remote: { type: "postgres", host: "db.example.com", database: "app" } })
+  const original = Dispatcher.call
+  const methods: string[] = []
+  const dispatch = spyOn(Dispatcher, "call").mockImplementation(async (method, args, context) => {
+    methods.push(method)
+    return original(method, args, context)
+  })
+  const get = spyOn(Registry, "get")
+  try {
+    const out = body(await call("warehouse_list", {}))
+    expect(out).toContain("remote | postgres")
+    expect(out).not.toContain("remote:")
+    expect(methods.filter((method) => method !== "warehouse.list")).toEqual([])
+    expect(get).not.toHaveBeenCalled()
+  } finally {
+    dispatch.mockRestore()
+    get.mockRestore()
+  }
+})
+
+mcpTest("warehouse_list skips table detail for a catalog over the table budget", async () => {
+  const { call } = await fixture(false, {}, undefined, (db) => {
+    for (let i = 0; i < 45; i++) db.run(`CREATE TABLE t${i} (id INTEGER)`)
+  })
+  const out = body(await call("warehouse_list", {}))
+  expect(out).toContain("source: catalog too large to list here; use schema_inspect.")
+  expect(out).not.toContain("main.t1")
+})
+
+mcpTest("warehouse_list discovery stops starting calls once its deadline passes", async () => {
+  const { call } = await fixture(false, {}, undefined, (db) => {
+    for (let i = 0; i < 6; i++) db.run(`CREATE TABLE slow${i} (id INTEGER)`)
+  })
+  const original = Dispatcher.call
+  let inspections = 0
+  const dispatch = spyOn(Dispatcher, "call").mockImplementation(async (method, args, context) => {
+    if (method === "schema.inspect") {
+      inspections++
+      await Bun.sleep(1_500)
+    }
+    return original(method, args, context)
+  })
+  try {
+    const started = Date.now()
+    const out = body(await call("warehouse_list", {}))
+    expect(Date.now() - started).toBeLessThan(7_000)
+    expect(inspections).toBeLessThanOrEqual(3)
+    expect(out).toContain("More tables or connections exist than shown")
+  } finally {
+    dispatch.mockRestore()
+  }
+}, 15_000)
 // altimate_change end

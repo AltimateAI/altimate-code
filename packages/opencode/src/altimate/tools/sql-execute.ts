@@ -2,7 +2,7 @@ import z from "zod"
 import { Effect } from "effect"
 import { EffectBridge } from "../../effect/bridge"
 import { Truncate } from "../../tool/truncate"
-import { legacyToInit, type LegacyToolDef } from "../tool-zod-compat"
+import { legacyToInit, type LegacyContext, type LegacyResult, type LegacyToolDef } from "../tool-zod-compat"
 import { formatSqlResult, SQL_MAX_PREVIEW_BYTES } from "./sql-result-format"
 import { lintSqlResult } from "./sql-result-lint"
 import { Tool } from "../../tool/tool"
@@ -41,6 +41,15 @@ const LIMIT_ERROR = "limit must be a finite positive integer"
 const MAX_GENERATED_SQL_BYTES = 1024 * 1024
 // Below the default tool-output cap, so a redirect never spills the SQL into a truncated file.
 const MAX_REDIRECT_SQL_BYTES = 40 * 1024
+// A batch shares one output budget; each query gets an equal share of what is left, so small results donate the rest.
+const MAX_BATCH_QUERIES = 8
+const BATCH_MAX_PREVIEW_BYTES = 24 * 1024
+
+/** Per-query overrides a batch applies to one item. */
+interface ItemBudget {
+  maxBytes: number
+  maxLines: number
+}
 
 function generatedRead(sql: string, warehouse: string, stage: "source" | "result"): string {
   try {
@@ -52,7 +61,20 @@ function generatedRead(sql: string, warehouse: string, stage: "source" | "result
 
 const parameters = z
   .object({
-  query: z.string().nullish().describe("SQL query to execute; omit when using query_from"),
+  query: z.string().nullish().describe("SQL query to execute; omit when using query_from or queries"),
+  queries: z
+    .array(
+      z.object({
+        label: z.string().nullish().describe("Short name for this result (default q1, q2, ...)"),
+        query: z.string().describe("Read-only SQL (or MongoDB JSON command)"),
+        warehouse: z.string().nullish().describe("Warehouse for this query (default: warehouse)"),
+      }),
+    )
+    .max(MAX_BATCH_QUERIES, `queries accepts at most ${MAX_BATCH_QUERIES} items`)
+    .nullish()
+    .describe(
+      `Up to ${MAX_BATCH_QUERIES} independent read-only queries run in one call, each returning its own labeled result; one failing query does not stop the others. Use instead of query when no query depends on another's result.`,
+    ),
   query_from: z
     .object({
       warehouse: z.string().describe("Warehouse containing the SQL generator or saved SQL"),
@@ -95,14 +117,19 @@ export const SqlExecuteTool = Tool.define(
     return () =>
       Effect.gen(function* () {
         const bridge = yield* EffectBridge.make()
-        return yield* legacyToInit({
+        const def = {
           description:
             "Execute SQL against a connected data warehouse. Returns all selected columns as a formatted table. full_text_columns prioritizes named cells within the ordinary output budget and always saves returned rows to result_path; read with char_offset/max_chars recovers clipped text. [] or null, or omitting the field, turns the mode off. A non-empty list caps preview rows at 20: omit limit to use the default; larger limits clamp to 20 with a result note. Missing column names produce a bounded note listing available columns while still returning rows. " +
-            "Provide exactly one of query or query_from. query_from runs a read-only generator SELECT and executes its single SQL string result (up to 1 MiB) as a read-only SELECT on warehouse, without previewing or retyping the generated SQL. " +
+            "Provide exactly one of query, query_from or queries. query_from runs a read-only generator SELECT and executes its single SQL string result (up to 1 MiB) as a read-only SELECT on warehouse, without previewing or retyping the generated SQL. " +
+            `queries runs up to ${MAX_BATCH_QUERIES} independent read-only queries in one call and returns one labeled result per query; batch queries that do not depend on each other. ` +
             "For DuckDB table sets, generate query_table([...], true) with escaped table-name string literals. For thousands of tables, UNION ALL BY NAME batches of at most 128 names to stay within the default expression depth.",
           parameters,
-          formatValidationError: (error) => error.issues?.map((issue) => issue.message).join("; ") || LIMIT_ERROR,
-          async execute(args, ctx) {
+          formatValidationError: (error: z.ZodError) => error.issues?.map((issue) => issue.message).join("; ") || LIMIT_ERROR,
+          async execute(args: z.infer<typeof parameters>, ctx: LegacyContext, budget?: ItemBudget): Promise<LegacyResult> {
+            if (!budget && args.queries?.length) {
+              const limits = await bridge.promise(truncate.limits())
+              return executeBatch(args, ctx, limits, (item, itemBudget) => def.execute(item, ctx, itemBudget))
+            }
             const fullText = Boolean(args.full_text_columns?.length)
             const limit = fullText ? Math.min(args.limit ?? 20, 20) : Math.min(args.limit ?? 100, MAX_SQL_ROWS)
             const limitNote =
@@ -199,6 +226,9 @@ export const SqlExecuteTool = Tool.define(
               throw new Error(
                 "DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety. This cannot be overridden.",
               )
+            }
+            if (budget && queryType !== "read") {
+              throw new Error("Batched queries must be read-only; run a write as its own sql_execute call.")
             }
             const parseError = "parseError" in classification ? classification.parseError : undefined
             if (!mongo && queryType === "read") {
@@ -337,7 +367,10 @@ export const SqlExecuteTool = Tool.define(
               }
               // altimate_change end
 
-              const limits = await bridge.promise(truncate.limits())
+              const configured = await bridge.promise(truncate.limits())
+              const limits = budget
+                ? { maxBytes: Math.min(configured.maxBytes, budget.maxBytes), maxLines: Math.min(configured.maxLines, budget.maxLines) }
+                : configured
               const maxBytes = Math.min(limits.maxBytes, SQL_MAX_PREVIEW_BYTES)
               // Reserve the routing explanation before the formatter budgets optional notes.
               const routingNotice = fullText ? Precedence.annotate(precedence, { output: "" }).output : ""
@@ -413,10 +446,103 @@ export const SqlExecuteTool = Tool.define(
               })
             }
           },
-        } satisfies LegacyToolDef<typeof parameters>)
+        } satisfies LegacyToolDef<typeof parameters>
+        return yield* legacyToInit(def)
       })
   }),
 )
+
+type BatchItem = { label?: string | null; query: string; warehouse?: string | null }
+
+/**
+ * Runs independent read queries one after another (one connection per warehouse) and renders each
+ * result under its label. A failing query becomes its own error block; the others still run.
+ * Every block, error or not, is clipped to its share of one shared byte/line budget.
+ */
+async function executeBatch(
+  args: z.infer<typeof parameters>,
+  ctx: LegacyContext,
+  configured: { maxBytes: number; maxLines: number },
+  run: (item: z.infer<typeof parameters>, budget: ItemBudget) => Promise<LegacyResult>,
+): Promise<LegacyResult> {
+  const items = args.queries as BatchItem[]
+  if (args.query?.trim() || args.query_from?.warehouse?.trim() || args.query_from?.sql?.trim()) {
+    throw new Error("Provide either queries or query/query_from, not both.")
+  }
+  let bytesLeft = Math.min(configured.maxBytes, BATCH_MAX_PREVIEW_BYTES)
+  let linesLeft = configured.maxLines
+  const blocks: string[] = []
+  const summary: { label: string; rowCount: number; error?: string; result_path?: string }[] = []
+  for (const [index, item] of items.entries()) {
+    ctx.abort.throwIfAborted()
+    const share = Math.floor(bytesLeft / (items.length - index))
+    const lineShare = Math.max(1, Math.floor(linesLeft / (items.length - index)))
+    const label = (item.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60) || `q${index + 1}`
+    const header = `[${label}]\n`
+    const separator = blocks.length ? "\n\n" : ""
+    const reserved = Buffer.byteLength(separator + header, "utf8") + Buffer.byteLength(BATCH_CLIPPED, "utf8")
+    const budget = { maxBytes: Math.max(0, share - reserved), maxLines: Math.max(1, lineShare - 2) }
+    let result: LegacyResult
+    try {
+      result = await run(
+        {
+          query: item.query,
+          warehouse: item.warehouse?.trim() || args.warehouse,
+          limit: args.limit,
+          query_timeout_ms: args.query_timeout_ms,
+        },
+        budget,
+      )
+    } catch (error) {
+      if (ctx.abort.aborted) throw error
+      const message = error instanceof Error ? error.message : String(error)
+      result = { title: "SQL: ERROR", metadata: { error: message }, output: `Failed to execute SQL: ${message}` }
+    }
+    const body = clipToBudget(result.output, budget.maxBytes, budget.maxLines)
+    const block = separator + header + body
+    blocks.push(block)
+    bytesLeft -= Buffer.byteLength(block, "utf8")
+    linesLeft -= block.split("\n").length - (separator ? 1 : 0)
+    const metadata = (result.metadata ?? {}) as Record<string, unknown>
+    summary.push({
+      label,
+      rowCount: Number(metadata.rowCount ?? 0),
+      ...(typeof metadata.error === "string" && metadata.success !== true ? { error: metadata.error } : {}),
+      ...(typeof metadata.result_path === "string" ? { result_path: metadata.result_path } : {}),
+    })
+  }
+  const failed = summary.filter((item) => item.error !== undefined)
+  return {
+    title: `SQL: ${items.length} queries${failed.length ? `, ${failed.length} failed` : ""}`,
+    metadata: {
+      rowCount: summary.reduce((total, item) => total + item.rowCount, 0),
+      queries: summary,
+      result_paths: summary.flatMap((item) => (item.result_path ? [item.result_path] : [])),
+      // This tool owns clipping; every block is already bounded.
+      truncated: false,
+      ...(failed.length === items.length ? { error: failed.map((item) => `${item.label}: ${item.error}`).join("\n") } : {}),
+    },
+    output: blocks.join(""),
+  }
+}
+
+const BATCH_CLIPPED = "…[output clipped]"
+
+/** Clip text to a byte and line budget on code-point boundaries, marking any clip. */
+function clipToBudget(text: string, maxBytes: number, maxLines: number): string {
+  if (Buffer.byteLength(text, "utf8") <= maxBytes && text.split("\n").length <= maxLines) return text
+  let bytes = 0
+  let lines = 1
+  let end = 0
+  for (const char of text) {
+    const size = Buffer.byteLength(char, "utf8")
+    if (bytes + size > maxBytes || (char === "\n" && lines >= maxLines)) break
+    bytes += size
+    if (char === "\n") lines++
+    end += char.length
+  }
+  return text.slice(0, end) + BATCH_CLIPPED
+}
 
 // altimate_change start — pre-execution SQL validation via cached schema
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours
