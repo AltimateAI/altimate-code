@@ -3,6 +3,9 @@ import { Decimal } from "decimal.js"
 import { Effect, Option, Schema, SchemaIssue } from "effect"
 import type { JSONSchema7 } from "@ai-sdk/provider"
 import { Tool } from "../../tool/tool"
+// altimate_change start — bounded re-run evidence for commits
+import { gatherEvidence, needsEvidence, reviewMessage } from "./answer-commit-evidence"
+// altimate_change end
 
 /** Maximum rendered answer length, including Markdown and basis, before the model echoes it. */
 export const MAX_RENDERED_ANSWER_CHARACTERS = 60_000
@@ -138,10 +141,21 @@ const parameters = z
             reading: z.string(),
             result_summary: z.string(),
             decided_by: z.string(),
+            // altimate_change start — a reading may carry the query that implements it, so readings can be compared on data
+            sql: optional(z.string()).describe(
+              "Optional read-only SELECT that implements this reading; readings with SQL on local DuckDB are executed and compared",
+            ),
+            warehouse: optional(z.string()).describe("Warehouse for sql; omit to use the warehouse of the last query"),
+            // altimate_change end
           })
           .strict(),
       ),
     ).describe("Advisory readings recorded only in metadata, never in the answer text"),
+    // altimate_change start — the data fact that decides between readings whose results differ
+    reading_evidence: optional(z.string().max(MAX_BASIS_CHARACTERS)).describe(
+      `When listed readings return different results, the data fact that decides between them, at most ${MAX_BASIS_CHARACTERS} characters; never rendered`,
+    ),
+    // altimate_change end
   })
   .strict()
   .refine(
@@ -304,10 +318,26 @@ export const AnswerCommitTool = Tool.define(
           return yield* Effect.die(new Error("answer_commit is only available to the analyst agent"))
         yield* ctx.ask({ permission: "answer_commit", patterns: ["*"], always: ["*"], metadata: {} })
         const output = renderAnswer(args)
+        // altimate_change start — one-time review when re-run evidence contradicts the answer (local DuckDB only)
+        const messages = ctx.messages ?? []
+        const evidence = needsEvidence(messages, args.readings)
+          ? yield* Effect.promise(() => gatherEvidence(ctx.sessionID, messages, args.readings))
+          : undefined
+        const review = reviewMessage(evidence, args.reading_evidence)
+        if (review) {
+          const rejected: Tool.ExecuteResult = {
+            title: "Answer not committed",
+            metadata: { readings: args.readings ?? [], truncated: false, evidence },
+            output: review,
+            status: "error",
+          }
+          return rejected
+        }
+        // altimate_change end
         return {
           title: "Answer committed",
           // The processor caps model-facing output but preserves metadata for the final echo.
-          metadata: { readings: args.readings ?? [], truncated: false, committed_text: output },
+          metadata: { readings: args.readings ?? [], truncated: false, committed_text: output, evidence },
           output,
         }
       }),
