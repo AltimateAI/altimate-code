@@ -23,7 +23,7 @@ Add this entry to your MCP client's configuration (for example, Claude Code's `.
 }
 ```
 
-The server exposes exactly `warehouse_list`, `schema_inspect`, `sql_execute`, `sql_check`, and `sql_materialize`. A connections file is a JSON object keyed by connection name:
+By default the server exposes `warehouse_list`, `warehouse_add`, `sql_execute`, `sql_materialize` and `answer_commit`. Pass `tables` to `sql_execute` to get those tables' columns and value profiles in the same call as its queries. Start with `--all-tools` to also expose `schema_inspect` and `sql_check`. Without `--connections`, the server reads the usual connection sources and re-reads them while none are configured, so a connections file written mid-session, or a connection added with `warehouse_add`, is picked up without a restart. A connections file is a JSON object keyed by connection name:
 
 ```json
 {
