@@ -35,6 +35,7 @@ import { Session as LegacySession } from "../../src/session"
 import { Session } from "@/session/session"
 import { SessionMessageTable } from "@opencode-ai/core/session/sql"
 import { LLM } from "../../src/session/llm"
+import * as WorkspaceIdentity from "../../src/altimate/workspace/identity"
 import { MessageV2 } from "../../src/session/message-v2"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { SessionCompaction } from "../../src/session/compaction"
@@ -622,6 +623,55 @@ noLLMServer.instance(
   { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
   30_000,
 )
+// altimate_change end
+
+// altimate_change start - the workspace memory line follows the tools the turn keeps
+for (const turn of [
+  { agent: "analyst", tools: undefined, expected: { read: true, write: false } },
+  { agent: "builder", tools: undefined, expected: { read: true, write: true } },
+  { agent: "builder", tools: { altimate_memory_read: false }, expected: { read: false, write: true } },
+] as const) {
+  noLLMServer.instance(
+    `prompt loop describes memory tools as ${turn.agent}${turn.tools ? " with read switched off" : ""} keeps them`,
+    () => Effect.gen(function* () {
+      const section = spyOn(WorkspaceIdentity, "systemSection").mockResolvedValue("")
+      const sent: Pick<LLM.StreamInput, "tools" | "agent" | "user">[] = []
+      const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+        sent.push({ tools: input.tools, agent: input.agent, user: input.user })
+        const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+        async function* fullStream() {
+          yield { type: "start" }
+          yield { type: "start-step" }
+          yield { type: "text-start", id: "reply" }
+          yield { type: "text-delta", id: "reply", text: "Done." }
+          yield { type: "text-end", id: "reply" }
+          yield { type: "finish-step", finishReason: "stop", usage }
+          yield { type: "finish", finishReason: "stop", totalUsage: usage }
+        }
+        return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+      })
+      try {
+        const { prompt, chat } = yield* boot()
+        yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: turn.agent,
+          model: promptRef,
+          tools: turn.tools,
+          parts: [{ type: "text", text: "What are our naming conventions?" }],
+        })
+        expect(section.mock.calls[0]?.[0]).toEqual({ memoryTools: turn.expected })
+        // Same answer as the filter applied to the tools handed to the model call.
+        const kept = (name: string) => name in sent[0].tools && !LLM.removedTools([name], sent[0]).has(name)
+        expect({ read: kept("altimate_memory_read"), write: kept("altimate_memory_write") }).toEqual(turn.expected)
+      } finally {
+        section.mockRestore()
+        stream.mockRestore()
+      }
+    }),
+    { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
+    30_000,
+  )
+}
 // altimate_change end
 
 // altimate_change start - approved lessons are harness-delivered without changing cached prefixes
