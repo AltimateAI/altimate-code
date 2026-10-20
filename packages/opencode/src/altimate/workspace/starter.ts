@@ -56,7 +56,7 @@ function integrationsLine(ids: string[] | null): string | null {
 function memoryLine(on: boolean | null): string | null {
   if (on === null) return null
   return on
-    ? "Memory: on. What you teach Altimate Code is saved automatically and shared with your team in the CLI, the IDE and Studio."
+    ? "Memory: on. What you teach Altimate Code is saved automatically and follows you in the CLI, the IDE and Studio. It's private to you: to share a convention with your team, publish it as a workspace skill."
     : "Memory: off for this workspace, so saved memory stays on this machine."
 }
 
