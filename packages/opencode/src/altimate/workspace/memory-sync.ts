@@ -972,10 +972,15 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
     // binding governs only whether we upload at all.
     const binding = await currentBinding(directory)
     if (!binding) return
-    const memory = await memoryStatus(binding)
-    if (memory === "disabled") return
-    // Recorded before an unknown setting returns: that block is left unsent too.
+    // Recorded before the memory-setting lookup, which can wait on the service: an exit while it is pending
+    // leaves this block unsent too. Taken back only on a confirmed "disabled".
+    const previous = mirrorRequests.last
     mirrorRequests.last = { directory, binding }
+    const memory = await memoryStatus(binding)
+    if (memory === "disabled") {
+      mirrorRequests.last = previous
+      return
+    }
     if (memory !== "enabled") return
     await push(block, binding, undefined, directory)
   })

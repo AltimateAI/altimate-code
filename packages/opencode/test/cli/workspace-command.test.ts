@@ -457,11 +457,15 @@ describe("link --workspace / --create without prompting", () => {
 
 describe("workspace list through the command parser", () => {
   const original = { isConfigured: AltimateApi.isConfigured, listDatamates: WorkspaceApi.listDatamates, write: process.stdout.write }
+  let priorExitCode: typeof process.exitCode
+  beforeEach(() => {
+    priorExitCode = process.exitCode
+  })
   afterEach(() => {
     ;(AltimateApi as any).isConfigured = original.isConfigured
     ;(WorkspaceApi as any).listDatamates = original.listDatamates
     process.stdout.write = original.write
-    process.exitCode = 0
+    process.exitCode = priorExitCode ?? 0
   })
 
   test("`workspace list --json` is registered and prints the account's workspaces", async () => {

@@ -95,6 +95,10 @@ describe("stdinWaitMs", () => {
     expect(stdinWaitMs({ ALTIMATE_RUN_STDIN_WAIT_MS: " 0 " })).toBe(0)
   })
 
+  test("a wait longer than a timer can hold is capped, not turned into an immediate timeout", () => {
+    expect(stdinWaitMs({ ALTIMATE_RUN_STDIN_WAIT_MS: "99999999999" })).toBe(2_147_483_647)
+  })
+
   test("an unusable value keeps the default", () => {
     for (const raw of ["", "  ", "soon", "-1", "Infinity"])
       expect(stdinWaitMs({ ALTIMATE_RUN_STDIN_WAIT_MS: raw })).toBe(STDIN_WAIT_MS)

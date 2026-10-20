@@ -10,7 +10,8 @@ function deps(over: Partial<UnsentMemoryDeps> = {}): UnsentMemoryDeps & { calls:
     calls: 0,
     dirs: [] as string[],
     target: (): MirrorTarget | undefined => ({ directory: "/bound", binding }),
-    status: async (directory: string) => {
+    status: async (directory: string, given: MirrorTarget["binding"]) => {
+      expect(given).toBe(binding)
       d.dirs.push(directory)
       d.calls++
       return { binding, memory: { local: 3, unsynced: 2 }, skillsEnabled: true, skillsSyncedAt: null } as any

@@ -4,12 +4,16 @@ import { fstatSync } from "fs"
 /** How long `run` waits for the first byte on a socket stdin. */
 export const STDIN_WAIT_MS = 3000
 
+/** The longest delay `setTimeout` honours; a larger one fires at once. */
+const MAX_TIMER_MS = 2_147_483_647
+
 /** `ALTIMATE_RUN_STDIN_WAIT_MS` overrides the wait, for a caller that writes its stdin late; 0 waits for EOF. */
 export function stdinWaitMs(env: Record<string, string | undefined> = process.env): number {
   const raw = env["ALTIMATE_RUN_STDIN_WAIT_MS"]?.trim()
   if (!raw) return STDIN_WAIT_MS
   const ms = Number(raw)
-  return Number.isFinite(ms) && ms >= 0 ? ms : STDIN_WAIT_MS
+  if (!Number.isFinite(ms) || ms < 0) return STDIN_WAIT_MS
+  return Math.min(ms, MAX_TIMER_MS)
 }
 
 export interface StdinSource {

@@ -459,6 +459,22 @@ describe("mirrorBlock", () => {
     expect(lastMirrorTarget()).toEqual({ directory: "/repo", binding: BINDING as any })
   })
 
+  test("the mirror is recorded while the memory-setting lookup is still pending, so an exit then still checks", async () => {
+    const inner = globalThis.fetch
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/") && !String(input).includes("/memory")) await held
+      return inner(input, init)
+    }) as typeof fetch
+    const mirror = mirrorBlock(block({ id: "pending-lookup" }), "/repo")
+    await Bun.sleep(20)
+    expect(lastMirrorTarget()).toEqual({ directory: "/repo", binding: BINDING as any })
+    release()
+    await mirror
+    globalThis.fetch = inner
+  })
+
   test("a workspace with memory turned off is not recorded: the block stays local by design", async () => {
     workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
     await mirrorBlock(block({ id: "kept-local" }), "/repo")
