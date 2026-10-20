@@ -28,7 +28,7 @@ export const descriptions: Record<string, string> = {
   sql_check: "Read-only data check: fanout, keys, grain, nulls or coverage.",
   sql_materialize: "Store a read-only query's rows as a scratch table, to join across connections.",
   answer_commit:
-    "Finish a data question; call last, then reply with exactly its FINAL ANSWER text. Use one of fields, rows or unresolved, with a field (or rows column) per asked item, named after it. Numbers may be your own computation; exact decimals as strings.",
+    "Finish a data question; call last, then reply with exactly its FINAL ANSWER text. Use one of fields, rows or unresolved, with a field (or rows column) per asked item, named after it. Never collapse a compound request into one field: 'the repository and the most copied file' needs two. An item that only selects the answer ('the customer with the largest invoice') is not asked. Numbers may be your own computation; exact decimals as strings.",
 }
 
 /**

@@ -833,8 +833,9 @@ mcpTest("tool definitions stay compact and keep their required properties", asyn
   const size = (tool: (typeof tools)[number]) =>
     JSON.stringify({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema }).length
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]))
-  expect(size(byName.answer_commit!)).toBeLessThanOrEqual(2_000)
-  expect(tools.reduce((total, tool) => total + size(tool), 0)).toBeLessThan(6_000)
+  expect(size(byName.answer_commit!)).toBeLessThanOrEqual(2_250)
+  expect(byName.answer_commit!.description).toContain("'the repository and the most copied file' needs two")
+  expect(tools.reduce((total, tool) => total + size(tool), 0)).toBeLessThan(6_250)
   expect(client.getInstructions()!.length).toBeLessThanOrEqual(723)
   const declared = JSON.stringify(tools)
   expect(declared).not.toContain("$schema")
