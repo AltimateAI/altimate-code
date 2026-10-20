@@ -84,6 +84,8 @@ let workspaces: any[] = [{ id: 42, name: "acme", memory_enabled: true }]
 let listFails = false
 /** When set, POST /datamates/memory/ fails, as a create that times out does. */
 let createFails = false
+/** When set, a PATCH to this record id fails. */
+let failPatchOf: string | undefined
 
 function stubFetch() {
   globalThis.fetch = (async (input: any, init?: any) => {
@@ -94,6 +96,9 @@ function stubFetch() {
       return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
     }
     if (createFails && method === "POST" && url.includes("/datamates/memory/")) {
+      return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
+    }
+    if (failPatchOf && method === "PATCH" && url.endsWith(`/datamates/memory/${failPatchOf}`)) {
       return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
     }
     const payload = (() => {
@@ -171,6 +176,7 @@ beforeEach(() => {
   listResponse = []
   listFails = false
   createFails = false
+  failPatchOf = undefined
   createResult = [{ id: "mem-new" }]
   workspaces = [{ id: 42, name: "acme", memory_enabled: true }]
   serverBinding = null
@@ -962,18 +968,66 @@ describe("toBlock", () => {
         block_scope: "project",
         repo_remote: "ssh://git@github.com/acme/other-repo.git",
       }),
-      "ssh://git@github.com/acme/analytics.git",
+      { kind: "remote", value: "ssh://git@github.com/acme/analytics.git" },
     )
     expect(b?.origin).toBe("other-repo")
   })
 
   test("a record from this same project is not labelled", () => {
     const own = "ssh://git@github.com/acme/analytics.git"
-    const b = toBlock(
-      record({ source: MIRROR_SOURCE, block_id: "x", block_scope: "project", repo_remote: own }),
-      own,
-    )
-    expect(b?.origin).toBeUndefined()
+    const b = toBlock(record({ source: MIRROR_SOURCE, block_id: "x", block_scope: "project", repo_remote: own }), {
+      kind: "remote",
+      value: own,
+    })
+    expect(b).not.toBeNull()
+    expect(b!.origin).toBeUndefined()
+  })
+
+  test("a record written under another URL form of this repo is not labelled", () => {
+    // The service moves a binding's stored value from the form it was linked
+    // with to the repo's https value; records written before keep the old one.
+    const project = (repo_remote: string) =>
+      record({ source: MIRROR_SOURCE, block_id: "x", block_scope: "project", repo_remote })
+    const https = { kind: "remote" as const, value: "https://github.com/acme/analytics" }
+    const ssh = { kind: "remote" as const, value: "ssh://git@github.com/acme/analytics" }
+    for (const [repoRemote, own] of [
+      ["ssh://git@github.com/acme/analytics", https],
+      ["git@github.com:Acme/Analytics.git", https],
+      ["https://github.com/acme/analytics", ssh],
+    ] as const) {
+      const b = toBlock(project(repoRemote), own)
+      expect(b).not.toBeNull()
+      expect(b!.origin).toBeUndefined()
+    }
+  })
+
+  test("self-hosted forms, other repos and paths still label a sibling", () => {
+    const project = (meta: Record<string, string>) =>
+      record({ source: MIRROR_SOURCE, block_id: "x", block_scope: "project", ...meta })
+    // A self-hosted server can serve SSH and https from different hosts, so
+    // its forms are not one repo.
+    expect(
+      toBlock(project({ repo_remote: "ssh://git@git.acme.internal/data/x" }), {
+        kind: "remote",
+        value: "https://git.acme.internal/data/x",
+      })?.origin,
+    ).toBe("x")
+    expect(
+      toBlock(project({ repo_remote: "ssh://git@github.acme.com/team/x" }), {
+        kind: "remote",
+        value: "https://github.acme.com/team/x",
+      })?.origin,
+    ).toBe("x")
+    expect(
+      toBlock(project({ repo_remote: "ssh://git@github.com/acme/other" }), {
+        kind: "remote",
+        value: "https://github.com/acme/analytics",
+      })?.origin,
+    ).toBe("other")
+    expect(toBlock(project({ project_path: "/work/x/" }), { kind: "path", value: "/work/x" })?.origin).toBe("x")
+    expect(
+      toBlock(project({ repo_remote: "https://github.com/acme/x" }), { kind: "path", value: "/work/x" })?.origin,
+    ).toBe("x")
   })
 
   test("restores expiry from metadata", () => {
@@ -1153,6 +1207,37 @@ describe("reaping blocks archived elsewhere", () => {
     ]
     await refresh(`${SES}-reap-5c`)
     expect(idsOf(removed)).toEqual(["ours"])
+  })
+
+  test("on a self-hosted host, an archived record for repo X.git is not reaped for repo X", async () => {
+    // Such a server can hold both repos; only the public hosts' forms are one repo.
+    syncInternals.resolveBinding = async () => ({ ...BINDING, repoRemote: "https://git.acme.internal/acme/X" }) as any
+    const removed = seeThrough({ shared: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      archived("shared", {
+        block_scope: "project",
+        datamate_id: String(BINDING.datamateId),
+        repo_remote: "https://git.acme.internal/acme/X.git",
+      }),
+    ]
+    await refresh(`${SES}-reap-5e`)
+    expect(idsOf(removed)).toEqual([])
+  })
+
+  test("an archived record for THIS project under an older URL form is reaped", async () => {
+    // The binding now holds the repo's https value; the record was archived
+    // when it still held the SSH form.
+    syncInternals.resolveBinding = async () => ({ ...BINDING, repoRemote: "https://github.com/acme/analytics" }) as any
+    const removed = seeThrough({ "ours-old-form": { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [
+      archived("ours-old-form", {
+        block_scope: "project",
+        datamate_id: String(BINDING.datamateId),
+        repo_remote: "ssh://git@github.com/acme/analytics",
+      }),
+    ]
+    await refresh(`${SES}-reap-5d`)
+    expect(idsOf(removed)).toEqual(["ours-old-form"])
   })
 
   test("a split-create extra does not take its live primary's block with it", async () => {
@@ -2068,6 +2153,382 @@ describe("binding resolution for the mirror", () => {
   })
 })
 
+// ── one repo, several URL forms ─────────────────────────────────────────────
+// The workspace service may move a binding's stored remote from the form it
+// was linked with (`ssh://git@github.com/acme/x`) to the repo's https value.
+// Records written before keep the old form, and must still be this project's.
+describe("a repo's URL forms", () => {
+  const SSH = "ssh://git@github.com/acme/analytics"
+  const HTTPS = "https://github.com/acme/analytics"
+  const boundTo = (repoRemote: string) => {
+    syncInternals.resolveBinding = async () => ({ ...BINDING, repoRemote }) as any
+  }
+  const projectRecord = (id: string, blockId: string, repoRemote: unknown, over: Record<string, unknown> = {}) => ({
+    id,
+    memory: "earlier text",
+    metadata: {
+      source: MIRROR_SOURCE,
+      block_id: blockId,
+      block_scope: "project",
+      datamate_id: String(BINDING.datamateId),
+      repo_remote: repoRemote,
+      ...over,
+    },
+  })
+  const edited = (id: string) => block({ id, scope: "project", content: "edited", updated: "2026-08-20T00:00:00.000Z" })
+
+  test("a record under the SSH form is updated once the binding holds the https value", async () => {
+    boundTo(HTTPS)
+    listResponse = [projectRecord("mem-ssh", "forms-ssh", SSH)]
+    await mirrorBlock(edited("forms-ssh"))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    expect(callsTo("/datamates/memory/mem-ssh", "PATCH").length).toBe(1)
+  })
+
+  test("and the reverse: an https record, a binding still cached in SSH form", async () => {
+    boundTo(SSH)
+    listResponse = [projectRecord("mem-https", "forms-https", HTTPS)]
+    await mirrorBlock(edited("forms-https"))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    expect(callsTo("/datamates/memory/mem-https", "PATCH").length).toBe(1)
+  })
+
+  test("a binding cached with the remote as git printed it matches the stored value", async () => {
+    boundTo("git@github.com:Acme/Analytics.git")
+    listResponse = [projectRecord("mem-raw", "forms-raw", HTTPS)]
+    await mirrorBlock(edited("forms-raw"))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    expect(callsTo("/datamates/memory/mem-raw", "PATCH").length).toBe(1)
+  })
+
+  test("a block synced before the rewrite is updated after it, not duplicated", async () => {
+    // The local index is keyed by the cached value as it was, so the rewrite
+    // misses it; the record lookup behind the index has to find the record.
+    boundTo(SSH)
+    createResult = [{ id: "mem-before" }]
+    const b = block({ id: "forms-index", scope: "project" })
+    await mirrorBlock(b)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+    // The stub keeps what a create sent; the service also keeps the metadata
+    // the create's verbatim update wrote.
+    const repair = callsTo("/datamates/memory/mem-before", "PATCH")[0]
+    expect(repair.body.metadata.repo_remote).toBe(SSH)
+    listResponse = [{ id: "mem-before", memory: repair.body.memory, metadata: repair.body.metadata }]
+    captured = []
+
+    boundTo(HTTPS)
+    await mirrorBlock({ ...b, content: "after the rewrite", updated: "2026-08-20T00:00:00.000Z" })
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    const patches = callsTo("/datamates/memory/mem-before", "PATCH")
+    expect(patches.length).toBe(1)
+    expect(patches[0].body.metadata.repo_remote).toBe(HTTPS)
+  })
+
+  test("another repo's record in the workspace is not taken over", async () => {
+    boundTo(HTTPS)
+    listResponse = [projectRecord("mem-other", "forms-other", "ssh://git@github.com/acme/other")]
+    await mirrorBlock(edited("forms-other"))
+    expect(callsTo("/datamates/memory/mem-other", "PATCH").length).toBe(0)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+  })
+
+  test("a record whose remote key isn't a string is not this project's, falsy or not", async () => {
+    boundTo(HTTPS)
+    for (const [i, key] of [42, 0, false].entries()) {
+      captured = []
+      const record = projectRecord(`mem-not-string-${i}`, `forms-not-string-${i}`, HTTPS)
+      listResponse = [{ ...record, metadata: { ...record.metadata, repo_remote: key } }]
+      await mirrorBlock(edited(`forms-not-string-${i}`))
+      expect(callsTo(`/datamates/memory/mem-not-string-${i}`, "PATCH").length).toBe(0)
+      expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+    }
+  })
+
+  test("a self-hosted record under the binding's own value is updated", async () => {
+    boundTo("https://git.acme.internal/data/analytics")
+    listResponse = [projectRecord("mem-self-same", "forms-self-same", "https://git.acme.internal/data/analytics")]
+    await mirrorBlock(edited("forms-self-same"))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    expect(callsTo("/datamates/memory/mem-self-same", "PATCH").length).toBe(1)
+  })
+
+  test("self-hosted SSH and https forms stay separate projects", async () => {
+    boundTo("https://git.acme.internal/data/analytics")
+    listResponse = [projectRecord("mem-selfhosted", "forms-self", "ssh://git@git.acme.internal/data/analytics")]
+    await mirrorBlock(edited("forms-self"))
+    expect(callsTo("/datamates/memory/mem-selfhosted", "PATCH").length).toBe(0)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(1)
+  })
+
+  test("a delete finds this project's record under the older form", async () => {
+    boundTo(HTTPS)
+    listResponse = [projectRecord("mem-delete-ssh", "forms-delete", SSH)]
+    await archiveBlock("project", "forms-delete")
+    expect(callsTo("/datamates/memory/mem-delete-ssh", "PATCH").length).toBe(1)
+  })
+})
+
+// ── copies of one block ─────────────────────────────────────────────────────
+// A client that compared remotes as raw strings wrote a second live record for
+// a block once its binding's cached form of the repo changed: one under each
+// form. Both now match the block.
+describe("two live records of one block", () => {
+  const SSH = "ssh://git@github.com/acme/analytics"
+  const HTTPS = "https://github.com/acme/analytics"
+  const boundTo = (binding: Record<string, unknown>) => {
+    syncInternals.resolveBinding = async () => ({ ...BINDING, ...binding }) as any
+  }
+  const copy = (id: string, blockId: string, meta: Record<string, unknown>, memory = "earlier text") => ({
+    id,
+    memory,
+    metadata: {
+      source: MIRROR_SOURCE,
+      block_id: blockId,
+      block_scope: "project",
+      datamate_id: String(BINDING.datamateId),
+      ...meta,
+    },
+  })
+  const OLDER = "2026-08-01T00:00:00.000Z"
+  const NEWER = "2026-08-10T00:00:00.000Z"
+  const edited = (id: string) => block({ id, scope: "project", content: "edited", updated: "2026-08-20T00:00:00.000Z" })
+
+  test("a save updates the newest and archives the other, emptied, under the binding's metadata", async () => {
+    boundTo({ repoRemote: HTTPS })
+    listResponse = [
+      copy("mem-old-ssh", "copies-save", { repo_remote: SSH, block_updated: OLDER }),
+      copy("mem-new-https", "copies-save", { repo_remote: HTTPS, block_updated: NEWER }),
+    ]
+    await mirrorBlock(edited("copies-save"))
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    const kept = callsTo("/datamates/memory/mem-new-https", "PATCH")
+    expect(kept.length).toBe(1)
+    expect(kept[0].body.memory).toBe("edited")
+    expect(kept[0].body.metadata.archived).toBeUndefined()
+    const archived = callsTo("/datamates/memory/mem-old-ssh", "PATCH")
+    expect(archived.length).toBe(1)
+    expect(archived[0].body.memory).toBe("")
+    expect(archived[0].body.metadata.archived).toBe("true")
+    expect(Number.isNaN(Date.parse(archived[0].body.metadata.archived_at))).toBe(false)
+    // The same identity as the record kept, so no client reads the tombstone
+    // without also reading the live record.
+    const { archived: _a, archived_at: _at, ...identity } = archived[0].body.metadata
+    expect(identity).toEqual(kept[0].body.metadata)
+  })
+
+  test("the record the index names is the one kept", async () => {
+    boundTo({ repoRemote: HTTPS })
+    await recordIndexEntry(
+      indexKey({ scope: "project", blockId: "copies-index", datamateId: BINDING.datamateId, projectKey: HTTPS }),
+      { memoryId: "mem-indexed-ssh", contentHash: "before", syncedAt: 1 },
+    )
+    listResponse = [
+      copy("mem-indexed-ssh", "copies-index", { repo_remote: SSH, block_updated: OLDER }),
+      copy("mem-other-https", "copies-index", { repo_remote: HTTPS, block_updated: NEWER }),
+    ]
+    await mirrorBlock(edited("copies-index"))
+    expect(callsTo("/datamates/memory/mem-indexed-ssh", "PATCH")[0].body.memory).toBe("edited")
+    expect(callsTo("/datamates/memory/mem-other-https", "PATCH")[0].body.metadata.archived).toBe("true")
+  })
+
+  test("a copy newer than the local block defers the save, whichever record the index names", async () => {
+    boundTo({ repoRemote: HTTPS })
+    await recordIndexEntry(
+      indexKey({ scope: "project", blockId: "copies-newer", datamateId: BINDING.datamateId, projectKey: HTTPS }),
+      { memoryId: "mem-older-https", contentHash: "before", syncedAt: 1 },
+    )
+    listResponse = [
+      copy("mem-older-https", "copies-newer", { repo_remote: HTTPS, block_updated: OLDER }),
+      copy("mem-newer-ssh", "copies-newer", { repo_remote: SSH, block_updated: "2026-09-01T00:00:00.000Z" }),
+    ]
+    await mirrorBlock(edited("copies-newer"))
+    expect(callsTo("/datamates/memory/", "PATCH").length).toBe(0)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+  })
+
+  test("a copy whose archive failed is archived by the next save of the same content", async () => {
+    boundTo({ repoRemote: HTTPS })
+    listResponse = [
+      copy("mem-retry-ssh", "copies-retry", { repo_remote: SSH, block_updated: OLDER }),
+      copy("mem-retry-https", "copies-retry", { repo_remote: HTTPS, block_updated: NEWER }),
+    ]
+    failPatchOf = "mem-retry-ssh"
+    const b = edited("copies-retry")
+    await mirrorBlock(b).catch(() => undefined)
+    expect(callsTo("/datamates/memory/mem-retry-ssh", "PATCH").length).toBe(1)
+
+    failPatchOf = undefined
+    captured = []
+    await mirrorBlock(b)
+    const archived = callsTo("/datamates/memory/mem-retry-ssh", "PATCH")
+    expect(archived.length).toBe(1)
+    expect(archived[0].body.metadata.archived).toBe("true")
+  })
+
+  test("a split create's extra whose archive failed is archived by the next save", async () => {
+    boundTo({ repoRemote: HTTPS })
+    createResult = [{ id: "mem-split-primary" }, { id: "mem-split-extra" }]
+    failPatchOf = "mem-split-extra"
+    const b = edited("copies-split")
+    await mirrorBlock(b).catch(() => undefined)
+    expect(callsTo("/datamates/memory/mem-split-extra", "PATCH").length).toBe(1)
+    // What the service now holds: both records under the metadata the create
+    // sent, the primary's rewritten by its repair update.
+    const sent = callsTo("/datamates/memory/", "POST")[0].body.memory_options.metadata
+    const repair = callsTo("/datamates/memory/mem-split-primary", "PATCH")[0].body
+    listResponse = [
+      { id: "mem-split-primary", memory: repair.memory, metadata: repair.metadata },
+      { id: "mem-split-extra", memory: "rewritten by the extractor", metadata: sent },
+    ]
+
+    failPatchOf = undefined
+    captured = []
+    await mirrorBlock(b)
+    expect(callsTo("/datamates/memory/", "POST").length).toBe(0)
+    const patched = ["mem-split-primary", "mem-split-extra"].map(
+      (id) => callsTo(`/datamates/memory/${id}`, "PATCH")[0]?.body.metadata.archived,
+    )
+    expect(patched.sort()).toEqual(["true", undefined].sort())
+  })
+
+  test("a delete archives every live copy", async () => {
+    boundTo({ repoRemote: HTTPS })
+    listResponse = [
+      copy("mem-del-ssh", "copies-delete", { repo_remote: SSH, block_updated: OLDER }, "ssh text"),
+      copy("mem-del-https", "copies-delete", { repo_remote: HTTPS, block_updated: NEWER }, "https text"),
+      copy("mem-del-other", "copies-delete", { repo_remote: "https://github.com/acme/other" }),
+    ]
+    await archiveBlock("project", "copies-delete")
+    for (const [id, text] of [
+      ["mem-del-ssh", "ssh text"],
+      ["mem-del-https", "https text"],
+    ]) {
+      const patches = callsTo(`/datamates/memory/${id}`, "PATCH")
+      expect(patches.length).toBe(1)
+      expect(patches[0].body.memory).toBe(text)
+      expect(patches[0].body.metadata.archived).toBe("true")
+    }
+    expect(callsTo("/datamates/memory/mem-del-other", "PATCH").length).toBe(0)
+  })
+
+  test("a delete on a truncated listing archives the copies in reach", async () => {
+    boundTo({ repoRemote: HTTPS })
+    listResponse = [
+      copy("mem-trunc-ssh", "copies-trunc", { repo_remote: SSH, block_updated: OLDER }),
+      ...Array.from({ length: LIST_LIMIT - 1 }, (_, i) => ({
+        id: `trunc-filler-${i}`,
+        memory: "x",
+        metadata: { source: MIRROR_SOURCE, block_id: `filler/${i}`, block_scope: "global" },
+      })),
+    ]
+    await archiveBlock("project", "copies-trunc")
+    expect(callsTo("/datamates/memory/mem-trunc-ssh", "PATCH")[0].body.metadata.archived).toBe("true")
+  })
+
+  test("a delete whose indexed record is already archived still archives a live copy", async () => {
+    boundTo({ repoRemote: HTTPS })
+    await recordIndexEntry(
+      indexKey({ scope: "project", blockId: "copies-tomb", datamateId: BINDING.datamateId, projectKey: HTTPS }),
+      { memoryId: "mem-tombstone", contentHash: "", syncedAt: 1 },
+    )
+    listResponse = [
+      copy("mem-tombstone", "copies-tomb", { repo_remote: HTTPS, archived: "true", archived_at: OLDER }),
+      copy("mem-live-copy", "copies-tomb", { repo_remote: SSH, block_updated: NEWER }),
+    ]
+    await archiveBlock("project", "copies-tomb")
+    expect(callsTo("/datamates/memory/mem-tombstone", "PATCH").length).toBe(0)
+    expect(callsTo("/datamates/memory/mem-live-copy", "PATCH")[0].body.metadata.archived).toBe("true")
+  })
+
+  test("a load serves one block per copy set, the newest", async () => {
+    boundTo({ repoRemote: HTTPS })
+    const sibling = "https://github.com/acme/other"
+    listResponse = [
+      copy("own-old", "notes", { repo_remote: SSH, block_updated: OLDER }, "stale"),
+      copy("own-new", "notes", { repo_remote: HTTPS, block_updated: NEWER }, "current"),
+      copy("sib-old", "notes", { repo_remote: "git@github.com:acme/other.git", block_updated: OLDER }, "sibling stale"),
+      copy("sib-new", "notes", { repo_remote: sibling, block_updated: NEWER }, "sibling current"),
+      // Another sibling with the same block id holds a different block.
+      copy("sib-2", "notes", { repo_remote: "https://github.com/other/other", block_updated: OLDER }, "second sibling"),
+      copy("g-old", "g", { block_scope: "global", block_updated: OLDER }, "global stale"),
+      copy("g-new", "g", { block_scope: "global", block_updated: NEWER }, "global current"),
+    ]
+    await hydrate(`${SES}-copies`)
+    const served = overlayBlocks(`${SES}-copies`)
+      .map((b) => `${b.scope}:${b.id}:${b.origin ?? "own"}:${b.content}`)
+      .sort()
+    expect(served).toEqual([
+      "global:g:own:global current",
+      "project:notes:other:second sibling",
+      "project:notes:other:sibling current",
+      "project:notes:own:current",
+    ])
+  })
+
+  test("an expiry on the newest copy holds even where an older copy has none", async () => {
+    boundTo({ repoRemote: HTTPS })
+    listResponse = [
+      copy("exp-old", "expiring", { repo_remote: SSH, block_updated: OLDER }),
+      copy("exp-new", "expiring", { repo_remote: HTTPS, block_updated: NEWER, block_expires: "2020-01-01T00:00:00.000Z" }),
+    ]
+    await hydrate(`${SES}-copies-expiry`)
+    expect(overlayBlocks(`${SES}-copies-expiry`)).toEqual([])
+  })
+})
+
+// ── edge metadata: one rule for sync and display ────────────────────────────
+describe("a record's project key, as sync and display read it", () => {
+  const HTTPS = "https://github.com/acme/analytics"
+  const meta = (over: Record<string, unknown>) => ({
+    source: MIRROR_SOURCE,
+    block_id: "edge",
+    block_scope: "project",
+    datamate_id: String(BINDING.datamateId),
+    block_updated: NOW,
+    ...over,
+  })
+  /** Does a save update this record (`true`), or create another (`false`)? */
+  async function syncAdopts(binding: Record<string, unknown>, metadata: Record<string, unknown>, blockId: string) {
+    syncInternals.resolveBinding = async () => ({ ...BINDING, ...binding }) as any
+    captured = []
+    listResponse = [{ id: `mem-${blockId}`, memory: "earlier", metadata: { ...metadata, block_id: blockId } }]
+    await mirrorBlock(block({ id: blockId, scope: "project", content: "edited", updated: "2026-08-20T00:00:00.000Z" }))
+    const updated = callsTo(`/datamates/memory/mem-${blockId}`, "PATCH").length === 1
+    const created = callsTo("/datamates/memory/", "POST").length === 1
+    expect(updated).toBe(!created)
+    return updated
+  }
+  /** Does display show this record as this project's own? A sibling's block
+   * carries `origin`, even when no label can be derived for it. */
+  const shownAsOwn = (own: { kind: "remote" | "path"; value: string }, metadata: Record<string, unknown>) =>
+    !("origin" in toBlock({ id: "rec", memory: "text", metadata }, own)!)
+
+  const cases: [string, Record<string, unknown>, Record<string, unknown>, boolean][] = [
+    // [name, binding, record fields, belongs to the project]
+    ["no key at all", { repoRemote: HTTPS }, {}, true],
+    ["a null remote and no path", { repoRemote: HTTPS }, { repo_remote: null }, true],
+    ["an undefined remote and no path", { repoRemote: HTTPS }, { repo_remote: undefined }, true],
+    ["an empty remote and no path", { repoRemote: HTTPS }, { repo_remote: "" }, true],
+    ["an empty remote and empty path", { repoRemote: HTTPS }, { repo_remote: "", project_path: "" }, true],
+    ["an empty remote falls back to the path", { repoRemote: null, projectPath: "/work/p" }, { repo_remote: "", project_path: "/work/p" }, true],
+    ["an empty remote and another path", { repoRemote: HTTPS }, { repo_remote: "", project_path: "/work/p" }, false],
+    ["a non-string remote, whatever the path", { repoRemote: null, projectPath: "/work/p" }, { repo_remote: 42, project_path: "/work/p" }, false],
+    ["a non-string path", { repoRemote: null, projectPath: "/work/p" }, { project_path: 7 }, false],
+    ["this repo under another URL form", { repoRemote: HTTPS }, { repo_remote: "git@github.com:Acme/Analytics.git" }, true],
+  ]
+
+  for (const [i, [name, binding, fields, belongs]] of cases.entries()) {
+    test(`${name}: ${belongs ? "this project's" : "not this project's"}, in sync and display alike`, async () => {
+      const own = {
+        kind: (binding.repoRemote ? "remote" : "path") as "remote" | "path",
+        value: (binding.repoRemote ?? binding.projectPath) as string,
+      }
+      expect(shownAsOwn(own, meta(fields))).toBe(belongs)
+      expect(await syncAdopts(binding, meta(fields), `edge-${i}`)).toBe(belongs)
+    })
+  }
+})
+
 // altimate_change start — workspace sync state
 describe("sync state", () => {
   const note = (blockId: string, title: string, updated = "2026-01-01T00:00:00.000Z") => ({
@@ -2136,11 +2597,37 @@ describe("sync state", () => {
     expect(entity?.changes).toEqual({ added: [], removed: [], updated: ["Naming conventions"] })
   })
 
-  test("two teammates' blocks with the same block id are two items", async () => {
-    const dir = mkdtempSync(path.join(SANDBOX, "memory-sync-state-teammates-"))
-    listResponse = [note("same", "Mine"), { ...note("same", "Theirs"), id: "mem-same-teammate" }]
-    await refresh(`${SES}-state-teammates`, dir)
+  test("two projects' blocks with the same block id are two items", async () => {
+    const dir = mkdtempSync(path.join(SANDBOX, "memory-sync-state-siblings-"))
+    const inProject = (record: ReturnType<typeof note>, repoRemote: string) => ({
+      ...record,
+      metadata: {
+        ...record.metadata,
+        block_scope: "project",
+        datamate_id: String(BINDING.datamateId),
+        repo_remote: repoRemote,
+      },
+    })
+    listResponse = [
+      inProject(note("same", "Mine"), BINDING.repoRemote),
+      { ...inProject(note("same", "Theirs"), "https://github.com/acme/other"), id: "mem-same-sibling" },
+    ]
+    await refresh(`${SES}-state-siblings`, dir)
     expect(await memoryState(dir)).toMatchObject({ status: "ok", count: 2 })
+  })
+
+  test("two live records of one block are one item, the record served", async () => {
+    const dir = mkdtempSync(path.join(SANDBOX, "memory-sync-state-copies-"))
+    const newer = { ...note("same", "Newer copy", "2026-02-01T00:00:00.000Z"), id: "mem-same-newer" }
+    listResponse = [note("same", "Older copy"), newer]
+    await refresh(`${SES}-state-copies-1`, dir)
+    expect(await memoryState(dir)).toMatchObject({ status: "ok", count: 1, changes: null })
+
+    // The block's next save archives the older copy: the item served is unchanged.
+    listResponse = [newer]
+    await refresh(`${SES}-state-copies-2`, dir)
+    await settled(dir)
+    expect(await memoryState(dir)).toMatchObject({ status: "ok", count: 1, changes: null })
   })
 
   test("a binding lookup that fails does not clear the record", async () => {

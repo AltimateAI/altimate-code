@@ -34,7 +34,10 @@ export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", 
       // (e.g. cartesian product). Never gate the count or title on `valid`.
       const issues = (data.findings ?? data.issues ?? []) as any[]
       const issueCount = issues.length
-      const error = result.error ?? data.error ?? extractSemanticsErrors(data)
+      // altimate_change start — a skipped analysis (no plan) is not a clean result
+      const error =
+        result.error ?? data.error ?? extractSemanticsErrors(data) ?? (data.skipped ? String(data.skip_reason) : undefined)
+      // altimate_change end
       const hasError = Boolean(error)
       // altimate_change start — sql quality findings for telemetry
       const findings: Telemetry.Finding[] = issues.map((f: any) => ({
@@ -42,7 +45,7 @@ export const AltimateCoreSemanticsTool = Tool.define("altimate_core_semantics", 
       }))
       // altimate_change end
       return {
-        title: hasError ? "Semantics: ERROR" : `Semantics: ${issueCount === 0 ? "VALID" : `${issueCount} issues`}`,
+        title: data.skipped ? "Semantics: SKIPPED" : hasError ? "Semantics: ERROR" : `Semantics: ${issueCount === 0 ? "VALID" : `${issueCount} issues`}`,
         metadata: {
           // Semantic issues are findings, not failures — but a failed engine
           // call or an abstention (validation_errors) must not report success:

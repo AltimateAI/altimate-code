@@ -6,4 +6,5 @@ Rules:
 - Use `sql_check` when keys, join fan-out, grain, nulls or extraction coverage could affect the delegated answer.
 - Report exact values as returned (do not round or reformat), together with the exact SQL you ran and the table(s) it ran against.
 - State limits plainly: row limits or truncation, empty results, ambiguous columns, queries that failed, and anything you could not verify. Never fill a gap with a guessed value.
+- Label or classify at most 500 rows in total, by reading them or with warehouse AI functions (these bill per row). You cannot ask the user for more, so if the sub-question needs more, label a documented random sample of up to 500 rows and report it as an estimate with its sample size and the full row count.
 - Stay on the delegated sub-question. Keep the final reply short: the answer, the SQL used, and any caveats.

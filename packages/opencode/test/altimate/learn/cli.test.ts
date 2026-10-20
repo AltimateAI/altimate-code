@@ -168,6 +168,34 @@ describe("learn pin and unpin", () => {
 })
 
 describe("learn opt-in and status", () => {
+  test("status includes recurrence coverage even with learning disabled", async () => {
+    await using dir = await tmpdir({ git: true })
+    const result = await runLearn(dir.path, ["status", "--json"], undefined, { ALTIMATE_LEARN: "0" })
+    expect(result.code).toBe(0)
+    expect(JSON.parse(result.stdout).recurrence).toEqual({
+      lessons: [], unmatched_topics: [],
+      coverage: { sessions_analyzed: 0, sessions_skipped_malformed: 0, truncated: false },
+    })
+    const shown = await runLearn(dir.path, ["status"], undefined, { ALTIMATE_LEARN: "0" })
+    expect(shown.stdout).toContain("Recurrence (observed counts need capture on)")
+    expect(shown.stdout).toContain("no matching current lesson")
+  })
+
+  test("status still reports when recurrence analysis fails", async () => {
+    await using dir = await tmpdir({ git: true })
+    await using outside = await tmpdir()
+    await fs.mkdir(path.join(dir.path, ".altimate-code", "learn"), { recursive: true })
+    await fs.symlink(outside.path, path.join(dir.path, ".altimate-code", "learn", ".sessions"))
+    const result = await runLearn(dir.path, ["status", "--json"])
+    expect(result.code).toBe(0)
+    const status = JSON.parse(result.stdout)
+    expect(status.recurrence).toBeUndefined()
+    expect(typeof status.recurrence_error).toBe("string")
+    expect(status.open_signals).toBe(0)
+    const shown = await learn(dir.path, "status")
+    expect(shown.stdout).toContain("Recurrence unavailable:")
+  })
+
   test.each(["config", "env"])("status reports the learning kill switch disabled by %s", async (source) => {
     await using dir = await tmpdir({ git: true })
     await fs.writeFile(path.join(dir.path, "opencode.json"), JSON.stringify({

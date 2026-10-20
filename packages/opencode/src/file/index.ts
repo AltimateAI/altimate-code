@@ -12,6 +12,9 @@ import fuzzysort from "fuzzysort"
 import { Global } from "../global"
 import { git } from "@/util/git"
 import { Protected } from "./protected"
+// altimate_change start — upstream_fix: log a failed background scan's NamedError data
+import { NamedError } from "@opencode-ai/util/error"
+// altimate_change end
 
 export namespace File {
   const log = Log.create({ service: "file" })
@@ -399,7 +402,18 @@ export namespace File {
       cache = result
       fetching = false
     }
-    fn(cache)
+    // altimate_change start — upstream_fix: nothing awaits this startup scan, so a failure (ripgrep
+    // cannot be downloaded, or its archive cannot be extracted) was an unhandled rejection. Under bun
+    // test that fails whichever test is running, or the run after its last test passed. Log it and
+    // keep the empty cache: `files()` scans again on demand and returns its own failure to its caller.
+    // A NamedError's details (download URL and status, tar's stderr) live in `data`, not the stack.
+    fn(cache).catch((error) =>
+      log.warn("background file scan failed", {
+        error,
+        ...(error instanceof NamedError ? { data: error.toObject().data } : {}),
+      }),
+    )
+    // altimate_change end
 
     let pending: Promise<void> | undefined
     return {
@@ -407,8 +421,15 @@ export namespace File {
         // Always ensure cache reflects a recent scan: if a scan is in-flight,
         // wait for it; otherwise kick off a fresh scan and await it.
         if (!pending) pending = fn({ files: [], dirs: [] })
-        await pending
-        pending = undefined
+        // altimate_change start — upstream_fix: clear the finished scan even when it failed. Clearing
+        // it only on success left a rejected scan in `pending`, so every later call re-awaited that
+        // rejection and never scanned again.
+        try {
+          await pending
+        } finally {
+          pending = undefined
+        }
+        // altimate_change end
         return cache
       },
     }

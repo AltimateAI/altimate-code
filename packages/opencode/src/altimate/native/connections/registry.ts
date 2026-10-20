@@ -58,7 +58,7 @@ const SCRATCH_NAME_CONFLICT =
 // Config file paths
 // ---------------------------------------------------------------------------
 
-function globalConfigPath(): string {
+export function globalConfigPath(): string {
   // altimate_change start — the same home Global.Path uses, so the test preload's OPENCODE_TEST_HOME keeps the
   // suite out of the developer's real connections (Bun caches os.homedir(), so changing HOME does not).
   return path.join(Global.Path.home, ".altimate-code", "connections.json")
@@ -93,7 +93,7 @@ function projectRoot(): string {
 }
 // altimate_change end
 
-function localConfigPath(): string {
+export function localConfigPath(): string {
   // altimate_change start — resolve against the project, not the launch cwd
   return path.join(projectRoot(), ".altimate-code", "connections.json")
   // altimate_change end
@@ -172,9 +172,13 @@ function loadFromFile(filePath: string): Record<string, ConnectionConfig> {
   }
 }
 
+// altimate_change start — exported so user-facing hints name the variable the loader reads
+export const CONN_ENV_PREFIX = "ALTIMATE_CODE_CONN_"
+// altimate_change end
+
 function loadFromEnv(): Record<string, ConnectionConfig> {
   const result: Record<string, ConnectionConfig> = {}
-  const prefix = "ALTIMATE_CODE_CONN_"
+  const prefix = CONN_ENV_PREFIX
 
   for (const [key, value] of Object.entries(process.env)) {
     if (!key.startsWith(prefix) || !value) continue
@@ -193,14 +197,17 @@ function loadFromEnv(): Record<string, ConnectionConfig> {
 }
 
 /** Load all connection configs. Local overrides global; env overrides both. */
-export function load(): void {
+export function load(includeProjectConfig = true): void {
   configs.clear()
 
   // altimate_change start — absolutize store paths against the directory that
   // declared them, so a later process.chdir() (--dir) cannot move the store.
   const base = projectRoot()
   const global = resolveStorePaths(loadFromFile(globalConfigPath()), path.dirname(globalConfigPath()))
-  const local = resolveStorePaths(loadFromFile(localConfigPath()), base)
+  // altimate_change start — see ensureLoaded(): a later reload must not pull in another project's file
+  const local = includeProjectConfig ? resolveStorePaths(loadFromFile(localConfigPath()), base) : {}
+  if (includeProjectConfig) loadedProjectDir = base
+  // altimate_change end
   const env = resolveStorePaths(loadFromEnv(), base)
   // altimate_change end
 
@@ -217,12 +224,37 @@ export function load(): void {
 
   if (configs.has(SCRATCH_NAME)) Log.Default.warn(SCRATCH_NAME_CONFLICT)
   loaded = true
+  // altimate_change start — real sources were read, so the registry is no longer test-injected
+  injected = false
+  // altimate_change end
 }
 
 /** Ensure configs are loaded. */
 function ensureLoaded(): void {
   if (!loaded) load()
+  // altimate_change start — the registry latches on first load, so a connections file created after an empty
+  // answer (the `warehouse_list` hint) was never seen. Re-read only while nothing is loaded: there is no state to
+  // replace or close, and a populated registry never changes under a running session.
+  else if (configs.size === 0 && !injected) load(projectConfigApplies())
+  // altimate_change end
 }
+
+// altimate_change start — the registry is process-global; this is the project whose local file it was loaded with
+let loadedProjectDir: string | undefined
+
+/**
+ * Whether the current project's local connections file is the one this registry reads. A server serving several
+ * directories shares one registry (pre-existing: the first load's project-local file applies process-wide), so a
+ * later empty-registry reload must not load another project's file into it.
+ */
+export function projectConfigApplies(): boolean {
+  return loadedProjectDir === undefined || loadedProjectDir === projectRoot()
+}
+// altimate_change end
+
+// altimate_change start — set by setConfigs() (tests): an injected empty registry is not a stale one
+let injected = false
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // Driver factory
@@ -861,6 +893,10 @@ export function reset(): void {
   pending.clear()
   loaded = false
   censusSent = false
+  // altimate_change start
+  injected = false
+  loadedProjectDir = undefined
+  // altimate_change end
 }
 
 /**
@@ -872,4 +908,7 @@ export function setConfigs(newConfigs: Record<string, ConnectionConfig>): void {
     configs.set(name, config)
   }
   loaded = true
+  // altimate_change start
+  injected = true
+  // altimate_change end
 }
