@@ -6,7 +6,7 @@ import * as Precedence from "../workspace/precedence"
 // altimate_change end
 
 // altimate_change start — point at the locations the registry actually reads
-import { CONN_ENV_PREFIX, globalConfigPath, localConfigPath, projectConfigApplies } from "../native/connections/registry"
+import { CONN_ENV_PREFIX, globalConfigPath, localConfigPath } from "../native/connections/registry"
 
 /** The no-connections hint. Paths come from the registry's own helpers so it cannot drift from what is loaded. */
 export function noConnectionsMessage(): string {
@@ -17,8 +17,8 @@ export function noConnectionsMessage(): string {
     "",
     "Alternatively, connections are read from these sources (later ones override earlier ones):",
     `  1. ${globalConfigPath()} (global)`,
-    ...(projectConfigApplies() ? [`  2. ${localConfigPath()} (this project)`] : []),
-    `  ${projectConfigApplies() ? 3 : 2}. ${CONN_ENV_PREFIX}<NAME> environment variables, each holding one connection's config as JSON (set them in the shell before starting altimate-code; a running process cannot see variables exported later)`,
+    `  2. ${localConfigPath()} (this project)`,
+    `  3. ${CONN_ENV_PREFIX}<NAME> environment variables, each holding one connection's config as JSON (set them in the shell before starting altimate-code; a running process cannot see variables exported later)`,
     "",
     "After adding the first connection file, call warehouse_list again. Edits to an existing connections.json take effect after a restart. Example connections.json:",
     "{",
