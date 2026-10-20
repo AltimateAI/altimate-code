@@ -1,4 +1,6 @@
 import z from "zod"
+import fs from "node:fs"
+import path from "node:path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 // altimate_change start — post-connect feature suggestions
@@ -58,10 +60,15 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
       }
     }
     // altimate_change end
+    // altimate_change start — a store this process cannot write (file or directory) is opened read-only; opening it
+    // read-write failed every query with "attempt to write a readonly database". A property of the file, so it is
+    // correct to persist; writable stores are unchanged.
+    const config = unwritableFileStore(args.config) ? { ...args.config, readonly: true } : args.config
+    // altimate_change end
     try {
       const result = await Dispatcher.call("warehouse.add", {
         name: args.name,
-        config: args.config,
+        config,
       })
 
       // altimate_change start — MCP clients have only the toolkit: no warehouse_test or suggested follow-up tools
@@ -174,6 +181,22 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
     }
   },
 })
+
+// altimate_change start — read-only detection for existing SQLite/DuckDB store files
+function unwritableFileStore(config: Record<string, unknown>): boolean {
+  const type = String(config.type).toLowerCase()
+  const store = config.path
+  if ((type !== "sqlite" && type !== "duckdb") || typeof store !== "string" || !path.isAbsolute(store)) return false
+  if (config.readonly !== undefined || !fs.existsSync(store)) return false
+  try {
+    fs.accessSync(store, fs.constants.W_OK)
+    fs.accessSync(path.dirname(store), fs.constants.W_OK)
+    return false
+  } catch {
+    return true
+  }
+}
+// altimate_change end
 
 // altimate_change start — driver readiness note for newly added warehouses
 /**

@@ -1,7 +1,7 @@
 // altimate_change start — standalone MCP enforcement and lifecycle regressions
 import { afterEach, expect, spyOn, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { mkdtemp, rm, stat, readFile } from "node:fs/promises"
+import { chmod, mkdir, mkdtemp, rm, stat, readFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -1104,6 +1104,8 @@ mcpTest("warehouse_add from an empty registry makes the connection queryable", a
   expect(added.body).toContain("Call warehouse_list")
   expect(added.body).not.toMatch(/warehouse_test|sql_analyze|lineage_check/)
   expect((await call("warehouse_list", {})).body).toContain("added | sqlite")
+  // A writable store keeps its configured mode.
+  expect(Registry.getConfig("added")?.readonly).toBeUndefined()
   const rows = await call("sql_execute", { warehouse: "added", query: "SELECT name FROM fruit" })
   expect(rows.result.isError).toBe(false)
   expect(rows.body).toContain("fig")
@@ -1126,5 +1128,27 @@ mcpTest("warehouse_add refuses create:true in a read-only session and creates no
   expect(added.body).toContain("read-only")
   expect((await call("warehouse_list", {})).body).not.toContain("fresh")
   expect(await Bun.file(target).exists()).toBe(false)
+})
+// altimate_change end
+
+// altimate_change start — a read-only session opens added file stores read-only (read-only files and directories work)
+mcpTest("warehouse_add of a SQLite file this process cannot write opens it read-only so it can be queried", async () => {
+  const { project, call } = await emptyProject()
+  const locked = path.join(project, "locked")
+  await mkdir(locked)
+  const store = path.join(locked, "ro.sqlite")
+  const db = new Database(store)
+  db.run("CREATE TABLE fruit (id INTEGER, name TEXT)")
+  db.run("INSERT INTO fruit VALUES (1, 'quince')")
+  db.close()
+  await chmod(store, 0o444)
+  await chmod(locked, 0o555)
+  cleanups.push(() => chmod(locked, 0o755))
+  const added = await call("warehouse_add", { name: "ro", config: { type: "sqlite", path: store } })
+  expect(added.result.isError).toBe(false)
+  const rows = await call("sql_execute", { warehouse: "ro", tables: ["fruit"], query: "SELECT name FROM fruit" })
+  expect(rows.body).not.toContain("readonly database")
+  expect(rows.result.isError).toBe(false)
+  expect(rows.body).toContain("quince")
 })
 // altimate_change end
