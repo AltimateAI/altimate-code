@@ -92,13 +92,12 @@ describe("v0.7.1 PR #820 — install script: review-driven hardening", () => {
     expect(installScript).toContain(`"$binary_path" -ef "$dest_path"`)
     expect(installScript).toContain("Source and destination are the same file")
   })
-  test("stale altimate-code binary cleanup runs after fresh install", () => {
-    // Pre-rename users have ~/.altimate-code/bin/altimate-code on PATH; the
-    // rename only moves to ~/.altimate/bin, so the old binary lingers as a
-    // stale v0.7.0 binary on $PATH. Cleanup must remove it after install.
-    expect(installScript).toContain(`rm -f "\${INSTALL_DIR}/altimate-code"`)
-    expect(installScript).toContain("Removed stale")
-    expect(installScript).toContain("renamed to altimate in v0.7.1")
+  test("a stale altimate-code binary is replaced by the alias after fresh install", () => {
+    // A pre-rename binary left in INSTALL_DIR must never run by name; the
+    // forced symlink overwrites it with an alias to the fresh `altimate`.
+    // Behavioural coverage lives in test/install/install-alias.test.ts.
+    expect(installScript).toContain(`ln -sfn "$target" "$alias_name"`)
+    expect(installScript).toContain('link_alias "$binary_name"')
   })
   test("tar/unzip extract only the expected binary member", () => {
     // Defense in depth: if a future build mistakenly tars a directory of

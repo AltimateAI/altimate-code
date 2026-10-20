@@ -275,6 +275,14 @@ check_version() {
         # treat an empty==empty as "already installed" — fall through and reinstall.
         if [ -n "$specific_version" ] && [[ "$installed_version" == "$specific_version" ]]; then
             print_message info "${MUTED}Version ${NC}$specific_version${MUTED} already installed${NC}"
+            # A standalone install from before the alias existed still gets it, but only
+            # when the matching binary is the one in INSTALL_DIR, so the alias never runs a
+            # different version than the one just checked.
+            # -ef compares the directories themselves, so a PATH entry spelled differently
+            # (a symlinked HOME, a trailing slash) still matches.
+            if [ "$(dirname "$(command -v "$probe")")" -ef "$INSTALL_DIR" ]; then
+                link_alias "$binary_name"
+            fi
             exit 0
         elif [ -n "$installed_version" ]; then
             print_message info "${MUTED}Installed version: ${NC}$installed_version."
@@ -453,16 +461,75 @@ download_and_install() {
     mv "$tmp_dir/$binary_name" "${INSTALL_DIR}/$binary_name"
     chmod 755 "${INSTALL_DIR}/$binary_name"
 
-    # If the previous install dropped `altimate-code` here (pre-v0.7.1 curl
-    # install), remove it so users don't end up running a stale binary by
-    # name. The npm/Homebrew/AUR paths still expose both names; only the
-    # standalone $INSTALL_DIR has the rename collapse.
-    if [ "$os" != "windows" ] && [ -f "${INSTALL_DIR}/altimate-code" ]; then
-        rm -f "${INSTALL_DIR}/altimate-code"
-        print_message info "${MUTED}Removed stale ${NC}altimate-code${MUTED} from ${NC}$INSTALL_DIR${MUTED} (renamed to altimate in v0.7.1)${NC}"
-    fi
+    link_alias "$binary_name"
 
     rm -rf "$tmp_dir"
+}
+
+# Expose `altimate-code` next to the installed binary, matching npm, Homebrew and
+# AUR, which all ship both names. A relative symlink keeps following the binary
+# across upgrades. `ln -sfn` also replaces a pre-v0.7.1 standalone `altimate-code`
+# binary, so that name can never run a stale build, and replaces a link to a
+# directory instead of writing into that directory. Under Git Bash, MSYS and
+# Cygwin, where `ln -s` usually makes a full copy, the shims install.ps1 writes
+# are written instead, so both Windows installers leave the same layout.
+link_alias() {
+    local target="$1"
+    local alias_name
+    case "$target" in
+        altimate) alias_name="altimate-code" ;;
+        altimate.exe) alias_name="altimate-code.exe" ;;
+        *) return 0 ;;
+    esac
+    [ -f "${INSTALL_DIR}/$target" ] || return 0
+
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            [ "$target" = "altimate.exe" ] && write_windows_shims
+            return 0
+            ;;
+    esac
+
+    if [ -d "${INSTALL_DIR}/$alias_name" ] && [ ! -L "${INSTALL_DIR}/$alias_name" ]; then
+        print_message warning "${MUTED}Skipped the ${NC}$alias_name${MUTED} alias: ${NC}${INSTALL_DIR}/$alias_name${MUTED} is a directory${NC}"
+        return 0
+    fi
+
+    if ! (cd "$INSTALL_DIR" && ln -sfn "$target" "$alias_name"); then
+        print_message warning "${MUTED}Could not create the ${NC}$alias_name${MUTED} alias in ${NC}$INSTALL_DIR"
+    fi
+}
+
+# The two shims Install-Alias in install.ps1 writes, byte for byte; keep both
+# copies in step. The .cmd first, and a stray altimate-code.exe (which PATHEXT
+# would put in front of it, and which older Git Bash installs left as a full copy)
+# goes only once it exists. The sh shim only runs under Git Bash, MSYS or Cygwin:
+# WSL also sees this directory on PATH, and there it must not pass for a Linux
+# install of the same version.
+write_windows_shims() {
+    local exe="${INSTALL_DIR}/altimate-code.exe"
+    rm -f "$exe.old" 2>/dev/null || true
+    write_shim altimate-code.cmd '@echo off\r\n"%%~dp0altimate.exe" %%*\r\nexit /b %%ERRORLEVEL%%\r\n' || return 0
+    if [ -f "$exe" ] || [ -L "$exe" ]; then
+        rm -f "$exe" 2>/dev/null || mv -f "$exe" "$exe.old" 2>/dev/null ||
+            print_message warning "${MUTED}Could not remove ${NC}$exe${MUTED}, which shadows the altimate-code.cmd alias${NC}"
+    fi
+    write_shim altimate-code '#!/bin/sh\ncase "$(uname -s)" in\n  MINGW*|MSYS*|CYGWIN*) exec "$(dirname "$0")/altimate.exe" "$@" ;;\nesac\necho "altimate-code: this is the Windows build; it runs only from Git Bash, MSYS or Cygwin" >&2\nexit 127\n' || return 0
+}
+
+# Writes printf format $2 to $INSTALL_DIR/$1 as an executable file (Cygwin keeps
+# POSIX modes, so the sh shim needs the bit), replacing a file or link there
+# instead of writing through it. A real directory is left alone.
+write_shim() {
+    local path="${INSTALL_DIR}/$1"
+    if [ -d "$path" ] && [ ! -L "$path" ]; then
+        print_message warning "${MUTED}Skipped the ${NC}$1${MUTED} alias: ${NC}$path${MUTED} is a directory${NC}"
+        return 1
+    fi
+    if ! { rm -f "$path" && printf "$2" > "$path" && chmod 755 "$path"; } 2>/dev/null; then
+        print_message warning "${MUTED}Could not create the ${NC}$1${MUTED} alias in ${NC}$INSTALL_DIR"
+        return 1
+    fi
 }
 
 install_from_binary() {
@@ -479,12 +546,14 @@ install_from_binary() {
     if [ -f "$dest_path" ] && [ "$binary_path" -ef "$dest_path" ]; then
         print_message info "${MUTED}Source and destination are the same file — nothing to do: ${NC}$dest_path"
         chmod 755 "$dest_path"
+        link_alias "$dest_name"
         return 0
     fi
 
     print_message info "\n${MUTED}Installing ${NC}$dest_name ${MUTED}from: ${NC}$binary_path"
     cp "$binary_path" "$dest_path"
     chmod 755 "$dest_path"
+    link_alias "$dest_name"
 }
 
 # Write the same post-install marker that npm's postinstall.mjs writes, so the

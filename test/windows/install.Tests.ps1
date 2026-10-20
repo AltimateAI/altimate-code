@@ -320,3 +320,208 @@ Describe "install.ps1 Write-InstallMarker" {
     $ErrorActionPreference | Should -Be "Stop"
   }
 }
+
+Describe "install.ps1 Install-Alias" {
+  BeforeAll {
+    $src = Get-Content -Raw $script:InstallScript
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$tokens, [ref]$errors)
+    $def = $ast.Find({
+      param($n)
+      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq "Install-Alias"
+    }, $true)
+    if (-not $def) { throw "Install-Alias not found in install.ps1" }
+    . ([ScriptBlock]::Create($def.Extent.Text))
+    function Write-Muted($msg) { }
+
+    # Same reason as Write-InstallMarker: the installer runs under "Stop".
+    $ErrorActionPreference = "Stop"
+    $script:ErrorActionPreference = "Stop"
+  }
+
+  BeforeEach {
+    $script:Sandbox = Join-Path ([IO.Path]::GetTempPath()) ("alias-" + [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $script:Sandbox | Out-Null
+  }
+
+  AfterEach {
+    Remove-Item -Recurse -Force $script:Sandbox -ErrorAction SilentlyContinue
+  }
+
+  It "writes an altimate-code.cmd shim that forwards to altimate.exe" {
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate.exe")) -Value "x" -NoNewline
+    Install-Alias -Dir $script:Sandbox
+
+    $shim = [IO.File]::ReadAllText([IO.Path]::Combine($script:Sandbox, "altimate-code.cmd"))
+    $shim | Should -Be "@echo off`r`n`"%~dp0altimate.exe`" %*`r`nexit /b %ERRORLEVEL%`r`n"
+  }
+
+  It "writes an extensionless shim for Git Bash that forwards to altimate.exe only there" {
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate.exe")) -Value "x" -NoNewline
+    Install-Alias -Dir $script:Sandbox
+
+    $shim = [IO.File]::ReadAllText([IO.Path]::Combine($script:Sandbox, "altimate-code"))
+    $expected = ((@(
+          '#!/bin/sh'
+          'case "$(uname -s)" in'
+          '  MINGW*|MSYS*|CYGWIN*) exec "$(dirname "$0")/altimate.exe" "$@" ;;'
+          'esac'
+          'echo "altimate-code: this is the Windows build; it runs only from Git Bash, MSYS or Cygwin" >&2'
+          'exit 127'
+        ) -join "`n") + "`n")
+    $shim | Should -Be $expected
+  }
+
+  # Needs cmd.exe; skipped when the suite runs under pwsh on macOS or Linux.
+  It "runs altimate.exe through the .cmd shim with its arguments and exit code" -Skip:($env:OS -ne "Windows_NT") {
+    # cmd.exe stands in for altimate.exe: a real executable whose output and exit
+    # code are driven entirely by the forwarded arguments.
+    Copy-Item -LiteralPath $env:ComSpec -Destination ([IO.Path]::Combine($script:Sandbox, "altimate.exe"))
+    Install-Alias -Dir $script:Sandbox
+    $shim = [IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")
+
+    (& $shim /c echo forwarded) | Should -Be "forwarded"
+    & $shim /c exit 7
+    $LASTEXITCODE | Should -Be 7
+  }
+
+  It "replaces a hard link at the shim path without writing through it" {
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate.exe")) -Value "x" -NoNewline
+    $outside = [IO.Path]::Combine($script:Sandbox, "outside.txt")
+    Set-Content -Path $outside -Value "untouched" -NoNewline
+    New-Item -ItemType HardLink -Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")) -Target $outside | Out-Null
+    Install-Alias -Dir $script:Sandbox
+
+    [IO.File]::ReadAllText($outside) | Should -Be "untouched"
+    [IO.File]::ReadAllText([IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")) | Should -Match "altimate.exe"
+  }
+
+  It "replaces a junction or directory link at the shim path without touching its target" {
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate.exe")) -Value "x" -NoNewline
+    $outsideDir = [IO.Path]::Combine($script:Sandbox, "outside")
+    New-Item -ItemType Directory -Path $outsideDir | Out-Null
+    Set-Content -Path ([IO.Path]::Combine($outsideDir, "keep.txt")) -Value "untouched" -NoNewline
+    # pwsh off Windows silently creates no junction; a directory symlink is the same case there.
+    $linkType = if ($env:OS -eq "Windows_NT") { "Junction" } else { "SymbolicLink" }
+    $link = [IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")
+    New-Item -ItemType $linkType -Path $link -Target $outsideDir | Out-Null
+    (Get-Item -LiteralPath $link -Force).LinkType | Should -Be $linkType
+    Install-Alias -Dir $script:Sandbox
+
+    [IO.File]::ReadAllText([IO.Path]::Combine($outsideDir, "keep.txt")) | Should -Be "untouched"
+    Test-Path -LiteralPath ([IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")) -PathType Leaf | Should -BeTrue
+  }
+
+  It "cleans up an altimate-code.exe.old left by an earlier run" {
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate.exe")) -Value "x" -NoNewline
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.exe.old")) -Value "old" -NoNewline
+    Install-Alias -Dir $script:Sandbox
+
+    Test-Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.exe.old")) | Should -BeFalse
+  }
+
+  It "removes a stale altimate-code.exe that would shadow the shim" {
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate.exe")) -Value "x" -NoNewline
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.exe")) -Value "stale" -NoNewline
+    Install-Alias -Dir $script:Sandbox
+
+    Test-Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.exe")) | Should -BeFalse
+    Test-Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")) | Should -BeTrue
+  }
+
+  It "creates nothing when altimate.exe is not installed" {
+    Install-Alias -Dir $script:Sandbox
+    Test-Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")) | Should -BeFalse
+    Test-Path ([IO.Path]::Combine($script:Sandbox, "altimate-code")) | Should -BeFalse
+  }
+
+  It "keeps an existing altimate-code.exe when the shim cannot be written" {
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate.exe")) -Value "x" -NoNewline
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.exe")) -Value "old" -NoNewline
+    New-Item -ItemType Directory -Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")) | Out-Null
+
+    { Install-Alias -Dir $script:Sandbox } | Should -Not -Throw
+    Test-Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.exe")) | Should -BeTrue
+  }
+
+  It "keeps the Git Bash shim when the .cmd shim cannot be written" {
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate.exe")) -Value "x" -NoNewline
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate-code")) -Value "previous" -NoNewline
+    New-Item -ItemType Directory -Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")) | Out-Null
+
+    { Install-Alias -Dir $script:Sandbox } | Should -Not -Throw
+    [IO.File]::ReadAllText([IO.Path]::Combine($script:Sandbox, "altimate-code")) | Should -Be "previous"
+  }
+
+  It "removes a shadowing altimate-code.exe once the .cmd exists, even if the Git Bash shim fails" {
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate.exe")) -Value "x" -NoNewline
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.exe")) -Value "stale" -NoNewline
+    New-Item -ItemType Directory -Path ([IO.Path]::Combine($script:Sandbox, "altimate-code")) | Out-Null
+
+    { Install-Alias -Dir $script:Sandbox } | Should -Not -Throw
+    Test-Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")) -PathType Leaf | Should -BeTrue
+    Test-Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.exe")) | Should -BeFalse
+  }
+
+  # Needs symlink privilege, which Windows CI runners have; off Windows the test above covers it.
+  It "replaces a Windows directory symlink at the shim path without touching its target" -Skip:($env:OS -ne "Windows_NT") {
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate.exe")) -Value "x" -NoNewline
+    $outsideDir = [IO.Path]::Combine($script:Sandbox, "outside")
+    New-Item -ItemType Directory -Path $outsideDir | Out-Null
+    Set-Content -Path ([IO.Path]::Combine($outsideDir, "keep.txt")) -Value "untouched" -NoNewline
+    $link = [IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")
+    New-Item -ItemType SymbolicLink -Path $link -Target $outsideDir | Out-Null
+    Install-Alias -Dir $script:Sandbox
+
+    [IO.File]::ReadAllText([IO.Path]::Combine($outsideDir, "keep.txt")) | Should -Be "untouched"
+    Test-Path -LiteralPath $link -PathType Leaf | Should -BeTrue
+  }
+
+  It "does not throw when the shim cannot be written" {
+    Set-Content -Path ([IO.Path]::Combine($script:Sandbox, "altimate.exe")) -Value "x" -NoNewline
+    New-Item -ItemType Directory -Path ([IO.Path]::Combine($script:Sandbox, "altimate-code.cmd")) | Out-Null
+
+    { Install-Alias -Dir $script:Sandbox } | Should -Not -Throw
+  }
+}
+
+Describe "install.ps1 Test-PathInDir" {
+  BeforeAll {
+    $src = Get-Content -Raw $script:InstallScript
+    $tokens = $null; $errors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$tokens, [ref]$errors)
+    $def = $ast.Find({
+      param($n)
+      $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq "Test-PathInDir"
+    }, $true)
+    if (-not $def) { throw "Test-PathInDir not found in install.ps1" }
+    . ([ScriptBlock]::Create($def.Extent.Text))
+    $script:Dir = [IO.Path]::Combine([IO.Path]::GetTempPath(), "altimate-home", ".altimate", "bin")
+  }
+
+  It "matches a file directly in the directory" {
+    Test-PathInDir -Path ([IO.Path]::Combine($script:Dir, "altimate.exe")) -Dir $script:Dir | Should -BeTrue
+  }
+
+  It "ignores a trailing separator on the directory" {
+    Test-PathInDir -Path ([IO.Path]::Combine($script:Dir, "altimate.exe")) -Dir ($script:Dir + [IO.Path]::DirectorySeparatorChar) | Should -BeTrue
+  }
+
+  It "ignores case" {
+    Test-PathInDir -Path ([IO.Path]::Combine($script:Dir.ToUpperInvariant(), "altimate.exe")) -Dir $script:Dir | Should -BeTrue
+  }
+
+  It "resolves . and .. segments" {
+    $spelled = [IO.Path]::Combine($script:Dir, "..", "bin", ".", "altimate.exe")
+    Test-PathInDir -Path $spelled -Dir $script:Dir | Should -BeTrue
+  }
+
+  It "does not match another directory" {
+    $other = [IO.Path]::Combine([IO.Path]::GetTempPath(), "npm", "altimate.exe")
+    Test-PathInDir -Path $other -Dir $script:Dir | Should -BeFalse
+  }
+
+  It "does not match a subdirectory" {
+    Test-PathInDir -Path ([IO.Path]::Combine($script:Dir, "nested", "altimate.exe")) -Dir $script:Dir | Should -BeFalse
+  }
+}
