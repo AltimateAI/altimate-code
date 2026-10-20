@@ -348,7 +348,7 @@ describe("release validation PR #937 source-level env plumbing", () => {
   test("run command guards the stdin read behind an existing non-TTY stdin", async () => {
     const source = await Bun.file(new URL("../../src/cli/cmd/run.ts", import.meta.url)).text()
 
-    expect(source).toContain("if (process.stdin && !process.stdin.isTTY) {\n      const { readRunStdin, STDIN_WAIT_MS }")
+    expect(source).toContain("if (process.stdin && !process.stdin.isTTY) {\n      const { readRunStdin, stdinWaitMs }")
     expect(source).not.toContain("if (!process.stdin?.isTTY)")
   })
 

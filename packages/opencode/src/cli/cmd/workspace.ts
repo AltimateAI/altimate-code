@@ -386,6 +386,10 @@ export const WorkspaceCommand = cmd({
   builder: (yargs) =>
     yargs
       .command(ListCommand)
-      .command(StatusCommand).command(RefreshCommand).command(SyncCommand).command(UnlinkCommand).demandCommand(),
+      .command(StatusCommand)
+      .command(RefreshCommand)
+      .command(SyncCommand)
+      .command(UnlinkCommand)
+      .demandCommand(),
   async handler() {},
 })

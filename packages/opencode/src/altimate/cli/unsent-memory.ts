@@ -1,15 +1,16 @@
 // altimate_change - new file
 import * as Manage from "@/altimate/workspace/manage"
-import { mirrorWasRequested } from "@/altimate/workspace/memory-sync"
+import { lastMirrorTarget, type MirrorTarget } from "@/altimate/workspace/memory-sync"
 
-/** How long `run`'s exit waits for the count. Without a local link row, `Manage.status` asks the service. */
+/** How long `run`'s exit waits for the count. It is read from local files, so this only bounds a stalled disk. */
 export const UNSENT_CHECK_MS = 5000
 
 /**
  * What `run` prints at exit about memory on this machine that the workspace has not received, or null
  * when there is nothing to say. `unsynced` is `workspace status`'s count for the project, not only this
- * run's: an upload that failed, was deferred or declined, or was still in flight when the exit flush gave
- * up is pending there; a block deleted since is not.
+ * run's: an upload that failed, was deferred or declined by the service, or was still in flight when the
+ * exit flush gave up is pending there; a block deleted since is not. A workspace with memory turned off
+ * keeps its blocks here by design and is not reported.
  */
 export function unsentMemoryNotice(unsynced: number | null): string | null {
   if (unsynced === null)
@@ -22,29 +23,30 @@ export function unsentMemoryNotice(unsynced: number | null): string | null {
 }
 
 export interface UnsentMemoryDeps {
-  requested(): boolean
-  status(directory: string): Promise<Manage.StatusReport>
-  timeoutMs: number
+  target(): MirrorTarget | undefined
+  status(directory: string, binding: MirrorTarget["binding"]): Promise<Manage.StatusReport>
 }
 
 const defaultDeps: UnsentMemoryDeps = {
-  requested: mirrorWasRequested,
-  status: (directory) => Manage.status(directory),
-  timeoutMs: UNSENT_CHECK_MS,
+  target: lastMirrorTarget,
+  // Passing the binding the upload used keeps `Manage.status` off the network.
+  status: (directory, binding) => Manage.status(directory, { binding }),
 }
 
-/** Counted only when this process saved memory for a linked workspace, so other runs pay nothing. A count
- * that cannot be read, or not in time, is reported as unknown. */
+/** Counted only when this process tried to upload memory to a linked workspace, so other runs pay nothing.
+ * A count that cannot be read, or not within `timeoutMs`, is reported as unknown. */
 export async function unsentMemoryNoticeAfterRun(
-  directory: string,
+  fallbackDirectory: string,
+  timeoutMs: number = UNSENT_CHECK_MS,
   deps: UnsentMemoryDeps = defaultDeps,
 ): Promise<string | null> {
-  if (!deps.requested()) return null
+  const target = deps.target()
+  if (!target) return null
   let timer: ReturnType<typeof setTimeout> | undefined
   const report = await Promise.race([
-    deps.status(directory).catch(() => null),
+    deps.status(target.directory ?? fallbackDirectory, target.binding).catch(() => null),
     new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), deps.timeoutMs)
+      timer = setTimeout(() => resolve(null), timeoutMs)
     }),
   ]).finally(() => clearTimeout(timer))
   if (!report || report.memoryUnreadable) return unsentMemoryNotice(null)

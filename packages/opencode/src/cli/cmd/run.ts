@@ -563,13 +563,15 @@ export const RunCommand = cmd({
     // Bun.stdin.text() on a stream that would never EOF. Skip the read
     // entirely when there is no stdin to read from. An agent's shell tool can
     // also hand `run` a socket stdin it never writes to or closes, so that
-    // read is bounded: see `readRunStdin`.
+    // read is bounded when there is a message or command to run without it:
+    // see `readRunStdin`.
     if (process.stdin && !process.stdin.isTTY) {
-      const { readRunStdin, STDIN_WAIT_MS } = await import("../../altimate/cli/run-stdin")
-      const piped = await readRunStdin()
+      const { readRunStdin, stdinWaitMs } = await import("../../altimate/cli/run-stdin")
+      const waitMs = stdinWaitMs()
+      const piped = await readRunStdin(undefined, waitMs, message.trim().length > 0 || !!args.command)
       if (piped.timedOut)
         process.stderr.write(
-          `No input on stdin after ${STDIN_WAIT_MS / 1000}s; continuing without it. Redirect stdin from /dev/null to skip the wait.${EOL}`,
+          `No input on stdin after ${waitMs / 1000}s; continuing without it. Redirect stdin from /dev/null to skip the wait, or set ALTIMATE_RUN_STDIN_WAIT_MS=0 to wait for it.${EOL}`,
         )
       message += "\n" + piped.text
     }
@@ -1548,8 +1550,16 @@ You are speaking to a non-technical business executive. Follow these rules stric
         void Promise.race([
           Promise.allSettled(drains),
           new Promise<void>((resolve) => { timer = setTimeout(resolve, 2_000) }),
-        ]).finally(() => {
+        ]).finally(async () => {
           clearTimeout(timer)
+          // An interrupted upload is the likeliest to stay on this machine, so say so here too. The count
+          // is local; a second signal still exits at once.
+          if (!CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
+            const notice = await import("../../altimate/cli/unsent-memory")
+              .then((m) => m.unsentMemoryNoticeAfterRun(process.cwd(), 1_000))
+              .catch(() => null)
+            if (notice) process.stderr.write(notice + EOL)
+          }
           process.exit(code)
         })
       }

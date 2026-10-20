@@ -1,15 +1,17 @@
 // altimate_change - new file
 import { describe, expect, test } from "bun:test"
 import { unsentMemoryNotice, unsentMemoryNoticeAfterRun, type UnsentMemoryDeps } from "../../../src/altimate/cli/unsent-memory"
+import type { MirrorTarget } from "../../../src/altimate/workspace/memory-sync"
 
 const binding = { datamateId: 46, datamateName: "Growth" } as any
 
-function deps(over: Partial<UnsentMemoryDeps> = {}): UnsentMemoryDeps & { calls: number } {
+function deps(over: Partial<UnsentMemoryDeps> = {}): UnsentMemoryDeps & { calls: number; dirs: string[] } {
   const d = {
     calls: 0,
-    requested: () => true,
-    timeoutMs: 1000,
-    status: async () => {
+    dirs: [] as string[],
+    target: (): MirrorTarget | undefined => ({ directory: "/bound", binding }),
+    status: async (directory: string) => {
+      d.dirs.push(directory)
       d.calls++
       return { binding, memory: { local: 3, unsynced: 2 }, skillsEnabled: true, skillsSyncedAt: null } as any
     },
@@ -33,36 +35,43 @@ describe("unsentMemoryNotice", () => {
   })
 
   test("an unknown count is reported as unknown, never as zero", () => {
-    expect(unsentMemoryNotice(null)).toContain("workspace status")
+    expect(unsentMemoryNotice(null)).toBe(
+      "Could not confirm that the memory saved here reached the workspace. Run `altimate-code workspace status` to check.",
+    )
   })
 })
 
 describe("unsentMemoryNoticeAfterRun", () => {
-  test("a run that saved no memory does not check at all", async () => {
-    const d = deps({ requested: () => false })
-    expect(await unsentMemoryNoticeAfterRun("/p", d)).toBeNull()
+  test("a run that uploaded no memory to a linked workspace does not check at all", async () => {
+    const d = deps({ target: () => undefined })
+    expect(await unsentMemoryNoticeAfterRun("/p", 1000, d)).toBeNull()
     expect(d.calls).toBe(0)
   })
 
-  test("a run that saved memory reports the project's pending count", async () => {
-    expect(await unsentMemoryNoticeAfterRun("/p", deps())).toContain("2 memories on this machine")
+  test("a run that saved memory reports the pending count of the directory it uploaded from", async () => {
+    const d = deps()
+    expect(await unsentMemoryNoticeAfterRun("/p", 1000, d)).toContain("2 memories on this machine")
+    expect(d.dirs).toEqual(["/bound"])
+    const unscoped = deps({ target: () => ({ directory: undefined, binding }) })
+    await unsentMemoryNoticeAfterRun("/p", 1000, unscoped)
+    expect(unscoped.dirs).toEqual(["/p"])
   })
 
   test("an unreadable local count, a failed check or a slow one is reported as unknown", async () => {
     const unreadable = deps({ status: async () => ({ binding, memory: null, memoryUnreadable: true }) as any })
-    expect(await unsentMemoryNoticeAfterRun("/p", unreadable)).toContain("Could not confirm")
+    expect(await unsentMemoryNoticeAfterRun("/p", 1000, unreadable)).toContain("Could not confirm")
     const failed = deps({ status: async () => Promise.reject(new Error("down")) })
-    expect(await unsentMemoryNoticeAfterRun("/p", failed)).toContain("Could not confirm")
-    const slow = deps({ timeoutMs: 20, status: () => new Promise(() => {}) })
+    expect(await unsentMemoryNoticeAfterRun("/p", 1000, failed)).toContain("Could not confirm")
+    const slow = deps({ status: () => new Promise(() => {}) })
     const started = Date.now()
-    expect(await unsentMemoryNoticeAfterRun("/p", slow)).toContain("Could not confirm")
+    expect(await unsentMemoryNoticeAfterRun("/p", 20, slow)).toContain("Could not confirm")
     expect(Date.now() - started).toBeLessThan(1000)
   })
 
   test("an unlinked project, or memory off in this build, says nothing", async () => {
     const unlinked = deps({ status: async () => ({ binding: null, memory: { local: 1, unsynced: 0 } }) as any })
-    expect(await unsentMemoryNoticeAfterRun("/p", unlinked)).toBeNull()
+    expect(await unsentMemoryNoticeAfterRun("/p", 1000, unlinked)).toBeNull()
     const off = deps({ status: async () => ({ binding, memory: null }) as any })
-    expect(await unsentMemoryNoticeAfterRun("/p", off)).toBeNull()
+    expect(await unsentMemoryNoticeAfterRun("/p", 1000, off)).toBeNull()
   })
 })

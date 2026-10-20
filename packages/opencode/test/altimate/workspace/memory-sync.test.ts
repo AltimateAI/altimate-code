@@ -45,7 +45,7 @@ const {
   isEnabled,
   memoryEnabledCached,
   mirrorBlock,
-  mirrorWasRequested,
+  lastMirrorTarget,
   flushPendingMirrors,
   overlayBlocks,
   refresh,
@@ -183,6 +183,9 @@ beforeEach(() => {
   stubCreds("acme", "https://api.example.com")
   stubFetch()
   resetOverlay()
+  // Process-global (see `lastMirrorTarget`), so an earlier test's mirror would otherwise satisfy a later one.
+  ;(globalThis as unknown as Record<symbol, { last?: unknown }>)[Symbol.for("altimate.memory-sync.mirror-requests")].last =
+    undefined
   syncInternals.resolveBinding = async () => BINDING as any
   // The store is not on disk in these tests; the delete-race guard has its
   // own coverage below.
@@ -449,10 +452,18 @@ describe("blockTitle", () => {
 // ── write path ──────────────────────────────────────────────────────────────
 describe("mirrorBlock", () => {
   test("a mirror to a linked workspace is recorded, failed or not, so `run`'s exit checks what stayed local", async () => {
+    expect(lastMirrorTarget()).toBeUndefined()
     createFails = true
-    await expect(mirrorBlock(block({ id: "unsent" }))).rejects.toThrow()
+    await expect(mirrorBlock(block({ id: "unsent" }), "/repo")).rejects.toThrow()
     createFails = false
-    expect(mirrorWasRequested()).toBe(true)
+    expect(lastMirrorTarget()).toEqual({ directory: "/repo", binding: BINDING as any })
+  })
+
+  test("a workspace with memory turned off is not recorded: the block stays local by design", async () => {
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    await mirrorBlock(block({ id: "kept-local" }), "/repo")
+    expect(lastMirrorTarget()).toBeUndefined()
+    expect(captured.some((c) => c.method === "POST")).toBe(false)
   })
 
   test("flushPendingMirrors waits for a mirror a short-lived process would abandon (#1332)", async () => {

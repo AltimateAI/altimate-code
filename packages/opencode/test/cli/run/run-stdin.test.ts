@@ -1,10 +1,18 @@
 import { describe, expect, test } from "bun:test"
-import { readRunStdin, type StdinSource } from "../../../src/altimate/cli/run-stdin"
+import { readRunStdin, stdinWaitMs, STDIN_WAIT_MS, type StdinSource } from "../../../src/altimate/cli/run-stdin"
 
 const encoder = new TextEncoder()
 
-/** A socket stdin (unless `file` or `fifo` is set) whose stream yields `chunks` (the first at once, each later one after `delayMs`), then ends unless `open` is set. */
-function source(opts: { chunks?: string[]; delayMs?: number; open?: boolean; file?: string; fifo?: string }): StdinSource & {
+/** A socket stdin (unless `file` or `fifo` is set) whose stream yields `chunks` (the first at once, each later one after `delayMs`), then ends unless `open` is set. Its read-to-EOF path returns `file`, `fifo` or `late` after `readAllMs`. */
+function source(opts: {
+  chunks?: string[]
+  delayMs?: number
+  open?: boolean
+  file?: string
+  fifo?: string
+  late?: string
+  readAllMs?: number
+}): StdinSource & {
   cancelled: () => boolean
 } {
   let cancelled = false
@@ -12,7 +20,7 @@ function source(opts: { chunks?: string[]; delayMs?: number; open?: boolean; fil
     cancelled: () => cancelled,
     isFile: () => opts.file !== undefined,
     isSocket: () => opts.file === undefined && opts.fifo === undefined,
-    readAll: async () => opts.file ?? opts.fifo ?? "",
+    readAll: () => Bun.sleep(opts.readAllMs ?? 0).then(() => opts.file ?? opts.fifo ?? opts.late ?? ""),
     stream: () =>
       new ReadableStream<Uint8Array>({
         async start(controller) {
@@ -37,8 +45,18 @@ describe("readRunStdin", () => {
   })
 
   test("a shell pipeline (not a socket) is read to EOF however long its producer takes", async () => {
-    const result = await readRunStdin(source({ fifo: "dbt build output\n" }), 10)
+    const result = await readRunStdin(source({ fifo: "dbt build output\n", readAllMs: 60 }), 10)
     expect(result).toEqual({ text: "dbt build output\n", timedOut: false })
+  })
+
+  test("a socket is read to EOF when there is nothing else to run, however late it is written", async () => {
+    const result = await readRunStdin(source({ chunks: [], open: true, late: "the prompt\n", readAllMs: 60 }), 10, false)
+    expect(result).toEqual({ text: "the prompt\n", timedOut: false })
+  })
+
+  test("a wait of 0 reads a socket to EOF", async () => {
+    const result = await readRunStdin(source({ chunks: [], open: true, late: "late\n", readAllMs: 60 }), 0)
+    expect(result).toEqual({ text: "late\n", timedOut: false })
   })
 
   test("reads piped text to EOF", async () => {
@@ -67,5 +85,18 @@ describe("readRunStdin", () => {
     expect(Date.now() - started).toBeLessThan(1000)
     await Bun.sleep(0)
     expect(stdin.cancelled()).toBe(true)
+  })
+})
+
+describe("stdinWaitMs", () => {
+  test("defaults to the 3s wait, and ALTIMATE_RUN_STDIN_WAIT_MS overrides it", () => {
+    expect(stdinWaitMs({})).toBe(STDIN_WAIT_MS)
+    expect(stdinWaitMs({ ALTIMATE_RUN_STDIN_WAIT_MS: "10000" })).toBe(10000)
+    expect(stdinWaitMs({ ALTIMATE_RUN_STDIN_WAIT_MS: " 0 " })).toBe(0)
+  })
+
+  test("an unusable value keeps the default", () => {
+    for (const raw of ["", "  ", "soon", "-1", "Infinity"])
+      expect(stdinWaitMs({ ALTIMATE_RUN_STDIN_WAIT_MS: raw })).toBe(STDIN_WAIT_MS)
   })
 })
