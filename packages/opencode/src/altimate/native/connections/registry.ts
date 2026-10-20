@@ -969,7 +969,9 @@ export async function remove(name: string): Promise<{ success: boolean; error?: 
     // only, so they are kept while an env var or the local config of a project this process serves still defines a
     // connection by that name (see forgetCredentials); the served set is read now, after the awaits above. (Own
     // properties only: a connection named "constructor" must not count as defined.)
-    const projectConfigPaths = [projectConfigPath, ...[...states.keys()].map(localConfigPathFor)]
+    // Open instances may not have performed a warehouse operation yet, so states alone is incomplete.
+    const projectDirs = new Set([...states.keys(), ...Instance.directories()])
+    const projectConfigPaths = [projectConfigPath, ...[...projectDirs].map(localConfigPathFor)]
     const stillDefined =
       projectConfigPaths.some((file) => Object.hasOwn(loadFromFile(file), name)) || Object.hasOwn(loadFromEnv(), name)
     const notRemoved = stillDefined ? [] : await forgetCredentials(name)

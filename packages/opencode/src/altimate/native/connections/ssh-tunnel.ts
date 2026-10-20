@@ -12,6 +12,7 @@
 
 import type { ConnectionConfig } from "@altimateai/drivers"
 import type { Server, Socket } from "net"
+import type { Duplex } from "stream"
 
 export interface TunnelInfo {
   localPort: number
@@ -106,6 +107,11 @@ export function openTunnel(config: SshConfig): TunnelHandle {
         if (closed) return
         // Create a local TCP server that forwards to remote host:port via SSH
         server = net.createServer((localSocket) => {
+          let remoteStream: Duplex | undefined
+          localSocket.on("error", () => {
+            remoteStream?.destroy()
+            localSocket.destroy()
+          })
           if (closed) {
             localSocket.destroy()
             return
@@ -113,7 +119,13 @@ export function openTunnel(config: SshConfig): TunnelHandle {
           sockets.add(localSocket)
           localSocket.on("close", () => sockets.delete(localSocket))
           client.forwardOut("127.0.0.1", 0, config.host, config.port, (err: Error | undefined, stream: any) => {
-            if (err || closed) {
+            remoteStream = stream
+            stream?.on("error", () => {
+              localSocket.destroy()
+              stream.destroy()
+            })
+            if (err || closed || localSocket.destroyed) {
+              stream?.destroy()
               localSocket.destroy()
               return
             }

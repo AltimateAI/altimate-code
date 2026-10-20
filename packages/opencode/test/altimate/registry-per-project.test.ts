@@ -7,10 +7,13 @@
  * process, through `process.chdir` (the CLI path) and through `Instance.provide` (the server path).
  */
 
-import { describe, test, expect, beforeEach, afterEach, afterAll, mock } from "bun:test"
+import { describe, test, expect, beforeEach, afterEach, afterAll, mock, spyOn } from "bun:test"
 import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
+import * as net from "net"
+import { EventEmitter } from "events"
+import { PassThrough } from "stream"
 
 // ssh2 is an optional dependency, normally not installed for tests; a fake client lets the real tunnel module run.
 // Bun's mock.module leaks across test files, so the genuine module (or its absence) is restored in afterAll.
@@ -41,6 +44,7 @@ const sshClients: { host: string; ended: boolean }[] = []
 const heldReady = new Map<string, () => void>()
 /** Simulates the SSH server closing the connection cleanly (no error event). */
 const remoteClose = new Map<string, () => void>()
+let forwardedStream: PassThrough | undefined
 mock.module("ssh2", () => ({
   Client: class {
     private handlers = new Map<string, (...args: unknown[]) => void>()
@@ -57,8 +61,9 @@ mock.module("ssh2", () => ({
       if (options.host.startsWith("held-")) heldReady.set(options.host, ready)
       else queueMicrotask(ready)
     }
-    forwardOut(_a: string, _b: number, _c: string, _d: number, cb: (err?: Error) => void) {
-      cb(new Error("no forwarding in tests"))
+    forwardOut(_a: string, _b: number, _c: string, _d: number, cb: (err?: Error, stream?: PassThrough) => void) {
+      if (forwardedStream) cb(undefined, forwardedStream)
+      else cb(new Error("no forwarding in tests"))
     }
     end() {
       this.record.ended = true
@@ -67,7 +72,7 @@ mock.module("ssh2", () => ({
 }))
 
 import * as Registry from "../../src/altimate/native/connections/registry"
-import { closeAllTunnels, openTunnelCount } from "../../src/altimate/native/connections/ssh-tunnel"
+import { openTunnel, closeAllTunnels, openTunnelCount } from "../../src/altimate/native/connections/ssh-tunnel"
 import { Instance } from "../../src/project/instance"
 import { disposeInstance } from "../../src/effect/instance-registry"
 
@@ -119,6 +124,7 @@ beforeEach(() => {
   process.env.OPENCODE_TEST_HOME = home
   projectA = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rpp-a-")))
   projectB = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "rpp-b-")))
+  forwardedStream = undefined
   sshClients.length = 0
   heldReady.clear()
   remoteClose.clear()
@@ -265,6 +271,40 @@ describe("connectors are per project", () => {
   })
 })
 
+describe("SSH forwarding errors", () => {
+  for (const side of ["local", "remote"] as const) {
+    test(`${side} socket errors destroy both forwarding endpoints without throwing`, async () => {
+      const stream = new PassThrough()
+      forwardedStream = stream
+      let accept: ((socket: net.Socket) => void) | undefined
+      const server = Object.assign(new EventEmitter(), {
+        listen: (_port: number, _host: string, ready: () => void) => ready(),
+        address: () => ({ port: 12345 }),
+        close: () => {},
+      })
+      const createServer = spyOn(net, "createServer").mockImplementation(((listener: (socket: net.Socket) => void) => {
+        accept = listener
+        return server
+      }) as typeof net.createServer)
+      const tunnel = openTunnel({ ssh_host: "forwarding", host: "db", port: 5432 })
+      const local = new net.Socket()
+      try {
+        await tunnel.ready
+        expect(accept).toBeDefined()
+        accept!(local)
+        const endpoint = side === "local" ? local : stream
+        expect(() => endpoint.emit("error", new Error("ECONNRESET"))).not.toThrow()
+        expect(local.destroyed).toBe(true)
+        expect(stream.destroyed).toBe(true)
+      } finally {
+        local.destroy()
+        tunnel.close()
+        createServer.mockRestore()
+      }
+    })
+  }
+})
+
 describe("each connect attempt owns its SSH tunnel", () => {
   test("a stale tunnel start that finishes after a newer start never publishes or closes the newer tunnel", async () => {
     writeLocal(projectA, { store: sshStore("held-old") })
@@ -390,6 +430,29 @@ describe("remove()", () => {
 })
 
 describe("credentials of a removed connection", () => {
+  test("are kept for an open project that has never used the warehouse registry", async () => {
+    const { setSecretBackendForTests } = await import("../../src/altimate/native/connections/credential-store")
+    const store = new Map<string, string>()
+    setSecretBackendForTests({
+      name: "test",
+      get: async (k: string) => store.get(k) ?? null,
+      set: async (k: string, v: string) => void store.set(k, v),
+      delete: async (k: string) => store.delete(k),
+    } as any)
+    try {
+      writeLocal(projectB, { shared: { type: "postgres", host: "b" } })
+      await Instance.provide({ directory: projectB, fn: async () => {} })
+      await inProject(projectA, () => Registry.add("shared", { type: "postgres", host: "g", password: "pw-test" } as any))
+      expect(store.get("shared/password")).toBe("pw-test")
+
+      expect((await inProject(projectA, () => Registry.remove("shared"))).success).toBe(true)
+      expect(store.get("shared/password")).toBe("pw-test")
+    } finally {
+      await Instance.provide({ directory: projectB, fn: () => Instance.dispose() })
+      setSecretBackendForTests(undefined)
+    }
+  })
+
   test("are kept while another served project's local config still names the connection", async () => {
     const { setSecretBackendForTests } = await import("../../src/altimate/native/connections/credential-store")
     const store = new Map<string, string>()
