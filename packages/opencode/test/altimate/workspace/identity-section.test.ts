@@ -142,7 +142,7 @@ describe("systemSection", () => {
     expect(out).not.toContain("What this Altimate Workspace provides")
   })
 
-  test("a bound project gets the team-memory line only once the workspace's memory is confirmed on", async () => {
+  test("a bound project gets the workspace-memory line only once the workspace's memory is confirmed on", async () => {
     const { memoryEnabledCache, resetEnablementMemoForTests, noteMemoryDisabledForTests } = await import(
       "../../../src/altimate/workspace/memory-sync"
     )
@@ -156,18 +156,18 @@ describe("systemSection", () => {
     resetEnablementMemoForTests()
     memoryEnabledCache.set(77, { checkedAt: Date.now() })
     try {
-      expect(await inProject(systemSection)).toContain("Team memory:")
+      expect(await inProject(systemSection)).toContain("Workspace memory: save decisions")
       resetOutcomeMemoForTests()
       resetEnablementMemoForTests()
       // A remembered "no" from the workspace switches the line off.
       noteMemoryDisabledForTests(77)
-      expect(await inProject(systemSection)).not.toContain("Team memory:")
+      expect(await inProject(systemSection)).not.toContain("Workspace memory: save decisions")
       expect(await inProject(systemSection)).toContain('is "Team"')
       // Not yet checked is not "on": the write path uploads only on a confirmed
       // yes, so the prompt must not promise a sync that would stay local. (bot review)
       resetOutcomeMemoForTests()
       resetEnablementMemoForTests()
-      expect(await inProject(systemSection)).not.toContain("Team memory:")
+      expect(await inProject(systemSection)).not.toContain("Workspace memory: save decisions")
       expect(await inProject(systemSection)).toContain('is "Team"')
     } finally {
       resetEnablementMemoForTests()
@@ -196,10 +196,10 @@ describe("systemSection", () => {
     resetEnablementMemoForTests()
     resetPollMemoForTests()
     try {
-      expect(await inProject(systemSection)).not.toContain("Team memory:")
+      expect(await inProject(systemSection)).not.toContain("Workspace memory: save decisions")
       expect(await memoryEnabledForPoller(binding as never)).toBe("enabled")
       resetOutcomeMemoForTests()
-      expect(await inProject(systemSection)).toContain("Team memory:")
+      expect(await inProject(systemSection)).toContain("Workspace memory: save decisions")
     } finally {
       resetEnablementMemoForTests()
       resetPollMemoForTests()
@@ -376,7 +376,7 @@ describe("systemSection", () => {
       expect(out).not.toContain("This project is linked to Altimate Workspace id 9")
       // A link that may have changed must not be followed by that workspace's contents as if current.
       expect(out).not.toContain("What this Altimate Workspace provides")
-      expect(out).not.toContain("Team memory:")
+      expect(out).not.toContain("Workspace memory: save decisions")
     } finally {
       resetEnablementMemoForTests()
     }

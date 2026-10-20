@@ -320,7 +320,9 @@ function renderWith(contents: WorkspaceContents, detail: SkillDetail): string {
           : `Integrations: ${contents.integrations.join(", ")}.`,
     )
   if (contents.memoryEnabled !== null)
-    lines.push(`Workspace memory: ${contents.memoryEnabled ? "on — saved memories are shared with the team" : "off"}.`)
+    lines.push(
+      `Workspace memory: ${contents.memoryEnabled ? "on — memories saved with `altimate_memory_write` sync to each user's own checkouts, not to teammates" : "off"}.`,
+    )
   const k = contents.knowledge
   if (k?.kind === "off") lines.push("Knowledge: none — the knowledge engine is off for this workspace.")
   else if (k?.kind === "all")

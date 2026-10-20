@@ -25,18 +25,21 @@ describe("bound — a specific Altimate Workspace is linked", () => {
   }
   const boundOut = render(boundOutcome)
 
-  test("with team memory on, the section names the team's store and the engine's hub as separate (#1332)", () => {
+  test("with workspace memory on, the section names the synced store as per-user and the engine's hub as separate (#1332, #1404)", () => {
     const out = render(boundOutcome, undefined, { teamMemory: true })
-    expect(out).toContain("Team memory: save decisions and conventions with `altimate_memory_write`")
-    expect(out).toContain("sync to the workspace and to every linked checkout")
+    expect(out).toContain("Workspace memory: save decisions and conventions with `altimate_memory_write`")
+    expect(out).toContain("sync to the workspace for this user only")
+    expect(out).toContain("Teammates' sessions do not read them")
+    expect(out).toContain("`altimate-code skill publish <name>`")
+    expect(out).not.toContain("Team memory")
     expect(out).toContain("`datamate_add_memories`")
     expect(out).toContain("are the engine's separate store")
     expect(out).toContain("check `altimate_memory_read` for an existing block")
     expect(out.split("\n")).toHaveLength(5)
     // Off (workspace memory disabled) and by default (pure formatter): no line.
-    expect(render(boundOutcome, undefined, { teamMemory: false })).not.toContain("Team memory")
-    expect(boundOut).not.toContain("Team memory")
-    expect(render({ status: "unbound" }, undefined, { teamMemory: true })).not.toContain("Team memory")
+    expect(render(boundOutcome, undefined, { teamMemory: false })).not.toContain("Workspace memory: save decisions")
+    expect(boundOut).not.toContain("Workspace memory: save decisions")
+    expect(render({ status: "unbound" }, undefined, { teamMemory: true })).not.toContain("Workspace memory: save decisions")
   })
 
   test("names the workspace and forbids substituting another service's 'workspace' for an identity question", () => {

@@ -22,7 +22,7 @@ describe("renderStarter", () => {
       "- Skills (2): acme-incident-runbook, acme-staging-conventions",
       "- Knowledge (2): Data handbook, KPI glossary",
       "- Integrations: github, snowflake",
-      "- Memory: on. What you teach Altimate Code is saved automatically and shared with your team in the CLI, the IDE and Studio.",
+      "- Memory: on. What you teach Altimate Code is saved automatically and follows you in the CLI, the IDE and Studio. It's private to you: to share a convention with your team, publish it as a workspace skill.",
       "",
       "What do you want to do? For example:",
       "  1. Which of our workspace skills fit this project?",

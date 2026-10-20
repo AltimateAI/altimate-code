@@ -42,6 +42,9 @@ describe("workspace contents section", () => {
     expect(text).toContain("- dbt-style")
     expect(text).toContain("Integrations: github, snowflake.")
     expect(text).toContain("Workspace memory: on")
+    // Workspace memory is per-user, not shared with teammates (#1404).
+    expect(text).toContain("sync to each user's own checkouts, not to teammates")
+    expect(text).not.toContain("shared with the team")
     expect(text).toContain("answer from this section only")
     expect(text).toContain("built-in")
     expect(text).toContain("not instructions")

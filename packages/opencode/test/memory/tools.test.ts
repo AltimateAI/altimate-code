@@ -703,3 +703,15 @@ describe("Global opt-out (ALTIMATE_DISABLE_MEMORY)", () => {
     expect(altTruthy("ALTIMATE_DISABLE_MEMORY", "OPENCODE_DISABLE_MEMORY")).toBe(true)
   })
 })
+
+describe("MemoryWriteTool description", () => {
+  test("says synced workspace memory is per-user, not shared with teammates (#1404)", async () => {
+    const { initTool } = await import("../altimate/tool-fixture")
+    const { MemoryWriteTool } = await import("../../src/memory/tools/memory-write")
+    const { description } = await initTool(MemoryWriteTool)
+    expect(description).toContain("saved blocks sync to the workspace for this user only")
+    expect(description).toContain("teammates' sessions do not read them")
+    expect(description).toContain("`altimate-code skill publish <name>`")
+    expect(description).not.toContain("TEAM's memory")
+  })
+})
