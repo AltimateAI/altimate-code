@@ -1540,6 +1540,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // flush takes; what is already on the wire is what gets the 2s.
         eventAbort.abort()
         const drains: Promise<unknown>[] = []
+        // Loaded during the drain, so only the count itself runs after it.
+        const unsent = CoreFlag.ALTIMATE_DISABLE_WORKSPACE
+          ? undefined
+          : import("../../altimate/cli/unsent-memory").catch(() => undefined)
         if (!CoreFlag.ALTIMATE_DISABLE_WORKSPACE)
           drains.push(import("../../altimate/workspace/memory-sync").then((m) => m.flushPendingMirrors(2_000)))
         if (captureEnabled)
@@ -1554,12 +1558,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
           clearTimeout(timer)
           // An interrupted upload is the likeliest to stay on this machine, so say so here too. The count
           // is local; a second signal still exits at once.
-          if (!CoreFlag.ALTIMATE_DISABLE_WORKSPACE) {
-            const notice = await import("../../altimate/cli/unsent-memory")
-              .then((m) => m.unsentMemoryNoticeAfterRun(process.cwd(), 1_000))
-              .catch(() => null)
-            if (notice) process.stderr.write(notice + EOL)
-          }
+          const notice = await unsent
+            ?.then((m) => m?.unsentMemoryNoticeAfterRun(process.cwd(), 1_000))
+            .catch(() => null)
+          if (notice) process.stderr.write(notice + EOL)
           process.exit(code)
         })
       }

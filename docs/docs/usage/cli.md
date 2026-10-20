@@ -190,7 +190,7 @@ altimate --print-logs --log-level DEBUG run "test query"
 altimate run --no-trace "quick question"
 ```
 
-`run` reads piped input to the end, however long the command before the pipe takes. One exception: when `run` already has a message or `--command` and its stdin is a socket, which is what an agent's shell tool or a Node `spawn` hands a child, it waits only 3 seconds for the first byte and then continues without stdin. Set `ALTIMATE_RUN_STDIN_WAIT_MS` to change that wait, or to `0` to always wait. A caller that never writes to or closes stdin, and whose stdin is not a socket (for example a pipe on Windows), should redirect it from an empty source: `< /dev/null`, or `< NUL` in `cmd.exe`.
+`run` reads piped input to the end, however long the command before the pipe takes. One exception: when `run` already has a message or `--command` and its stdin is a socket, which is what an agent's shell tool or a Node `spawn` hands a child, it waits only 3 seconds for the first byte and then continues without stdin. That can also catch a slow pipe that reaches `run` through a socket, such as `slow-cmd | ssh host altimate-code run "summarize"`. Set `ALTIMATE_RUN_STDIN_WAIT_MS` to change that wait, or to `0` to always wait. A caller that never writes to or closes stdin, and whose stdin is not a socket (for example a pipe on Windows), should redirect it from an empty source: `< /dev/null`, or `< NUL` in `cmd.exe`.
 
 For CI pipelines and headless automation, see [CI & Automation](ci-headless.md).
 

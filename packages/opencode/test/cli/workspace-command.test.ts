@@ -11,10 +11,14 @@ import {
   runStatus,
   runSync,
   runUnlink,
+  WorkspaceCommand,
   type WorkspaceDeps,
 } from "../../src/cli/cmd/workspace"
 import { SIGN_IN_COMMAND, linkHeadless, matchWorkspace, type LinkHeadlessDeps } from "../../src/cli/cmd/link"
 import { AltimateAuthPlugin } from "../../src/altimate/plugin/altimate"
+import { AltimateApi } from "../../src/altimate/api/client"
+import { WorkspaceApi } from "../../src/altimate/workspace/api-client"
+import yargs from "yargs"
 
 const binding = {
   datamateId: 35,
@@ -448,5 +452,29 @@ describe("link --workspace / --create without prompting", () => {
     const f = linkDeps()
     await linkHeadless({ directory: dir, create: "Marketing", yes: false }, f.deps)
     expect(f.calls).toEqual(["create:Marketing"])
+  })
+})
+
+describe("workspace list through the command parser", () => {
+  const original = { isConfigured: AltimateApi.isConfigured, listDatamates: WorkspaceApi.listDatamates, write: process.stdout.write }
+  afterEach(() => {
+    ;(AltimateApi as any).isConfigured = original.isConfigured
+    ;(WorkspaceApi as any).listDatamates = original.listDatamates
+    process.stdout.write = original.write
+    process.exitCode = 0
+  })
+
+  test("`workspace list --json` is registered and prints the account's workspaces", async () => {
+    ;(AltimateApi as any).isConfigured = async () => true
+    ;(WorkspaceApi as any).listDatamates = async () => [{ id: 35, name: "Growth", memory_enabled: true }]
+    let written = ""
+    process.stdout.write = ((chunk: string) => {
+      written += chunk
+      return true
+    }) as typeof process.stdout.write
+    await yargs(["workspace", "list", "--json"]).command(WorkspaceCommand).strict().fail(false).parseAsync()
+    process.stdout.write = original.write
+    expect(JSON.parse(written)).toEqual({ ok: true, workspaces: [{ id: 35, name: "Growth" }] })
+    expect(process.exitCode).toBe(0)
   })
 })
