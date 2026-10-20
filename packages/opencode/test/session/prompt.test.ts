@@ -632,7 +632,7 @@ for (const turn of [
   { agent: "builder", tools: { altimate_memory_read: false }, expected: { read: false, write: true } },
 ] as const) {
   noLLMServer.instance(
-    `prompt loop describes memory tools as ${turn.agent}${turn.tools ? " with read switched off" : ""} keeps them`,
+    `prompt loop describes only the memory tools ${turn.agent} keeps${turn.tools ? " with read switched off on the request" : ""}`,
     () => Effect.gen(function* () {
       const section = spyOn(WorkspaceIdentity, "systemSection").mockResolvedValue("")
       const sent: Pick<LLM.StreamInput, "tools" | "agent" | "user">[] = []
