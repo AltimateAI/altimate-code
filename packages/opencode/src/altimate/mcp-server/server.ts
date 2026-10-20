@@ -16,7 +16,7 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 export const SERVER_INSTRUCTIONS = [
   "Analyst method for data questions:",
-  "1. Start with warehouse_list; it shows local tables, columns and a sample row.",
+  "1. Start with warehouse_list; it shows local tables, columns and a sample row. If none fit, warehouse_add one.",
   "2. Check stored value formats (schema_inspect value profile) before filtering or joining on a column; formats differ across databases.",
   "3. Compute in the database; batch independent queries in one sql_execute call (`queries`).",
   "4. Cross-connection joins: sql_materialize the smaller filtered side into `scratch` and join there.",

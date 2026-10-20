@@ -71,7 +71,7 @@ mcpTest("initialize result carries short analyst-method instructions", async () 
   }
 })
 
-mcpTest("lists exactly six tools and executes warehouse, schema, SQL and checks without routing notices", async () => {
+mcpTest("lists exactly seven tools and executes warehouse, schema, SQL and checks without routing notices", async () => {
   const { client, call } = await fixture()
   const listed = await client.listTools()
   expect(listed.tools.map((t) => t.name).sort()).toEqual([
@@ -80,6 +80,7 @@ mcpTest("lists exactly six tools and executes warehouse, schema, SQL and checks 
     "sql_check",
     "sql_execute",
     "sql_materialize",
+    "warehouse_add",
     "warehouse_list",
   ])
   expect(listed.tools.every((t) => t.inputSchema.type === "object")).toBe(true)
@@ -261,7 +262,7 @@ mcpTest("server startup and tool listing make no network calls", async () => {
   )
   try {
     const { client } = await fixture()
-    expect((await client.listTools()).tools).toHaveLength(6)
+    expect((await client.listTools()).tools).toHaveLength(7)
     expect(fetch).not.toHaveBeenCalled()
   } finally {
     fetch.mockRestore()
@@ -835,7 +836,7 @@ mcpTest("tool definitions stay compact and keep their required properties", asyn
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]))
   expect(size(byName.answer_commit!)).toBeLessThanOrEqual(2_250)
   expect(byName.answer_commit!.description).toContain("'the repository and the most copied file' needs two")
-  expect(tools.reduce((total, tool) => total + size(tool), 0)).toBeLessThan(6_250)
+  expect(tools.reduce((total, tool) => total + size(tool), 0)).toBeLessThan(6_600)
   expect(client.getInstructions()!.length).toBeLessThanOrEqual(723)
   const declared = JSON.stringify(tools)
   expect(declared).not.toContain("$schema")
@@ -980,5 +981,104 @@ mcpTest("MCP inline results, listings and receipts drop the rule line and repeat
     await call("sql_materialize", { source_warehouse: "source", sql, target_table: "small", mode: "replace" }),
   )
   expect(again).not.toContain("Join it in scratch")
+})
+// altimate_change end
+
+// altimate_change start — setup from zero: no connections file, then a file or warehouse_add
+async function emptyProject(env: Record<string, string> = {}) {
+  const project = await mkdtemp(path.join(os.tmpdir(), "mcp-empty-project-"))
+  const previous = process.cwd()
+  const saved: Record<string, string | undefined> = {}
+  // Ambient connection variables would make the empty-registry assertions depend on the caller's shell.
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith(Registry.CONN_ENV_PREFIX) || key in env) saved[key] = process.env[key]
+    if (key.startsWith(Registry.CONN_ENV_PREFIX)) delete process.env[key]
+  }
+  for (const [key, value] of Object.entries(env)) {
+    saved[key] ??= process.env[key]
+    process.env[key] = value
+  }
+  process.chdir(project)
+  Registry.reset()
+  const db = new Database(path.join(project, "store.sqlite"))
+  db.run("CREATE TABLE fruit (id INTEGER, name TEXT)")
+  db.run("INSERT INTO fruit VALUES (1, 'fig')")
+  db.close()
+  const server = await createServer({})
+  const client = new Client({ name: "test", version: "1" })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await server.connect(serverTransport)
+  await client.connect(clientTransport)
+  cleanups.push(async () => {
+    await client.close()
+    await server.close()
+    await Registry.closeAll()
+    process.chdir(previous)
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
+    // warehouse_add writes the (test-isolated) global file; later tests must not see it.
+    await rm(Registry.globalConfigPath(), { force: true })
+    await rm(project, { recursive: true, force: true })
+  })
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const result = await client.callTool({ name, arguments: args })
+    return { result, body: (result.content as { text?: string }[]).map((part) => part.text ?? "").join("\n") }
+  }
+  return { project, call }
+}
+
+mcpTest("an empty registry names the real config paths and sees a connections file written afterwards", async () => {
+  const { project, call } = await emptyProject()
+  const first = await call("warehouse_list", {})
+  expect(first.body).toContain("No warehouse connections configured.")
+  expect(first.body).toContain(Registry.localConfigPath())
+  expect(first.body).toContain(Registry.globalConfigPath())
+  expect(first.body).toContain(Registry.CONN_ENV_PREFIX)
+  expect(first.body).not.toContain(".opencode/connections.json")
+  await Bun.write(
+    path.join(project, ".altimate-code", "connections.json"),
+    JSON.stringify({ local: { type: "sqlite", path: path.join(project, "store.sqlite") } }),
+  )
+  const second = await call("warehouse_list", {})
+  expect(second.body).toContain("local | sqlite")
+  const rows = await call("sql_execute", { warehouse: "local", query: "SELECT name FROM fruit" })
+  expect(rows.result.isError).toBe(false)
+  expect(rows.body).toContain("fig")
+})
+
+mcpTest("warehouse_add from an empty registry makes the connection queryable", async () => {
+  const { project, call } = await emptyProject()
+  const added = await call("warehouse_add", {
+    name: "added",
+    config: { type: "sqlite", path: path.join(project, "store.sqlite") },
+  })
+  expect(added.result.isError).toBe(false)
+  expect(added.body).toContain("Call warehouse_list")
+  expect(added.body).not.toMatch(/warehouse_test|sql_analyze|lineage_check/)
+  expect((await call("warehouse_list", {})).body).toContain("added | sqlite")
+  const rows = await call("sql_execute", { warehouse: "added", query: "SELECT name FROM fruit" })
+  expect(rows.result.isError).toBe(false)
+  expect(rows.body).toContain("fig")
+})
+
+mcpTest("an empty registry lists detected connection candidates by type and source, never their values", async () => {
+  const { call } = await emptyProject({ SNOWFLAKE_ACCOUNT: "acct-value-xyz", SNOWFLAKE_PASSWORD: "secret-value-xyz" })
+  const { body } = await call("warehouse_list", {})
+  expect(body).toContain("snowflake from environment variable SNOWFLAKE_ACCOUNT")
+  expect(body).not.toContain("acct-value-xyz")
+  expect(body).not.toContain("secret-value-xyz")
+})
+// altimate_change end
+
+// altimate_change start — read-only MCP sessions cannot create a store through warehouse_add
+mcpTest("warehouse_add refuses create:true in a read-only session and creates no file", async () => {
+  const { project, call } = await emptyProject()
+  const target = path.join(project, "new.duckdb")
+  const added = await call("warehouse_add", { name: "fresh", config: { type: "duckdb", path: target, create: true } })
+  expect(added.body).toContain("read-only")
+  expect((await call("warehouse_list", {})).body).not.toContain("fresh")
+  expect(await Bun.file(target).exists()).toBe(false)
 })
 // altimate_change end

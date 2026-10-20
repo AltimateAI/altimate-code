@@ -49,12 +49,30 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
       }
     }
 
+    // altimate_change start — a read-only MCP session must not create a database file through `create`
+    if (ctx.extra?.forceReadOnly === true && args.config.create === true) {
+      return {
+        title: `Add '${args.name}': FAILED`,
+        metadata: { success: false, name: args.name, type: String(args.config.type) },
+        output: `This session is read-only, so "create": true is not allowed. Point "path" at an existing database file.`,
+      }
+    }
+    // altimate_change end
     try {
       const result = await Dispatcher.call("warehouse.add", {
         name: args.name,
         config: args.config,
       })
 
+      // altimate_change start — MCP clients have only the toolkit: no warehouse_test or suggested follow-up tools
+      if (result.success && ctx.extra?.mcpClient === true) {
+        let output = `Added warehouse '${result.name}' (type: ${result.type}). Call warehouse_list to see its tables.`
+        output += driverReadinessNote(result.type)
+        if (result.warnings?.length)
+          output += `\n\nWarning — not every credential was saved:\n${result.warnings.map((w) => `- ${w}`).join("\n")}`
+        return { title: `Add '${args.name}': OK`, metadata: { success: true, name: result.name, type: result.type }, output }
+      }
+      // altimate_change end
       if (result.success) {
         // altimate_change start — append post-connect feature suggestions (async, non-blocking)
         let output = `Successfully added warehouse '${result.name}' (type: ${result.type}).\n\nUse warehouse_test to verify connectivity.`

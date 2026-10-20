@@ -33,6 +33,28 @@ export function noConnectionsMessage(): string {
 }
 // altimate_change end
 
+// altimate_change start — MCP: connection candidates from the existing project-scan detection (names and types only,
+// never values); every probe is local and fail-safe.
+const MAX_CANDIDATES = 10
+async function discoveredCandidates(): Promise<string> {
+  const scan = await import("./project-scan")
+  const [env, dbt] = await Promise.all([
+    scan.detectEnvVars().catch(() => []),
+    scan
+      .detectDbtProject(process.cwd())
+      .then((project) => Dispatcher.call("dbt.profiles", { projectDir: project.found ? project.path : undefined }))
+      .then((result) => result.connections ?? [])
+      .catch(() => []),
+  ])
+  const lines = [
+    ...env.map((c) => `- ${c.type} from environment variable ${c.signal}`),
+    ...dbt.map((c) => `- ${c.type} from dbt profile ${c.name}`),
+  ].slice(0, MAX_CANDIDATES)
+  if (!lines.length) return ""
+  return ["", "", "Detected but not configured (read the values from their source, then call warehouse_add):", ...lines].join("\n")
+}
+// altimate_change end
+
 export const WarehouseListTool = Tool.define("warehouse_list", {
   description: "List all configured warehouse connections. Shows connection name, type, and database.",
   parameters: z.object({}),
@@ -42,10 +64,13 @@ export const WarehouseListTool = Tool.define("warehouse_list", {
 
       const warehouses = result.warehouses ?? []
       if (warehouses.length === 0) {
+        // altimate_change start — MCP: name connections the existing env-var and dbt-profile detection can see
+        const candidates = ctx.extra?.mcpClient === true ? await discoveredCandidates() : ""
+        // altimate_change end
         return {
           title: "Warehouses: none configured",
           metadata: { count: 0 },
-          output: noConnectionsMessage(),
+          output: noConnectionsMessage() + candidates,
         }
       }
 

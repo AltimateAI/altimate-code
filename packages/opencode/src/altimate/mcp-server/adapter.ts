@@ -10,6 +10,7 @@ import { Tool } from "@/tool/tool"
 import { Truncate } from "@/tool/truncate"
 import { outputLimits } from "./output-settings"
 import { WarehouseListTool } from "../tools/warehouse-list"
+import { WarehouseAddTool } from "../tools/warehouse-add"
 import { SchemaInspectTool } from "../tools/schema-inspect"
 import { SqlExecuteTool } from "../tools/sql-execute"
 import { SqlCheckTool } from "../tools/sql-check"
@@ -22,6 +23,7 @@ import type { SessionID, MessageID } from "@/session/schema"
 
 export const descriptions: Record<string, string> = {
   warehouse_list: "List connections; for local databases also tables, columns and a sample row.",
+  warehouse_add: "Add a connection when warehouse_list shows none or the one you need is missing.",
   schema_inspect: "List tables when table is omitted; otherwise one table's columns and value profile.",
   sql_execute:
     "Run SQL and return rows. Put independent queries in one call with `queries`. Source writes need --allow-write.",
@@ -38,6 +40,12 @@ export const descriptions: Record<string, string> = {
  */
 const DROP = Symbol("drop")
 const PROPERTY_DESCRIPTIONS: Record<string, Record<string, string | null | typeof DROP>> = {
+  warehouse_add: {
+    name: "Connection name",
+    config:
+      'Must include "type". postgres/mysql: host, port, database, user, password; mongodb: connection_string, ' +
+      "database; duckdb/sqlite: path (absolute, existing file); snowflake/bigquery/others: their usual fields",
+  },
   schema_inspect: {
     table: "Table, optionally schema-qualified; omit to list tables",
     schema_name: null,
@@ -276,7 +284,15 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
     Effect.scoped(
       Effect.gen(function* () {
         const result = new Map<string, Tool.Def>()
-        for (const source of [WarehouseListTool, SchemaInspectTool, SqlExecuteTool, SqlCheckTool, SqlMaterializeTool, AnswerCommitTool]) {
+        for (const source of [
+          WarehouseListTool,
+          WarehouseAddTool,
+          SchemaInspectTool,
+          SqlExecuteTool,
+          SqlCheckTool,
+          SqlMaterializeTool,
+          AnswerCommitTool,
+        ]) {
           const info = yield* source
           const tool = yield* Tool.init(info, { agent: analyst })
           if (tool.jsonSchema) {
