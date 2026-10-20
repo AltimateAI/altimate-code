@@ -334,6 +334,11 @@ export const layer = Layer.effect(
                 question: "allow",
                 // Skills return instruction text only (no side effects), so they are safe for a read-only agent.
                 skill: "allow",
+                // Workspace memory: reading and reloading are read-only. Saving and deleting stay
+                // denied, so a decision is recorded through builder.
+                altimate_memory_read: "allow",
+                altimate_memory_refresh: "allow",
+                altimate_memory_audit: "allow",
                 // Delegation is limited to the read-only data-explorer subagent: general/explore/build
                 // carry broader permissions than analyst, and children do not inherit parent-agent limits.
                 task: {

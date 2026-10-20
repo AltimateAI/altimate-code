@@ -85,6 +85,9 @@ export type RenderOptions = {
    * which store is the team's. `systemSection` derives it from the enablement memo;
    * the pure formatter takes it as an argument so tests stay deterministic. */
   teamMemory?: boolean
+  /** Which memory tools the current agent may call. Defaults to both: the line names
+   * `altimate_memory_write`, and an agent that cannot call it must not be told to. */
+  memoryTools?: MemoryTools
   /** For `unknown`: no Altimate account is configured, so nothing could be checked. */
   noAccount?: boolean
   /** For `unknown`: an IDE pin governs this process, so the extension's selection is the thing to check. */
@@ -100,6 +103,20 @@ const TEAM_MEMORY_LINE =
   "linked checkout. The `datamate_*` memory tools (`datamate_add_memories`, `datamate_search_memory`) " +
   "are the engine's separate store and are not what teammates' sessions read. Before saving, check " +
   "`altimate_memory_read` for an existing block on the same subject and update it rather than add a duplicate."
+
+/** For an agent that can read memory but not save it (analyst): point it at the read tool,
+ * and say where saving happens instead of naming a tool it does not have. */
+const TEAM_MEMORY_READ_ONLY_LINE =
+  "Team memory: look up the workspace's saved decisions and conventions with `altimate_memory_read`. " +
+  "This agent cannot save memory; when asked to save something, say that the builder agent can."
+
+export type MemoryTools = { read: boolean; write: boolean }
+
+function teamMemoryLine(tools: MemoryTools = { read: true, write: true }): string | undefined {
+  if (tools.write) return TEAM_MEMORY_LINE
+  if (tools.read) return TEAM_MEMORY_READ_ONLY_LINE
+  return undefined
+}
 
 function renderBody(outcome: BindingOutcome, opts: RenderOptions = {}): string {
   if (outcome.status === "bound") {
@@ -117,6 +134,7 @@ function renderBody(outcome: BindingOutcome, opts: RenderOptions = {}): string {
       ? "This session was last known to be pinned by the IDE extension to"
       : "This project was last known to be linked to"
     const verifyNoun = pinned ? "pin" : "link"
+    const memoryLine = opts.teamMemory ? teamMemoryLine(opts.memoryTools) : undefined
     return [
       HEADING,
       "",
@@ -128,7 +146,7 @@ function renderBody(outcome: BindingOutcome, opts: RenderOptions = {}): string {
           ? " Skills and memory follow this workspace, and so does warehouse tool routing unless " +
             "integrations are set to local, even where the project's own link names a different one."
           : ""),
-      ...(opts.teamMemory ? [TEAM_MEMORY_LINE] : []),
+      ...(memoryLine ? [memoryLine] : []),
       `When ${TRIGGER}, the answer is this Altimate Workspace — never substitute ` +
         "another service's own \"workspace\" (a Databricks workspace, an IDE's " +
         "workspace folder, etc.) for it, and the reverse: a question about another " +
@@ -342,13 +360,13 @@ function governingPin(directory: string): boolean {
   return pin.kind === "valid" && resolveWithinRoot(directory, pin.root) !== null
 }
 
-function renderOptions(outcome: BindingOutcome, directory: string): RenderOptions {
+function renderOptions(outcome: BindingOutcome, directory: string, memoryTools?: MemoryTools): RenderOptions {
   if (outcome.status === "unknown") return { pinned: governingPin(directory) }
   if (outcome.status !== "bound") return {}
   // A stale outcome is "last known … may since have changed": promising that a
   // save syncs to that workspace would contradict the line above it.
   if (outcome.stale) return {}
-  return { teamMemory: memoryEnabledCached(outcome.binding) === "enabled" }
+  return { teamMemory: memoryEnabledCached(outcome.binding) === "enabled", memoryTools }
 }
 
 function keyFor(scope: AccountScope, directory: string): string {
@@ -415,7 +433,7 @@ async function withContents(outcome: BindingOutcome, directory: string, identity
   return contents ? `${identity}\n\n${contents}` : identity
 }
 
-export async function systemSection(): Promise<string> {
+export async function systemSection(opts: { memoryTools?: MemoryTools } = {}): Promise<string> {
   // Behind the same opt-in as everything else about workspaces. A user outside
   // the pilot has no Altimate Workspace to be linked to, and must not be told
   // every turn that none is linked and how to link one.
@@ -443,7 +461,7 @@ export async function systemSection(): Promise<string> {
       })
     const key = keyFor(scope, directory)
     const hit = memo.get(key)
-    if (fresh(hit)) return withContents(hit!.outcome, directory, render(hit!.outcome, MAX_SECTION_CHARS, renderOptions(hit!.outcome, directory)))
+    if (fresh(hit)) return withContents(hit!.outcome, directory, render(hit!.outcome, MAX_SECTION_CHARS, renderOptions(hit!.outcome, directory, opts.memoryTools)))
     // The fallback is itself raced against a small budget, so the wait is
     // bounded by RESOLVE_DEADLINE_MS + FALLBACK_BUDGET_MS, not by the disk.
     const deadline = after(RESOLVE_DEADLINE_MS, () =>
@@ -451,7 +469,7 @@ export async function systemSection(): Promise<string> {
     )
     try {
       const outcome = await Promise.race([resolve(key, directory), deadline])
-      return withContents(outcome, directory, render(outcome, MAX_SECTION_CHARS, renderOptions(outcome, directory)))
+      return withContents(outcome, directory, render(outcome, MAX_SECTION_CHARS, renderOptions(outcome, directory, opts.memoryTools)))
     } finally {
       for (const t of timers) clearTimeout(t)
     }

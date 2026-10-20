@@ -1913,7 +1913,14 @@ export namespace SessionPrompt {
       // pure link identity. `systemSection()` reads `Instance.directory` itself, inside
       // its own try/catch — NOT passed as an argument here — so a missing instance
       // context can't throw synchronously at this call site.
-      const workspaceIdentity = await WorkspaceIdentity.systemSection()
+      // The team-memory line names memory tools; describe only the ones this agent can call.
+      const memoryDisabled = PermissionNext.disabled(["altimate_memory_read", "altimate_memory_write"], agent.permission)
+      const workspaceIdentity = await WorkspaceIdentity.systemSection({
+        memoryTools: {
+          read: !memoryDisabled.has("altimate_memory_read"),
+          write: !memoryDisabled.has("altimate_memory_write"),
+        },
+      })
       // altimate_change end
       // altimate_change start — workspace tool awareness.
       // Reads the snapshot `Precedence.refresh` stored for this turn during tool

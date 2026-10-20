@@ -157,6 +157,14 @@ describe("systemSection", () => {
     memoryEnabledCache.set(77, { checkedAt: Date.now() })
     try {
       expect(await inProject(systemSection)).toContain("Team memory:")
+      // A read-only agent is told to read, not to save; resolved and memoised outcomes alike.
+      const readOnly = () => systemSection({ memoryTools: { read: true, write: false } })
+      resetOutcomeMemoForTests()
+      for (let i = 0; i < 2; i++) {
+        const out = await inProject(readOnly)
+        expect(out).toContain("Team memory: look up the workspace's saved decisions")
+        expect(out).not.toContain("altimate_memory_write")
+      }
       resetOutcomeMemoForTests()
       resetEnablementMemoForTests()
       // A remembered "no" from the workspace switches the line off.

@@ -39,6 +39,23 @@ describe("bound — a specific Altimate Workspace is linked", () => {
     expect(render({ status: "unbound" }, undefined, { teamMemory: true })).not.toContain("Team memory")
   })
 
+  test("the team memory line names only the memory tools the agent can call", () => {
+    const full = render(boundOutcome, undefined, { teamMemory: true, memoryTools: { read: true, write: true } })
+    expect(full).toBe(render(boundOutcome, undefined, { teamMemory: true }))
+    const readOnly = render(boundOutcome, undefined, { teamMemory: true, memoryTools: { read: true, write: false } })
+    expect(readOnly).toContain("Team memory: look up the workspace's saved decisions and conventions with `altimate_memory_read`")
+    expect(readOnly).toContain("This agent cannot save memory; when asked to save something, say that the builder agent can.")
+    expect(readOnly).not.toContain("altimate_memory_write")
+    expect(readOnly.split("\n")).toHaveLength(5)
+    const none = render(boundOutcome, undefined, { teamMemory: true, memoryTools: { read: false, write: false } })
+    expect(none).not.toContain("Team memory")
+    expect(none).not.toContain("altimate_memory_")
+    // Workspace memory off still wins over the agent's access.
+    expect(render(boundOutcome, undefined, { teamMemory: false, memoryTools: { read: true, write: false } })).not.toContain(
+      "Team memory",
+    )
+  })
+
   test("names the workspace and forbids substituting another service's 'workspace' for an identity question", () => {
     expect(boundOut).toContain("## Altimate Workspace")
     expect(boundOut).toContain('"Foo Corp Data Team"')
