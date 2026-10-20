@@ -26,7 +26,7 @@ export const descriptions: Record<string, string> = {
   warehouse_add: "Add a connection when warehouse_list shows none or the one you need is missing.",
   schema_inspect: "List tables when table is omitted; otherwise one table's columns and value profile.",
   sql_execute:
-    "Run SQL and return rows. Put independent queries in one call with `queries`. Source writes need --allow-write.",
+    "Run SQL and return rows. Put independent queries in one call with `queries`; `tables` describes tables in the same call. Source writes need --allow-write.",
   sql_check: "Read-only data check: fanout, keys, grain, nulls or coverage.",
   sql_materialize: "Store a read-only query's rows as a scratch table, to join across connections.",
   answer_commit:
@@ -187,6 +187,33 @@ export function compactSchema<T>(name: string, schema: T): T {
 const BASIS_LIMIT = 400
 const MCP_ONLY_TOOLS = new Set(["answer_commit"])
 
+/**
+ * Tool definitions are re-sent with every model request, so the default toolset is the five tools clients use;
+ * `sql_execute.tables` covers table inspection in the same call as the queries. `allTools` also advertises
+ * schema_inspect and sql_check.
+ */
+const LEAN_TOOLS = new Set(["warehouse_list", "warehouse_add", "sql_execute", "sql_materialize", "answer_commit"])
+const MAX_FUSED_TABLES = 8
+
+/** Adds `tables` to the advertised sql_execute schema: tables described in the same call, before its queries. */
+function withTables<T>(schema: T): T {
+  const copy = JSON.parse(JSON.stringify(schema)) as { properties?: Record<string, unknown> }
+  copy.properties = {
+    tables: {
+      type: "array",
+      items: { type: "string" },
+      maxItems: MAX_FUSED_TABLES,
+      description: "Tables to describe first in this call (columns, types, value profile); a query is optional",
+    },
+    ...copy.properties,
+  }
+  return copy as T
+}
+
+function hasQuery(args: Record<string, unknown>): boolean {
+  return Boolean(args.query) || Boolean(args.query_from) || (Array.isArray(args.queries) && args.queries.length > 0)
+}
+
 /** Session-level record the native commit checks read: tool outputs and rejections of the current turn. */
 type TurnMessage = Tool.Context["messages"][number]
 /**
@@ -274,7 +301,7 @@ function relaxBasis<T>(schema: T): T {
   return copy as T
 }
 
-export async function createAdapter(options: { allowWrite?: boolean } = {}) {
+export async function createAdapter(options: { allowWrite?: boolean; allTools?: boolean } = {}) {
   const limits = await outputLimits()
   const directory = await mkdtemp(path.join(tmpdir(), "altimate-code-mcp-results-"))
   await chmod(directory, 0o700)
@@ -305,6 +332,7 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
           }
           if (tool.jsonSchema && info.id === "answer_commit") tool.jsonSchema = withRequest(relaxBasis(tool.jsonSchema))
           if (tool.jsonSchema) tool.jsonSchema = compactSchema(info.id, tool.jsonSchema)
+          if (tool.jsonSchema && info.id === "sql_execute") tool.jsonSchema = withTables(tool.jsonSchema)
           result.set(info.id, tool)
         }
         return result
@@ -339,12 +367,41 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
     messages.push(userMessage())
     return { ...result, output: finalAnswerText(args, result.metadata.committed_text ?? result.output, request) }
   }
+  const advertised = new Map([...tools].filter(([name]) => options.allTools || LEAN_TOOLS.has(name)))
+  /** sql_execute with `tables`: describe each table with schema_inspect, then run the queries, in one call. */
+  const fused = async (tables: unknown[], args: Record<string, unknown>, ctx: Tool.Context): Promise<Tool.ExecuteResult> => {
+    const inspect = tools.get("schema_inspect")!
+    const parts: string[] = []
+    let inspected = 0
+    for (const table of tables.slice(0, MAX_FUSED_TABLES)) {
+      if (typeof table !== "string" || !table.trim()) continue
+      ctx.abort.throwIfAborted()
+      const target = { table: table.trim(), ...(typeof args.warehouse === "string" ? { warehouse: args.warehouse } : {}) }
+      try {
+        const result = await Effect.runPromise(inspect.execute(target, ctx))
+        if (result.status !== "error" && !result.metadata?.error) inspected++
+        parts.push(result.output)
+      } catch (error) {
+        if (ctx.abort.aborted) throw error
+        parts.push(`Table ${table}: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    ctx.abort.throwIfAborted()
+    if (!hasQuery(args)) {
+      const output = parts.join("\n\n")
+      // Nothing described and nothing queried: report a failure, not completed evidence.
+      if (inspected === 0) return { title: "Schema: no table described", metadata: { error: output }, output, status: "error" }
+      return { title: `Schema: ${inspected} table(s)`, metadata: {}, output }
+    }
+    const result = await Effect.runPromise(tools.get("sql_execute")!.execute(args, ctx))
+    return { ...result, output: [...parts, result.output].join("\n\n") }
+  }
   return {
-    tools,
+    tools: advertised,
     async execute(name: string, args: Record<string, unknown>, signal: AbortSignal) {
       signal = AbortSignal.any([signal, shutdown.signal])
       signal.throwIfAborted()
-      const tool = tools.get(name)
+      const tool = advertised.get(name)
       if (!tool) throw new Error(`Unknown tool: ${name}`)
       const ctx: Tool.Context = {
         sessionID,
@@ -371,7 +428,15 @@ export async function createAdapter(options: { allowWrite?: boolean } = {}) {
         recordRequest(messages, request)
         args = rest
       }
-      const pending = Effect.runPromise(tool.execute(args, ctx))
+      let pending: Promise<Tool.ExecuteResult>
+      if (name === "sql_execute" && Array.isArray(args.tables) && args.tables.length > 0) {
+        const { tables, ...rest } = args
+        args = rest
+        pending = fused(tables, rest, ctx)
+      } else {
+        if (name === "sql_execute") args = Object.fromEntries(Object.entries(args).filter(([key]) => key !== "tables"))
+        pending = Effect.runPromise(tool.execute(args, ctx))
+      }
       active.add(pending)
       try {
         const result = await pending

@@ -133,10 +133,11 @@ export const McpServeCommand = cmd({
   describe: "serve data tools over MCP stdio (no model required)",
   builder: (yargs) => yargs
     .option("connections", { type: "string", describe: "Connections JSON file" })
-    .option("allow-write", { type: "boolean", default: false, describe: "Allow SQL write permissions" }),
+    .option("allow-write", { type: "boolean", default: false, describe: "Allow SQL write permissions" })
+    .option("all-tools", { type: "boolean", default: false, describe: "Also expose schema_inspect and sql_check" }),
   async handler(args) {
     const { serveStdio } = await import("../../altimate/mcp-server/server")
-    await serveStdio({ connections: args.connections, allowWrite: args.allowWrite })
+    await serveStdio({ connections: args.connections, allowWrite: args.allowWrite, allTools: args.allTools })
   },
 })
 // altimate_change end

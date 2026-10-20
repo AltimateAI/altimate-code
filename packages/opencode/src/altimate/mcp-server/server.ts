@@ -16,12 +16,11 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 export const SERVER_INSTRUCTIONS = [
   "Analyst method for data questions:",
-  "1. Start with warehouse_list; it shows local tables, columns and a sample row. If none fit, warehouse_add one.",
-  "2. Check stored value formats (schema_inspect value profile) before filtering or joining on a column; formats differ across databases.",
-  "3. Compute in the database; batch independent queries in one sql_execute call (`queries`).",
+  "1. Start with warehouse_list (local tables, columns, a sample row); if none fit, warehouse_add one.",
+  "2. Check stored value formats before filtering or joining: sql_execute `tables` returns value profiles in the same call as your queries.",
+  "3. Compute in the database; put independent queries in one sql_execute call (`queries`).",
   "4. Cross-connection joins: sql_materialize the smaller filtered side into `scratch` and join there.",
-  "5. Use sql_check when keys, fan-out, grain or nulls could change the answer; make sure every condition filters something.",
-  "6. Finish with answer_commit (`asked` = the requested items, one field each); reply with exactly its FINAL ANSWER text.",
+  "5. Finish with answer_commit (`asked` = the requested items, one field each); reply with exactly its FINAL ANSWER text.",
 ].join("\n")
 
 /** Spilled results: a resource_link next to the text, which keeps the preview, row count and path. */
@@ -50,6 +49,8 @@ const analyzePrompt = {
 export interface ServeOptions {
   connections?: string
   allowWrite?: boolean
+  // Also advertise schema_inspect and sql_check (default: the five-tool set, see adapter LEAN_TOOLS).
+  allTools?: boolean
   // Bounds the reading question so an unanswered prompt cannot outlast the client's tool-call timeout.
   elicitTimeoutMs?: number
 }

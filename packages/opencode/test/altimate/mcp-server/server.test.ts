@@ -32,6 +32,7 @@ async function fixture(
   capabilities: Record<string, object> = {},
   elicitTimeoutMs?: number,
   setup?: (db: Database) => void,
+  allTools = true,
 ) {
   const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-tools-test-"))
   cleanups.push(() => rm(dir, { recursive: true, force: true }))
@@ -43,7 +44,7 @@ async function fixture(
   db.close()
   const config = path.join(dir, "connections.json")
   await Bun.write(config, JSON.stringify({ source: { type: "sqlite", path: "source.sqlite" } }))
-  const server = await createServer({ allowWrite, connections: config, elicitTimeoutMs })
+  const server = await createServer({ allowWrite, connections: config, elicitTimeoutMs, allTools })
   const client = new Client({ name: "test", version: "1" }, { capabilities })
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   await server.connect(serverTransport)
@@ -66,12 +67,57 @@ mcpTest("initialize result carries short analyst-method instructions", async () 
   const instructions = client.getInstructions()
   expect(instructions).toBe(SERVER_INSTRUCTIONS)
   expect(instructions!.split(/\s+/).length).toBeLessThanOrEqual(120)
-  for (const tool of ["warehouse_list", "schema_inspect", "sql_materialize", "sql_check"]) {
+  for (const tool of ["warehouse_list", "warehouse_add", "sql_execute", "sql_materialize", "answer_commit"]) {
     expect(instructions).toContain(tool)
   }
+  // Instructions name only advertised tools.
+  expect(instructions).not.toMatch(/schema_inspect|sql_check/)
 })
 
-mcpTest("lists exactly seven tools and executes warehouse, schema, SQL and checks without routing notices", async () => {
+mcpTest("the default toolset is five tools; sql_execute `tables` describes tables and runs queries in one call", async () => {
+  const { client, call } = await fixture(false, {}, undefined, undefined, false)
+  const listed = await client.listTools()
+  expect(listed.tools.map((t) => t.name).sort()).toEqual([
+    "answer_commit",
+    "sql_execute",
+    "sql_materialize",
+    "warehouse_add",
+    "warehouse_list",
+  ])
+  const declared = listed.tools.reduce(
+    (total, t) => total + JSON.stringify({ name: t.name, description: t.description, inputSchema: t.inputSchema }).length,
+    0,
+  )
+  expect(declared).toBeLessThan(5_200)
+  expect(client.getInstructions()!.length).toBeLessThanOrEqual(600)
+  const sqlExecute = listed.tools.find((t) => t.name === "sql_execute")!
+  expect(Object.keys(sqlExecute.inputSchema.properties ?? {})).toContain("tables")
+  const fused = await call("sql_execute", {
+    warehouse: "source",
+    tables: ["items"],
+    queries: [{ label: "fruit", query: "SELECT name FROM items ORDER BY id" }],
+  })
+  expect(fused.isError).toBe(false)
+  const body = text(fused)
+  // Schema first (column list with its value profile), then the query result, in one response.
+  expect(body).toContain("name")
+  expect(body.indexOf("items")).toBeLessThan(body.indexOf("apple"))
+  expect(body).toContain("pear")
+  const schemaOnly = await call("sql_execute", { warehouse: "source", tables: ["items"] })
+  expect(schemaOnly.isError).toBe(false)
+  expect(text(schemaOnly)).toContain("items")
+  expect(text(schemaOnly)).not.toContain("apple | ")
+  const schemaMiss = await call("sql_execute", { warehouse: "source", tables: ["no_such_table"] })
+  expect(schemaMiss.isError).toBe(true)
+  const missing = await call("sql_execute", { warehouse: "source", tables: ["no_such_table"], query: "SELECT 1 AS one" })
+  expect(text(missing)).toContain("no_such_table")
+  expect(text(missing)).toContain("one")
+  // Unadvertised tools are not callable.
+  const hidden = await call("sql_check", { warehouse: "source", check: "nulls", sql: "SELECT * FROM items", columns: ["id"] })
+  expect(hidden.isError).toBe(true)
+})
+
+mcpTest("allTools lists exactly seven tools and executes warehouse, schema, SQL and checks without routing notices", async () => {
   const { client, call } = await fixture()
   const listed = await client.listTools()
   expect(listed.tools.map((t) => t.name).sort()).toEqual([
@@ -836,7 +882,7 @@ mcpTest("tool definitions stay compact and keep their required properties", asyn
   const byName = Object.fromEntries(tools.map((tool) => [tool.name, tool]))
   expect(size(byName.answer_commit!)).toBeLessThanOrEqual(2_250)
   expect(byName.answer_commit!.description).toContain("'the repository and the most copied file' needs two")
-  expect(tools.reduce((total, tool) => total + size(tool), 0)).toBeLessThan(6_600)
+  expect(tools.reduce((total, tool) => total + size(tool), 0)).toBeLessThan(7_000)
   expect(client.getInstructions()!.length).toBeLessThanOrEqual(723)
   const declared = JSON.stringify(tools)
   expect(declared).not.toContain("$schema")
