@@ -345,10 +345,10 @@ describe("release validation PR #937 source-level env plumbing", () => {
     expect(source).not.toContain('process.env["ALTIMATE_NON_INTERACTIVE"] === undefined')
   })
 
-  test("run command guards Bun.stdin.text() behind an existing non-TTY stdin", async () => {
+  test("run command guards the stdin read behind an existing non-TTY stdin", async () => {
     const source = await Bun.file(new URL("../../src/cli/cmd/run.ts", import.meta.url)).text()
 
-    expect(source).toContain("if (process.stdin && !process.stdin.isTTY) message +=")
+    expect(source).toContain("if (process.stdin && !process.stdin.isTTY) {\n      const { readRunStdin, STDIN_WAIT_MS }")
     expect(source).not.toContain("if (!process.stdin?.isTTY)")
   })
 
