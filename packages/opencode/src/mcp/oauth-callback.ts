@@ -3,6 +3,11 @@ import { createServer } from "http"
 import { escapeHtml } from "@/util/html"
 import { OAUTH_CALLBACK_PORT, OAUTH_CALLBACK_PATH, parseRedirectUri } from "./oauth-provider"
 
+// altimate_change start — upstream_fix: the callback receives OAuth authorization codes; never listen on
+// non-loopback interfaces. Redirect URIs use 127.0.0.1 and isPortInUse probes 127.0.0.1 (anomalyco/opencode#30022)
+const OAUTH_CALLBACK_HOST = "127.0.0.1"
+// altimate_change end
+
 // Current callback server configuration (may differ from defaults if custom redirectUri is used)
 let currentPort = OAUTH_CALLBACK_PORT
 let currentPath = OAUTH_CALLBACK_PATH
@@ -164,7 +169,9 @@ export async function ensureRunning(redirectUri?: string): Promise<void> {
 
   server = createServer(handleRequest)
   await new Promise<void>((resolve, reject) => {
-    server!.listen(currentPort, () => {
+    // altimate_change start — upstream_fix: bind the OAuth callback server to IPv4 loopback only (anomalyco/opencode#30022)
+    server!.listen(currentPort, OAUTH_CALLBACK_HOST, () => {
+      // altimate_change end
       resolve()
     })
     server!.on("error", reject)
