@@ -28,7 +28,7 @@ The agent for asking questions about your data. Truly read-only mode for safe da
 - **Bash**: Safe commands auto-allowed (`ls`, `grep`, `cat`, `head`, `tail`, `find`, `wc`). dbt read commands allowed (`dbt list`, `dbt ls`, `dbt debug`). Everything else denied.
 - **Web**: Fetch and search allowed without prompts
 - **Schema/warehouse/finops**: All inspection tools available
-- **Workspace knowledge**: Loads workspace and project skills; reads and reloads workspace memory. Saving memory is done with `builder`.
+- **Workspace knowledge**: Loads workspace and project skills; reads workspace memory and views this checkout's memory audit log. Reloading memory syncs the local copy with the workspace, which can remove a local copy of a block the workspace archived. Saving memory is done with `builder`.
 
 !!! tip
     Use `analyst` when exploring data to ensure no accidental writes. Switch to `builder` when you're ready to create or modify models.
