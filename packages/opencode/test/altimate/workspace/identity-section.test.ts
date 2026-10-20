@@ -165,6 +165,11 @@ describe("systemSection", () => {
         expect(out).toContain("Team memory: look up the workspace's saved decisions")
         expect(out).not.toContain("altimate_memory_write")
       }
+      // The memo holds the outcome, not the text: the same cached outcome renders per agent.
+      expect(await inProject(systemSection)).toContain("Team memory: save decisions")
+      expect(await inProject(() => systemSection({ memoryTools: { read: false, write: false } }))).not.toContain(
+        "Team memory:",
+      )
       resetOutcomeMemoForTests()
       resetEnablementMemoForTests()
       // A remembered "no" from the workspace switches the line off.

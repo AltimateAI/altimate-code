@@ -97,12 +97,16 @@ export type RenderOptions = {
 /** Two stores answer "remember this". Only one is read by other linked checkouts,
  * and nothing told the model which — so on a plain "save this for the team" it
  * reached for the engine's hub and the decision never left the session (#1332). */
-const TEAM_MEMORY_LINE =
+const TEAM_MEMORY_SAVE_LINE =
   "Team memory: save decisions and conventions with `altimate_memory_write` (scope " +
   '"project" for this project, "global" for everything); they sync to the workspace and to every ' +
   "linked checkout. The `datamate_*` memory tools (`datamate_add_memories`, `datamate_search_memory`) " +
-  "are the engine's separate store and are not what teammates' sessions read. Before saving, check " +
-  "`altimate_memory_read` for an existing block on the same subject and update it rather than add a duplicate."
+  "are the engine's separate store and are not what teammates' sessions read."
+
+/** Appended only when the agent can also read, since it names the read tool. */
+const TEAM_MEMORY_DEDUP_HINT =
+  " Before saving, check `altimate_memory_read` for an existing block on the same subject and update " +
+  "it rather than add a duplicate."
 
 /** For an agent that can read memory but not save it (analyst): point it at the read tool,
  * and say where saving happens instead of naming a tool it does not have. */
@@ -113,7 +117,7 @@ const TEAM_MEMORY_READ_ONLY_LINE =
 export type MemoryTools = { read: boolean; write: boolean }
 
 function teamMemoryLine(tools: MemoryTools = { read: true, write: true }): string | undefined {
-  if (tools.write) return TEAM_MEMORY_LINE
+  if (tools.write) return tools.read ? TEAM_MEMORY_SAVE_LINE + TEAM_MEMORY_DEDUP_HINT : TEAM_MEMORY_SAVE_LINE
   if (tools.read) return TEAM_MEMORY_READ_ONLY_LINE
   return undefined
 }

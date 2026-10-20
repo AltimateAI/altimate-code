@@ -1913,12 +1913,16 @@ export namespace SessionPrompt {
       // pure link identity. `systemSection()` reads `Instance.directory` itself, inside
       // its own try/catch — NOT passed as an argument here — so a missing instance
       // context can't throw synchronously at this call site.
-      // The team-memory line names memory tools; describe only the ones this agent can call.
-      const memoryDisabled = PermissionNext.disabled(["altimate_memory_read", "altimate_memory_write"], agent.permission)
+      // The team-memory line names memory tools; describe only the ones this turn sends the model.
+      const memoryRemoved = LLM.removedTools(["altimate_memory_read", "altimate_memory_write"], {
+        agent,
+        user: lastUser,
+      })
+      const memoryCallable = (name: string) => name in tools && !memoryRemoved.has(name)
       const workspaceIdentity = await WorkspaceIdentity.systemSection({
         memoryTools: {
-          read: !memoryDisabled.has("altimate_memory_read"),
-          write: !memoryDisabled.has("altimate_memory_write"),
+          read: memoryCallable("altimate_memory_read"),
+          write: memoryCallable("altimate_memory_write"),
         },
       })
       // altimate_change end

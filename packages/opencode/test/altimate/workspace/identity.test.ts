@@ -39,17 +39,32 @@ describe("bound — a specific Altimate Workspace is linked", () => {
     expect(render({ status: "unbound" }, undefined, { teamMemory: true })).not.toContain("Team memory")
   })
 
-  test("the team memory line names only the memory tools the agent can call", () => {
+  const memoryAccessCases: { read: boolean; write: boolean; line?: string; names: string[] }[] = [
+    { read: true, write: true, line: "Team memory: save decisions", names: ["altimate_memory_write", "altimate_memory_read"] },
+    { read: true, write: false, line: "Team memory: look up the workspace's saved decisions", names: ["altimate_memory_read"] },
+    { read: false, write: true, line: "Team memory: save decisions", names: ["altimate_memory_write"] },
+    { read: false, write: false, names: [] },
+  ]
+  for (const access of memoryAccessCases) {
+    test(`the team memory line names only the memory tools the agent can call (read=${access.read}, write=${access.write})`, () => {
+      const out = render(boundOutcome, undefined, {
+        teamMemory: true,
+        memoryTools: { read: access.read, write: access.write },
+      })
+      const memoryLines = out.split("\n").filter((line) => line.startsWith("Team memory:"))
+      expect(memoryLines).toHaveLength(access.line ? 1 : 0)
+      if (access.line) expect(memoryLines[0]).toStartWith(access.line)
+      for (const tool of ["altimate_memory_read", "altimate_memory_write"]) {
+        expect(out.includes(tool)).toBe(access.names.includes(tool))
+      }
+    })
+  }
+
+  test("the team memory line keeps its text for an agent with full access, and tells a read-only one who saves", () => {
     const full = render(boundOutcome, undefined, { teamMemory: true, memoryTools: { read: true, write: true } })
     expect(full).toBe(render(boundOutcome, undefined, { teamMemory: true }))
     const readOnly = render(boundOutcome, undefined, { teamMemory: true, memoryTools: { read: true, write: false } })
-    expect(readOnly).toContain("Team memory: look up the workspace's saved decisions and conventions with `altimate_memory_read`")
     expect(readOnly).toContain("This agent cannot save memory; when asked to save something, say that the builder agent can.")
-    expect(readOnly).not.toContain("altimate_memory_write")
-    expect(readOnly.split("\n")).toHaveLength(5)
-    const none = render(boundOutcome, undefined, { teamMemory: true, memoryTools: { read: false, write: false } })
-    expect(none).not.toContain("Team memory")
-    expect(none).not.toContain("altimate_memory_")
     // Workspace memory off still wins over the agent's access.
     expect(render(boundOutcome, undefined, { teamMemory: false, memoryTools: { read: true, write: false } })).not.toContain(
       "Team memory",
