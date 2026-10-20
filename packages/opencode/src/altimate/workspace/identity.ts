@@ -82,7 +82,7 @@ export function render(outcome: BindingOutcome, cap = MAX_SECTION_CHARS, opts: R
 
 export type RenderOptions = {
   /** The bound workspace has memory on (or has not said otherwise): tell the model
-   * which store is the team's. `systemSection` derives it from the enablement memo;
+   * which store syncs, and to whom. `systemSection` derives it from the enablement memo;
    * the pure formatter takes it as an argument so tests stay deterministic. */
   teamMemory?: boolean
   /** For `unknown`: no Altimate account is configured, so nothing could be checked. */
@@ -93,13 +93,18 @@ export type RenderOptions = {
 
 /** Two stores answer "remember this". Only one is read by other linked checkouts,
  * and nothing told the model which — so on a plain "save this for the team" it
- * reached for the engine's hub and the decision never left the session (#1332). */
+ * reached for the engine's hub and the decision never left the session (#1332).
+ * Those checkouts are the same user's: mirrored records are private, so team-wide
+ * conventions belong in a published workspace skill (#1404). */
 const TEAM_MEMORY_LINE =
-  "Team memory: save decisions and conventions with `altimate_memory_write` (scope " +
-  '"project" for this project, "global" for everything); they sync to the workspace and to every ' +
-  "linked checkout. The `datamate_*` memory tools (`datamate_add_memories`, `datamate_search_memory`) " +
-  "are the engine's separate store and are not what teammates' sessions read. Before saving, check " +
-  "`altimate_memory_read` for an existing block on the same subject and update it rather than add a duplicate."
+  "Workspace memory: save decisions and conventions with `altimate_memory_write` (scope " +
+  '"project" for this project, "global" for everything); they sync to the workspace for this user only ' +
+  "and follow them to their other linked checkouts. Teammates' sessions do not read them, so for a " +
+  "convention the whole team should follow, suggest publishing a workspace skill " +
+  "(`altimate-code skill publish <name>`). The `datamate_*` memory tools (`datamate_add_memories`, " +
+  "`datamate_search_memory`) are the engine's separate store and are not what linked checkouts read. " +
+  "Before saving, check `altimate_memory_read` for an existing block on the same subject and update it " +
+  "rather than add a duplicate."
 
 function renderBody(outcome: BindingOutcome, opts: RenderOptions = {}): string {
   if (outcome.status === "bound") {
