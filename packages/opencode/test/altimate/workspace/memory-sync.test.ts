@@ -449,6 +449,24 @@ describe("blockTitle", () => {
   })
 })
 
+/** Holds the workspace-list request (the memory-setting lookup) open until `release`; `started` resolves
+ * once it is waiting. */
+function holdWorkspaceLookup() {
+  const inner = globalThis.fetch
+  let release!: () => void
+  let entered!: () => void
+  const held = new Promise<void>((resolve) => (release = resolve))
+  const started = new Promise<void>((resolve) => (entered = resolve))
+  globalThis.fetch = (async (input: any, init?: any) => {
+    if (String(input).includes("/datamates/") && !String(input).includes("/memory")) {
+      entered()
+      await held
+    }
+    return inner(input, init)
+  }) as typeof fetch
+  return { started, release, restore: () => (globalThis.fetch = inner) }
+}
+
 // ── write path ──────────────────────────────────────────────────────────────
 describe("mirrorBlock", () => {
   test("a mirror to a linked workspace is recorded, failed or not, so `run`'s exit checks what stayed local", async () => {
@@ -460,53 +478,31 @@ describe("mirrorBlock", () => {
   })
 
   test("the mirror is recorded while the memory-setting lookup is still pending, so an exit then still checks", async () => {
-    const inner = globalThis.fetch
-    let release!: () => void
-    const held = new Promise<void>((resolve) => (release = resolve))
-    let entered!: () => void
-    const lookupStarted = new Promise<void>((resolve) => (entered = resolve))
-    globalThis.fetch = (async (input: any, init?: any) => {
-      if (String(input).includes("/datamates/") && !String(input).includes("/memory")) {
-        entered()
-        await held
-      }
-      return inner(input, init)
-    }) as typeof fetch
+    const lookup = holdWorkspaceLookup()
     const mirror = mirrorBlock(block({ id: "pending-lookup" }), "/repo")
     try {
-      await lookupStarted
+      await lookup.started
       expect(lastMirrorTarget()).toEqual({ directory: "/repo", binding: BINDING as any })
     } finally {
-      release()
+      lookup.release()
       await mirror.catch(() => {})
-      globalThis.fetch = inner
+      lookup.restore()
     }
   })
 
   test("a disabled lookup takes back only its own record, not one a concurrent mirror made since", async () => {
     workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
-    const inner = globalThis.fetch
-    let release!: () => void
-    const held = new Promise<void>((resolve) => (release = resolve))
-    let entered!: () => void
-    const lookupStarted = new Promise<void>((resolve) => (entered = resolve))
-    globalThis.fetch = (async (input: any, init?: any) => {
-      if (String(input).includes("/datamates/") && !String(input).includes("/memory")) {
-        entered()
-        await held
-      }
-      return inner(input, init)
-    }) as typeof fetch
+    const lookup = holdWorkspaceLookup()
     const mirror = mirrorBlock(block({ id: "disabled-slow" }), "/repo")
     const newer = { directory: "/other", binding: BINDING as any }
     try {
-      await lookupStarted
+      await lookup.started
       // Another block's mirror records its own target while this lookup is pending.
       ;(globalThis as unknown as Record<symbol, { last?: unknown }>)[Symbol.for("altimate.memory-sync.mirror-requests")].last = newer
     } finally {
-      release()
+      lookup.release()
       await mirror.catch(() => {})
-      globalThis.fetch = inner
+      lookup.restore()
     }
     expect(lastMirrorTarget()).toBe(newer)
   })
