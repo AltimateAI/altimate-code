@@ -472,7 +472,9 @@ download_and_install() {
 # binary, so that name can never run a stale build, and replaces a link to a
 # directory instead of writing into that directory. Under Git Bash, MSYS and
 # Cygwin, where `ln -s` usually makes a full copy, the shims install.ps1 writes
-# are written instead, so both Windows installers leave the same layout.
+# are written for altimate.exe, so both Windows installers leave the same layout.
+# A `--binary` named plain `altimate` there only runs from those shells, so it
+# gets the same link (or copy) as on POSIX.
 link_alias() {
     local target="$1"
     local alias_name
@@ -485,8 +487,10 @@ link_alias() {
 
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*)
-            [ "$target" = "altimate.exe" ] && write_windows_shims
-            return 0
+            if [ "$target" = "altimate.exe" ]; then
+                write_windows_shims
+                return 0
+            fi
             ;;
     esac
 

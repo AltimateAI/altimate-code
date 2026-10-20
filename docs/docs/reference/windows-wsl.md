@@ -21,8 +21,9 @@ powershell -c "irm https://www.altimate.sh/install.ps1 | iex"
 This downloads `altimate.exe` to `%USERPROFILE%\.altimate\bin` and adds that
 directory to your user PATH (open a new terminal afterwards). It also writes an
 `altimate-code` alias there: `altimate-code.cmd` for cmd.exe and PowerShell, and
-an extensionless shim for Git Bash. Inside WSL, install the Linux build with the
-curl one-liner; the Windows shim refuses to run there. The installer
+an extensionless shim for Git Bash. Inside WSL, install the Linux build with
+`curl -fsSL https://www.altimate.sh/install | bash`; the Windows shim refuses to
+run there. The installer
 auto-detects AVX2 support and falls back to the baseline build on older CPUs.
 
 Options (pass via a script block):

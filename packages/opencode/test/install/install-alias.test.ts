@@ -291,6 +291,18 @@ describe("install — altimate-code alias, executed", () => {
     })
   })
 
+  testUnlessWindows("under Git Bash a --binary named plain altimate still gets the alias", () => {
+    withHome((home) => {
+      const uname = gitBashUname(join(home, "uname"))
+      const { code, bin } = runInstaller(home, "altimate", `${uname}:`)
+      expect(code).toBe(0)
+      const alias = join(bin, "altimate-code")
+      expect(readlinkSync(alias)).toBe("altimate")
+      expect(spawnSync(alias, ["--version"], { encoding: "utf-8" }).stdout.trim()).toBe("fake-altimate --version")
+      expect(existsSync(join(bin, "altimate-code.cmd"))).toBe(false)
+    })
+  })
+
   testUnlessWindows("the sh shim forwards only under Git Bash and refuses elsewhere, e.g. WSL", () => {
     withHome((home) => {
       const uname = gitBashUname(join(home, "uname"))
