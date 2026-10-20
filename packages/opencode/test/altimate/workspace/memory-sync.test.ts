@@ -463,16 +463,52 @@ describe("mirrorBlock", () => {
     const inner = globalThis.fetch
     let release!: () => void
     const held = new Promise<void>((resolve) => (release = resolve))
+    let entered!: () => void
+    const lookupStarted = new Promise<void>((resolve) => (entered = resolve))
     globalThis.fetch = (async (input: any, init?: any) => {
-      if (String(input).includes("/datamates/") && !String(input).includes("/memory")) await held
+      if (String(input).includes("/datamates/") && !String(input).includes("/memory")) {
+        entered()
+        await held
+      }
       return inner(input, init)
     }) as typeof fetch
     const mirror = mirrorBlock(block({ id: "pending-lookup" }), "/repo")
-    await Bun.sleep(20)
-    expect(lastMirrorTarget()).toEqual({ directory: "/repo", binding: BINDING as any })
-    release()
-    await mirror
-    globalThis.fetch = inner
+    try {
+      await lookupStarted
+      expect(lastMirrorTarget()).toEqual({ directory: "/repo", binding: BINDING as any })
+    } finally {
+      release()
+      await mirror.catch(() => {})
+      globalThis.fetch = inner
+    }
+  })
+
+  test("a disabled lookup takes back only its own record, not one a concurrent mirror made since", async () => {
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    const inner = globalThis.fetch
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    let entered!: () => void
+    const lookupStarted = new Promise<void>((resolve) => (entered = resolve))
+    globalThis.fetch = (async (input: any, init?: any) => {
+      if (String(input).includes("/datamates/") && !String(input).includes("/memory")) {
+        entered()
+        await held
+      }
+      return inner(input, init)
+    }) as typeof fetch
+    const mirror = mirrorBlock(block({ id: "disabled-slow" }), "/repo")
+    const newer = { directory: "/other", binding: BINDING as any }
+    try {
+      await lookupStarted
+      // Another block's mirror records its own target while this lookup is pending.
+      ;(globalThis as unknown as Record<symbol, { last?: unknown }>)[Symbol.for("altimate.memory-sync.mirror-requests")].last = newer
+    } finally {
+      release()
+      await mirror.catch(() => {})
+      globalThis.fetch = inner
+    }
+    expect(lastMirrorTarget()).toBe(newer)
   })
 
   test("a workspace with memory turned off is not recorded: the block stays local by design", async () => {

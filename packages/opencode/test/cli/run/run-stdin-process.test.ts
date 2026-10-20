@@ -12,7 +12,8 @@ function collect(child: ReturnType<typeof spawn>): Promise<{ code: number | null
   const started = Date.now()
   let out = ""
   child.stdout!.on("data", (chunk) => (out += chunk))
-  return new Promise((resolve) => child.on("exit", (code) => resolve({ code, out, ms: Date.now() - started })))
+  // `close`, not `exit`: it fires only after stdout is drained.
+  return new Promise((resolve) => child.on("close", (code) => resolve({ code, out, ms: Date.now() - started })))
 }
 
 describe("readRunStdin on a real stdin", () => {
@@ -36,7 +37,7 @@ describe("readRunStdin on a real stdin", () => {
     expect(JSON.parse((await collect(child)).out)).toEqual({ text: "the prompt\n", timedOut: false })
   })
 
-  test("a shell pipeline is read to EOF even when its first byte comes after the wait", async () => {
+  test.skipIf(process.platform === "win32")("a shell pipeline is read to EOF even when its first byte comes after the wait", async () => {
     const child = spawn("sh", ["-c", `sleep 0.6; echo piped | "${process.execPath}" "${FIXTURE}"`], { env })
     expect(JSON.parse((await collect(child)).out)).toEqual({ text: "piped\n", timedOut: false })
   })

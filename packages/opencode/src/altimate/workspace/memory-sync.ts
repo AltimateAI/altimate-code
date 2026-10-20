@@ -973,12 +973,14 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
     const binding = await currentBinding(directory)
     if (!binding) return
     // Recorded before the memory-setting lookup, which can wait on the service: an exit while it is pending
-    // leaves this block unsent too. Taken back only on a confirmed "disabled".
+    // leaves this block unsent too. Taken back only on a confirmed "disabled", and only while it is still
+    // this call's record: other blocks mirror concurrently and may have recorded since.
     const previous = mirrorRequests.last
-    mirrorRequests.last = { directory, binding }
+    const recorded: MirrorTarget = { directory, binding }
+    mirrorRequests.last = recorded
     const memory = await memoryStatus(binding)
     if (memory === "disabled") {
-      mirrorRequests.last = previous
+      if (mirrorRequests.last === recorded) mirrorRequests.last = previous
       return
     }
     if (memory !== "enabled") return

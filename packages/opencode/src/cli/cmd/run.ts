@@ -1561,8 +1561,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
           const notice = await unsent
             ?.then((m) => m?.unsentMemoryNoticeAfterRun(process.cwd(), 1_000))
             .catch(() => null)
-          // process.exit does not wait for a pending write to a piped stderr.
-          if (notice) await new Promise<void>((resolve) => process.stderr.write(notice + EOL, () => resolve()))
+          // process.exit does not wait for a pending write to a piped stderr; wait briefly, never for a
+          // reader that has stopped.
+          if (notice)
+            await new Promise<void>((resolve) => {
+              setTimeout(resolve, 500)
+              try {
+                process.stderr.write(notice + EOL, () => resolve())
+              } catch {
+                resolve()
+              }
+            })
           process.exit(code)
         })
       }
