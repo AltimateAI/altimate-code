@@ -24,8 +24,13 @@ function toolCtx() {
 let project: string
 let prevCwd: string
 let ambientConnEnv: Record<string, string>
+let ambientGlobalConfig: string | undefined
 
 beforeEach(() => {
+  // Registry.add() in other files persists to the shared test-home global file; set it aside for the empty-registry cases.
+  const globalFile = Registry.globalConfigPath()
+  ambientGlobalConfig = fs.existsSync(globalFile) ? fs.readFileSync(globalFile, "utf-8") : undefined
+  fs.rmSync(globalFile, { force: true })
   // Ambient connection env vars would make the empty-registry assertions depend on the caller's shell.
   ambientConnEnv = {}
   for (const [key, value] of Object.entries(process.env)) {
@@ -45,6 +50,12 @@ afterEach(() => {
   Registry.reset()
   fs.rmSync(project, { recursive: true, force: true })
   Object.assign(process.env, ambientConnEnv)
+  const globalFile = Registry.globalConfigPath()
+  if (ambientGlobalConfig === undefined) fs.rmSync(globalFile, { force: true })
+  else {
+    fs.mkdirSync(path.dirname(globalFile), { recursive: true })
+    fs.writeFileSync(globalFile, ambientGlobalConfig)
+  }
 })
 
 describe("warehouse_list no-connections hint", () => {
@@ -132,6 +143,9 @@ describe("warehouse_list no-connections hint", () => {
         JSON.stringify({ "proj-b": { type: "postgres" } }),
       )
       process.chdir(other)
+      // each project has its own registry
+      expect(Registry.names()).toEqual(["proj-b"])
+      process.chdir(project)
       expect(Registry.names()).toEqual(["proj-a"])
     } finally {
       process.chdir(project)
@@ -150,12 +164,11 @@ describe("warehouse_list no-connections hint", () => {
         JSON.stringify({ "proj-b": { type: "postgres" } }),
       )
       process.chdir(other)
-      expect(Registry.names()).toEqual([])
-      expect(Registry.projectConfigApplies()).toBe(false)
-      expect(noConnectionsMessage()).not.toContain(Registry.localConfigPath())
-      expect(noConnectionsMessage()).toContain(Registry.globalConfigPath())
+      expect(Registry.names()).toEqual(["proj-b"])
+      expect(noConnectionsMessage()).toContain(Registry.localConfigPath())
       process.chdir(dirA)
-      expect(Registry.projectConfigApplies()).toBe(true)
+      expect(Registry.names()).toEqual([])
+      expect(noConnectionsMessage()).toContain(Registry.localConfigPath())
       // the same project still picks up its own file after an empty answer
       fs.mkdirSync(path.join(dirA, ".altimate-code"))
       fs.writeFileSync(

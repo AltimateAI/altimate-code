@@ -42,7 +42,7 @@ On Windows, install the same self-contained binary (to `%USERPROFILE%\.altimate\
 powershell -c "irm https://www.altimate.sh/install.ps1 | iex"
 ```
 
-The standalone install drops a single self-contained binary named `altimate`. The npm install exposes both `altimate` and `altimate-code` on PATH; the standalone install only exposes `altimate`. Alpine Linux (musl) and Windows on ARM64 are not currently supported by the standalone binary — use `apk add gcompat` on Alpine, or use WSL on Windows-on-ARM.
+The standalone install drops a single self-contained binary named `altimate`, plus an `altimate-code` alias for it — the same two names the npm install exposes. On Windows that alias is an `altimate-code.cmd` shim, which passes its arguments through `cmd.exe` (`%VAR%` expands, unquoted `&` `|` `^` are interpreted), so scripts should call `altimate`. Alpine Linux (musl) and Windows on ARM64 are not currently supported by the standalone binary — use `apk add gcompat` on Alpine, or use WSL on Windows-on-ARM.
 
 For GitHub, [install the Altimate Code App](https://github.com/apps/altimate-code-agent/installations/new)
 to select repositories for interactive agent tasks. Automatic dbt pull-request

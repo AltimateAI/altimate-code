@@ -10,7 +10,7 @@ description: "Fix common Altimate Code installation and runtime issues including
 
 **Symptoms:** `altimate-code: command not found` after running `curl -fsSL https://www.altimate.sh/install | bash`.
 
-As of v0.7.1 the curl-installed binary is named `altimate`, not `altimate-code`. The npm package continues to ship both names. If you scripted against the curl install:
+As of v0.7.1 the curl-installed binary is named `altimate`, and curl installs from v0.7.1 until the `altimate-code` alias was added put only that name on PATH (v0.7.0 and earlier installed `altimate-code` under `~/.altimate-code/bin` instead). Re-run the installer — it adds `altimate-code` next to `altimate` in `~/.altimate/bin` — or call `altimate` directly:
 
 ```bash
 # Before (v0.7.0 and earlier curl install):
@@ -19,8 +19,6 @@ As of v0.7.1 the curl-installed binary is named `altimate`, not `altimate-code`.
 # After (v0.7.1+ curl install):
 ~/.altimate/bin/altimate run "..."
 ```
-
-Or stay on the `altimate-code` name by installing via npm: `npm install -g altimate-code`.
 
 ### `Cannot find module '@altimateai/altimate-code-core'`
 
