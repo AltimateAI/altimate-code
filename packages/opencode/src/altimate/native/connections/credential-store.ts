@@ -167,7 +167,9 @@ export async function deleteCredential(
  * Entries are keyed by connection name only. Only `saveConnection` writes them, for the saved (global) connection
  * of that name; a project's own connections file never stores a secret here. A project file that defines a
  * connection of the same name without its secret was reading the saved connection's secret, and loses it when that
- * saved connection is removed or re-saved without it.
+ * saved connection is removed or re-saved without it. The registry keeps the entries on removal while an env var or
+ * the local config of a project this process currently serves still names the connection; projects it does not
+ * serve (closed, never opened, or in another process) are not consulted.
  */
 export async function forgetCredentials(name: string, keep?: ConnectionConfig): Promise<string[]> {
   const store = await getBackend()

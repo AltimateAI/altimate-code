@@ -81,6 +81,11 @@ export const Instance = {
       return input.fn()
     })
   },
+  // altimate_change start — enumerate open projects even before their warehouse registry is loaded
+  directories(): string[] {
+    return [...cache.keys()]
+  },
+  // altimate_change end
   get current() {
     return context.use()
   },

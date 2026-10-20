@@ -132,6 +132,9 @@ describe("warehouse_list no-connections hint", () => {
         JSON.stringify({ "proj-b": { type: "postgres" } }),
       )
       process.chdir(other)
+      // each project has its own registry
+      expect(Registry.names()).toEqual(["proj-b"])
+      process.chdir(project)
       expect(Registry.names()).toEqual(["proj-a"])
     } finally {
       process.chdir(project)
@@ -150,12 +153,11 @@ describe("warehouse_list no-connections hint", () => {
         JSON.stringify({ "proj-b": { type: "postgres" } }),
       )
       process.chdir(other)
-      expect(Registry.names()).toEqual([])
-      expect(Registry.projectConfigApplies()).toBe(false)
-      expect(noConnectionsMessage()).not.toContain(Registry.localConfigPath())
-      expect(noConnectionsMessage()).toContain(Registry.globalConfigPath())
+      expect(Registry.names()).toEqual(["proj-b"])
+      expect(noConnectionsMessage()).toContain(Registry.localConfigPath())
       process.chdir(dirA)
-      expect(Registry.projectConfigApplies()).toBe(true)
+      expect(Registry.names()).toEqual([])
+      expect(noConnectionsMessage()).toContain(Registry.localConfigPath())
       // the same project still picks up its own file after an empty answer
       fs.mkdirSync(path.join(dirA, ".altimate-code"))
       fs.writeFileSync(
