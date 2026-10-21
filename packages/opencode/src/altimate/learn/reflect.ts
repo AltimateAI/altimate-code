@@ -41,7 +41,7 @@ export interface ReflectInput {
   digest: string
   feedback: string
   kind: FeedbackKind
-  bullets: Bullet[]
+  bullets: (Bullet & { recurred?: number })[]
 }
 
 /** The model call, injectable so tests need no provider. Returns the raw object. */
@@ -79,7 +79,7 @@ function escapePromptSection(text: string): string {
 
 export function buildPrompt(input: ReflectInput): { system: string; prompt: string } {
   const playbook = input.bullets.length
-    ? input.bullets.map((b) => `[${b.id}] (h:${b.helpful} x:${b.harmful}${b.coexists?.length ? ` c:${b.coexists.join(",")}` : ""}) ${redactSecrets(b.text)}`).join("\n")
+    ? input.bullets.map((b) => `[${b.id}] (h:${b.helpful} x:${b.harmful}${(b.recurred ?? 0) >= 2 ? ` r:${b.recurred}` : ""}${b.coexists?.length ? ` c:${b.coexists.join(",")}` : ""}) ${redactSecrets(b.text)}`).join("\n")
     : "(empty)"
   const prompt = [
     "<playbook>",

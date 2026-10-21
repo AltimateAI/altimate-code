@@ -86,6 +86,15 @@ type ToolProps<T = Tool.Info> = {
   part: ToolPart
 }
 
+// altimate_change start — upstream_fix: run quoted space-containing prompt arguments, which reached the model as literal quotes
+export function joinRunMessage(args: string[], command: boolean): string {
+  if (!command) return args.join(" ")
+  return args
+    .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
+    .join(" ")
+}
+// altimate_change end
+
 function props<T = Tool.Info>(part: ToolPart): ToolProps<T> {
   const state = part.state
   return {
@@ -485,9 +494,9 @@ export const RunCommand = cmd({
     })
     // altimate_change end
 
-    let message = [...args.message, ...(args["--"] || [])]
-      .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
-      .join(" ")
+    // altimate_change start — upstream_fix: run quoted space-containing prompt arguments, which reached the model as literal quotes
+    let message = joinRunMessage([...args.message, ...(args["--"] || [])], Boolean(args.command))
+    // altimate_change end
 
     const directory = (() => {
       if (!args.dir) return undefined

@@ -11,6 +11,21 @@ import { accountUsage, type UsageSummary } from "../../../src/altimate/learn/usa
 const bullets = [{ id: "L-0001", text: "Staging models are prefixed stg_.", helpful: 2, harmful: 0 }]
 
 describe("buildPrompt", () => {
+  test("recurrence hints appear only at two distinct sessions", () => {
+    for (const recurred of [undefined, 0, 1, 2, 3]) {
+      const { prompt, system } = buildPrompt({ digest: "d", feedback: "f", kind: "user", bullets: [{ ...bullets[0], recurred }] })
+      expect(prompt.includes(` r:${recurred}`)).toBe((recurred ?? 0) >= 2)
+      expect(system).toContain("If the agent simply did not follow a correct rule, keep it.")
+    }
+  })
+
+  test("a missed but correct bullet earns no helpful vote", () => {
+    const { system } = buildPrompt({ digest: "d", feedback: "f", kind: "user", bullets })
+    expect(system).toContain("HELPFUL only when the DIGEST shows the agent followed it")
+    expect(system).toContain("it is neither HELPFUL nor HARMFUL")
+    expect(system).not.toContain("(the last is HELPFUL)")
+  })
+
   test("requires backticks around generated identifiers and naming patterns", () => {
     const { system } = buildPrompt({ digest: "d", feedback: "f", kind: "ci", bullets })
     expect(system).toContain("Wrap every code identifier and naming pattern (including prefixes and suffixes) in backticks.")

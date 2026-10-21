@@ -28,6 +28,46 @@ export function isExistenceError(err: unknown): boolean {
 }
 // altimate_change end
 
+// altimate_change start — fail closed when the engine skips plan-based analysis
+// Core 0.9.0 returns allowed:true / valid:true with no findings for statements it rewrites
+// around table-valued functions (no logical plan). That is "not evaluated", not "clean":
+// policy must block, and semantics must say it did not run.
+const PLAN_SKIP_RULES = new Set(["plan_unavailable", "POLICY_SKIPPED"])
+const PLAN_SKIP_NOTE = /plan-based analysis was skipped|logical plan unavailable/i
+
+export const POLICY_NOT_EVALUATED_MESSAGE =
+  "policy could not be evaluated for this statement (table-valued function, no plan available); treated as blocked"
+export const SEMANTICS_SKIPPED_MESSAGE =
+  "semantic analysis skipped (no plan available for this statement, e.g. table-valued function)"
+
+/** Mark a policy result not-allowed when the engine skipped evaluation. */
+export function applyPolicySkipGuard(data: Record<string, unknown>): Record<string, unknown> {
+  const warnings = Array.isArray(data.warnings) ? (data.warnings as Array<Record<string, unknown>>) : []
+  const skipped = warnings.some((w) => PLAN_SKIP_RULES.has(String(w?.rule)) || PLAN_SKIP_RULES.has(String(w?.code)))
+  if (!skipped) return data
+  const violations = Array.isArray(data.violations) ? (data.violations as unknown[]) : []
+  data.allowed = false
+  data.policy_skipped = true
+  data.violations = [
+    ...violations,
+    { rule: "policy_not_evaluated", severity: "error", message: POLICY_NOT_EVALUATED_MESSAGE },
+  ]
+  const audit = data.audit as Record<string, unknown> | undefined
+  if (audit && typeof audit === "object") audit.allowed = false
+  return data
+}
+
+/** Flag a semantics result whose analysis did not run. */
+export function applySemanticsSkipGuard(data: Record<string, unknown>): Record<string, unknown> {
+  const notes = Array.isArray(data.notes) ? (data.notes as unknown[]) : []
+  if (notes.some((n) => PLAN_SKIP_NOTE.test(String(n)))) {
+    data.skipped = true
+    data.skip_reason = SEMANTICS_SKIPPED_MESSAGE
+  }
+  return data
+}
+// altimate_change end
+
 function toData(obj: unknown): Record<string, unknown> {
   if (obj === null || obj === undefined) return {}
   if (typeof obj !== "object") return { value: obj }
@@ -400,7 +440,7 @@ export function registerAll(): void {
     try {
       const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
       const raw = await core.checkPolicy(sql, schema, params.policy_json)
-      const data = toData(raw)
+      const data = applyPolicySkipGuard(toData(raw))
       return ok(true, data)
     } catch (e) {
       return fail(e)
@@ -412,7 +452,7 @@ export function registerAll(): void {
     try {
       const { sql, schema } = prepareSql(params.sql, params.schema_path, params.schema_context)
       const raw = await core.checkSemantics(sql, schema)
-      const data = toData(raw)
+      const data = applySemanticsSkipGuard(toData(raw))
       return ok(true, data)
     } catch (e) {
       return fail(e)

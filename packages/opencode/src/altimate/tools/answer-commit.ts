@@ -20,7 +20,7 @@ import {
   unsourcedNumbers,
 } from "./answer-commit-checks"
 // altimate_change start — one-time conjunction review
-import { conjunctionRejection } from "./answer-commit-conjunction"
+import { AnswerCommitConjunction } from "./answer-commit-conjunction"
 // altimate_change end
 
 /** Maximum rendered answer length, including Markdown and basis, before the model echoes it. */
@@ -314,6 +314,7 @@ type CommitMetadata = {
   asked: string[]
   truncated: boolean
   committed_text?: string
+  failure_kind?: string
 }
 
 /**
@@ -371,19 +372,25 @@ export const AnswerCommitTool = Tool.define(
         // An MCP server sees only its own tool output, never the numbers a client computed in its own
         // shell or code, so the number-provenance check would reject correct derived values there.
         const checkNumbers = ctx.extra?.mcpClient !== true
+        const commitCheck = commitRejection(args, ctx.messages ?? [], checkNumbers)
         const rejection =
-          commitRejection(args, ctx.messages ?? [], checkNumbers) ??
-          conjunctionRejection(args, ctx.messages ?? [], ctx.sessionID)
-        // altimate_change end
+          commitCheck ?? AnswerCommitConjunction.conjunctionRejection(args, ctx.messages ?? [], ctx.sessionID)
         if (rejection) {
           const rejected: Tool.ExecuteResult<CommitMetadata> = {
             title: "Answer not committed",
-            metadata: { readings: args.readings ?? [], asked: args.asked ?? [], truncated: false },
+            // failure_kind separates these advisories from real commit failures in telemetry.
+            metadata: {
+              readings: args.readings ?? [],
+              asked: args.asked ?? [],
+              truncated: false,
+              failure_kind: commitCheck ? "commit_check" : "conjunction_check",
+            },
             output: rejection,
             status: "error",
           }
           return rejected
         }
+        // altimate_change end
         return {
           title: "Answer committed",
           // The processor caps model-facing output but preserves metadata for the final echo.

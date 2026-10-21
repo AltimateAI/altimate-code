@@ -14,6 +14,7 @@ import * as Signals from "./signals"
 import { curate, flagSuspiciousFeedback, type CurateResult } from "./curator"
 import { buildDigest, redactSecrets, sourceFromMessages, type DigestSource } from "./digest"
 import { FEEDBACK_CAP, feedbackText, reflect, replace, type FeedbackKind, type Generate } from "./reflect"
+import { analyzeRecurrence, recurrenceHint } from "./recurrence"
 import { sharedAnchors } from "./anchors"
 import { processClaims } from "./claims"
 import { createUsageTracker, type UsageSummary } from "./usage"
@@ -107,8 +108,15 @@ export async function reflectCore(input: ReflectCoreInput): Promise<ReflectCoreR
   const digest = buildDigest(input.source)
   const snapshot = await prepareReflection(root, name, input.applyPaths)
   const originalText = new Map(Playbook.bullets(snapshot).map((b) => [b.id, b.text]))
+  const recurrence = await analyzeRecurrence(root, { name }).catch((error) => {
+    log.warn("learn recurrence unavailable", { error })
+    return undefined
+  })
+  const bullets = Playbook.bullets(snapshot).map((bullet) => ({
+    ...bullet, ...(recurrence ? { recurred: recurrenceHint(recurrence, name, bullet) } : {}),
+  }))
   const deltas = await reflect(
-    { digest, feedback: input.feedback, kind: input.kind, bullets: Playbook.bullets(snapshot) },
+    { digest, feedback: input.feedback, kind: input.kind, bullets },
     generate,
   ).catch((e) => {
     throw new Error(`Model call failed (${input.modelLabel ?? "the default model"}): ${errText(e)}`)

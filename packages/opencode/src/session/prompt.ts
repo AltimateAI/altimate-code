@@ -41,6 +41,7 @@ import * as WorkspaceMemory from "../altimate/workspace/memory-sync"
 // altimate_change start — harness-owned, frozen approved lesson delivery
 import { Delivery as LessonDelivery } from "../altimate/learn/delivery"
 import { learnEnabled } from "../altimate/learn/config"
+import * as UserRequest from "../altimate/session/user-request"
 // altimate_change end
 // altimate_change start — workspace engine turn boundary, managed-key refusal, tool precedence
 import * as WorkspaceEngine from "../altimate/workspace/engine-overlay"
@@ -50,6 +51,7 @@ import * as Awareness from "../altimate/workspace/awareness"
 import * as WorkspaceIdentity from "../altimate/workspace/identity"
 import * as PendingTurns from "../altimate/workspace/pending-turns"
 import * as DatamateManagerGate from "../altimate/workspace/datamate-manager-gate"
+import * as TurnBoundary from "../altimate/workspace/turn-boundary"
 // altimate_change end
 import { Plugin } from "../plugin"
 import PROMPT_PLAN from "../session/prompt/plan.txt"
@@ -113,6 +115,7 @@ import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-sourc
 // altimate_change end
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
+import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
 import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
 // altimate_change start — keyless public Zen predicate (flat module)
@@ -692,11 +695,13 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     let step = 0
-    // altimate_change start — first tool catalog of this loop. `step` counts loop
-    // iterations, and an iteration can `continue` before cataloguing (pending
-    // compaction, context overflow), so "step === 1" is not "first catalog".
-    let catalogued = false
-    // The linked-project notice for this turn, settled at its first catalog.
+    // altimate_change start — which tool catalogs of this loop run the workspace
+    // engine's turn boundary: the first, and the first after a new user request
+    // joins the loop. `step` counts loop iterations, and an iteration can
+    // `continue` before cataloguing (pending compaction, context overflow), so
+    // "step === 1" is not "first catalog".
+    const turnBoundary = TurnBoundary.tracker()
+    // The linked-project notice, settled at each boundary.
     const workspaceNotice = DatamateManagerGate.turnNotice()
     // altimate_change end
     // altimate_change start (AI-7519) — capture bootstrap start; emitted as a
@@ -801,6 +806,7 @@ export namespace SessionPrompt {
       toolCategory: string
       errorClass: string
       errorHash: string
+      errorMessage: string
       recovered: boolean
       recoveryTool: string
     }
@@ -1482,19 +1488,17 @@ export namespace SessionPrompt {
             }
           }
           const user = msgs.find((msg) => msg.info.id === lastUser.id)!
-          const text = user.parts.filter((part): part is MessageV2.TextPart =>
-            part.type === "text" && !part.synthetic && !part.ignored,
-          )
-          const files = user.parts.filter((part): part is MessageV2.FilePart => part.type === "file")
-          if (text.length || files.length) {
-            // Auto-compaction can replay a user message under a fresh DB id. It
-            // remains the same request for retrieval and must not consume more rules.
-            const original = user.parts.find((part): part is MessageV2.TextPart =>
-              part.type === "text" && typeof part.metadata?.learnOriginalMessage === "string",
-            )
-            const requestID = String(original?.metadata?.learnOriginalMessage ?? user.info.id)
+          // Auto-compaction can replay a user message under a fresh DB id. It
+          // remains the same request for retrieval and must not consume more rules.
+          // The workspace engine's turn boundary counts requests by the same rule.
+          const requestID = UserRequest.requestID(user)
+          if (requestID !== undefined) {
             let selected = learnRequests.get(requestID)
             if (!selected) {
+              const text = user.parts.filter((part): part is MessageV2.TextPart =>
+                part.type === "text" && !part.synthetic && !part.ignored,
+              )
+              const files = user.parts.filter((part): part is MessageV2.FilePart => part.type === "file")
               const query = [...text.map((part) => part.text), ...files.map((part) => part.filename ?? "")].join("\n")
               selected = await lessons.prepare(sessionID, requestID, query)
               learnRequests.set(requestID, selected)
@@ -1715,20 +1719,22 @@ export namespace SessionPrompt {
           { step, agent: agent.name },
           sessionID,
         )
-      // Workspace engine turn boundary, on the turn's FIRST catalog (not its first
-      // loop iteration — a compaction can run before any catalog): reconcile the
-      // bound workspace's engine (re-link, one retry on a failed handshake), settle
-      // this session's outcome, announce it once per verdict — then catalog the
+      // Workspace engine turn boundary, on the FIRST catalog of each user request
+      // in this loop (not its first loop iteration — a compaction can run before
+      // any catalog). A message sent while the assistant is busy joins this loop,
+      // so it is a new request here, not a new loop; a message the loop wrote
+      // itself is not one (see TurnBoundary). The boundary reconciles the bound
+      // workspace's engine (re-link, one retry on a failed handshake), settles
+      // this session's outcome, announces it once per verdict — then catalogs the
       // tools under the same per-directory lock, so another session's boundary
       // cannot replace the engine between this reconcile and this snapshot. The
       // cold engine boot happens inside MCP's own bootstrap, bounded by its
-      // per-server timeout. Later catalogs keep the engine tools this turn started
-      // with.
-      const firstCatalog = !catalogued
-      catalogued = true
-      const tools = firstCatalog ? await WorkspaceEngine.atTurnStart(sessionID, catalog) : await catalog()
-      WorkspaceEngine.pinTurnTools(sessionID, firstCatalog, tools)
-      if (firstCatalog) workspaceNotice.settle(sessionID)
+      // per-server timeout. Later catalogs keep the engine tools this request
+      // started with.
+      const boundary = turnBoundary(msgs)
+      const tools = boundary ? await WorkspaceEngine.atTurnStart(sessionID, catalog) : await catalog()
+      WorkspaceEngine.pinTurnTools(sessionID, boundary, tools)
+      if (boundary) workspaceNotice.settle(sessionID)
       // altimate_change end
 
       // Inject StructuredOutput tool if JSON schema mode enabled
@@ -1919,8 +1925,8 @@ export namespace SessionPrompt {
       const workspaceAwareness = Awareness.systemSection(Precedence.forSession(sessionID))
       // A linked session: `datamate_manager` is turned off for the project, so the
       // model is told that a request to connect a datamate is about this link and
-      // what the engine's state means for it — as settled at this turn's first
-      // catalog, like the tools it describes. "" for an unlinked project, so other
+      // what the engine's state means for it — as settled at this request's
+      // boundary, like the tools it describes. "" for an unlinked project, so other
       // sessions assemble the same array as before.
       const workspaceEngineNotice = workspaceNotice.text()
       // altimate_change end
@@ -2176,12 +2182,11 @@ export namespace SessionPrompt {
           lastToolWasError = true
           const errorMsg =
             part.state.status === "error" && typeof part.state.error === "string" ? part.state.error : "unknown"
-          const masked = Telemetry.maskString(errorMsg).slice(0, 500)
           pendingError = {
             toolName: part.tool,
             toolCategory,
             errorClass: Telemetry.classifyError(errorMsg),
-            errorHash: Telemetry.hashError(masked),
+            ...ErrorDetail.describeToolError(errorMsg),
           }
         } else {
           if (lastToolWasError && pendingError) {
@@ -2533,17 +2538,7 @@ export namespace SessionPrompt {
     }
     // Error fingerprints — one event per unique error (capped at 20)
     for (const err of errorRecords.slice(0, 20)) {
-      Telemetry.track({
-        type: "error_fingerprint",
-        timestamp: Date.now(),
-        session_id: sessionID,
-        error_hash: err.errorHash,
-        error_class: err.errorClass,
-        tool_name: err.toolName,
-        tool_category: err.toolCategory,
-        recovery_successful: err.recovered,
-        recovery_tool: err.recoveryTool,
-      })
+      Telemetry.track(ErrorDetail.buildErrorFingerprintEvent(sessionID, err))
     }
     // altimate_change end — emit quality signal, tool chain, and error fingerprint events
     // altimate_change start — populate agent_outcome diagnostic fields

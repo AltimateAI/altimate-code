@@ -16,7 +16,7 @@ import { SqlExecuteTool } from "../tools/sql-execute"
 import { SqlCheckTool } from "../tools/sql-check"
 import { SqlMaterializeTool } from "../tools/sql-materialize"
 import { AnswerCommitTool, renderAnswer } from "../tools/answer-commit"
-import { requestedItemCount } from "../tools/answer-commit-conjunction"
+import { AnswerCommitConjunction } from "../tools/answer-commit-conjunction"
 import * as Precedence from "../workspace/precedence"
 import { closeScratch } from "../native/connections/scratch"
 import type { SessionID, MessageID } from "@/session/schema"
@@ -227,7 +227,7 @@ export function finalAnswerText(args: Record<string, unknown>, committed: string
   const fields = Array.isArray(args.fields) ? args.fields.length : 0
   const complete =
     Boolean(args.rows) ||
-    (fields > 0 && fields >= requestedItemCount(typeof request === "string" ? request : ""))
+    (fields > 0 && fields >= AnswerCommitConjunction.requestedItems(typeof request === "string" ? request : "").count)
   if (!complete) return `FINAL ANSWER: ${committed}`
   let answer = committed
   try {
