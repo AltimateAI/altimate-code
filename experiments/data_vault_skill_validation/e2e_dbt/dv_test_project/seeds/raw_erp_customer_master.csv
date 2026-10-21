@@ -1,0 +1,4 @@
+cust_no,legal_name,tax_id,country_code,updated_at
+C-100,Alice Anderson LLC,US-100,US,2024-02-01 12:00:00
+C-102,Carol Chen,US-102,US,2024-02-01 12:00:00
+C-105,Frank Foster,US-105,US,2024-02-01 12:00:00
