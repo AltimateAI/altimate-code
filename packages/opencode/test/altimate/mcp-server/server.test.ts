@@ -1196,19 +1196,29 @@ mcpTest("a later batch step filters on an earlier step's column on the same conn
   const batch = await chainFixture()
   const { result, body } = await batch([
     { label: "pick", query: "SELECT id FROM items WHERE name IN ('apple', 'o''brien')" },
-    { label: "names", query: "SELECT name FROM items WHERE id IN {{pick.id}} ORDER BY id" },
+    { label: "names", query: "SELECT name FROM items WHERE id IN ({{pick.id}}) ORDER BY id" },
   ])
   expect(result.isError).toBe(false)
   expect(block(body, "names")).toContain("apple")
   expect(block(body, "names")).toContain("o'brien")
   expect(block(body, "names")).not.toContain("pear")
+  // The values also fit a DuckDB list, and an empty earlier result matches nothing instead of failing.
+  const more = await batch([
+    { label: "pick", warehouse: "a", query: "SELECT id FROM items WHERE name = 'pear'" },
+    { label: "none", warehouse: "a", query: "SELECT id FROM items WHERE name = 'kiwi'" },
+    { label: "list", warehouse: "scratch", query: "SELECT list_contains([{{pick.id}}], 2) AS has_pear" },
+    { label: "empty", warehouse: "a", query: "SELECT count(*) AS n FROM items WHERE id IN ({{none.id}})" },
+  ])
+  expect(block(more.body, "list")).toContain("true")
+  expect(block(more.body, "empty")).not.toContain("Failed")
+  expect(block(more.body, "empty")).toMatch(/\b0\b/)
 })
 
 mcpTest("a batch step feeds another connection's IN list, and a scratch step joins stored step rows", async () => {
   const batch = await chainFixture()
   const { result, body } = await batch([
     { label: "ids", warehouse: "a", query: "SELECT id, name FROM items WHERE name <> 'pear'" },
-    { label: "price", warehouse: "b", query: "SELECT item_id, label, price FROM prices WHERE label IN {{ids.name}}" },
+    { label: "price", warehouse: "b", query: "SELECT item_id, label, price FROM prices WHERE label IN ({{ids.name}})" },
     {
       label: "joined",
       warehouse: "scratch",
@@ -1232,9 +1242,9 @@ mcpTest("a value list from a step with more than the bound row cap fails that st
   const batch = await chainFixture()
   const { body } = await batch([
     { label: "all", query: "SELECT id FROM big" },
-    { label: "use", query: "SELECT count(*) AS n FROM big WHERE id IN {{all.id}}" },
+    { label: "use", query: "SELECT count(*) AS n FROM big WHERE id IN ({{all.id}})" },
     { label: "few", query: "SELECT id FROM big WHERE id < 3" },
-    { label: "small", query: "SELECT count(*) AS n FROM big WHERE id IN {{few.id}}" },
+    { label: "small", query: "SELECT count(*) AS n FROM big WHERE id IN ({{few.id}})" },
   ])
   expect(block(body, "use")).toContain("more than 1000 rows")
   expect(block(body, "small")).toMatch(/\b3\b/)
@@ -1244,8 +1254,8 @@ mcpTest("a failing batch step fails its dependents and the remaining steps still
   const batch = await chainFixture()
   const { result, body } = await batch([
     { label: "bad", query: "SELEC id FROM items" },
-    { label: "dep", query: "SELECT * FROM items WHERE id IN {{bad.id}}" },
-    { label: "missing", query: "SELECT * FROM items WHERE id IN {{nope.id}}" },
+    { label: "dep", query: "SELECT * FROM items WHERE id IN ({{bad.id}})" },
+    { label: "missing", query: "SELECT * FROM items WHERE id IN ({{nope.id}})" },
     { label: "ok", query: "SELECT 42 AS answer" },
   ])
   expect(result.isError).toBe(false)

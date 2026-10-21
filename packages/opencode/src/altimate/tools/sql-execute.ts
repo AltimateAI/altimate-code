@@ -82,7 +82,7 @@ const parameters = z
     .max(MAX_BATCH_QUERIES, `queries accepts at most ${MAX_BATCH_QUERIES} items`)
     .nullish()
     .describe(
-      `Up to ${MAX_BATCH_QUERIES} read-only queries run in order in one call, each returning its own labeled result; one failing query does not stop the others. A later query can use an earlier one's rows: {{label.column}} becomes a literal value list (at most ${MAX_BOUND_ROWS} rows) and {{label}} a scratch table (warehouse scratch).`,
+      `Up to ${MAX_BATCH_QUERIES} read-only queries run in order in one call, each returning its own labeled result; one failing query does not stop the others. A later query can use an earlier one's rows: {{label.column}} becomes its values as comma-separated literals, e.g. IN ({{ids.id}}) (at most ${MAX_BOUND_ROWS} rows) and {{label}} a scratch table (warehouse scratch).`,
     ),
   query_from: z
     .object({
@@ -130,7 +130,7 @@ export const SqlExecuteTool = Tool.define(
           description:
             "Execute SQL against a connected data warehouse. Returns all selected columns as a formatted table. full_text_columns prioritizes named cells within the ordinary output budget and always saves returned rows to result_path; read with char_offset/max_chars recovers clipped text. [] or null, or omitting the field, turns the mode off. A non-empty list caps preview rows at 20: omit limit to use the default; larger limits clamp to 20 with a result note. Missing column names produce a bounded note listing available columns while still returning rows. " +
             "Provide exactly one of query, query_from or queries. query_from runs a read-only generator SELECT and executes its single SQL string result (up to 1 MiB) as a read-only SELECT on warehouse, without previewing or retyping the generated SQL. " +
-            `queries runs up to ${MAX_BATCH_QUERIES} read-only queries in order in one call and returns one labeled result per query; a later query can reference an earlier one with {{label.column}} (value list) or {{label}} (scratch table). ` +
+            `queries runs up to ${MAX_BATCH_QUERIES} read-only queries in order in one call and returns one labeled result per query; a later query can reference an earlier one with IN ({{label.column}}) (its values) or {{label}} (scratch table). ` +
             "For DuckDB table sets, generate query_table([...], true) with escaped table-name string literals. For thousands of tables, UNION ALL BY NAME batches of at most 128 names to stay within the default expression depth.",
           parameters,
           formatValidationError: (error: z.ZodError) => error.issues?.map((issue) => issue.message).join("; ") || LIMIT_ERROR,
@@ -598,8 +598,9 @@ async function executeBatch(
 }
 
 /**
- * Replaces {{label.column}} with a literal list of that earlier step's distinct column values ((...) for SQL, a JSON
- * array for MongoDB) and {{label}} with the scratch table holding its rows. Throws, failing only this step, when the
+ * Replaces {{label.column}} with that earlier step's distinct column values as comma-separated literals (no brackets,
+ * so `IN ({{x.id}})`, a DuckDB list `[{{x.id}}]` and a MongoDB `[{{x.id}}]` all work; NULL when empty) and {{label}}
+ * with the scratch table holding its rows. Throws, failing only this step, when the
  * reference names no earlier successful step, a missing column, a step with more than MAX_BOUND_ROWS rows, or a
  * table reference outside scratch.
  */
@@ -624,11 +625,13 @@ function resolveStepRefs(
       return table
     }
     const index = source.columns.findIndex((name) => name.toLowerCase() === column.toLowerCase())
+    // Some drivers return no column names for an empty result; an empty step is an empty list either way.
+    if (index < 0 && !source.rows.length && !source.columns.length) return isMongoWarehouse(warehouse) ? "null" : "NULL"
     if (index < 0) throw new Error(`${match}: step "${ref}" has no column ${column} (columns: ${source.columns.join(", ")}).`)
     const values = [...new Set(source.rows.map((row) => row[index]).filter((value) => value !== null && value !== undefined))]
-    if (isMongoWarehouse(warehouse)) return JSON.stringify(values)
+    if (isMongoWarehouse(warehouse)) return values.map((value) => JSON.stringify(value)).join(", ") || "null"
     const mysql = ["mysql", "mariadb"].includes(Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? "")
-    return values.length ? `(${values.map((value) => sqlLiteral(value, mysql)).join(", ")})` : "(NULL)"
+    return values.length ? values.map((value) => sqlLiteral(value, mysql)).join(", ") : "NULL"
   })
 }
 
