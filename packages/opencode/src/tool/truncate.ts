@@ -54,7 +54,7 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Truncate") {}
 
-// altimate_change start — let standalone MCP sessions share output handling with private storage and neutral hints.
+// altimate_change start — standalone MCP sessions share output handling with private storage and neutral hints (inner notes are plain comments: markers do not nest); carries upstream_fix: age files by mtime, not decoded ID timestamps.
 export function makeLayer(
   options: {
     directory?: string
@@ -69,7 +69,7 @@ export function makeLayer(
       const fs = yield* FSUtil.Service
 
       const cleanup = Effect.fn("Truncate.cleanup")(function* () {
-        // altimate_change start — upstream_fix: age files by mtime, not decoded ID timestamps.
+        // Age files by mtime, not decoded ID timestamps (upstream fix).
         // Identifier packs `timestamp * 4096` into 48 bits, which wraps every
         // 2^36 ms (~795 days) — the 26th wrap landed 2026-08-14T11:19:55Z, after
         // which every new ID decoded as "ancient" and cleanup deleted files the
@@ -89,7 +89,6 @@ export function makeLayer(
           if (mtimeMs >= cutoffMs) continue
           yield* fs.remove(file).pipe(Effect.catch(() => Effect.void))
         }
-        // altimate_change end
       })
 
       const write = Effect.fn("Truncate.write")(function* (text: string) {
@@ -110,7 +109,7 @@ export function makeLayer(
         }
       })
 
-      // altimate_change start — default direction "middle" (head+tail,
+      // Default direction "middle" (head+tail,
       // tail-weighted elision) via the shared truncate-core.ts algorithm.
       const output = Effect.fn("Truncate.output")(function* (
         text: string,
@@ -146,7 +145,6 @@ export function makeLayer(
           outputPath: file,
         } as const
       })
-      // altimate_change end
 
       yield* cleanup().pipe(
         Effect.catchCause((cause) => Effect.logError("truncation cleanup failed", { cause: Cause.pretty(cause) })),

@@ -5,6 +5,8 @@ import path from "node:path"
 import os from "node:os"
 import { Database } from "bun:sqlite"
 
+const CLI_ENTRY = path.resolve(import.meta.dir, "../../../src/index.ts")
+
 // Minimal newline-delimited JSON-RPC client over the child's stdio. The full suite shares one Bun process and
 // test/mcp/* mock the MCP SDK client modules (never restored), so using the SDK here would talk to those mocks.
 function rpcClient(child: ReturnType<typeof Bun.spawn>) {
@@ -53,19 +55,19 @@ for (const allowWrite of [false, true]) {
     const connections = path.join(dir, "connections.json")
     await Bun.write(connections, JSON.stringify({ source: { type: "sqlite", path: "db.sqlite" } }))
     // Any network attempt, including module initialization, fails this test. stdout must contain only MCP frames.
+    // The guard is an entry wrapper, not `--preload`: the package bunfig.toml `preload` replaces a CLI one.
     const guard = path.join(dir, "no-network.ts")
     await Bun.write(
       guard,
-      'globalThis.fetch = (() => { process.stderr.write("UNEXPECTED_NETWORK_CALL\\n"); throw new Error("No network allowed") }) as typeof fetch\n',
+      'globalThis.fetch = (() => { process.stderr.write("UNEXPECTED_NETWORK_CALL\\n"); throw new Error("No network allowed") }) as typeof fetch\n' +
+        `process.stderr.write("NETWORK_GUARD_ACTIVE\\n")\nawait import(${JSON.stringify(CLI_ENTRY)})\n`,
     )
     const child = Bun.spawn(
       [
         process.execPath,
         "run",
         "--conditions=browser",
-        "--preload",
         guard,
-        "src/index.ts",
         "mcp",
         "serve",
         "--connections",
@@ -115,6 +117,7 @@ for (const allowWrite of [false, true]) {
       if (spill) expect(await Bun.file(spill).exists()).toBe(false)
       await rm(dir, { recursive: true, force: true })
     }
+    expect(stderr).toContain("NETWORK_GUARD_ACTIVE")
     expect(stderr).not.toContain("UNEXPECTED_NETWORK_CALL")
   }, 15_000)
 }
@@ -134,6 +137,53 @@ test("CLI exits cleanly when the client closes stdin", async () => {
     expect(await new Response(process.stderr).text()).toBe("")
   } finally {
     process.kill()
+  }
+}, 15_000)
+
+test("global --log-level and --integrations apply to mcp serve", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-stdio-flags-"))
+  // Runs at exit, after the CLI middleware: logs through the same shim instance and reports the integrations mode.
+  const probe = path.join(dir, "probe.ts")
+  const shim = path.resolve(import.meta.dir, "../../../src/altimate/util/log.ts")
+  await Bun.write(
+    probe,
+    `import { Log } from ${JSON.stringify(shim)}\n` +
+      `process.on("exit", () => { Log.Default.info("probe-info-line"); Log.Default.error("probe-error-line"); ` +
+      `require("node:fs").writeSync(2, "integrations=" + process.env.ALTIMATE_INTEGRATIONS + "\\n") })\n` +
+      `await import(${JSON.stringify(CLI_ENTRY)})\n`,
+  )
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "run",
+      "--conditions=browser",
+      probe,
+      "mcp",
+      "serve",
+      "--print-logs",
+      "--log-level",
+      "ERROR",
+      "--integrations",
+      "local",
+    ],
+    {
+      cwd: path.resolve(import.meta.dir, "../../.."),
+      env: { ...process.env, ALTIMATE_TELEMETRY_DISABLED: "1", ALTIMATE_LOG_LEVEL: "", OPENCODE_LOG_LEVEL: "" },
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  )
+  child.stdin.end()
+  try {
+    expect(await child.exited).toBe(0)
+    const stderr = await new Response(child.stderr).text()
+    expect(stderr).toContain("integrations=local")
+    expect(stderr).toContain("probe-error-line")
+    expect(stderr).not.toContain("probe-info-line")
+  } finally {
+    child.kill()
+    await rm(dir, { recursive: true, force: true })
   }
 }, 15_000)
 

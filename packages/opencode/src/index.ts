@@ -137,16 +137,19 @@ let cli = yargs(args)
   .middleware(async (opts) => {
     if (opts.printLogs) process.env.OPENCODE_PRINT_LOGS = "1"
     if (opts.logLevel) process.env.OPENCODE_LOG_LEVEL = opts.logLevel
-    // altimate_change start — MCP stdio needs no banner, telemetry startup or agent initialization
-    if (opts._[0] === "mcp" && opts._[1] === "serve") return
+    // altimate_change start — the altimate log shim read its level when it was imported, before this ran
+    if (opts.logLevel) AltimateLog.setLevel(opts.logLevel as AltimateLog.Level)
+    // altimate_change end
+    // altimate_change start - workspace precedence escape hatch. Process-wide, not
+    // per session: an env var inherited by child processes, and under `serve` (and
+    // `mcp serve`) it covers every session that process hosts.
+    if (opts.integrations) process.env.ALTIMATE_INTEGRATIONS = String(opts.integrations)
     // altimate_change end
     if (opts.pure) {
       process.env.OPENCODE_PURE = "1"
     }
-    // altimate_change start - workspace precedence escape hatch. Process-wide, not
-    // per session: an env var inherited by child processes, and under `serve` it
-    // covers every session that process hosts.
-    if (opts.integrations) process.env.ALTIMATE_INTEGRATIONS = String(opts.integrations)
+    // altimate_change start — MCP stdio needs no banner, telemetry startup or agent initialization
+    if (opts._[0] === "mcp" && opts._[1] === "serve") return
     // altimate_change end
 
     Heap.start()

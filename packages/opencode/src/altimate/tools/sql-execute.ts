@@ -320,7 +320,15 @@ export const SqlExecuteTool = Tool.define(
                 limit: Math.max(limit, budget?.minRows ?? 0),
                 query_timeout_ms: args.query_timeout_ms,
                 ...(readOnly ? { read_only: true } : {}),
-              }, { signal: ctx.abort, sessionID: ctx.sessionID, ...(ctx.extra?.forceReadOnly === true ? { forceReadOnly: true } : {}) })
+              }, {
+                signal: ctx.abort,
+                sessionID: ctx.sessionID,
+                // forceReadOnly protects source connections; the session's own scratch tables take the
+                // same table writes here that need no write permission above.
+                ...(ctx.extra?.forceReadOnly === true && !(queryType === "write" && isScratch(args.warehouse) && isScratchSafeWrite(sql))
+                  ? { forceReadOnly: true }
+                  : {}),
+              })
 
               // altimate_change start — a failure must not be rendered as "(0 rows)".
               // sql.execute never throws: it catches every connection and query error

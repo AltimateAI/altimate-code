@@ -92,6 +92,14 @@ jobs:
               - 'packages/opencode/test/altimate/mcp-server/**'
               - 'packages/opencode/src/altimate/tools/schema-inspect.ts'
               - 'packages/opencode/src/altimate/tools/schema-values.ts'
+              # The tools the MCP server exposes; server.test.ts is their only real-driver run.
+              - 'packages/opencode/src/altimate/tools/warehouse-list.ts'
+              - 'packages/opencode/src/altimate/tools/warehouse-add.ts'
+              - 'packages/opencode/src/altimate/tools/sql-execute.ts'
+              - 'packages/opencode/src/altimate/tools/sql-check.ts'
+              - 'packages/opencode/src/altimate/tools/sql-materialize.ts'
+              - 'packages/opencode/src/altimate/tools/answer-commit*.ts'
+              - 'packages/opencode/src/tool/truncate.ts'
               # altimate_change end
               - 'packages/drivers/src/**'
               - 'packages/opencode/src/altimate/native/connections/**'

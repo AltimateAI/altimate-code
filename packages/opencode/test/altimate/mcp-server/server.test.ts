@@ -212,6 +212,22 @@ mcpTest("materializes read-only sources into scratch, refuses source mutations",
   expect(denied.isError).toBe(true)
 })
 
+mcpTest("scratch table writes run without --allow-write; source writes stay refused", async () => {
+  const { call } = await fixture()
+  for (const query of ["CREATE TABLE notes (n INTEGER)", "INSERT INTO notes VALUES (41)", "UPDATE notes SET n = n + 1"]) {
+    const result = await call("sql_execute", { warehouse: "scratch", query })
+    expect(result.isError, `${query}: ${text(result)}`).toBe(false)
+  }
+  expect(text(await call("sql_execute", { warehouse: "scratch", query: "SELECT n FROM notes" }))).toContain("42")
+  expect((await call("sql_execute", { warehouse: "source", query: "INSERT INTO items VALUES (3, 'fig')" })).isError).toBe(true)
+})
+
+mcpTest("a discovered connection without a string type does not stop startup", async () => {
+  Registry.setConfigs({ broken: {} as never })
+  const server = await createServer({})
+  await server.close()
+})
+
 mcpTest("MCP cancellation reaches the active tool abort signal", async () => {
   const { client } = await fixture()
   const started = Promise.withResolvers<AbortSignal>()
