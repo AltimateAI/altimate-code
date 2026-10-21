@@ -81,6 +81,16 @@ test("ALTIMATE_CLI_DISABLE_PROJECT_CONFIG skips project files", async () => {
   expect(await outputLimits()).toEqual({ maxLines: MAX_LINES, maxBytes: MAX_BYTES })
 })
 
+test("substitutes {env:VAR} as the agent loader does", async () => {
+  process.env.MCP_OUTPUT_TEST_LINES = "11"
+  try {
+    await writeFile(path.join(repo, "opencode.json"), '{ "tool_output": { "max_lines": {env:MCP_OUTPUT_TEST_LINES} } }')
+    expect(await outputLimits()).toEqual({ maxLines: 11, maxBytes: MAX_BYTES })
+  } finally {
+    delete process.env.MCP_OUTPUT_TEST_LINES
+  }
+})
+
 test("an unreadable config path does not stop startup", async () => {
   await mkdir(path.join(repo, "sub", "opencode.json"))
   await writeFile(path.join(repo, "opencode.jsonc"), output({ max_lines: 8 }))

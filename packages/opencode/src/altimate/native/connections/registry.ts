@@ -401,8 +401,9 @@ const DRIVER_MAP: Record<string, string> = {
  * different service with different credentials and endpoints, where Postgres
  * wire-compatibility is an implementation detail rather than an identity.
  */
-export function canonicalType(type: string | undefined | null): string | null {
-  if (!type) return null
+export function canonicalType(type: unknown): string | null {
+  // A hand-edited connection may carry a non-string type; it maps to no driver rather than throwing.
+  if (typeof type !== "string" || !type) return null
   const driverPath = DRIVER_MAP[type.toLowerCase()]
   if (!driverPath) return null
   return driverPath.slice(driverPath.lastIndexOf("/") + 1)

@@ -222,10 +222,25 @@ mcpTest("scratch table writes run without --allow-write; source writes stay refu
   expect((await call("sql_execute", { warehouse: "source", query: "INSERT INTO items VALUES (3, 'fig')" })).isError).toBe(true)
 })
 
-mcpTest("a discovered connection without a string type does not stop startup", async () => {
-  Registry.setConfigs({ broken: {} as never })
+mcpTest("a discovered connection without a string type stops neither startup nor warehouse_list", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-malformed-type-"))
+  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+  const db = new Database(path.join(dir, "ok.sqlite"))
+  db.run("CREATE TABLE items (id INTEGER)")
+  db.close()
+  Registry.setConfigs({ missing: {} as never, numeric: { type: 42 } as never, ok: { type: "sqlite", path: path.join(dir, "ok.sqlite") } })
   const server = await createServer({})
-  await server.close()
+  const client = new Client({ name: "test", version: "1" }, { capabilities: {} })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await server.connect(serverTransport)
+  await client.connect(clientTransport)
+  cleanups.push(async () => {
+    await client.close()
+    await server.close()
+  })
+  const listed = await client.callTool({ name: "warehouse_list", arguments: {} })
+  expect(listed.isError, text(listed)).toBe(false)
+  expect(text(listed)).toContain("ok")
 })
 
 mcpTest("MCP cancellation reaches the active tool abort signal", async () => {

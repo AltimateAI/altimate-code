@@ -6,6 +6,7 @@ import { Flag, env } from "@opencode-ai/core/flag/flag"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "@/global"
 import { ConfigPaths } from "@/config/paths"
+import { ConfigVariable } from "@/config/variable"
 import { git } from "@/util/git"
 import { MAX_LINES, MAX_BYTES } from "@/tool/truncate-core"
 
@@ -37,15 +38,20 @@ async function projectWorktree(directory: string): Promise<string> {
 export async function outputLimits() {
   const directory = process.cwd()
   const limits = { maxLines: MAX_LINES, maxBytes: MAX_BYTES }
-  const apply = (text: string) => {
-    const output = parse(text)?.tool_output
+  // `{env:VAR}`, `${VAR}` and `{file:path}` resolve as in the agent loader; text that cannot be substituted is skipped.
+  const apply = async (text: string, from: { path: string } | { source: string }) => {
+    const expanded = await ConfigVariable.substitute(
+      "path" in from ? { text, type: "path", path: from.path } : { text, type: "virtual", dir: directory, source: from.source },
+    ).catch(() => undefined)
+    if (!expanded) return
+    const output = parse(expanded)?.tool_output
     if (Number.isInteger(output?.max_lines) && output.max_lines > 0) limits.maxLines = output.max_lines
     if (Number.isInteger(output?.max_bytes) && output.max_bytes > 0) limits.maxBytes = output.max_bytes
   }
   // A missing or unreadable file contributes nothing; output limits never stop the server from starting.
   const load = async (file: string) => {
     const text = await readFile(file, "utf8").catch(() => undefined)
-    if (text) apply(text)
+    if (text) await apply(text, { path: file })
   }
   const worktree = await projectWorktree(directory)
   const discover = <A>(effect: Effect.Effect<A, unknown, FSUtil.Service>, fallback: A) =>
@@ -69,6 +75,6 @@ export async function outputLimits() {
     }
   }
   const content = env("OPENCODE_CONFIG_CONTENT")
-  if (content) apply(content)
+  if (content) await apply(content, { source: "OPENCODE_CONFIG_CONTENT" })
   return limits
 }
