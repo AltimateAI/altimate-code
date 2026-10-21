@@ -17,11 +17,11 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 export const SERVER_INSTRUCTIONS = [
   "Analyst method for data questions:",
-  "1. Connections are listed below; warehouse_list refreshes them with columns and a sample row. If none fit, warehouse_add one.",
+  "1. Connections are listed below (warehouse_list adds columns and a sample row); if none fit, warehouse_add one.",
   "2. Check stored value formats before filtering or joining: sql_execute `tables` returns value profiles in the same call as your queries.",
   "3. Compute in the database; chain dependent steps (any connection) in one sql_execute `queries` call.",
   "4. Cross-connection joins: sql_materialize the smaller filtered side into `scratch` and join there.",
-  "5. Finish with answer_commit (`asked` = the requested items, one field each); reply with exactly its FINAL ANSWER text.",
+  "5. End with `FINAL ANSWER: <value(s)>` naming every requested item (entity and related item both); answer_commit is optional.",
 ].join("\n")
 
 /**
