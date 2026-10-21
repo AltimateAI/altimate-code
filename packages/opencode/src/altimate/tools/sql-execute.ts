@@ -51,7 +51,14 @@ const BATCH_MAX_PREVIEW_BYTES = 24 * 1024
 interface ItemBudget {
   maxBytes: number
   maxLines: number
+  // A later batch step references this one: fetch at least this many rows and hand back the raw result.
+  minRows?: number
+  capture?: (result: SqlExecuteResult) => void
 }
+
+// Batch steps reference earlier steps: {{label.column}} (literal value list) or {{label}} (scratch table).
+const STEP_REF = /\{\{([A-Za-z_]\w*)(?:\.([A-Za-z_]\w*))?\}\}/g
+const MAX_BOUND_ROWS = 1000
 
 function generatedRead(sql: string, warehouse: string, stage: "source" | "result"): string {
   try {
@@ -75,7 +82,7 @@ const parameters = z
     .max(MAX_BATCH_QUERIES, `queries accepts at most ${MAX_BATCH_QUERIES} items`)
     .nullish()
     .describe(
-      `Up to ${MAX_BATCH_QUERIES} independent read-only queries run in one call, each returning its own labeled result; one failing query does not stop the others. Use instead of query when no query depends on another's result.`,
+      `Up to ${MAX_BATCH_QUERIES} read-only queries run in order in one call, each returning its own labeled result; one failing query does not stop the others. A later query can use an earlier one's rows: {{label.column}} becomes a literal value list (at most ${MAX_BOUND_ROWS} rows) and {{label}} a scratch table (warehouse scratch).`,
     ),
   query_from: z
     .object({
@@ -123,7 +130,7 @@ export const SqlExecuteTool = Tool.define(
           description:
             "Execute SQL against a connected data warehouse. Returns all selected columns as a formatted table. full_text_columns prioritizes named cells within the ordinary output budget and always saves returned rows to result_path; read with char_offset/max_chars recovers clipped text. [] or null, or omitting the field, turns the mode off. A non-empty list caps preview rows at 20: omit limit to use the default; larger limits clamp to 20 with a result note. Missing column names produce a bounded note listing available columns while still returning rows. " +
             "Provide exactly one of query, query_from or queries. query_from runs a read-only generator SELECT and executes its single SQL string result (up to 1 MiB) as a read-only SELECT on warehouse, without previewing or retyping the generated SQL. " +
-            `queries runs up to ${MAX_BATCH_QUERIES} independent read-only queries in one call and returns one labeled result per query; batch queries that do not depend on each other. ` +
+            `queries runs up to ${MAX_BATCH_QUERIES} read-only queries in order in one call and returns one labeled result per query; a later query can reference an earlier one with {{label.column}} (value list) or {{label}} (scratch table). ` +
             "For DuckDB table sets, generate query_table([...], true) with escaped table-name string literals. For thousands of tables, UNION ALL BY NAME batches of at most 128 names to stay within the default expression depth.",
           parameters,
           formatValidationError: (error: z.ZodError) => error.issues?.map((issue) => issue.message).join("; ") || LIMIT_ERROR,
@@ -310,7 +317,7 @@ export const SqlExecuteTool = Tool.define(
               const result = await Dispatcher.call("sql.execute", {
                 sql: query,
                 warehouse: args.warehouse,
-                limit,
+                limit: Math.max(limit, budget?.minRows ?? 0),
                 query_timeout_ms: args.query_timeout_ms,
                 ...(readOnly ? { read_only: true } : {}),
               }, { signal: ctx.abort, sessionID: ctx.sessionID, ...(ctx.extra?.forceReadOnly === true ? { forceReadOnly: true } : {}) })
@@ -341,6 +348,7 @@ export const SqlExecuteTool = Tool.define(
                 })
               }
               // altimate_change end
+              budget?.capture?.(result)
 
               // altimate_change start — emit SQL structure fingerprint telemetry on the
               // success path, BEFORE formatting the result. A query that reached this point
@@ -396,7 +404,7 @@ export const SqlExecuteTool = Tool.define(
               const lint = await lintSqlResult(sql, args.warehouse, ctx.sessionID)
               const formatted = await formatSqlResult(result, {
                 mcpClient: ctx.extra?.mcpClient === true,
-                limit,
+                limit: Math.max(limit, budget?.minRows ?? 0),
                 fullTextColumns: args.full_text_columns,
                 // The statement text lets the formatter add the empty/near-empty
                 // result hint when a string-literal filter is present.
@@ -512,21 +520,36 @@ async function executeBatch(
   let linesLeft = configured.maxLines
   const blocks: string[] = []
   const summary: { label: string; rowCount: number; error?: string; result_path?: string }[] = []
+  const labels = items.map((item, index) => (item.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60) || `q${index + 1}`)
+  // Steps a later step references, as a value list ({{label.column}}) or a scratch table ({{label}}).
+  const listRefs = new Set<string>()
+  const tableRefs = new Set<string>()
+  for (const item of items.slice(1))
+    for (const [, ref, column] of item.query.matchAll(STEP_REF)) (column ? listRefs : tableRefs).add(ref)
+  const captured = new Map<string, SqlExecuteResult>()
+  const stored = new Map<string, string>()
   for (const [index, item] of items.entries()) {
     ctx.abort.throwIfAborted()
     const share = Math.floor(bytesLeft / (items.length - index))
     const lineShare = Math.max(1, Math.floor(linesLeft / (items.length - index)))
-    const label = (item.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60) || `q${index + 1}`
+    const label = labels[index]
     const header = `[${label}]\n`
     const separator = blocks.length ? "\n\n" : ""
     const reserved = Buffer.byteLength(separator + header, "utf8") + Buffer.byteLength(BATCH_CLIPPED, "utf8")
-    const budget = { maxBytes: Math.max(0, share - reserved), maxLines: Math.max(1, lineShare - 2) }
+    const referenced = listRefs.has(label) || tableRefs.has(label)
+    const budget: ItemBudget = {
+      maxBytes: Math.max(0, share - reserved),
+      maxLines: Math.max(1, lineShare - 2),
+      ...(referenced ? { minRows: MAX_BOUND_ROWS, capture: (raw: SqlExecuteResult) => captured.set(label, raw) } : {}),
+    }
+    const warehouse = item.warehouse?.trim() || args.warehouse
     let result: LegacyResult
     try {
+      const query = resolveStepRefs(item.query, labels.slice(0, index), captured, stored, warehouse)
       result = await run(
         {
-          query: item.query,
-          warehouse: item.warehouse?.trim() || args.warehouse,
+          query,
+          warehouse,
           limit: args.limit,
           full_text_columns: args.full_text_columns,
           query_timeout_ms: args.query_timeout_ms,
@@ -537,6 +560,14 @@ async function executeBatch(
       if (ctx.abort.aborted) throw error
       const message = error instanceof Error ? error.message : String(error)
       result = { title: "SQL: ERROR", metadata: { error: message }, output: `Failed to execute SQL: ${message}` }
+    }
+    const failedStep = typeof result.metadata?.error === "string" && result.metadata?.success !== true
+    if (failedStep) captured.delete(label)
+    // A step referenced as {{label}} is stored in scratch (result_N), like a spilled result.
+    const raw = captured.get(label)
+    if (raw && tableRefs.has(label) && !raw.truncated) {
+      const table = await storeSpill(raw, { signal: ctx.abort, sessionID: ctx.sessionID })
+      if (table) stored.set(label, table)
     }
     const body = clipToBudget(result.output, budget.maxBytes, budget.maxLines)
     const block = separator + header + body
@@ -564,6 +595,50 @@ async function executeBatch(
     },
     output: blocks.join(""),
   }
+}
+
+/**
+ * Replaces {{label.column}} with a literal list of that earlier step's distinct column values ((...) for SQL, a JSON
+ * array for MongoDB) and {{label}} with the scratch table holding its rows. Throws, failing only this step, when the
+ * reference names no earlier successful step, a missing column, a step with more than MAX_BOUND_ROWS rows, or a
+ * table reference outside scratch.
+ */
+function resolveStepRefs(
+  query: string,
+  earlier: string[],
+  captured: Map<string, SqlExecuteResult>,
+  stored: Map<string, string>,
+  warehouse: string | undefined,
+): string {
+  return query.replace(STEP_REF, (match, ref: string, column: string | undefined) => {
+    if (!earlier.includes(ref)) throw new Error(`${match} names no earlier step in this call.`)
+    const source = captured.get(ref)
+    if (!source) throw new Error(`${match}: step "${ref}" failed, so this step did not run.`)
+    if (source.truncated)
+      throw new Error(`${match}: step "${ref}" has more than ${MAX_BOUND_ROWS} rows; filter or aggregate it first.`)
+    if (!column) {
+      if (!isScratch(warehouse))
+        throw new Error(`${match} is a scratch table: run this step on warehouse "scratch", or use {{${ref}.column}}.`)
+      const table = stored.get(ref)
+      if (!table) throw new Error(`${match}: storing step "${ref}" in scratch failed.`)
+      return table
+    }
+    const index = source.columns.findIndex((name) => name.toLowerCase() === column.toLowerCase())
+    if (index < 0) throw new Error(`${match}: step "${ref}" has no column ${column} (columns: ${source.columns.join(", ")}).`)
+    const values = [...new Set(source.rows.map((row) => row[index]).filter((value) => value !== null && value !== undefined))]
+    if (isMongoWarehouse(warehouse)) return JSON.stringify(values)
+    const mysql = ["mysql", "mariadb"].includes(Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? "")
+    return values.length ? `(${values.map((value) => sqlLiteral(value, mysql)).join(", ")})` : "(NULL)"
+  })
+}
+
+function sqlLiteral(value: unknown, mysql: boolean): string {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value)
+  if (typeof value === "bigint") return value.toString()
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE"
+  const text = typeof value === "string" ? value : value instanceof Date ? value.toISOString() : JSON.stringify(value)
+  const escaped = text.replaceAll("'", "''")
+  return `'${mysql ? escaped.replaceAll("\\", "\\\\") : escaped}'`
 }
 
 const BATCH_CLIPPED = "…[output clipped]"

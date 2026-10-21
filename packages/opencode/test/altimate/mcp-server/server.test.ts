@@ -1152,3 +1152,106 @@ mcpTest("warehouse_add of a SQLite file this process cannot write opens it read-
   expect(rows.body).toContain("quince")
 })
 // altimate_change end
+
+// altimate_change start — chained batch steps: {{label.column}} value lists and {{label}} scratch tables
+async function chainFixture() {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-chain-test-"))
+  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+  const a = new Database(path.join(dir, "a.sqlite"))
+  a.run("CREATE TABLE items (id INTEGER, name TEXT)")
+  a.run("INSERT INTO items VALUES (1, 'apple'), (2, 'pear'), (3, 'o''brien')")
+  a.run("CREATE TABLE big (id INTEGER)")
+  a.run(`INSERT INTO big VALUES ${Array.from({ length: 1500 }, (_, i) => `(${i})`).join(",")}`)
+  a.close()
+  const b = new Database(path.join(dir, "b.sqlite"))
+  b.run("CREATE TABLE prices (item_id INTEGER, label TEXT, price REAL)")
+  b.run("INSERT INTO prices VALUES (1, 'apple', 3.5), (2, 'pear', 1.25), (3, 'o''brien', 9.75)")
+  b.close()
+  const config = path.join(dir, "connections.json")
+  await Bun.write(config, JSON.stringify({ a: { type: "sqlite", path: "a.sqlite" }, b: { type: "sqlite", path: "b.sqlite" } }))
+  const server = await createServer({ connections: config })
+  const client = new Client({ name: "test", version: "1" })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await server.connect(serverTransport)
+  await client.connect(clientTransport)
+  cleanups.push(async () => {
+    await client.close()
+    await server.close()
+    await Registry.closeAll()
+  })
+  return async (queries: Record<string, unknown>[], warehouse = "a") => {
+    const result = await client.callTool({ name: "sql_execute", arguments: { warehouse, queries } })
+    return { result, body: (result.content as { text?: string }[]).map((part) => part.text ?? "").join("\n") }
+  }
+}
+
+function block(body: string, label: string): string {
+  const start = body.indexOf(`[${label}]`)
+  if (start < 0) return ""
+  const next = body.indexOf("\n\n[", start + 1)
+  return body.slice(start, next < 0 ? undefined : next)
+}
+
+mcpTest("a later batch step filters on an earlier step's column on the same connection", async () => {
+  const batch = await chainFixture()
+  const { result, body } = await batch([
+    { label: "pick", query: "SELECT id FROM items WHERE name IN ('apple', 'o''brien')" },
+    { label: "names", query: "SELECT name FROM items WHERE id IN {{pick.id}} ORDER BY id" },
+  ])
+  expect(result.isError).toBe(false)
+  expect(block(body, "names")).toContain("apple")
+  expect(block(body, "names")).toContain("o'brien")
+  expect(block(body, "names")).not.toContain("pear")
+})
+
+mcpTest("a batch step feeds another connection's IN list, and a scratch step joins stored step rows", async () => {
+  const batch = await chainFixture()
+  const { result, body } = await batch([
+    { label: "ids", warehouse: "a", query: "SELECT id, name FROM items WHERE name <> 'pear'" },
+    { label: "price", warehouse: "b", query: "SELECT item_id, label, price FROM prices WHERE label IN {{ids.name}}" },
+    {
+      label: "joined",
+      warehouse: "scratch",
+      query: "SELECT i.name, p.price FROM {{ids}} i JOIN {{price}} p ON p.item_id = i.id ORDER BY p.price DESC",
+    },
+  ])
+  expect(result.isError).toBe(false)
+  expect(block(body, "price")).toContain("3.5")
+  expect(block(body, "price")).not.toContain("1.25")
+  expect(block(body, "joined")).toContain("9.75")
+  expect(block(body, "joined")).toContain("o'brien")
+  // A table reference outside scratch fails only that step.
+  const outside = await batch([
+    { label: "ids", query: "SELECT id FROM items" },
+    { label: "bad", query: "SELECT * FROM {{ids}}" },
+  ])
+  expect(block(outside.body, "bad")).toContain('warehouse "scratch"')
+})
+
+mcpTest("a value list from a step with more than the bound row cap fails that step only", async () => {
+  const batch = await chainFixture()
+  const { body } = await batch([
+    { label: "all", query: "SELECT id FROM big" },
+    { label: "use", query: "SELECT count(*) AS n FROM big WHERE id IN {{all.id}}" },
+    { label: "few", query: "SELECT id FROM big WHERE id < 3" },
+    { label: "small", query: "SELECT count(*) AS n FROM big WHERE id IN {{few.id}}" },
+  ])
+  expect(block(body, "use")).toContain("more than 1000 rows")
+  expect(block(body, "small")).toMatch(/\b3\b/)
+})
+
+mcpTest("a failing batch step fails its dependents and the remaining steps still run", async () => {
+  const batch = await chainFixture()
+  const { result, body } = await batch([
+    { label: "bad", query: "SELEC id FROM items" },
+    { label: "dep", query: "SELECT * FROM items WHERE id IN {{bad.id}}" },
+    { label: "missing", query: "SELECT * FROM items WHERE id IN {{nope.id}}" },
+    { label: "ok", query: "SELECT 42 AS answer" },
+  ])
+  expect(result.isError).toBe(false)
+  expect(block(body, "bad")).toContain("Failed")
+  expect(block(body, "dep")).toContain('step "bad" failed')
+  expect(block(body, "missing")).toContain("names no earlier step")
+  expect(block(body, "ok")).toContain("42")
+})
+// altimate_change end

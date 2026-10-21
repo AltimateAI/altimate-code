@@ -26,7 +26,7 @@ export const descriptions: Record<string, string> = {
   warehouse_add: "Add a connection when warehouse_list shows none or the one you need is missing.",
   schema_inspect: "List tables when table is omitted; otherwise one table's columns and value profile.",
   sql_execute:
-    "Run SQL and return rows. Put independent queries in one call with `queries`; `tables` describes tables in the same call. Source writes need --allow-write.",
+    "Run SQL and return rows. Chain queries in one call with `queries`: a later one can use {{label.column}} (value list from an earlier result) or {{label}} (its rows as a scratch table, warehouse scratch). `tables` describes tables first. Source writes need --allow-write.",
   sql_check: "Read-only data check: fanout, keys, grain, nulls or coverage.",
   sql_materialize: "Store a read-only query's rows as a scratch table, to join across connections.",
   answer_commit:
@@ -54,7 +54,7 @@ const PROPERTY_DESCRIPTIONS: Record<string, Record<string, string | null | typeo
   },
   sql_execute: {
     query: "SQL, or a MongoDB JSON command",
-    queries: "Up to 8 independent queries, one labeled result each",
+    queries: "Up to 8 queries, run in order, one labeled result each",
     "queries[].label": null,
     "queries[].query": null,
     "queries[].warehouse": null,
