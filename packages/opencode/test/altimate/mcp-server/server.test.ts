@@ -65,8 +65,10 @@ function text(result: Awaited<ReturnType<Client["callTool"]>>) {
 mcpTest("initialize result carries short analyst-method instructions", async () => {
   const { client } = await fixture()
   const instructions = client.getInstructions()
-  expect(instructions).toBe(SERVER_INSTRUCTIONS)
-  expect(instructions!.split(/\s+/).length).toBeLessThanOrEqual(120)
+  expect(instructions!.startsWith(SERVER_INSTRUCTIONS)).toBe(true)
+  // The connection list known at startup follows the method, so no warehouse_list call is needed to start.
+  expect(instructions).toContain("Connections:\n- source (sqlite): items")
+  expect(SERVER_INSTRUCTIONS.split(/\s+/).length).toBeLessThanOrEqual(120)
   for (const tool of ["warehouse_list", "warehouse_add", "sql_execute", "sql_materialize", "answer_commit"]) {
     expect(instructions).toContain(tool)
   }
@@ -89,7 +91,7 @@ mcpTest("the default toolset is five tools; sql_execute `tables` describes table
     0,
   )
   expect(declared).toBeLessThan(5_200)
-  expect(client.getInstructions()!.length).toBeLessThanOrEqual(600)
+  expect(SERVER_INSTRUCTIONS.length).toBeLessThanOrEqual(620)
   const sqlExecute = listed.tools.find((t) => t.name === "sql_execute")!
   expect(Object.keys(sqlExecute.inputSchema.properties ?? {})).toContain("tables")
   const fused = await call("sql_execute", {
@@ -473,6 +475,9 @@ mcpTest("shared truncation honors configured limits and preserves failure wordin
 for (const allowWrite of [false, true]) {
   mcpTest(`DuckDB hidden function writes reach the database read-only guard (allow-write=${allowWrite})`, async () => {
     const { call } = await fixture(allowWrite)
+    // The server opened the fixture's SQLite connector to list its tables at startup; start from a clean registry.
+    await Registry.closeAll()
+    Registry.reset()
     Registry.setConfigs({ source: { type: "duckdb", path: ":memory:" } })
     const connector = await Registry.get("source")
     await connector.execute("CREATE SEQUENCE source_sequence")
@@ -1263,5 +1268,17 @@ mcpTest("a failing batch step fails its dependents and the remaining steps still
   expect(block(body, "dep")).toContain('step "bad" failed')
   expect(block(body, "missing")).toContain("names no earlier step")
   expect(block(body, "ok")).toContain("42")
+})
+// altimate_change end
+
+// altimate_change start — startup connection list in the instructions stays bounded
+mcpTest("a large catalog is listed by connection name only and the instructions stay within the cap", async () => {
+  const { client } = await fixture(false, {}, undefined, (db) => {
+    for (let i = 0; i < 60; i++) db.run(`CREATE TABLE wide_table_with_a_long_name_${i} (id INTEGER)`)
+  })
+  const instructions = client.getInstructions()!
+  expect(instructions).toContain("Connections:\n- source (sqlite)")
+  expect(instructions).not.toContain("wide_table_with_a_long_name_0")
+  expect(instructions.length - SERVER_INSTRUCTIONS.length).toBeLessThanOrEqual(1_250)
 })
 // altimate_change end

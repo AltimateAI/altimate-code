@@ -168,6 +168,48 @@ export async function discoverCatalog(warehouses: { name: string; type: string }
   return lines.join("\n")
 }
 
+const SUMMARY_BYTES = 1_200
+const SUMMARY_DEADLINE_MS = 2_000
+
+/**
+ * A compact connection list for the MCP server instructions: one line per connection with its type and, for small
+ * local catalogs, its table names. Bounded like discoverCatalog (local engines only, table budget, deadline) and by
+ * SUMMARY_BYTES; a connection whose tables do not fit is listed by name only. No columns, samples or row counts.
+ */
+export async function catalogSummary(warehouses: { name: string; type: string }[], context: DiscoveryContext): Promise<string> {
+  const deadline = Date.now() + SUMMARY_DEADLINE_MS
+  const timeLeft = () => deadline - Date.now()
+  const budget = { tables: TABLE_BUDGET, columns: 0, samples: 0 }
+  const lines: string[] = []
+  let bytes = 0
+  const shown = warehouses.filter((warehouse) => !isScratch(warehouse.name)).slice(0, MAX_CONNECTIONS)
+  for (const [index, warehouse] of shown.entries()) {
+    const head = `- ${warehouse.name} (${warehouse.type})`
+    // Keep room for a name-only line for every connection still to come.
+    const reserve = shown.slice(index + 1).reduce((total, next) => total + next.name.length + next.type.length + 8, 0)
+    let line = head
+    const config = Registry.getConfig(warehouse.name)
+    if (isLocalConnection(config) && timeLeft() > 0) {
+      context.signal.throwIfAborted()
+      const type = Registry.canonicalType(config?.type) ?? ""
+      const tables = await listTables(warehouse.name, type, budget, context, timeLeft).catch(() => {
+        context.signal.throwIfAborted()
+        return undefined
+      })
+      if (tables?.length) {
+        const names = tables.map((table) => (table.schema && table.schema !== "main" ? `${table.schema}.${table.name}` : table.name))
+        const full = `${head}: ${names.join(", ")}`
+        if (bytes + Buffer.byteLength(full, "utf8") + 1 + reserve <= SUMMARY_BYTES) line = full
+      }
+    }
+    if (bytes + Buffer.byteLength(line, "utf8") + 1 > SUMMARY_BYTES) break
+    lines.push(line)
+    bytes += Buffer.byteLength(line, "utf8") + 1
+  }
+  if (lines.length < warehouses.filter((warehouse) => !isScratch(warehouse.name)).length) lines.push("- (more: warehouse_list)")
+  return lines.join("\n")
+}
+
 /** The connection's tables in name order, or undefined when the catalog exceeds the remaining table budget. */
 async function listTables(
   warehouse: string,

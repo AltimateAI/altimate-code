@@ -9,6 +9,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 import * as Registry from "../native/connections/registry"
 import { createAdapter, descriptions } from "./adapter"
+import { catalogSummary } from "../tools/warehouse-discovery"
 import { readOnlyCaveat } from "../native/connections/read-only"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
@@ -16,12 +17,28 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 export const SERVER_INSTRUCTIONS = [
   "Analyst method for data questions:",
-  "1. Start with warehouse_list (local tables, columns, a sample row); if none fit, warehouse_add one.",
+  "1. Connections are listed below; warehouse_list refreshes them with columns and a sample row. If none fit, warehouse_add one.",
   "2. Check stored value formats before filtering or joining: sql_execute `tables` returns value profiles in the same call as your queries.",
   "3. Compute in the database; chain dependent steps (any connection) in one sql_execute `queries` call.",
   "4. Cross-connection joins: sql_materialize the smaller filtered side into `scratch` and join there.",
   "5. Finish with answer_commit (`asked` = the requested items, one field each); reply with exactly its FINAL ANSWER text.",
 ].join("\n")
+
+/**
+ * The analyst method plus the connection list known at startup (names, types, table names of small local catalogs;
+ * bounded by catalogSummary), so a client can start querying without a warehouse_list round trip. A failing or empty
+ * listing leaves the method alone.
+ */
+async function serverInstructions(): Promise<string> {
+  try {
+    const warehouses = Registry.list().warehouses
+    if (!warehouses.length) return SERVER_INSTRUCTIONS
+    const summary = await catalogSummary(warehouses, { signal: AbortSignal.timeout(5_000), sessionID: "mcp-startup" })
+    return summary ? `${SERVER_INSTRUCTIONS}\n\nConnections:\n${summary}` : SERVER_INSTRUCTIONS
+  } catch {
+    return SERVER_INSTRUCTIONS
+  }
+}
 
 /** Spilled results: a resource_link next to the text, which keeps the preview, row count and path. */
 function resultLinks(metadata: Record<string, unknown>) {
@@ -68,7 +85,7 @@ export async function createServer(options: ServeOptions = {}) {
   const adapter = await createAdapter(options)
   const server = new Server({ name: "altimate-code", version: InstallationVersion }, {
     capabilities: { tools: {}, prompts: {} },
-    instructions: SERVER_INSTRUCTIONS,
+    instructions: await serverInstructions(),
   })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [...adapter.tools].map(([name, tool]) => ({
