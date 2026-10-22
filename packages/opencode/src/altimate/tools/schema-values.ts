@@ -483,8 +483,9 @@ export async function profileValues(
       warehouse: target.name,
       limit: PROFILE_MAX_COLUMNS + 1,
       // A shorter deadline would restart a local engine and drop session temp tables; the sample is
-      // already bounded by its LIMIT. Remote stores (e.g. MotherDuck) keep the profiling cap.
-      ...(isLocalConnection(Registry.getConfig(target.name)) && (dialect === "sqlite" || dialect === "duckdb")
+      // already bounded by its LIMIT. SQLite always runs in the local helper (including `file:` URIs);
+      // remote DuckDB stores (e.g. MotherDuck) keep the profiling cap.
+      ...(dialect === "sqlite" || (dialect === "duckdb" && isLocalConnection(Registry.getConfig(target.name)))
         ? {}
         : { query_timeout_ms: PROFILE_TIMEOUT_MS }),
       ...(dialect === "postgres" ? { read_only: true } : {}),

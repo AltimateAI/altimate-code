@@ -209,6 +209,7 @@ describe("schema_inspect value grounding", () => {
     ["postgres", undefined],
     ["postgresql", undefined],
     ["sqlite", ":memory:"],
+    ["sqlite", "file::memory:"],
     ["duckdb", ":memory:"],
     ["duckdb", "md:remote_db"],
   ])(
@@ -237,7 +238,7 @@ describe("schema_inspect value grounding", () => {
         // Local engines keep the connection's own timeout: a shorter deadline would restart the helper.
         // Remote stores, including MotherDuck, keep the profiling cap.
         expect(options.queryTimeoutMs).toBe(
-          path === ":memory:" ? resolveQueryTimeout(Registry.getConfig("w")).ms : 15_000,
+          type === "sqlite" || path === ":memory:" ? resolveQueryTimeout(Registry.getConfig("w")).ms : 15_000,
         )
         if (type === "postgres" || type === "postgresql") expect(options.readOnly).toBe(true)
         else expect(options).not.toHaveProperty("readOnly")
