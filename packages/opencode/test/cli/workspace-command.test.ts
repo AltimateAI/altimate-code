@@ -309,7 +309,8 @@ describe("link --workspace / --create without prompting", () => {
     process.exitCode = 0
   })
   afterEach(() => {
-    process.exitCode = priorExitCode
+    // Bun retains the last numeric exit code when assigned undefined.
+    process.exitCode = priorExitCode ?? 0
   })
 
   test("both flags, an empty --workspace, or no sign-in: exit 2 and nothing changes", async () => {
