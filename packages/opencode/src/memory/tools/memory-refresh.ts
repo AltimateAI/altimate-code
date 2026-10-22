@@ -20,7 +20,8 @@ export const MemoryRefreshTool = Tool.define("altimate_memory_refresh", {
     "workspace memory once at start; anything written after that is invisible",
     "until this runs.",
     "",
-    "Does nothing when the project is not linked to a workspace.",
+    "Does nothing when the project is not linked to a workspace. May remove local",
+    "copies of blocks the workspace has archived; never creates or edits memory.",
   ].join("\n"),
   parameters: z.object({}),
   async execute(_args, ctx) {

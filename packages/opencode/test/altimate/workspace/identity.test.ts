@@ -64,7 +64,10 @@ describe("bound — a specific Altimate Workspace is linked", () => {
     const full = render(boundOutcome, undefined, { teamMemory: true, memoryTools: { read: true, write: true } })
     expect(full).toBe(render(boundOutcome, undefined, { teamMemory: true }))
     const readOnly = render(boundOutcome, undefined, { teamMemory: true, memoryTools: { read: true, write: false } })
-    expect(readOnly).toContain("This agent cannot save memory; when asked to save something, say that the builder agent can.")
+    expect(readOnly).toContain(
+      "This agent cannot save workspace memory blocks; when asked to save a decision or " +
+        "convention for the team, say that an agent with memory write access, such as builder, can.",
+    )
     // Workspace memory off still wins over the agent's access.
     expect(render(boundOutcome, undefined, { teamMemory: false, memoryTools: { read: true, write: false } })).not.toContain(
       "Team memory",

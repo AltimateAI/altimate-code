@@ -112,7 +112,8 @@ const TEAM_MEMORY_DEDUP_HINT =
  * and say where saving happens instead of naming a tool it does not have. */
 const TEAM_MEMORY_READ_ONLY_LINE =
   "Team memory: look up the workspace's saved decisions and conventions with `altimate_memory_read`. " +
-  "This agent cannot save memory; when asked to save something, say that the builder agent can."
+  "This agent cannot save workspace memory blocks; when asked to save a decision or " +
+  "convention for the team, say that an agent with memory write access, such as builder, can."
 
 export type MemoryTools = { read: boolean; write: boolean }
 
