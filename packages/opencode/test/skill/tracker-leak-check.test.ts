@@ -214,4 +214,35 @@ describe("scanner end-to-end (git behaviour)", () => {
     const r = run(dir, `(delete) ${ZERO} refs/heads/gone ${"1".repeat(40)}\n`)
     expect(r.status).toBe(0)
   })
+
+  test("a real `git push` reads the refs from the hook's stdin and finishes", () => {
+    // The hook used to wait forever on stdin under `git push`. Run it the way
+    // git does: a pre-push hook fed by git itself, pushing to a local bare repo.
+    const dir = repo()
+    baseline(dir)
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), "tracker-remote-"))
+    created.push(remote)
+    spawnSync("git", ["init", "-q", "--bare", remote])
+    // Outside the work tree: `commit()` stages everything, and a tracked hook
+    // would vanish on the next branch switch.
+    const hooks = fs.mkdtempSync(path.join(os.tmpdir(), "tracker-hooks-"))
+    created.push(hooks)
+    fs.writeFileSync(path.join(hooks, "pre-push"), `#!/bin/sh\nexec bun ${JSON.stringify(SCRIPT)}\n`, { mode: 0o755 })
+    git(dir, "config", "core.hooksPath", hooks)
+    const push = (ref: string) =>
+      spawnSync("git", ["push", "-q", remote, ref], { cwd: dir, encoding: "utf-8", timeout: 30_000 })
+
+    const clean = push("main:refs/heads/clean")
+    expect(clean.signal).toBeNull()
+    expect(clean.status).toBe(0)
+
+    // HEAD stays clean, so only a scan of the pushed ref from stdin catches this.
+    git(dir, "checkout", "-qb", "dirty")
+    commit(dir, `hidden ${key(5151)}`, "leaky work")
+    git(dir, "checkout", "-q", "main")
+    const leaky = push("dirty:refs/heads/other")
+    expect(leaky.signal).toBeNull()
+    expect(leaky.status).not.toBe(0)
+    expect(leaky.stderr).toContain(key(5151))
+  })
 })
