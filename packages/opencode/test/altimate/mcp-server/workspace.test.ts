@@ -7,7 +7,7 @@ import * as Probes from "../../../src/altimate/workspace/engine-probes"
 test("only the supported workspace read capabilities cross the facade", () => {
   for (const name of [
     "ask_knowledge_base",
-    "snowflake_get_table_stats",
+    "snowflake_list_database_connections",
     "snowflake_execute_database_query",
     "bigquery_execute_database_query",
     "postgresql_execute_database_query",
@@ -61,17 +61,46 @@ test("real stdio engine connection is pinned, excludes mutations and refuses cal
       "workspace_skill",
       "workspace_snowflake_execute_database_query",
       "workspace_ask_knowledge_base",
+      "workspace_snowflake_list_database_connections",
+      "workspace_databricks_execute_sql",
     ])
     const signal = new AbortController().signal
-    const answer = await adapter.execute("workspace_snowflake_execute_database_query", { query: "SELECT 1" }, signal)
+    const answer = await adapter.execute(
+      "workspace_snowflake_execute_database_query",
+      { connection_id: "fixture", sql_query: "SELECT 1" },
+      signal,
+    )
     expect(JSON.stringify(answer)).toContain('\\"workspace\\":\\"35\\"')
     expect(JSON.stringify(answer)).toContain("SELECT 1")
     await expect(
-      adapter.execute("workspace_snowflake_execute_database_query", { query: "DELETE FROM orders" }, signal),
+      adapter.execute(
+        "workspace_snowflake_execute_database_query",
+        { connection_id: "fixture", sql_query: "DELETE FROM orders" },
+        signal,
+      ),
     ).rejects.toThrow("read-only")
     await expect(
       adapter.execute("workspace_snowflake_execute_database_query", { sql: "SELECT 1" }, signal),
-    ).rejects.toThrow("query is required")
+    ).rejects.toThrow("sql_query is required")
+    expect(
+      JSON.stringify(await adapter.execute("workspace_snowflake_list_database_connections", {}, signal)),
+    ).toContain("snowflake_list_database_connections")
+    expect(
+      JSON.stringify(
+        await adapter.execute(
+          "workspace_databricks_execute_sql",
+          { warehouse_id: "fixture", statement: "SELECT 1" },
+          signal,
+        ),
+      ),
+    ).toContain("SELECT 1")
+    await expect(
+      adapter.execute(
+        "workspace_databricks_execute_sql",
+        { warehouse_id: "fixture", statement: "DROP TABLE orders" },
+        signal,
+      ),
+    ).rejects.toThrow("read-only")
     await expect(adapter.execute("workspace_datamate_add_memories", {}, signal)).rejects.toThrow("Unknown")
     changed = true
     await expect(adapter.execute("workspace_ask_knowledge_base", { question: "ARR?" }, signal)).rejects.toThrow(

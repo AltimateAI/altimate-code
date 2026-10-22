@@ -7,7 +7,12 @@ import { clearsFloor, engineEntry, ENGINE_BINARY } from "../workspace/engine-typ
 import { classifyAndCheck } from "../tools/sql-classify"
 
 // Deliberately closed: adding a new engine capability requires classifying it.
-const METADATA_READS = new Set(["ask_knowledge_base", "snowflake_get_table_stats"])
+const METADATA_READS = new Set([
+  "ask_knowledge_base",
+  "snowflake_list_database_connections",
+  "bigquery_list_database_connections",
+  "postgresql_list_database_connections",
+])
 const QUERY_DIALECTS: Record<string, string> = {
   snowflake_execute_database_query: "snowflake",
   bigquery_execute_database_query: "bigquery",
@@ -24,7 +29,7 @@ export function checkEngineRead(name: string, args: Record<string, unknown>) {
   if (!allowedEngineRead(name)) throw new Error("This workspace operation is not exposed by the read-only integration.")
   const dialect = QUERY_DIALECTS[name]
   if (!dialect) return
-  const queries = [args.query, args.sql, args.sql_query].filter(
+  const queries = [args.query, args.sql, args.sql_query, args.statement].filter(
     (value): value is string => typeof value === "string" && !!value.trim(),
   )
   if (!queries.length) throw new Error("A SQL query is required; this engine's query argument is not supported.")
@@ -73,12 +78,17 @@ export async function createWorkspaceAdapter(directory: string) {
         cwd: directory,
         stderr: "pipe",
       })
+      // Drain diagnostics without logging connection/query details. An unread
+      // pipe can block the engine's handshake or subsequent tool responses.
+      transport.stderr?.on("data", () => {})
       await client.connect(transport, { timeout: 15_000 })
       const catalog = await client.listTools({}, { timeout: 15_000 })
       await WorkspaceClient.assertIdentity(directory, pinned.token)
       for (const tool of catalog.tools.filter((tool) => allowedEngineRead(tool.name)).slice(0, 20)) {
         if (QUERY_DIALECTS[tool.name]) {
-          const fields = ["query", "sql", "sql_query"].filter((field) => tool.inputSchema.properties?.[field])
+          const fields = ["query", "sql", "sql_query", "statement"].filter(
+            (field) => tool.inputSchema.properties?.[field],
+          )
           // A parser must not validate a decoy `query` while the engine executes
           // an unrecognised SQL argument. Unsupported engine contracts stay out.
           if (fields.length !== 1) continue
