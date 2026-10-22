@@ -21,6 +21,7 @@
  */
 
 import { $ } from "bun"
+import { readFileSync } from "fs"
 
 // altimate_change — #1052 D8 review-fix: drop the trailing word-boundary from
 // the Jira-key regex so the guard catches suffix-adjacent leaks (letter,
@@ -185,7 +186,11 @@ async function readPushedRefs(): Promise<{
 }> {
   if (process.stdin.isTTY) return { hadInput: false, tips: [] }
   try {
-    const raw = await new Response(Bun.stdin.stream()).text()
+    // A blocking read(2) of fd 0. `Bun.stdin.stream()` waits on the event loop
+    // and has hung forever under `git push` with the pipe's writer already closed
+    // (no peer on fd 0), so the push never finished. A synchronous read returns
+    // at end of input as soon as no writer remains.
+    const raw = readFileSync(0, "utf-8")
     const rows = raw
       .split("\n")
       .map((l) => l.trim())
