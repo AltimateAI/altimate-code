@@ -481,7 +481,7 @@ export async function profileValues(
       sql,
       warehouse: target.name,
       limit: PROFILE_MAX_COLUMNS + 1,
-      query_timeout_ms: PROFILE_TIMEOUT_MS,
+      ...(dialect === "sqlite" || dialect === "duckdb" ? {} : { query_timeout_ms: PROFILE_TIMEOUT_MS }),
       ...(dialect === "postgres" ? { read_only: true } : {}),
     }, { signal: ctx.abort, sessionID: ctx.sessionID, ...(ctx.extra?.forceReadOnly === true ? { forceReadOnly: true } : {}) })) as unknown
     const data = isRecord(res) && isRecord(res.data) ? res.data : res

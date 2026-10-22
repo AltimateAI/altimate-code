@@ -33,7 +33,7 @@ By default the server exposes `warehouse_list`, `warehouse_add`, `sql_execute`, 
 
 Relative database paths resolve beside this file. With `--connections`, this file is the only source of connections: global and project `connections.json` files and `ALTIMATE_CODE_CONN_*` overrides are ignored. Omit `--connections` to use normal connection discovery: global and project `.altimate-code/connections.json` files, followed by `ALTIMATE_CODE_CONN_*` environment overrides. Set your client's working directory to the project when using project discovery.
 
-At startup the server lists each connection's name and type in its instructions, read from configuration only: it does not connect to remote or server databases or run queries on them. For local SQLite and DuckDB files (not behind an SSH tunnel) it also lists table names from one catalog query (no row counts); a file with more than 40 tables is noted as such instead. Call `warehouse_list` for columns and sample rows.
+At startup the server lists each connection's name and type in its instructions, read from configuration only: it does not connect to remote or server databases or run queries on them. For local SQLite and DuckDB files (not behind an SSH tunnel) it also lists table names from one catalog query (no row counts); a file with more than 40 tables is noted as such instead. Call `warehouse_list` for columns and sample rows. Listing tools use catalog row estimates where available (including DuckDB); SQLite listings omit row counts. They never count rows by scanning each table.
 
 <!-- altimate_change start — MCP read-only limits and private output lifecycle -->
 

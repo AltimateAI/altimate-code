@@ -56,7 +56,7 @@ async function discoveredCandidates(): Promise<string> {
 // altimate_change end
 
 export const WarehouseListTool = Tool.define("warehouse_list", {
-  description: "List all configured warehouse connections. Shows connection name, type, and database.",
+  description: "List all configured warehouse connections. Shows connection name, type, and database, with local catalog details and samples when available; row counts are catalog estimates only.",
   parameters: z.object({}),
   async execute(args, ctx) {
     try {

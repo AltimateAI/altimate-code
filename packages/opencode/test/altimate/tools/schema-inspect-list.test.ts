@@ -4,7 +4,9 @@ import { mkdtemp, rm } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import type { Connector } from "@altimateai/drivers"
+import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
 import { initTool } from "../tool-fixture"
+import { discoverCatalog } from "../../../src/altimate/tools/warehouse-discovery"
 import { SchemaInspectTool } from "../../../src/altimate/tools/schema-inspect"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { registerAll } from "../../../src/altimate/native/connections/register"
@@ -45,7 +47,7 @@ async function inspect(args: Record<string, unknown> = {}, ask = async (_input: 
 }
 
 for (const type of ["sqlite", "duckdb"] as const) {
-  test(`${type}: real local tables list with counts; blank table and schema mean absent`, async () => {
+  test(`${type}: real local tables list with catalog metadata; blank table and schema mean absent`, async () => {
     registerAll()
     directory = await mkdtemp(path.join(os.tmpdir(), "schema-list-"))
     Registry.setConfigs({ local: { type, path: path.join(directory, `source.${type}`), create: true } })
@@ -59,9 +61,9 @@ for (const type of ["sqlite", "duckdb"] as const) {
     expect(overview.output).not.toContain('odd"name')
     const result = await inspect({ warehouse: "local", schema_name: "main" })
     expect(result.metadata.success).toBe(true)
-    expect(result.output).toContain('main | odd"name | table | 2')
-    expect(result.output).toContain("main | empty | table | 0")
-    expect(result.output).toContain("main | sample | view | not counted\n")
+    expect(result.output).toContain('main | odd"name | table | ' + (type === "duckdb" ? "2 (estimate)" : ""))
+    expect(result.output).toContain("main | empty | table | " + (type === "duckdb" ? "0 (estimate)" : ""))
+    expect(result.output).toContain("main | sample | view | \n")
     expect(result.output).toContain('schema_inspect(warehouse="local", schema_name="<schema>", table="<name>")')
     expect(await inspect({ warehouse: "local", table: "", schema_name: "" })).toEqual(overview)
     expect(await inspect({ warehouse: "local", table: "   " })).toEqual(overview)
@@ -70,9 +72,14 @@ for (const type of ["sqlite", "duckdb"] as const) {
       await connector.execute("CREATE TABLE analytics.other (id INTEGER)")
       expect((await inspect({ warehouse: "local" })).output).toContain("analytics | 1")
       const filtered = await inspect({ warehouse: "local", schema_name: "analytics" })
-      expect(filtered.output).toContain("analytics | other | table | 0")
+      expect(filtered.output).toContain("analytics | other | table | 0 (estimate)")
       expect(filtered.output).not.toContain("main |")
     }
+    await connector.execute("CREATE TEMP TABLE scratch_probe (id INTEGER)")
+    await connector.execute("INSERT INTO scratch_probe VALUES (42)")
+    await inspect({ warehouse: "local", schema_name: "main" })
+    await discoverCatalog([{ name: "local", type }], { signal: ctx.abort, sessionID: ctx.sessionID })
+    expect((await connector.execute("SELECT id FROM scratch_probe")).rows).toEqual([[42]])
     const single = await inspect({ warehouse: "local", table: "empty", values: false })
     expect(single).toEqual({
       title: "Schema: empty",
@@ -124,7 +131,7 @@ test.each(["postgres", "mysql", "snowflake", "duckdb", "redshift", "bigquery"])(
     expect(result.output).not.toContain("t0000000")
     expect(connector.execute).toHaveBeenCalledTimes(1)
     expect(connector.execute.mock.calls[0][0]).toMatch(/GROUP BY.*ORDER BY.*LIMIT 201/)
-    expect(connector.execute.mock.calls[0][3]).toMatchObject({ readOnly: true, signal: expect.any(AbortSignal) })
+    expect(connector.execute.mock.calls[0][3]).toMatchObject({ readOnly: true, queryTimeoutMs: 10_000, signal: expect.any(AbortSignal) })
     const start = performance.now()
     const filtered = await inspect({ warehouse: "remote", schema_name: "two" })
     expect(performance.now() - start).toBeLessThan(2000)
@@ -207,33 +214,50 @@ test("catalog failure never falls back to an unbounded list", async () => {
   expect(connector.listTables).not.toHaveBeenCalled()
 })
 
-test("local counts stop at 50 and mark the rest", async () => {
-  const connector = fake("sqlite", 100, ":memory:")
-  const result = await inspect({ warehouse: "remote", schema_name: "one" })
-  expect(result.metadata.success).toBe(true)
-  expect(connector.execute.mock.calls.filter(([sql]) => /^SELECT COUNT/.test(sql))).toHaveLength(50)
-  expect(result.output.match(/not counted/g)).toHaveLength(50)
-  expect(connector.execute.mock.calls[1]).toMatchObject([
-    'SELECT COUNT(*) FROM "one"."t0000000"',
-    1,
-    undefined,
-    { readOnly: true, queryTimeoutMs: 1000 },
-  ])
-})
-
-test("slow local counts share a three second budget, including non-cooperative probes", async () => {
-  const connector = fake("sqlite", 500, ":memory:")
-  const execute = connector.execute.getMockImplementation()!
-  connector.execute.mockImplementation((sql, ...args) =>
-    /^SELECT COUNT/.test(sql) ? new Promise(() => {}) : execute(sql, ...args),
-  )
-  const start = performance.now()
-  const result = await inspect({ warehouse: "remote", schema_name: "one" })
-  expect(performance.now() - start).toBeLessThan(4000)
-  expect(result.metadata.success).toBe(true)
-  expect(result.output.match(/not counted/g)).toHaveLength(500)
-  expect(connector.execute.mock.calls.filter(([sql]) => /^SELECT COUNT/.test(sql)).length).toBeLessThanOrEqual(4)
-})
+for (const type of ["sqlite", "duckdb"]) {
+  for (const store of [":memory:", "/tmp/catalog-test.db"]) {
+    for (const count of [1, 501]) {
+      test(`${type} ${store}: catalog-only listing with ${count} tables adds no deadline`, async () => {
+        const connector = fake(type, count, store)
+        if (type === "duckdb" && count === 1)
+          connector.execute.mockResolvedValueOnce({
+            rows: [["orders", "BASE TABLE", 23], ["view", "VIEW", null]],
+            columns: [], row_count: 2, truncated: false,
+          })
+        const timeout = spyOn(AbortSignal, "timeout")
+        try {
+          const result = await inspect({ warehouse: "remote", schema_name: "one" })
+          expect(result.metadata.success).toBe(true)
+          expect(connector.execute).toHaveBeenCalledTimes(1)
+          const [sql, limit, , options] = connector.execute.mock.calls[0]
+          expect(sql).not.toMatch(/COUNT\s*\(/i)
+          expect(sql).toContain("LIMIT 501")
+          expect(limit).toBe(501)
+          expect(options).toMatchObject({ readOnly: true })
+          // Only the connection's own timeout applies; the listing adds no shorter deadline.
+          expect((options as { queryTimeoutMs?: number }).queryTimeoutMs).toBe(
+            resolveQueryTimeout(Registry.getConfig("remote")).ms,
+          )
+          expect(timeout).not.toHaveBeenCalled()
+          if (type === "duckdb") expect(sql).toContain("d.estimated_size")
+          if (count > 500) {
+            expect(result.output).toContain("Showing first 500 of ≥501")
+            expect(result.metadata.truncated).toBe(true)
+          } else if (type === "duckdb") {
+            expect(result.output).toContain("orders | table | 23 (estimate)")
+            expect(result.output).toContain("view | view | ")
+            expect(result.output).not.toContain("view | view | 0")
+          } else {
+            expect(result.output).toContain("t0000000 | table | ")
+            expect(result.output).not.toContain("(estimate)")
+          }
+        } finally {
+          timeout.mockRestore()
+        }
+      })
+    }
+  }
+}
 
 test("remote catalog statistics are displayed as estimates without table scans", async () => {
   const connector = fake("postgres")

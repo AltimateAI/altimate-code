@@ -1,4 +1,4 @@
-import { absoluteFileUriPath, isLocalFilePath, requireStorePath } from "@altimateai/drivers/file-store"
+import { absoluteFileUriPath, isLocalFilePath } from "@altimateai/drivers/file-store"
 import type { ConnectionConfig } from "@altimateai/drivers/types"
 import type { SchemaListParams, SchemaListResult } from "../types"
 import { executeQuery, type QueryContext } from "../query-execution"
@@ -7,8 +7,6 @@ import * as Registry from "./registry"
 
 const TABLE_LIMIT = 500
 const SCHEMA_LIMIT = 200
-const COUNT_LIMIT = 50
-const COUNT_BUDGET_MS = 3_000
 const quoteIdent = (id: string) => `"${id.replace(/"/g, '""')}"`
 
 /** Undefined means this driver has no supported catalog SQL, never a failed catalog query. */
@@ -39,11 +37,15 @@ function catalogQuery(type: string, config: ConnectionConfig | undefined, schema
         ? ", t.row_count"
         : type === "postgres"
           ? ", c.reltuples"
-          : ""
+          : type === "duckdb"
+            ? ", d.estimated_size"
+            : ""
   const join =
     type === "postgres"
       ? " LEFT JOIN pg_catalog.pg_namespace n ON n.nspname = t.table_schema LEFT JOIN pg_catalog.pg_class c ON c.relnamespace = n.oid AND c.relname = t.table_name"
-      : ""
+      : type === "duckdb"
+        ? " LEFT JOIN duckdb_tables() d ON d.database_name = current_database() AND d.schema_name = t.table_schema AND d.table_name = t.table_name AND t.table_type = 'BASE TABLE'"
+        : ""
   return `SELECT t.table_name, t.table_type${stats} FROM ${catalog} t${join} WHERE ${filters.join(" AND ")} ORDER BY t.table_name LIMIT 501`
 }
 
@@ -62,9 +64,16 @@ export async function listSchemaTables(params: SchemaListParams, context?: Query
   const type = Registry.canonicalType(config?.type) ?? ""
   const schema = params.schema_name?.trim() || undefined
   const query = catalogQuery(type, config, schema)
-  const run = (sql: string, limit: number, binds?: unknown[], timeout = 10_000) =>
-    executeQuery(config, { readOnly: true, queryTimeoutMs: timeout }, context, (options) =>
-      connector.execute(sql, limit, binds, options),
+  const store = typeof config?.path === "string" ? config.path : ""
+  const local =
+    type === "sqlite" ||
+    (type === "duckdb" && (store === ":memory:" || isLocalFilePath(store) || absoluteFileUriPath(store) !== undefined))
+  const run = (sql: string, limit: number, binds?: unknown[]) =>
+    executeQuery(
+      config,
+      { readOnly: true, ...(local ? {} : { queryTimeoutMs: 10_000 }) },
+      context,
+      (options) => connector.execute(sql, limit, binds, options),
     )
   if (!schema) {
     if (query) {
@@ -121,44 +130,6 @@ export async function listSchemaTables(params: SchemaListParams, context?: Query
       .sort((a, b) => a.name.localeCompare(b.name))
       .slice(0, TABLE_LIMIT)
       .map((table) => ({ schema, ...table }))
-  }
-  // A DuckDB connection can target MotherDuck or another remote store. Only local
-  // base tables are eligible; views may scan remote data even in a local file.
-  const store = type === "sqlite" || type === "duckdb" ? requireStorePath(config!, type) : undefined
-  const countLocal =
-    store !== undefined && (store === ":memory:" || isLocalFilePath(store) || absoluteFileUriPath(store) !== undefined)
-  if (countLocal) {
-    const deadline = Date.now() + COUNT_BUDGET_MS
-    let attempted = 0
-    for (const table of tables) {
-      context?.signal?.throwIfAborted()
-      table.row_count_status = "not counted"
-      if (table.type !== "table" || attempted >= COUNT_LIMIT || Date.now() >= deadline) continue
-      attempted++
-      try {
-        const timeout = Math.max(1, Math.min(1_000, deadline - Date.now()))
-        const result = await executeQuery(
-          config,
-          {
-            readOnly: true,
-            queryTimeoutMs: timeout,
-            signal: AbortSignal.timeout(timeout),
-          },
-          context,
-          (options) =>
-            connector.execute(
-              `SELECT COUNT(*) FROM ${quoteIdent(table.schema)}.${quoteIdent(table.name)}`,
-              1,
-              undefined,
-              options,
-            ),
-        )
-        table.row_count = nonnegativeCount(result.rows[0]?.[0])
-        if (table.row_count !== undefined) table.row_count_status = undefined
-      } catch {
-        context?.signal?.throwIfAborted()
-      }
-    }
   }
   return { warehouse, tables, truncated, ...(fallback ? { fallback: true } : {}) }
 }

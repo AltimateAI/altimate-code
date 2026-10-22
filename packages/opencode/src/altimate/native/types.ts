@@ -119,7 +119,6 @@ export interface SchemaListResult {
     type: string
     row_count?: number
     row_count_estimated?: boolean
-    row_count_status?: "not counted"
   }>
   schemas?: Array<{ name: string; table_count?: number }>
   fallback?: boolean

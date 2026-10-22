@@ -11,7 +11,7 @@ import { executeQuery } from "../native/query-execution"
  *
  * Bounded by the data before any work: local engines only (remote warehouses run no queries here),
  * table/column/sample budgets shared across connections, one overall deadline checked before every
- * call (each call also has its own query timeout), and a byte cap on the rendered text. Samples run
+ * call (queries use the connection's own timeout), and a byte cap on the rendered text. Samples run
  * only on SQLite and local DuckDB base tables, whose drivers enforce read-only at the database.
  */
 const MAX_CONNECTIONS = 8
@@ -24,7 +24,6 @@ const SAMPLE_CELL_CHARS = 40
 const OUTPUT_BYTES = 8 * 1024
 const NOTICE_RESERVE_BYTES = 256
 const DEADLINE_MS = 4_000
-const SAMPLE_TIMEOUT_MS = 1_000
 const MONGO_SYSTEM_DATABASES = new Set(["admin", "config", "local"])
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"])
 const SAMPLED_ENGINES = new Set(["sqlite", "duckdb"])
@@ -148,7 +147,7 @@ export async function discoverCatalog(warehouses: { name: string; type: string }
         if (!push(line)) break
         if (names && SAMPLED_ENGINES.has(type) && table.type === "table" && budget.samples > 0 && timeLeft() > 0) {
           budget.samples--
-          const sample = await sampleRow(warehouse.name, config!, table, names.length, context, timeLeft).catch(() => {
+          const sample = await sampleRow(warehouse.name, config!, table, names.length, context).catch(() => {
             context.signal.throwIfAborted()
             return undefined
           })
@@ -277,13 +276,11 @@ async function sampleRow(
   table: Table,
   width: number,
   context: DiscoveryContext,
-  timeLeft: () => number,
 ): Promise<string | undefined> {
   const connector = await Registry.get(warehouse)
-  const timeout = Math.max(1, Math.min(SAMPLE_TIMEOUT_MS, timeLeft()))
   const result = await executeQuery(
     config,
-    { readOnly: true, queryTimeoutMs: timeout },
+    { readOnly: true },
     { signal: context.signal, sessionID: context.sessionID, forceReadOnly: true },
     (options) =>
       connector.execute(`SELECT * FROM ${quoteIdent(table.schema)}.${quoteIdent(table.name)} LIMIT 1`, 1, undefined, options),

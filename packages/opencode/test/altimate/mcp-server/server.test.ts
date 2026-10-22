@@ -148,7 +148,7 @@ mcpTest("allTools lists exactly seven tools and executes warehouse, schema, SQL 
 })
 
 // altimate_change start — warehouse discovery accepts strict-schema empty table fillers
-mcpTest("schema_inspect lists schemas, then SQLite tables with protected counts", async () => {
+mcpTest("schema_inspect lists schemas, then SQLite tables without scanning for row counts", async () => {
   const { call } = await fixture()
   for (const [index, args] of [
     { warehouse: "source" },
@@ -161,7 +161,8 @@ mcpTest("schema_inspect lists schemas, then SQLite tables with protected counts"
     expect(body(result)).not.toContain("main | items")
     const tables = await call("schema_inspect", { warehouse: "source", schema_name: "main" })
     expect(tables.isError).toBe(false)
-    expect(body(tables)).toContain("main | items | table | 2")
+    // SQLite has no catalog row statistic, so the Rows cell stays empty rather than counting.
+    expect(body(tables)).toMatch(/^main \| items \| table \| *$/m)
     // altimate_change end
     // The usage hint is shown once per session; the table rule line is gone over MCP.
     if (index === 0) expect(body(result)).toContain("Inspect one table with schema_inspect")
@@ -962,7 +963,7 @@ mcpTest("warehouse_list lists local tables with columns and one sample row", asy
     db.run("CREATE VIEW item_names AS SELECT name FROM items")
   })
   const out = body(await call("warehouse_list", {}))
-  expect(out).toContain("source: main.items (2 rows): id INTEGER, name TEXT")
+  expect(out).toContain("source: main.items: id INTEGER, name TEXT")
   expect(out).toMatch(/source: main\.items[^\n]*\n {2}e\.g\. 1 \| apple/)
   // Views are listed but never sampled: a view may run arbitrary work.
   expect(out).toMatch(/source: main\.item_names: name/)

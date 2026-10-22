@@ -17,7 +17,7 @@ import * as Precedence from "../workspace/precedence"
 
 export const SchemaInspectTool = Tool.define("schema_inspect", {
   description:
-    "List schemas with table/collection counts when table and schema_name are omitted; list up to 500 tables/collections when schema_name is given; otherwise inspect columns, types, and constraints for one table.",
+    "List schemas with table/collection counts when table and schema_name are omitted; list up to 500 tables/collections with available catalog row estimates (no table scans) when schema_name is given; otherwise inspect columns, types, and constraints for one table.",
   parameters: z.object({
     table: z
       .string()
@@ -98,7 +98,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
               ...rule("-------|------|------|-----"),
               ...result.tables.map(
                 (table) =>
-                  `${table.schema} | ${table.name} | ${table.type} | ${table.row_count === undefined ? (table.row_count_status ?? "") : `${table.row_count}${table.row_count_estimated ? " (estimate)" : ""}`}`,
+                  `${table.schema} | ${table.name} | ${table.type} | ${table.row_count === undefined ? "" : `${table.row_count}${table.row_count_estimated ? " (estimate)" : ""}`}`,
               ),
             ]
         if (schemas ? !schemas.length : !result.tables.length)
