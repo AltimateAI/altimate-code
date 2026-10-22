@@ -1312,4 +1312,124 @@ mcpTest("a large catalog is listed by connection name only and the instructions 
   expect(instructions).not.toContain("wide_table_with_a_long_name_0")
   expect(instructions.length - SERVER_INSTRUCTIONS.length).toBeLessThanOrEqual(1_250)
 })
+
+/** Starts a server on a connections file and records every connector opened and SQL run during startup. */
+async function startupFixture(connections: Record<string, unknown>, setup?: (dir: string) => Promise<void>) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-startup-test-"))
+  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+  await setup?.(dir)
+  const file = path.join(dir, "connections.json")
+  await Bun.write(file, JSON.stringify(connections))
+  const opened: string[] = []
+  const executed: { warehouse: string; sql: string }[] = []
+  const original = Registry.get
+  const get = spyOn(Registry, "get").mockImplementation(async (name) => {
+    opened.push(name)
+    const config = Registry.getConfig(name)
+    if (config?.type !== "sqlite" && config?.type !== "duckdb") {
+      // A remote or server connection double: it records calls and never answers, like an unreachable host.
+      const hang = (sql: string) => {
+        executed.push({ warehouse: name, sql })
+        return new Promise<never>(() => {})
+      }
+      return {
+        connect: () => hang("<connect>"),
+        execute: (sql: string) => hang(sql),
+        listSchemas: () => hang("<listSchemas>"),
+        listTables: () => hang("<listTables>"),
+        describeTable: () => hang("<describeTable>"),
+        close: async () => {},
+      } as unknown as Connector
+    }
+    const connector = await original(name)
+    return new Proxy(connector, {
+      get(target, key, receiver) {
+        if (key !== "execute") return Reflect.get(target, key, receiver)
+        return (sql: string, ...rest: unknown[]) => {
+          executed.push({ warehouse: name, sql })
+          return (target.execute as (...args: unknown[]) => unknown).call(target, sql, ...rest)
+        }
+      },
+    })
+  })
+  try {
+    const started = Date.now()
+    const server = await createServer({ connections: file })
+    const elapsed = Date.now() - started
+    const client = new Client({ name: "test", version: "1" }, { capabilities: {} })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await server.connect(serverTransport)
+    await client.connect(clientTransport)
+    cleanups.push(async () => {
+      await client.close()
+      await server.close()
+    })
+    return { instructions: client.getInstructions()!, opened: [...opened], executed: [...executed], elapsed }
+  } finally {
+    get.mockRestore()
+  }
+}
+
+const REMOTE_CONNECTIONS = {
+  pg_local: { type: "postgres", host: "localhost", database: "app", user: "u" },
+  pg_remote: { type: "postgres", host: "db.example.com", database: "app", user: "u" },
+  mongo_local: { type: "mongodb", connection_string: "mongodb://localhost:27017" },
+  warehouse: { type: "snowflake", account: "acct", user: "u", password: "p" },
+  lake: { type: "bigquery", project: "proj" },
+}
+
+mcpTest("startup lists remote and server connections by name and type without opening them", async () => {
+  const { instructions, opened, executed, elapsed } = await startupFixture(REMOTE_CONNECTIONS)
+  expect(opened).toEqual([])
+  expect(executed).toEqual([])
+  // No deadline is raced: nothing slow ran, so startup returns at once.
+  expect(elapsed).toBeLessThan(2_000)
+  expect(instructions).toContain(
+    "Connections:\n- pg_local (postgres)\n- pg_remote (postgres)\n- mongo_local (mongodb)\n- warehouse (snowflake)\n- lake (bigquery)",
+  )
+})
+
+mcpTest("startup lists a local SQLite file's tables with one catalog query and no row counts", async () => {
+  const { instructions, executed } = await startupFixture(
+    { source: { type: "sqlite", path: "source.sqlite" }, ...REMOTE_CONNECTIONS },
+    async (dir) => {
+      const db = new Database(path.join(dir, "source.sqlite"))
+      db.run("CREATE TABLE items (id INTEGER)")
+      db.run("INSERT INTO items VALUES (1), (2)")
+      db.run("CREATE VIEW item_ids AS SELECT id FROM items")
+      db.close()
+    },
+  )
+  expect(instructions).toContain("Connections:\n- source (sqlite): item_ids, items\n- pg_local (postgres)")
+  expect(instructions).not.toMatch(/rows/)
+  expect(executed.map((call) => call.warehouse)).toEqual(["source"])
+  expect(executed.some((call) => /count\s*\(/i.test(call.sql))).toBe(false)
+  expect(executed[0]!.sql).toContain("sqlite_master")
+})
+
+mcpTest("startup lists a local DuckDB file's tables with their schema", async () => {
+  const { instructions, executed } = await startupFixture({ lake: { type: "duckdb", path: "lake.duckdb" } }, async (dir) => {
+    Registry.setConfigs({ lake: { type: "duckdb", path: path.join(dir, "lake.duckdb"), create: true } })
+    const connector = await Registry.get("lake")
+    await connector.execute("CREATE SCHEMA analytics")
+    await connector.execute("CREATE TABLE analytics.orders (id INTEGER)")
+    await connector.execute("CREATE TABLE customers (id INTEGER)")
+    await Registry.closeAll()
+    Registry.reset()
+  })
+  expect(instructions).toContain("Connections:\n- lake (duckdb): analytics.orders, customers")
+  expect(executed.some((call) => /count\s*\(/i.test(call.sql))).toBe(false)
+})
+
+mcpTest("startup skips a local catalog over the table gate with a short note", async () => {
+  const { instructions, executed } = await startupFixture({ source: { type: "sqlite", path: "source.sqlite" } }, async (dir) => {
+    const db = new Database(path.join(dir, "source.sqlite"))
+    for (let i = 0; i < 45; i++) db.run(`CREATE TABLE t${i} (id INTEGER)`)
+    db.close()
+  })
+  expect(instructions).toContain("Connections:\n- source (sqlite): over 40 tables")
+  expect(instructions).not.toContain("t1")
+  expect(executed).toHaveLength(1)
+  expect(executed[0]!.sql).toContain("LIMIT 41")
+})
 // altimate_change end

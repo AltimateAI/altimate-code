@@ -25,15 +25,15 @@ export const SERVER_INSTRUCTIONS = [
 ].join("\n")
 
 /**
- * The analyst method plus the connection list known at startup (names, types, table names of small local catalogs;
- * bounded by catalogSummary), so a client can start querying without a warehouse_list round trip. A failing or empty
- * listing leaves the method alone.
+ * The analyst method plus the connection list known at startup (names and types from config; table names only for
+ * small local SQLite/DuckDB files, see catalogSummary), so a client can start querying without a warehouse_list round
+ * trip. Remote connections are never contacted here. A failing or empty listing leaves the method alone.
  */
 async function serverInstructions(): Promise<string> {
   try {
     const warehouses = Registry.list().warehouses
     if (!warehouses.length) return SERVER_INSTRUCTIONS
-    const summary = await catalogSummary(warehouses, { signal: AbortSignal.timeout(5_000), sessionID: "mcp-startup" })
+    const summary = await catalogSummary(warehouses)
     return summary ? `${SERVER_INSTRUCTIONS}\n\nConnections:\n${summary}` : SERVER_INSTRUCTIONS
   } catch {
     return SERVER_INSTRUCTIONS

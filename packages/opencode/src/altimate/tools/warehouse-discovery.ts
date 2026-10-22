@@ -169,44 +169,69 @@ export async function discoverCatalog(warehouses: { name: string; type: string }
 }
 
 const SUMMARY_BYTES = 1_200
-const SUMMARY_DEADLINE_MS = 2_000
+// Catalog-size gate: one metadata query fetches at most this many names plus one.
+const SUMMARY_TABLE_GATE = 40
+
+/** Catalog metadata SQL for a local SQLite/DuckDB file; names only, never table data or row counts. */
+function summaryCatalogQuery(type: string): string | undefined {
+  const limit = SUMMARY_TABLE_GATE + 1
+  if (type === "sqlite")
+    return `SELECT 'main', name FROM main.sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT ${limit}`
+  if (type === "duckdb")
+    return (
+      "SELECT table_schema, table_name FROM information_schema.tables WHERE table_catalog = current_database() " +
+      `AND table_schema NOT IN ('information_schema', 'pg_catalog') ORDER BY table_schema, table_name LIMIT ${limit}`
+    )
+  return undefined
+}
+
+/** Table names of a local SQLite/DuckDB file within the gate, "over" past it, or undefined when unavailable. */
+async function summaryTables(warehouse: string, config: ConnectionConfig): Promise<string[] | "over" | undefined> {
+  const type = Registry.canonicalType(config.type) ?? ""
+  const sql = summaryCatalogQuery(type)
+  const store = typeof config.path === "string" ? config.path : ""
+  // File stores only: a memory store is empty at startup and other paths may name a remote store.
+  if (!sql || !(isLocalFilePath(store) || absoluteFileUriPath(store) !== undefined)) return undefined
+  try {
+    const connector = await Registry.get(warehouse)
+    // No signal or deadline: the query is bounded by its LIMIT, and aborting the local engine would restart it.
+    const result = await executeQuery(config, { readOnly: true }, undefined, (options) =>
+      connector.execute(sql, SUMMARY_TABLE_GATE + 1, undefined, options),
+    )
+    if (result.rows.length > SUMMARY_TABLE_GATE || result.truncated) return "over"
+    return result.rows.map((row) => (row[0] && row[0] !== "main" ? `${row[0]}.${row[1]}` : String(row[1])))
+  } catch {
+    return undefined
+  }
+}
 
 /**
- * A compact connection list for the MCP server instructions: one line per connection with its type and, for small
- * local catalogs, its table names. Bounded like discoverCatalog (local engines only, table budget, deadline) and by
- * SUMMARY_BYTES; a connection whose tables do not fit is listed by name only. No columns, samples or row counts.
+ * A compact connection list for the MCP server instructions: one line per connection with its name and type from
+ * config. Only local SQLite/DuckDB files are opened, for one catalog-metadata query each (table names, no row counts),
+ * gated by SUMMARY_TABLE_GATE; remote and server connections run no network call or query. Bounded by SUMMARY_BYTES;
+ * a connection whose tables do not fit is listed by name only.
  */
-export async function catalogSummary(warehouses: { name: string; type: string }[], context: DiscoveryContext): Promise<string> {
-  const deadline = Date.now() + SUMMARY_DEADLINE_MS
-  const timeLeft = () => deadline - Date.now()
-  const budget = { tables: TABLE_BUDGET, columns: 0, samples: 0 }
+export async function catalogSummary(warehouses: { name: string; type: unknown }[]): Promise<string> {
   const lines: string[] = []
   let bytes = 0
-  const shown = warehouses.filter((warehouse) => !isScratch(warehouse.name)).slice(0, MAX_CONNECTIONS)
+  const named = warehouses.filter((warehouse) => !isScratch(warehouse.name))
+  const shown = named.slice(0, MAX_CONNECTIONS)
+  const typeOf = (warehouse: { type: unknown }) => (typeof warehouse.type === "string" ? warehouse.type : "unknown")
   for (const [index, warehouse] of shown.entries()) {
-    const head = `- ${warehouse.name} (${warehouse.type})`
+    const head = `- ${warehouse.name} (${typeOf(warehouse)})`
     // Keep room for a name-only line for every connection still to come.
-    const reserve = shown.slice(index + 1).reduce((total, next) => total + next.name.length + next.type.length + 8, 0)
+    const reserve = shown.slice(index + 1).reduce((total, next) => total + next.name.length + typeOf(next).length + 8, 0)
     let line = head
     const config = Registry.getConfig(warehouse.name)
-    if (isLocalConnection(config) && timeLeft() > 0) {
-      context.signal.throwIfAborted()
-      const type = Registry.canonicalType(config?.type) ?? ""
-      const tables = await listTables(warehouse.name, type, budget, context, timeLeft).catch(() => {
-        context.signal.throwIfAborted()
-        return undefined
-      })
-      if (tables?.length) {
-        const names = tables.map((table) => (table.schema && table.schema !== "main" ? `${table.schema}.${table.name}` : table.name))
-        const full = `${head}: ${names.join(", ")}`
-        if (bytes + Buffer.byteLength(full, "utf8") + 1 + reserve <= SUMMARY_BYTES) line = full
-      }
-    }
+    const tables = config ? await summaryTables(warehouse.name, config) : undefined
+    const detail =
+      tables === "over" ? `${head}: over ${SUMMARY_TABLE_GATE} tables` : tables?.length ? `${head}: ${tables.join(", ")}` : head
+    if (bytes + Buffer.byteLength(detail, "utf8") + 1 + reserve <= SUMMARY_BYTES) line = detail
     if (bytes + Buffer.byteLength(line, "utf8") + 1 > SUMMARY_BYTES) break
     lines.push(line)
     bytes += Buffer.byteLength(line, "utf8") + 1
   }
-  if (lines.length < warehouses.filter((warehouse) => !isScratch(warehouse.name)).length) lines.push("- (more: warehouse_list)")
+  if (lines.length < named.length) lines.push("- (more: warehouse_list)")
   return lines.join("\n")
 }
 
