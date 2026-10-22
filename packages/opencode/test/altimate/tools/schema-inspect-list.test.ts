@@ -77,8 +77,10 @@ for (const type of ["sqlite", "duckdb"] as const) {
     }
     await connector.execute("CREATE TEMP TABLE scratch_probe (id INTEGER)")
     await connector.execute("INSERT INTO scratch_probe VALUES (42)")
-    await inspect({ warehouse: "local", schema_name: "main" })
-    await discoverCatalog([{ name: "local", type }], { signal: ctx.abort, sessionID: ctx.sessionID })
+    // Both listing paths must actually run against this engine before the temp table is checked.
+    expect((await inspect({ warehouse: "local", schema_name: "main" })).output).toContain("main | empty | table")
+    const discovered = await discoverCatalog([{ name: "local", type }], { signal: ctx.abort, sessionID: ctx.sessionID })
+    expect(discovered).toContain("local: main.empty")
     expect((await connector.execute("SELECT id FROM scratch_probe")).rows).toEqual([[42]])
     const single = await inspect({ warehouse: "local", table: "empty", values: false })
     expect(single).toEqual({

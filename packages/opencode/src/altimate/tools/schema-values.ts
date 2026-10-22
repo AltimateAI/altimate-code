@@ -11,6 +11,7 @@ import * as Precedence from "../workspace/precedence"
 import { Dispatcher } from "../native"
 import * as Registry from "../native/connections/registry"
 import { isRecord, normalizeError } from "./response-normalization"
+import { isLocalConnection } from "./warehouse-discovery"
 
 /** Rows scanned per table; keeps wide or large tables cheap. */
 export const PROFILE_SAMPLE_ROWS = 10_000
@@ -481,7 +482,11 @@ export async function profileValues(
       sql,
       warehouse: target.name,
       limit: PROFILE_MAX_COLUMNS + 1,
-      ...(dialect === "sqlite" || dialect === "duckdb" ? {} : { query_timeout_ms: PROFILE_TIMEOUT_MS }),
+      // A shorter deadline would restart a local engine and drop session temp tables; the sample is
+      // already bounded by its LIMIT. Remote stores (e.g. MotherDuck) keep the profiling cap.
+      ...(isLocalConnection(Registry.getConfig(target.name)) && (dialect === "sqlite" || dialect === "duckdb")
+        ? {}
+        : { query_timeout_ms: PROFILE_TIMEOUT_MS }),
       ...(dialect === "postgres" ? { read_only: true } : {}),
     }, { signal: ctx.abort, sessionID: ctx.sessionID, ...(ctx.extra?.forceReadOnly === true ? { forceReadOnly: true } : {}) })) as unknown
     const data = isRecord(res) && isRecord(res.data) ? res.data : res

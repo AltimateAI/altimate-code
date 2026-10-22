@@ -26,6 +26,11 @@ describe("isLocalConnection", () => {
     expect(isLocalConnection({ type: "postgres" })).toBe(false)
   })
 
+  test("an SSH-tunneled connection is never local, even with a loopback host", () => {
+    expect(isLocalConnection({ type: "postgres", host: "localhost", ssh_host: "bastion.example.com" })).toBe(false)
+    expect(isLocalConnection({ type: "sqlite", path: "/data/app.sqlite", ssh_host: "bastion.example.com" })).toBe(false)
+  })
+
   test("other engines are never local", () => {
     expect(isLocalConnection({ type: "snowflake", host: "localhost" })).toBe(false)
     expect(isLocalConnection({ type: "bigquery" })).toBe(false)

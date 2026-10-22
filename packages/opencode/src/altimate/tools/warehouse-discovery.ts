@@ -37,7 +37,8 @@ type Table = { schema: string; name: string; type: string; row_count?: number; r
 
 /** Data on this machine: a local SQLite/DuckDB file (or memory), or a server on a loopback host or socket. */
 export function isLocalConnection(config: ConnectionConfig | undefined): boolean {
-  if (!config) return false
+  // An SSH tunnel reaches a remote host even when the configured host is loopback.
+  if (!config || config.ssh_host) return false
   const type = Registry.canonicalType(config.type) ?? ""
   if (type === "sqlite" || type === "duckdb") {
     const store = typeof config.path === "string" ? config.path : ""
