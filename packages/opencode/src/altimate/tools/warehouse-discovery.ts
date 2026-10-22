@@ -190,11 +190,13 @@ async function summaryTables(warehouse: string, config: ConnectionConfig): Promi
   const type = Registry.canonicalType(config.type) ?? ""
   const sql = summaryCatalogQuery(type)
   const store = typeof config.path === "string" ? config.path : ""
-  // File stores only: a memory store is empty at startup and other paths may name a remote store.
-  if (!sql || !(isLocalFilePath(store) || absoluteFileUriPath(store) !== undefined)) return undefined
+  // File stores only: a memory store is empty at startup and other paths may name a remote store. An SSH tunnel
+  // setting would open a network connection before the file.
+  if (!sql || config.ssh_host || !(isLocalFilePath(store) || absoluteFileUriPath(store) !== undefined)) return undefined
   try {
     const connector = await Registry.get(warehouse)
-    // No signal or deadline: the query is bounded by its LIMIT, and aborting the local engine would restart it.
+    // No signal or added deadline: the query is bounded by its LIMIT. Only the connection's own query timeout
+    // applies, and at startup the engine holds no session scratch tables a restart could drop.
     const result = await executeQuery(config, { readOnly: true }, undefined, (options) =>
       connector.execute(sql, SUMMARY_TABLE_GATE + 1, undefined, options),
     )

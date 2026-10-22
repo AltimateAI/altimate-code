@@ -1376,6 +1376,8 @@ const REMOTE_CONNECTIONS = {
   mongo_local: { type: "mongodb", connection_string: "mongodb://localhost:27017" },
   warehouse: { type: "snowflake", account: "acct", user: "u", password: "p" },
   lake: { type: "bigquery", project: "proj" },
+  // A local file behind an SSH tunnel would open a network connection first.
+  tunneled: { type: "sqlite", path: "/tmp/never-opened.sqlite", ssh_host: "bastion.example.com", ssh_user: "u" },
 }
 
 mcpTest("startup lists remote and server connections by name and type without opening them", async () => {
@@ -1385,7 +1387,7 @@ mcpTest("startup lists remote and server connections by name and type without op
   // No deadline is raced: nothing slow ran, so startup returns at once.
   expect(elapsed).toBeLessThan(2_000)
   expect(instructions).toContain(
-    "Connections:\n- pg_local (postgres)\n- pg_remote (postgres)\n- mongo_local (mongodb)\n- warehouse (snowflake)\n- lake (bigquery)",
+    "Connections:\n- pg_local (postgres)\n- pg_remote (postgres)\n- mongo_local (mongodb)\n- warehouse (snowflake)\n- lake (bigquery)\n- tunneled (sqlite)",
   )
 })
 
