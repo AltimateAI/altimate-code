@@ -216,8 +216,9 @@ describe("scanner end-to-end (git behaviour)", () => {
   })
 
   test("a real `git push` reads the refs from the hook's stdin and finishes", () => {
-    // The hook used to wait forever on stdin under `git push`. Run it the way
-    // git does: a pre-push hook fed by git itself, pushing to a local bare repo.
+    // Runs the script the way git does: a pre-push hook fed by git itself,
+    // pushing to a local bare repo. This guards the stdin contract end to end; it
+    // does not reproduce the intermittent ssh hang, which never happened on demand.
     const dir = repo()
     baseline(dir)
     const remote = fs.mkdtempSync(path.join(os.tmpdir(), "tracker-remote-"))
