@@ -1,7 +1,7 @@
 // Shared, model-free workspace operations for external coding clients.
 import fs from "node:fs/promises"
 import path from "node:path"
-import { createHash, randomUUID } from "node:crypto"
+import { createHash } from "node:crypto"
 import { WorkspaceApi } from "./api-client"
 import { accountDigest, resolveBindingOutcome } from "./state"
 import { workspaceContents, render } from "./contents"
@@ -46,12 +46,15 @@ export async function assertIdentity(directory: string, token: string) {
 
 export async function listWorkspaces() {
   if (!SkillSync.isEnabled()) throw new Error("Workspaces are disabled on this machine.")
-  const account = await accountDigest()
-  const credentials = await WorkspaceApi.captureCredentials()
-  if (!account || !credentials) throw new Error("Sign in to Altimate first.")
-  const workspaces = await WorkspaceApi.listDatamates(credentials)
-  if ((await accountDigest()) !== account) throw new Error("Altimate account changed. Try again.")
-  return workspaces.map(({ id, name }) => ({ id, name })).slice(0, 100)
+  const result = await withCredentials(await AltimateApi.getCredentials(), async () => {
+    const account = await accountDigest()
+    const credentials = await WorkspaceApi.captureCredentials()
+    if (!account || !credentials) throw new Error("Sign in to Altimate first.")
+    const workspaces = await WorkspaceApi.listDatamates(credentials)
+    return { account, workspaces }
+  })
+  if ((await accountDigest()) !== result.account) throw new Error("Altimate account changed. Try again.")
+  return result.workspaces.map(({ id, name }) => ({ id, name })).slice(0, 100)
 }
 
 export async function context(directory: string) {
@@ -62,13 +65,12 @@ export async function context(directory: string) {
 
 async function scopedContext(directory: string) {
   const { binding, token } = await identity(directory)
-  const session = `external-workspace-${randomUUID()}`
-  try {
+  {
     const [contents, memory] = await Promise.all([
       workspaceContents(directory, binding.datamateId, { skills: 1000, summary: 3000 }),
-      MemorySync.refresh(session, directory),
+      MemorySync.readOnly(directory),
     ])
-    const blocks = MemorySync.overlayBlocks(session).filter((block) => block.scope === "project")
+    const blocks = memory.blocks.filter((block) => block.scope === "project")
     let remaining = 6000
     const memories = []
     for (const block of blocks) {
@@ -89,8 +91,6 @@ async function scopedContext(directory: string) {
       skills,
       memory: { status: memory.status, memories, clipped: blocks.length > memories.length || remaining === 0 },
     }
-  } finally {
-    MemorySync.resetOverlay(session)
   }
 }
 
@@ -169,7 +169,7 @@ async function scopedRemember(directory: string, token: string, id: string, cont
   await assertIdentity(directory, token)
   // Suppress the default fire-and-forget mirror: it resolves its own binding,
   // whereas this command must send only to the workspace the user just saw.
-  await MemoryStore.write(block, { mirror: false })
+  await MemoryStore.write(block, { mirror: false, cleanup: false })
   try {
     await assertIdentity(directory, token)
     const sync = await MemorySync.backfill([block], binding, directory)

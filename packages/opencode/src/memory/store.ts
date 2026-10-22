@@ -265,7 +265,7 @@ export namespace MemoryStore {
     })
   }
 
-  export async function write(block: MemoryBlock, options?: { mirror?: boolean }): Promise<{ duplicates: MemoryBlock[] }> {
+  export async function write(block: MemoryBlock, options?: { mirror?: boolean; cleanup?: boolean }): Promise<{ duplicates: MemoryBlock[] }> {
     if (block.content.length > MEMORY_MAX_BLOCK_SIZE) {
       throw new Error(
         `Memory block "${block.id}" content exceeds maximum size of ${MEMORY_MAX_BLOCK_SIZE} characters (got ${block.content.length})`,
@@ -337,7 +337,7 @@ export namespace MemoryStore {
     // altimate_change end
 
     // Auto-clean expired blocks AFTER successful write to avoid data loss
-    if (needsCleanup) {
+    if (needsCleanup && options?.cleanup !== false) {
       const expiredBlocks = allBlocks.filter((b) => isExpired(b))
       for (const expired of expiredBlocks) {
         await remove(block.scope, expired.id)

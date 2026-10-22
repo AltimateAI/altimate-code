@@ -8,6 +8,8 @@ import * as Contents from "../../../src/altimate/workspace/contents"
 import * as Sync from "../../../src/altimate/workspace/memory-sync"
 import { MemoryStore } from "../../../src/memory/store"
 import * as Client from "../../../src/altimate/workspace/client"
+import { Instance } from "../../../src/project/instance"
+import { WorkspaceApi } from "../../../src/altimate/workspace/api-client"
 import { AltimateApi } from "../../../src/altimate/api/client"
 import { currentCredentials } from "../../../src/altimate/api/credentials-context"
 
@@ -80,9 +82,9 @@ test("context contains bounded project memories, excludes global memory and refu
     knowledge: { kind: "off" },
   }))
   replace(Skills, "snapshotWorkspaceId", async () => null)
-  replace(Sync, "refresh", async () => ({ count: 20, ok: true, status: "loaded" }))
-  replace(Sync, "overlayBlocks", () =>
-    Array.from({ length: 20 }, (_, index) => ({
+  replace(Sync, "readOnly", async () => ({
+    status: "loaded",
+    blocks: Array.from({ length: 20 }, (_, index) => ({
       id: `id-${index}`,
       remote: true as const,
       scope: index === 0 ? "global" : "project",
@@ -91,14 +93,14 @@ test("context contains bounded project memories, excludes global memory and refu
       created: "2026-10-22T00:00:00Z",
       updated: "2026-10-22T00:00:00Z",
     })),
-  )
+  }))
   const result = await Client.context("/project")
   expect(result.memory.memories.map((block) => block.id)).not.toContain("id-0")
   expect(result.memory.memories.reduce((n, block) => n + block.content.length, 0)).toBe(6000)
   expect(result.memory.clipped).toBe(true)
-  replace(Sync, "refresh", async () => {
+  replace(Sync, "readOnly", async () => {
     f.account("account-B")
-    return { count: 0, ok: true, status: "loaded" }
+    return { blocks: [], status: "loaded" }
   })
   await expect(Client.context("/project")).rejects.toThrow("changed")
 })
@@ -139,7 +141,7 @@ test("explicit save validates receipt and content, writes one project block and 
   expect(writes.length).toBe(1)
   expect(writes[0]).toMatchObject([
     { scope: "project", id: "metrics/arr", content: "Use booked ARR." },
-    { mirror: false },
+    { mirror: false, cleanup: false },
   ])
   replace(Sync, "backfill", async () => {
     throw new Error("offline")
@@ -174,4 +176,49 @@ test("account change after local persistence cannot retarget the approved public
   expect((await Client.remember("/project", token, "good", "text")).cloudConfirmed).toBe(true)
   expect(sentAs).toBe("account-A")
   expect((await AltimateApi.getCredentials()).altimateApiKey).toBe("account-B")
+})
+
+test("single-block save suppresses unrelated expired-file cleanup in the real store", async () => {
+  scope()
+  const directory = await mkdtemp(path.join(os.tmpdir(), "workspace-save-cleanup-"))
+  cleanups.push(() => rm(directory, { recursive: true, force: true }))
+  const root = path.join(directory, ".altimate-code", "memory")
+  await mkdir(root, { recursive: true })
+  for (let i = 0; i < 50; i++) {
+    await writeFile(
+      path.join(root, `expired-${i}.md`),
+      `---\nid: expired-${i}\nscope: project\ncreated: 2020-01-01T00:00:00Z\nupdated: 2020-01-01T00:00:00Z\nexpires: 2020-01-02T00:00:00Z\n---\n\nOld fact.\n`,
+    )
+  }
+  await Instance.provide({
+    directory,
+    fn: async () => {
+      const block = {
+        id: "fresh",
+        scope: "project" as const,
+        content: "New fact.",
+        tags: [],
+        created: new Date().toISOString(),
+        updated: new Date().toISOString(),
+      }
+      await MemoryStore.write(block, { mirror: false, cleanup: false })
+      expect((await MemoryStore.list("project", { includeExpired: true })).length).toBe(51)
+      await MemoryStore.write({ ...block, id: "control" }, { mirror: false })
+      expect((await MemoryStore.list("project", { includeExpired: true })).map((b) => b.id).sort()).toEqual([
+        "control",
+        "fresh",
+      ])
+    },
+  })
+})
+
+test("workspace listing pins one credential snapshot across account changes", async () => {
+  const f = scope()
+  replace(WorkspaceApi, "listDatamates", async (credentials) => {
+    f.account("account-B")
+    expect((await AltimateApi.getCredentials()).altimateApiKey).toBe("account-A")
+    f.account("account-A")
+    return []
+  })
+  expect(await Client.listWorkspaces()).toEqual([])
 })
