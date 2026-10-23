@@ -521,6 +521,11 @@ describe("v0.12.8 adversarial: plan-skip fail-closed guards", () => {
     const out = applySemanticsSkipGuard({ notes: [null, 3, "ok", "plan-based analysis was skipped"] })
     expect(out.skipped).toBe(true)
   })
+
+  test("a type-confused rule field that stringifies to a skip rule fails closed", () => {
+    const out = applyPolicySkipGuard({ allowed: true, warnings: [{ rule: ["POLICY_SKIPPED"] }] })
+    expect(out.allowed).toBe(false)
+  })
 })
 
 describe("v0.12.8 adversarial: permission aliases only tighten", () => {
@@ -550,11 +555,6 @@ describe("v0.12.8 adversarial: permission aliases only tighten", () => {
   test("rule order still decides: a later authored allow shadows an earlier alias deny", () => {
     const r = evaluateRequest(req({ safe: [["rm"]] }), "safe", [rule("deny", "rm"), rule("allow", "safe")])
     expect(r.action).toBe("allow")
-  })
-
-  test("a type-confused rule field that stringifies to a skip rule fails closed", () => {
-    const out = applyPolicySkipGuard({ allowed: true, warnings: [{ rule: ["POLICY_SKIPPED"] }] })
-    expect(out.allowed).toBe(false)
   })
 
   test("an ask via alias tightens an authored allow but not an authored deny", () => {
