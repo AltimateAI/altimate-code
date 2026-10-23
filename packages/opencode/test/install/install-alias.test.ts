@@ -398,3 +398,47 @@ describe("install.ps1 — altimate-code alias", () => {
     for (const line of SH_SHIM_LINES) expect(INSTALL_PS1).toContain(`'${line}'`)
   })
 })
+
+// The shim text as each installer spells it, decoded to the bytes it writes. Only the
+// host language's escaping is undone; anything the decoder does not know fails the match.
+// Sources are read with LF endings, as an autocrlf checkout may hand them back with CRLF.
+const lf = (text: string) => text.replace(/\r\n/g, "\n")
+
+function bashShim(name: string) {
+  const INSTALL_SH = lf(readFileSync(INSTALL_SH_PATH, "utf-8"))
+  const m = INSTALL_SH.match(new RegExp(`^\\s*write_shim ${name.replace(".", "\\.")} '([^']*)' \\|\\| return 0$`, "m"))
+  expect(m).not.toBeNull()
+  // A printf format: only \r, \n and %% may appear, so no other escape or conversion is lost.
+  const format = m![1]
+  expect(format.replace(/\\[rn]|%%/g, "")).not.toMatch(/[\\%]/)
+  return format.replace(/\\r/g, "\r").replace(/\\n/g, "\n").replace(/%%/g, "%")
+}
+
+function ps1CmdShim() {
+  const m = lf(INSTALL_PS1).match(/^\s*& \$writeShim "altimate-code\.cmd" "((?:[^"`]|`.)*)"$/m)
+  expect(m).not.toBeNull()
+  // A double-quoted PowerShell string: no `$` expansion, only `r, `n and `" escapes.
+  const text = m![1]
+  expect(text).not.toContain("$")
+  expect(text.replace(/`[rn"]/g, "")).not.toContain("`")
+  return text.replace(/`r/g, "\r").replace(/`n/g, "\n").replace(/`"/g, '"')
+}
+
+function ps1ShShim() {
+  const m = lf(INSTALL_PS1).match(/^\s*& \$writeShim "altimate-code" \(\(@\(\n((?:\s*'(?:[^']|'')*'\n)+)\s*\) -join "`n"\) \+ "`n"\)$/m)
+  expect(m).not.toBeNull()
+  const lines = [...m![1].matchAll(/^\s*'((?:[^']|'')*)'$/gm)].map((l) => l[1].replace(/''/g, "'"))
+  return lines.join("\n") + "\n"
+}
+
+describe("install and install.ps1 — Windows alias shims", () => {
+  test("write the same altimate-code.cmd", () => {
+    expect(bashShim("altimate-code.cmd")).toBe(ps1CmdShim())
+    expect(ps1CmdShim()).toBe(CMD_SHIM)
+  })
+
+  test("write the same altimate-code sh shim", () => {
+    expect(bashShim("altimate-code")).toBe(ps1ShShim())
+    expect(ps1ShShim()).toBe(SH_SHIM)
+  })
+})
