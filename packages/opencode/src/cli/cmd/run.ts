@@ -571,7 +571,7 @@ export const RunCommand = cmd({
       const piped = await readRunStdin(undefined, waitMs, message.trim().length > 0 || !!args.command)
       if (piped.timedOut)
         process.stderr.write(
-          `No input on stdin after ${waitMs / 1000}s; continuing without it. Redirect stdin from /dev/null to skip the wait, or set ALTIMATE_RUN_STDIN_WAIT_MS=0 to wait for it.${EOL}`,
+          `No input on stdin after ${waitMs / 1000}s; continuing without it (input sent later is ignored). Redirect stdin from /dev/null to skip the wait, or set ALTIMATE_RUN_STDIN_WAIT_MS=0 to wait for it.${EOL}`,
         )
       message += "\n" + piped.text
     }

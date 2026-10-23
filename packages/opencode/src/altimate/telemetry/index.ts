@@ -942,7 +942,7 @@ export namespace Telemetry {
         tool_name: string
         /** Tool category */
         tool_category: string
-        /** Allowlist template of the error first line, max 200 chars: plain lowercase words are kept, identifiers, numbers, quoted values, capitalized names and credential values become <x> */
+        /** Template of the error first line, max 200 chars: only words from a fixed vocabulary of common error terms are kept; every other word becomes <x>, and digits and symbols are dropped */
         error_message?: string
         /** Whether a subsequent tool call succeeded (error was recovered) */
         recovery_successful: boolean

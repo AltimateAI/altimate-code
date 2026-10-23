@@ -342,8 +342,12 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
 
   if (method === "curl" && targets.binary) {
     UI.empty()
-    prompts.log.message("To finish removing the binary, run:")
-    // altimate_change start — platform-native commands, plus the installer's other files
+    // altimate_change start — platform-native commands (named shell on Windows), plus the installer's other files
+    prompts.log.message(
+      process.platform === "win32"
+        ? "To finish removing the binary, run in PowerShell:"
+        : "To finish removing the binary, run:",
+    )
     prompts.log.info(`  ${removeFileCommand(targets.binary, process.platform)}`)
     for (const file of targets.installerFiles) {
       prompts.log.info(`  ${removeFileCommand(file, process.platform, true)}`)

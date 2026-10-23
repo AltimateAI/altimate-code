@@ -31,6 +31,11 @@ Table: ANALYTICS.PUBLIC.ORDERS
 - `table` (required): Table name (schema-qualified: `schema.table` or just `table`)
 - `schema_name` (optional): Schema to search in
 - `warehouse` (optional): Connection name
+- `values` (optional, default `true`): Append a value profile per column
+
+On SQLite, DuckDB and PostgreSQL connections, and for MongoDB collections, `schema_inspect` also profiles each column's values from a bounded sample (10,000 rows, or 100 documents for MongoDB; at most 40 columns): distinct count, null share, the most frequent values with their counts, whether the values are unique in the sample, and, for short text, the common value shapes. MongoDB nested fields are listed by their dotted paths. The profile shows the stored format, such as case, prefixes or padding, so filters match real data.
+
+The profile contains real cell values, which are sent to your model provider with the rest of the tool output. For tables that hold personal or sensitive data, ask for `values: false` to get the column list only.
 
 ---
 
