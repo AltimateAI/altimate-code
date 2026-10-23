@@ -8,7 +8,11 @@ export const WorkspaceClientCommand = cmd({
   describe: "workspace context for coding clients (JSON; no model calls)",
   builder: (yargs) =>
     yargs
-      .positional("action", { type: "string", choices: ["list", "context", "remember"] as const, demandOption: true })
+      .positional("action", {
+        type: "string",
+        choices: ["list", "context", "remember", "engine-install"] as const,
+        demandOption: true,
+      })
       .option("directory", { type: "string", default: process.cwd() })
       .option("token", { type: "string", describe: "Workspace receipt from context (required for remember)" })
       .option("id", { type: "string", describe: "Memory block id (remember only)" }),
@@ -20,9 +24,16 @@ export const WorkspaceClientCommand = cmd({
         print({ ok: true, workspaces: await WorkspaceClient.listWorkspaces() })
         return
       }
+      if (args.action === "engine-install") {
+        const { installEngine } = await import("@/altimate/workspace/engine-offer")
+        const result = await installEngine()
+        print(result)
+        if (!result.ok) process.exitCode = 1
+        return
+      }
       await bootstrap(args.directory, async () => {
         if (args.action === "context") {
-          print({ ok: true, ...(await WorkspaceClient.context(args.directory)) })
+          print({ ok: true, ...(await WorkspaceClient.setup(args.directory)) })
           return
         }
         if (!args.token || !args.id) throw new Error("remember requires --token and --id, with memory text on stdin.")

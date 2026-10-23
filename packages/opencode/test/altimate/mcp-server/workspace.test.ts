@@ -1,6 +1,10 @@
 import { expect, test, spyOn } from "bun:test"
 import { fileURLToPath } from "node:url"
-import { allowedEngineRead, checkEngineRead, createWorkspaceAdapter } from "../../../src/altimate/mcp-server/workspace"
+import {
+  allowedEngineRead,
+  checkEngineRead,
+  createPinnedWorkspaceAdapter as createWorkspaceAdapter,
+} from "../../../src/altimate/mcp-server/workspace"
 import * as WorkspaceClient from "../../../src/altimate/workspace/client"
 import * as Probes from "../../../src/altimate/workspace/engine-probes"
 

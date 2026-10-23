@@ -57,6 +57,25 @@ function scope() {
 }
 
 describe("external workspace identity", () => {
+  test("setup reports safe actionable states without credential diagnostics", async () => {
+    const f = scope()
+    f.account(null)
+    const auth = await Client.setup("/project")
+    expect(auth.status).toBe("needs_auth")
+    if (auth.status === "ready") throw new Error("Expected setup requirement")
+    expect(auth.message).toContain("Sign in")
+    f.account("account-A")
+    replace(Skills, "isEnabled", () => false)
+    expect((await Client.setup("/project")).status).toBe("disabled")
+    replace(Skills, "isEnabled", () => true)
+    replace(State, "resolveBindingOutcome", async () => {
+      throw new Error("secret-token upstream failure")
+    })
+    const failure = await Client.setup("/project")
+    expect(failure.status).toBe("unavailable")
+    expect(JSON.stringify(failure)).not.toContain("secret-token")
+  })
+
   test("receipt binds account, workspace and project; stale or unsigned identities are refused", async () => {
     const f = scope()
     const first = await Client.identity("/project")

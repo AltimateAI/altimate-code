@@ -12,19 +12,59 @@ import { MemoryBlockSchema, MEMORY_MAX_BLOCK_SIZE } from "@/memory/types"
 import { AltimateApi } from "@/altimate/api/client"
 import { withCredentials } from "@/altimate/api/credentials-context"
 
+export class WorkspaceSetupError extends Error {
+  constructor(
+    public readonly status: "needs_auth" | "needs_workspace" | "disabled" | "unavailable",
+    message: string,
+  ) {
+    super(message)
+  }
+}
+
+async function credentials() {
+  try {
+    return await AltimateApi.getCredentials()
+  } catch {
+    throw new WorkspaceSetupError("needs_auth", "Sign in to Altimate to use workspace data.")
+  }
+}
+
+/** Machine-readable first-use state; never return credential errors or secrets to a client. */
+export async function setup(directory: string) {
+  try {
+    return { status: "ready" as const, ...(await context(directory)) }
+  } catch (error) {
+    const status = error instanceof WorkspaceSetupError ? error.status : "unavailable"
+    const workspaces = status === "needs_workspace" ? await listWorkspaces().catch(() => []) : []
+    return {
+      status,
+      workspaces,
+      message:
+        status === "needs_auth"
+          ? "Sign in to Altimate to continue this workspace task."
+          : status === "needs_workspace"
+            ? "Choose the workspace for this project. Local data tools remain available."
+            : status === "disabled"
+              ? "Workspace access is disabled in Altimate settings."
+              : "Workspace access could not be confirmed. Check your connection or sign in again.",
+    }
+  }
+}
+
 export async function identity(directory: string) {
-  return withCredentials(await AltimateApi.getCredentials(), () => scopedIdentity(directory))
+  return withCredentials(await credentials(), () => scopedIdentity(directory))
 }
 
 async function scopedIdentity(directory: string) {
-  if (!SkillSync.isEnabled()) throw new Error("Workspaces are disabled on this machine.")
+  if (!SkillSync.isEnabled()) throw new WorkspaceSetupError("disabled", "Workspaces are disabled on this machine.")
   const account = await accountDigest()
-  if (!account) throw new Error("Sign in to Altimate first, then reconnect the MCP server.")
+  if (!account) throw new WorkspaceSetupError("needs_auth", "Sign in to Altimate first.")
   const outcome = await resolveBindingOutcome(directory)
   if (outcome.status !== "bound" || outcome.stale) {
-    throw new Error(
+    throw new WorkspaceSetupError(
+      outcome.status === "unbound" ? "needs_workspace" : "unavailable",
       outcome.status === "unbound"
-        ? "This project is not linked. Run altimate-code link, then reconnect MCP."
+        ? "This project is not linked. Choose a workspace to continue."
         : "The workspace could not be confirmed. Check your connection and try again.",
     )
   }
@@ -40,13 +80,13 @@ async function scopedIdentity(directory: string) {
 export async function assertIdentity(directory: string, token: string) {
   const current = await identity(directory)
   if (current.token !== token)
-    throw new Error("Altimate account or workspace changed. Refresh the workspace and reconnect MCP before continuing.")
+    throw new Error("Altimate account or workspace changed. Read workspace_context again before continuing.")
   return current
 }
 
 export async function listWorkspaces() {
-  if (!SkillSync.isEnabled()) throw new Error("Workspaces are disabled on this machine.")
-  const result = await withCredentials(await AltimateApi.getCredentials(), async () => {
+  if (!SkillSync.isEnabled()) throw new WorkspaceSetupError("disabled", "Workspaces are disabled on this machine.")
+  const result = await withCredentials(await credentials(), async () => {
     const account = await accountDigest()
     const credentials = await WorkspaceApi.captureCredentials()
     if (!account || !credentials) throw new Error("Sign in to Altimate first.")
@@ -58,7 +98,7 @@ export async function listWorkspaces() {
 }
 
 export async function context(directory: string) {
-  const result = await withCredentials(await AltimateApi.getCredentials(), () => scopedContext(directory))
+  const result = await withCredentials(await credentials(), () => scopedContext(directory))
   await assertIdentity(directory, result.workspace.token)
   return result
 }
@@ -100,9 +140,7 @@ function validSkillName(name: string) {
 
 /** Do not expose a stale account's snapshot, symlinks, or arbitrary local files. */
 export async function readSkill(directory: string, name: string, token: string) {
-  const content = await withCredentials(await AltimateApi.getCredentials(), () =>
-    scopedReadSkill(directory, name, token),
-  )
+  const content = await withCredentials(await credentials(), () => scopedReadSkill(directory, name, token))
   await assertIdentity(directory, token)
   return content
 }
@@ -144,7 +182,7 @@ async function scopedReadSkill(directory: string, name: string, token: string) {
 
 /** User-invoked CLI action only; never automatically called from a model tool. */
 export async function remember(directory: string, token: string, id: string, content: string) {
-  return withCredentials(await AltimateApi.getCredentials(), () => scopedRemember(directory, token, id, content))
+  return withCredentials(await credentials(), () => scopedRemember(directory, token, id, content))
 }
 
 async function scopedRemember(directory: string, token: string, id: string, content: string) {
