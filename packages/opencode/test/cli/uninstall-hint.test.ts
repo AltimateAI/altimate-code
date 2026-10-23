@@ -3,8 +3,7 @@ import {
   installerSiblingFiles,
   removalHeader,
   removeEmptyDirCommand,
-  removeFileCommand,
-} from "../../src/cli/cmd/uninstall"
+  removeFileCommand, emptyBinDirToRemove } from "../../src/cli/cmd/uninstall"
 
 describe("uninstall — installer files beside the binary", () => {
   test("names the alias next to a standalone unix install", () => {
@@ -99,5 +98,13 @@ describe("uninstall — removal header and empty-directory command", () => {
     expect(removeEmptyDirCommand("/home/o'neil $dev/.opencode/bin", "linux")).toBe(
       "rmdir '/home/o'\\''neil $dev/.opencode/bin' 2>/dev/null",
     )
+  })
+
+  test("the empty bin directory is offered for the installers' ~/.altimate/bin and a legacy ~/.opencode/bin only", () => {
+    expect(emptyBinDirToRemove("/home/dev/.altimate/bin/altimate")).toBe("/home/dev/.altimate/bin")
+    expect(emptyBinDirToRemove("/home/dev/.opencode/bin/opencode")).toBe("/home/dev/.opencode/bin")
+    expect(emptyBinDirToRemove("/usr/local/bin/altimate")).toBeUndefined()
+    expect(emptyBinDirToRemove("/home/dev/.altimate/other/altimate")).toBeUndefined()
+    expect(emptyBinDirToRemove("/home/dev/my.opencode.tools/bin/altimate")).toBeUndefined()
   })
 })

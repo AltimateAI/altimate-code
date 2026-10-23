@@ -70,6 +70,13 @@ export function removalHeader(platform: NodeJS.Platform): string {
   return platform === "win32" ? "To finish removing the binary, run in PowerShell:" : "To finish removing the binary, run:"
 }
 
+/** The bin directory to offer removing once it is empty: the installers' `~/.altimate/bin`, or a legacy `~/.opencode/bin`. */
+export function emptyBinDirToRemove(binary: string): string | undefined {
+  const binDir = path.dirname(binary)
+  const parent = path.basename(path.dirname(binDir))
+  return path.basename(binDir) === "bin" && (parent === ".altimate" || parent === ".opencode") ? binDir : undefined
+}
+
 /**
  * A command that removes `dir` only when it is empty and stays silent otherwise, quoted like
  * `removeFileCommand`. PowerShell's `Remove-Item` prompts for a non-empty directory instead of
@@ -364,10 +371,8 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
       prompts.log.info(`  ${removeFileCommand(file, process.platform, true)}`)
     }
 
-    const binDir = path.dirname(targets.binary)
-    if (binDir.includes(".opencode")) {
-      prompts.log.info(`  ${removeEmptyDirCommand(binDir, process.platform)}`)
-    }
+    const binDir = emptyBinDirToRemove(targets.binary)
+    if (binDir) prompts.log.info(`  ${removeEmptyDirCommand(binDir, process.platform)}`)
     // altimate_change end
   }
 

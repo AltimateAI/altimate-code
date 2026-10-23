@@ -56,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`run --model` reports a failed provider list as itself**, with the HTTP status, not "Model not found". (#1472)
 - **A failed background file scan is handled** instead of surfacing as an unhandled rejection. (#1471)
 - **The read-only SQL check blocks PostgreSQL replication-slot copy and sync functions.** `pg_copy_logical_replication_slot`, `pg_copy_physical_replication_slot` and `pg_sync_replication_slots` were not on the side-effect list, so a top-level call passed as read-only; the create and drop slot functions were already blocked. Found in this release's review.
-- **`uninstall` on Windows gives PowerShell commands, and says so**, including for the empty `.opencode` bin directory, which used a POSIX `rmdir … 2>/dev/null` line. Found in this release's review.
+- **`uninstall` on Windows gives PowerShell commands, and says so**, and now also offers to remove the empty `~/.altimate/bin` directory (previously only a legacy `~/.opencode/bin`, with a POSIX `rmdir … 2>/dev/null` line even on Windows). Found in this release's review.
 
 ## [0.12.7] - 2026-10-13
 

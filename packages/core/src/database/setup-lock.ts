@@ -40,7 +40,7 @@ export function waitNotice(filename: string) {
   return `Waiting for another altimate-code process to finish setting up the database (lock: ${sentinel(filename)})`
 }
 
-/** The notice is diagnostic only: a failing stderr write or `notify` must never abort the database open. */
+/** The notice is diagnostic only: a `notify` (or stderr write) that throws synchronously must not abort the database open. */
 function announce(filename: string, options: Options) {
   try {
     ;(options.notify ?? notifyStderr)(waitNotice(filename))
