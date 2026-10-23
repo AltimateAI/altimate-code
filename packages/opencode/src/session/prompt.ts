@@ -2194,6 +2194,8 @@ export namespace SessionPrompt {
         lastToolName = part.tool
         // altimate_change end
         if (toolChain.length < 50) toolChain.push(part.tool)
+        // A declined permission prompt is the user's decision: neither a tool error nor a recovery.
+        if (part.state?.status === "error" && ErrorDetail.isUserRejection(String(part.state.error))) continue
         const isError = part.state?.status === "error"
         if (isError) {
           toolErrorCount++
