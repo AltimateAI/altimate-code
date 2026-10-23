@@ -1,4 +1,6 @@
 import z from "zod"
+import fs from "node:fs"
+import path from "node:path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 // altimate_change start — post-connect feature suggestions
@@ -49,12 +51,35 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
       }
     }
 
+    // altimate_change start — a read-only MCP session must not create a database file through `create`
+    if (ctx.extra?.forceReadOnly === true && args.config.create === true) {
+      return {
+        title: `Add '${args.name}': FAILED`,
+        metadata: { success: false, name: args.name, type: String(args.config.type) },
+        output: `This session is read-only, so "create": true is not allowed. Point "path" at an existing database file.`,
+      }
+    }
+    // altimate_change end
+    // altimate_change start — a store this process cannot write (file or directory) is opened read-only; opening it
+    // read-write failed every query with "attempt to write a readonly database". A property of the file, so it is
+    // correct to persist; writable stores are unchanged.
+    const config = unwritableFileStore(args.config) ? { ...args.config, readonly: true } : args.config
+    // altimate_change end
     try {
       const result = await Dispatcher.call("warehouse.add", {
         name: args.name,
-        config: args.config,
+        config,
       })
 
+      // altimate_change start — MCP clients have only the toolkit: no warehouse_test or suggested follow-up tools
+      if (result.success && ctx.extra?.mcpClient === true) {
+        let output = `Added warehouse '${result.name}' (type: ${result.type}). Call warehouse_list to see its tables.`
+        output += driverReadinessNote(result.type)
+        if (result.warnings?.length)
+          output += `\n\nWarning — not every credential was saved:\n${result.warnings.map((w) => `- ${w}`).join("\n")}`
+        return { title: `Add '${args.name}': OK`, metadata: { success: true, name: result.name, type: result.type }, output }
+      }
+      // altimate_change end
       if (result.success) {
         // altimate_change start — append post-connect feature suggestions (async, non-blocking)
         let output = `Successfully added warehouse '${result.name}' (type: ${result.type}).\n\nUse warehouse_test to verify connectivity.`
@@ -156,6 +181,22 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
     }
   },
 })
+
+// altimate_change start — read-only detection for existing SQLite/DuckDB store files
+function unwritableFileStore(config: Record<string, unknown>): boolean {
+  const type = String(config.type).toLowerCase()
+  const store = config.path
+  if ((type !== "sqlite" && type !== "duckdb") || typeof store !== "string" || !path.isAbsolute(store)) return false
+  if (config.readonly !== undefined || !fs.existsSync(store)) return false
+  try {
+    fs.accessSync(store, fs.constants.W_OK)
+    fs.accessSync(path.dirname(store), fs.constants.W_OK)
+    return false
+  } catch {
+    return true
+  }
+}
+// altimate_change end
 
 // altimate_change start — driver readiness note for newly added warehouses
 /**

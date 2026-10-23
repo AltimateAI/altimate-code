@@ -6,6 +6,43 @@ description: "Configure Model Context Protocol (MCP) servers in Altimate Code to
 
 altimate supports the Model Context Protocol (MCP) for connecting to external tool servers.
 
+## Use Altimate Code tools from another MCP client
+
+Run `altimate-code mcp serve` to expose data tools over stdio. Your MCP client's model handles reasoning; this server runs tools directly without calling a model.
+
+Add this entry to your MCP client's configuration (for example, Claude Code's `.mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "altimate-code": {
+      "command": "altimate-code",
+      "args": ["mcp", "serve", "--connections", "/absolute/path/to/connections.json"]
+    }
+  }
+}
+```
+
+By default the server exposes `warehouse_list`, `warehouse_add`, `sql_execute`, `sql_materialize` and `answer_commit`. Pass `tables` to `sql_execute` to get those tables' columns and value profiles in the same call as its queries. Start with `--all-tools` to also expose `schema_inspect` and `sql_check`. Without `--connections`, the server reads the usual connection sources and re-reads them while none are configured, so a connections file written mid-session, or a connection added with `warehouse_add`, is picked up without a restart. A connections file is a JSON object keyed by connection name:
+
+```json
+{
+  "local": { "type": "sqlite", "path": "./analytics.sqlite" }
+}
+```
+
+Relative database paths resolve beside this file. With `--connections`, this file is the only source of connections: global and project `connections.json` files and `ALTIMATE_CODE_CONN_*` overrides are ignored. Omit `--connections` to use normal connection discovery: global and project `.altimate-code/connections.json` files, followed by `ALTIMATE_CODE_CONN_*` environment overrides. Set your client's working directory to the project when using project discovery.
+
+At startup the server lists each connection's name and type in its instructions, read from configuration only: it does not connect to remote or server databases or run queries on them. For local SQLite and DuckDB files (not behind an SSH tunnel) it also lists table names from one catalog query (no row counts); a file with more than 40 tables is noted as such instead. Call `warehouse_list` for columns and sample rows. Listing tools use catalog row estimates where available (including DuckDB); SQLite listings omit row counts. They never count rows by scanning each table.
+
+<!-- altimate_change start — MCP read-only limits and private output lifecycle -->
+
+Source writes are refused by default. Without `--allow-write`, source queries request database-enforced read-only execution on PostgreSQL, SQLite and DuckDB. For other connection types, read-only is enforced by SQL classification only; stored functions with side effects are not blocked — use a read-only database user. The server prints this caveat on stderr at startup and includes it in `warehouse_list` for each affected connection. Add `--allow-write` to enable SQL write permissions; existing hard safety blocks still apply. `sql_materialize` always requires a read-only source query and writes only into the server session's temporary `scratch` warehouse. Scratch tables disappear when the server exits. Large results may include a local spill file path that your client can open with any file reader. Spill files use a private directory and are deleted when the server exits. Local `tool_output.max_lines` and `tool_output.max_bytes` settings control output limits; remote agent configuration is not loaded.
+
+<!-- altimate_change end -->
+
+The server writes only MCP protocol messages to stdout and sends logs to stderr. It does not initialize telemetry and honors `ALTIMATE_TELEMETRY_DISABLED`.
+
 ## Local MCP Servers
 
 Run an MCP server as a local subprocess:
