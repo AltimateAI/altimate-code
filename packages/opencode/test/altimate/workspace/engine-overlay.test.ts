@@ -61,6 +61,8 @@ type Harness = {
    * the first config load, then tracked through add/remove, as in the runtime. */
   live?: boolean
   fingerprint: string | null
+  /** The workspace's connection choices as the engine would read them. */
+  choices: string | null
 }
 
 function install(opts: {
@@ -104,6 +106,7 @@ function install(opts: {
     lines: [],
     clock: 1_000_000,
     fingerprint: "bin-1",
+    choices: "[]",
   }
   if (opts.flag === false) process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
   else delete process.env.ALTIMATE_DISABLE_WORKSPACE
@@ -131,6 +134,7 @@ function install(opts: {
   }
   syncInternals.now = () => h.clock
   syncInternals.fingerprint = () => h.fingerprint
+  syncInternals.choices = () => h.choices
   // No TUI bus in this harness, so a refusal that would raise the install
   // offer falls back to the toast, which is what these tests observe.
   syncInternals.publishOffer = async () => false
@@ -830,6 +834,132 @@ describe("beforeTurn — what a turn boundary does", () => {
     expect(managedWorkspace()).toEqual({ id: "7", name: "growth" })
     expect(settledOutcome("s1")?.kind).toBe("attached")
     expect(h.toasts.at(-1)?.title).toContain("growth")
+  })
+
+  test("a changed connection choice starts the engine again at the next boundary, once", async () => {
+    // The engine fetches its connections only when it starts and never says its
+    // tools changed: a new choice reaches the catalog through a fresh engine.
+    const h = install({})
+    await beforeTurn("s1")
+    expect(h.added).toEqual([])
+    h.choices = '[["jira","9"]]'
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(1)
+    expect(pinnedWorkspace(h.added[0] as LocalMcpConfig)).toBe("42")
+    expect(h.invalidates).toBe(0)
+    expect(settledOutcome("s1")?.kind).toBe("attached")
+    // Unchanged since that start: nothing more, from any session.
+    await beforeTurn("s1")
+    await beforeTurn("s2")
+    expect(h.added).toHaveLength(1)
+  })
+
+  test.each([
+    [
+      "a changed choice",
+      (h: Harness): void => {
+        h.choices = '[["jira","9"]]'
+      },
+    ],
+    [
+      "a re-link",
+      (h: Harness): void => {
+        h.binding = bound(7, "growth")
+      },
+    ],
+  ] as const)("an engine started for %s that fails its handshake gets the session's one retry, like any start", async (_, change) => {
+    // The restart and the failed-handshake retry are separate rules: a start that
+    // fails is retried once per session, whatever started it. (codex r1)
+    const h = install({})
+    await beforeTurn("s1")
+    h.status = "failed"
+    change(h)
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(2)
+    expect(settledOutcome("s1")?.kind).toBe("connect-failed")
+    // Spent: later boundaries neither restart nor retry.
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(2)
+  })
+
+  test("a choice made before the first boundary counts against the engine's own start", async () => {
+    // MCP bootstrapped the engine from the first config load, which read "[]".
+    const h = install({})
+    await syncInternals.config!.get()
+    expect(h.live).toBe(true)
+    h.choices = '[["jira","9"]]'
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(1)
+  })
+
+  test("a config reload before the first boundary does not hide a changed choice from the bootstrapped engine", async () => {
+    // The reload re-derives the overlay with the new choices; the engine MCP
+    // started from the first load still has the old ones. (codex r2)
+    const h = install({})
+    await syncInternals.config!.get()
+    h.choices = '[["jira","9"]]'
+    await syncInternals.config!.invalidate()
+    await syncInternals.config!.get()
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(1)
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(1)
+  })
+
+  test("a config reload between turns does not hide a changed choice from the running engine", async () => {
+    // Any consumer can reload config, re-deriving the overlay with the new
+    // choices while the engine that started with the old ones keeps running.
+    const h = install({})
+    await beforeTurn("s1")
+    h.choices = '[["jira","9"]]'
+    await syncInternals.config!.invalidate()
+    await syncInternals.config!.get()
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(1)
+  })
+
+  test("a choices file that cannot be read is never a change", async () => {
+    const h = install({})
+    await beforeTurn("s1")
+    h.choices = null
+    await beforeTurn("s1")
+    // Readable again and as it was: still no restart.
+    h.choices = "[]"
+    await beforeTurn("s1")
+    expect(h.added).toEqual([])
+  })
+
+  test("an engine whose start-time choices are unknown adopts the current ones without a restart", async () => {
+    const h = install({})
+    h.choices = null
+    await beforeTurn("s1")
+    h.choices = '[["jira","9"]]'
+    await beforeTurn("s1")
+    expect(h.added).toEqual([])
+    // From then on a change is a change.
+    h.choices = '[["jira","12"]]'
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(1)
+  })
+
+  test("a re-link that also changed the choices replaces the engine once", async () => {
+    const h = install({})
+    await beforeTurn("s1")
+    h.binding = bound(7, "growth")
+    h.choices = '[["jira","9"]]'
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(1)
+    await beforeTurn("s1")
+    expect(h.added).toHaveLength(1)
+  })
+
+  test("with no engine to start, a changed choice does nothing", async () => {
+    const h = install({ which: null })
+    await beforeTurn("s1")
+    h.choices = '[["jira","9"]]'
+    await beforeTurn("s1")
+    expect(h.added).toEqual([])
+    expect(settledOutcome("s1")?.kind).toBe("engine-missing")
   })
 
   test("an unlink mid-session removes the engine and settles unbound", async () => {
