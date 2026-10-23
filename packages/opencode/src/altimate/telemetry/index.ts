@@ -275,11 +275,11 @@ export namespace Telemetry {
         //
         // SEMANTICS (read this before writing dashboard queries):
         //   tokens_input        = UNCACHED input tokens. Equal to 0 on a full cache hit.
-        //                          Normalized across providers: Anthropic (and Bedrock
-        //                          Anthropic) return this directly; non-Anthropic
-        //                          providers return the inclusive total and Session.getUsage
-        //                          subtracts cache_read (and cache_write where present)
-        //                          to derive the uncached portion. cache_write in
+        //                          Normalized across providers: the AI SDK reports the
+        //                          inclusive total with a no-cache/cache-read/cache-write
+        //                          split, which Session.getUsage uses (older SDK usage
+        //                          without the split falls back to subtracting cache
+        //                          tokens, except Anthropic/Bedrock). cache_write in
         //                          particular is only populated for Anthropic / Bedrock /
         //                          Venice metadata paths — OpenAI / OpenRouter don't
         //                          surface a "cache write" concept today, so the

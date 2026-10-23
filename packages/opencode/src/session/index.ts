@@ -872,21 +872,30 @@ export namespace Session {
       const outputTokens = safe(input.usage.outputTokens ?? 0)
       const reasoningTokens = safe(input.usage.reasoningTokens ?? 0)
 
-      const cacheReadInputTokens = safe(input.usage.cachedInputTokens ?? 0)
+      // altimate_change start — upstream_fix: AI SDK v6 reports `inputTokenDetails`, where
+      // `inputTokens` includes cached tokens for every provider (Anthropic and Bedrock too).
+      // Without this, cached input was also billed at the uncached rate (~6x on cached sessions).
+      const details = (input.usage as { inputTokenDetails?: Record<string, number | undefined> }).inputTokenDetails
+      const reportsDetails = typeof details?.noCacheTokens === "number"
+      const cacheReadInputTokens = safe((reportsDetails ? details?.cacheReadTokens : undefined) ?? input.usage.cachedInputTokens ?? 0)
       const cacheWriteInputTokens = safe(
-        (input.metadata?.["anthropic"]?.["cacheCreationInputTokens"] ??
+        ((reportsDetails ? details?.cacheWriteTokens : undefined) ??
+          input.metadata?.["anthropic"]?.["cacheCreationInputTokens"] ??
           // @ts-expect-error
           input.metadata?.["bedrock"]?.["usage"]?.["cacheWriteInputTokens"] ??
           // @ts-expect-error
           input.metadata?.["venice"]?.["usage"]?.["cacheCreationInputTokens"] ??
           0) as number,
       )
+      // altimate_change end
 
       // OpenRouter provides inputTokens as the total count of input tokens (including cached).
       // AFAIK other providers (OpenRouter/OpenAI/Gemini etc.) do it the same way e.g. vercel/ai#8794 (comment)
       // Anthropic does it differently though - inputTokens doesn't include cached tokens.
       // It looks like Altimate Code's cost calculation assumes all providers return inputTokens the same way Anthropic does (I'm guessing getUsage logic was originally implemented with anthropic), so it's causing incorrect cost calculation for OpenRouter and others.
-      const excludesCachedTokens = !!(input.metadata?.["anthropic"] || input.metadata?.["bedrock"])
+      // altimate_change start — upstream_fix: only the pre-v6 usage shape excludes cached tokens
+      const excludesCachedTokens = !reportsDetails && !!(input.metadata?.["anthropic"] || input.metadata?.["bedrock"])
+      // altimate_change end
       // altimate_change start — clamp at zero so inconsistent provider counts
       // (inputTokens < cachedInputTokens) don't produce negative cost.
       // Without the Math.max(0, ...), `tokens.input * costInfo.input` becomes
@@ -929,7 +938,9 @@ export namespace Session {
       }
 
       const costInfo =
-        input.model.cost?.experimentalOver200K && tokens.input + tokens.cache.read > 200_000
+        // altimate_change start — upstream_fix: the long-context tier counts all prompt tokens, cache writes included
+        input.model.cost?.experimentalOver200K && tokens.input + tokens.cache.read + tokens.cache.write > 200_000
+        // altimate_change end
           ? input.model.cost.experimentalOver200K
           : input.model.cost
       return {
