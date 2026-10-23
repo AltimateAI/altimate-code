@@ -11,6 +11,7 @@
 // bodies come out as `{"detail": <string|object>}` — we parse the object form
 // for 409/412 and surface it as a typed error rather than a bare status code.
 import { AltimateApi } from "@/altimate/api/client"
+import { Telemetry } from "@/altimate/telemetry"
 
 const REQUEST_TIMEOUT_MS = 15_000
 
@@ -153,6 +154,9 @@ export class WorkspaceApiError extends Error {
   constructor(
     msg: string,
     public readonly status?: number,
+    /** Where it failed: on the wire before any answer, or in an answer the server gave (its
+     * status, when known, is `status`). A statusless error is transport unless said otherwise. */
+    public readonly failure: "transport" | "response" = status === undefined ? "transport" : "response",
   ) {
     super(msg)
     this.name = "WorkspaceApiError"
@@ -172,6 +176,145 @@ async function creds(): Promise<{ url: string; instance: string; apiKey: string 
   const c = await AltimateApi.getCredentials()
   return { url: c.altimateUrl, instance: c.altimateInstanceName, apiKey: c.altimateApiKey }
 }
+
+// altimate_change start — workspace telemetry helpers. Every failed workspace call reports
+// `workspace_api_error` (or `workspace_auth_expired` on 401/403) with the endpoint masked of
+// ids; the link lifecycle functions below report linked / created / switched / unlinked on the
+// success response and `workspace_link_failed` with a reason class otherwise.
+/** Endpoint labels come from a ROUTE TABLE, never from how a segment is spelled: an identifier,
+ * a memory id or a file path equal to a route word must not reach telemetry. Each router the
+ * workspace clients call lists the shapes of its subpaths as regular expressions with the label
+ * they map to; a subpath that matches no shape, or a router not listed, is labelled with every
+ * segment masked. Identifiers and file paths therefore cannot leak whatever they contain; an
+ * unlisted new route only costs detail until it is added here. */
+const ROUTES: Record<string, Array<[RegExp, string]>> = {
+  "/datamate-project-bindings": [
+    [/^\/?$/, "/"],
+    [/^\/bind$/, "/bind"],
+    [/^\/by-remote$/, "/by-remote"],
+    [/^\/by-path$/, "/by-path"],
+  ],
+  "/datamates": [[/^\/?$/, "/"]],
+  "/users": [[/^\/me$/, "/me"]],
+  "/skills": [
+    [/^\/[^/]+$/, "/:id"],
+    [/^\/[^/]+\/datamates$/, "/:id/datamates"],
+    [/^\/[^/]+\/files(\/.*)?$/, "/:id/files/:path"],
+  ],
+  "/datamates/memory": [
+    [/^\/?$/, "/"],
+    [/^\/list$/, "/list"],
+    [/^\/[^/]+$/, "/:id"],
+  ],
+}
+
+/** "METHOD /base/path" with every dynamic segment replaced from the route table above. */
+export function endpointOf(method: string, basePath: string, subpath: string): string {
+  const shapes = ROUTES[basePath]
+  const maskAll = (p: string) =>
+    p
+      .split("/")
+      .map((seg) => (seg === "" ? seg : ":id"))
+      .join("/")
+  if (!shapes) return `${method} ${maskAll(basePath)}${maskAll(subpath)}`
+  const query = subpath.split("?")[0]
+  for (const [shape, label] of shapes) if (shape.test(query)) return `${method} ${basePath}${label}`
+  return `${method} ${basePath}${maskAll(query)}`
+}
+
+function workspaceIdIn(body: unknown): number | undefined {
+  if (!body || typeof body !== "object") return undefined
+  const b = body as Record<string, unknown>
+  const id = b.datamate_id ?? b.target_datamate_id
+  return typeof id === "number" && Number.isInteger(id) && id > 0 ? id : undefined
+}
+
+function reportApiError(input: {
+  endpoint: string
+  status?: number
+  kind: "4xx" | "5xx" | "network" | "timeout" | "response"
+  workspaceId?: number
+}) {
+  const session_id = Telemetry.getContext().sessionId
+  const ws = input.workspaceId !== undefined ? { workspace_id: input.workspaceId } : {}
+  if (input.status === 401 || input.status === 403) {
+    Telemetry.track({
+      type: "workspace_auth_expired",
+      timestamp: Date.now(),
+      session_id,
+      endpoint: input.endpoint,
+      status: input.status,
+      ...ws,
+    })
+    return
+  }
+  Telemetry.track({
+    type: "workspace_api_error",
+    timestamp: Date.now(),
+    session_id,
+    endpoint: input.endpoint,
+    status_class: input.kind,
+    ...(input.status !== undefined ? { status: input.status } : {}),
+    ...ws,
+  })
+}
+
+/** The reason class of a failed link call, for `workspace_link_failed`. */
+export function linkFailureReason(err: unknown): "auth" | "not_found" | "network" | "conflict" | "other" {
+  if (err instanceof ForbiddenError) return "auth"
+  if (err instanceof NotFoundError) return "not_found"
+  if (err instanceof ConflictError || err instanceof PreconditionFailedError) return "conflict"
+  if (err instanceof WorkspaceApiError) {
+    // An answer whose body failed carries its status here rather than as a typed error: the same
+    // status classes as a readable answer.
+    if (err.status === 401 || err.status === 403) return "auth"
+    if (err.status === 404) return "not_found"
+    if (err.status === 409 || err.status === 412) return "conflict"
+    if (err.status === undefined && err.failure === "transport") return "network" // unreachable or timed out
+  }
+  return "other"
+}
+
+type LinkHow = "bind_existing" | "create_and_bind" | "create_unbound" | "rebind_remote" | "rebind_path"
+
+async function linkAttempt<T>(how: LinkHow, workspaceId: number | undefined, call: () => Promise<T>): Promise<T> {
+  try {
+    return await call()
+  } catch (err) {
+    Telemetry.track({
+      type: "workspace_link_failed",
+      timestamp: Date.now(),
+      session_id: Telemetry.getContext().sessionId,
+      how,
+      reason: linkFailureReason(err),
+      ...(workspaceId !== undefined ? { workspace_id: workspaceId } : {}),
+    })
+    throw err
+  }
+}
+
+function trackSwitched(to: number, from: number | undefined, how: "rebind_remote" | "rebind_path") {
+  Telemetry.track({
+    type: "workspace_switched",
+    timestamp: Date.now(),
+    session_id: Telemetry.getContext().sessionId,
+    to_workspace_id: to,
+    ...(from !== undefined ? { from_workspace_id: from } : {}),
+    how,
+  })
+  trackLinked(to, how)
+}
+
+function trackLinked(workspaceId: number, how: "bind_existing" | "create_and_bind" | "rebind_remote" | "rebind_path") {
+  Telemetry.track({
+    type: "workspace_linked",
+    timestamp: Date.now(),
+    session_id: Telemetry.getContext().sessionId,
+    workspace_id: workspaceId,
+    how,
+  })
+}
+// altimate_change end
 
 async function req<T>(
   method: string,
@@ -222,10 +365,13 @@ async function req<T>(
   const qs = opts.query ? "?" + new URLSearchParams(opts.query).toString() : ""
   const basePath = opts.base ?? "/datamate-project-bindings"
   const target = `${url}${basePath}${subpath}${qs}`
+  const endpoint = endpointOf(method, basePath, subpath)
+  const bodyWorkspaceId = workspaceIdIn(opts.body)
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   let res: Response
   let text: string
+  let answered: number | undefined // the status once the server answered, for the catch below
   try {
     res = await fetch(target, {
       method,
@@ -237,6 +383,7 @@ async function req<T>(
       signal: controller.signal,
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
     })
+    answered = res.status
     // Keep the AbortController timeout ACTIVE while we read the response body.
     // ``fetch()`` resolves after headers arrive; a server can send headers then
     // stall the body stream indefinitely, so pulling the body inside the same
@@ -266,11 +413,34 @@ async function req<T>(
     // The abort fires equally when it kills the fetch OR the body read. (m8)
     const name = (err as { name?: string } | undefined)?.name
     if (name === "AbortError") {
-      throw new WorkspaceApiError(
-        `Request to ${target} timed out after ${Math.round(timeoutMs / 1000)}s`,
-      )
+      // A timeout after the server answered (the body stalled) keeps the answer's status:
+      // a 500 whose body never arrives is still a 5xx row; a 2xx whose body never arrives
+      // stays a timeout, with the status attached.
+      reportApiError({
+        endpoint,
+        ...(answered !== undefined ? { status: answered } : {}),
+        kind: answered === undefined ? "timeout" : answered >= 500 ? "5xx" : answered >= 400 ? "4xx" : "timeout",
+        workspaceId: bodyWorkspaceId,
+      })
+      // The answer's status rides on the error too, so a link failure after an answer is not
+      // classified as a network failure.
+      throw new WorkspaceApiError(`Request to ${target} timed out after ${Math.round(timeoutMs / 1000)}s`, answered)
+    }
+    // The server answered and the body failed afterwards (readBounded's cap, a cut stream):
+    // classify by the status it answered with, so an oversized 500 is still a 5xx row; only a
+    // usable status with a bad body is "response". Before any answer it is transport.
+    if (answered !== undefined) {
+      reportApiError({
+        endpoint,
+        status: answered,
+        kind: answered >= 500 ? "5xx" : answered >= 400 ? "4xx" : "response",
+        workspaceId: bodyWorkspaceId,
+      })
+    } else {
+      reportApiError({ endpoint, kind: "network", workspaceId: bodyWorkspaceId })
     }
     const msg = err instanceof Error ? err.message : String(err)
+    if (answered !== undefined) throw new WorkspaceApiError(`Response from ${target} failed: ${msg}`, answered)
     throw new WorkspaceApiError(`Cannot reach ${target}: ${msg}`)
   } finally {
     clearTimeout(timeout)
@@ -284,6 +454,14 @@ async function req<T>(
     }
   }
   const detail = (json as { detail?: unknown } | undefined)?.detail
+  if (!res.ok) {
+    reportApiError({
+      endpoint,
+      status: res.status,
+      kind: res.status >= 500 ? "5xx" : "4xx",
+      workspaceId: bodyWorkspaceId,
+    })
+  }
   if (res.status === 404) throw new NotFoundError(typeof detail === "string" ? detail : "Not found")
   if (res.status === 403) throw new ForbiddenError(typeof detail === "string" ? detail : "Forbidden")
   if (res.status === 409) {
@@ -316,10 +494,8 @@ async function req<T>(
   // is treated as an empty body too — otherwise ``null as T`` reaches callers
   // and .foo throws in a way the typed switches can't classify. (m7 + CR)
   if (json == null && !opts.allowEmptyBody) {
-    throw new WorkspaceApiError(
-      `Empty ${res.status} body from ${target} — expected JSON payload`,
-      res.status,
-    )
+    reportApiError({ endpoint, status: res.status, kind: "response", workspaceId: bodyWorkspaceId })
+    throw new WorkspaceApiError(`Empty ${res.status} body from ${target} — expected JSON payload`, res.status)
   }
   return json as T
 }
@@ -346,9 +522,7 @@ async function readBounded(res: Response, target: string): Promise<string> {
   if (!res.body) {
     const whole = await res.text()
     if (Buffer.byteLength(whole, "utf8") > MAX_RESPONSE_BYTES) {
-      throw new WorkspaceApiError(
-        `Response from ${target} exceeded the ${MAX_RESPONSE_BYTES} byte limit`,
-      )
+      throw new WorkspaceApiError(`Response from ${target} exceeded the ${MAX_RESPONSE_BYTES} byte limit`)
     }
     return whole
   }
@@ -362,9 +536,7 @@ async function readBounded(res: Response, target: string): Promise<string> {
       if (!value) continue
       total += value.byteLength
       if (total > MAX_RESPONSE_BYTES) {
-        throw new WorkspaceApiError(
-          `Response from ${target} exceeded the ${MAX_RESPONSE_BYTES} byte limit`,
-        )
+        throw new WorkspaceApiError(`Response from ${target} exceeded the ${MAX_RESPONSE_BYTES} byte limit`)
       }
       chunks.push(value)
     }
@@ -380,7 +552,10 @@ export namespace WorkspaceApi {
   /** Server-authoritative pre-check by git remote. Returns null on 404. */
   export async function getBindingForRemote(remote: string, actAs?: ActAs): Promise<GetBindingResponse | null> {
     try {
-      return await req<GetBindingResponse>("GET", "/by-remote", { query: { repo_remote: remote }, ...(actAs ? { actAs } : {}) })
+      return await req<GetBindingResponse>("GET", "/by-remote", {
+        query: { repo_remote: remote },
+        ...(actAs ? { actAs } : {}),
+      })
     } catch (err) {
       if (err instanceof NotFoundError) return null
       throw err
@@ -391,7 +566,10 @@ export namespace WorkspaceApi {
    * without a git remote). Returns null on 404. */
   export async function getBindingForPath(projectPath: string, actAs?: ActAs): Promise<GetBindingResponse | null> {
     try {
-      return await req<GetBindingResponse>("GET", "/by-path", { query: { project_path: projectPath }, ...(actAs ? { actAs } : {}) })
+      return await req<GetBindingResponse>("GET", "/by-path", {
+        query: { project_path: projectPath },
+        ...(actAs ? { actAs } : {}),
+      })
     } catch (err) {
       if (err instanceof NotFoundError) return null
       throw err
@@ -403,7 +581,10 @@ export namespace WorkspaceApi {
    * picks the right endpoint even if the current identifier's remote has
    * changed since the binding was created (M3). Both fields on the
    * identifier are optional but at least one must be present. */
-  export async function getBindingForProject(id: ProjectIdentifier, actAs?: ActAs): Promise<ProjectBindingLookup | null> {
+  export async function getBindingForProject(
+    id: ProjectIdentifier,
+    actAs?: ActAs,
+  ): Promise<ProjectBindingLookup | null> {
     if (id.repoRemote) {
       const hit = await getBindingForRemote(id.repoRemote, actAs)
       if (hit) return { ...hit, matchedBy: "remote" }
@@ -425,7 +606,9 @@ export namespace WorkspaceApi {
    * A local-only unlink is not possible: ``lookupBinding`` re-asks the server
    * whenever the cache misses, so a row dropped only on disk comes straight back
    * on the next resolve. */
-  export async function unbindProject(id: ProjectIdentifier): Promise<boolean> {
+  /** `knownDatamateId`: the workspace the caller knows it is unlinking, for telemetry; the
+   * endpoint identifies the binding by project, not by workspace, and answers nothing. */
+  export async function unbindProject(id: ProjectIdentifier, knownDatamateId?: number): Promise<boolean> {
     const query: Record<string, string> = {}
     // Send exactly one identifier. The endpoint answers 409 when both are given
     // and they name different bindings, and preferring the remote matches how
@@ -436,6 +619,12 @@ export namespace WorkspaceApi {
     else return false
     try {
       await req<unknown>("DELETE", "/", { query, allowEmptyBody: true })
+      Telemetry.track({
+        type: "workspace_unlinked",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        ...(knownDatamateId !== undefined ? { workspace_id: knownDatamateId } : {}),
+      })
       return true
     } catch (err) {
       if (err instanceof NotFoundError) return false
@@ -448,14 +637,28 @@ export namespace WorkspaceApi {
     identifier: ProjectIdentifier
     description?: string
   }): Promise<CreateAndBindResponse> {
-    return req<CreateAndBindResponse>("POST", "/", {
-      body: {
-        name: input.name,
-        repo_remote: input.identifier.repoRemote ?? null,
-        project_path: input.identifier.projectPath ?? null,
-        description: input.description ?? null,
-      },
-    })
+    const res = await linkAttempt("create_and_bind", undefined, () =>
+      req<CreateAndBindResponse>("POST", "/", {
+        body: {
+          name: input.name,
+          repo_remote: input.identifier.repoRemote ?? null,
+          project_path: input.identifier.projectPath ?? null,
+          description: input.description ?? null,
+        },
+      }),
+    )
+    const id = res?.binding?.datamate_id ?? res?.datamate?.id
+    if (typeof id === "number") {
+      Telemetry.track({
+        type: "workspace_created",
+        timestamp: Date.now(),
+        session_id: Telemetry.getContext().sessionId,
+        workspace_id: id,
+        how: "create_and_bind",
+      })
+      trackLinked(id, "create_and_bind")
+    }
+    return res
   }
 
   /** Create a workspace WITHOUT binding anything to it.
@@ -502,30 +705,46 @@ export namespace WorkspaceApi {
     name: string
     description?: string
   }): Promise<{ id: number; name: string }> {
-    const data = await req<{ id: number }>("POST", "/", {
-      base: "/datamates",
-      body: {
-        name: input.name,
-        description: input.description ?? null,
-        integrations: [],
-        memory_enabled: true,
-        knowledge_engine_enabled: true,
-        privacy: "private",
-      },
+    // The id check sits inside the reported attempt: a create whose answer is unusable is a
+    // failed link step, not a created workspace.
+    const id = await linkAttempt("create_unbound", undefined, async () => {
+      const data = await req<{ id: number }>("POST", "/", {
+        base: "/datamates",
+        body: {
+          name: input.name,
+          description: input.description ?? null,
+          integrations: [],
+          memory_enabled: true,
+          knowledge_engine_enabled: true,
+          privacy: "private",
+        },
+      })
+      // `typeof` FIRST, before any arithmetic. `Number()` coerces, so the
+      // previous `Number.isSafeInteger(Number(data?.id))` accepted `true` as 1,
+      // `"7"` as 7 and `[5]` as 5 — a malformed body would have rebound the
+      // project to whatever those coerced to (workspace 1, in the boolean case)
+      // instead of failing. The server's `CreateDatamateResponse` is `{id: int}`
+      // and FastAPI enforces it, so anything else here is a contract break worth
+      // refusing loudly rather than guessing at.
+      const id: unknown = (data as { id?: unknown } | null | undefined)?.id
+      if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
+        throw new WorkspaceApiError(
+          `Workspace was created but the server returned no usable id (${JSON.stringify(id) ?? "undefined"}).`,
+          undefined,
+          "response",
+        )
+      }
+      return id
     })
-    // `typeof` FIRST, before any arithmetic. `Number()` coerces, so the
-    // previous `Number.isSafeInteger(Number(data?.id))` accepted `true` as 1,
-    // `"7"` as 7 and `[5]` as 5 — a malformed body would have rebound the
-    // project to whatever those coerced to (workspace 1, in the boolean case)
-    // instead of failing. The server's `CreateDatamateResponse` is `{id: int}`
-    // and FastAPI enforces it, so anything else here is a contract break worth
-    // refusing loudly rather than guessing at.
-    const id: unknown = (data as { id?: unknown } | null | undefined)?.id
-    if (typeof id !== "number" || !Number.isSafeInteger(id) || id <= 0) {
-      throw new WorkspaceApiError(
-        `Workspace was created but the server returned no usable id (${JSON.stringify(id) ?? "undefined"}).`,
-      )
-    }
+    // The create-then-rebind path for an already-linked project: the workspace exists
+    // from here; the rebind that follows reports the switch and the link.
+    Telemetry.track({
+      type: "workspace_created",
+      timestamp: Date.now(),
+      session_id: Telemetry.getContext().sessionId,
+      workspace_id: id,
+      how: "create_unbound",
+    })
     return { id, name: input.name }
   }
 
@@ -539,14 +758,18 @@ export namespace WorkspaceApi {
     identifier: ProjectIdentifier,
     actAs?: ActAs,
   ): Promise<BindingResponse> {
-    return req<BindingResponse>("POST", "/bind", {
-      body: {
-        datamate_id: datamateId,
-        repo_remote: identifier.repoRemote ?? null,
-        project_path: identifier.projectPath ?? null,
-      },
-      ...(actAs ? { actAs } : {}),
-    })
+    const res = await linkAttempt("bind_existing", datamateId, () =>
+      req<BindingResponse>("POST", "/bind", {
+        body: {
+          datamate_id: datamateId,
+          repo_remote: identifier.repoRemote ?? null,
+          project_path: identifier.projectPath ?? null,
+        },
+        ...(actAs ? { actAs } : {}),
+      }),
+    )
+    trackLinked(res?.binding?.datamate_id ?? datamateId, "bind_existing")
+    return res
   }
 
   export async function rebindByRemote(input: {
@@ -555,16 +778,20 @@ export namespace WorkspaceApi {
     expectedCurrentDatamateId?: number
     actAs?: ActAs
   }): Promise<BindingResponse> {
-    return req<BindingResponse>("PUT", "/by-remote", {
-      body: {
-        repo_remote: input.remote,
-        target_datamate_id: input.targetDatamateId,
-        ...(input.expectedCurrentDatamateId !== undefined
-          ? { expected_current_datamate_id: input.expectedCurrentDatamateId }
-          : {}),
-      },
-      ...(input.actAs ? { actAs: input.actAs } : {}),
-    })
+    const res = await linkAttempt("rebind_remote", input.targetDatamateId, () =>
+      req<BindingResponse>("PUT", "/by-remote", {
+        body: {
+          repo_remote: input.remote,
+          target_datamate_id: input.targetDatamateId,
+          ...(input.expectedCurrentDatamateId !== undefined
+            ? { expected_current_datamate_id: input.expectedCurrentDatamateId }
+            : {}),
+        },
+        ...(input.actAs ? { actAs: input.actAs } : {}),
+      }),
+    )
+    trackSwitched(res?.binding?.datamate_id ?? input.targetDatamateId, input.expectedCurrentDatamateId, "rebind_remote")
+    return res
   }
 
   /** Path-identified rebind — symmetric to ``rebindByRemote`` for projects
@@ -575,16 +802,20 @@ export namespace WorkspaceApi {
     expectedCurrentDatamateId?: number
     actAs?: ActAs
   }): Promise<BindingResponse> {
-    return req<BindingResponse>("PUT", "/by-path", {
-      body: {
-        project_path: input.projectPath,
-        target_datamate_id: input.targetDatamateId,
-        ...(input.expectedCurrentDatamateId !== undefined
-          ? { expected_current_datamate_id: input.expectedCurrentDatamateId }
-          : {}),
-      },
-      ...(input.actAs ? { actAs: input.actAs } : {}),
-    })
+    const res = await linkAttempt("rebind_path", input.targetDatamateId, () =>
+      req<BindingResponse>("PUT", "/by-path", {
+        body: {
+          project_path: input.projectPath,
+          target_datamate_id: input.targetDatamateId,
+          ...(input.expectedCurrentDatamateId !== undefined
+            ? { expected_current_datamate_id: input.expectedCurrentDatamateId }
+            : {}),
+        },
+        ...(input.actAs ? { actAs: input.actAs } : {}),
+      }),
+    )
+    trackSwitched(res?.binding?.datamate_id ?? input.targetDatamateId, input.expectedCurrentDatamateId, "rebind_path")
+    return res
   }
 
   /** Populates the "link to existing workspace" picker. Reuses the existing
@@ -618,11 +849,7 @@ export namespace WorkspaceApi {
       // ``datamates`` or ``data`` value (object / string / null) would
       // otherwise slip through and throw on ``.map`` below, taking the
       // picker down before it renders. (cubic round 4.)
-      rows = Array.isArray(body.datamates)
-        ? body.datamates
-        : Array.isArray(body.data)
-          ? body.data
-          : []
+      rows = Array.isArray(body.datamates) ? body.datamates : Array.isArray(body.data) ? body.data : []
     } else {
       rows = []
     }
