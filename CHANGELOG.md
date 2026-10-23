@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.8] - 2026-10-23
+
+**Claude Code can work through your Altimate workspace.** With the Altimate Code plugin installed and the project linked, tasks Claude hands to altimate-code run with the workspace's skills, knowledge and shared memory, and a headless `run` no longer hangs waiting on a stdin nobody writes to. Also in this release: the curl and PowerShell installers add an `altimate-code` command, the analyst can read workspace memory, `learn status` shows whether a lesson keeps being corrected, `schema_inspect` shows what column values look like, and SQL policy checks fail closed on statements they cannot analyze.
+
+**Heads-up for support:**
+- **`run` waits at most 3 s on a socket stdin.** When `run` already has a message or `--command` and stdin is a socket (an agent's shell tool, a Node `spawn`), it waits 3 s for the first byte, then continues without stdin and prints one line on stderr; input sent later is ignored. Files and shell pipelines (`dbt build | altimate-code run …`) are still read to the end. `ALTIMATE_RUN_STDIN_WAIT_MS` changes the wait (`0` waits for EOF), and `< /dev/null` (`< NUL` in cmd.exe) skips it. On Windows a pipe is not a socket, so a caller that never closes stdin should redirect it (#1577).
+- **`run` may end with a line about unsent memory**, giving the count and `altimate-code workspace sync`. It goes to stderr; scripts that parse stderr will see it.
+- **Plain `run` prompts are no longer quoted.** Arguments containing spaces used to reach the model wrapped in quotes; they now arrive as typed. `--command` keeps its quoting.
+- **`check` policy and semantic checks fail closed.** altimate-core 0.9.0 accepts table-valued functions (`TABLE(fn())`, Snowflake `LATERAL FLATTEN`, DuckDB `read_csv(...)`) that 0.8.0 rejected as invalid, but cannot plan them. Policy now reports `policy_not_evaluated` and treats the statement as blocked; semantics reports it as skipped instead of clean.
+- **`schema_inspect` sends sampled column values to the model provider** by default (see Added). `values: false` turns it off per call, and `ALTIMATE_DISABLE_SCHEMA_VALUES=1` turns it off for every call.
+- **`error_fingerprint` telemetry carries a masked `error_message`**: the first line of the error with every word outside a fixed list of common error terms replaced by `<x>`, at most 200 characters. No identifiers, paths, values or SQL.
+- **Read and bash deny rules match equivalent path spellings** (relative, absolute, after `cd`, through a symlink). A deny rule can now stop a command that used to slip past it; allow rules are unchanged.
+- **Warehouse connections are kept per project directory.** A `serve` process serving two projects no longer shares one project's connections with the other. Global and project connection files load as before; a running server still does not re-read an edited `connections.json`.
+- **`datamate_manager` is not offered in projects linked to a workspace**; integrations there come from the workspace's engine. Existing `datamate-*` entries still load, with a one-time notice naming their file.
+
+### Added
+
+- **Claude Code plugin path to workspaces.** The plugin hands work to `altimate-code run` in the linked workspace; the first run in a project pulls the workspace's skills; `workspace list [--json]` lists the workspaces an account can link to. See the Claude Code guide. (#1552)
+- **`altimate-code` from the standalone installers.** curl installs link `altimate-code` to `altimate`; PowerShell installs add `altimate-code.cmd` and a Git Bash shim. Re-running the installer adds it to an existing install. Scripts on Windows should call `altimate`, since the `.cmd` shim passes arguments through cmd.exe. (#1562)
+- **Column value profiles in `schema_inspect`.** On SQLite, DuckDB, PostgreSQL and MongoDB it adds, per column, distinct count, null share, the most frequent values with counts, uniqueness in the sample and common value shapes, from a bounded sample, so filters match the stored format. MongoDB nested fields are listed by path. (#1542)
+- **`ALTIMATE_DISABLE_SCHEMA_VALUES`** turns those value profiles off for every call, whatever the model asks for. (#1578)
+- **Lesson recurrence in `learn status`.** It shows whether a lesson that was shown still drew a correction on the same topic, and flags recurring lessons to reflection. (#1556)
+- **`/integrations` in the TUI** opens the workspace's integration status directly, or offers the link or the engine install when those are missing. (#1464)
+- **Workspace sync state for every client.** When skills and memory were last checked and what changed is recorded and published, so the IDE extension can show it as the TUI sidebar does. (#1429)
+- **Analyst data analysis** gets query deadlines, result envelopes, a scratch bridge (`sql_execute` `query_from`) and verification checks. (#1441)
+- **`answer_commit` asks once for a missed item.** A commit with fewer fields than the request asked for ("the X and its Y") is rejected once, naming the clause; an unchanged recommit is accepted. (#1553)
+- **`client_connected` telemetry** marks the first client to attach to a running server. (#1528)
+
+### Changed
+
+- **The analyst can read workspace memory** (read, refresh and audit) and is steered to workspace skills. Saving memory blocks stays with builder; `training_save` still works. (#1570)
+- **altimate-core 0.9.0**, with policy and semantic checks failing closed as described above. The messages now say to review such statements by hand. (#1555, #1585)
+- **`datamate_manager` is off in linked projects.** (#1431)
+- **Plain `run` prompt arguments are no longer quoted.** (#1561)
+
+### Fixed
+
+- **Headless `run` no longer hangs under an agent's shell.** (#1552)
+- **"database is locked" when several CLI processes start on a fresh data directory.** Setup is serialized with a lock that the OS releases if its holder dies; after 5 s of waiting, startup says which lock it is waiting on. (#1541, #1580)
+- **Warehouse connections no longer leak between projects in one server**, including SSH tunnels, which are now owned by the connect attempt that opened them. (#1567)
+- **`warehouse_list` with no connections points at the real config locations** and the `ALTIMATE_CODE_CONN_*` variables. (#1559)
+- **Workspace memory and link checks match a repo's remote across its URL forms**, using the same comparison as the workspace service. (#1462)
+- **A message sent while the assistant is busy attaches the workspace engine.** (#1461)
+- **Prompt caching works across working directories.** The environment section moved after the cached instructions, and tool schemas no longer embed the directory. (#1517)
+- **Gemini:** tool schemas no longer contain empty-string enum values, which Gemini rejected with a 400 on every request; small calls on Gemini 4 use thinking levels instead of a budget it rejects. (#1532, #1534)
+- **Large MongoDB reads are fast again.** Byte-bounded cursors read in 1,000-document batches instead of one document per round trip. (#1480)
+- **DuckDB schema indexing** stays in the current catalog, no longer duplicates schemas from attached catalogs, and stops at a 30 s default deadline with partial results. (#1514)
+- **The analyst reports tool failures as failures**, accepts valid read-only syntax and retrieves long text in full. (#1448)
+- **`run --model` reports a failed provider list as itself**, with the HTTP status, not "Model not found". (#1472)
+- **A failed background file scan is handled** instead of surfacing as an unhandled rejection. (#1471)
+- **`uninstall` on Windows says its removal commands are for PowerShell.** Found in this release's review.
+
 ## [0.12.7] - 2026-10-13
 
 **Workspace skills and knowledge come first.** In a linked project the agent prefers the workspace's own skills over lookalikes in the repo or your home folder, and checks the workspace's knowledge base for best practices without being asked. Linking now ends with a starter that says what the workspace provides and suggests prompts. Also in this release: opt-in automatic promotion for `learn`, session traces for the IDE extension, and Snowflake reconnects written to `opencode.log`.
