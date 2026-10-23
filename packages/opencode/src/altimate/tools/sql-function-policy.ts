@@ -18,7 +18,7 @@ const PURE_PG_FUNCTION = new RegExp(`^pg_(?:${PURE_PG_FUNCTIONS})$`, "i")
 // Explicit mutating families take precedence over broad inspection patterns
 // (for example, a future pg_stat_reset_* name must not match the *_size getter).
 const SIDE_EFFECT_PG_FUNCTION =
-  /^pg_(?:write_file|append_file|file_write|file_rename|file_unlink|try_advisory\w*|advisory_unlock\w*|advisory_lock\w*|advisory_xact\w*|terminate_backend|cancel_backend|reload_conf|rotate_logfile|promote|switch_wal|logical_emit_message|create_\w*_replication_slot|drop_replication_slot|replication_slot_advance|replication_origin_\w+|notify|stat\w*reset\w*|\w*_reset\w*|stat_clear\w*|stat_force\w*|wal_replay_\w+|logical_slot_\w+|replication_slot_\w+|xlog_replay_\w+|log_backend_memory_contexts|create_restore_point|backup_\w+|start_backup|stop_backup)$/i
+  /^pg_(?:write_file|append_file|file_write|file_rename|file_unlink|try_advisory\w*|advisory_unlock\w*|advisory_lock\w*|advisory_xact\w*|terminate_backend|cancel_backend|reload_conf|rotate_logfile|promote|switch_wal|logical_emit_message|create_\w*_replication_slot|copy_\w*_replication_slot|sync_replication_slots|drop_replication_slot|replication_slot_advance|replication_origin_\w+|notify|stat\w*reset\w*|\w*_reset\w*|stat_clear\w*|stat_force\w*|wal_replay_\w+|logical_slot_\w+|replication_slot_\w+|xlog_replay_\w+|log_backend_memory_contexts|create_restore_point|backup_\w+|start_backup|stop_backup)$/i
 const SIDE_EFFECT_FUNCTION =
   /^(?:nextval|setval|set_config|load_extension|writefile|dblink\w*|lo_\w*|lowrite|loread|checkpoint|force_checkpoint|get_lock|release_lock|release_all_locks|is_free_lock|is_used_lock|master_pos_wait|source_pos_wait|sleep|benchmark|postgres_execute|mysql_execute|sqlite_execute|SYSTEM\$\w+)$/i
 
