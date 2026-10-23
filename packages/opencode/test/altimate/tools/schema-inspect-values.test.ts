@@ -55,6 +55,8 @@ async function inspect(args: Record<string, unknown>) {
   return tool.execute({ table: "t", ...args } as any, ctx as any)
 }
 
+const ORIGINAL_DISABLE_SCHEMA_VALUES = process.env.ALTIMATE_DISABLE_SCHEMA_VALUES
+
 beforeEach(() => {
   Registry.reset()
   Dispatcher.reset()
@@ -65,6 +67,8 @@ beforeEach(() => {
 afterAll(() => {
   Registry.reset()
   registerAll()
+  if (ORIGINAL_DISABLE_SCHEMA_VALUES === undefined) delete process.env.ALTIMATE_DISABLE_SCHEMA_VALUES
+  else process.env.ALTIMATE_DISABLE_SCHEMA_VALUES = ORIGINAL_DISABLE_SCHEMA_VALUES
 })
 
 function expectAppendix(output: string) {

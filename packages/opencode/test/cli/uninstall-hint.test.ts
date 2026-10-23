@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test"
-import { installerSiblingFiles, removeFileCommand } from "../../src/cli/cmd/uninstall"
+import {
+  installerSiblingFiles,
+  removalHeader,
+  removeEmptyDirCommand,
+  removeFileCommand,
+} from "../../src/cli/cmd/uninstall"
 
 describe("uninstall — installer files beside the binary", () => {
   test("names the alias next to a standalone unix install", () => {
@@ -74,6 +79,25 @@ describe("uninstall — removal commands", () => {
     )
     expect(removeFileCommand("C:\\Users\\o'neil $dev\\.altimate\\bin\\altimate.exe", "win32")).toBe(
       "Remove-Item -LiteralPath 'C:\\Users\\o''neil $dev\\.altimate\\bin\\altimate.exe' -Force",
+    )
+  })
+})
+
+describe("uninstall — removal header and empty-directory command", () => {
+  test("the header names PowerShell on Windows only", () => {
+    expect(removalHeader("win32")).toBe("To finish removing the binary, run in PowerShell:")
+    expect(removalHeader("linux")).toBe("To finish removing the binary, run:")
+  })
+
+  test("Windows gets a PowerShell command, never POSIX rmdir or 2>/dev/null", () => {
+    const cmd = removeEmptyDirCommand("C:\\Users\\o'neil\\.opencode\\bin", "win32")
+    expect(cmd).toBe("try { [IO.Directory]::Delete('C:\\Users\\o''neil\\.opencode\\bin') } catch {}")
+    expect(cmd).not.toContain("/dev/null")
+  })
+
+  test("POSIX keeps rmdir with errors silenced, single-quoted literally", () => {
+    expect(removeEmptyDirCommand("/home/o'neil $dev/.opencode/bin", "linux")).toBe(
+      "rmdir '/home/o'\\''neil $dev/.opencode/bin' 2>/dev/null",
     )
   })
 })

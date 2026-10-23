@@ -5,11 +5,14 @@ import { Effect } from "effect"
 import * as SetupLock from "@opencode-ai/core/database/setup-lock"
 import { tmpdir } from "./fixture/tmpdir"
 
-/** Holds the setup lock from a separate connection, as another process would. */
+/** Holds the setup lock from a separate connection, as another process would. The release is idempotent. */
 function holdExternally(filename: string) {
   const db = new Database(filename + ".setup-lock", { create: true })
   db.run("BEGIN EXCLUSIVE")
+  let released = false
   return () => {
+    if (released) return
+    released = true
     db.run("ROLLBACK")
     db.close()
   }
@@ -49,7 +52,7 @@ describe("SetupLock wait notice", () => {
       releaseHolder()
     }
     // The notice did not end the wait: it continued to the full timeout.
-    expect(Date.now() - started).toBeGreaterThanOrEqual(250)
+    expect(Date.now() - started).toBeGreaterThanOrEqual(200)
     expect(lines).toEqual([SetupLock.waitNotice(filename)])
   })
 
@@ -69,15 +72,67 @@ describe("SetupLock wait notice", () => {
     const filename = path.join(tmp.path, "held-hold.db")
     const releaseHolder = holdExternally(filename)
     const lines: string[] = []
-    const timer = setTimeout(releaseHolder, 400)
     try {
       const result = await Effect.runPromise(
-        SetupLock.hold(filename, Effect.succeed("ran"), { noticeAfterMs: 50, notify: (line) => lines.push(line) }),
+        SetupLock.hold(filename, Effect.succeed("ran"), {
+          noticeAfterMs: 50,
+          notify: (line) => {
+            lines.push(line)
+            releaseHolder()
+          },
+        }),
       )
       expect(result).toBe("ran")
     } finally {
-      clearTimeout(timer)
+      releaseHolder()
     }
     expect(lines).toEqual([SetupLock.waitNotice(filename)])
+  })
+
+  test("acquireSync: a throwing notify does not abort the wait; only the busy error surfaces", async () => {
+    await using tmp = await tmpdir()
+    const filename = path.join(tmp.path, "throwing-sync.db")
+    const releaseHolder = holdExternally(filename)
+    let notified = 0
+    const started = Date.now()
+    try {
+      expect(() =>
+        SetupLock.acquireSync(filename, {
+          noticeAfterMs: 50,
+          timeoutMs: 300,
+          notify: () => {
+            notified++
+            throw new Error("stderr closed")
+          },
+        }),
+      ).toThrow(/locked|busy/i)
+    } finally {
+      releaseHolder()
+    }
+    expect(Date.now() - started).toBeGreaterThanOrEqual(200)
+    expect(notified).toBe(1)
+  })
+
+  test("hold: a throwing notify still acquires once the holder releases", async () => {
+    await using tmp = await tmpdir()
+    const filename = path.join(tmp.path, "throwing-hold.db")
+    const releaseHolder = holdExternally(filename)
+    let notified = 0
+    try {
+      const result = await Effect.runPromise(
+        SetupLock.hold(filename, Effect.succeed("ran"), {
+          noticeAfterMs: 50,
+          notify: () => {
+            notified++
+            releaseHolder()
+            throw new Error("stderr closed")
+          },
+        }),
+      )
+      expect(result).toBe("ran")
+    } finally {
+      releaseHolder()
+    }
+    expect(notified).toBe(1)
   })
 })

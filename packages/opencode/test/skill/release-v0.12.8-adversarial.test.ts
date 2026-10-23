@@ -342,8 +342,9 @@ describe("v0.12.8 adversarial: templateErrorMessage", () => {
     expect(out).toMatch(/^[a-z<> ]*$/)
   })
 
-  test("numbers and symbols leave a visible gap rather than disappearing", () => {
-    expect(templateErrorMessage("timeout after 30000 ms")).toBe(templateErrorMessage("timeout after 30000 ms"))
+  test("digits and symbols are dropped, and unknown words they separated collapse into one placeholder", () => {
+    // "30000" is dropped as a separator; the unknown word "ms" becomes the placeholder.
+    expect(templateErrorMessage("timeout after 30000 ms")).toBe("timeout after <x>")
     expect(templateErrorMessage("zzqq9876543210zzqq")).toBe("<x>")
     expect(templateErrorMessage("zzqq 9876543210 zzqq")).toBe("<x>")
   })
@@ -883,6 +884,12 @@ describe("v0.12.8 adversarial: schema value profile", () => {
     const out = profileDocuments([{ note: long }, { note: long }])
     expect(out.length).toBeLessThan(5_000)
     expect(out).not.toContain(long)
+  })
+
+  test("profileDocuments counts distinct values on the full text, not the clipped text", () => {
+    const prefix = "Q".repeat(500)
+    const out = profileDocuments([{ note: prefix + "a" }, { note: prefix + "b" }])
+    expect(out).toMatch(/^note: 2 distinct\b/m)
   })
 
   test("profileDocuments caps the number of profiled fields", () => {

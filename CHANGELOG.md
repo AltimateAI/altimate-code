@@ -43,7 +43,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Headless `run` no longer hangs under an agent's shell.** (#1552)
-- **"database is locked" when several CLI processes start on a fresh data directory.** Setup is serialized with a lock that the OS releases if its holder dies; after 5 s of waiting, startup says which lock it is waiting on. (#1541, #1580)
+- **"database is locked" when several CLI processes start on a fresh data directory.** Setup is serialized with a lock that the OS releases if its holder dies; after 5 s of waiting, CLI commands such as `run` and `serve` print the lock they are waiting on to stderr; the TUI writes it to the log. (#1541, #1580)
 - **Warehouse connections no longer leak between projects in one server**, including SSH tunnels, which are now owned by the connect attempt that opened them. (#1567)
 - **`warehouse_list` with no connections points at the real config locations** and the `ALTIMATE_CODE_CONN_*` variables. (#1559)
 - **Workspace memory and link checks match a repo's remote across its URL forms**, using the same comparison as the workspace service. (#1462)
@@ -55,7 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The analyst reports tool failures as failures**, accepts valid read-only syntax and retrieves long text in full. (#1448)
 - **`run --model` reports a failed provider list as itself**, with the HTTP status, not "Model not found". (#1472)
 - **A failed background file scan is handled** instead of surfacing as an unhandled rejection. (#1471)
-- **`uninstall` on Windows says its removal commands are for PowerShell.** Found in this release's review.
+- **The read-only SQL check blocks PostgreSQL replication-slot copy and sync functions.** `pg_copy_logical_replication_slot`, `pg_copy_physical_replication_slot` and `pg_sync_replication_slots` were not on the side-effect list, so a top-level call passed as read-only; the create and drop slot functions were already blocked. Found in this release's review.
+- **`uninstall` on Windows gives PowerShell commands, and says so**, including for the empty `.opencode` bin directory, which used a POSIX `rmdir … 2>/dev/null` line. Found in this release's review.
 
 ## [0.12.7] - 2026-10-13
 

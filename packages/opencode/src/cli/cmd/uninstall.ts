@@ -64,6 +64,21 @@ export function removeFileCommand(file: string, platform: NodeJS.Platform, force
   if (platform === "win32") return `Remove-Item -LiteralPath '${file.replaceAll("'", "''")}' -Force`
   return `rm${force ? " -f" : ""} '${file.replaceAll("'", "'\\''")}'`
 }
+
+/** Heading for the manual removal commands, naming the shell they are written for. */
+export function removalHeader(platform: NodeJS.Platform): string {
+  return platform === "win32" ? "To finish removing the binary, run in PowerShell:" : "To finish removing the binary, run:"
+}
+
+/**
+ * A command that removes `dir` only when it is empty and stays silent otherwise, quoted like
+ * `removeFileCommand`. PowerShell's `Remove-Item` prompts for a non-empty directory instead of
+ * failing, so Windows uses `Directory.Delete`, which refuses a non-empty one.
+ */
+export function removeEmptyDirCommand(dir: string, platform: NodeJS.Platform): string {
+  if (platform === "win32") return `try { [IO.Directory]::Delete('${dir.replaceAll("'", "''")}') } catch {}`
+  return `rmdir '${dir.replaceAll("'", "'\\''")}' 2>/dev/null`
+}
 // altimate_change end
 
 export const UninstallCommand = {
@@ -343,21 +358,17 @@ async function executeUninstall(method: Installation.Method, targets: RemovalTar
   if (method === "curl" && targets.binary) {
     UI.empty()
     // altimate_change start — platform-native commands (named shell on Windows), plus the installer's other files
-    prompts.log.message(
-      process.platform === "win32"
-        ? "To finish removing the binary, run in PowerShell:"
-        : "To finish removing the binary, run:",
-    )
+    prompts.log.message(removalHeader(process.platform))
     prompts.log.info(`  ${removeFileCommand(targets.binary, process.platform)}`)
     for (const file of targets.installerFiles) {
       prompts.log.info(`  ${removeFileCommand(file, process.platform, true)}`)
     }
-    // altimate_change end
 
     const binDir = path.dirname(targets.binary)
     if (binDir.includes(".opencode")) {
-      prompts.log.info(`  rmdir "${binDir}" 2>/dev/null`)
+      prompts.log.info(`  ${removeEmptyDirCommand(binDir, process.platform)}`)
     }
+    // altimate_change end
   }
 
   if (errors.length > 0) {

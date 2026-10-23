@@ -50,7 +50,7 @@ altimate-code check --fail-on warning
 | `semantic` | Semantic validation (cartesian products, wrong JOINs)        | Optional      | No      |
 | `grade`    | SQL quality grading with recommendations                     | Optional      | No      |
 
-`policy` and `semantic` fail closed on a statement the engine cannot plan, such as a table-valued function (`TABLE(fn())`, Snowflake `LATERAL FLATTEN`, DuckDB `read_csv(...)`). `policy` reports a `policy_not_evaluated` error and treats the statement as blocked, and `semantic` reports it as skipped rather than clean (an error when `--schema` is given, a warning without). Earlier versions rejected these statements as invalid SQL.
+`policy` and `semantic` never report a statement the engine cannot plan as clean. Such statements include table-valued functions (`TABLE(fn())`, Snowflake `LATERAL FLATTEN`, DuckDB `read_csv(...)`). `policy` fails closed: it reports a `policy_not_evaluated` error and treats the statement as blocked. `semantic` reports the skip as a finding: an error when `--schema` is given, and a warning without it, which passes the default `--fail-on error`. Earlier versions rejected these statements as invalid SQL.
 
 Findings usually carry a machine-readable `rule` field (e.g. `unbalanced_quote`, `sql_injection`, `L003`) visible in `--format json` output — see the [Finding Object](#finding-object) schema below. `safety` and `policy` findings always include one; `lint` findings may omit both `rule` and `code` if the engine didn't attach them, so switch on presence rather than assuming.
 

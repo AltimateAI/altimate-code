@@ -40,6 +40,13 @@ export function waitNotice(filename: string) {
   return `Waiting for another altimate-code process to finish setting up the database (lock: ${sentinel(filename)})`
 }
 
+/** The notice is diagnostic only: a failing stderr write or `notify` must never abort the database open. */
+function announce(filename: string, options: Options) {
+  try {
+    ;(options.notify ?? notifyStderr)(waitNotice(filename))
+  } catch {}
+}
+
 export function acquireSync(filename: string, options: Options = {}): () => void {
   if (filename === ":memory:" || active.has(filename)) return () => {}
   const timeoutMs = options.timeoutMs ?? SYNC_TIMEOUT_MS
@@ -51,7 +58,7 @@ export function acquireSync(filename: string, options: Options = {}): () => void
       lock.exec("BEGIN EXCLUSIVE")
     } catch (error) {
       if (!isBusy(error) || noticeAfterMs >= timeoutMs) throw error
-      ;(options.notify ?? notifyStderr)(waitNotice(filename))
+      announce(filename, options)
       lock.exec(`PRAGMA busy_timeout = ${timeoutMs - noticeAfterMs}`)
       lock.exec("BEGIN EXCLUSIVE")
     }
@@ -107,7 +114,7 @@ export function hold<A, E, R>(
       }
       if (!noticed && Date.now() - started >= noticeAfterMs) {
         noticed = true
-        ;(options.notify ?? notifyStderr)(waitNotice(filename))
+        announce(filename, options)
       }
       // `acquireUseRelease` makes `acquire` uninterruptible; no handle is open while sleeping, so cancel here.
       yield* Effect.interruptible(Effect.sleep(POLL_MS))
