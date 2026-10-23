@@ -1,4 +1,3 @@
-import { Account } from "@/account"
 import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -6,6 +5,7 @@ import { Log } from "@/altimate/util/log"
 import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "@/altimate/util/machine-id"
+import { TelemetryIdentity } from "./identity"
 import { createHash, randomUUID } from "crypto"
 // altimate_change — first-run health: the event-loop stall monitor labels which thread stalled
 import { isMainThread } from "node:worker_threads"
@@ -1867,7 +1867,25 @@ export namespace Telemetry {
   let enabled = false
   let buffer: Event[] = []
   let flushTimer: ReturnType<typeof setInterval> | undefined
-  let userEmail = ""
+  // altimate_change — who the machine is signed in as (backend user uuid + tenant), for the
+  // funnel join with web events. Resolved off the stored credential in doInit(); see identity.ts.
+  let identity: TelemetryIdentity.Identity | undefined
+  // altimate_change — resolutions are detached (doInit does not await the backend), so each one
+  // carries the generation it started in and applies only while it is still the newest: a
+  // resolution started under credential A must not land after a sign-in installed B, nor after
+  // shutdown() cleared the state. shutdown() and every new resolution bump it.
+  let identityGeneration = 0
+  // altimate_change — stamp of the credential files when the current identity was resolved; a
+  // flush that sees a different stamp re-resolves, so a sign-in, sign-out or key change made on
+  // disk by any path (manual file edit, the TUI, another thread's auth flow) is picked up within
+  // one flush interval instead of at the next process start.
+  let identityStamp = ""
+  // altimate_change — a resolution that failed while a credential exists (backend down, timeout)
+  // is tried again at the first flush after this time, not on every 5 s flush. The stamp of the
+  // failed credential is kept, so a different credential appearing in the meantime is noticed at
+  // once by the stamp comparison; the backoff only throttles retries of the unchanged one.
+  const IDENTITY_RETRY_MS = 60_000
+  let identityRetryAt = 0 // 0: no retry pending
   let machineId = ""
   let sessionId = ""
   let projectId = ""
@@ -1936,7 +1954,16 @@ export namespace Telemetry {
     return { iKey, endpoint: `${base}v2/track` }
   }
 
-  function toAppInsightsEnvelopes(events: Event[], cfg: AppInsightsConfig): object[] {
+  // altimate_change — `ids` lets a caller build envelopes for a machine and identity other than
+  // the module's current state (the opt-out marker runs while telemetry is disabled and must not
+  // touch the state an enabled init may be using concurrently).
+  function toAppInsightsEnvelopes(
+    events: Event[],
+    cfg: AppInsightsConfig,
+    ids?: { machineId: string; identity: TelemetryIdentity.Identity | undefined },
+  ): object[] {
+    const mid = ids ? ids.machineId : machineId
+    const who = ids ? ids.identity : identity
     // Process-level client, read live from the env flag (defaults to "cli") so events
     // emitted before any prompt runs — startup, connection setup, standalone CLI
     // subcommands — are labelled correctly instead of stuck at a hardcoded default.
@@ -1953,7 +1980,10 @@ export namespace Telemetry {
         cli_version: InstallationVersion,
         source: clientSource,
         project_id: fields.project_id ?? projectId,
-        ...(machineId && { machine_id: machineId }),
+        ...(mid && { machine_id: mid }),
+        // altimate_change — the backend user uuid and tenant when signed in to Altimate, so a CLI
+        // row joins the PostHog person and the backend record for the same account.
+        ...(who && { user_id: who.user_id, tenant: who.tenant }),
         // altimate_change — groups every event from one process launch. The onboarding funnel
         // spans the TUI main thread and the server worker, and most of it runs before any chat
         // session exists, so `session_id` is empty for the first half and real for the second —
@@ -1978,12 +2008,10 @@ export namespace Telemetry {
         iKey: cfg.iKey,
         tags: {
           "ai.session.id": sid || "startup",
-          // altimate_change start — use machine_id as fallback for anonymous user identification
-          // This IMPROVES privacy: previously all anonymous users shared ai.user.id=""
-          // which made them appear as one mega-user in analytics. Using the random UUID
-          // (already sent as a custom property) gives each machine a distinct identity
-          // without any PII. machine_id is a crypto.randomUUID() stored locally.
-          "ai.user.id": userEmail || machineId || "",
+          // altimate_change start — the backend user uuid when signed in, else the machine id.
+          // Anonymous machines each keep a distinct identity (the random machine UUID, already a
+          // custom property) instead of sharing ai.user.id="". No email, hashed or not, is sent.
+          "ai.user.id": who?.user_id || mid || "",
           // altimate_change end
           "ai.cloud.role": "altimate",
           "ai.application.ver": InstallationVersion,
@@ -2089,16 +2117,12 @@ export namespace Telemetry {
         return
       }
       appInsights = cfg
-      try {
-        // altimate_change start — bridge merge: Account.active() became async in v1.4.0
-        const account = await Account.active()
-        if (account?.email) {
-          userEmail = createHash("sha256").update(account.email.toLowerCase().trim()).digest("hex")
-        }
-        // altimate_change end
-      } catch {
-        // Account unavailable — proceed without user ID
-      }
+      // altimate_change start — identity for the funnel join: the backend user uuid and tenant from
+      // the stored Altimate credential, cached per credential so this costs no network unless the
+      // credential changed. Replaces the hashed account email. Not awaited: events flushed before it
+      // resolves carry only the machine id, and telemetry never waits on the backend.
+      void resolveIdentity()
+      // altimate_change end
       // altimate_change — use shared getOrCreateMachineId() from util/machine-id.ts.
       // Returns "" on all error conditions (ENOENT: mints new UUID; EACCES/corrupt/oversized:
       // logs + returns ""). No try/catch needed — all paths are handled inside.
@@ -2128,6 +2152,44 @@ export namespace Telemetry {
       // altimate_change end
     }
   }
+
+  // altimate_change start — re-resolve the signed-in user after a sign-in or sign-out in this
+  // process (the browser login flow saves the credential while telemetry is already running).
+  function resolveIdentity(opts: { refresh?: boolean } = {}): Promise<void> {
+    const generation = ++identityGeneration
+    identityStamp = TelemetryIdentity.credentialStamp()
+    identityRetryAt = 0
+    return TelemetryIdentity.resolve(opts)
+      .then(async (resolved) => {
+        if (generation !== identityGeneration) return
+        identity = resolved
+        if (resolved === undefined && (await TelemetryIdentity.hasCredential())) {
+          // Signed in but unresolved: a transient failure. Retry at a later flush.
+          if (generation === identityGeneration) identityRetryAt = Date.now() + IDENTITY_RETRY_MS
+        }
+      })
+      .catch(() => {})
+  }
+
+  /** Re-resolve who the machine is signed in as; clears it when no credential is stored. Events
+   * already buffered are flushed under the identity they were tracked with first, and events
+   * tracked while the new answer is pending carry no account rather than the previous one. */
+  export async function refreshIdentity(): Promise<void> {
+    await flush()
+    identity = undefined
+    await resolveIdentity({ refresh: true })
+  }
+
+  /** Test seam. */
+  export function identityForTest(): TelemetryIdentity.Identity | undefined {
+    return identity
+  }
+
+  /** Test seam: end a pending retry backoff so the next flush re-resolves. */
+  export function retryIdentityNowForTest() {
+    if (identityRetryAt !== 0) identityRetryAt = 1
+  }
+  // altimate_change end
 
   export function setContext(opts: { sessionId: string; projectId: string }) {
     sessionId = opts.sessionId
@@ -2338,6 +2400,20 @@ export namespace Telemetry {
   }
 
   async function doFlush(timeoutMs: number) {
+    // altimate_change start — this batch is attributed to the identity in force when it is sent,
+    // captured before the credential check below can start replacing it; then notice a credential
+    // change on disk and re-resolve (cheap: two stats, and the cache answers unless the key changed).
+    const who = identity
+    const mid = machineId
+    if (enabled) {
+      const stamp = TelemetryIdentity.credentialStamp()
+      const retryDue = identityRetryAt !== 0 && Date.now() >= identityRetryAt
+      if (stamp !== identityStamp || retryDue) {
+        identity = undefined
+        void resolveIdentity()
+      }
+    }
+    // altimate_change end
     if (!enabled || buffer.length === 0 || !appInsights) return
 
     const events = buffer.splice(0, buffer.length)
@@ -2361,7 +2437,7 @@ export namespace Telemetry {
       const response = await fetch(appInsights.endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(toAppInsightsEnvelopes(events, appInsights)),
+        body: JSON.stringify(toAppInsightsEnvelopes(events, appInsights, { machineId: mid, identity: who })),
         signal: controller.signal,
       })
       if (!response.ok) {
@@ -2500,10 +2576,13 @@ export namespace Telemetry {
     sessionId = ""
     projectId = ""
     machineId = ""
-    // doInit() only assigns userEmail when Account.active() returns one, so without this a
-    // logout followed by a re-init in the same process kept hashing the previous account into
-    // ai.user.id.
-    userEmail = ""
+    // Cleared so a sign-out followed by a re-init in the same process does not keep stamping the
+    // previous account on events; doInit() resolves it again from whatever credential is on disk.
+    // The generation bump makes any resolution still in flight a no-op when it settles.
+    identityGeneration++
+    identity = undefined
+    identityStamp = ""
+    identityRetryAt = 0
     // NOTE: cachedLaunchId is deliberately NOT cleared here. session/prompt.ts shuts telemetry
     // down at the end of every session, so clearing it would mint a fresh launch_id per prompt in
     // a long-lived `serve` process and shatter the per-launch correlation it exists to provide.
