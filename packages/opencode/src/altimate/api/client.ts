@@ -3,6 +3,7 @@ import path from "path"
 import { rm } from "node:fs/promises"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
+import { currentCredentials } from "./credentials-context"
 
 const DEFAULT_MCP_URL = "https://mcpserver.getaltimate.com/sse"
 // altimate_change start — default Altimate API URL when user omits it from the TUI credential entry
@@ -67,6 +68,7 @@ export namespace AltimateApi {
   }
 
   export async function isConfigured(): Promise<boolean> {
+    if (currentCredentials()) return true
     return Filesystem.exists(credentialsPath())
   }
 
@@ -85,6 +87,8 @@ export namespace AltimateApi {
   }
 
   export async function getCredentials(): Promise<AltimateCredentials> {
+    const scoped = currentCredentials()
+    if (scoped) return scoped
     const p = credentialsPath()
     if (!(await Filesystem.exists(p))) {
       throw new Error(`Altimate credentials not found at ${p}`)

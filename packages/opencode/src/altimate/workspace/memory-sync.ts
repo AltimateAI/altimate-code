@@ -1541,7 +1541,7 @@ type LoadOutcome = (
 
 /** Read this project's workspace memory. Pure: it publishes nothing, so a slow
  * load that has been superseded cannot write over a newer result. */
-async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
+async function loadWorkspaceMemory(directory?: string, reap = true): Promise<LoadOutcome> {
   const raw = directory ?? currentDirectory()
   const dir = raw ? canonicalDirectory(raw) : null
   // Last epoch this load can vouch for. A failure after the binding resolved keeps that one, so
@@ -1596,7 +1596,7 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
     // binding changed underneath it, but that discards a RESULT — no help once
     // files have been unlinked. The fence is re-read per iteration inside, so a
     // relink landing mid-loop stops the rest. (review)
-    await reapArchivedBlocks(known, binding, dir, () => epochFor(dir) === epoch).catch((err) =>
+    if (reap) await reapArchivedBlocks(known, binding, dir, () => epochFor(dir) === epoch).catch((err) =>
       log.warn("could not reap archived blocks", { err: String(err) }),
     )
 
@@ -1715,6 +1715,15 @@ export type RefreshResult = {
   count: number
   ok: boolean
   status: "loaded" | "unlinked" | "disabled" | "error" | "off"
+}
+
+/** Read cloud memory without reaping local files or publishing sync/session state. */
+export async function readOnly(directory: string) {
+  if (!isEnabled()) return { status: "off" as const, blocks: [] as RemoteMemoryBlock[] }
+  const outcome = await loadWorkspaceMemory(directory, false)
+  if (outcome.epoch !== epochFor(outcome.dir ?? null))
+    return { status: "error" as const, blocks: [] as RemoteMemoryBlock[] }
+  return { status: outcome.status, blocks: outcome.status === "loaded" ? outcome.blocks : [] }
 }
 
 /** Re-read this session's workspace memory, discarding what it already holds.

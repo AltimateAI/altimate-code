@@ -1191,6 +1191,16 @@ describe("reaping blocks archived elsewhere", () => {
   }
   const idsOf = (removed: { id: string }[]) => removed.map((r) => r.id)
 
+  test("read-only cloud hydration leaves matching local tombstones untouched", async () => {
+    const removed = seeThrough({ gone: { updated: "2026-05-01T00:00:00.000Z" } })
+    listResponse = [archived("gone")]
+    const { readOnly } = await import("../../../src/altimate/workspace/memory-sync")
+    expect((await readOnly("/project")).status).toBe("loaded")
+    expect(removed).toEqual([])
+    await refresh(`${SES}-read-only-control`, "/project")
+    expect(idsOf(removed)).toEqual(["gone"])
+  })
+
   test("a block whose record was archived elsewhere is deleted locally", async () => {
     const removed = seeThrough({ gone: { updated: "2026-05-01T00:00:00.000Z" } })
     listResponse = [archived("gone")]

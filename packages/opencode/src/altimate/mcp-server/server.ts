@@ -68,6 +68,7 @@ export interface ServeOptions {
   allowWrite?: boolean
   // Also advertise schema_inspect and sql_check (default: the five-tool set, see adapter LEAN_TOOLS).
   allTools?: boolean
+  workspaceTools?: boolean
   // Bounds the reading question so an unanswered prompt cannot outlast the client's tool-call timeout.
   elicitTimeoutMs?: number
 }
@@ -83,16 +84,17 @@ export async function createServer(options: ServeOptions = {}) {
     }
   }
   const adapter = await createAdapter(options)
+  const workspace = options.workspaceTools ? await (await import("./workspace")).createWorkspaceAdapter(process.cwd()) : undefined
   const server = new Server({ name: "altimate-code", version: InstallationVersion }, {
     capabilities: { tools: {}, prompts: {} },
     instructions: await serverInstructions(),
   })
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [...adapter.tools].map(([name, tool]) => ({
+    tools: [...[...adapter.tools].map(([name, tool]) => ({
       name,
       description: descriptions[name],
       inputSchema: tool.jsonSchema as McpTool["inputSchema"],
-    })),
+    })), ...(workspace?.tools ?? [])],
   }))
   // Ask the user once per session when the model weighed two readings and the client can ask; any
   // failure, decline or cancel (headless clients cancel) leaves the commit as accepted.
@@ -131,6 +133,9 @@ export async function createServer(options: ServeOptions = {}) {
   })
   server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     try {
+      if (workspace?.tools.some((tool) => tool.name === request.params.name)) {
+        return await workspace.execute(request.params.name, request.params.arguments ?? {}, extra.signal)
+      }
       const result = await adapter.execute(request.params.name, request.params.arguments ?? {}, extra.signal)
       const clarified = request.params.name === "answer_commit" ? await clarifyReading(request.params.arguments, result, extra.signal) : undefined
       if (clarified) return { content: [{ type: "text" as const, text: clarified }], isError: true }
@@ -147,7 +152,7 @@ export async function createServer(options: ServeOptions = {}) {
     }
   })
   let cleanup: Promise<void> | undefined
-  const dispose = () => (cleanup ??= adapter.close())
+  const dispose = () => (cleanup ??= Promise.all([adapter.close(), workspace?.close()]).then(() => {}))
   server.onclose = async () => {
     await dispose().catch(console.error)
   }

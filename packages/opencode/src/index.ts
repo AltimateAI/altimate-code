@@ -52,6 +52,7 @@ import { LearnCommand } from "./cli/cmd/learn"
 import { LinkCommand } from "./cli/cmd/link"
 // altimate_change start — headless workspace commands (status, refresh, sync, unlink)
 import { WorkspaceCommand } from "./cli/cmd/workspace"
+import { WorkspaceClientCommand } from "./cli/cmd/workspace-client"
 // altimate_change end
 import { pilotOffCommand } from "./cli/cmd/workspace-pilot"
 // altimate_change end
@@ -243,7 +244,7 @@ let cli = yargs(args)
 
 // altimate_change start — link and workspace: absent from --help when workspaces are turned off
 // via ALTIMATE_DISABLE_WORKSPACE=1. Off, hidden stubs take their place and say why.
-if (!Flag.ALTIMATE_DISABLE_WORKSPACE) cli = cli.command(LinkCommand).command(WorkspaceCommand)
+if (!Flag.ALTIMATE_DISABLE_WORKSPACE) cli = cli.command(LinkCommand).command(WorkspaceCommand).command(WorkspaceClientCommand)
 else cli = cli.command(pilotOffCommand("link")).command(pilotOffCommand("workspace [action]"))
 // altimate_change end
 
