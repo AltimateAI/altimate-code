@@ -8,6 +8,7 @@ import { PostConnectSuggestions } from "./post-connect-suggestions"
 import { resolveInspectionTarget } from "../native/connections/inspection-target"
 import * as Registry from "../native/connections/registry"
 import { profileValues } from "./schema-values"
+import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { isRecord, normalizeError } from "./response-normalization"
 import { validateTableName, validateWarehouseName } from "./input-validation"
 // altimate_change start — workspace precedence
@@ -116,7 +117,10 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       // altimate_change start — progressive disclosure suggestions
       let output = formatSchema(schemaResult)
       if (schemaResult.resolution) output = `${schemaResult.resolution}\n\n${output}`
-      if (args.values !== false) {
+      if (CoreFlag.ALTIMATE_DISABLE_SCHEMA_VALUES) {
+        // Says why, so the model does not retry with values:true.
+        output += "\n\nValue profiles are turned off by ALTIMATE_DISABLE_SCHEMA_VALUES."
+      } else if (args.values !== false) {
         const resolvedTable = schemaResult.table ?? args.table
         const parts = resolvedTable.includes(".") ? resolvedTable.split(".") : [schemaResult.schema_name, resolvedTable]
         const ref = parts

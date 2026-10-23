@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test"
+import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { Database } from "bun:sqlite"
 import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
@@ -59,6 +59,7 @@ beforeEach(() => {
   Registry.reset()
   Dispatcher.reset()
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
+  delete process.env.ALTIMATE_DISABLE_SCHEMA_VALUES
 })
 
 afterAll(() => {
@@ -126,6 +127,39 @@ describe("schema_inspect value grounding", () => {
       const result = await inspect({ values: false })
       expect(calls).toHaveLength(0)
       expect(result.output).not.toContain("Value samples")
+      expect(result.output).not.toContain("ALTIMATE_DISABLE_SCHEMA_VALUES")
+    })
+
+    describe("ALTIMATE_DISABLE_SCHEMA_VALUES", () => {
+      afterEach(() => {
+        delete process.env.ALTIMATE_DISABLE_SCHEMA_VALUES
+      })
+
+      for (const value of ["1", "true", " YES "]) {
+        test(`set to ${JSON.stringify(value)} skips the profiling query even with values:true`, async () => {
+          process.env.ALTIMATE_DISABLE_SCHEMA_VALUES = value
+          const calls: string[] = []
+          install("sqlite", run, calls)
+          const result = await inspect({ values: true })
+          expect(calls).toHaveLength(0)
+          expect(result.metadata.success).toBe(true)
+          expect(result.output).toContain("id | INTEGER")
+          expect(result.output).not.toContain("Value samples")
+          expect(result.output).toContain("Value profiles are turned off by ALTIMATE_DISABLE_SCHEMA_VALUES.")
+        })
+      }
+
+      for (const value of ["0", "false", ""]) {
+        test(`set to ${JSON.stringify(value)} behaves as unset`, async () => {
+          process.env.ALTIMATE_DISABLE_SCHEMA_VALUES = value
+          const calls: string[] = []
+          install("sqlite", run, calls)
+          const result = await inspect({})
+          expectAppendix(result.output)
+          expect(calls).toHaveLength(1)
+          expect(result.output).not.toContain("ALTIMATE_DISABLE_SCHEMA_VALUES")
+        })
+      }
     })
 
     test("a profiling failure degrades to a note and keeps the column list", async () => {
