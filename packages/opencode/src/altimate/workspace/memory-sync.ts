@@ -907,6 +907,25 @@ function serialize<T>(scope: "global" | "project", blockId: string, op: () => Pr
  * `skill-sync.flushPendingSyncs` holds it for a cold skill sync. */
 const mirrorsInFlight = syncState.mirrorsInFlight
 
+/** The linked workspace this process last tried to upload a block to, and the directory it was bound from.
+ * A one-shot `run` reads it at exit and, only then, counts the memory still not in the workspace
+ * (`Manage.status`, given this binding so the count stays local): nothing in `run` retries an upload, so
+ * without the check a block left behind stays on this machine unannounced. Not set when the workspace has
+ * memory turned off, since that block stays here by design. Process-global for the same two-module-graph
+ * reason as `syncState`. */
+const mirrorRequests: { last?: MirrorTarget } = ((globalThis as unknown as Record<symbol, { last?: MirrorTarget } | undefined>)[
+  Symbol.for("altimate.memory-sync.mirror-requests")
+] ??= {})
+
+export interface MirrorTarget {
+  directory: string | undefined
+  binding: CachedBinding
+}
+
+export function lastMirrorTarget(): MirrorTarget | undefined {
+  return mirrorRequests.last
+}
+
 /** Hold a task in `mirrorsInFlight` for its lifetime. */
 async function tracked(task: Promise<void>): Promise<void> {
   mirrorsInFlight.add(task)
@@ -953,7 +972,18 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
     // binding governs only whether we upload at all.
     const binding = await currentBinding(directory)
     if (!binding) return
-    if (!(await memoryEnabled(binding))) return
+    // Recorded before the memory-setting lookup, which can wait on the service: an exit while it is pending
+    // leaves this block unsent too. Taken back only on a confirmed "disabled", and only while it is still
+    // this call's record: other blocks mirror concurrently and may have recorded since.
+    const previous = mirrorRequests.last
+    const recorded: MirrorTarget = { directory, binding }
+    mirrorRequests.last = recorded
+    const memory = await memoryStatus(binding)
+    if (memory === "disabled") {
+      if (mirrorRequests.last === recorded) mirrorRequests.last = previous
+      return
+    }
+    if (memory !== "enabled") return
     await push(block, binding, undefined, directory)
   })
   return tracked(task)

@@ -45,6 +45,7 @@ const {
   isEnabled,
   memoryEnabledCached,
   mirrorBlock,
+  lastMirrorTarget,
   flushPendingMirrors,
   overlayBlocks,
   refresh,
@@ -81,6 +82,8 @@ let createResult: any = [{ id: "mem-new" }]
 let workspaces: any[] = [{ id: 42, name: "acme", memory_enabled: true }]
 /** When set, GET /list fails -- used to prove a failed lookup never creates. */
 let listFails = false
+/** When set, POST /datamates/memory/ fails, as a create that times out does. */
+let createFails = false
 /** When set, a PATCH to this record id fails. */
 let failPatchOf: string | undefined
 
@@ -90,6 +93,9 @@ function stubFetch() {
     const method = (init?.method ?? "GET").toUpperCase()
     captured.push({ method, url, body: init?.body ? JSON.parse(init.body) : undefined })
     if (listFails && url.includes("/datamates/memory/list")) {
+      return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
+    }
+    if (createFails && method === "POST" && url.includes("/datamates/memory/")) {
       return new Response(JSON.stringify({ detail: "boom" }), { status: 500 })
     }
     if (failPatchOf && method === "PATCH" && url.endsWith(`/datamates/memory/${failPatchOf}`)) {
@@ -169,6 +175,7 @@ beforeEach(() => {
   captured = []
   listResponse = []
   listFails = false
+  createFails = false
   failPatchOf = undefined
   createResult = [{ id: "mem-new" }]
   workspaces = [{ id: 42, name: "acme", memory_enabled: true }]
@@ -176,6 +183,9 @@ beforeEach(() => {
   stubCreds("acme", "https://api.example.com")
   stubFetch()
   resetOverlay()
+  // Process-global (see `lastMirrorTarget`), so an earlier test's mirror would otherwise satisfy a later one.
+  ;(globalThis as unknown as Record<symbol, { last?: unknown }>)[Symbol.for("altimate.memory-sync.mirror-requests")].last =
+    undefined
   syncInternals.resolveBinding = async () => BINDING as any
   // The store is not on disk in these tests; the delete-race guard has its
   // own coverage below.
@@ -439,8 +449,71 @@ describe("blockTitle", () => {
   })
 })
 
+/** Holds the workspace-list request (the memory-setting lookup) open until `release`; `started` resolves
+ * once it is waiting. */
+function holdWorkspaceLookup() {
+  const inner = globalThis.fetch
+  let release!: () => void
+  let entered!: () => void
+  const held = new Promise<void>((resolve) => (release = resolve))
+  const started = new Promise<void>((resolve) => (entered = resolve))
+  globalThis.fetch = (async (input: any, init?: any) => {
+    if (String(input).includes("/datamates/") && !String(input).includes("/memory")) {
+      entered()
+      await held
+    }
+    return inner(input, init)
+  }) as typeof fetch
+  return { started, release, restore: () => (globalThis.fetch = inner) }
+}
+
 // ── write path ──────────────────────────────────────────────────────────────
 describe("mirrorBlock", () => {
+  test("a mirror to a linked workspace is recorded, failed or not, so `run`'s exit checks what stayed local", async () => {
+    expect(lastMirrorTarget()).toBeUndefined()
+    createFails = true
+    await expect(mirrorBlock(block({ id: "unsent" }), "/repo")).rejects.toThrow()
+    createFails = false
+    expect(lastMirrorTarget()).toEqual({ directory: "/repo", binding: BINDING as any })
+  })
+
+  test("the mirror is recorded while the memory-setting lookup is still pending, so an exit then still checks", async () => {
+    const lookup = holdWorkspaceLookup()
+    const mirror = mirrorBlock(block({ id: "pending-lookup" }), "/repo")
+    try {
+      await lookup.started
+      expect(lastMirrorTarget()).toEqual({ directory: "/repo", binding: BINDING as any })
+    } finally {
+      lookup.release()
+      await mirror.catch(() => {})
+      lookup.restore()
+    }
+  })
+
+  test("a disabled lookup takes back only its own record, not one a concurrent mirror made since", async () => {
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    const lookup = holdWorkspaceLookup()
+    const mirror = mirrorBlock(block({ id: "disabled-slow" }), "/repo")
+    const newer = { directory: "/other", binding: BINDING as any }
+    try {
+      await lookup.started
+      // Another block's mirror records its own target while this lookup is pending.
+      ;(globalThis as unknown as Record<symbol, { last?: unknown }>)[Symbol.for("altimate.memory-sync.mirror-requests")].last = newer
+    } finally {
+      lookup.release()
+      await mirror.catch(() => {})
+      lookup.restore()
+    }
+    expect(lastMirrorTarget()).toBe(newer)
+  })
+
+  test("a workspace with memory turned off is not recorded: the block stays local by design", async () => {
+    workspaces = [{ id: 42, name: "acme", memory_enabled: false }]
+    await mirrorBlock(block({ id: "kept-local" }), "/repo")
+    expect(lastMirrorTarget()).toBeUndefined()
+    expect(captured.some((c) => c.method === "POST")).toBe(false)
+  })
+
   test("flushPendingMirrors waits for a mirror a short-lived process would abandon (#1332)", async () => {
     // `MemoryStore.write` fires the mirror and forgets it; a one-shot `run` exits
     // when the turn ends, routinely before the upload lands. The flush holds the
