@@ -20,12 +20,41 @@ const sentinel = (filename: string) => filename + ".setup-lock"
 const SYNC_TIMEOUT_MS = 60_000
 const POLL_MS = 25
 const HOLD_TIMEOUT_MS = 60_000
+/** How long to wait silently before telling the user why startup is stalled. */
+export const WAIT_NOTICE_MS = 5_000
 
-export function acquireSync(filename: string): () => void {
+/** Overrides for tests; production callers use the defaults. */
+export interface Options {
+  /** Wait before printing the notice. */
+  noticeAfterMs?: number
+  /** Total wait before giving up. */
+  timeoutMs?: number
+  /** Receives the notice line. */
+  notify?: (line: string) => void
+}
+
+// stderr, not stdout: `run --format json` consumers parse stdout.
+const notifyStderr = (line: string) => void process.stderr.write(line + "\n")
+
+export function waitNotice(filename: string) {
+  return `Waiting for another altimate-code process to finish setting up the database (lock: ${sentinel(filename)})`
+}
+
+export function acquireSync(filename: string, options: Options = {}): () => void {
   if (filename === ":memory:" || active.has(filename)) return () => {}
-  const lock = openSetupLock(sentinel(filename), SYNC_TIMEOUT_MS)
+  const timeoutMs = options.timeoutMs ?? SYNC_TIMEOUT_MS
+  const noticeAfterMs = Math.min(options.noticeAfterMs ?? WAIT_NOTICE_MS, timeoutMs)
+  // Block for the notice threshold first, then announce the wait and block for the remainder.
+  const lock = openSetupLock(sentinel(filename), noticeAfterMs)
   try {
-    lock.exec("BEGIN EXCLUSIVE")
+    try {
+      lock.exec("BEGIN EXCLUSIVE")
+    } catch (error) {
+      if (!isBusy(error) || noticeAfterMs >= timeoutMs) throw error
+      ;(options.notify ?? notifyStderr)(waitNotice(filename))
+      lock.exec(`PRAGMA busy_timeout = ${timeoutMs - noticeAfterMs}`)
+      lock.exec("BEGIN EXCLUSIVE")
+    }
   } catch (error) {
     lock.close()
     throw error
@@ -44,15 +73,22 @@ function isBusy(error: unknown) {
 }
 
 /** Runs `body` holding the lock; waiting is async so in-process peers keep making progress. */
-export function hold<A, E, R>(filename: string, body: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> {
+export function hold<A, E, R>(
+  filename: string,
+  body: Effect.Effect<A, E, R>,
+  options: Options = {},
+): Effect.Effect<A, E, R> {
   if (filename === ":memory:") return body
   let semaphore = semaphores.get(filename)
   if (!semaphore) {
     semaphore = Semaphore.makeUnsafe(1)
     semaphores.set(filename, semaphore)
   }
+  const timeoutMs = options.timeoutMs ?? HOLD_TIMEOUT_MS
+  const noticeAfterMs = options.noticeAfterMs ?? WAIT_NOTICE_MS
   const acquire = Effect.gen(function* () {
     const started = Date.now()
+    let noticed = false
     while (true) {
       const lock = openSetupLock(sentinel(filename), 0)
       const result = yield* Effect.try({ try: () => lock.exec("BEGIN EXCLUSIVE"), catch: (error) => error }).pipe(
@@ -60,7 +96,7 @@ export function hold<A, E, R>(filename: string, body: Effect.Effect<A, E, R>): E
         Effect.catch((error) =>
           Effect.sync(() => lock.close()).pipe(
             Effect.flatMap(() =>
-              isBusy(error) && Date.now() - started < HOLD_TIMEOUT_MS ? Effect.succeed(undefined) : Effect.die(error),
+              isBusy(error) && Date.now() - started < timeoutMs ? Effect.succeed(undefined) : Effect.die(error),
             ),
           ),
         ),
@@ -68,6 +104,10 @@ export function hold<A, E, R>(filename: string, body: Effect.Effect<A, E, R>): E
       if (result) {
         active.add(filename)
         return result
+      }
+      if (!noticed && Date.now() - started >= noticeAfterMs) {
+        noticed = true
+        ;(options.notify ?? notifyStderr)(waitNotice(filename))
       }
       // `acquireUseRelease` makes `acquire` uninterruptible; no handle is open while sleeping, so cancel here.
       yield* Effect.interruptible(Effect.sleep(POLL_MS))
