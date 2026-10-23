@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import path from "path"
 import {
   installerSiblingFiles,
   removalHeader,
@@ -101,10 +102,13 @@ describe("uninstall — removal header and empty-directory command", () => {
   })
 
   test("the empty bin directory is offered for the installers' ~/.altimate/bin and a legacy ~/.opencode/bin only", () => {
-    expect(emptyBinDirToRemove("/home/dev/.altimate/bin/altimate")).toBe("/home/dev/.altimate/bin")
-    expect(emptyBinDirToRemove("/home/dev/.opencode/bin/opencode")).toBe("/home/dev/.opencode/bin")
-    expect(emptyBinDirToRemove("/usr/local/bin/altimate")).toBeUndefined()
-    expect(emptyBinDirToRemove("/home/dev/.altimate/other/altimate")).toBeUndefined()
-    expect(emptyBinDirToRemove("/home/dev/my.opencode.tools/bin/altimate")).toBeUndefined()
+    const home = path.join(path.sep, "home", "dev")
+    const altimateBin = path.join(home, ".altimate", "bin")
+    const opencodeBin = path.join(home, ".opencode", "bin")
+    expect(emptyBinDirToRemove(path.join(altimateBin, "altimate"))).toBe(altimateBin)
+    expect(emptyBinDirToRemove(path.join(opencodeBin, "opencode"))).toBe(opencodeBin)
+    expect(emptyBinDirToRemove(path.join(path.sep, "usr", "local", "bin", "altimate"))).toBeUndefined()
+    expect(emptyBinDirToRemove(path.join(home, ".altimate", "other", "altimate"))).toBeUndefined()
+    expect(emptyBinDirToRemove(path.join(home, "my.opencode.tools", "bin", "altimate"))).toBeUndefined()
   })
 })
