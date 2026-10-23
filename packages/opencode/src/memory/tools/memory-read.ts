@@ -107,7 +107,9 @@ export const MemoryReadTool = Tool.define("altimate_memory_read", {
         return {
           title: "Memory: empty",
           metadata: { count: 0 },
-          output: "No memory blocks found. Use altimate_memory_write to save information for future sessions.",
+          // Read-only agents (analyst) call this tool too, so the result must not
+          // direct them to a save tool they cannot call.
+          output: "No memory blocks found.",
         }
       }
 

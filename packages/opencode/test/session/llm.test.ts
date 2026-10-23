@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:tes
 import path from "path"
 import { jsonSchema, tool, type ModelMessage, type Tool } from "ai"
 import { LLM } from "../../src/session/llm"
+import { PermissionNext } from "../../src/permission/next"
 import { Instance } from "../../src/project/instance"
 import { Provider } from "../../src/provider/provider"
 import { ProviderTransform } from "../../src/provider/transform"
@@ -137,6 +138,20 @@ describe("session.llm.addHistoricalToolStubs", () => {
     LLM.addHistoricalToolStubs(tools, new Set(["bash"]))
     expect(Object.keys(tools)).toEqual(["bash"])
     expect(tools.bash).toBe(real)
+  })
+})
+
+describe("session.llm.removedTools", () => {
+  test("removes a tool the agent denies or the request switches off, and keeps the rest", () => {
+    const agent = {
+      permission: PermissionNext.fromConfig({ "*": "allow", altimate_memory_write: "deny" }),
+    } as Agent.Info
+    const user = { tools: { altimate_memory_read: false, altimate_memory_audit: true } } as unknown as MessageV2.User
+    const names = ["altimate_memory_read", "altimate_memory_write", "altimate_memory_audit", "read"]
+    expect(LLM.removedTools(names, { agent, user })).toEqual(new Set(["altimate_memory_read", "altimate_memory_write"]))
+    expect(LLM.removedTools(names, { agent, user: { tools: undefined } as unknown as MessageV2.User })).toEqual(
+      new Set(["altimate_memory_write"]),
+    )
   })
 })
 

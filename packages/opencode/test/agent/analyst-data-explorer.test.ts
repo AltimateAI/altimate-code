@@ -75,6 +75,25 @@ it.instance("analyst can load skills", () =>
   }),
 )
 
+it.instance("analyst can read workspace memory but not save, extract or delete it", () =>
+  Effect.gen(function* () {
+    const analyst = (yield* Agent.use.get("analyst"))!
+    const builder = (yield* Agent.use.get("builder"))!
+    const de = (yield* Agent.use.get("data-explorer"))!
+    const read = ["altimate_memory_read", "altimate_memory_refresh", "altimate_memory_audit"]
+    const write = ["altimate_memory_write", "altimate_memory_delete", "altimate_memory_extract"]
+    for (const tool of read) expect(action(analyst, tool)).toBe("allow")
+    for (const tool of write) expect(action(analyst, tool)).toBe("deny")
+    expect(Permission.disabled([...read, ...write], analyst.permission)).toEqual(new Set(write))
+    // The data-explorer subagent stays limited to warehouse and file reads.
+    for (const tool of [...read, ...write]) expect(action(de, tool)).toBe("deny")
+    for (const tool of ["altimate_memory_read", "altimate_memory_write"]) expect(action(builder, tool)).toBe("allow")
+    // Reading memory does not loosen the rest of analyst's read-only policy.
+    expect(action(analyst, "bash")).toBe("deny")
+    expect(action(analyst, "sql_execute_write")).toBe("deny")
+  }),
+)
+
 it.instance("analyst may delegate only to data-explorer", () =>
   Effect.gen(function* () {
     const analyst = yield* Agent.use.get("analyst")

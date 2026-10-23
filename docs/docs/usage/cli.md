@@ -40,7 +40,7 @@ altimate --agent analyst
 | `import`    | Import session data            |
 | `session`   | Session management             |
 | `link`      | Link this project to an Altimate workspace |
-| `workspace` | Show, refresh, sync or unlink this project's workspace from a shell |
+| `workspace` | List workspaces, or show, refresh, sync or unlink this project's workspace from a shell |
 | `trace`     | List and view session traces (recordings of agent sessions) |
 | `github`    | GitHub integration             |
 | `pr`        | Pull request tools             |
@@ -57,6 +57,7 @@ With workspaces on:
 - `altimate-code link` links the current project to a workspace (or creates one), then shows what the workspace provides (its skills, knowledge, integrations and whether memory is on) and a few prompts to start with. The sidebar then names the workspace and shows how many memories are not yet synced and when skills last synced.
 - From a shell, script or CI job, without the TUI:
     - `altimate-code link --workspace <name|id>` links to an existing workspace (an id is matched before a name), and `altimate-code link --create [name]` creates one (named after the repo by default) and links to it. Neither prompts. If the project is already linked to a different workspace they refuse unless `--yes` is passed. Running `--create` again when the project is already linked to a workspace of that name creates nothing, so it is safe in a devcontainer's setup command; if another workspace already has that name it refuses and names its id, unless `--allow-duplicate` is passed. Linking to the workspace the project is already linked to confirms that link on this machine, which a fresh clone needs before `workspace sync` sends its memory.
+    - `altimate-code workspace list [--json]` lists the workspaces your account can link to, with their ids, for `link --workspace`.
     - `altimate-code workspace status [--json]` shows the linked workspace and, when known, how many saved memories have not reached it and when skills last synced.
     - `altimate-code workspace refresh` pulls the workspace's skills (memory is loaded by the next session started in the project); `altimate-code workspace sync` sends memory the workspace has not received; `altimate-code workspace unlink [--yes]` detaches the project (`--yes` is required without a terminal).
     - These commands accept `--directory`. Exit codes: `0` done, `1` failed (including when the workspace service could not be reached), `2` a request to change (not signed in, a re-link or unlink without `--yes` and no terminal to confirm on, or a `sync` to a link not yet confirmed on this machine), `3` the project is not linked. With `--json`, `ok` is `true` exactly when the exit code is `0`.
@@ -188,6 +189,8 @@ altimate --print-logs --log-level DEBUG run "test query"
 # Disable tracing for a single run
 altimate run --no-trace "quick question"
 ```
+
+`run` reads piped input to the end, however long the command before the pipe takes. One exception: when `run` already has a message or `--command` and its stdin is a socket, which is what an agent's shell tool or a Node `spawn` hands a child, it waits only 3 seconds for the first byte and then continues without stdin. Set `ALTIMATE_RUN_STDIN_WAIT_MS` to change that wait, or to `0` to always wait. A caller that never writes to or closes stdin, and whose stdin is not a socket (for example a pipe on Windows), should redirect it from an empty source: `< /dev/null`, or `< NUL` in `cmd.exe`.
 
 For CI pipelines and headless automation, see [CI & Automation](ci-headless.md).
 

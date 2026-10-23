@@ -38,10 +38,9 @@
 // detection is per-skill ``updated_at`` and the only integrity check available
 // is byte length.
 import fs from "fs/promises"
-import { createHash } from "node:crypto"
 import { statSync } from "node:fs"
 import path from "path"
-import { Global } from "@/global"
+import { emptyRecordPath } from "./empty-record-path"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
@@ -655,16 +654,10 @@ export async function recentlySynced(directory: string): Promise<boolean> {
 /** Which account each project's snapshot was last fetched for. */
 const syncedFor = store.syncedFor
 
-/** Where the record lives that a project's workspace had no custom skills at the last sync
- * (account key + workspace id). On disk rather than on `globalThis`, which is per thread: an
- * unlink in the TUI thread has to clear what the prompt worker's sync recorded, and the other way
- * round. Under the app's state directory, so nothing is written into the user's repository. */
-function emptyRecordPath(canon: string): string {
-  const id = createHash("sha256").update(canon).digest("hex").slice(0, 32)
-  return path.join(Global.Path.state, "altimate-workspace-empty", id)
-}
-
-/** The record as written: `<key>\n<write id>`. The write id tells one sync's record from another
+/** The record as written: `<key>\n<write id>`, at `emptyRecordPath` (./empty-record-path), saying the
+ * project's workspace had no custom skills at the last sync (account key + workspace id). On disk rather
+ * than on `globalThis`, which is per thread: an unlink in the TUI thread has to clear what the prompt
+ * worker's sync recorded, and the other way round. The write id tells one sync's record from another
  * sync's record for the same key, so a sync only ever withdraws the record it wrote itself. */
 async function readEmptyRecordRaw(canon: string): Promise<string | null> {
   try {

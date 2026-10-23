@@ -134,6 +134,7 @@ Estimated savings: ~60 credits/week (71% reduction on this query alone)
 - Search warehouse metadata
 - Detect PII columns
 - Save training entries
+- Read and reload workspace memory, view this checkout's memory audit log, and answer questions about team conventions from workspace skills (saving memory is done with builder)
 
 ---
 

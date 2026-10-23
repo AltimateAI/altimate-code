@@ -9,6 +9,8 @@ import { SessionID, MessageID, PartID } from "./schema"
 // altimate_change start — module-scope echo transport predicate
 import { MessageV2, isEchoTransportError } from "./message-v2"
 // altimate_change end
+// altimate_change — a linked workspace with no skills yet still waits for the skill sync; see `prompt`
+import { emptyRecordPath } from "../altimate/workspace/empty-record-path"
 import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "."
@@ -420,11 +422,14 @@ export namespace SessionPrompt {
     } else {
       // Workspaces are on by default, so this branch runs on every user's turn. Awaiting it puts
       // event-loop ticks (and up to WORKSPACE_SKILL_WAIT_MS) before `createUserMessage` — the
-      // reordering described above. Only a project that already has a workspace snapshot can have
-      // skills to land on this turn, so only that case waits; everyone else starts the sync in the
-      // background and keeps the synchronous path. The background sync does not refresh the skill
-      // registry when it lands, so its skills reach the next turn (which finds the snapshot and
-      // refreshes before it starts), never part-way through this one.
+      // reordering described above. Only a project a sync has already seen linked can have skills
+      // to land on this turn, so only that case waits: one with a workspace snapshot, or one whose
+      // workspace had no skills at the last sync. Without the second, the first skill added to an
+      // empty workspace missed the next `run` entirely — each is a fresh process, so the skill was
+      // named in the workspace prompt but the skill tool could not load it. Everyone
+      // else starts the sync in the background and keeps the synchronous path. The background sync
+      // does not refresh the skill registry when it lands, so its skills reach the next turn (which
+      // finds the snapshot and refreshes before it starts), never part-way through this one.
       const workspaceSkillTurn = async (background: boolean) => {
         try {
           const skillSync = await import("../altimate/workspace/skill-sync")
@@ -493,7 +498,11 @@ export namespace SessionPrompt {
           log.warn("workspace skill sync failed", { err: String(err) })
         }
       }
-      if (existsSync(path.join(Instance.directory, ".altimate-code", "skill", "_workspace"))) await workspaceSkillTurn(false)
+      if (
+        existsSync(path.join(Instance.directory, ".altimate-code", "skill", "_workspace")) ||
+        existsSync(emptyRecordPath(path.resolve(Instance.directory)))
+      )
+        await workspaceSkillTurn(false)
       // Registered now, synchronously, so a `run` that ends at once still flushes it on exit.
       else PendingTurns.track(workspaceSkillTurn(true))
     }
@@ -1913,7 +1922,20 @@ export namespace SessionPrompt {
       // pure link identity. `systemSection()` reads `Instance.directory` itself, inside
       // its own try/catch — NOT passed as an argument here — so a missing instance
       // context can't throw synchronously at this call site.
-      const workspaceIdentity = await WorkspaceIdentity.systemSection()
+      // The team-memory line names memory tools; describe only the ones this agent and request
+      // keep. Steps that send no tools at all (answer echo, budget finalization) withhold every
+      // tool this prompt names, not just these, and are handled on their own paths.
+      const memoryRemoved = LLM.removedTools(["altimate_memory_read", "altimate_memory_write"], {
+        agent,
+        user: lastUser,
+      })
+      const memoryCallable = (name: string) => name in tools && !memoryRemoved.has(name)
+      const workspaceIdentity = await WorkspaceIdentity.systemSection({
+        memoryTools: {
+          read: memoryCallable("altimate_memory_read"),
+          write: memoryCallable("altimate_memory_write"),
+        },
+      })
       // altimate_change end
       // altimate_change start — workspace tool awareness.
       // Reads the snapshot `Precedence.refresh` stored for this turn during tool

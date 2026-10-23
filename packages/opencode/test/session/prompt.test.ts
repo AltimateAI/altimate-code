@@ -35,6 +35,7 @@ import { Session as LegacySession } from "../../src/session"
 import { Session } from "@/session/session"
 import { SessionMessageTable } from "@opencode-ai/core/session/sql"
 import { LLM } from "../../src/session/llm"
+import * as WorkspaceIdentity from "../../src/altimate/workspace/identity"
 import { MessageV2 } from "../../src/session/message-v2"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { SessionCompaction } from "../../src/session/compaction"
@@ -622,6 +623,56 @@ noLLMServer.instance(
   { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
   30_000,
 )
+// altimate_change end
+
+// altimate_change start - the workspace memory line follows the tools the turn keeps
+for (const turn of [
+  { agent: "analyst", tools: undefined, expected: { read: true, write: false } },
+  { agent: "builder", tools: undefined, expected: { read: true, write: true } },
+  { agent: "builder", tools: { altimate_memory_read: false }, expected: { read: false, write: true } },
+  { agent: "analyst", tools: { altimate_memory_read: false }, expected: { read: false, write: false } },
+] as const) {
+  noLLMServer.instance(
+    `prompt loop passes the identity section only the memory tools ${turn.agent} keeps${turn.tools ? " with read switched off on the request" : ""}`,
+    () => Effect.gen(function* () {
+      const section = spyOn(WorkspaceIdentity, "systemSection").mockResolvedValue("")
+      const sent: Pick<LLM.StreamInput, "tools" | "agent" | "user">[] = []
+      const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+        sent.push({ tools: input.tools, agent: input.agent, user: input.user })
+        const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+        async function* fullStream() {
+          yield { type: "start" }
+          yield { type: "start-step" }
+          yield { type: "text-start", id: "reply" }
+          yield { type: "text-delta", id: "reply", text: "Done." }
+          yield { type: "text-end", id: "reply" }
+          yield { type: "finish-step", finishReason: "stop", usage }
+          yield { type: "finish", finishReason: "stop", totalUsage: usage }
+        }
+        return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+      })
+      try {
+        const { prompt, chat } = yield* boot()
+        yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: turn.agent,
+          model: promptRef,
+          tools: turn.tools,
+          parts: [{ type: "text", text: "What are our naming conventions?" }],
+        })
+        expect(section.mock.calls[0]?.[0]).toEqual({ memoryTools: turn.expected })
+        // Same answer as the filter applied to the tools handed to the model call.
+        const kept = (name: string) => name in sent[0].tools && !LLM.removedTools([name], sent[0]).has(name)
+        expect({ read: kept("altimate_memory_read"), write: kept("altimate_memory_write") }).toEqual(turn.expected)
+      } finally {
+        section.mockRestore()
+        stream.mockRestore()
+      }
+    }),
+    { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
+    30_000,
+  )
+}
 // altimate_change end
 
 // altimate_change start - approved lessons are harness-delivered without changing cached prefixes
@@ -1953,6 +2004,71 @@ it.instance(
         )
       }),
     ),
+  30_000,
+)
+
+// A linked workspace that had no skills at the last sync leaves no snapshot, only the empty record. The
+// first skill added to it must reach the next `run`, which is a fresh process, so that turn waits for the
+// sync like a project with a snapshot does, before the turn's message is written.
+let emptyRecordFile: string | undefined
+it.instance(
+  "a turn waits for the workspace sync when the linked workspace had no skills at the last sync",
+  () =>
+    withWorkspacesOn(
+      Effect.gen(function* () {
+        const { llm } = yield* useServerConfig(providerCfg)
+        const { prompt, chat } = yield* boot()
+        const skillSync = yield* Effect.promise(() => import("../../src/altimate/workspace/skill-sync"))
+        let landedAt: number | undefined
+        let messageAt: number | undefined
+        // `prompt` touches the session right after it creates the user message, so this marks when the
+        // turn's message was written.
+        const realTouch = LegacySession.touch
+        const touch = spyOn(LegacySession, "touch").mockImplementation(((sessionID: SessionID) => {
+          messageAt ??= performance.now()
+          return realTouch(sessionID)
+        }) as typeof LegacySession.touch)
+        const recent = spyOn(skillSync, "recentlySynced").mockResolvedValue(false)
+        const sync = spyOn(skillSync, "syncSkills").mockImplementation(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(() => {
+                landedAt = performance.now()
+                resolve({ changed: false, skipped: [] } as unknown as Awaited<ReturnType<typeof skillSync.syncSkills>>)
+              }, 500),
+            ),
+        )
+        yield* Effect.gen(function* () {
+          yield* llm.text("done")
+          yield* prompt.prompt({
+            sessionID: chat.id, agent: "build", model: promptRef,
+            parts: [{ type: "text", text: "Hello." }],
+          })
+          expect(sync).toHaveBeenCalled()
+          expect(landedAt).toBeDefined()
+          expect(messageAt).toBeDefined()
+          expect(landedAt!).toBeLessThan(messageAt!)
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              recent.mockRestore()
+              sync.mockRestore()
+              touch.mockRestore()
+              if (emptyRecordFile) require("fs").rmSync(emptyRecordFile, { force: true })
+            }),
+          ),
+        )
+      }),
+    ),
+  {
+    init: (directory: string) =>
+      Effect.promise(async () => {
+        const { emptyRecordPath } = await import("../../src/altimate/workspace/empty-record-path")
+        emptyRecordFile = emptyRecordPath(path.resolve(directory))
+        require("fs").mkdirSync(path.dirname(emptyRecordFile), { recursive: true })
+        require("fs").writeFileSync(emptyRecordFile, "key\nwrite-id")
+      }),
+  },
   30_000,
 )
 // altimate_change end
