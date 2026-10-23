@@ -36,9 +36,9 @@ const PLAN_SKIP_RULES = new Set(["plan_unavailable", "POLICY_SKIPPED"])
 const PLAN_SKIP_NOTE = /plan-based analysis was skipped|logical plan unavailable/i
 
 export const POLICY_NOT_EVALUATED_MESSAGE =
-  "policy could not be evaluated for this statement (table-valued function, no plan available); treated as blocked"
+  "policy could not be evaluated for this statement (table-valued function, no plan available); treated as blocked. Review it by hand: the policy engine cannot check statements built on TABLE(...), LATERAL FLATTEN or file readers such as read_csv(...)"
 export const SEMANTICS_SKIPPED_MESSAGE =
-  "semantic analysis skipped (no plan available for this statement, e.g. table-valued function)"
+  "semantic analysis skipped (no plan available for this statement, e.g. table-valued function); review it by hand"
 
 /** Mark a policy result not-allowed when the engine skipped evaluation. */
 export function applyPolicySkipGuard(data: Record<string, unknown>): Record<string, unknown> {

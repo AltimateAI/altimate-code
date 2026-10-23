@@ -23,7 +23,9 @@ directory to your user PATH (open a new terminal afterwards). It also writes an
 `altimate-code` alias there: `altimate-code.cmd` for cmd.exe and PowerShell, and
 an extensionless shim for Git Bash. Inside WSL, install the Linux build with
 `curl -fsSL https://www.altimate.sh/install | bash`; the Windows shim refuses to
-run there. The installer
+run there. The `.cmd` alias passes its arguments through cmd.exe, which expands
+`%VAR%` and interprets unquoted `&`, `|` and `^`, so scripts should call
+`altimate` directly. The installer
 auto-detects AVX2 support and falls back to the baseline build on older CPUs.
 
 Options (pass via a script block):
