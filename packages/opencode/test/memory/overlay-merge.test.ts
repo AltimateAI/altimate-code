@@ -252,6 +252,16 @@ describe("the memory read tool", () => {
     expect(out).toContain("A LOCAL FACT")
     expect(out).toContain("A WORKSPACE FACT")
   })
+
+  test("an empty result does not tell a read-only agent to save", async () => {
+    // analyst may read memory but not write it; naming the write tool in the
+    // result steers it toward a call it cannot make.
+    await hydrate(SES)
+    const tool = await initTool(MemoryReadTool)
+    const res: any = await tool.execute({ scope: "all", tags: ["no-such-tag"] }, { sessionID: SES, agent: "analyst" })
+    expect(res.metadata.count).toBe(0)
+    expect(String(res.output)).toEqual("No memory blocks found.")
+  })
 })
 
 describe("on-demand reload", () => {

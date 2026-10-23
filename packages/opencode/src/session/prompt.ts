@@ -1922,7 +1922,20 @@ export namespace SessionPrompt {
       // pure link identity. `systemSection()` reads `Instance.directory` itself, inside
       // its own try/catch — NOT passed as an argument here — so a missing instance
       // context can't throw synchronously at this call site.
-      const workspaceIdentity = await WorkspaceIdentity.systemSection()
+      // The team-memory line names memory tools; describe only the ones this agent and request
+      // keep. Steps that send no tools at all (answer echo, budget finalization) withhold every
+      // tool this prompt names, not just these, and are handled on their own paths.
+      const memoryRemoved = LLM.removedTools(["altimate_memory_read", "altimate_memory_write"], {
+        agent,
+        user: lastUser,
+      })
+      const memoryCallable = (name: string) => name in tools && !memoryRemoved.has(name)
+      const workspaceIdentity = await WorkspaceIdentity.systemSection({
+        memoryTools: {
+          read: memoryCallable("altimate_memory_read"),
+          write: memoryCallable("altimate_memory_write"),
+        },
+      })
       // altimate_change end
       // altimate_change start — workspace tool awareness.
       // Reads the snapshot `Precedence.refresh` stored for this turn during tool
