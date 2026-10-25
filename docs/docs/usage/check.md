@@ -303,7 +303,7 @@ The engine does not publish a rule list. The rules below are the ones `check` ac
 | `comment_injection` | A string literal followed by `--`, `#` or `/* */`, or the `';--` truncation pattern | `SELECT * FROM users WHERE name = 'a' -- x` | error |
 | `info_schema_probe` | Reads from `information_schema` or Snowflake system functions | `SELECT * FROM information_schema.tables` | error |
 | `transaction_escape` | A transaction control statement | `COMMIT; SELECT 1` | error |
-| `string_concat_predicate` | `CONCAT()`, `||` or `+` string concatenation in a `WHERE` clause | `SELECT * FROM users WHERE name = CONCAT('a', 'b')` | warning |
+| `string_concat_predicate` | `CONCAT()`, `\|\|` or `+` string concatenation in a `WHERE` clause | `SELECT * FROM users WHERE name = CONCAT('a', 'b')` | warning |
 | `sleep_attack` | Time-based blind injection (`SLEEP(...)`) | `SELECT * FROM users WHERE id = 1 AND SLEEP(5)` | error |
 | `encoding_bypass` | `CHAR()` encoding, URL-encoded payloads, Jinja statement tags in SQL, hex literals | `SELECT * FROM users WHERE name = CHAR(97,100,109,105,110)` | error (hex literal `0x…`: warning) |
 
@@ -348,7 +348,7 @@ Lint findings carry both a `code` and a `rule`. Almost every `SELECT` without a 
 | `L040` | `monetary_float_cast` | Money-like column cast to `FLOAT`/`DOUBLE`/`REAL` | `SELECT CAST(amount AS FLOAT) FROM orders` | warning |
 | `L042` | `case_sensitive_like` | `LIKE`, which is case-sensitive on most warehouses | `SELECT id FROM orders WHERE name LIKE 'abc%'` | info |
 | `L043` | `outer_join_filter_in_where` | `WHERE` predicate on the outer side of a `LEFT`/`RIGHT` join (turns it into an inner join) | `SELECT o.id FROM orders o LEFT JOIN customers c ON o.cid = c.id WHERE c.name = 'x'` | warning |
-| `L044` | `null_propagating_concat` | `||` concatenation, which is NULL if any operand is NULL | `SELECT a || b FROM t` | warning |
+| `L044` | `null_propagating_concat` | `\|\|` concatenation, which is NULL if any operand is NULL | `SELECT a \|\| b FROM t` | warning |
 | `L045` | `greatest_least_null` | `GREATEST`/`LEAST` over nullable columns | `SELECT greatest(qty, price) FROM orders` | warning |
 | `L046` | `distinct_with_window` | `SELECT DISTINCT` together with a window function | `SELECT DISTINCT id, row_number() OVER (PARTITION BY id ORDER BY id) FROM orders` | warning |
 | `L048` | `cast_division_to_int` | Division result cast to an integer (truncates) | `SELECT CAST(qty / price AS INTEGER) FROM orders` | warning |
@@ -370,7 +370,7 @@ Except `allowed_statements` and `blocked_tables`, these checks run only when `--
 | `max_tables` | `{"cost_control": {"max_tables": 1}}` | `SELECT o.id FROM orders o JOIN customers c ON o.customer_id = c.id` | error |
 | `block_select_star` | `{"cost_control": {"block_select_star": true}}` | `SELECT * FROM orders` | error |
 | `require_limit` | `{"cost_control": {"require_limit": true}}` | `SELECT id FROM orders` | error |
-| `max_complexity_score` | `{"cost_control": {"max_complexity_score": 5}}` | A join plus an `IN` subquery and `GROUP BY` (score 9) | error |
+| `max_complexity_score` | `{"cost_control": {"max_complexity_score": 5}}` | A join plus an `IN` subquery and `GROUP BY` | error |
 | `blocked_columns` | `{"data_protection": {"blocked_columns": [{"table": "customers", "columns": ["email"]}]}}` | `SELECT email FROM customers` | error |
 | `blocked_tables` | `{"data_protection": {"blocked_tables": [{"table": "customers"}]}}` | `SELECT id FROM customers` | error |
 | `require_where_clause` | `{"data_protection": {"require_where_clause": true}}` | `DELETE FROM orders` | error |
