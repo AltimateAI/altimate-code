@@ -5,7 +5,12 @@ import path from "path"
 import { Effect } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import type { Tool } from "@/tool/tool"
-import { assertExternalDirectoryEffect, assertExternalDirectoryLegacy } from "../../src/tool/external-directory"
+import {
+  assertExternalDirectoryEffect,
+  assertExternalDirectoryLegacy,
+  assertSensitiveWrite,
+  assertSensitiveWriteEffect,
+} from "../../src/tool/external-directory"
 import { Filesystem } from "@/util/filesystem"
 import { InstanceState } from "@/effect/instance-state"
 import { Instance } from "../../src/project/instance"
@@ -301,4 +306,30 @@ describe("tool.assertExternalDirectory", () => {
       { git: true },
     )
   }
+})
+
+describe("tool.assertSensitiveWrite", () => {
+  it.instance("checks the resolved destination of an innocently named project link", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const outside = yield* tmpdirScoped()
+      const sensitive = path.join(outside, ".ssh")
+      fs.mkdirSync(sensitive)
+      const link = path.join(test.directory, "config")
+      fs.symlinkSync(sensitive, link, process.platform === "win32" ? "junction" : "dir")
+      const target = path.join(link, "credentials")
+
+      const { requests, ctx } = makeCtx()
+      yield* assertSensitiveWriteEffect(ctx, target)
+      expect(requests).toHaveLength(1)
+      expect(requests[0]?.permission).toBe("sensitive_write")
+      expect(requests[0]?.metadata.sensitive).toBe(".ssh")
+
+      const legacy = makeCtx()
+      const instance = yield* InstanceState.context
+      yield* Effect.promise(() => Instance.restore(instance, () => assertSensitiveWrite(legacy.ctx, target)))
+      expect(legacy.requests).toHaveLength(1)
+      expect(legacy.requests[0]?.patterns).toContain(path.relative(test.directory, path.join(sensitive, "credentials")))
+    }),
+  )
 })

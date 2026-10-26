@@ -46,6 +46,17 @@ function containsAuthoredPath(filepath: string, directory: string, worktree: str
   if (worktree === "/") return false
   return FSUtil.contains(worktree, filepath)
 }
+
+function sensitiveWriteMatches(target: string, directory: string) {
+  const authored = authoredPath(target)
+  const resolved = Filesystem.realLocation(process.platform === "win32" ? FSUtil.windowsPath(target) : target)
+  return [...new Set([authored, resolved].filter((item): item is string => !!item))]
+    .map((filepath) => {
+      const relative = path.relative(directory, filepath)
+      return { filepath, relative, matched: Protected.isSensitiveWrite(relative) }
+    })
+    .filter((item): item is typeof item & { matched: string } => !!item.matched)
+}
 // altimate_change end
 
 export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirectory")(function* (
@@ -104,17 +115,18 @@ export const assertSensitiveWriteEffect = Effect.fn("Tool.assertSensitiveWrite")
 ) {
   if (!target) return
   const ins = yield* InstanceState.context
-  const relativePath = path.relative(ins.directory, target)
-  const matched = Protected.isSensitiveWrite(relativePath)
-  if (!matched) return
+  const matches = sensitiveWriteMatches(target, ins.directory)
+  if (!matches.length) return
+  const patterns = matches.map((item) => item.relative)
+  const matched = matches[0]
   yield* ctx.ask({
     permission: "sensitive_write",
-    patterns: [relativePath],
-    always: [relativePath],
+    patterns,
+    always: patterns,
     metadata: {
-      filepath: target,
-      sensitive: matched,
-      reason: `This file is in a sensitive location (${matched}). Modifications could affect credentials, version control, or security configuration.`,
+      filepath: authoredPath(target),
+      sensitive: matched.matched,
+      reason: `This file is in a sensitive location (${matched.matched}). Modifications could affect credentials, version control, or security configuration.`,
     },
   })
 })
@@ -123,18 +135,19 @@ export const assertSensitiveWriteEffect = Effect.fn("Tool.assertSensitiveWrite")
 // (like the Legacy external-directory variant) rather than InstanceState.context.
 export async function assertSensitiveWrite(ctx: Tool.Context, target?: string): Promise<void> {
   if (!target) return
-  const relativePath = path.relative(Instance.directory, target)
-  const matched = Protected.isSensitiveWrite(relativePath)
-  if (!matched) return
+  const matches = sensitiveWriteMatches(target, Instance.directory)
+  if (!matches.length) return
+  const patterns = matches.map((item) => item.relative)
+  const matched = matches[0]
   await Effect.runPromise(
     ctx.ask({
       permission: "sensitive_write",
-      patterns: [relativePath],
-      always: [relativePath],
+      patterns,
+      always: patterns,
       metadata: {
-        filepath: target,
-        sensitive: matched,
-        reason: `This file is in a sensitive location (${matched}). Modifications could affect credentials, version control, or security configuration.`,
+        filepath: authoredPath(target),
+        sensitive: matched.matched,
+        reason: `This file is in a sensitive location (${matched.matched}). Modifications could affect credentials, version control, or security configuration.`,
       },
     }),
   )

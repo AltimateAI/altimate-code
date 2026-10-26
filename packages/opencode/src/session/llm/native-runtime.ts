@@ -89,6 +89,7 @@ export function stream(input: StreamInput): StreamResult {
   // — if a field ever needs to differ between the two surfaces, the
   // translation belongs here, not split across both packages.
   const tools = nativeTools(input.tools, input)
+  const advertisedTools = Object.fromEntries(Object.entries(tools).filter(([name]) => name !== "invalid"))
   const request = LLMNative.request({
     model: input.model,
     apiKey: current.apiKey,
@@ -112,7 +113,7 @@ export function stream(input: StreamInput): StreamResult {
         const provider = input.llmClient
           .stream(
             LLMRequest.update(request, {
-              tools: [...request.tools, ...toDefinitions(tools)],
+              tools: [...request.tools, ...toDefinitions(advertisedTools)],
             }),
           )
           .pipe(
