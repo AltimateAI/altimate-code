@@ -63,6 +63,39 @@ describe("tool.assertExternalDirectory", () => {
     }),
   )
 
+  if (process.platform !== "win32") {
+    it.instance("asks when '..' after a link inside the project leads outside it", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const outside = fs.realpathSync(yield* tmpdirScoped())
+        fs.mkdirSync(path.join(outside, "deep"))
+        fs.symlinkSync(path.join(outside, "deep"), path.join(test.directory, "link"))
+        // Written by hand so ".." follows the link, as the kernel does. The lexical spelling
+        // (<project>/file.txt) exists, which is what made whole-path realpath call it in-project.
+        fs.writeFileSync(path.join(test.directory, "file.txt"), "decoy")
+        fs.writeFileSync(path.join(outside, "file.txt"), "outside")
+        const target = `${test.directory}/link/../file.txt`
+        const expected = glob(path.join(outside, "*"))
+
+        const { requests, ctx } = makeCtx()
+        yield* assertExternalDirectoryEffect(ctx, target)
+        expect(requests[0]?.patterns.at(-1)).toBe(expected)
+
+        const legacy: string[][] = []
+        const instance = yield* InstanceState.context
+        yield* Effect.promise(() =>
+          Instance.restore(instance, () =>
+            assertExternalDirectoryLegacy(
+              { ...baseCtx, metadata: () => {}, ask: async (req) => void legacy.push([...req.patterns]) },
+              target,
+            ),
+          ),
+        )
+        expect(legacy[0]?.at(-1)).toBe(expected)
+      }),
+    )
+  }
+
   it.instance("asks with a single canonical glob", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
@@ -118,6 +151,7 @@ describe("tool.assertExternalDirectory", () => {
         fs.writeFileSync(path.join(elsewhere, "secret.txt"), "x")
         fs.symlinkSync(elsewhere, path.join(allowed, "linked-dir"))
         fs.symlinkSync(path.join(elsewhere, "secret.txt"), path.join(allowed, "linked-file.txt"))
+        fs.symlinkSync(path.join(elsewhere, "not-yet.txt"), path.join(allowed, "dangling.txt"))
 
         for (const target of [path.join(allowed, "linked-dir", "secret.txt"), path.join(allowed, "linked-file.txt")]) {
           const { requests, ctx } = makeCtx()
@@ -138,6 +172,8 @@ describe("tool.assertExternalDirectory", () => {
           ],
           // Written by hand: path.join would collapse the ".." before the link is followed.
           [`${allowed}/linked-dir/../file.txt`, "file", outerTmp],
+          // A link whose target does not exist yet: a write through it lands in the target's directory.
+          [path.join(allowed, "dangling.txt"), "file", elsewhere],
         ]
         for (const [target, kind, real] of cases) {
           const { requests, ctx } = makeCtx()

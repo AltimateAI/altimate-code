@@ -5,7 +5,8 @@ import { lookup } from "mime-types"
 import { realpathSync } from "fs"
 import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve } from "path"
 // altimate_change start — parse() finds the root for Filesystem.realLocation
-import { parse } from "path"
+import { parse, sep } from "path"
+import { lstatSync, readlinkSync } from "fs"
 // altimate_change end
 // altimate_change start — upstream_fix: convert Git Bash/Cygwin/WSL paths before Windows realpath
 import { win32 } from "path"
@@ -209,8 +210,9 @@ export namespace Filesystem {
   // altimate_change start — real location of a path that may not exist yet
   // Resolves symlinks one segment at a time, so ".." steps out of where a link really points (as
   // the kernel does; realpath normalizes ".." lexically first) and the segments that do not exist
-  // yet are kept as written. Undefined for a relative path.
-  export function realLocation(p: string): string | undefined {
+  // yet are kept as written. A link whose target does not exist yet is followed too, so a write
+  // through it is checked where it lands. Undefined for a relative path.
+  export function realLocation(p: string, hops = 0): string | undefined {
     const { root } = parse(p)
     if (!root) return undefined
     const segments = p.slice(root.length).split(process.platform === "win32" ? /[\\/]/ : "/")
@@ -230,10 +232,21 @@ export namespace Filesystem {
       try {
         real = realpathSync(next)
       } catch {
-        real = next
+        real = (hops < 40 && danglingLinkTarget(next, real, hops)) || next
       }
     }
     return real
+  }
+
+  function danglingLinkTarget(link: string, dir: string, hops: number) {
+    try {
+      if (!lstatSync(link).isSymbolicLink()) return undefined
+      const target = readlinkSync(link)
+      // Concatenated, not joined: join would collapse ".." in the target before the walk follows it.
+      return realLocation(isAbsolute(target) ? target : `${dir}${sep}${target}`, hops + 1)
+    } catch {
+      return undefined
+    }
   }
   // altimate_change end
 

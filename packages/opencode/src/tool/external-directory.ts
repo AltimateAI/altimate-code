@@ -51,7 +51,10 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
 
   const ins = yield* InstanceState.context
   const full = process.platform === "win32" ? FSUtil.normalizePath(target) : target
-  if (containsPath(full, ins)) return false
+  // altimate_change start — decide containment on where the path really lands: realpath collapses
+  // ".." lexically, so "<project>/link/../x" would otherwise pass as inside the project
+  if (containsPath(Filesystem.realLocation(full) ?? full, ins)) return false
+  // altimate_change end
 
   const kind = options?.kind ?? "file"
   const dir = kind === "directory" ? full : path.dirname(full)
@@ -139,7 +142,7 @@ export async function assertExternalDirectoryLegacy(
   if (options?.bypass) return false
 
   const full = process.platform === "win32" ? FSUtil.normalizePath(target) : target
-  if (Instance.containsPath(full)) return false
+  if (Instance.containsPath(Filesystem.realLocation(full) ?? full)) return false
 
   const kind = options?.kind ?? "file"
   const dir = kind === "directory" ? full : path.dirname(full)
