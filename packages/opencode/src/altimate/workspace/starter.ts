@@ -19,6 +19,8 @@ export interface Starter {
   prompts: string[]
   /** The whole message as plain text, for a terminal or a chat bubble. */
   text: string
+  /** The workspace the starter describes, so a client can report a pick against it. Set by `starterFor`. */
+  workspaceId?: number
 }
 
 const MAX_PROMPTS = 3
@@ -174,5 +176,5 @@ export async function starterFor(
   const contents = await workspaceContents(directory, binding.datamateId, waitMs)
   const starter = renderStarter(binding.datamateName, contents)
   trackStarterShown(binding.datamateId, contents)
-  return starter
+  return { ...starter, workspaceId: binding.datamateId }
 }

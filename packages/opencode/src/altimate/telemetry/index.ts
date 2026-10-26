@@ -623,6 +623,16 @@ export namespace Telemetry {
         memory_enabled?: boolean
       }
     | {
+        /** One selection from the TUI's workspace starter: a suggested prompt, open in browser, or done. */
+        type: "starter_action_picked"
+        timestamp: number
+        session_id: string
+        workspace_id: number
+        action: "prompt" | "open" | "done"
+        /** 0-based position of the suggested prompt; only for `prompt`. The prompt's text is never sent. */
+        prompt_index?: number
+      }
+    | {
         /** A memory block was written back to the bound workspace's cloud memory. */
         type: "workspace_memory_contributed"
         timestamp: number

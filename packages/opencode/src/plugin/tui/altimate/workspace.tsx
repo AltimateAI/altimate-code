@@ -43,6 +43,7 @@ import {
 } from "@/altimate/workspace/workspace-name"
 import { currentAttachSnapshot } from "@/altimate/workspace/attach-snapshot"
 import { trackEngineError, trackInstallPrompt } from "@/altimate/workspace/engine-telemetry"
+import { trackStarterActionPicked } from "@/altimate/workspace/starter-telemetry"
 import {
   accountScope,
   loadStatusView,
@@ -449,7 +450,9 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
         if (!props.starter()?.prompts.length && option.value !== initial) setMovedEarly(true)
       }}
       onSelect={(option) => {
-        // altimate_change start - put the chosen prompt in the input without sending it
+        // altimate_change start - the pick, once the starter is on screen (before, this is the bare confirmation)
+        trackStarterActionPicked(props.starter(), option.value)
+        // put the chosen prompt in the input without sending it
         if (option.value.startsWith("prompt:")) {
           fillPrompt(props.api, option.title)
           return
@@ -524,6 +527,7 @@ function WorkspaceStarterDialog(props: { api: TuiPluginApi; starter: Starter }) 
       ]}
       current={props.starter.prompts.length > 0 ? "prompt:0" : "done"}
       onSelect={(option) => {
+        trackStarterActionPicked(props.starter, option.value)
         if (option.value.startsWith("prompt:")) fillPrompt(props.api, option.title)
         else props.api.ui.dialog.clear()
       }}
