@@ -152,10 +152,11 @@ export function stream(input: StreamInput): StreamResult {
 }
 
 function repairToolCall(tools: ReturnType<typeof nativeTools>, call: ToolCallPart): ToolCallPart {
-  if (tools[call.name]) return call
+  const hasTool = (name: string) => Object.prototype.hasOwnProperty.call(tools, name)
+  if (hasTool(call.name)) return call
   const lower = call.name.toLowerCase()
-  if (tools[lower]) return { ...call, name: lower }
-  if (!tools.invalid) return call
+  if (hasTool(lower)) return { ...call, name: lower }
+  if (!hasTool("invalid")) return call
   return {
     ...call,
     name: "invalid",

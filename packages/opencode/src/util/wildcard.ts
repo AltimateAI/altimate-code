@@ -1,17 +1,8 @@
 import { sortBy, pipe } from "remeda"
 
 export function match(str: string, pattern: string) {
-  return matchNormalized(str?.replaceAll("\\", "/"), pattern?.replaceAll("\\", "/"))
-}
-
-// altimate_change start — preserve POSIX backslashes when matching filesystem paths
-export function matchPath(str: string, pattern: string) {
-  if (process.platform === "win32") return match(str, pattern)
-  return matchNormalized(str, pattern)
-}
-// altimate_change end
-
-function matchNormalized(str: string, pattern: string) {
+  if (str) str = str.replaceAll("\\", "/")
+  if (pattern) pattern = pattern.replaceAll("\\", "/")
   let escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&") // escape special regex chars
     .replace(/\*/g, ".*") // * becomes .*
@@ -26,6 +17,10 @@ function matchNormalized(str: string, pattern: string) {
   const flags = process.platform === "win32" ? "si" : "s"
   return new RegExp("^" + escaped + "$", flags).test(str)
 }
+
+// altimate_change start — preserve POSIX backslashes when matching filesystem paths
+export { matchPath } from "@opencode-ai/core/util/wildcard"
+// altimate_change end
 
 export function all(input: string, patterns: Record<string, any>) {
   const sorted = pipe(patterns, Object.entries, sortBy([([key]) => key.length, "asc"], [([key]) => key, "asc"]))

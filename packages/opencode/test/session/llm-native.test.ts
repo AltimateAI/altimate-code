@@ -558,7 +558,7 @@ describe("session.llm-native.request", () => {
   it.effect("keeps the invalid fallback dispatchable without advertising it to the provider", () =>
     Effect.gen(function* () {
       let advertised: string[] = []
-      let invalidInput: unknown
+      const invalidInputs: unknown[] = []
       let visibleCalls = 0
       const invalid = tool({
         description: "Internal fallback",
@@ -568,7 +568,7 @@ describe("session.llm-native.request", () => {
           required: ["tool", "error"],
         }),
         execute: async (input) => {
-          invalidInput = input
+          invalidInputs.push(input)
           return "fallback"
         },
       })
@@ -587,6 +587,7 @@ describe("session.llm-native.request", () => {
           return Stream.fromIterable([
             LLMEvent.toolCall({ id: "call-visible", name: "VISIBLE", input: {} }),
             LLMEvent.toolCall({ id: "call-invalid", name: "write", input: {} }),
+            LLMEvent.toolCall({ id: "call-inherited", name: "constructor", input: {} }),
             LLMEvent.finish({ reason: "tool-calls" }),
           ])
         },
@@ -608,7 +609,10 @@ describe("session.llm-native.request", () => {
       const events = Array.from(yield* native.stream.pipe(Stream.runCollect))
       expect(advertised).toEqual(["visible"])
       expect(visibleCalls).toBe(1)
-      expect(invalidInput).toEqual({ tool: "write", error: "Unknown tool: write" })
+      expect(invalidInputs).toEqual([
+        { tool: "write", error: "Unknown tool: write" },
+        { tool: "constructor", error: "Unknown tool: constructor" },
+      ])
       expect(events).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ type: "tool-call", name: "visible" }),
