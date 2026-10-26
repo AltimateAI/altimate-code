@@ -1,5 +1,8 @@
-import { expect } from "bun:test"
+import { afterAll, expect } from "bun:test"
 import { Effect } from "effect"
+import fs from "fs"
+import os from "os"
+import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { deriveSubagentSessionPermission } from "../../src/agent/subagent-permissions"
 import { Permission } from "../../src/permission"
@@ -273,3 +276,81 @@ for (const override of ["global", "agent"] as const) {
     },
   )
 }
+
+// Write tools a config grant must not re-enable for analyst (last-match-wins would otherwise apply).
+const analystWrites = [
+  "altimate_memory_write",
+  "altimate_memory_delete",
+  "altimate_memory_extract",
+  "edit",
+  "write",
+  "apply_patch",
+  "sql_execute_write",
+  "bash",
+]
+const writeGrants = Object.fromEntries(analystWrites.map((tool) => [tool, "allow" as const]))
+
+for (const override of ["global", "agent"] as const) {
+  it.instance(
+    `analyst keeps write and memory-save denies after ${override} wildcard and explicit grants`,
+    () =>
+      Effect.gen(function* () {
+        const analyst = (yield* Agent.use.get("analyst"))!
+        for (const tool of analystWrites) expect(action(analyst, tool), tool).toBe("deny")
+        expect(Permission.disabled(analystWrites, analyst.permission)).toEqual(new Set(analystWrites))
+        expect(action(analyst, "task", "data-explorer")).toBe("allow")
+        for (const subagent of ["general", "builder", "explore"]) {
+          expect(action(analyst, "task", subagent), subagent).toBe("deny")
+        }
+        for (const tool of ["altimate_memory_read", "altimate_memory_refresh", "altimate_memory_audit", "skill"]) {
+          expect(action(analyst, tool), tool).toBe("allow")
+        }
+        expect(action(analyst, "read", "models/a.sql")).toBe("allow")
+        expect(action(analyst, "sql_execute")).toBe("allow")
+      }),
+    {
+      config:
+        override === "global"
+          ? { permission: { "*": "allow", ...writeGrants, task: "allow" } }
+          : { agent: { analyst: { permission: { "*": "allow", ...writeGrants, task: "allow" } } } },
+    },
+  )
+}
+
+it.instance(
+  "analyst keeps a configured deny for delegating to data-explorer",
+  () =>
+    Effect.gen(function* () {
+      const analyst = (yield* Agent.use.get("analyst"))!
+      expect(action(analyst, "task", "data-explorer")).toBe("deny")
+    }),
+  { config: { agent: { analyst: { permission: { task: { "data-explorer": "deny" } } } } } },
+)
+
+// A skill stored outside the project, like a global skill under the home directory.
+const externalSkills = fs.mkdtempSync(path.join(os.tmpdir(), "analyst-global-skills-"))
+fs.mkdirSync(path.join(externalSkills, "naming", "references"), { recursive: true })
+fs.writeFileSync(
+  path.join(externalSkills, "naming", "SKILL.md"),
+  "---\nname: naming\ndescription: Naming conventions.\n---\n\nSee references/rules.md.\n",
+)
+fs.writeFileSync(path.join(externalSkills, "naming", "references", "rules.md"), "Use snake_case.\n")
+afterAll(() => fs.rmSync(externalSkills, { recursive: true, force: true }))
+
+it.instance(
+  "analyst can read files bundled with a skill stored outside the project",
+  () =>
+    Effect.gen(function* () {
+      const analyst = (yield* Agent.use.get("analyst"))!
+      const skillDir = path.join(externalSkills, "naming")
+      // The read tool asks for the bundled file's directory with a trailing "/*".
+      for (const dir of [skillDir, path.join(skillDir, "references")]) {
+        expect(action(analyst, "external_directory", path.join(dir, "*")), dir).toBe("allow")
+      }
+      expect(action(analyst, "external_directory", "/some/other/path/*")).toBe("deny")
+      // data-explorer is unchanged: no external directory access beyond the shared truncation glob.
+      const de = (yield* Agent.use.get("data-explorer"))!
+      expect(action(de, "external_directory", path.join(skillDir, "*"))).toBe("deny")
+    }),
+  { config: { skills: { paths: [externalSkills] } } },
+)

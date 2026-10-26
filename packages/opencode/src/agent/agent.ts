@@ -334,6 +334,9 @@ export const layer = Layer.effect(
                 question: "allow",
                 // Skills return instruction text only (no side effects), so they are safe for a read-only agent.
                 skill: "allow",
+                // "*": "deny" above also drops the default allow for skill directories, so files
+                // bundled with a global skill (stored outside the project) could not be read.
+                external_directory: Object.fromEntries(skillDirs.map((dir) => [path.join(dir, "*"), "allow"])),
                 // Workspace memory: read, reload and view the audit log. Reloading syncs like the
                 // load every session runs (it can drop a local copy of a block the workspace has
                 // archived), but cannot create or edit memory. Saving and deleting stay denied, so a
@@ -637,8 +640,26 @@ export const layer = Layer.effect(
           // Permission.disabled requires the final bash rule to deny "*". Without
           // it, narrower safety rules leave the tool exposed to commands that emit
           // no permission patterns (e.g. `>out.txt`). data-explorer is capped above.
+          // The other write tools are denied again too: last-match-wins would otherwise let a
+          // config grant such as "*": "allow" turn file edits, SQL writes, memory saves or
+          // broader delegation back on for the read-only agent.
           if (name === "analyst") {
-            agent.permission = Permission.merge(agent.permission, Permission.fromConfig({ bash: "deny" }))
+            // Keep what config resolved for data-explorer (it may deny or ask), but nothing broader.
+            const explorer = Permission.evaluate("task", "data-explorer", agent.permission).action
+            agent.permission = Permission.merge(
+              agent.permission,
+              Permission.fromConfig({
+                bash: "deny",
+                sql_execute_write: "deny",
+                edit: "deny",
+                write: "deny",
+                apply_patch: "deny",
+                altimate_memory_write: "deny",
+                altimate_memory_delete: "deny",
+                altimate_memory_extract: "deny",
+                task: { "*": "deny", "data-explorer": explorer },
+              }),
+            )
           }
           // altimate_change end
           const explicit = agent.permission.some((r) => {
