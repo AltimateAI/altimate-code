@@ -147,11 +147,11 @@ Verify your connection:
 
 altimate ships with specialized agent modes, each with its own tool permissions:
 
-| Mode        | Access     | Use when you want to...                                                        |
-| ----------- | ---------- | ------------------------------------------------------------------------------ |
-| **Builder** | Read/Write | Create and modify SQL, dbt models, pipelines. SQL writes prompt for approval.  |
-| **Analyst** | Read-only  | Ask questions about your data, explore production data safely, run cost analysis. SQL writes denied entirely. |
-| **Plan**    | Minimal    | Plan an approach before switching to builder to execute it                     |
+| Mode        | Access     | Use when you want to...                                                                                                                                 |
+| ----------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Builder** | Read/Write | Create and modify SQL, dbt models, pipelines. SQL writes prompt for approval.                                                                           |
+| **Analyst** | Read-only  | Ask questions about your data, explore production data safely, run cost analysis. Production SQL writes are denied; session scratch tables are allowed. |
+| **Plan**    | Minimal    | Plan an approach before switching to builder to execute it                                                                                              |
 
 Switch modes in the TUI:
 
@@ -251,7 +251,7 @@ Set tool permissions for each agent mode in `altimate-code.json`:
 }
 ```
 
-Analyst's shell and built-in write tools are always denied, so config cannot turn them on. It can still save training entries, and MCP or custom tools follow your config.
+Analyst's shell and built-in write tools are always denied, so config cannot turn them on. It can still save training entries and create session scratch tables, and MCP or custom tools follow your config.
 
 ### Project rules with AGENTS.md
 
@@ -268,11 +268,11 @@ Define project-wide conventions in an `AGENTS.md` file at your project root. The
 
 ### Default permissions by agent mode
 
-| Agent   | File writes | SQL writes                 | Bash                              | Training |
-| ------- | ----------- | -------------------------- | --------------------------------- | -------- |
-| Builder | allow       | ask (prompts for approval) | ask                               | allow    |
-| Analyst | deny        | deny (blocked entirely)    | deny                              | allow    |
-| Plan    | deny        | deny                       | deny                              | deny     |
+| Agent   | File writes | SQL writes                  | Bash | Training |
+| ------- | ----------- | --------------------------- | ---- | -------- |
+| Builder | allow       | ask (prompts for approval)  | ask  | allow    |
+| Analyst | deny        | deny, except scratch tables | deny | allow    |
+| Plan    | deny        | deny                        | deny | deny     |
 
 ---
 
