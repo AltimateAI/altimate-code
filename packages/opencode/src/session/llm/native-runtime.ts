@@ -17,6 +17,7 @@ import {
   toDefinitions,
   type JsonSchema,
   type LLMEvent,
+  type ToolCallPart,
 } from "@opencode-ai/llm"
 import type { LLMClientShape } from "@opencode-ai/llm/route"
 import { LLMNative } from "./native-request"
@@ -117,22 +118,22 @@ export function stream(input: StreamInput): StreamResult {
             }),
           )
           .pipe(
-            Stream.flatMap((event) =>
-              event.type !== "tool-call" || event.providerExecuted
-                ? Stream.make(event)
-                : Stream.make(event).pipe(
-                    Stream.concat(
-                      Stream.fromEffectDrain(
-                        ToolRuntime.dispatch(tools, event).pipe(
-                          Effect.flatMap((dispatched) => Queue.offerAll(results, dispatched.events)),
-                          Effect.catchCause((cause) => Queue.failCause(results, cause)),
-                          Effect.asVoid,
-                          FiberSet.run(settlements, { startImmediately: true }),
-                        ),
-                      ),
+            Stream.flatMap((event) => {
+              if (event.type !== "tool-call" || event.providerExecuted) return Stream.make(event)
+              const call = repairToolCall(tools, event)
+              return Stream.make(call).pipe(
+                Stream.concat(
+                  Stream.fromEffectDrain(
+                    ToolRuntime.dispatch(tools, call).pipe(
+                      Effect.flatMap((dispatched) => Queue.offerAll(results, dispatched.events)),
+                      Effect.catchCause((cause) => Queue.failCause(results, cause)),
+                      Effect.asVoid,
+                      FiberSet.run(settlements, { startImmediately: true }),
                     ),
                   ),
-            ),
+                ),
+              )
+            }),
             Stream.concat(
               Stream.fromEffectDrain(
                 FiberSet.awaitEmpty(settlements).pipe(Effect.andThen(Queue.end(results)), Effect.asVoid),
@@ -147,6 +148,18 @@ export function stream(input: StreamInput): StreamResult {
   return {
     ...current,
     stream: fetch ? stream.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch)) : stream,
+  }
+}
+
+function repairToolCall(tools: ReturnType<typeof nativeTools>, call: ToolCallPart): ToolCallPart {
+  if (tools[call.name]) return call
+  const lower = call.name.toLowerCase()
+  if (tools[lower]) return { ...call, name: lower }
+  if (!tools.invalid) return call
+  return {
+    ...call,
+    name: "invalid",
+    input: { tool: call.name, error: `Unknown tool: ${call.name}` },
   }
 }
 

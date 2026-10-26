@@ -9,7 +9,9 @@ import { Wildcard } from "@opencode-ai/core/util/wildcard"
 const STRICTNESS = { allow: 0, ask: 1, deny: 2 } as const
 
 function matchPattern(permission: string, input: string, pattern: string) {
-  return permission === "external_directory" ? Wildcard.matchPath(input, pattern) : Wildcard.match(input, pattern)
+  return permission === "external_directory" || permission === "sensitive_write"
+    ? Wildcard.matchPath(input, pattern)
+    : Wildcard.match(input, pattern)
 }
 
 function evaluatePatterns(

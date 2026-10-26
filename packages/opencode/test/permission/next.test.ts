@@ -165,6 +165,20 @@ test.skipIf(process.platform === "win32")(
   },
 )
 
+test.skipIf(process.platform === "win32")(
+  "sensitive_write does not treat a POSIX backslash as a path separator",
+  () => {
+    const literal = "/tmp/secrets\\credentials"
+    const descendant = "/tmp/secrets/credentials"
+    const config = { "*": "deny" as const, sensitive_write: { [literal]: "allow" as const } }
+
+    expect(Permission.evaluate("sensitive_write", descendant, Permission.fromConfig(config)).action).toBe("deny")
+    expect(LegacyPermission.evaluate("sensitive_write", descendant, LegacyPermission.fromConfig(config)).action).toBe(
+      "deny",
+    )
+  },
+)
+
 test("fromConfig - expands $HOME to home directory", () => {
   const result = Permission.fromConfig({ external_directory: { "$HOME/projects/*": "allow" } })
   expect(result).toEqual([{ permission: "external_directory", pattern: `${os.homedir()}/projects/*`, action: "allow" }])
@@ -642,8 +656,14 @@ it.instance(
             metadata: { permissionAliases: { "ls /project": [["ls .."]] } },
             always: [],
             ruleset: [{ permission: "bash", pattern: "ls /project", action: "deny" }],
-          }).then(() => "allowed", (err: unknown) => err)
-          const result = await Promise.race([request, new Promise((resolve) => setTimeout(() => resolve("pending"), 100))])
+          }).then(
+            () => "allowed",
+            (err: unknown) => err,
+          )
+          const result = await Promise.race([
+            request,
+            new Promise((resolve) => setTimeout(() => resolve("pending"), 100)),
+          ])
           for (const item of await LegacyPermission.list()) {
             await LegacyPermission.reply({ requestID: item.id, reply: "reject" })
           }

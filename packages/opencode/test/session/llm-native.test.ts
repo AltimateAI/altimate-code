@@ -558,22 +558,35 @@ describe("session.llm-native.request", () => {
   it.effect("keeps the invalid fallback dispatchable without advertising it to the provider", () =>
     Effect.gen(function* () {
       let advertised: string[] = []
+      let invalidInput: unknown
+      let visibleCalls = 0
       const invalid = tool({
         description: "Internal fallback",
-        inputSchema: jsonSchema({ type: "object" }),
-        execute: async () => "fallback",
+        inputSchema: jsonSchema<{ tool: string; error: string }>({
+          type: "object",
+          properties: { tool: { type: "string" }, error: { type: "string" } },
+          required: ["tool", "error"],
+        }),
+        execute: async (input) => {
+          invalidInput = input
+          return "fallback"
+        },
       })
       const visible = tool({
         description: "Visible tool",
         inputSchema: jsonSchema({ type: "object" }),
-        execute: async () => "visible",
+        execute: async () => {
+          visibleCalls++
+          return "visible"
+        },
       })
       const llmClient = {
         prepare: () => Effect.die("unused"),
         stream: (request: LLMRequest) => {
           advertised = request.tools.map((item) => item.name)
           return Stream.fromIterable([
-            LLMEvent.toolCall({ id: "call-invalid", name: "invalid", input: {} }),
+            LLMEvent.toolCall({ id: "call-visible", name: "VISIBLE", input: {} }),
+            LLMEvent.toolCall({ id: "call-invalid", name: "write", input: {} }),
             LLMEvent.finish({ reason: "tool-calls" }),
           ])
         },
@@ -594,8 +607,12 @@ describe("session.llm-native.request", () => {
 
       const events = Array.from(yield* native.stream.pipe(Stream.runCollect))
       expect(advertised).toEqual(["visible"])
+      expect(visibleCalls).toBe(1)
+      expect(invalidInput).toEqual({ tool: "write", error: "Unknown tool: write" })
       expect(events).toEqual(
         expect.arrayContaining([
+          expect.objectContaining({ type: "tool-call", name: "visible" }),
+          expect.objectContaining({ type: "tool-result", name: "visible" }),
           expect.objectContaining({ type: "tool-call", name: "invalid" }),
           expect.objectContaining({ type: "tool-result", name: "invalid" }),
         ]),
