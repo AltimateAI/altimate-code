@@ -251,7 +251,7 @@ Set tool permissions for each agent mode in `altimate-code.json`:
 }
 ```
 
-Analyst's shell and write tools are always denied, so config can only restrict analyst further.
+Analyst's shell and built-in write tools are always denied, so config cannot turn them on. It can still save training entries, and MCP or custom tools follow your config.
 
 ### Project rules with AGENTS.md
 

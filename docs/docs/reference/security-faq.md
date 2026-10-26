@@ -96,7 +96,7 @@ Yes. Use pattern-based permissions to deny destructive SQL:
 }
 ```
 
-You can also configure per-agent permissions. For example, keep the `builder` agent from editing files and allow only `SELECT` shell commands. The `analyst` agent is already read-only: its shell and write tools stay denied whatever its config says.
+You can also configure per-agent permissions. For example, keep the `builder` agent from editing files and allow only `SELECT` shell commands. The `analyst` agent's shell and built-in write tools are already denied whatever its config says. It can still save training entries and create session scratch tables, and MCP or custom tools follow your config.
 
 ```json
 {

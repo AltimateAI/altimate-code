@@ -73,7 +73,7 @@ Disable a tool for a specific agent by setting its permission to `"deny"`:
 ```
 
 !!! example "Builder with file edit tools denied"
-    The configuration above denies the builder agent's `write` and `edit` tools. The builder can read and explore the codebase. It must ask before running other shell commands, and `dbt run` is blocked entirely. An approved shell command can still modify files. The `analyst` agent is already read-only: its shell and write tools stay denied whatever its permission config says. It can still save training entries and create session scratch tables for analysis.
+    The configuration above denies the builder agent's `write` and `edit` tools. The builder can read and explore the codebase. It must ask before running other shell commands, and `dbt run` is blocked entirely. An approved shell command can still modify files. The `analyst` agent's shell and built-in write tools are already denied whatever its permission config says. It can still save training entries and create session scratch tables for analysis, and MCP or custom tools follow your config.
 
 ## Tool Behavior
 
