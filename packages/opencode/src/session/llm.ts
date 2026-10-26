@@ -477,7 +477,10 @@ export namespace LLM {
   // Tools removed before the model call: denied by the agent, or switched off on the request.
   export function removedTools(names: string[], input: Pick<StreamInput, "agent" | "user">): Set<string> {
     const disabled = PermissionNext.disabled(names, input.agent.permission)
-    return new Set(names.filter((tool) => input.user.tools?.[tool] === false || disabled.has(tool)))
+    // The hidden SDK fallback reports rejected calls; it grants no tool capability.
+    return new Set(
+      names.filter((tool) => tool !== "invalid" && (input.user.tools?.[tool] === false || disabled.has(tool))),
+    )
   }
 
   async function resolveTools(input: Pick<StreamInput, "tools" | "agent" | "user">) {
