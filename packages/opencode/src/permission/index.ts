@@ -6,8 +6,8 @@ import { Deferred, Effect, Layer, Context } from "effect"
 import os from "os"
 // altimate_change start — resolve symlinked external_directory rule paths
 import path from "path"
-import { realpathSync } from "fs"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { Filesystem } from "@/util/filesystem"
 // altimate_change end
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -227,21 +227,17 @@ export function fromConfig(permission: ConfigPermissionV1.Info) {
   return ruleset
 }
 
-// altimate_change start — resolved twin of a literal "<dir>/*" external_directory pattern
+// altimate_change start — resolved twin of an external_directory pattern: its literal leading
+// directory (up to the first segment with a wildcard) resolved through symlinks, rest unchanged
 function resolvedDirectoryPattern(pattern: string) {
-  const suffix = [`${path.sep}*`, "/*"].find((end) => pattern.endsWith(end))
-  if (!suffix) return
-  const dir = pattern.slice(0, -suffix.length)
-  if (/[*?]/.test(dir)) return
-  try {
-    const resolved = realpathSync(dir)
-    if (resolved === dir) return
-    return process.platform === "win32"
-      ? FSUtil.normalizePathPattern(path.join(resolved, "*"))
-      : path.join(resolved, "*")
-  } catch {
-    return
-  }
+  const segments = pattern.split(process.platform === "win32" ? /[\\/]/ : "/")
+  const wildcard = segments.findIndex((segment) => /[*?]/.test(segment))
+  if (wildcard <= 0) return
+  const dir = segments.slice(0, wildcard).join(path.sep) || path.sep
+  const resolved = Filesystem.realLocation(dir)
+  if (!resolved || resolved === dir) return
+  const twin = path.join(resolved, ...segments.slice(wildcard))
+  return process.platform === "win32" ? FSUtil.normalizePathPattern(twin) : twin
 }
 // altimate_change end
 

@@ -132,6 +132,16 @@ test.skipIf(process.platform === "win32")(
         { permission: "external_directory", pattern: path.join(root, "link", "*"), action: "allow" },
         { permission: "external_directory", pattern: path.join(root, "real", "*"), action: "allow" },
       ])
+      // Wildcard rules keep their wildcard part, and a directory that does not exist yet resolves
+      // through its nearest existing ancestor.
+      expect(Permission.fromConfig({ external_directory: { [path.join(root, "link", "**")]: "allow" } })[1]).toEqual({
+        permission: "external_directory",
+        pattern: path.join(root, "real", "**"),
+        action: "allow",
+      })
+      expect(
+        Permission.fromConfig({ external_directory: { [path.join(root, "link", "later", "*")]: "deny" } })[1],
+      ).toEqual({ permission: "external_directory", pattern: path.join(root, "real", "later", "*"), action: "deny" })
       // Other permissions and non-symlinked directories get no extra rule.
       expect(Permission.fromConfig({ read: { [path.join(root, "link", "*")]: "allow" } })).toHaveLength(1)
       expect(Permission.fromConfig({ external_directory: { [path.join(root, "real", "*")]: "allow" } })).toHaveLength(1)

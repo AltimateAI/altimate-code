@@ -4,6 +4,9 @@ import { randomBytes } from "crypto"
 import { lookup } from "mime-types"
 import { realpathSync } from "fs"
 import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve } from "path"
+// altimate_change start — parse() finds the root for Filesystem.realLocation
+import { parse } from "path"
+// altimate_change end
 // altimate_change start — upstream_fix: convert Git Bash/Cygwin/WSL paths before Windows realpath
 import { win32 } from "path"
 // altimate_change end
@@ -202,6 +205,37 @@ export namespace Filesystem {
     if (isAbsolute(rel)) return false
     return !rel.startsWith("..")
   }
+
+  // altimate_change start — real location of a path that may not exist yet
+  // Resolves symlinks one segment at a time, so ".." steps out of where a link really points (as
+  // the kernel does; realpath normalizes ".." lexically first) and the segments that do not exist
+  // yet are kept as written. Undefined for a relative path.
+  export function realLocation(p: string): string | undefined {
+    const { root } = parse(p)
+    if (!root) return undefined
+    const segments = p.slice(root.length).split(process.platform === "win32" ? /[\\/]/ : "/")
+    if (!segments.includes("..")) {
+      try {
+        return realpathSync(p)
+      } catch {}
+    }
+    let real = root
+    for (const segment of segments) {
+      if (!segment || segment === ".") continue
+      if (segment === "..") {
+        real = dirname(real)
+        continue
+      }
+      const next = join(real, segment)
+      try {
+        real = realpathSync(next)
+      } catch {
+        real = next
+      }
+    }
+    return real
+  }
+  // altimate_change end
 
   /**
    * Symlink-aware containment check. Resolves both paths to their real

@@ -5,8 +5,10 @@ import path from "path"
 import { Effect } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import type { Tool } from "@/tool/tool"
-import { assertExternalDirectoryEffect } from "../../src/tool/external-directory"
+import { assertExternalDirectoryEffect, assertExternalDirectoryLegacy } from "../../src/tool/external-directory"
 import { Filesystem } from "@/util/filesystem"
+import { InstanceState } from "@/effect/instance-state"
+import { Instance } from "../../src/project/instance"
 import { TestInstance, tmpdirScoped } from "../fixture/fixture"
 import type { Permission } from "../../src/permission"
 import { SessionID, MessageID } from "../../src/session/schema"
@@ -124,6 +126,38 @@ describe("tool.assertExternalDirectory", () => {
           expect(requests[0]!.patterns, target).toEqual(expected)
           expect(requests[0]!.always, target).toEqual(expected)
         }
+
+        // A directory reached through the link (grep), a file in a subdirectory that does not exist
+        // yet (write), and ".." after the link all resolve to where the kernel would go.
+        const cases: Array<[string, "file" | "directory", string]> = [
+          [path.join(allowed, "linked-dir"), "directory", elsewhere],
+          [
+            path.join(allowed, "linked-dir", "new", "deeper", "file.txt"),
+            "file",
+            path.join(elsewhere, "new", "deeper"),
+          ],
+          // Written by hand: path.join would collapse the ".." before the link is followed.
+          [`${allowed}/linked-dir/../file.txt`, "file", outerTmp],
+        ]
+        for (const [target, kind, real] of cases) {
+          const { requests, ctx } = makeCtx()
+          yield* assertExternalDirectoryEffect(ctx, target, { kind })
+          expect(requests[0]!.patterns.at(-1), target).toBe(glob(path.join(real, "*")))
+        }
+
+        // glob and ls use the Promise-based variant; it asks for the resolved directory too.
+        const legacy: string[][] = []
+        const instance = yield* InstanceState.context
+        yield* Effect.promise(() =>
+          Instance.restore(instance, () =>
+            assertExternalDirectoryLegacy(
+              { ...baseCtx, metadata: () => {}, ask: async (req) => void legacy.push([...req.patterns]) },
+              path.join(allowed, "linked-dir"),
+              { kind: "directory" },
+            ),
+          ),
+        )
+        expect(legacy).toEqual([[glob(path.join(allowed, "linked-dir", "*")), glob(path.join(elsewhere, "*"))]])
 
         // A plain file in the allowed directory asks only for that directory.
         fs.writeFileSync(path.join(allowed, "plain.txt"), "x")
