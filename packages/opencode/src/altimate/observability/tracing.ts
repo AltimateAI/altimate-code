@@ -22,6 +22,52 @@ import path from "path"
 import { Global } from "../../global"
 import { randomUUIDv7 } from "bun"
 import { Log } from "@/altimate/util/log"
+import { bigintReplacer } from "@/altimate/util/json"
+import { createHash } from "node:crypto"
+import z from "zod"
+import { BusEvent } from "@/bus/bus-event"
+
+/** Request-boundary data only: never include request options, auth, or headers. */
+export const LLMRequestEvent = BusEvent.define(
+  "llm.request",
+  z.object({
+    requestID: z.string(),
+    sessionID: z.string(),
+    messageID: z.string(),
+    userMessageID: z.string(),
+    agent: z.string(),
+    providerID: z.string(),
+    modelID: z.string(),
+    variant: z.string().optional(),
+    startTime: z.number(),
+    system: z.string(),
+    instructions: z.string().optional(),
+    tools: z.array(
+      z.object({
+        name: z.string(),
+        description: z.string().optional(),
+        inputSchema: z.unknown(),
+        active: z.boolean(),
+        providerToolID: z.string().optional(),
+      }),
+    ),
+  }),
+  { private: true },
+)
+export type LLMRequestSnapshot = z.infer<typeof LLMRequestEvent.properties>
+
+function snapshotJSON(value: unknown): string {
+  return JSON.stringify(value, (key, value) => {
+    const child = bigintReplacer(key, value)
+    return child && typeof child === "object" && !Array.isArray(child)
+      ? Object.fromEntries(
+          Object.keys(child)
+            .sort()
+            .map((key) => [key, (child as Record<string, unknown>)[key]]),
+        )
+      : child
+  })
+}
 
 // ---------------------------------------------------------------------------
 // Trace data types — v2 schema
@@ -45,14 +91,12 @@ export interface TraceSpan {
   kind: "session" | "generation" | "tool" | "text" | "span" | "user-message"
   startTime: number
   endTime?: number
-  status: "ok" | "error"
+  status: "ok" | "error" | "running" | "aborted"
   statusMessage?: string
   /**
-   * True when this span was force-closed by trace reconstruction (worker
-   * restart / cache eviction) rather than by a real error. The span keeps
-   * `status: "error"` so its boundary stays visible, but consumers (the viewer,
-   * error aggregations) should treat it as "incomplete (reconstructed)" — not a
-   * genuine agent/tool failure.
+   * True when recording or execution was interrupted. Reconstructed generation
+   * spans keep `status: "error"`; unfinished tools use `status: "aborted"`.
+   * Consumers should distinguish these from genuine agent/tool failures.
    */
   interrupted?: boolean
 
@@ -83,6 +127,54 @@ export interface TraceSpan {
   attributes?: Record<string, unknown>
 }
 
+export interface RunTraceLineage {
+  rootSessionId: string
+  parentSessionId?: string
+  sessions?: Array<{
+    sessionId: string
+    parentSessionId?: string
+    traceId: string
+    taskLinks?: Array<{ sessionId: string; messageId: string; callId: string }>
+  }>
+}
+
+const RESUME_ABORT_REASON = "Recording resumed before the tool finished"
+
+function abortOpenTools(spans: TraceSpan[], reason: string, endTime = Date.now()) {
+  for (const span of spans) {
+    if (span.kind !== "tool" || span.endTime !== undefined) continue
+    span.endTime = endTime
+    span.status = "aborted"
+    span.statusMessage = reason
+    span.interrupted = true
+    span.tool = { ...span.tool, durationMs: Math.max(0, endTime - span.startTime) }
+  }
+}
+
+function traceToolInput(input: unknown): unknown {
+  try {
+    return input != null ? JSON.parse(JSON.stringify(input, bigintReplacer)) : undefined
+  } catch {
+    return { _serialization_error: "Input contained circular references or non-serializable data" }
+  }
+}
+
+export interface RunBudgetMetadata {
+  max_turns?: number
+  time_budget_s?: number
+  elapsed_s: number
+  time_budget_deadline: "none" | "soft" | "hard"
+  /** Unix milliseconds, matching generation and span timestamps. */
+  effort_downgraded_at?: number
+  generation_interrupted_at?: number
+}
+
+interface TracePartIdentity {
+  id?: string
+  messageID?: string
+  sessionID?: string
+}
+
 /** Root trace object persisted to disk / exported. */
 export interface TraceFile {
   /** Schema version for forward compatibility. */
@@ -97,7 +189,7 @@ export interface TraceFile {
   endedAt?: string
 
   // --- Context ---
-  metadata: {
+  metadata: Partial<RunBudgetMetadata> & {
     /** Session title (human-readable, set via --title or auto-generated). */
     title?: string
     model?: string
@@ -113,6 +205,15 @@ export interface TraceFile {
     version?: string
     /** Arbitrary tags for filtering. */
     tags?: string[]
+    /** Linked run recordings; each session owns its own generation state. */
+    run?: RunTraceLineage
+    /** Content unavailable to this recorder, rather than silently implied complete. */
+    captureOmissions?: string[]
+  }
+
+  omissions?: {
+    spans?: { original: number; retained: number; omitted: number; limit: number }
+    deduplicationKeys?: { evicted: number; limit: number }
   }
 
   // --- Spans ---
@@ -245,7 +346,7 @@ export class FileExporter implements TraceExporter {
       // flushSync to interleave.
       if (this.crashedSessions.has(trace.sessionId)) return undefined
       // altimate_change end
-      await fs.writeFile(tmpPath, JSON.stringify(trace, null, 2))
+      await fs.writeFile(tmpPath, JSON.stringify(trace, bigintReplacer, 2))
       // altimate_change start — M3 fix: re-check before the rename. If
       // flushSync ran during the writeFile, drop the tmp instead of
       // overwriting flushSync's crashed canonical file.
@@ -366,7 +467,7 @@ export class HttpExporter implements TraceExporter {
       const res = await fetch(this.endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", ...this.headers },
-        body: JSON.stringify(trace),
+        body: JSON.stringify(trace, bigintReplacer),
         signal: AbortSignal.timeout(5_000),
       })
 
@@ -494,7 +595,17 @@ export class Trace {
   private currentGenerationSpanId: string | undefined
   private generationText: string[] = []
   private generationToolCalls: string[] = []
-  private pendingToolResults: Array<{ tool: string; summary: string }> = []
+  private generationsByMessage = new Map<string, { spanId: string; text: string[]; tools: string[] }>()
+  private recordedParts = new Set<string>()
+  private runningTools = new Map<string, TraceSpan>()
+  private requestSnapshotHashes = new Set<string>()
+  private deduplicationKeysEvicted = 0
+  private pendingToolResults: Array<{
+    tool: string
+    summary: string
+    originalCharacters: number
+    retainedCharacters: number
+  }> = []
   private spans: TraceSpan[] = []
   private startTime: number
   private exporters: TraceExporter[]
@@ -575,25 +686,67 @@ export class Trace {
     return new Trace(exporters)
   }
 
+  /** Open a separate session recording, retaining any existing local evidence. */
+  async forkSession(sessionId: string, metadata: TraceFile["metadata"] = {}): Promise<Trace> {
+    const trace = new Trace([...this.exporters])
+    // Rehydrate before startTrace's initial snapshot can overwrite an earlier
+    // descendant recording, including children seeded but inactive on resume.
+    if (!(await trace.rehydrateFromFile(sessionId))) trace.startTrace(sessionId, metadata)
+    return trace
+  }
+
+  getIdentity(): { sessionId: string | undefined; traceId: string } {
+    return { sessionId: this.sessionId, traceId: this.traceId }
+  }
+
+  setRunLineage(lineage: RunTraceLineage) {
+    this.metadata.run = JSON.parse(JSON.stringify(lineage, bigintReplacer))
+    this.snapshot()
+  }
+
+  setRunBudget(budget: RunBudgetMetadata) {
+    Object.assign(this.metadata, budget)
+    this.snapshot()
+  }
+
+  setCaptureOmissions(omissions: string[]) {
+    this.metadata.captureOmissions = [...new Set(omissions)]
+    this.snapshot()
+  }
+
+  private recordPart(kind: string, part: TracePartIdentity | null | undefined, fallbackID?: string): boolean {
+    if (!part || typeof part !== "object") return false
+    if (part.sessionID && part.sessionID !== this.sessionId) return false
+    const id = part.id ?? fallbackID
+    if (!id) return true // Legacy callers do not always supply persisted identities.
+    const key = `${kind}:${part.messageID ?? ""}:${id}`
+    if (this.recordedParts.has(key)) return false
+    this.recordedParts.add(key)
+    if (this.recordedParts.size > 20_000) {
+      this.recordedParts.delete(this.recordedParts.values().next().value!)
+      this.deduplicationKeysEvicted++
+    }
+    return true
+  }
+
+  private generationFor(part: TracePartIdentity | null | undefined) {
+    if (!part || typeof part !== "object") return undefined
+    if (part.messageID) {
+      const generation = this.generationsByMessage.get(part.messageID)
+      if (generation) return generation
+      // Older event sources omit identity on step-start. Only use that unlabelled
+      // current generation; a labelled different message must never receive this part.
+      const current = this.spans.find((span) => span.spanId === this.currentGenerationSpanId)
+      if (current?.attributes?.messageId) return undefined
+    }
+    if (!this.currentGenerationSpanId) return undefined
+    return { spanId: this.currentGenerationSpanId, text: this.generationText, tools: this.generationToolCalls }
+  }
+
   /**
    * Start the root trace for this session.
    */
-  startTrace(
-    sessionId: string,
-    metadata: {
-      instance_id?: string
-      title?: string
-      model?: string
-      providerId?: string
-      agent?: string
-      variant?: string
-      prompt?: string
-      userId?: string
-      environment?: string
-      version?: string
-      tags?: string[]
-    },
-  ) {
+  startTrace(sessionId: string, metadata: TraceFile["metadata"] & { instance_id?: string }) {
     this.sessionId = sessionId
     this.metadata = {
       title: metadata.title,
@@ -606,6 +759,14 @@ export class Trace {
       environment: metadata.environment,
       version: metadata.version,
       tags: metadata.tags,
+      run: metadata.run,
+      captureOmissions: metadata.captureOmissions,
+      max_turns: metadata.max_turns,
+      time_budget_s: metadata.time_budget_s,
+      elapsed_s: metadata.elapsed_s,
+      time_budget_deadline: metadata.time_budget_deadline,
+      effort_downgraded_at: metadata.effort_downgraded_at,
+      generation_interrupted_at: metadata.generation_interrupted_at,
     }
     this.rootSpanId = randomUUIDv7()
     this.spans.push({
@@ -714,6 +875,7 @@ export class Trace {
     // `rootSpanId`, silently degrading the trace shape. Marking them
     // interrupted preserves the partial data and makes the boundary visible.
     const now = Date.now()
+    abortOpenTools(this.spans, RESUME_ABORT_REASON, now)
     for (const s of this.spans) {
       if (s.kind === "generation" && s.endTime === undefined) {
         s.endTime = now
@@ -786,6 +948,16 @@ export class Trace {
         endTime: now,
         status: "ok",
         input: text.length > USER_MESSAGE_INPUT_MAX_CHARS ? text.slice(0, USER_MESSAGE_INPUT_MAX_CHARS) : text,
+        ...(text.length > USER_MESSAGE_INPUT_MAX_CHARS && {
+          attributes: {
+            inputOmission: {
+              reason: "character_limit",
+              originalCharacters: text.length,
+              retainedCharacters: USER_MESSAGE_INPUT_MAX_CHARS,
+              omittedCharacters: text.length - USER_MESSAGE_INPUT_MAX_CHARS,
+            },
+          },
+        }),
       })
       this.snapshot()
     } catch {
@@ -797,13 +969,17 @@ export class Trace {
   /**
    * Open a generation span from a step-start event.
    */
-  logStepStart(part: { id: string }) {
+  logStepStart(part: { id: string } & TracePartIdentity) {
     if (!this.rootSpanId) return
     try {
+      const identity: TracePartIdentity = part ?? {}
+      if (!this.recordPart("step-start", identity)) return
       const input =
         this.pendingToolResults.length > 0
           ? this.pendingToolResults.map((r) => `[${r.tool}] ${r.summary}`).join("\n")
           : undefined
+      const originalCharacters = this.pendingToolResults.reduce((sum, result) => sum + result.originalCharacters, 0)
+      const retainedCharacters = this.pendingToolResults.reduce((sum, result) => sum + result.retainedCharacters, 0)
       this.pendingToolResults = []
       this.generationText = []
       this.generationToolCalls = []
@@ -823,9 +999,29 @@ export class Trace {
           variant: this.metadata.variant,
         },
         input,
+        attributes: {
+          sessionId: this.sessionId,
+          messageId: identity.messageID,
+          ...(input !== undefined && { inputSource: "tool-result-summaries" }),
+          ...(originalCharacters > retainedCharacters && {
+            inputOmission: {
+              reason: "tool_result_summary_limit",
+              originalCharacters,
+              retainedCharacters,
+              omittedCharacters: originalCharacters - retainedCharacters,
+            },
+          }),
+        },
       })
       // Only update state after successful push
       this.currentGenerationSpanId = genSpanId
+      if (identity.messageID) {
+        this.generationsByMessage.set(identity.messageID, {
+          spanId: genSpanId,
+          text: this.generationText,
+          tools: this.generationToolCalls,
+        })
+      }
       this.generationCount++
     } catch {
       // best-effort
@@ -835,7 +1031,7 @@ export class Trace {
   /**
    * Close the current generation span with token/cost data from step-finish.
    */
-  logStepFinish(part: {
+  logStepFinish(part: TracePartIdentity & {
     id: string
     reason: string
     cost: number
@@ -846,8 +1042,9 @@ export class Trace {
       cache: { read: number; write: number }
     }
   }) {
-    if (!this.currentGenerationSpanId) return
     try {
+      const generation = this.generationFor(part)
+      if (!generation || !this.recordPart("step-finish", part)) return
       const n = (v: number) => (Number.isFinite(v) ? v : 0)
       const tokens = part.tokens ?? ({} as Record<string, unknown>)
       const cache = (tokens as any).cache ?? {}
@@ -866,12 +1063,12 @@ export class Trace {
       this.tokensBreakdown.cacheRead += tCacheRead
       this.tokensBreakdown.cacheWrite += tCacheWrite
 
-      const textOutput = this.generationText.join("")
+      const textOutput = generation.text.join("")
       const output =
         textOutput ||
-        (this.generationToolCalls.length > 0 ? `[tool calls: ${this.generationToolCalls.join(", ")}]` : undefined)
+        (generation.tools.length > 0 ? `[tool calls: ${generation.tools.join(", ")}]` : undefined)
 
-      const span = this.spans.find((s) => s.spanId === this.currentGenerationSpanId)
+      const span = this.spans.find((s) => s.spanId === generation.spanId)
       if (span) {
         span.endTime = Date.now()
         span.output = output
@@ -886,7 +1083,7 @@ export class Trace {
           total,
         }
       }
-      this.currentGenerationSpanId = undefined
+      if (this.currentGenerationSpanId === generation.spanId) this.currentGenerationSpanId = undefined
       this.snapshot()
     } catch {
       // best-effort
@@ -894,12 +1091,17 @@ export class Trace {
   }
 
   /**
-   * Log a completed or errored tool call.
+   * Record a tool when it starts and update the same span when it finishes.
    */
-  logToolCall(part: {
+  logToolCall(part: TracePartIdentity & {
     tool: string
     callID: string
     state:
+      | {
+          status: "running"
+          input: Record<string, unknown>
+          time: { start: number }
+        }
       | {
           status: "completed"
           input: Record<string, unknown>
@@ -910,54 +1112,114 @@ export class Trace {
           status: "error"
           input: Record<string, unknown>
           error: string
+          metadata?: { interrupted?: boolean }
           time: { start: number; end: number }
         }
   }) {
     if (!this.rootSpanId) return
     try {
+      const key = `${part.messageID ?? ""}:${part.id ?? part.callID}`
       const state = part.state
+      if (state.status === "running") {
+        if (this.runningTools.has(key)) return
+        if (!this.recordPart("tool-start", part, part?.messageID ? part.callID : undefined)) return
+        const generation = this.generationFor(part)
+        const span: TraceSpan = {
+          spanId: randomUUIDv7(),
+          parentSpanId: generation?.spanId ?? this.rootSpanId,
+          name: part.tool || "unknown",
+          kind: "tool",
+          startTime: state.time.start,
+          status: "running",
+          tool: { callId: part.callID },
+          input: traceToolInput(state.input),
+          attributes: { sessionId: this.sessionId, messageId: part.messageID },
+        }
+        this.runningTools.set(key, span)
+        this.spans.push(span)
+        generation?.tools.push(span.name)
+        this.toolCallCount++
+        this.snapshot()
+        return
+      }
+      if (!this.recordPart("tool", part, part?.messageID ? part.callID : undefined)) return
+      this.recordPart("tool-start", part, part?.messageID ? part.callID : undefined)
+      // A completion that arrives after the trace was rebuilt from disk finds its span closed as
+      // interrupted by rehydration; finish that span instead of recording a second one.
+      const running =
+        this.runningTools.get(key) ??
+        this.spans.find(
+          (s) =>
+            s.kind === "tool" &&
+            s.interrupted === true &&
+            s.statusMessage === RESUME_ABORT_REASON &&
+            s.tool?.callId === part.callID &&
+            s.attributes?.messageId === part.messageID,
+        )
+      this.runningTools.delete(key)
       const isError = state.status === "error"
+      const interrupted = isError && state.metadata?.interrupted === true
 
       const toolName = part.tool || "unknown"
-      this.generationToolCalls.push(toolName)
+      const generation = this.generationFor(part)
+      if (!running) generation?.tools.push(toolName)
 
       const errorStr = isError ? String(state.error ?? "") : ""
       const outputStr = !isError ? String(state.output ?? "") : ""
       const outputSummary = isError ? `error: ${errorStr.slice(0, 200)}` : outputStr.slice(0, 500)
-      this.pendingToolResults.push({ tool: toolName, summary: outputSummary })
+      this.pendingToolResults.push({
+        tool: toolName,
+        summary: outputSummary,
+        originalCharacters: isError ? errorStr.length : outputStr.length,
+        retainedCharacters: isError ? Math.min(errorStr.length, 200) : Math.min(outputStr.length, 500),
+      })
 
       const time = state.time ?? { start: Date.now(), end: Date.now() }
-      const durationMs = (time.end ?? 0) - (time.start ?? 0)
+      const durationMs = (time.end ?? 0) - (running?.startTime ?? time.start ?? 0)
 
-      // Safely serialize input — guard against circular references
-      let safeInput: unknown
-      try {
-        safeInput = state.input != null ? JSON.parse(JSON.stringify(state.input)) : undefined
-      } catch {
-        safeInput = { _serialization_error: "Input contained circular references or non-serializable data" }
-      }
+      const safeInput = traceToolInput(state.input)
 
-      this.spans.push({
-        spanId: randomUUIDv7(),
-        parentSpanId: this.currentGenerationSpanId ?? this.rootSpanId,
+      const span: TraceSpan = {
+        spanId: running?.spanId ?? randomUUIDv7(),
+        parentSpanId: running?.parentSpanId ?? generation?.spanId ?? this.rootSpanId,
         name: toolName,
         kind: "tool",
-        startTime: time.start ?? Date.now(),
+        startTime: running?.startTime ?? time.start ?? Date.now(),
         endTime: time.end ?? Date.now(),
-        status: isError ? "error" : "ok",
+        status: interrupted ? "aborted" : isError ? "error" : "ok",
         statusMessage: isError ? errorStr : undefined,
+        ...(interrupted && { interrupted: true }),
         tool: {
           callId: part.callID,
           durationMs: Number.isFinite(durationMs) ? durationMs : 0,
         },
         input: safeInput,
         output: isError ? { error: errorStr } : outputStr.slice(0, 10000),
-      })
-      this.toolCallCount++
+        attributes: {
+          ...running?.attributes,
+          sessionId: this.sessionId,
+          messageId: part.messageID,
+          ...(!isError && outputStr.length > 10000 && {
+            outputOmission: {
+              reason: "character_limit",
+              originalCharacters: outputStr.length,
+              retainedCharacters: 10000,
+              omittedCharacters: outputStr.length - 10000,
+            },
+          }),
+        },
+      }
+      if (running) {
+        Object.assign(running, span)
+        if (!interrupted) delete (running as { interrupted?: boolean }).interrupted
+      } else {
+        this.spans.push(span)
+        this.toolCallCount++
+      }
 
       // altimate_change start — trace: loop detection
       try {
-        const inputStr = safeInput != null ? JSON.stringify(safeInput) : ""
+        const inputStr = safeInput != null ? JSON.stringify(safeInput, bigintReplacer) : ""
         const inputHash = simpleHash(toolName + inputStr)
         const now = Date.now()
         this.toolCallHistory.push({ tool: toolName, inputHash, time: now })
@@ -999,8 +1261,38 @@ export class Trace {
   /**
    * Attach assistant text to the current generation.
    */
-  logText(part: { text: string }) {
-    if (part.text != null) this.generationText.push(String(part.text))
+  logText(part: { text: string } & TracePartIdentity) {
+    if (part?.text == null || !this.recordPart("text", part)) return
+    const generation = this.generationFor(part)
+    if (!generation) return
+    generation.text.push(String(part.text))
+    const span = this.spans.find((s) => s.spanId === generation.spanId)
+    if (span?.endTime !== undefined) {
+      span.output = generation.text.join("")
+      this.snapshot()
+    }
+  }
+
+  /** Record only reasoning actually exposed by the provider, regardless of terminal display. */
+  logReasoning(part: { text: string } & TracePartIdentity) {
+    try {
+      if (!this.rootSpanId || !part?.text || !this.recordPart("reasoning", part)) return
+      const now = Date.now()
+      this.spans.push({
+        spanId: randomUUIDv7(),
+        parentSpanId: this.generationFor(part)?.spanId ?? this.rootSpanId,
+        name: "reasoning",
+        kind: "span",
+        startTime: now,
+        endTime: now,
+        status: "ok",
+        output: part.text,
+        attributes: { sessionId: this.sessionId, messageId: part.messageID, providerExposed: true },
+      })
+      this.snapshot()
+    } catch {
+      // best-effort
+    }
   }
 
   /**
@@ -1036,6 +1328,55 @@ export class Trace {
     }
   }
 
+  /** One request span per stream invocation, with content stored once per session/hash. */
+  logLLMRequest(request: LLMRequestSnapshot) {
+    if (!this.rootSpanId || request.sessionID !== this.sessionId) return
+    try {
+      if (!this.recordPart("llm-request", { id: request.requestID, messageID: request.messageID })) return
+      const hashes: string[] = []
+      const snapshot = (field: string, content: unknown) => {
+        const hash = createHash("sha256")
+          .update(typeof content === "string" ? content : snapshotJSON(content))
+          .digest("hex")
+        const key = `${field}:${hash}`
+        hashes.push(key)
+        return this.requestSnapshotHashes.has(key) ? { hash } : { hash, content }
+      }
+      // Clone only the allowlisted catalog fields; callers must never pass provider options.
+      const tools = JSON.parse(snapshotJSON(request.tools))
+      this.spans.push({
+        spanId: randomUUIDv7(),
+        parentSpanId: this.rootSpanId,
+        name: "llm-request",
+        kind: "span",
+        startTime: request.startTime,
+        endTime: request.startTime,
+        status: "ok",
+        model: { modelId: request.modelID, providerId: request.providerID, variant: request.variant },
+        attributes: {
+          sessionId: request.sessionID,
+          messageId: request.messageID,
+          userMessageId: request.userMessageID,
+          agent: request.agent,
+          requestId: request.requestID,
+          captureBoundary: "before-streamText",
+        },
+        input: {
+          system: snapshot("system", request.system),
+          tools: snapshot("tools", tools),
+          ...(request.instructions !== undefined && { instructions: snapshot("instructions", request.instructions) }),
+        },
+      })
+      for (const hash of hashes) this.requestSnapshotHashes.add(hash)
+      this.metadata.captureOmissions = this.metadata.captureOmissions?.filter(
+        (item) => !item.startsWith("effective_system_prompt:") && !item.startsWith("resolved_tool_catalog:"),
+      )
+      this.snapshot()
+    } catch {
+      Log.Default.debug("[tracing] failed to record LLM request")
+    }
+  }
+
   /**
    * Build a TraceFile snapshot of the current state (in-progress or complete).
    * Used for incremental writes and live viewing.
@@ -1045,12 +1386,12 @@ export class Trace {
     const sanitize = (n: number) => (Number.isFinite(n) ? n : 0)
 
     // Snapshot the spans array and metadata to isolate from concurrent mutations.
-    // structuredClone is safer than JSON.parse(JSON.stringify) for undefined values.
+    // Normalize BigInts at the serialization boundary without mutating live span data.
     let snapshotSpans: TraceSpan[]
     let snapshotMetadata: TraceFile["metadata"]
     try {
-      snapshotSpans = JSON.parse(JSON.stringify(this.spans))
-      snapshotMetadata = { ...this.metadata, tags: this.metadata.tags ? [...this.metadata.tags] : undefined }
+      snapshotSpans = JSON.parse(JSON.stringify(this.spans, bigintReplacer))
+      snapshotMetadata = JSON.parse(JSON.stringify(this.metadata, bigintReplacer))
     } catch {
       // If spans contain non-serializable data, fall back to reference (best-effort)
       snapshotSpans = this.spans
@@ -1058,6 +1399,11 @@ export class Trace {
     }
 
     snapshotSpans = capSpansForSerialization(snapshotSpans)
+    const elisionMarkers = snapshotSpans.filter(
+      (span) => span.spanId.startsWith("elided-") && typeof span.attributes?.elided === "number",
+    )
+    const omittedSpans = elisionMarkers.reduce((count, span) => count + Number(span.attributes!.elided), 0)
+    const retainedSpans = snapshotSpans.length - elisionMarkers.length
 
     return {
       version: 2,
@@ -1067,13 +1413,32 @@ export class Trace {
       endedAt: new Date(endTime).toISOString(),
       metadata: snapshotMetadata,
       spans: snapshotSpans,
+      ...((omittedSpans || this.deduplicationKeysEvicted) && {
+        omissions: {
+          ...(omittedSpans > 0 && {
+            spans: {
+              original: retainedSpans + omittedSpans,
+              retained: retainedSpans,
+              omitted: omittedSpans,
+              limit: MAX_SERIALIZED_SPANS,
+            },
+          }),
+          ...(this.deduplicationKeysEvicted > 0 && {
+            deduplicationKeys: { evicted: this.deduplicationKeysEvicted, limit: 20_000 },
+          }),
+        },
+      }),
       summary: {
         totalTokens: sanitize(this.totalTokens),
         totalCost: sanitize(this.totalCost),
         totalToolCalls: this.toolCallCount,
         totalGenerations: this.generationCount,
         duration: sanitize(endTime - this.startTime),
-        status: error ? "error" : this.currentGenerationSpanId ? "running" : "completed",
+        status: error
+          ? "error"
+          : this.currentGenerationSpanId || this.spans.some((span) => span.kind === "tool" && span.endTime === undefined)
+            ? "running"
+            : "completed",
         ...(error && { error }),
         tokens: {
           input: sanitize(this.tokensBreakdown.input),
@@ -1122,7 +1487,7 @@ export class Trace {
     // ran *during* the write doesn't get clobbered.
     this.snapshotPromise = fs
       .mkdir(this.snapshotDir, { recursive: true })
-      .then(() => fs.writeFile(tmpPath, JSON.stringify(trace, null, 2)))
+      .then(() => fs.writeFile(tmpPath, JSON.stringify(trace, bigintReplacer, 2)))
       .then(() => {
         if (this.crashed) {
           // flushSync took over — drop the temp and bail
@@ -1232,7 +1597,7 @@ export class Trace {
         if (value === undefined) continue
         // Guard against non-serializable values (circular refs, functions, etc.)
         try {
-          const serialized = JSON.stringify(value)
+          const serialized = JSON.stringify(value, bigintReplacer)
           // JSON.stringify returns undefined for functions, symbols, etc.
           if (serialized === undefined) {
             span.attributes[key] = String(value)
@@ -1281,6 +1646,7 @@ export class Trace {
 
     // Force-close any orphaned generation span
     this.currentGenerationSpanId = undefined
+    abortOpenTools(this.spans, error ?? "Session ended before the tool completed")
 
     // Close root span
     const rootSpan = this.spans.find((s) => s.spanId === this.rootSpanId)
@@ -1403,6 +1769,7 @@ export class Trace {
       this.crashed = true
       for (const exp of this.exporters) exp.markCrashed?.(this.sessionId)
       this.currentGenerationSpanId = undefined
+      abortOpenTools(this.spans, "Session ended before the tool completed")
       const rootSpan = this.spans.find((s) => s.spanId === this.rootSpanId)
       if (rootSpan) {
         rootSpan.endTime = Date.now()
@@ -1415,7 +1782,7 @@ export class Trace {
       const safeId = (this.sessionId || "unknown").replace(/[/\\.:]/g, "_") || "unknown"
       const filePath = path.join(this.snapshotDir, `${safeId}.json`)
       fsSync.mkdirSync(this.snapshotDir, { recursive: true })
-      fsSync.writeFileSync(filePath, JSON.stringify(trace, null, 2))
+      fsSync.writeFileSync(filePath, JSON.stringify(trace, bigintReplacer, 2))
       // FileExporter: prune synchronously (this path bypasses export()'s async pruneOldTraces, so
       // without it the traces dir grows unbounded for a TUI-only user). Non-file exporters (HTTP):
       // fire best-effort so configured `tracing.exporters` still receive interactive-session traces
@@ -1462,6 +1829,7 @@ export class Trace {
       }
       // altimate_change end
       this.currentGenerationSpanId = undefined
+      abortOpenTools(this.spans, error ?? "Process exited before the tool completed")
       const rootSpan = this.spans.find((s) => s.spanId === this.rootSpanId)
       if (rootSpan) {
         rootSpan.endTime = Date.now()
@@ -1474,7 +1842,7 @@ export class Trace {
       const filePath = path.join(this.snapshotDir, `${safeId}.json`)
       // Must be synchronous — async writes won't complete before signal handler exits
       fsSync.mkdirSync(this.snapshotDir, { recursive: true })
-      fsSync.writeFileSync(filePath, JSON.stringify(trace, null, 2))
+      fsSync.writeFileSync(filePath, JSON.stringify(trace, bigintReplacer, 2))
     } catch {
       // best-effort — crash handler must never throw
     }

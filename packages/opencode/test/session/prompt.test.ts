@@ -35,6 +35,7 @@ import { Session as LegacySession } from "../../src/session"
 import { Session } from "@/session/session"
 import { SessionMessageTable } from "@opencode-ai/core/session/sql"
 import { LLM } from "../../src/session/llm"
+import * as WorkspaceIdentity from "../../src/altimate/workspace/identity"
 import { MessageV2 } from "../../src/session/message-v2"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { SessionCompaction } from "../../src/session/compaction"
@@ -64,6 +65,13 @@ import { ProviderID, ModelID } from "@/provider/schema"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { withLegacyInstanceRunner } from "./legacy-instance"
+// altimate_change start — run budget prompt integration without a listening socket
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
+import { withBudgetControl } from "@/altimate/session/run-budget-control"
+import { SessionTermination } from "@/session/termination"
+import * as RunBudgetEffort from "@/altimate/session/run-budget-effort"
+import { Bus } from "@/bus"
+// altimate_change end
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -477,6 +485,196 @@ const boot = Effect.fn("test.boot")(function* (input?: { title?: string }) {
   return { prompt, run, sessions, chat }
 })
 
+// altimate_change start — the saved noReply nudge resumes the actual loop with low provider effort
+for (const downgrade of [true, false]) {
+  noLLMServer.instance(`soft budget resumes a hanging provider with the persisted nudge (downgrade: ${downgrade})`, () =>
+    Effect.gen(function* () {
+      const { chat, prompt } = yield* boot()
+      const context = yield* Effect.context<never>()
+      const previousDowngrade = process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE
+      process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE = downgrade ? "1" : "0"
+      const published = spyOn(Bus, "publish")
+      const requests: Record<string, unknown>[] = []
+      let interrupted = false
+      const partial = reply().reason("Keep the prior reasoning.").text("Partial work.").hang().item()
+      const complete = reply().text("Final budget answer.\nDONE").stop().item()
+      if (partial.type !== "sse" || complete.type !== "sse") throw new Error("expected SSE responses")
+      const language = createOpenAICompatible({
+        name: "test", baseURL: "https://unused.invalid/v1",
+        fetch: (async (_url, init) => {
+          requests.push(JSON.parse(String(init?.body)))
+          if (requests.length !== 1) {
+            return new Response([...complete.head, ...complete.tail]
+              .map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") + "data: [DONE]\n\n",
+            { headers: { "Content-Type": "text/event-stream" } })
+          }
+          return new Response(new ReadableStream<Uint8Array>({
+            start(stream) {
+              for (const chunk of [...partial.head, ...partial.tail]) {
+                stream.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`))
+              }
+              init!.signal!.addEventListener("abort", () => {
+                interrupted = true
+                stream.error(init!.signal!.reason)
+              }, { once: true })
+            },
+          }), { headers: { "Content-Type": "text/event-stream" } })
+        }) as typeof fetch,
+      }).chatModel("test-model")
+      const getLanguage = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+      const registryTools = spyOn(ToolRegistry, "tools").mockResolvedValue([])
+      const mcpTools = spyOn(MCP, "tools").mockResolvedValue({})
+      const post = (control: string, body: Pick<SessionPrompt.PromptInput, "parts" | "noReply">) =>
+        withBudgetControl({ sessionID: chat.id, control, noReply: body.noReply }, () =>
+          Effect.runPromise(prompt.prompt({ sessionID: chat.id, agent: "build", model: promptRef, variant: "high", ...body }).pipe(Effect.provide(context))),
+        )
+      try {
+        const work = yield* Effect.sync(() => post("work", { parts: [{ type: "text", text: "Finish before the budget." }] }))
+        yield* pollWithTimeout(
+          Effect.sync(() => published.mock.calls.some(([event, properties]) => {
+            const delta = properties as { sessionID?: string; delta?: string }
+            return event === MessageV2.Event.PartDelta && delta.sessionID === chat.id && delta.delta === "Partial work."
+          }) ? true : undefined),
+          "provider did not emit the partial answer",
+          "20 seconds",
+        )
+        yield* Effect.promise(() => post("soft", {
+          noReply: true,
+          parts: [{ type: "text", text: SessionTermination.REPLY_BEFORE_TIME_BUDGET, synthetic: true }],
+        }))
+        const result = yield* Effect.promise(() => work)
+        expect(interrupted).toBe(true)
+        expect(result.info).not.toHaveProperty("error")
+        expect(result.parts).toContainEqual(expect.objectContaining({ type: "text", text: "Final budget answer.\nDONE" }))
+        expect(requests).toHaveLength(2)
+        expect(requests[0].reasoning_effort).toBe("high")
+        expect(requests[1].reasoning_effort).toBe(downgrade ? "low" : "high")
+        expect(JSON.stringify(requests[1].messages)).toContain("Partial work.")
+        expect(JSON.stringify(requests[1].messages)).toContain(SessionTermination.REPLY_BEFORE_TIME_BUDGET)
+        expect(RunBudgetEffort.effortOverride(chat.id)).toBe(false)
+      } finally {
+        getLanguage.mockRestore()
+        registryTools.mockRestore()
+        mcpTools.mockRestore()
+        published.mockRestore()
+        if (previousDowngrade === undefined) delete process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE
+        else process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE = previousDowngrade
+      }
+    }),
+    {
+      config: {
+        ...cfg, snapshot: false, learn: { enabled: false },
+        provider: { test: { ...cfg.provider.test, models: { "test-model": {
+          ...cfg.provider.test.models["test-model"], reasoning: true, variants: { high: { reasoningEffort: "high" } },
+        } } } },
+      },
+    },
+    30_000,
+  )
+}
+// altimate_change end
+
+// altimate_change start - ambient environment stays outside the cached prompt prefix
+noLLMServer.instance(
+  "prompt loop separates ambient environment from cached instructions and user content",
+  () => Effect.gen(function* () {
+    const { directory } = yield* TestInstance
+    const captured: Pick<LLM.StreamInput, "system" | "environment" | "messages">[] = []
+    const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+      captured.push({
+        system: [...input.system],
+        environment: input.environment && [...input.environment],
+        messages: structuredClone(input.messages),
+      })
+      const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+      async function* fullStream() {
+        yield { type: "start" }
+        yield { type: "start-step" }
+        yield { type: "text-start", id: "reply" }
+        yield { type: "text-delta", id: "reply", text: "Done." }
+        yield { type: "text-end", id: "reply" }
+        yield { type: "finish-step", finishReason: "stop", usage }
+        yield { type: "finish", finishReason: "stop", totalUsage: usage }
+      }
+      return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+    })
+    try {
+      const { prompt, chat } = yield* boot()
+      const result = yield* prompt.prompt({
+        sessionID: chat.id,
+        agent: "build",
+        model: promptRef,
+        parts: [{ type: "text", text: "Review invoice totals." }],
+      })
+      expect(result.info).not.toHaveProperty("error")
+      expect(captured).toHaveLength(1)
+      const request = captured[0]
+      const environment = request.environment?.join("\n") ?? ""
+      expect(environment).toContain(`<env>\n  Working directory: ${directory}`)
+      expect(environment).toContain(`  Today's date: ${new Date().toDateString()}`)
+      expect(request.system.join("\n")).not.toContain("<env>")
+      expect(request.system.join("\n")).not.toContain(directory)
+      expect(JSON.stringify(request.messages)).not.toContain("<env>")
+      expect(JSON.stringify(request.messages)).not.toContain("Today's date:")
+    } finally {
+      stream.mockRestore()
+    }
+  }),
+  { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
+  30_000,
+)
+// altimate_change end
+
+// altimate_change start - the workspace memory line follows the tools the turn keeps
+for (const turn of [
+  { agent: "analyst", tools: undefined, expected: { read: true, write: false } },
+  { agent: "builder", tools: undefined, expected: { read: true, write: true } },
+  { agent: "builder", tools: { altimate_memory_read: false }, expected: { read: false, write: true } },
+  { agent: "analyst", tools: { altimate_memory_read: false }, expected: { read: false, write: false } },
+] as const) {
+  noLLMServer.instance(
+    `prompt loop passes the identity section only the memory tools ${turn.agent} keeps${turn.tools ? " with read switched off on the request" : ""}`,
+    () => Effect.gen(function* () {
+      const section = spyOn(WorkspaceIdentity, "systemSection").mockResolvedValue("")
+      const sent: Pick<LLM.StreamInput, "tools" | "agent" | "user">[] = []
+      const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+        sent.push({ tools: input.tools, agent: input.agent, user: input.user })
+        const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+        async function* fullStream() {
+          yield { type: "start" }
+          yield { type: "start-step" }
+          yield { type: "text-start", id: "reply" }
+          yield { type: "text-delta", id: "reply", text: "Done." }
+          yield { type: "text-end", id: "reply" }
+          yield { type: "finish-step", finishReason: "stop", usage }
+          yield { type: "finish", finishReason: "stop", totalUsage: usage }
+        }
+        return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+      })
+      try {
+        const { prompt, chat } = yield* boot()
+        yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: turn.agent,
+          model: promptRef,
+          tools: turn.tools,
+          parts: [{ type: "text", text: "What are our naming conventions?" }],
+        })
+        expect(section.mock.calls[0]?.[0]).toEqual({ memoryTools: turn.expected })
+        // Same answer as the filter applied to the tools handed to the model call.
+        const kept = (name: string) => name in sent[0].tools && !LLM.removedTools([name], sent[0]).has(name)
+        expect({ read: kept("altimate_memory_read"), write: kept("altimate_memory_write") }).toEqual(turn.expected)
+      } finally {
+        section.mockRestore()
+        stream.mockRestore()
+      }
+    }),
+    { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
+    30_000,
+  )
+}
+// altimate_change end
+
 // altimate_change start - approved lessons are harness-delivered without changing cached prefixes
 for (const change of ["lower budget", "replacement", "disabled config", "disabled env"] as const) {
   noLLMServer.instance(
@@ -884,6 +1082,274 @@ it.instance("learn file hooks append glob and anchor matches once and respect th
 
 // Loop semantics
 
+// altimate_change start - an answer committed before the step limit must still be echoed
+for (const mode of [
+  "committed",
+  "failed",
+  "structured",
+  "compacted",
+  "compacted-usage",
+  "compacted-unlimited",
+  "compacted-new-request",
+  "compacted-synthetic-request",
+  "compacted-overflow",
+] as const) {
+  const compacts = mode.startsWith("compacted")
+  const newRequest = mode === "compacted-new-request" || mode === "compacted-synthetic-request"
+  const scenario = {
+    committed: "the exact final echo",
+    failed: "the failed-call limit",
+    structured: "the user output schema",
+    compacted: "the exact rows after automatic compaction",
+    "compacted-usage": "the exact rows after usage-triggered compaction",
+    "compacted-unlimited": "the exact rows after compaction without a step limit",
+    "compacted-new-request": "the newer user request after compaction",
+    "compacted-synthetic-request": "the newer synthetic user request after compaction",
+    "compacted-overflow": "the exact rows after compaction and directly recovers an echo overflow",
+  }[mode]
+  noLLMServer.instance(
+    `answer_commit preserves ${scenario}`,
+    () =>
+      Effect.gen(function* () {
+        const { prompt, chat, sessions } = yield* boot()
+        const requests: Record<string, unknown>[] = []
+        const requestCount = compacts ? 3 : 2
+        const rows = Array.from({ length: 60 }, (_, index) => [`${index}: ${"x".repeat(500)}`])
+        const answer = compacts ? ["| value |", "|---|", ...rows.map(([value]) => `| ${value} |`)].join("\n") : "42"
+        const args =
+          mode === "failed"
+            ? {}
+            : compacts
+              ? {
+                  rows: { columns: ["value"], values: rows },
+                  answer_only: true,
+                  basis: "Selected all records at record grain using records.value.",
+                }
+              : {
+                  fields: [{ name: "", value: 42 }],
+                  answer_only: true,
+                  basis: "Counted all records at record grain using records.id.",
+                }
+        const language = createOpenAICompatible({
+          name: "test",
+          baseURL: "https://unused.invalid/v1",
+          fetch: Object.assign(
+            async (_url: string | URL | Request, init?: RequestInit) => {
+              if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+              const request = JSON.parse(init.body)
+              requests.push(request)
+              if (requests.length > requestCount) throw new Error("answer_commit exceeded its generation budget")
+              if (mode === "compacted-overflow" && requests.length === 3) {
+                return new Response(JSON.stringify({ error: { message: "request entity too large" } }), {
+                  status: 413,
+                  headers: { "Content-Type": "application/json" },
+                })
+              }
+              if (newRequest && requests.length === 2) {
+                const userID = MessageID.ascending()
+                await LegacySession.updateMessage({
+                  id: userID,
+                  sessionID: chat.id,
+                  role: "user",
+                  agent: "analyst",
+                  model: promptRef,
+                  time: { created: Date.now() },
+                })
+                await LegacySession.updatePart({
+                  id: PartID.ascending(),
+                  messageID: userID,
+                  sessionID: chat.id,
+                  type: "text",
+                  synthetic: mode === "compacted-synthetic-request",
+                  text: "A new question arrived during compaction; do not repeat the previous answer.",
+                })
+              }
+              const limited = JSON.stringify(request.messages).includes("CRITICAL - MAXIMUM STEPS REACHED")
+              const response =
+                requests.length === 1
+                  ? reply()
+                      .tool(
+                        mode === "structured" ? "tool_lookup" : "answer_commit",
+                        mode === "structured" ? { tool_name: "__missing_tool" } : args,
+                      )
+                      .usage({ input: mode === "compacted-usage" ? 80_000 : compacts ? 70_000 : 1, output: 1 })
+                      .item()
+                  : compacts && requests.length === 2
+                    ? reply().text("The rows were committed. Continue with the final reply.").stop().item()
+                    : mode === "structured"
+                      ? reply().tool("StructuredOutput", { count: 42 }).item()
+                      : reply()
+                          .text(limited ? "Maximum steps reached." : compacts ? "The rows were compacted away." : answer)
+                          .stop()
+                          .item()
+              if (response.type !== "sse") throw new Error("expected SSE response")
+              return new Response(
+                [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                  "data: [DONE]\n\n",
+                { headers: { "Content-Type": "text/event-stream" } },
+              )
+            },
+            { preconnect: () => undefined },
+          ),
+        }).chatModel("test-model")
+        const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+        try {
+          const result = yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "analyst",
+            model: promptRef,
+            parts: [{ type: "text", text: "How many rows? Reply with only the count." }],
+            ...(mode === "structured"
+              ? {
+                  format: {
+                    type: "json_schema" as const,
+                    retryCount: 0,
+                    schema: {
+                      type: "object",
+                      properties: { count: { type: "number" } },
+                      required: ["count"],
+                      additionalProperties: false,
+                    },
+                  },
+                }
+              : {}),
+          })
+          expect(result.info).not.toHaveProperty("error")
+          expect(requests).toHaveLength(requestCount)
+          const messages = yield* sessions.messages({ sessionID: chat.id })
+          if (mode === "compacted-overflow") {
+            expect(result.info).toHaveProperty("finish", "stop")
+            expect(result.info).toHaveProperty("metadata.answer_commit_echo_error.name", "ContextOverflowError")
+            const persisted = messages.find((message) => message.info.id === result.info.id)
+            expect(persisted?.info).not.toHaveProperty("error")
+            expect(persisted?.info).toHaveProperty("metadata.answer_commit_echo_error.name", "ContextOverflowError")
+            expect(messages.filter((message) => message.info.role === "assistant" && message.info.summary)).toHaveLength(1)
+          }
+          const commit = messages
+            .flatMap((message) => message.parts)
+            .find((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "answer_commit")
+          expect(commit?.state.status).toBe(mode === "structured" ? undefined : mode === "failed" ? "error" : "completed")
+          if (mode === "committed" || (compacts && !newRequest)) {
+            const finalRequest = requests.at(-1)!
+            expect(JSON.stringify(finalRequest.messages)).not.toContain("CRITICAL - MAXIMUM STEPS REACHED")
+            expect(finalRequest.tools ?? []).toHaveLength(0)
+            expect(requestText(requestMessages(finalRequest).at(-1)!.content)).toBe(
+              "Tools are disabled. Reply with exactly the text returned by answer_commit and nothing else.",
+            )
+            if (compacts) {
+              expect(messages.some((message) => message.info.role === "assistant" && message.info.summary)).toBe(true)
+              expect(
+                requestMessages(finalRequest).some((message) => requestText(message.content).includes(answer)),
+              ).toBe(false)
+              expect(commit?.state.status === "completed" && commit.state.metadata.truncated).toBe(false)
+            }
+            expect(
+              result.parts
+                .filter((part) => part.type === "text")
+                .map((part) => part.text)
+                .join(""),
+            ).toBe(answer)
+          } else if (mode === "failed" || newRequest) {
+            expect(JSON.stringify(requests.at(-1)!.messages)).toContain("CRITICAL - MAXIMUM STEPS REACHED")
+            expect(result.parts).toContainEqual(
+              expect.objectContaining({ type: "text", text: "Maximum steps reached." }),
+            )
+          } else {
+            for (const request of requests) {
+              expect(JSON.stringify(request.tools)).not.toContain('"name":"answer_commit"')
+            }
+            expect(requests[1].tool_choice).toBe("required")
+            expect(result.info).toHaveProperty("structured", { count: 42 })
+          }
+        } finally {
+          languageSpy.mockRestore()
+        }
+      }),
+    {
+      config: {
+        ...cfg,
+        snapshot: false,
+        learn: { enabled: false },
+        agent: {
+          analyst: { steps: mode === "compacted-unlimited" ? undefined : 2, permission: { StructuredOutput: "allow" } },
+        },
+      },
+    },
+    30_000,
+  )
+}
+// altimate_change end
+
+// altimate_change start - the conjunction check reads the request from the session's own user message
+noLLMServer.instance(
+  "answer_commit rejects an under-asked commit once using the session's user message",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat, sessions } = yield* boot()
+      const requests: Record<string, unknown>[] = []
+      const args = {
+        fields: [{ name: "repository", value: "repo-a" }],
+        basis: "Selected repositories at repository grain from repositories.name.",
+      }
+      const committed = `${args.basis}\n\n**Answer:** repository: repo-a`
+      const language = createOpenAICompatible({
+        name: "test",
+        baseURL: "https://unused.invalid/v1",
+        fetch: Object.assign(
+          async (_url: string | URL | Request, init?: RequestInit) => {
+            if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+            const request = JSON.parse(init.body)
+            requests.push(request)
+            if (requests.length > 3) throw new Error("answer_commit exceeded its generation budget")
+            // The first commit is rejected and the unchanged recommit accepted, then the answer is echoed.
+            const response =
+              requests.length < 3
+                ? reply().tool("answer_commit", args).usage({ input: 1, output: 1 }).item()
+                : reply().text(committed).stop().item()
+            if (response.type !== "sse") throw new Error("expected SSE response")
+            return new Response(
+              [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              { headers: { "Content-Type": "text/event-stream" } },
+            )
+          },
+          { preconnect: () => undefined },
+        ),
+      }).chatModel("test-model")
+      const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+      try {
+        const result = yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "analyst",
+          model: promptRef,
+          parts: [{ type: "text", text: "Which repository has the most forks, and its most copied file?" }],
+        })
+        expect(result.info).not.toHaveProperty("error")
+        expect(requests).toHaveLength(3)
+        const commits = (yield* sessions.messages({ sessionID: chat.id }))
+          .flatMap((message) => message.parts)
+          .filter((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "answer_commit")
+        expect(commits.map((part) => part.state.status)).toEqual(["error", "completed"])
+        const rejection = commits[0]!.state.status === "error" ? commits[0]!.state.error : ""
+        expect(rejection).toContain("answer_commit conjunction check:")
+        expect(rejection).toContain('"and its most copied file"')
+        expect(JSON.stringify(requests[1]!.messages)).toContain("answer_commit conjunction check:")
+        expect(commits[1]!.state.status === "completed" && commits[1]!.state.metadata.committed_text).toBe(committed)
+        expect(
+          result.parts
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join(""),
+        ).toBe(committed)
+      } finally {
+        languageSpy.mockRestore()
+      }
+    }),
+  { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
+  30_000,
+)
+// altimate_change end
+
 noLLMServer.instance(
   "loop exits immediately when last assistant has stop finish",
   () =>
@@ -1002,6 +1468,72 @@ it.instance("loop surfaces content-filter finishes as session errors", () =>
     )
   }),
 )
+// altimate_change start - provider length codes must retain the automatic compaction path
+noLLMServer.instance(
+  "HTTP 413 content_length_exceeded stays a context overflow and runs compaction without a commit",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat, sessions } = yield* boot()
+      const requests: Record<string, unknown>[] = []
+      const summaryText = "The user requested a count. Continue after compacting the conversation."
+      const language = createOpenAICompatible({
+        name: "test",
+        baseURL: "https://unused.invalid/v1",
+        fetch: Object.assign(
+          async (_url: string | URL | Request, init?: RequestInit) => {
+            if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+            requests.push(JSON.parse(init.body))
+            if (requests.length > 3) throw new Error("unexpected request after overflow recovery")
+            if (requests.length === 1) {
+              return new Response(
+                JSON.stringify({ error: { code: "content_length_exceeded", message: "request entity too large" } }),
+                { status: 413, headers: { "Content-Type": "application/json" } },
+              )
+            }
+            const response = reply().text(requests.length === 2 ? summaryText : "42").stop().item()
+            if (response.type !== "sse") throw new Error("expected SSE response")
+            return new Response(
+              [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              { headers: { "Content-Type": "text/event-stream" } },
+            )
+          },
+          { preconnect: () => undefined },
+        ),
+      }).chatModel("test-model")
+      const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+      const classify = spyOn(MessageV2, "fromError")
+      try {
+        const result = yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "build",
+          model: promptRef,
+          parts: [{ type: "text", text: "How many rows?" }],
+        })
+        expect(classify.mock.results.map((result) => result.value)).toContainEqual(
+          expect.objectContaining({ name: "ContextOverflowError" }),
+        )
+        expect(result.info).not.toHaveProperty("error")
+        expect(result.info).toHaveProperty("finish", "stop")
+        expect(result.parts.filter((part) => part.type === "text").map((part) => part.text).join("")).toBe("42")
+        expect(requests).toHaveLength(3)
+        expect(JSON.stringify(requests[2].messages)).toContain(summaryText)
+        const messages = yield* sessions.messages({ sessionID: chat.id })
+        expect(messages.filter((message) => message.info.role === "assistant" && message.info.summary)).toHaveLength(1)
+        expect(messages.flatMap((message) => message.parts)).toContainEqual(
+          expect.objectContaining({ type: "compaction", overflow: true }),
+        )
+        expect(messages.flatMap((message) => message.parts).some((part) => part.type === "tool" && part.tool === "answer_commit")).toBe(false)
+      } finally {
+        classify.mockRestore()
+        languageSpy.mockRestore()
+      }
+    }),
+  { config: { ...cfg, snapshot: false, learn: { enabled: false }, compaction: { auto: true } } },
+  30_000,
+)
+// altimate_change end
+
 it.instance("loop stops provider overflow instead of auto-compacting when disabled", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig((url) => ({
@@ -1472,6 +2004,71 @@ it.instance(
         )
       }),
     ),
+  30_000,
+)
+
+// A linked workspace that had no skills at the last sync leaves no snapshot, only the empty record. The
+// first skill added to it must reach the next `run`, which is a fresh process, so that turn waits for the
+// sync like a project with a snapshot does, before the turn's message is written.
+let emptyRecordFile: string | undefined
+it.instance(
+  "a turn waits for the workspace sync when the linked workspace had no skills at the last sync",
+  () =>
+    withWorkspacesOn(
+      Effect.gen(function* () {
+        const { llm } = yield* useServerConfig(providerCfg)
+        const { prompt, chat } = yield* boot()
+        const skillSync = yield* Effect.promise(() => import("../../src/altimate/workspace/skill-sync"))
+        let landedAt: number | undefined
+        let messageAt: number | undefined
+        // `prompt` touches the session right after it creates the user message, so this marks when the
+        // turn's message was written.
+        const realTouch = LegacySession.touch
+        const touch = spyOn(LegacySession, "touch").mockImplementation(((sessionID: SessionID) => {
+          messageAt ??= performance.now()
+          return realTouch(sessionID)
+        }) as typeof LegacySession.touch)
+        const recent = spyOn(skillSync, "recentlySynced").mockResolvedValue(false)
+        const sync = spyOn(skillSync, "syncSkills").mockImplementation(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(() => {
+                landedAt = performance.now()
+                resolve({ changed: false, skipped: [] } as unknown as Awaited<ReturnType<typeof skillSync.syncSkills>>)
+              }, 500),
+            ),
+        )
+        yield* Effect.gen(function* () {
+          yield* llm.text("done")
+          yield* prompt.prompt({
+            sessionID: chat.id, agent: "build", model: promptRef,
+            parts: [{ type: "text", text: "Hello." }],
+          })
+          expect(sync).toHaveBeenCalled()
+          expect(landedAt).toBeDefined()
+          expect(messageAt).toBeDefined()
+          expect(landedAt!).toBeLessThan(messageAt!)
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              recent.mockRestore()
+              sync.mockRestore()
+              touch.mockRestore()
+              if (emptyRecordFile) require("fs").rmSync(emptyRecordFile, { force: true })
+            }),
+          ),
+        )
+      }),
+    ),
+  {
+    init: (directory: string) =>
+      Effect.promise(async () => {
+        const { emptyRecordPath } = await import("../../src/altimate/workspace/empty-record-path")
+        emptyRecordFile = emptyRecordPath(path.resolve(directory))
+        require("fs").mkdirSync(path.dirname(emptyRecordFile), { recursive: true })
+        require("fs").writeFileSync(emptyRecordFile, "key\nwrite-id")
+      }),
+  },
   30_000,
 )
 // altimate_change end

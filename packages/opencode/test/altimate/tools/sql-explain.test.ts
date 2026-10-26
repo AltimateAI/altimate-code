@@ -7,7 +7,7 @@
  *   3. Dialect-aware EXPLAIN prefix selection (unit tests on the helper).
  *   4. Translating verbatim DB errors into actionable messages.
  */
-import { describe, test, expect, spyOn, afterEach, beforeEach } from "bun:test"
+import { describe, test, expect, mock, spyOn, afterEach, beforeEach } from "bun:test"
 import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
 import {
@@ -18,8 +18,11 @@ import {
   buildExplainPlan,
   buildExplainPrefix,
   translateExplainError,
+  registerAll,
 } from "../../../src/altimate/native/connections/register"
+import * as Registry from "../../../src/altimate/native/connections/registry"
 import { SessionID, MessageID } from "../../../src/session/schema"
+import type { Connector } from "@altimateai/drivers/types"
 
 beforeEach(() => {
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
@@ -39,6 +42,60 @@ const ctx = {
   metadata: () => {},
   ask: async () => {},
 }
+
+describe("sql.explain read-only execution", () => {
+  beforeEach(() => {
+    Registry.reset()
+    registerAll()
+  })
+  afterEach(() => Registry.reset())
+
+  test("PostgreSQL EXPLAIN ANALYZE runs with readOnly protection", async () => {
+    for (const type of ["postgres", "postgresql"]) {
+      Registry.setConfigs({ source: { type } })
+      const execute = mock<Connector["execute"]>(async () => ({ columns: ["plan"], rows: [["plan"]], row_count: 1, truncated: false }))
+      const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
+      try {
+        const result = await Dispatcher.call("sql.explain", { sql: "SELECT writing_view()", warehouse: "source", analyze: true })
+        expect(result.success).toBe(true)
+        expect(execute.mock.calls[0]?.[0]).toBe("EXPLAIN (ANALYZE, BUFFERS) SELECT writing_view()")
+        expect(execute.mock.calls[0]?.[3]).toMatchObject({ readOnly: true })
+      } finally {
+        get.mockRestore()
+      }
+    }
+  })
+
+  test("aborted session cancels EXPLAIN before it reaches the connector", async () => {
+    Registry.setConfigs({ source: { type: "postgres" } })
+    const execute = mock<Connector["execute"]>(async () => ({ columns: ["plan"], rows: [["plan"]], row_count: 1, truncated: false }))
+    const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
+    try {
+      const result = await Dispatcher.call(
+        "sql.explain",
+        { sql: "SELECT 1", warehouse: "source", analyze: true },
+        { signal: AbortSignal.abort(new Error("stopped")) },
+      )
+      expect(result.success).toBe(false)
+      expect(execute).not.toHaveBeenCalled()
+    } finally {
+      get.mockRestore()
+    }
+  })
+
+  test("non-PostgreSQL EXPLAIN connector options stay unchanged", async () => {
+    Registry.setConfigs({ source: { type: "snowflake" } })
+    const execute = mock<Connector["execute"]>(async () => ({ columns: ["plan"], rows: [["plan"]], row_count: 1, truncated: false }))
+    const get = spyOn(Registry, "get").mockResolvedValue({ execute } as never)
+    try {
+      const result = await Dispatcher.call("sql.explain", { sql: "SELECT 1", warehouse: "source", analyze: true })
+      expect(result.success).toBe(true)
+      expect((execute.mock.calls[0]?.[3] as { readOnly?: boolean }).readOnly).toBeUndefined()
+    } finally {
+      get.mockRestore()
+    }
+  })
+})
 
 // ---------------------------------------------------------------------------
 // Input validation helpers (pure functions)
@@ -434,6 +491,27 @@ describe("SqlExplainTool.execute", () => {
     expect(String(result.output)).toContain("warehouse")
     expect(spy).not.toHaveBeenCalled()
     spy.mockRestore()
+  })
+
+  for (const sql of ["INSERT INTO t VALUES (1)", "DELETE FROM t", "SELECT 1; DELETE FROM t", "CREATE TABLE t2 AS SELECT 1"]) {
+    test(`refuses EXPLAIN ANALYZE of a non-read statement before calling dispatcher: ${sql}`, async () => {
+      const spy = spyOn(Dispatcher, "call")
+      const tool = await initTool(SqlExplainTool)
+      const result = await tool.execute({ sql, analyze: true }, ctx as any)
+
+      expect(result.metadata.success).toBe(false)
+      expect(result.metadata.error_class).toBe("input_validation")
+      expect(String(result.output)).toContain("only a single read-only query can be analyzed")
+      expect(spy).not.toHaveBeenCalled()
+      spy.mockRestore()
+    })
+  }
+
+  test("still explains a write statement without analyze, and analyzes a read", async () => {
+    mockDispatcher({ success: true, plan_text: "plan", plan_rows: [], analyzed: false, warehouse_type: "duckdb" })
+    const tool = await initTool(SqlExplainTool)
+    expect((await tool.execute({ sql: "INSERT INTO t VALUES (1)", analyze: false }, ctx as any)).metadata.success).toBe(true)
+    expect((await tool.execute({ sql: "SELECT id FROM t", analyze: true }, ctx as any)).metadata.success).toBe(true)
   })
 
   test("returns success when dispatcher reports success", async () => {

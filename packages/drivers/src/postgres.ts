@@ -4,6 +4,51 @@
 
 import type { ConnectionConfig, Connector, ConnectorResult, ExecuteOptions, SchemaColumn } from "./types"
 import { loadOptionalDriver } from "./resolve"
+import { QueryTimeoutError } from "./types"
+import { MAX_TIMER_MS, resolveQueryTimeout, tighter } from "./query-timeout"
+// altimate_change start — enforce extraction byte limits while rows arrive
+import { createResultByteBudget } from "./result-byte-limit"
+// altimate_change end
+
+/** SQLSTATE for a statement cancelled by the server (statement_timeout or a manual cancel). */
+const PG_QUERY_CANCELED = "57014"
+
+const PG_UNIT_MS: Record<string, number> = { us: 0.001, ms: 1, s: 1000, min: 60_000, h: 3_600_000, d: 86_400_000 }
+
+/** Parse a `SHOW statement_timeout` value ("30s", "5min", "0", "250ms") to ms; `0` means unlimited. */
+export function parsePgDuration(value: unknown): { ms: number | undefined } | undefined {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(us|ms|s|min|h|d)?\s*$/i.exec(String(value ?? ""))
+  if (!m) return undefined
+  const ms = Number(m[1]) * PG_UNIT_MS[(m[2] ?? "ms").toLowerCase()]!
+  return { ms: ms > 0 ? Math.ceil(ms) : undefined }
+}
+
+async function acquireClient(pool: any, signal?: AbortSignal): Promise<any> {
+  if (!signal) return pool.connect()
+  signal.throwIfAborted()
+  const connecting = pool.connect()
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(signal.reason)
+    signal.addEventListener("abort", abort, { once: true })
+    connecting.then(
+      (client: any) => {
+        signal.removeEventListener("abort", abort)
+        // pg cannot remove a queued pool.connect(): return a late client without
+        // issuing any SQL, even after the caller has already received its timeout.
+        if (signal.aborted) {
+          client.release()
+          reject(signal.reason)
+          return
+        }
+        resolve(client)
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", abort)
+        reject(error)
+      },
+    )
+  })
+}
 
 export async function connect(config: ConnectionConfig): Promise<Connector> {
   let pg: any
@@ -11,8 +56,15 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
 
   const Pool = pg.default?.Pool ?? pg.Pool
   let pool: any
+  // The role/database/session default a pooled client starts each call with
+  // (we RESET back to it), cached until user SQL mentions statement_timeout.
+  // `undefined` = not read yet.
+  const existingTimeout = new WeakMap<object, { ms: number | undefined } | null>()
 
   const connector: Connector = {
+    // altimate_change start
+    supportsResultByteLimit: true,
+    // altimate_change end
     async connect() {
       const poolConfig: Record<string, unknown> = {}
 
@@ -43,13 +95,94 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       pool = new Pool(poolConfig)
     },
 
-    async execute(sql: string, limit?: number, _binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
-      const client = await pool.connect()
+    async execute(sql: string, limit?: number, binds?: any[], options?: ExecuteOptions): Promise<ConnectorResult> {
+      const client = await acquireClient(pool, options?.signal)
+      // Tighter of the explicit statement_timeout and the common execution
+      // deadline: a configured limit stricter than the default is preserved.
+      const configured = Number(config.statement_timeout)
+      const configuredMs = Number.isFinite(configured) && configured > 0 ? Math.round(configured) : undefined
+      const queryTimeout = resolveQueryTimeout(config, options)
+      const ourMs = tighter(configuredMs, queryTimeout.ms)
+      let effectiveMs = ourMs
+      let timeoutApplied = false
+      let discardClient = false
+      // altimate_change start — keep source extraction inside one client's read-only transaction
+      let readOnlyTransaction = false
+      let releasedClient = false
+      // altimate_change end
+      const runQuery = async <T>(run: () => Promise<T>): Promise<T> => {
+        const signal = options?.signal
+        if (!signal) return run()
+        signal.throwIfAborted()
+        let abort: (() => void) | undefined
+        try {
+          return await new Promise<T>((resolve, reject) => {
+            abort = () => {
+              discardClient = true
+              if (!releasedClient) {
+                releasedClient = true
+                client.release(true)
+              }
+              reject(signal.reason)
+            }
+            signal.addEventListener("abort", abort, { once: true })
+            Promise.resolve(run()).then(resolve, reject)
+          })
+        } finally {
+          if (abort) signal.removeEventListener("abort", abort)
+        }
+      }
       try {
-        if (config.statement_timeout) {
-          const timeoutMs = Number(config.statement_timeout)
-          if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
-            await client.query(`SET statement_timeout TO ${Math.round(timeoutMs)}`)
+        options?.signal?.throwIfAborted()
+        if (ourMs !== undefined) {
+          // Session setup runs before the user's SQL has a deadline of its own. Race each
+          // setup query against the effective deadline and the caller's signal; pg's promise
+          // API has no cancellation handle, so an abandoned client is discarded, never reused.
+          const signal = options?.signal
+          const bounded = async <T>(run: () => Promise<T>): Promise<T> => {
+            let timer: ReturnType<typeof setTimeout> | undefined
+            let abort: (() => void) | undefined
+            try {
+              return await new Promise<T>((resolve, reject) => {
+                const fail = (error: unknown) => {
+                  discardClient = true
+                  reject(error)
+                }
+                abort = () => fail(signal!.reason)
+                signal?.addEventListener("abort", abort, { once: true })
+                // A caller's signal may fire only after its own grace period, or never.
+                timer = setTimeout(
+                  () => fail(new QueryTimeoutError({ engine: "PostgreSQL", timeoutMs: ourMs })),
+                  Math.min(ourMs, MAX_TIMER_MS),
+                )
+                if (signal?.aborted) {
+                  abort()
+                  return
+                }
+                // Handle late settlement too, just as acquireClient does.
+                Promise.resolve(run()).then(resolve, reject)
+              })
+            } finally {
+              if (timer !== undefined) clearTimeout(timer)
+              if (abort) signal?.removeEventListener("abort", abort)
+            }
+          }
+          // Never loosen a stricter limit the server or role already imposes.
+          let existing = existingTimeout.get(client)
+          if (existing === undefined) {
+            try {
+              const shown = await bounded<any>(() => runQuery(() => client.query("SHOW statement_timeout")))
+              existing = parsePgDuration(shown?.rows?.[0]?.statement_timeout) ?? null
+            } catch (error) {
+              if (discardClient) throw error
+              existing = null
+            }
+            existingTimeout.set(client, existing)
+          }
+          effectiveMs = tighter(existing?.ms, ourMs)
+          if (existing?.ms === undefined || ourMs < existing.ms) {
+            await bounded(() => runQuery(() => client.query(`SET statement_timeout TO ${ourMs}`)))
+            timeoutApplied = true
           }
         }
 
@@ -65,7 +198,64 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           query = `${sql.replace(/;\s*$/, "")} LIMIT ${effectiveLimit + 1}`
         }
 
-        const result = await client.query(query)
+        // altimate_change start — a derived SELECT can still invoke a writing function
+        if (options?.readOnly) {
+          await runQuery(() => client.query("BEGIN READ ONLY"))
+          readOnlyTransaction = true
+        }
+        // altimate_change end
+        // The deadline can also expire while the session's timeout or read-only
+        // transaction is being set up. Never start the user's SQL afterwards.
+        options?.signal?.throwIfAborted()
+        // User SQL can change a stricter session timeout that we did not SET or
+        // RESET. Recheck it on the next call instead of trusting stale state.
+        // `RESET ALL` / `DISCARD ALL` clear every session setting, including statement_timeout.
+        if (/statement_timeout|\breset\s+all\b|\bdiscard\s+all\b/i.test(sql)) existingTimeout.delete(client)
+        // altimate_change start — pg Query row listeners disable pg's result-array accumulation
+        if (options?.maxResultBytes !== undefined) {
+          const consume = createResultByteBudget(options.maxResultBytes)
+          const Query = pg.default?.Query ?? pg.Query
+          return await runQuery(() => new Promise<ConnectorResult>((resolve, reject) => {
+            const stream = new Query({ text: query, values: binds, rowMode: "array" })
+            const rows: unknown[][] = []
+            let columns: string[] = []
+            let truncated = false
+            let stopped = false
+            stream.on("row", (row: unknown[], result: { fields: { name: string }[] }) => {
+              if (stopped || releasedClient) return
+              try {
+                if (effectiveLimit > 0 && rows.length >= effectiveLimit) {
+                  truncated = true
+                  return
+                }
+                consume(row)
+                columns = result.fields.map((field) => field.name)
+                rows.push(row)
+              } catch (error) {
+                stopped = true
+                // Destroying the connection stops delivery and rolls back any open transaction.
+                discardClient = true
+                releasedClient = true
+                client.release(true)
+                reject(error)
+              }
+            })
+            stream.on("error", (error: Error) => {
+              stopped = true
+              reject(error)
+            })
+            stream.on("end", (result: { fields?: { name: string }[] }) => {
+              if (stopped) return
+              columns = result.fields?.map((field) => field.name) ?? columns
+              resolve({ columns, rows, row_count: rows.length, truncated })
+            })
+            client.query(stream)
+          }))
+        }
+        // altimate_change end
+        // altimate_change start — preserve bound catalog names and other query parameters
+        const result = await runQuery<any>(() => client.query(query, binds))
+        // altimate_change end
         const columns = result.fields?.map((f: any) => f.name) ?? []
         const truncated = effectiveLimit > 0 && result.rows.length > effectiveLimit
         const rows = truncated
@@ -78,8 +268,36 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
           row_count: rows.length,
           truncated,
         }
+      } catch (err: any) {
+        if (options?.signal?.aborted && err === options.signal.reason) throw err
+        // 57014 is also a manual cancel; only the message names a timeout.
+        if (effectiveMs !== undefined && err?.code === PG_QUERY_CANCELED && /statement timeout/i.test(String(err?.message))) {
+          throw new QueryTimeoutError({ engine: "PostgreSQL", timeoutMs: effectiveMs })
+        }
+        throw err
       } finally {
-        client.release()
+        // altimate_change start — rollback also suppresses transaction-delayed pg_notify calls
+        if (readOnlyTransaction && !releasedClient) {
+          try {
+            await runQuery(() => client.query("ROLLBACK"))
+          } catch {
+            discardClient = true
+          }
+        }
+        // altimate_change end
+        // Restore the session default before the client returns to the pool, so
+        // one call's deadline never leaks into the next caller's query. If the
+        // reset fails the session state is unknown: drop the connection instead.
+        // altimate_change start — a byte-limit abort already discarded the connection
+        if (timeoutApplied && !releasedClient) {
+          try {
+            await runQuery(() => client.query("RESET statement_timeout"))
+          } catch {
+            discardClient = true
+          }
+        }
+        if (!releasedClient) client.release(discardClient ? true : undefined)
+        // altimate_change end
       }
     },
 

@@ -146,8 +146,10 @@ describe("Telemetry Safety: Registry operations survive telemetry explosions", (
     })
 
     const result = Registry.list()
-    expect(result.warehouses.length).toBe(2)
-    expect(result.warehouses.map((w: any) => w.name).sort()).toEqual(["pg", "sf"])
+    // The implicit `scratch` warehouse is appended whenever real warehouses exist.
+    const configured = result.warehouses.filter((w: any) => w.name !== "scratch")
+    expect(configured.length).toBe(2)
+    expect(configured.map((w: any) => w.name).sort()).toEqual(["pg", "sf"])
     // Census telemetry was attempted and threw — but list worked fine
   })
 
@@ -158,7 +160,7 @@ describe("Telemetry Safety: Registry operations survive telemetry explosions", (
 
     for (let i = 0; i < 10; i++) {
       const r = Registry.list()
-      expect(r.warehouses.length).toBe(1)
+      expect(r.warehouses.filter((w: any) => w.name !== "scratch").length).toBe(1)
     }
   })
 
@@ -225,7 +227,7 @@ describe("Telemetry Safety: Telemetry calls are attempted but swallowed", () => 
 
     // This should NOT throw even though telemetry is exploding
     const result = Registry.list()
-    expect(result.warehouses.length).toBe(1)
+    expect(result.warehouses.filter((w: any) => w.name !== "scratch").length).toBe(1)
     expect(result.warehouses[0].name).toBe("pg")
   })
 })

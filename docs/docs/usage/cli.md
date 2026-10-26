@@ -40,7 +40,7 @@ altimate --agent analyst
 | `import`    | Import session data            |
 | `session`   | Session management             |
 | `link`      | Link this project to an Altimate workspace |
-| `workspace` | Show, refresh, sync or unlink this project's workspace from a shell |
+| `workspace` | List workspaces, or show, refresh, sync or unlink this project's workspace from a shell |
 | `trace`     | List and view session traces (recordings of agent sessions) |
 | `github`    | GitHub integration             |
 | `pr`        | Pull request tools             |
@@ -57,10 +57,13 @@ With workspaces on:
 - `altimate-code link` links the current project to a workspace (or creates one), then shows what the workspace provides (its skills, knowledge, integrations and whether memory is on) and a few prompts to start with. The sidebar then names the workspace and shows how many memories are not yet synced and when skills last synced.
 - From a shell, script or CI job, without the TUI:
     - `altimate-code link --workspace <name|id>` links to an existing workspace (an id is matched before a name), and `altimate-code link --create [name]` creates one (named after the repo by default) and links to it. Neither prompts. If the project is already linked to a different workspace they refuse unless `--yes` is passed. Running `--create` again when the project is already linked to a workspace of that name creates nothing, so it is safe in a devcontainer's setup command; if another workspace already has that name it refuses and names its id, unless `--allow-duplicate` is passed. Linking to the workspace the project is already linked to confirms that link on this machine, which a fresh clone needs before `workspace sync` sends its memory.
+    - `altimate-code workspace list [--json]` lists the workspaces your account can link to, with their ids, for `link --workspace`.
     - `altimate-code workspace status [--json]` shows the linked workspace and, when known, how many saved memories have not reached it and when skills last synced.
     - `altimate-code workspace refresh` pulls the workspace's skills (memory is loaded by the next session started in the project); `altimate-code workspace sync` sends memory the workspace has not received; `altimate-code workspace unlink [--yes]` detaches the project (`--yes` is required without a terminal).
     - These commands accept `--directory`. Exit codes: `0` done, `1` failed (including when the workspace service could not be reached), `2` a request to change (not signed in, a re-link or unlink without `--yes` and no terminal to confirm on, or a `sync` to a link not yet confirmed on this machine), `3` the project is not linked. With `--json`, `ok` is `true` exactly when the exit code is `0`.
 - `/workspace` in the TUI opens a menu: **Get started** shows what the workspace provides and prompts to try (choosing one puts it in the prompt without sending it; after you link from the TUI, the confirmation shows the same summary and prompts), **Refresh** pulls the workspace's skills and memory into this project, **Sync** re-sends local memory the workspace never received, **Open in browser** (when a web URL is available) shows the workspace on the web, **Switch workspace** relinks the project, **Unlink** detaches it. In a project that is not linked yet, it offers **Link to a workspace** instead.
+- `/integrations` in the TUI opens the workspace's integration status directly (the same view as `/workspace` → Status). In a project that is not linked it offers the link, and when the workspace engine is missing or too old it offers the install and says which.
+- In a project linked to a workspace, integrations come only from the workspace's engine, so the `datamate_manager` tool is not offered there and refuses to run. `datamate-*` MCP servers already in the config still load, and a one-time notice names the file they are in; the config is not edited.
 - `altimate-code skill publish <name>` uploads a project skill to the linked workspace; see [Skills](../configure/skills.md#cli-commands).
 - When the linked workspace has knowledge, the agent is told to check it for best practices and team conventions before answering, without you having to mention the knowledge base.
 - In an ordinary session the agent is told every turn which workspace the project is linked to — or that none is, or that the link could not be verified just now. In an extension-pinned session it is told the pinned workspace instead, and that it differs from the project's own link. Either way "which workspace am I in?" has an answer, and the agent is told not to confuse it with a Databricks workspace or an IDE workspace folder.
@@ -109,6 +112,7 @@ Configuration can be controlled via environment variables:
 | `ALTIMATE_CLI_DISABLE_PRUNE`           | Disable database pruning             |
 | `ALTIMATE_CLI_DISABLE_MODELS_FETCH`    | Don't fetch models from models.dev   |
 | `ALTIMATE_DISABLE_WORKSPACE`           | Set to `1` to turn off every workspace feature (linking, skill and memory sync, the workspace engine, and the project lookup each session makes). The value is trimmed and read without regard to case; anything other than `0`, `false` or an empty value counts as set. Workspaces are on by default |
+| `ALTIMATE_DISABLE_SCHEMA_VALUES`       | Set to `1` to turn off `schema_inspect`'s column value profiles for every call, whatever the model passes as `values`, so no cell values are sampled or sent to the model provider. The value is trimmed and read without regard to case; anything other than `0`, `false` or an empty value counts as set |
 | `ALTIMATE_WORKSPACE_WEB_URL`           | Development only: the base URL of a local web app's Workspaces pages, used instead of the tenant's for `link`'s browser hand-off and workspace links. Include the mount path, e.g. `http://acme.localhost:3000/workspaces` |
 | `ALTIMATE_INTEGRATIONS`                | Set to `local` to keep warehouse tools local rather than routing them through a bound workspace's engine |
 | `ALTIMATE_CODE_SERVE`                  | Set to `1` by `altimate-code serve` itself, whether the IDE extension or you launched it. Marks that process as the extension's host — so it is the one that reads the pin variables — and is stripped from every child the bash and shell tools start |
@@ -188,6 +192,10 @@ altimate --print-logs --log-level DEBUG run "test query"
 # Disable tracing for a single run
 altimate run --no-trace "quick question"
 ```
+
+`run` reads piped input to the end, however long the command before the pipe takes. One exception: when `run` already has a message or `--command` and its stdin is a socket, which is what an agent's shell tool or a Node `spawn` hands a child, it waits only 3 seconds for the first byte and then continues without stdin. Set `ALTIMATE_RUN_STDIN_WAIT_MS` to change that wait, or to `0` to always wait. A caller that never writes to or closes stdin, and whose stdin is not a socket (for example a pipe on Windows), should redirect it from an empty source: `< /dev/null`, or `< NUL` in `cmd.exe`.
+
+A plain `run` prompt given as several arguments is joined with spaces and reaches the model as typed; arguments are no longer wrapped in quotes. With `--command`, arguments that contain spaces are still quoted so `$1` and `$2` expand to whole values.
 
 For CI pipelines and headless automation, see [CI & Automation](ci-headless.md).
 

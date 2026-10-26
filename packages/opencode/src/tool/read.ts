@@ -12,11 +12,11 @@ import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
 // altimate_change start — upstream_fix: restore stale-file guard (dropped in v1.17.9 merge)
 import { FileTime } from "../file/time"
 import { Instance } from "../project/instance"
+import { realpath } from "fs/promises"
 // altimate_change end
 
 const DEFAULT_READ_LIMIT = 2000
 const MAX_LINE_LENGTH = 2000
-const MAX_LINE_SUFFIX = `... (line truncated to ${MAX_LINE_LENGTH} chars)`
 const MAX_BYTES = 50 * 1024
 const MAX_BYTES_LABEL = `${MAX_BYTES / 1024} KB`
 const SAMPLE_BYTES = 4096
@@ -37,6 +37,15 @@ export const Parameters = Schema.Struct({
   limit: Schema.optional(NonNegativeInt).annotate({
     description: "The maximum number of lines to read (defaults to 2000)",
   }),
+  // altimate_change start — retrieve long lines in character windows
+  char_offset: Schema.optional(NonNegativeInt).annotate({
+    description:
+      "Character offset within each selected line (0-indexed, defaults to 0). Use limit=1 for a single long line.",
+  }),
+  max_chars: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))).annotate({
+    description: "Maximum characters per selected line (defaults to 2000); output remains bounded to 50 KB.",
+  }),
+  // altimate_change end
 })
 
 type Display =
@@ -138,10 +147,17 @@ export const ReadTool = Tool.define<
       )
     })
 
-    const lines = Effect.fn("ReadTool.lines")(function* (filepath: string, opts: { limit: number; offset: number }) {
+    // altimate_change start — character windows preserve the existing line and byte limits
+    const lines = Effect.fn("ReadTool.lines")(function* (
+      filepath: string,
+      opts: { limit: number; offset: number; char_offset?: number; max_chars?: number },
+    ) {
       const start = opts.offset - 1
       const raw: string[] = []
-      const flags = { bytes: 0, count: 0, cut: false, more: false, done: false }
+      const flags = { bytes: 0, count: 0, cut: false, more: false, done: false, lineCut: false }
+      const charOffset = opts.char_offset ?? 0
+      const maxChars = opts.max_chars ?? MAX_LINE_LENGTH
+      // altimate_change end
 
       // Note: prefer manual TextDecoder over Stream.decodeText — when the source stream
       // ends without flushing, decodeText drops the final unterminated line. We also
@@ -163,7 +179,33 @@ export const ReadTool = Tool.define<
               return
             }
 
-            const line = text.length > MAX_LINE_LENGTH ? text.substring(0, MAX_LINE_LENGTH) + MAX_LINE_SUFFIX : text
+            // altimate_change start — expose a continuation for every clipped line
+            const splitsPair = (index: number) =>
+              index > 0 && /[\uD800-\uDBFF]/.test(text[index - 1]) && /[\uDC00-\uDFFF]/.test(text[index] ?? "")
+            const windowStart = splitsPair(charOffset) ? charOffset - 1 : charOffset
+            const byteLimit = MAX_BYTES - 512
+            let stop = Math.min(text.length, windowStart + maxChars, windowStart + byteLimit)
+            if (splitsPair(stop)) stop += stop === windowStart + 1 ? 1 : -1
+            let chunk = text.slice(windowStart, stop)
+            // Reserve room for the continuation message within the same byte cap.
+            if (Buffer.byteLength(chunk, "utf-8") > byteLimit) {
+              let bytes = 0
+              let chars = 0
+              for (const char of chunk) {
+                const size = Buffer.byteLength(char, "utf-8")
+                if (bytes + size > byteLimit) break
+                bytes += size
+                chars += char.length
+              }
+              chunk = chunk.slice(0, chars)
+            }
+            const end = windowStart + chunk.length
+            const clipped = end < text.length
+            const line = clipped
+              ? `${chunk}... (line truncated to ${chunk.length} chars) (Use offset=${flags.count}, limit=1, char_offset=${end}, max_chars=${Math.min(maxChars, chunk.length)} to continue this line.)`
+              : chunk
+            flags.lineCut ||= clipped
+            // altimate_change end
             const size = Buffer.byteLength(line, "utf-8") + (raw.length > 0 ? 1 : 0)
             if (flags.bytes + size <= MAX_BYTES) {
               raw.push(line)
@@ -180,7 +222,9 @@ export const ReadTool = Tool.define<
         Effect.catchTag("ReadStop", () => Effect.void),
       )
 
-      return { raw, count: flags.count, cut: flags.cut, more: flags.more, offset: opts.offset }
+      // altimate_change start — distinguish clipped text from remaining lines
+      return { raw, count: flags.count, cut: flags.cut, more: flags.more, lineCut: flags.lineCut, offset: opts.offset }
+      // altimate_change end
     })
 
     const isBinaryFile = (filepath: string, bytes: Uint8Array) => {
@@ -235,10 +279,9 @@ export const ReadTool = Tool.define<
       ctx: Tool.Context<Metadata>,
     ) {
       const instance = yield* InstanceState.context
-      let filepath = params.filePath
-      if (!path.isAbsolute(filepath)) {
-        filepath = path.resolve(instance.directory, filepath)
-      }
+      // altimate_change start — upstream_fix: normalize read paths before permission evaluation
+      let filepath = path.resolve(instance.directory, params.filePath)
+      // altimate_change end
       if (process.platform === "win32") {
         filepath = FSUtil.normalizePath(filepath)
       }
@@ -256,11 +299,19 @@ export const ReadTool = Tool.define<
         kind: stat?.type === "Directory" ? "directory" : "file",
       })
 
+      // altimate_change start — upstream_fix: match absolute and symlink-resolved deny rules; allow rules keep the authored spelling
+      const resolved = yield* Effect.promise(() => realpath(filepath).catch(() => filepath))
+      const relative = path.relative(instance.worktree, filepath)
       yield* ctx.ask({
         permission: "read",
-        patterns: [path.relative(instance.worktree, filepath)],
+        patterns: [relative],
         always: ["*"],
-        metadata: {},
+        metadata: {
+          permissionAliases: {
+            [relative]: [Array.from(new Set([filepath, resolved, path.relative(instance.worktree, resolved)]))],
+          },
+        },
+        // altimate_change end
       })
 
       if (!stat) return yield* miss(filepath)
@@ -335,7 +386,14 @@ export const ReadTool = Tool.define<
         return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
       }
 
-      const file = yield* lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
+      // altimate_change start — pass through optional character windows
+      const file = yield* lines(filepath, {
+        limit: params.limit ?? DEFAULT_READ_LIMIT,
+        offset: params.offset || 1,
+        char_offset: params.char_offset,
+        max_chars: params.max_chars,
+      })
+      // altimate_change end
       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
         return yield* Effect.fail(
           new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
@@ -347,7 +405,9 @@ export const ReadTool = Tool.define<
 
       const last = file.offset + file.raw.length - 1
       const next = last + 1
-      const truncated = file.more || file.cut
+      // altimate_change start — include clipped lines in truncation metadata
+      const truncated = file.more || file.cut || file.lineCut
+      // altimate_change end
       if (file.cut) {
         output += `\n\n(Output capped at ${MAX_BYTES_LABEL}. Showing lines ${file.offset}-${last}. Use offset=${next} to continue.)`
       } else if (file.more) {

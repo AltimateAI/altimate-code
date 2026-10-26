@@ -386,8 +386,8 @@ describe("run.ts ALTIMATE_NON_INTERACTIVE guard contract", () => {
 // ---------------------------------------------------------------------------
 // Gap #9 — null-safe stdin read does not stall when process.stdin is undefined.
 //
-// The guard is inline in src/cli/cmd/run.ts:463 and not exported:
-//   if (process.stdin && !process.stdin.isTTY) message += "\n" + (await Bun.stdin.text())
+// The guard is inline in src/cli/cmd/run.ts and not exported:
+//   if (process.stdin && !process.stdin.isTTY) { ... await readRunStdin() ... }
 // Helper mirrors that predicate and the append behavior so the regression
 // (undefined stdin satisfied `!stdin?.isTTY` and stalled awaiting EOF) is
 // locked: undefined stdin must NOT trigger the read.

@@ -532,26 +532,28 @@ export namespace ProviderTransform {
   }
   // altimate_change end
 
-  export function message(msgs: ModelMessage[], model: Provider.Model, options: Record<string, unknown>) {
-    msgs = unsupportedParts(msgs, model)
-    msgs = normalizeMessages(msgs, model, options)
-    if (
+  // altimate_change start — upstream_fix: shared with LLM.stream so the environment split only applies where cache breakpoints are explicit
+  export function usesExplicitCacheBreakpoints(model: Provider.Model) {
+    return (
       (model.providerID === "anthropic" ||
-        // altimate_change start — altimate-specific Anthropic provider IDs
         model.providerID === "google-vertex-anthropic" ||
         model.providerID === "altimate-backend" ||
-        // altimate_change end
         model.api.id.includes("anthropic") ||
         model.api.id.includes("claude") ||
         model.id.includes("anthropic") ||
         model.id.includes("claude") ||
         model.api.npm === "@ai-sdk/anthropic" ||
-        // altimate_change start — Alibaba Anthropic-compatible cache-control namespace
         model.api.npm === "@ai-sdk/alibaba"
-        // altimate_change end
       ) &&
       model.api.npm !== "@ai-sdk/gateway"
-    ) {
+    )
+  }
+  // altimate_change end
+
+  export function message(msgs: ModelMessage[], model: Provider.Model, options: Record<string, unknown>) {
+    msgs = unsupportedParts(msgs, model)
+    msgs = normalizeMessages(msgs, model, options)
+    if (usesExplicitCacheBreakpoints(model)) {
       msgs = applyCaching(msgs, model)
     }
 
@@ -734,7 +736,8 @@ export namespace ProviderTransform {
     return null
   }
 
-  function anthropicOmitsThinking(apiId: string) {
+  /** Models that always think: they reject `thinking.type: "disabled"` and only accept adaptive thinking. */
+  export function anthropicOmitsThinking(apiId: string) {
     return anthropicOpus47OrLater(apiId) || apiId.includes("fable-5")
   }
 
@@ -1344,7 +1347,7 @@ export namespace ProviderTransform {
     ) {
       return mergeDeep({ store: false }, small)
     }
-    // altimate_change start — upstream_fix: restore Google minimal thinking for small calls only on reasoning models
+    // altimate_change start — upstream_fix: use generation-supported Google thinking controls for small reasoning calls
     if (
       (model.providerID === "google" ||
         model.api.npm === "@ai-sdk/google" ||
@@ -1352,10 +1355,19 @@ export namespace ProviderTransform {
       model.capabilities.reasoning
     ) {
       const id = model.api.id.toLowerCase()
-      if (id.includes("gemini-3")) {
+      // Leading digits after "gemini-", wherever it appears (prefixed, concatenated or dated ids).
+      const generation = Number(/gemini-(\d+)/.exec(id)?.[1])
+      if (generation === 3) {
         return { thinkingConfig: { thinkingLevel: "minimal" } }
       }
-      return { thinkingConfig: { thinkingBudget: 0 } }
+      // Gemini 2.x and unversioned aliases (e.g. gemini-flash-latest) keep the budget control.
+      if (!(generation >= 4)) {
+        return { thinkingConfig: { thinkingBudget: 0 } }
+      }
+      // Gemini 4+ rejects budgets and "minimal"; prefer the lowest configured supported level.
+      const levels = Object.values(model.variants ?? {}).map((variant) => variant.thinkingConfig?.thinkingLevel)
+      const thinkingLevel = WIDELY_SUPPORTED_EFFORTS.find((level) => levels.includes(level)) ?? "low"
+      return { thinkingConfig: { thinkingLevel } }
     }
     // altimate_change end
     if (model.providerID === "openrouter" || model.providerID === "llmgateway") {
@@ -1525,6 +1537,13 @@ export namespace ProviderTransform {
   // altimate_change end
 
   export function schema(model: Provider.Model, schema: JSONSchema.BaseSchema | JSONSchema7): JSONSchema7 {
+    // altimate_change start — omit the tool schema dialect declaration for Anthropic, Bedrock, and Vertex
+    if (["@ai-sdk/anthropic", "@ai-sdk/amazon-bedrock", "@ai-sdk/google-vertex/anthropic"].includes(model.api.npm)) {
+      const { $schema, ...rest } = schema
+      schema = rest
+    }
+    // altimate_change end
+
     /*
     if (["openai", "azure"].includes(providerID)) {
       if (schema.type === "object" && schema.properties) {
@@ -1602,10 +1621,26 @@ export namespace ProviderTransform {
         }
 
         const result: any = {}
+        // altimate_change start — track dropped empty literals so an untyped node stays a string
+        let droppedEmptyLiteral = false
+        // altimate_change end
         for (const [key, value] of Object.entries(obj)) {
+          // altimate_change start — Gemini rejects empty-string enum/const values ("cannot be empty");
+          // drop them and keep the branch's type. Tool arguments are still validated by Zod at runtime.
+          if (key === "const" && value === "") {
+            droppedEmptyLiteral = true
+            continue
+          }
+          if (key === "enum" && Array.isArray(value) && value.length > 0 && value.every((v) => String(v) === "")) {
+            droppedEmptyLiteral = true
+            continue
+          }
+          // altimate_change end
           if (key === "enum" && Array.isArray(value)) {
             // Convert all enum values to strings
-            result[key] = value.map((v) => String(v))
+            // altimate_change start — skip empty-string values Gemini rejects
+            result[key] = value.map((v) => String(v)).filter((v) => v !== "")
+            // altimate_change end
             // If we have integer type with enum, change type to string
             if (result.type === "integer" || result.type === "number") {
               result.type = "string"
@@ -1616,6 +1651,10 @@ export namespace ProviderTransform {
             result[key] = value
           }
         }
+
+        // altimate_change start — an untyped node that lost its empty literal would become `{}` (any value)
+        if (droppedEmptyLiteral && result.type === undefined) result.type = "string"
+        // altimate_change end
 
         // altimate_change start — Gemini requires a single type; split JSON Schema type arrays
         if (Array.isArray(result.type)) {

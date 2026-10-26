@@ -8,6 +8,9 @@
  * - Binds parameter is silently ignored
  */
 import { describe, test, expect, mock, beforeEach } from "bun:test"
+import { restoreModuleMocksAfterTests } from "./module-mock"
+
+await restoreModuleMocksAfterTests("@clickhouse/client")
 
 // --- Mock @clickhouse/client ---
 

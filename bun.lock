@@ -272,7 +272,7 @@
         "@ai-sdk/togetherai": "2.0.41",
         "@ai-sdk/vercel": "2.0.39",
         "@ai-sdk/xai": "3.0.82",
-        "@altimateai/altimate-core": "0.7.0",
+        "@altimateai/altimate-core": "0.9.0",
         "@altimateai/drivers": "workspace:*",
         "@aws-sdk/credential-providers": "3.1057.0",
         "@clack/prompts": "1.0.0-alpha.1",
@@ -371,6 +371,7 @@
         "@types/turndown": "5.0.5",
         "@types/yargs": "17.0.33",
         "@typescript/native-preview": "catalog:",
+        "ajv": "8.20.0",
         "drizzle-orm": "catalog:",
         "playwright-core": "1.59.1",
         "prettier": "3.6.2",
@@ -510,6 +511,8 @@
     "@opentui/core": "catalog:",
     "@opentui/keymap": "catalog:",
     "@opentui/solid": "catalog:",
+    "@smithy/is-array-buffer": "4.2.2",
+    "@smithy/util-buffer-from": "4.2.2",
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
   },
@@ -642,17 +645,17 @@
 
     "@altimateai/altimate-code": ["@altimateai/altimate-code@workspace:packages/opencode"],
 
-    "@altimateai/altimate-core": ["@altimateai/altimate-core@0.7.0", "", { "optionalDependencies": { "@altimateai/altimate-core-darwin-arm64": "0.7.0", "@altimateai/altimate-core-darwin-x64": "0.7.0", "@altimateai/altimate-core-linux-arm64-gnu": "0.7.0", "@altimateai/altimate-core-linux-x64-gnu": "0.7.0", "@altimateai/altimate-core-win32-x64-msvc": "0.7.0" } }, "sha512-9LqXOUHhrsuZlvdfZEoFLyMGg5Uz83cHj6TrqMb0h8lK97UdeVBvd2S/53TB7sPVlYnpjFlI++fNh8swqADsLA=="],
+    "@altimateai/altimate-core": ["@altimateai/altimate-core@0.9.0", "", { "optionalDependencies": { "@altimateai/altimate-core-darwin-arm64": "0.9.0", "@altimateai/altimate-core-darwin-x64": "0.9.0", "@altimateai/altimate-core-linux-arm64-gnu": "0.9.0", "@altimateai/altimate-core-linux-x64-gnu": "0.9.0", "@altimateai/altimate-core-win32-x64-msvc": "0.9.0" } }, "sha512-1nheHkeAsCJwhc59mCuFUfqwxfEOly2JKJ3LDOOHCbitZqAqgqqYLFf4X6nNDFxauf4DWN9KLxYU9V+8gMVaXA=="],
 
-    "@altimateai/altimate-core-darwin-arm64": ["@altimateai/altimate-core-darwin-arm64@0.7.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-NBPwsfBT5Ul41u9zNiovYaOpZ+zhzHKq5+GqFWZcy4iW6k0aWUb30niTrz2Yse73/nWIt6G//pS4m4IX/nMy4g=="],
+    "@altimateai/altimate-core-darwin-arm64": ["@altimateai/altimate-core-darwin-arm64@0.9.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-Gozy3etd94aw3nYhb3/TAIQ339WIdVsEGSg6EYKwOm616dDpIDXeI3e0iw7eMTzOGrXk1HBFPvZhel1H5rd3dA=="],
 
-    "@altimateai/altimate-core-darwin-x64": ["@altimateai/altimate-core-darwin-x64@0.7.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-pLEJT2ePh247XOIicaJw8x5i2hRsCF2HqgVUy9nKJf5ebynHLGZ2JFC0fMq4oRe9ZCmywN8EzMD1UwN1Nw9AUQ=="],
+    "@altimateai/altimate-core-darwin-x64": ["@altimateai/altimate-core-darwin-x64@0.9.0", "", { "os": "darwin", "cpu": "x64" }, "sha512-+uI97u23d5A404CA4R7uLLQwqhZ/7DAF6+SmA6X6WfiHY+pb4HvyTVWBV7NoWRu9Eb9delV5pW8U7WI4fOl56Q=="],
 
-    "@altimateai/altimate-core-linux-arm64-gnu": ["@altimateai/altimate-core-linux-arm64-gnu@0.7.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-co6Sm/iFIyYnsWxkhw7tUJRB9hfHH0Bjt0oa4bAysG8hVVoMhCN8ADS4fvPAg52Z8umk126mAN8k2XPfXh/ieA=="],
+    "@altimateai/altimate-core-linux-arm64-gnu": ["@altimateai/altimate-core-linux-arm64-gnu@0.9.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-8YfWq8adhAOj1WrG801LhBFOb8JjqM8o5kHu5yJ186UB+dZzjqT9jUwwwJfacMaL9+Zo7efsyMiK9MQjF+bgaQ=="],
 
-    "@altimateai/altimate-core-linux-x64-gnu": ["@altimateai/altimate-core-linux-x64-gnu@0.7.0", "", { "os": "linux", "cpu": "x64" }, "sha512-hc9tOl8v+DQFsy8TIkFPxZGTyohPcwpfUqquLgiuKn2U6MDyJK3962Nzf/TzgfcbHj+GQE34oyPJ709iaBZnGg=="],
+    "@altimateai/altimate-core-linux-x64-gnu": ["@altimateai/altimate-core-linux-x64-gnu@0.9.0", "", { "os": "linux", "cpu": "x64" }, "sha512-w9g01DTf/JwtfJSurwyXPHQwk9yYboMAjRG9PTppcX9ITgkx7BF0xZJjZ9fICG/iALiKxWymr88T6mipV0kyiQ=="],
 
-    "@altimateai/altimate-core-win32-x64-msvc": ["@altimateai/altimate-core-win32-x64-msvc@0.7.0", "", { "os": "win32", "cpu": "x64" }, "sha512-GrykrvnilY1yZCgusNxVTvYr5ENkD1vpgjGib2qX/yvJVs0Nb59/JsSLzvA9XqAt2FVf7OcZ5ttH11OkxuFivg=="],
+    "@altimateai/altimate-core-win32-x64-msvc": ["@altimateai/altimate-core-win32-x64-msvc@0.9.0", "", { "os": "win32", "cpu": "x64" }, "sha512-MoELhLPzJGAxJMtL7C/g/gj464I9pbSmfJ6IamhFwsyz7nfUrKOkAnixVXuQrLEJ9I+sVZJuPMq2H1HUCkpOwA=="],
 
     "@altimateai/dbt-integration": ["@altimateai/dbt-integration@0.2.14", "", { "dependencies": { "@altimateai/altimate-core": "0.1.6", "node-abort-controller": "^3.1.1", "node-fetch": "^3.3.2", "python-bridge": "^1.1.0", "semver": "^7.6.3", "yaml": "^2.5.0" }, "peerDependencies": { "patch-package": "^8.0.0" } }, "sha512-44hFBx3gXss2RUlRZE9cIpAocffB3miAzpjvmma1EED0jiOhyrgmzGsw3RXEZqs73OuLYpDehixvRUt1vTfcfQ=="],
 
@@ -1374,7 +1377,7 @@
 
     "@smithy/fetch-http-handler": ["@smithy/fetch-http-handler@5.4.5", "", { "dependencies": { "@smithy/core": "^3.24.5", "@smithy/types": "^4.14.2", "tslib": "^2.6.2" } }, "sha512-SK3VMeH0fibgdTg2QeB+O4p7Yy/2E5HBOHJeC58FshkDdeuX8lOgO7PfjYfLyPLP1ch55j91cQqKBzDS0mRjSQ=="],
 
-    "@smithy/is-array-buffer": ["@smithy/is-array-buffer@2.2.0", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-GGP3O9QFD24uGeAXYUjwSTXARoqpZykHadOmA8G5vfJPK0/DC67qa//0qvqrJzL1xc8WQWX7/yc7fwudjPHPhA=="],
+    "@smithy/is-array-buffer": ["@smithy/is-array-buffer@4.2.2", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-n6rQ4N8Jj4YTQO3YFrlgZuwKodf4zUFs7EJIWH86pSCWBaAtAGBFfCM7Wx6D2bBJ2xqFNxGBSrUWswT3M0VJow=="],
 
     "@smithy/node-http-handler": ["@smithy/node-http-handler@4.7.5", "", { "dependencies": { "@smithy/core": "^3.24.5", "@smithy/types": "^4.14.2", "tslib": "^2.6.2" } }, "sha512-3dA9TQ+ybRSZ/m0wnbZhiBy4Dezjgq1Ib/ZZrYTpJDBgpoLLU/SDzZc/g0x0MNAdOJe1wPcM+x2PBRmoOur+Sw=="],
 
@@ -1384,7 +1387,7 @@
 
     "@smithy/types": ["@smithy/types@4.14.2", "", { "dependencies": { "tslib": "^2.6.2" } }, "sha512-P+otAxbV4CqBybp7EkcJCrig63yE2E7PuNVOmilVMRcx/O+QDzGULTrKsq4DV13gSfak9ObPrWaHl/9bL5YcWw=="],
 
-    "@smithy/util-buffer-from": ["@smithy/util-buffer-from@4.3.5", "", { "dependencies": { "@smithy/core": "^3.24.5", "tslib": "^2.6.2" } }, "sha512-CthqHx5VTlNIsS5rJni+pIfkGgYPnVFsy9qYiv8e+hMQDPemZod5wTa+2DkrI+vubX51sD6qqcgH3UHqdTf2bw=="],
+    "@smithy/util-buffer-from": ["@smithy/util-buffer-from@4.2.2", "", { "dependencies": { "@smithy/is-array-buffer": "^4.2.2", "tslib": "^2.6.2" } }, "sha512-FDXD7cvUoFWwN6vtQfEta540Y/YBe5JneK3SoZg9bThSoOAC/eGeYEua6RkBgKjGa/sz6Y+DuBZj3+YEY21y4Q=="],
 
     "@smithy/util-hex-encoding": ["@smithy/util-hex-encoding@4.3.5", "", { "dependencies": { "@smithy/core": "^3.24.5", "tslib": "^2.6.2" } }, "sha512-+ip3QrXGjDOzV/ciNWPTm6bhJuXjmzugMR19ouXgA26QqhEo0zuXM7pvYE9S4VfX13YmPgSYDPkF4+2bPqIwAg=="],
 
@@ -3461,12 +3464,6 @@
     "@altimateai/dbt-integration/@altimateai/altimate-core/@altimateai/altimate-core-linux-x64-gnu": ["@altimateai/altimate-core-linux-x64-gnu@0.1.6", "", { "os": "linux", "cpu": "x64" }, "sha512-wXWYNxGhUBBaf2b6dsvuD1ZuiTLQZbKg4/fckrQELuW+BrsN1+nzna+0IZ9FTATYfF1OatpqVun9QyBkvlQn+Q=="],
 
     "@altimateai/dbt-integration/@altimateai/altimate-core/@altimateai/altimate-core-win32-x64-msvc": ["@altimateai/altimate-core-win32-x64-msvc@0.1.6", "", { "os": "win32", "cpu": "x64" }, "sha512-6Sbneg0DLHMmo1lDVd9oDgGtqPJpDUXZvXwAbGb7eoh+vUmXMxABA43//hBbwkMVsWKClKjv1KXSKp44shrUiw=="],
-
-    "@aws-crypto/sha1-browser/@smithy/util-utf8/@smithy/util-buffer-from": ["@smithy/util-buffer-from@2.2.0", "", { "dependencies": { "@smithy/is-array-buffer": "^2.2.0", "tslib": "^2.6.2" } }, "sha512-IJdWBbTcMQ6DA0gdNhh/BwrLkDR+ADW5Kr1aZmd4k3DIF6ezMV4R2NIAmT08wQJ3yUK82thHWmC/TnK/wpMMIA=="],
-
-    "@aws-crypto/sha256-browser/@smithy/util-utf8/@smithy/util-buffer-from": ["@smithy/util-buffer-from@2.2.0", "", { "dependencies": { "@smithy/is-array-buffer": "^2.2.0", "tslib": "^2.6.2" } }, "sha512-IJdWBbTcMQ6DA0gdNhh/BwrLkDR+ADW5Kr1aZmd4k3DIF6ezMV4R2NIAmT08wQJ3yUK82thHWmC/TnK/wpMMIA=="],
-
-    "@aws-crypto/util/@smithy/util-utf8/@smithy/util-buffer-from": ["@smithy/util-buffer-from@2.2.0", "", { "dependencies": { "@smithy/is-array-buffer": "^2.2.0", "tslib": "^2.6.2" } }, "sha512-IJdWBbTcMQ6DA0gdNhh/BwrLkDR+ADW5Kr1aZmd4k3DIF6ezMV4R2NIAmT08wQJ3yUK82thHWmC/TnK/wpMMIA=="],
 
     "@aws-sdk/checksums/@aws-sdk/core/@aws-sdk/xml-builder": ["@aws-sdk/xml-builder@3.972.30", "", { "dependencies": { "@smithy/types": "^4.14.3", "fast-xml-parser": "5.7.3", "tslib": "^2.6.2" } }, "sha512-StElZPEoBquWwNqw1AcfpzEyZqJvFxouG+mpDNYlcH6ZOrqd2CuIryv+8LV8gNHZUOyKyJF3Dq9vxaXEmDR9TQ=="],
 

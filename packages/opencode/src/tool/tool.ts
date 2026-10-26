@@ -23,6 +23,10 @@ import {
 // altimate_change start — humanize tool-call titles at the source
 import { describeToolCall } from "../altimate/tool-label"
 // altimate_change end
+// altimate_change start — upstream_fix: normalize optional strict-schema fillers before validation
+import { fillerSafeParameters } from "./filler-parameters"
+import { ToolJsonSchema } from "./json-schema"
+// altimate_change end
 
 interface Metadata {
   [key: string]: any
@@ -60,16 +64,43 @@ export type Context<M extends Metadata = Metadata> = {
   callID?: string
   extra?: { [key: string]: unknown }
   messages: SessionV1.WithParts[]
+  // altimate_change start — pass effective permission rules to search result filtering
+  permissions?: PermissionV1.Ruleset
+  // altimate_change end
   metadata(input: { title?: string; metadata?: M }): Effect.Effect<void>
-  ask(input: Omit<PermissionV1.Request, "id" | "sessionID" | "tool">): Effect.Effect<void>
+  // altimate_change start — allow search approvals to preserve absolute read restrictions
+  ask(input: Omit<PermissionV1.Request, "id" | "sessionID" | "tool"> & { ruleset?: PermissionV1.Ruleset }): Effect.Effect<void>
+  // altimate_change end
 }
 
 export interface ExecuteResult<M extends Metadata = Metadata> {
   title: string
   metadata: M
   output: string
+  // altimate_change start — explicit failures survive the tool result envelope
+  status?: "ok" | "error"
+  // altimate_change end
   attachments?: Omit<SessionV1.FilePart, "id" | "sessionID" | "messageID">[]
 }
+
+// altimate_change start — distinguish execution failures from successful diagnostic findings
+function isErrorResult(result: ExecuteResult) {
+  // success:false alone is not an SDK error (for example, grep's no-match exit).
+  // SDK errors require an explicit error envelope or backend error metadata;
+  // successful diagnostics may include error details by declaring success:true.
+  return (
+    result.status === "error" ||
+    (result.metadata.success !== true && Boolean(result.metadata.error))
+  )
+}
+
+/** Turn a failed envelope into the SDK's tool-error event without discarding its output. */
+export function assertSuccess(result: ExecuteResult) {
+  if (isErrorResult(result)) {
+    throw new Error(result.output || String(result.metadata.error || "Tool execution failed"))
+  }
+}
+// altimate_change end
 
 export interface Def<
   Parameters extends Schema.Decoder<unknown> = Schema.Decoder<unknown>,
@@ -175,7 +206,7 @@ function altimateTrackSuccess(
   result: ExecuteResult,
 ) {
   try {
-    const isSoftFailure = result.metadata?.success === false
+    const isSoftFailure = hasFailureSignals(id, result)
     const durationMs = Date.now() - startTime
     const toolCategory = Telemetry.categorizeToolName(id, "standard")
     // Skip success tool_call for high-volume/low-signal file tools; failures still tracked.
@@ -214,7 +245,7 @@ function altimateTrackSuccess(
           errorMsg = String(rawError)
         }
       } else {
-        errorMsg = `soft_failure:${id}:no_error_metadata`
+        errorMsg = `soft_failure:${id}:${result.metadata.failure_kind ?? "no_error_metadata"}`
       }
       const maskedErrorMsg = Telemetry.maskString(errorMsg).slice(0, 500)
       Telemetry.track({
@@ -251,6 +282,12 @@ function altimateTrackSuccess(
     // Telemetry must never break tool execution
   }
 }
+
+function hasFailureSignals(id: string, result: ExecuteResult) {
+  // Bash non-zero exit codes can describe ordinary command outcomes. Only its
+  // explicit execution failure kinds should affect traces, hints, and telemetry.
+  return isErrorResult(result) || (id === "bash" ? Boolean(result.metadata.failure_kind) : result.metadata.success === false)
+}
 // altimate_change end
 
 function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadata>(
@@ -264,9 +301,15 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
     Effect.gen(function* () {
       const toolInfo = typeof init === "function" ? { ...(yield* init(ctx)) } : { ...init }
       // altimate_change end
+      // altimate_change start — upstream_fix: share filler handling across all tool schemas
+      const jsonSchema = ToolJsonSchema.fromTool({ ...toolInfo, id })
+      const parameters = fillerSafeParameters(toolInfo.parameters, jsonSchema)
+      // altimate_change end
       // Compile the parser closure once per tool init; `decodeUnknownEffect`
       // allocates a new closure per call, so hoisting avoids re-closing it.
-      const decode = Schema.decodeUnknownEffect(toolInfo.parameters)
+      // altimate_change start — upstream_fix: validate after optional fillers become omissions
+      const decode = Schema.decodeUnknownEffect(parameters)
+      // altimate_change end
       const execute = toolInfo.execute
       toolInfo.execute = (args, ctx) => {
         const attrs = {
@@ -287,6 +330,13 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           )
           // altimate_change start — telemetry instrumentation for tool execution
           const startTime = Date.now()
+          // Search callers without a ruleset use the configured agent defaults,
+          // including read denials. An unknown agent leaves an empty ruleset,
+          // which the search filter treats as deny-all rather than ask-everything.
+          if (["grep", "glob", "list"].includes(id) && !ctx.permissions?.length) {
+            const agent = yield* agents.get(ctx.agent)
+            ctx = { ...ctx, permissions: agent?.permission ?? [] }
+          }
           // Debug mode: trace each call as it starts and ends (no-op unless ALTIMATE_DEBUG).
           const endTrace = traceToolCall(id, ctx.callID)
           const rawResult = yield* execute(decoded as Schema.Schema.Type<Parameters>, ctx).pipe(
@@ -298,18 +348,26 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
               }),
             ),
           )
+          const failed = isErrorResult(rawResult)
+          const unsuccessful = hasFailureSignals(id, rawResult)
           // Ended before anything else can throw, so a call that finished is never left "running".
-          endTrace(rawResult.metadata?.success === false ? "error" : "success")
+          endTrace(unsuccessful ? "error" : "success")
           // humanize the tool-call title at the source so any client (chat webview,
           // TUI, ...) can render a readable label from state.title.
-          const result = { ...rawResult, title: describeToolCall(id, decoded, rawResult.title) ?? rawResult.title }
+          const result = {
+            ...rawResult,
+            ...(failed && { status: "error" as const, metadata: { ...rawResult.metadata, success: false } }),
+            title: describeToolCall(id, decoded, rawResult.title) ?? rawResult.title,
+          }
           altimateTrackSuccess(id, decoded, ctx, startTime, result)
           // altimate_change end
           if (result.metadata.truncated !== undefined) {
             return result
           }
           const agent = yield* agents.get(ctx.agent)
-          const truncated = yield* truncate.output(result.output, {}, agent)
+          // altimate_change start — truncation cannot re-label a failed result as successful
+          const truncated = yield* truncate.output(result.output, { outcome: unsuccessful ? "error" : "success" }, agent)
+          // altimate_change end
           return {
             ...result,
             output: truncated.content,
@@ -321,7 +379,9 @@ function wrap<Parameters extends Schema.Decoder<unknown>, Result extends Metadat
           }
         }).pipe(Effect.orDie, Effect.withSpan("Tool.execute", { attributes: attrs }))
       }
-      return toolInfo
+      // altimate_change start — upstream_fix: expose the same decoder to schema and batch callers
+      return { ...toolInfo, parameters, jsonSchema }
+      // altimate_change end
     })
 }
 

@@ -36,8 +36,7 @@ const MAX_SUBMATCHES = 100
 // The 16 MiB ceiling bounds the cost of parsing ONE line. It does not bound what the search
 // retains: `run` collects rows with `Stream.runCollect` and holds them until the stream ends, and
 // each row carried the FULL `lines.text` until the mapping step trimmed it at the very end. Peak
-// retained memory is therefore rows x record size — and callers pass no meaningful row cap
-// (`tool/grep.ts` passes `Number.MAX_SAFE_INTEGER`), so raising the per-record ceiling raised the
+// retained memory is therefore rows x record size, so raising the per-record ceiling raised the
 // retained bound with it. Capping the line here instead keeps the parse ceiling while making the
 // retained bound tighter than it was before this change. Nothing downstream ever renders more.
 const LINE_TEXT_CAP = 2_000
@@ -253,6 +252,10 @@ export interface GrepInput {
   // altimate_change end
   readonly limit: number
   readonly signal?: AbortSignal
+  // altimate_change start — filter streamed paths before retaining bounded grep results
+  readonly filterPath?: (relativePath: string) => boolean
+  readonly scanLimit?: number
+  // altimate_change end
 }
 
 export interface Interface {
@@ -282,6 +285,10 @@ export const layer = Layer.effect(
       readonly parse: (line: string) => Effect.Effect<A | undefined, Error>
       readonly pattern?: string
       readonly onItem?: (item: A) => Effect.Effect<void>
+      // altimate_change start — bound scanned matches independently of accepted results
+      readonly filter?: (item: A) => boolean
+      readonly scanLimit?: number
+      // altimate_change end
     }) => {
       const program = Effect.scoped(
         Effect.gen(function* () {
@@ -293,11 +300,21 @@ export const layer = Layer.effect(
             Effect.forkScoped,
           )
           let observed = 0
+          // altimate_change start — track the scan ceiling even when every match is filtered out
+          let scanned = 0
+          // altimate_change end
           const rows = yield* Stream.decodeText(handle.stdout).pipe(
             Stream.splitLines,
             Stream.filter((line) => line.length > 0),
             Stream.mapEffect(input.parse),
             Stream.filter((row): row is A => row !== undefined),
+            // altimate_change start — filter before collection with a separate hard scan ceiling
+            Stream.take(input.scanLimit ?? Infinity),
+            Stream.filter((row) => {
+              scanned++
+              return input.filter?.(row) ?? true
+            }),
+            // altimate_change end
             Stream.tap((row) => {
               if (!input.onItem || observed++ >= input.limit) return Effect.void
               return input.onItem(row)
@@ -306,7 +323,9 @@ export const layer = Layer.effect(
             Stream.runCollect,
             Effect.map((chunk) => [...chunk]),
           )
-          const truncated = rows.length > input.limit
+          // altimate_change start — do not wait for an unread child pipe after reaching the scan ceiling
+          const truncated = rows.length > input.limit || scanned >= (input.scanLimit ?? Infinity)
+          // altimate_change end
           if (truncated) return { items: rows.slice(0, input.limit), truncated, partial: false }
 
           const code = yield* handle.exitCode
@@ -415,6 +434,7 @@ export const layer = Layer.effect(
           const skipped: { count: number; samples: string[] } = { count: 0, samples: [] }
           return run<RawMatchData>({
             ...input,
+            filter: input.filterPath ? (match) => input.filterPath!(match.path.text) : undefined,
             args: [
               "--no-config",
               "--json",

@@ -23,7 +23,8 @@ Run SQL queries against your connected warehouse.
 ```
 
 **Parameters:**
-- `query` (required): SQL to execute
+- `query` (required unless `query_from` is set): SQL to execute
+- `query_from` (optional): `{warehouse, sql}` - a single read-only SELECT, run on `warehouse`, that returns exactly one row and one non-empty SQL string column (max 1 MiB). That SQL is validated as a read-only SELECT and run on the target `warehouse` without passing through the conversation. `query_from.warehouse` is the source; the top-level `warehouse` is then required and names the target; provide exactly one of `query` or `query_from`
 - `warehouse` (optional): Connection name from config. Uses default if omitted
 - `limit` (optional, default: 100): Max rows returned
 

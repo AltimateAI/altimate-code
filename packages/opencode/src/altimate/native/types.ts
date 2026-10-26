@@ -9,6 +9,11 @@ export interface SqlExecuteParams {
   sql: string
   warehouse?: string
   limit?: number
+  /** Execution deadline in ms; `0` uses the default. Omitted: the connection's
+   *  `query_timeout_ms`, then `ALTIMATE_SQL_QUERY_TIMEOUT_MS`, then 120 s. */
+  query_timeout_ms?: number
+  /** Run PostgreSQL read probes in a read-only transaction. */
+  read_only?: boolean
 }
 
 export interface SqlExecuteResult {
@@ -120,6 +125,9 @@ export interface SchemaColumn {
 export interface SchemaInspectResult {
   table: string
   schema_name?: string
+  warehouse?: string
+  resolution?: string
+  addressing_hint?: string
   columns: SchemaColumn[]
   row_count?: number
 }
@@ -400,6 +408,8 @@ export interface WarehouseDiscoverResult {
 
 export interface SchemaIndexParams {
   warehouse: string
+  signal?: AbortSignal
+  timeout_ms?: number
 }
 
 export interface SchemaIndexResult {
@@ -409,6 +419,8 @@ export interface SchemaIndexResult {
   tables_indexed: number
   columns_indexed: number
   timestamp: string
+  partial?: boolean
+  note?: string
 }
 
 export interface SchemaSearchParams {

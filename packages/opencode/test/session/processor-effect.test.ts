@@ -2,7 +2,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { EventV2Bridge } from "@/event-v2-bridge"
-import { expect } from "bun:test"
+import { expect, spyOn } from "bun:test"
 import { tool } from "ai"
 import { Cause, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import path from "path"
@@ -28,6 +28,12 @@ import { SessionEvent } from "@opencode-ai/core/session/event"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { LLMEvent } from "@opencode-ai/llm"
 import { provideTmpdirInstanceLegacy, provideTmpdirServerLegacy } from "./legacy-instance"
+// altimate_change start — exercise real provider serialization without a listening socket
+import { createOpenAICompatible } from "@ai-sdk/openai-compatible"
+// altimate_change end
+// altimate_change start — request-only run budget interruption regressions
+import { RunBudget } from "@/altimate/run-budget"
+// altimate_change end
 
 const summary = Layer.succeed(
   SessionSummary.Service,
@@ -270,6 +276,520 @@ const runProcess = (
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+const streamGuard = testEffect(LayerNode.buildLayer(root, { replacements }))
+
+for (const deadline of ["soft", "hard"] as const) {
+  for (const stall of ["opening", "after tool result"] as const) {
+    streamGuard.live(`${deadline} deadline ends an unresponsive provider ${stall}`, () =>
+      provideTmpdirInstanceLegacy(
+        (dir) =>
+          Effect.gen(function* () {
+            const { processors, session, provider } = yield* boot()
+            const chat = yield* session.create({})
+            const parent = yield* user(chat.id, "Summarize the lookup.")
+            const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+            const mdl = yield* refModel(provider)
+            const controller = new AbortController()
+            const handle = yield* processors.create({
+              assistantMessage: msg as unknown as MessageV2.Assistant,
+              sessionID: chat.id, model: mdl, abort: controller.signal,
+            })
+            const stalled = defer<void>()
+            const release = defer<void>()
+            let requestSignal: AbortSignal | undefined
+            let idleBeforeCleanup = false
+            const setStatus = SessionStatus.set
+            const status = spyOn(SessionStatus, "set").mockImplementation(async (sessionID, value) => {
+              if (sessionID === chat.id && value.type === "idle" && stall === "after tool result") {
+                idleBeforeCleanup ||= !MessageV2.parts(msg.id).some((part) => part.type === "text" && part.time?.end)
+              }
+              return setStatus(sessionID, value)
+            })
+            const stream = spyOn(LLM, "stream").mockImplementation(async (request) => {
+              requestSignal = request.abort
+              if (stall === "opening") {
+                stalled.resolve()
+                await release.promise
+              }
+              async function* fullStream() {
+                yield { type: "start-step" }
+                yield { type: "text-start", id: "reply" }
+                yield { type: "text-delta", id: "reply", text: "A partial finding." }
+                const execution = handle.beginToolExecution("lookup-1")
+                yield { type: "tool-input-start", id: "lookup-1", toolName: "lookup" }
+                yield { type: "tool-call", toolCallId: "lookup-1", toolName: "lookup", input: {} }
+                handle.finishToolExecution(execution)
+                yield {
+                  type: "tool-result", toolCallId: "lookup-1", toolName: "lookup", input: {},
+                  output: { output: "A completed lookup.", title: "lookup", metadata: {} },
+                }
+                stalled.resolve()
+                // Neither the pending read nor iterator.return() cooperates with cancellation.
+                await release.promise
+              }
+              return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+            })
+            const fiber = yield* Effect.forkChild(runProcess(handle, controller, {
+              user: userInput(parent, chat.id), sessionID: chat.id, model: mdl, agent: agent(),
+              system: [], messages: [{ role: "user", content: "Summarize the lookup." }], tools: {},
+            }))
+            try {
+              yield* Effect.promise(() => stalled.promise)
+              if (deadline === "soft") RunBudget.interruptGeneration(chat.id)
+              else controller.abort()
+              expect(yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))).toBe(
+                deadline === "soft" ? "continue" : "stop",
+              )
+              expect(requestSignal?.aborted).toBe(true)
+              expect(controller.signal.aborted).toBe(deadline === "hard")
+              expect(handle.message.time.completed).toBeNumber()
+              expect(handle.message.error?.name).toBe(deadline === "hard" ? "MessageAbortedError" : undefined)
+              expect(idleBeforeCleanup).toBe(false)
+              if (stall === "after tool result") {
+                expect(MessageV2.parts(msg.id)).toContainEqual(expect.objectContaining({
+                  type: "tool", state: expect.objectContaining({ status: "completed", output: "A completed lookup." }),
+                }))
+                expect(MessageV2.parts(msg.id)).toContainEqual(expect.objectContaining({
+                  type: "text", text: "A partial finding.", time: expect.objectContaining({ end: expect.any(Number) }),
+                }))
+              }
+            } finally {
+              controller.abort()
+              release.resolve()
+              stream.mockRestore()
+              status.mockRestore()
+            }
+          }),
+        { config: { ...cfg, snapshot: false } },
+      ),
+    )
+  }
+}
+
+streamGuard.live("parent abort preserves committed findings from a still-running child task", () =>
+  provideTmpdirInstanceLegacy(
+    (dir) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "Delegate a lookup.")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const child = yield* session.create({ parentID: chat.id })
+        const childUser = yield* user(child.id, "Look up the items.")
+        const childReply = yield* assistant(child.id, childUser.id, path.resolve(dir))
+        yield* session.updatePart({
+          id: PartID.ascending(), sessionID: child.id, messageID: childReply.id,
+          type: "text", text: "Found three matching items.",
+        })
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
+        const handle = yield* processors.create({
+          assistantMessage: msg as unknown as MessageV2.Assistant,
+          sessionID: chat.id, model: mdl, abort: controller.signal,
+        })
+        const stalled = defer<void>()
+        const release = defer<void>()
+        const stream = spyOn(LLM, "stream").mockImplementation(async () => {
+          async function* fullStream() {
+            yield { type: "start-step" }
+            handle.beginToolExecution("task-1")
+            yield { type: "tool-input-start", id: "task-1", toolName: "task" }
+            yield { type: "tool-call", toolCallId: "task-1", toolName: "task", input: {} }
+            stalled.resolve()
+            await release.promise
+          }
+          return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+        })
+        try {
+          const fiber = yield* Effect.forkChild(runProcess(handle, controller, {
+            user: userInput(parent, chat.id), sessionID: chat.id, model: mdl, agent: agent(),
+            system: [], messages: [{ role: "user", content: "Delegate a lookup." }], tools: {},
+          }))
+          yield* Effect.promise(() => stalled.promise)
+          const part = handle.partFromToolCall("task-1")!
+          if (part.state.status !== "running") throw new Error("task was not running")
+          yield* session.updatePart({
+            ...part, state: { ...part.state, title: "Lookup", metadata: { sessionId: child.id, messageID: childUser.id } },
+          })
+          controller.abort()
+          expect(yield* Fiber.join(fiber).pipe(Effect.timeout("1 second"))).toBe("stop")
+          expect(MessageV2.parts(msg.id)).toContainEqual(expect.objectContaining({
+            type: "tool", tool: "task", state: expect.objectContaining({
+              status: "completed", metadata: expect.objectContaining({ interrupted: true, sessionId: child.id }),
+              output: expect.stringContaining("Found three matching items."),
+            }),
+          }))
+        } finally {
+          controller.abort()
+          release.resolve()
+          stream.mockRestore()
+        }
+      }),
+    { config: { ...cfg, snapshot: false } },
+  ),
+)
+
+// altimate_change start — soft deadlines retain partial output and settle tools before interrupting
+for (const toolState of ["none", "running", "result queued"] as const) {
+  const withTool = toolState !== "none"
+  streamGuard.live(`soft budget interrupts only the provider request (tool: ${toolState})`, () =>
+    provideTmpdirInstanceLegacy(
+      (dir) =>
+        Effect.gen(function* () {
+          const { processors, session, provider } = yield* boot()
+          const chat = yield* session.create({})
+          const parent = yield* user(chat.id, "Finish before the time budget.")
+          const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+          const mdl = yield* refModel(provider)
+          const controller = new AbortController()
+          const handle = yield* processors.create({
+            assistantMessage: msg as unknown as MessageV2.Assistant,
+            sessionID: chat.id,
+            model: mdl,
+            abort: controller.signal,
+          })
+          let interrupted = false
+          const stream = spyOn(LLM, "stream").mockImplementation(async (request) => {
+            async function* fullStream() {
+              yield { type: "start" }
+              yield { type: "start-step" }
+              yield { type: "reasoning-start", id: "thought" }
+              yield { type: "reasoning-delta", id: "thought", text: "Keep this reasoning" }
+              yield { type: "text-start", id: "reply" }
+              yield { type: "text-delta", id: "reply", text: "Keep this partial answer" }
+              const execution = withTool ? handle.beginToolExecution("lookup-1") : undefined
+              if (toolState === "result queued") {
+                handle.finishToolExecution(execution!)
+                RunBudget.interruptGeneration(chat.id)
+                expect(request.abort.aborted).toBe(false)
+              }
+              if (withTool) {
+                yield { type: "tool-input-start", id: "lookup-1", toolName: "lookup" }
+                yield { type: "tool-call", toolCallId: "lookup-1", toolName: "lookup", input: {} }
+              }
+              RunBudget.interruptGeneration(chat.id)
+              if (withTool) {
+                expect(request.abort.aborted).toBe(false)
+                if (toolState !== "result queued") handle.finishToolExecution(execution!)
+                yield {
+                  type: "tool-result", toolCallId: "lookup-1", toolName: "lookup", input: {},
+                  output: { output: "Keep the completed tool result", title: "lookup", metadata: {} },
+                }
+              }
+              expect(request.abort.aborted).toBe(true)
+              expect(controller.signal.aborted).toBe(false)
+              interrupted = true
+              throw request.abort.reason
+            }
+            return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+          })
+          try {
+            const result = yield* runProcess(handle, controller, {
+              user: userInput(parent, chat.id), sessionID: chat.id, model: mdl, agent: agent(),
+              system: [], messages: [{ role: "user", content: "Finish before the time budget." }], tools: {},
+            })
+            expect(interrupted).toBe(true)
+            expect(result).toBe("continue")
+            expect(handle.message.error).toBeUndefined()
+            expect(handle.message.finish).toBeUndefined()
+            expect(controller.signal.aborted).toBe(false)
+            expect(stream).toHaveBeenCalledTimes(1)
+            const parts = MessageV2.parts(msg.id)
+            expect(parts).toContainEqual(expect.objectContaining({
+              type: "reasoning", text: "Keep this reasoning", time: expect.objectContaining({ end: expect.any(Number) }),
+            }))
+            expect(parts).toContainEqual(expect.objectContaining({
+              type: "text", text: "Keep this partial answer", time: expect.objectContaining({ end: expect.any(Number) }),
+            }))
+            if (withTool) expect(parts).toContainEqual(expect.objectContaining({
+              type: "tool", state: expect.objectContaining({ status: "completed", output: "Keep the completed tool result" }),
+            }))
+          } finally {
+            stream.mockRestore()
+          }
+        }),
+      { config: { ...cfg, snapshot: false } },
+    ),
+  )
+}
+// altimate_change end
+
+// altimate_change start — use the real SDK stream with a transport that only ends on abort
+streamGuard.live("soft budget drains an executing tool before aborting the hanging SDK provider", () =>
+  provideTmpdirInstanceLegacy(
+    (dir) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "Finish before the time budget.")
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
+        const handle = yield* processors.create({
+          assistantMessage: msg as unknown as MessageV2.Assistant,
+          sessionID: chat.id, model: mdl, abort: controller.signal,
+        })
+        const started = defer<void>()
+        const release = defer<void>()
+        let transportSignal: AbortSignal | undefined
+        let requests = 0
+        const response = reply().text("Preserve partial text.").tool("lookup", {}).hang().item()
+        if (response.type !== "sse") throw new Error("expected SSE response")
+        const language = createOpenAICompatible({
+          name: "test", baseURL: "https://unused.invalid/v1",
+          fetch: (async (_url, init) => {
+            requests++
+            transportSignal = init?.signal ?? undefined
+            return new Response(new ReadableStream<Uint8Array>({
+              start(stream) {
+                for (const chunk of [...response.head, ...response.tail]) {
+                  stream.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(chunk)}\n\n`))
+                }
+                transportSignal!.addEventListener("abort", () => stream.error(transportSignal!.reason), { once: true })
+              },
+            }), { headers: { "Content-Type": "text/event-stream" } })
+          }) as typeof fetch,
+        }).chatModel("test-model")
+        const getLanguage = spyOn(Provider, "getLanguage").mockResolvedValue(language)
+        try {
+          const fiber = yield* Effect.forkChild(runProcess(handle, controller, {
+            user: userInput(parent, chat.id), sessionID: chat.id, model: mdl, agent: agent(),
+            system: [], messages: [{ role: "user", content: "Finish before the time budget." }],
+            tools: {
+              lookup: tool({
+                inputSchema: z.object({}),
+                execute: async (_input, options) => {
+                  const execution = handle.beginToolExecution(options.toolCallId)
+                  started.resolve()
+                  try {
+                    await release.promise
+                    expect(options.abortSignal?.aborted).toBe(false)
+                    return { output: "The completed lookup result", title: "lookup", metadata: {} }
+                  } finally {
+                    handle.finishToolExecution(execution)
+                  }
+                },
+              }),
+            },
+          }))
+          yield* Effect.promise(() => started.promise)
+          RunBudget.interruptGeneration(chat.id)
+          expect(transportSignal?.aborted).toBe(false)
+          release.resolve()
+          expect(yield* Fiber.join(fiber)).toBe("continue")
+          expect(transportSignal?.aborted).toBe(true)
+          expect(controller.signal.aborted).toBe(false)
+          expect(handle.message.error).toBeUndefined()
+          expect(requests).toBe(1)
+          const parts = MessageV2.parts(msg.id)
+          expect(parts).toContainEqual(expect.objectContaining({ type: "text", text: "Preserve partial text." }))
+          expect(parts).toContainEqual(expect.objectContaining({
+            type: "tool", state: expect.objectContaining({ status: "completed", output: "The completed lookup result" }),
+          }))
+        } finally {
+          release.resolve()
+          getLanguage.mockRestore()
+        }
+      }),
+    { config: { ...cfg, snapshot: false } },
+  ),
+)
+// altimate_change end
+
+for (const finishReason of ["other", "stop"] as const) {
+  for (const content of ["none", "text", "tool", "reasoning", "prior-step"] as const) {
+    for (const usageCase of ["zero", "undefined", "nonzero", "details-only"] as const) {
+      streamGuard.live(`empty stream guard: ${finishReason}, ${content}, usage ${usageCase}`, () =>
+        provideTmpdirInstanceLegacy(
+          (dir) =>
+            Effect.gen(function* () {
+              const { processors, session, provider } = yield* boot()
+              const chat = yield* session.create({})
+              const parent = yield* user(chat.id, "hi")
+              const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+              const mdl = yield* refModel(provider)
+              const controller = new AbortController()
+              const handle = yield* processors.create({
+                assistantMessage: msg as unknown as MessageV2.Assistant,
+                sessionID: chat.id,
+                model: mdl,
+                abort: controller.signal,
+              })
+              const tokens = usageCase === "zero" ? 0 : usageCase === "nonzero" ? 1 : undefined
+              const usage = {
+                inputTokens: tokens,
+                outputTokens: tokens,
+                totalTokens: tokens,
+                ...(usageCase === "details-only" && { inputTokenDetails: { cacheWriteTokens: 1 } }),
+              }
+              const stream = spyOn(LLM, "stream").mockImplementation(async () => {
+                async function* fullStream() {
+                  yield { type: "start" }
+                  yield { type: "start-step" }
+                  if (content === "text" || content === "prior-step") {
+                    yield { type: "text-start", id: "reply" }
+                    yield { type: "text-delta", id: "reply", text: "Hello" }
+                    yield { type: "text-end", id: "reply" }
+                  }
+                  if (content === "reasoning") {
+                    yield { type: "reasoning-start", id: "thought" }
+                    yield { type: "reasoning-delta", id: "thought", text: "Thinking" }
+                    yield { type: "reasoning-end", id: "thought" }
+                  }
+                  if (content === "tool") {
+                    yield { type: "tool-input-start", id: "call-1", toolName: "lookup" }
+                    yield { type: "tool-call", toolCallId: "call-1", toolName: "lookup", input: {} }
+                    yield {
+                      type: "tool-result",
+                      toolCallId: "call-1",
+                      toolName: "lookup",
+                      input: {},
+                      output: { output: "ok", title: "lookup", metadata: {} },
+                    }
+                  }
+                  if (content === "prior-step") {
+                    yield {
+                      type: "finish-step",
+                      finishReason: "stop",
+                      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                    }
+                    yield { type: "start-step" }
+                  }
+                  yield { type: "finish-step", finishReason, usage }
+                  yield { type: "finish", finishReason, totalUsage: usage }
+                }
+                return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+              })
+              try {
+                const result = yield* runProcess(handle, controller, {
+                  user: userInput(parent, chat.id),
+                  sessionID: chat.id,
+                  model: mdl,
+                  agent: agent(),
+                  system: [],
+                  messages: [{ role: "user", content: "hi" }],
+                  tools: {},
+                })
+                const empty = content === "none" || content === "prior-step"
+                if (finishReason === "other" && empty && (usageCase === "zero" || usageCase === "undefined")) {
+                  expect(result).toBe("stop")
+                  expect(handle.message.error?.data).toMatchObject({
+                    message: expect.stringContaining("the response likely could not be decoded"),
+                  })
+                } else {
+                  expect(handle.message.error).toBeUndefined()
+                  expect(result).toBe("continue")
+                }
+                if (content === "text" || content === "reasoning" || content === "tool") {
+                  expect(MessageV2.parts(msg.id).some((part) => part.type === content)).toBe(true)
+                }
+              } finally {
+                stream.mockRestore()
+              }
+            }),
+          { config: { ...cfg, snapshot: false } },
+        ),
+      )
+    }
+  }
+}
+
+// altimate_change start — a tool result must survive the next request's estimator and transport
+streamGuard.live("session.processor continues after a BigInt tool result", () =>
+  provideTmpdirInstanceLegacy(
+    (dir) =>
+      Effect.gen(function* () {
+        const { processors, session, provider } = yield* boot()
+        const chat = yield* session.create({})
+        const parent = yield* user(chat.id, "Count the qualifying projects.")
+        const previous = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const msg = yield* assistant(chat.id, parent.id, path.resolve(dir))
+        const mdl = yield* refModel(provider)
+        const controller = new AbortController()
+        const handle = yield* processors.create({
+          assistantMessage: msg as unknown as MessageV2.Assistant,
+          sessionID: chat.id,
+          model: mdl,
+          abort: controller.signal,
+        })
+        // Inject at the completed-tool replay boundary, before conversion to the
+        // AI SDK messages. Ordinary SQL tools format output as text; external
+        // tools can still return native values despite the declared string type.
+        const fakeTool = async () => ({
+          output: 9223372036854775807n,
+          metadata: { qualifying_projects: 9223372036854775807n, lint_rules: ["null_propagating_concat"] },
+          title: "COUNT",
+        })
+        const result = yield* Effect.promise(fakeTool)
+        const history = [
+          {
+            info: previous,
+            parts: [
+              {
+                id: PartID.ascending(),
+                messageID: previous.id,
+                sessionID: chat.id,
+                type: "tool",
+                tool: "count_projects",
+                callID: "call_count",
+                state: { status: "completed", input: {}, ...result, time: { start: 1, end: 2 } },
+              },
+            ],
+          },
+        ] as unknown as MessageV2.WithParts[]
+        const messages = yield* MessageV2.toModelMessagesEffect(history, mdl)
+        const requests: unknown[] = []
+        const response = reply().text("There are 9223372036854775807 qualifying projects.").stop().item()
+        if (response.type !== "sse") throw new Error("expected SSE response")
+        const language = createOpenAICompatible({
+          name: "test",
+          baseURL: "https://unused.invalid/v1",
+          fetch: (async (_url, init) => {
+            requests.push(JSON.parse(String(init?.body)))
+            return new Response(
+              [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              {
+                headers: { "Content-Type": "text/event-stream" },
+              },
+            )
+          }) as typeof fetch,
+        }).chatModel("test-model")
+        const getLanguage = spyOn(Provider, "getLanguage").mockResolvedValue(language)
+        try {
+          const value = yield* runProcess(handle, controller, {
+            user: userInput(parent, chat.id),
+            sessionID: chat.id,
+            model: mdl,
+            agent: agent(),
+            system: [],
+            messages,
+            tools: { count_projects: tool({ inputSchema: z.object({}) }) },
+          })
+
+          // Before the fix this is UnknownError: JSON.stringify cannot serialize
+          // BigInt, with zero tokens and no HTTP call or llm.request trace event.
+          expect(handle.message.error).toBeUndefined()
+          expect(value).toBe("continue")
+          expect(requests).toHaveLength(1)
+          expect(JSON.stringify(requests)).toContain("9223372036854775807")
+          expect(MessageV2.parts(msg.id)).toContainEqual(
+            expect.objectContaining({
+              type: "text",
+              text: "There are 9223372036854775807 qualifying projects.",
+            }),
+          )
+          expect(result.output).toBe(9223372036854775807n)
+          expect(result.metadata.qualifying_projects).toBe(9223372036854775807n)
+        } finally {
+          getLanguage.mockRestore()
+        }
+      }),
+    { config: { ...cfg, snapshot: false } },
+  ),
+)
+// altimate_change end
 
 it.live("session.processor effect tests capture llm input cleanly", () =>
   provideTmpdirServerLegacy(

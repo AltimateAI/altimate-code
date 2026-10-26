@@ -7,6 +7,7 @@ import { MessageID, SessionID } from "@/session/schema"
 import { Log } from "@/altimate/util/log"
 import { Dispatcher } from "../native"
 import { type Finding, type ReviewCategory, type Severity, makeFinding } from "./finding"
+import { readStreamText } from "../llm/stream-text"
 
 const log = Log.create({ service: "ai-review" })
 
@@ -120,13 +121,7 @@ export async function runAiReview(input: AiReviewInput): Promise<Finding[]> {
       retries: 1,
       messages: [{ role: "user", content: buildUserMessage({ ...input, files }) }],
     })
-    for await (const _ of stream.fullStream) {
-      // drain to avoid SDK hangs
-    }
-    const text = await Promise.resolve(stream.text).catch((err: unknown) => {
-      log.error("ai review stream failed", { error: err })
-      return undefined
-    })
+    const text = await readStreamText(stream)
     if (!text) return []
 
     // Parse + clamp in core (the prompt-injection-resistant, advisory-only

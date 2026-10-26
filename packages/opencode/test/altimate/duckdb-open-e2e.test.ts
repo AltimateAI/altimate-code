@@ -146,6 +146,135 @@ describe("DuckDB driver: opening a real store", () => {
     expect(results).toEqual(Array(8).fill(1))
   })
 
+  ddbTest("shares the engine until the last overlapping connector closes", async () => {
+    const connectors = await Promise.all(
+      Array.from({ length: 8 }, () => connect({ type: "duckdb", path: storePath })),
+    )
+    try {
+      // Keep the first writer alive until all other opens have settled. This
+      // forces overlap without relying on helper startup speed or a sleep.
+      await connectors[0].connect()
+      const opened = await Promise.allSettled(connectors.slice(1).map((c) => c.connect()))
+      expect(opened.filter((result) => result.status === "rejected")).toEqual([])
+
+      const counts = await Promise.all(
+        connectors.map(async (c) => Number((await c.execute("SELECT count(*) AS n FROM t")).rows[0][0])),
+      )
+      expect(counts).toEqual(Array(8).fill(1))
+
+      await Promise.all(connectors.slice(0, -1).map((c) => c.close()))
+      const survivor = await connectors[7].execute("SELECT count(*) AS n FROM t")
+      expect(Number(survivor.rows[0][0])).toBe(1)
+    } finally {
+      await Promise.all(connectors.map((c) => c.close()))
+    }
+
+    // A different process must be able to take the write lock once every
+    // connector releases the shared helper.
+    const lock = await holdWriteLock(storePath, dir)
+    await lock.release()
+  })
+
+  ddbTest("keeps overlapping connectors in independent sessions", async () => {
+    const first = await connect({ type: "duckdb", path: storePath })
+    const second = await connect({ type: "duckdb", path: storePath })
+    const table = `connector_transaction_${crypto.randomUUID().replaceAll("-", "")}`
+    try {
+      await Promise.all([first.connect(), second.connect()])
+      await first.execute("CREATE TEMP TABLE session_probe AS SELECT 1 AS value")
+      await second.execute("CREATE TEMP TABLE session_probe AS SELECT 2 AS value")
+      expect(Number((await first.execute("SELECT value FROM session_probe")).rows[0][0])).toBe(1)
+      expect(Number((await second.execute("SELECT value FROM session_probe")).rows[0][0])).toBe(2)
+
+      await first.execute(`CREATE TABLE ${table} (value INTEGER)`)
+      await first.execute("BEGIN")
+      await first.execute(`INSERT INTO ${table} VALUES (3)`)
+      expect(Number((await first.execute(`SELECT count(*) AS n FROM ${table}`)).rows[0][0])).toBe(1)
+      expect(Number((await second.execute(`SELECT count(*) AS n FROM ${table}`)).rows[0][0])).toBe(0)
+      await first.execute("COMMIT")
+      expect(Number((await second.execute(`SELECT count(*) AS n FROM ${table}`)).rows[0][0])).toBe(1)
+    } finally {
+      await first.execute("ROLLBACK").catch(() => {})
+      await first.execute(`DROP TABLE IF EXISTS ${table}`).catch(() => {})
+      await Promise.all([first.close(), second.close()])
+    }
+  })
+
+  ddbTest.each([undefined, 4096])("keeps sandbox restrictions on shared connector sessions (maxResultBytes=%s)", async (maxResultBytes) => {
+    const allowed = path.join(fs.realpathSync(dir), `sandbox's-${maxResultBytes ?? "buffered"}`)
+    fs.mkdirSync(allowed)
+    const inside = path.join(allowed, "inside.csv")
+    const outside = path.join(fs.realpathSync(dir), "outside.csv")
+    fs.writeFileSync(inside, "value\n42\n")
+    fs.writeFileSync(outside, "value\n99\n")
+    const quote = (value: string) => `'${value.replaceAll("'", "''")}'`
+    const config = { type: "duckdb", path: path.join(allowed, "store.duckdb"), create: true, sandbox_directory: allowed }
+    const first = await connect(config)
+    const second = await connect(config)
+    const blocked = [outside, "https://example.invalid/blocked.csv", `${allowed}/../outside.csv`]
+    try {
+      await first.connect()
+      await second.connect()
+      // Overlapping writers require one shared engine; equal temp table names
+      // below prove that each connector still has its own native connection.
+      for (const [index, c] of [first, second].entries()) {
+        // Exercise denied file and remote reads as the first user statement on
+        // a fresh native connection, before any successful query can initialize it.
+        for (const target of index === 0 ? blocked : [blocked[1], blocked[0], blocked[2]]) {
+          await expect(c.execute(`SELECT * FROM read_csv(${quote(target)})`, undefined, undefined, { maxResultBytes }))
+            .rejects.toThrow("file system operations are disabled by configuration")
+        }
+        const settings = await c.execute(`SELECT name, value, scope FROM duckdb_settings()
+          WHERE name IN ('autoinstall_known_extensions', 'autoload_known_extensions', 'enable_external_access', 'lock_configuration')
+          ORDER BY name`)
+        expect(settings.rows).toEqual([
+          ["autoinstall_known_extensions", "false", "GLOBAL"],
+          ["autoload_known_extensions", "false", "GLOBAL"],
+          ["enable_external_access", "false", "GLOBAL"],
+          ["lock_configuration", "true", "GLOBAL"],
+        ])
+        expect((await c.execute("SELECT scope FROM duckdb_settings() WHERE name = 'allowed_directories'")).rows)
+          .toEqual([["GLOBAL"]])
+        for (const sql of [
+          "SET enable_external_access = true",
+          `SET allowed_directories = [${quote(allowed)}]`,
+          `SET home_directory = ${quote(allowed)}`,
+        ]) await expect(c.execute(sql)).rejects.toThrow("the configuration has been locked")
+        const result = await c.execute(`SELECT * FROM read_csv(${quote(inside)})`, undefined, undefined, { maxResultBytes })
+        expect(result.rows).toEqual([[42n]])
+        await c.execute(`CREATE TEMP TABLE sandbox_session AS SELECT ${index} AS value`)
+      }
+      expect((await first.execute("SELECT * FROM sandbox_session")).rows).toEqual([[0]])
+      expect((await second.execute("SELECT * FROM sandbox_session")).rows).toEqual([[1]])
+
+      await second.close()
+      await second.connect()
+      for (const target of blocked) {
+        await expect(second.execute(`SELECT * FROM read_csv(${quote(target)})`, undefined, undefined, { maxResultBytes }))
+          .rejects.toThrow("file system operations are disabled by configuration")
+      }
+      expect((await second.execute(`SELECT * FROM read_csv(${quote(inside)})`)).rows).toEqual([[42n]])
+    } finally {
+      await Promise.all([first.close(), second.close()])
+    }
+  })
+
+  ddbTest("overlapping read-only connectors cannot write through their shared engine", async () => {
+    const readers = await Promise.all(
+      Array.from({ length: 2 }, () => connect({ type: "duckdb", path: storePath, readonly: true })),
+    )
+    try {
+      await Promise.all(readers.map((c) => c.connect()))
+      for (const [i, reader] of readers.entries()) {
+        expect(Number((await reader.execute("SELECT count(*) AS n FROM t")).rows[0][0])).toBe(1)
+        const message = await messageFrom(() => reader.execute(`CREATE TABLE reader_must_not_write_${i} (x INTEGER)`))
+        expect(message.toLowerCase()).toContain("read-only")
+      }
+    } finally {
+      await Promise.all(readers.map((c) => c.close()))
+    }
+  })
+
   ddbTest("honours config.readonly by actually opening READ_ONLY", async () => {
     const c = await connect({ type: "duckdb", path: storePath, readonly: true })
     await c.connect()

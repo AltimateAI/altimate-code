@@ -41,6 +41,15 @@ import { Locale } from "../../util/locale"
 import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../altimate/observability/tracing"
 // altimate_change start — run accounting helpers (fork-only module)
 import { RunAccounting } from "./run-accounting"
+// altimate_change start — wall-clock budget validation and deadline decisions
+import { RunTimeBudget } from "./run-time-budget"
+import { defer } from "../../util/defer"
+import { setTimeout as sleep } from "node:timers/promises"
+// altimate_change end
+import { RunTracing } from "./run-tracing"
+// altimate_change start — private trace stream diagnostics
+import { Log } from "../../util/log"
+// altimate_change end
 // altimate_change start — stable message id for idempotent prompt retries
 import { MessageID } from "../../session/schema"
 // altimate_change end
@@ -63,6 +72,7 @@ import { SessionTermination } from "../../session/termination"
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 // altimate_change - render the workspace engine offer in an attached run
 import { OFFER_COMMAND, installCommand } from "@/altimate/workspace/engine-offer"
+import { OutputCollector } from "./run-output"
 // altimate_change end
 
 // When a tool's parameters can't be statically inferred (legacy fork tools whose
@@ -75,6 +85,15 @@ type ToolProps<T = Tool.Info> = {
   metadata: Tool.InferMetadata<T>
   part: ToolPart
 }
+
+// altimate_change start — upstream_fix: run quoted space-containing prompt arguments, which reached the model as literal quotes
+export function joinRunMessage(args: string[], command: boolean): string {
+  if (!command) return args.join(" ")
+  return args
+    .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
+    .join(" ")
+}
+// altimate_change end
 
 function props<T = Tool.Info>(part: ToolPart): ToolProps<T> {
   const state = part.state
@@ -375,7 +394,9 @@ export const RunCommand = cmd({
         .option("output", {
           alias: ["o"],
           type: "string",
-          describe: "write final assistant response to file (.md or .txt)",
+          // altimate_change start — clarify the existing completed-text output contract
+          describe: "write completed assistant text, including preambles, when the run ends (.md or .txt); not incremental",
+          // altimate_change end
         })
         .option("audience", {
           type: "string",
@@ -395,8 +416,14 @@ export const RunCommand = cmd({
         // altimate_change start — budget limits for CI/enterprise governance
         .option("max-turns", {
           type: "number",
-          describe: "maximum number of assistant turns before aborting the session",
+          describe: "maximum assistant work turns; allows one committed-answer echo, or one best-effort reply after a budget abort",
         })
+        // altimate_change start — wall-clock work budget, with a separate finalization allowance
+        .option("time-budget", {
+          type: "number",
+          describe: "maximum time in seconds including startup (env: ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow",
+        })
+        // altimate_change end
         // altimate_change end
         // altimate_change start — backport upstream PR #21266 (dropped during v1.4.0 merge)
         .option("dangerously-skip-permissions", {
@@ -420,6 +447,14 @@ export const RunCommand = cmd({
     // benchmark harness must hear about immediately, not discover afterwards.
     if (args.maxTurns !== undefined && !RunAccounting.isValidMaxTurns(args.maxTurns)) {
       UI.error(`--max-turns must be a positive integer (got ${String(args.maxTurns)})`)
+      process.exit(1)
+    }
+    // altimate_change end
+    // altimate_change start — validate the CLI value or env fallback before starting any work
+    const timeBudgetInput = args.timeBudget ?? process.env.ALTIMATE_RUN_TIME_BUDGET_S
+    const timeBudget = timeBudgetInput === undefined ? undefined : Number(timeBudgetInput)
+    if (timeBudget !== undefined && !RunTimeBudget.isValidTimeBudget(timeBudget)) {
+      UI.error(`--time-budget must be a positive number (env: ALTIMATE_RUN_TIME_BUDGET_S; got ${String(timeBudgetInput)})`)
       process.exit(1)
     }
     // altimate_change end
@@ -459,9 +494,9 @@ export const RunCommand = cmd({
     })
     // altimate_change end
 
-    let message = [...args.message, ...(args["--"] || [])]
-      .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
-      .join(" ")
+    // altimate_change start — upstream_fix: run quoted space-containing prompt arguments, which reached the model as literal quotes
+    let message = joinRunMessage([...args.message, ...(args["--"] || [])], Boolean(args.command))
+    // altimate_change end
 
     const directory = (() => {
       if (!args.dir) return undefined
@@ -526,8 +561,20 @@ export const RunCommand = cmd({
     // Earlier revision used `!process.stdin?.isTTY`, which turned the crash
     // into a stall: undefined stdin satisfied the guard and we then awaited
     // Bun.stdin.text() on a stream that would never EOF. Skip the read
-    // entirely when there is no stdin to read from.
-    if (process.stdin && !process.stdin.isTTY) message += "\n" + (await Bun.stdin.text())
+    // entirely when there is no stdin to read from. An agent's shell tool can
+    // also hand `run` a socket stdin it never writes to or closes, so that
+    // read is bounded when there is a message or command to run without it:
+    // see `readRunStdin`.
+    if (process.stdin && !process.stdin.isTTY) {
+      const { readRunStdin, stdinWaitMs } = await import("../../altimate/cli/run-stdin")
+      const waitMs = stdinWaitMs()
+      const piped = await readRunStdin(undefined, waitMs, message.trim().length > 0 || !!args.command)
+      if (piped.timedOut)
+        process.stderr.write(
+          `No input on stdin after ${waitMs / 1000}s; continuing without it (input sent later is ignored). Redirect stdin from /dev/null to skip the wait, or set ALTIMATE_RUN_STDIN_WAIT_MS=0 to wait for it.${EOL}`,
+        )
+      message += "\n" + piped.text
+    }
     // altimate_change end
 
     if (message.trim().length === 0 && !args.command) {
@@ -604,7 +651,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
 - "Query Duration" not "total_elapsed_time" — "Data Processed" not "bytes_scanned" — "Monthly Cost" not "credits_used * 3.00"`
 
     async function execute(sdk: OpencodeClient) {
-      const outputParts: string[] = []
+      // altimate_change start — collect completed assistant text for run output
+      const outputParts = new OutputCollector()
+      // altimate_change end
       // altimate_change start — a turn must end with text (#1334). Track whether
       // the assistant said anything at all, and the last tool failure, so a
       // silent end can be answered with one synthetic reply turn.
@@ -618,14 +667,28 @@ You are speaking to a non-technical business executive. Follow these rules stric
       let lastToolFailure: { tool: string; error: string } | undefined
       let step = 0
       let lastTextStep: number | undefined
-      const answered = () => lastTextStep !== undefined && lastTextStep === step
+      // altimate_change start — a preamble before a still-running tool is not a final answer
+      let lastToolStep: number | undefined
+      let interruptedStep: number | undefined
+      const answered = () =>
+        lastTextStep !== undefined && lastTextStep === step && lastToolStep !== step && interruptedStep !== step
+      // altimate_change end
       // altimate_change end
       // altimate_change start — validate explicit models before starting the session event loop.
       // Otherwise an invalid model can fail before an idle event is emitted, leaving non-interactive
       // `run` waiting until the process-level timeout kills it.
       if (args.model) {
         const parsed = Provider.parseModel(args.model)
-        const providers = providerListOrThrow(await sdk.provider.list(), args.model)
+        // A failed list call (server busy at startup) is not "no providers": retry, then surface the real error
+        // instead of masquerading as an unknown model.
+        const providers = await (async () => {
+          for (let attempt = 1; ; attempt++) {
+            const res = await sdk.provider.list()
+            if (!res.error && Array.isArray(res.data?.all)) return res.data.all
+            if (attempt >= 3) return providerListOrThrow(res, args.model!)
+            await Bun.sleep(250 * attempt)
+          }
+        })()
         const provider = providers.find((item) => item.id === parsed.providerID)
         if (!provider?.models?.[parsed.modelID]) {
           throw new Provider.ModelNotFoundError({
@@ -658,8 +721,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
       }
 
+      // altimate_change start — preserve the first budget event across work and finalization loops
+      let budgetExhaustedEmitted = false
+      // altimate_change end
       function emit(type: string, data: Record<string, unknown>) {
         if (args.format === "json") {
+          // altimate_change start — finalization can exhaust its own allowance after the work budget
+          if (type === "budget_exhausted") {
+            if (budgetExhaustedEmitted) return true
+            budgetExhaustedEmitted = true
+          }
+          // altimate_change end
           process.stdout.write(JSON.stringify({ type, timestamp: Date.now(), sessionID, ...data }) + EOL)
           return true
         }
@@ -678,6 +750,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change start — turn accounting + dual-attribution
       // termination state for this run (see run-accounting.ts).
       const accounting = RunAccounting.create()
+      const requestOwnership = RunAccounting.createRequestOwnership()
+      // A queued request must not revoke the in-flight echo owned by an earlier request.
+      const committedRequests = new Set<string>()
+      const beginRequest = (messageID: string) => {
+        // The persisted request boundary includes requests from other attached clients.
+        // Retries retain their ID; internal synthetic/compaction rows do not emit this event.
+        if (!requestOwnership.beginRequest(messageID)) return
+        accounting.resetCommittedAnswer()
+      }
       // altimate_change end
       // altimate_change start — idle-done fallback state (run-mode-only by
       // construction — this exists only in the run command). Thresholds are
@@ -728,6 +809,161 @@ You are speaking to a non-technical business executive. Follow these rules stric
         }
       })()
 
+      // altimate_change start — isolate descendant traces from root CLI accounting
+      let runTracing: RunTracing | undefined
+      const traceAbort = new AbortController()
+      using _traceEvents = defer(() => traceAbort.abort())
+      let traceEventsDone: Promise<void> | undefined
+      // altimate_change end
+      // altimate_change start — one clock for all work, including task children and continuation turns
+      let timeStarted: number | undefined
+      let queryDeadline: number | undefined
+      let timeBudgetTimer: ReturnType<typeof setInterval> | undefined
+      const timeBudgetStop = new AbortController()
+      let workActive = false
+      let timeBudgetDeadline: "none" | "soft" | "hard" = "none"
+      // altimate_change start — run control travels with prompts, including attached finalization
+      let effortDowngradedAt: number | undefined
+      let generationInterruptedAt: number | undefined
+      const budgetWarnings: string[] = []
+      const budgetHeaders = (finalizing = false) => {
+        if (timeBudget === undefined && !finalizing) return undefined
+        const control =
+          timeBudgetDeadline === "none"
+            ? "work"
+            : process.env.ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE === "0"
+              ? "soft-no-downgrade"
+              : "soft"
+        return {
+          ...(!finalizing && queryDeadline !== undefined
+            ? { "x-altimate-run-query-deadline": String(queryDeadline) }
+            : {}),
+          "x-altimate-run-budget": finalizing
+            ? control === "soft"
+              ? "finalization"
+              : "finalization-no-downgrade"
+            : control,
+        }
+      }
+      const warnBudget = (message: string) => {
+        budgetWarnings.push(message)
+        process.stderr.write(`Warning: ${message}${EOL}`)
+        tracer?.logSpan({
+          name: "time-budget-warning",
+          startTime: Date.now(),
+          endTime: Date.now(),
+          attributes: { warning: message },
+        })
+      }
+      // altimate_change end
+      let timeBudgetReminder = Promise.resolve()
+      let timeBudgetAbort = Promise.resolve()
+      let timeAbortRequested = false
+      const timeExhausted = () => timeBudgetDeadline === "hard"
+      const elapsedSeconds = () => timeStarted === undefined ? 0 : (performance.now() - timeStarted) / 1000
+      const budgetMetadata = () => ({
+        max_turns: args.maxTurns,
+        time_budget_s: timeBudget,
+        elapsed_s: elapsedSeconds(),
+        time_budget_deadline: timeBudgetDeadline,
+        // altimate_change start — actual server request-boundary timestamps, in Unix milliseconds
+        effort_downgraded_at: effortDowngradedAt,
+        generation_interrupted_at: generationInterruptedAt,
+        // altimate_change end
+      })
+      const stopTimeBudget = () => {
+        clearInterval(timeBudgetTimer)
+        timeBudgetTimer = undefined
+      }
+      using _timeBudget = defer(stopTimeBudget)
+      const abortForTimeBudget = () => {
+        if (!sessionID || timeAbortRequested) return
+        timeAbortRequested = true
+        // altimate_change start — distinguish harness deadlines from user cancellation on the server
+        timeBudgetAbort = sdk.session.abort(
+          { sessionID },
+          { signal: AbortSignal.timeout(5_000), headers: { "x-altimate-run-budget": "hard-deadline" } },
+        ).then((result) => {
+          if (result.error) throw result.error
+        }).catch((e) => {
+          accounting.onSessionError("TimeBudgetAbortError", String(e))
+          eventAbort.abort()
+        })
+        // altimate_change end
+      }
+      const checkTimeBudget = () => {
+        if (!sessionID || !workActive || timeExhausted()) return
+        const deadline = RunTimeBudget.deadline(elapsedSeconds(), timeBudget)
+        if (deadline === "hard") {
+          timeBudgetDeadline = "hard"
+          timeBudgetStop.abort()
+          stopTimeBudget()
+          // altimate_change start — a time abort is recoverable by an answered finalization
+          accounting.onBudgetExhausted("time")
+          tracer?.setRunBudget(budgetMetadata())
+          const warning = `Budget exceeded: reached ${timeBudget} second time limit. Aborting work and requesting a final reply.`
+          emit("budget_exhausted", { limit_seconds: timeBudget })
+          warnBudget(warning)
+          // altimate_change end
+          // A resumed session can already be busy before this subscription starts.
+          // Cancel it even when no new busy event was observed.
+          abortForTimeBudget()
+          return
+        }
+        // altimate_change start — partial emitted text is not proof that an active request finished
+        if (deadline !== "soft" || timeBudgetDeadline !== "none") return
+        // altimate_change end
+        timeBudgetDeadline = "soft"
+        tracer?.setRunBudget(budgetMetadata())
+        if (!emit("time_budget_warning", { limit_seconds: timeBudget })) {
+          UI.println(
+            UI.Style.TEXT_WARNING_BOLD + "!",
+            UI.Style.TEXT_NORMAL + " Time budget nearly exhausted; requesting an answer.",
+          )
+        }
+        // altimate_change start — save the reminder then interrupt only the active model request
+        // The server applies the effort override before saving this user turn,
+        // and defers interruption until executing tools have kept their results.
+        const messageID = MessageID.ascending()
+        beginRequest(messageID)
+        // altimate_change end
+        timeBudgetReminder = sdk.session
+          // altimate_change start — carries soft control to both local and attached servers
+          .prompt(
+            {
+              sessionID,
+              messageID,
+              noReply: true,
+              agent,
+              model: args.model ? Provider.parseModel(args.model) : undefined,
+              variant: args.variant,
+              ...(audienceSystem ? { system: audienceSystem } : {}),
+              parts: [{ type: "text", text: SessionTermination.REPLY_BEFORE_TIME_BUDGET, synthetic: true }],
+            },
+            { signal: AbortSignal.timeout(5_000), headers: budgetHeaders() },
+          )
+          // altimate_change end
+          .then((result) => {
+            if (result.error) throw result.error
+          }).catch((e) => {
+            const detail = RunAccounting.serializeSessionError(e)
+            if (!emit("time_budget_warning_failed", { error: detail })) UI.error(`Time budget reminder failed: ${detail}`)
+          })
+      }
+      const startWorkClock = () => {
+        workActive = true
+        if (timeStarted !== undefined) return
+        // altimate_change start — include process bootstrap in the work deadline
+        timeStarted = performance.now() - process.uptime() * 1000
+        // altimate_change end
+        // compute the query cutoff once so reminders cannot extend it
+        queryDeadline = RunTimeBudget.queryDeadline(Date.now() - process.uptime() * 1000, timeBudget)
+        tracer?.setRunBudget(budgetMetadata())
+        // Fixed short ticks avoid the signed-32-bit timeout overflow for large budgets.
+        if (timeBudget !== undefined) timeBudgetTimer = setInterval(checkTimeBudget, 25)
+      }
+      // altimate_change end
+
       // altimate_change start — the event loop takes its stream as a
       // parameter so the idle-done challenge phase can re-run it over a fresh
       // subscription after the deliberate mid-run abort (same accounting, same
@@ -737,17 +973,57 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // would otherwise end the phase before the challenge prompt begins).
       async function loop(
         stream: typeof events.stream,
-        options?: { requireBusyFirst?: boolean; suppressInterruptedPromptAbort?: boolean },
+        options?: {
+          requireBusyFirst?: boolean
+          suppressInterruptedPromptAbort?: boolean
+          turnLimit?: number
+          signal?: AbortSignal
+        },
       ) {
         let sawBusy = false
         // altimate_change end
         const toggles = new Map<string, boolean>()
         // altimate_change start — max-turns budget enforcement (count kept in accounting)
-        const maxTurns = args.maxTurns
+        const maxTurns = options?.turnLimit ?? args.maxTurns
+        let budgetAborted = false
         // altimate_change end
 
         // altimate_change start — parameterized stream
         for await (const event of stream) {
+          if (options?.signal?.aborted) break
+          await runTracing?.observe(event)
+          if (options?.signal?.aborted) break
+          // altimate_change start — preserve request boundaries and internal continuation ownership on attached streams
+          const requestEvent = event as {
+            type: string
+            properties: { sessionID?: string; messageID?: string; parentID?: string }
+          }
+          if (
+            requestEvent.type === "session.request.started" &&
+            requestEvent.properties.sessionID === sessionID &&
+            requestEvent.properties.messageID
+          )
+            beginRequest(requestEvent.properties.messageID)
+          if (
+            requestEvent.type === "session.request.continued" &&
+            requestEvent.properties.sessionID === sessionID &&
+            requestEvent.properties.messageID &&
+            requestEvent.properties.parentID
+          )
+            requestOwnership.onUserMessage(requestEvent.properties.messageID, requestEvent.properties.parentID)
+          // altimate_change end
+          // altimate_change start — shared SDKs omit fork-only run budget events
+          const budgetEvent = event as { type: string; properties: { sessionID?: string; timestamp?: number } }
+          if (budgetEvent.properties.sessionID === sessionID && typeof budgetEvent.properties.timestamp === "number") {
+            if (budgetEvent.type === "session.budget.effort") effortDowngradedAt ??= budgetEvent.properties.timestamp
+            if (budgetEvent.type === "session.generation.interrupted") {
+              generationInterruptedAt ??= budgetEvent.properties.timestamp
+              // The processor closes partial text when interrupted, without completing its answer.
+              interruptedStep = step
+            }
+            tracer?.setRunBudget(budgetMetadata())
+          }
+          // altimate_change end
           // altimate_change end
           // altimate_change start — record each assistant message's agent so
           // step-start parts (which carry only messageID/sessionID) can be attributed.
@@ -755,25 +1031,24 @@ You are speaking to a non-technical business executive. Follow these rules stric
           // its first step-start part streams, so the lookup is populated in time.
           if (
             event.type === "message.updated" &&
+            event.properties.info.role === "user" &&
+            event.properties.info.sessionID === sessionID
+          ) {
+            // This provisional owner is replaced by the persisted request boundary
+            // or the internal continuation's explicit origin before its assistant starts.
+            requestOwnership.onUserMessage(event.properties.info.id)
+          }
+          if (
+            event.type === "message.updated" &&
             event.properties.info.role === "assistant" &&
             event.properties.info.sessionID === sessionID
           ) {
             accounting.onAssistantMessage(event.properties.info)
+            // Keep the request that owned the assistant's creation, even if an older
+            // tool finishes after another attached client persists a new request.
+            requestOwnership.onAssistantMessage(event.properties.info)
             assistantStarted = true
-          }
-          // altimate_change end
-          if (
-            event.type === "message.updated" &&
-            event.properties.info.role === "assistant" &&
-            args.format !== "json" &&
-            toggles.get("start") !== true
-          ) {
-            UI.empty()
-            UI.println(`> ${event.properties.info.agent} · ${event.properties.info.modelID}`)
-            UI.empty()
-            toggles.set("start", true)
-
-            // Enrich trace with resolved model/provider from the first assistant message
+            // Enrich only from this run's assistant, independently of presentation.
             const info = event.properties.info
             tracer?.enrichFromAssistant({
               modelID: info.modelID,
@@ -782,10 +1057,46 @@ You are speaking to a non-technical business executive. Follow these rules stric
               variant: info.variant,
             })
           }
+          // altimate_change end
+          if (
+            event.type === "message.updated" &&
+            event.properties.info.role === "assistant" &&
+            // altimate_change start — upstream_fix: only display this run's assistant
+            event.properties.info.sessionID === sessionID &&
+            // altimate_change end
+            args.format !== "json" &&
+            toggles.get("start") !== true
+          ) {
+            UI.empty()
+            UI.println(`> ${event.properties.info.agent} · ${event.properties.info.modelID}`)
+            UI.empty()
+            toggles.set("start", true)
+          }
 
+          // altimate_change start — discarded streamed text must not survive in --output fallbacks
+          if (event.type === "message.part.removed" && event.properties.sessionID === sessionID) {
+            outputParts.remove(event.properties.partID)
+          }
+          // altimate_change end
           if (event.type === "message.part.updated") {
             const part = event.properties.part
             if (part.sessionID !== sessionID) continue
+
+            // altimate_change start — tool steps cannot satisfy the final-answer check
+            if (part.type === "tool" && !accounting.isCompactionStep(part.messageID)) lastToolStep = step
+            if (
+              part.type === "tool" && part.tool === "answer_commit" &&
+              (part.state.status === "completed" || part.state.status === "error")
+            ) {
+              const requestID = requestOwnership.ownerOf(part.messageID)
+              if (requestID !== undefined) {
+                // Success and failed retries affect only the request that owns this tool.
+                if (part.state.status === "completed") committedRequests.add(requestID)
+                else committedRequests.delete(requestID)
+                if (requestID === requestOwnership.activeRequestID) accounting.onAnswerCommit(part.state.status)
+              }
+            }
+            // altimate_change end
 
             // altimate_change start — feed every part event through the
             // idle-done observer (event-stream ordering for build-after-last-write,
@@ -794,7 +1105,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // altimate_change end
 
             if (part.type === "tool" && (part.state.status === "completed" || part.state.status === "error")) {
-              tracer?.logToolCall(part as Parameters<Tracer["logToolCall"]>[0])
               // altimate_change start — remembered for the silent-turn reply (#1334). Before
               // the JSON-mode `emit`, which `continue`s past the rest.
               if (part.state.status === "error") {
@@ -825,7 +1135,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
             }
 
             if (part.type === "step-start") {
-              tracer?.logStepStart(part)
+              // altimate_change start — `--output` keeps only the last step's text (see run-output.ts)
+              outputParts.stepStart(accounting.isCompactionStep(part.messageID))
+              // altimate_change end
               // altimate_change start — see `step` (#1334). Compaction steps do not count,
               // as for the turn budget below: one running after the final answer would
               // otherwise move `step` past `lastTextStep` and ask for a reply the model
@@ -837,19 +1149,30 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // the owning message's agent is resolved via the message.updated lookup
               // above, so compacting models are not differentially charged turns.
               const counted = accounting.onStepStart(part.messageID)
-              if (counted && maxTurns && accounting.turnCount > maxTurns) {
+              const requestID = requestOwnership.ownerOf(part.messageID)
+              const committedAnswer = requestID !== undefined && committedRequests.has(requestID)
+              // altimate_change start — the time-budget abort already owns the interrupted work phase
+              if (
+                counted && maxTurns && accounting.turnCount > maxTurns && !committedAnswer && !budgetAborted &&
+                (!timeExhausted() || options?.turnLimit !== undefined)
+              ) {
+                stopTimeBudget()
+                // altimate_change end
+                budgetAborted = true
                 accounting.onBudgetExhausted()
                 error = `Budget exceeded: reached ${maxTurns} assistant turn${maxTurns !== 1 ? "s" : ""} limit`
-                UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
-                await sdk.session.abort({ sessionID })
-                break
+                if (!emit("budget_exhausted", { limit: maxTurns })) {
+                  UI.println(UI.Style.TEXT_DANGER_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Aborting session.`)
+                }
+                await sdk.session.abort({ sessionID }, { signal: options?.signal })
+                // Drain the ordered abort/error/idle tail before starting another phase.
+                continue
               }
               // altimate_change end
               if (emit("step_start", { part })) continue
             }
 
             if (part.type === "step-finish") {
-              tracer?.logStepFinish(part)
               // altimate_change start — record the model-side finish reason
               accounting.onStepFinish(part.messageID, (part as { reason?: string }).reason)
               // altimate_change end
@@ -859,6 +1182,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // one-shot). Firing aborts the churning prompt and hands off to the
               // confirm-DONE challenge phase after the event loop drains. Checked
               // BEFORE the json-mode emit-continue so headless drivers take this path too.
+              // altimate_change start — do not issue a completion challenge after a time abort
+              if (budgetAborted || timeBudgetDeadline === "hard") continue
+              // altimate_change end
               if (idleDone.shouldChallenge()) {
                 idleDone.markChallengeIssued()
                 accounting.onIdleDoneChallengeIssued()
@@ -882,7 +1208,6 @@ You are speaking to a non-technical business executive. Follow these rules stric
             }
 
             if (part.type === "text" && part.time?.end) {
-              tracer?.logText(part)
               // altimate_change start — explicit-done attribution input
               accounting.onText(part.messageID, part.text, part.synthetic === true)
               // altimate_change end
@@ -898,10 +1223,18 @@ You are speaking to a non-technical business executive. Follow these rules stric
                 lastTextStep = step
               }
               // altimate_change end
-              if (emit("text", { part })) continue
+              // altimate_change start — upstream_fix: --output collects text in JSON mode too
               const text = part.text.trim()
+              if (args.output && text) {
+                outputParts.text(text, {
+                  partID: part.id,
+                  synthetic: part.synthetic === true,
+                  compaction: accounting.isCompactionStep(part.messageID),
+                })
+              }
+              if (emit("text", { part })) continue
               if (!text) continue
-              if (args.output) outputParts.push(text)
+              // altimate_change end
               if (!process.stdout.isTTY) {
                 process.stdout.write(text + EOL)
                 continue
@@ -944,12 +1277,19 @@ You are speaking to a non-technical business executive. Follow these rules stric
             // (never a bare name, "[object Object]", or a literal {}); feed the
             // harness-stop attribution (recoverable overflow errors are excluded there).
             const err = RunAccounting.serializeSessionError(props.error)
-            accounting.onSessionError(
+            // altimate_change start — intentional time-budget cancellation is a warning
+            const disposition = accounting.onSessionError(
               props.error.name,
               "data" in props.error && props.error.data && "message" in props.error.data
                 ? String(props.error.data.message)
                 : undefined,
             )
+            if (timeExhausted() && disposition === "budget-abort") {
+              warnBudget(err)
+              emit("time_budget_abort_warning", { error: props.error })
+              continue
+            }
+            // altimate_change end
             // altimate_change end
             // altimate_change start — keep overflow trace failures recoverable only through compaction
             if (props.error.name === "ContextOverflowError") recoverableOverflowTraceErrors.add(err)
@@ -976,6 +1316,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
             event.properties.status.type === "busy"
           ) {
             sawBusy = true
+            // altimate_change start — cancel a generation whose budget expired during prompt setup
+            if (timeExhausted() && options?.turnLimit === undefined) {
+              // A deadline during preparation may have preceded the actual generation.
+              timeAbortRequested = false
+              abortForTimeBudget()
+            }
+            // altimate_change end
           }
           // altimate_change end
 
@@ -1009,6 +1356,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
           ) {
             // altimate_change start — ignore stale pre-challenge idles
             if (options?.requireBusyFirst && !sawBusy) continue
+            // altimate_change end
+            // altimate_change start — idle gaps are not active work; continuations retain the same start time
+            workActive = false
             // altimate_change end
             break
           }
@@ -1119,8 +1469,53 @@ You are speaking to a non-technical business executive. Follow these rules stric
         variant: args.variant,
         prompt: message,
       })
-      // altimate_change start - activate tracer for session
-      if (tracer) Tracer.setActive(tracer)
+      // altimate_change start — one trace per verified session, sharing export policy
+      // Global active spans carry no session identity and would mix child work
+      // into the root. Record that omission until the request-boundary hook exists.
+      if (tracer) {
+        Tracer.setActive(null)
+        runTracing = new RunTracing(sessionID, tracer, {
+          get: async (id) => (await sdk.session.get({ sessionID: id }, { signal: AbortSignal.timeout(1_000) })).data,
+          children: async (id) =>
+            (await sdk.session.children({ sessionID: id }, { signal: AbortSignal.timeout(1_000) })).data ?? [],
+        })
+        await runTracing.seed()
+        // Prompt snapshots use a separate, origin-guarded stream and are never public events.
+        let connected!: () => void
+        let failed!: (cause: unknown) => void
+        const ready = new Promise<void>((resolve, reject) => {
+          connected = resolve
+          failed = reject
+        })
+        const readyTimer = setTimeout(() => {
+          traceAbort.abort()
+          failed(new Error("Trace event subscription timed out"))
+        }, 5_000)
+        try {
+          const snapshots = await sdk.event.subscribe(undefined, {
+            url: "/altimate/trace/event",
+            signal: traceAbort.signal,
+          } as Parameters<typeof sdk.event.subscribe>[1])
+          traceEventsDone = (async () => {
+            for await (const event of snapshots.stream) {
+              if (event.type === "server.connected") connected()
+              await runTracing?.observe(event)
+            }
+          })()
+            .catch((cause) => {
+              failed(cause)
+              if (!traceAbort.signal.aborted) Log.Default.warn("trace event stream ended", { cause })
+            })
+            .finally(() => failed(new Error("Trace event stream closed before connecting")))
+          // The SDK stream is lazy: wait until the server has installed its private subscriber.
+          await ready
+        } catch (cause) {
+          traceAbort.abort()
+          Log.Default.warn("trace request capture unavailable", { cause })
+        } finally {
+          clearTimeout(readyTimer)
+        }
+      }
       // altimate_change end
 
       // Register crash handlers to flush the trace on unexpected exit
@@ -1145,6 +1540,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // flush takes; what is already on the wire is what gets the 2s.
         eventAbort.abort()
         const drains: Promise<unknown>[] = []
+        // Loaded during the drain, so only the count itself runs after it.
+        const unsent = CoreFlag.ALTIMATE_DISABLE_WORKSPACE
+          ? undefined
+          : import("../../altimate/cli/unsent-memory").catch(() => undefined)
         if (!CoreFlag.ALTIMATE_DISABLE_WORKSPACE)
           drains.push(import("../../altimate/workspace/memory-sync").then((m) => m.flushPendingMirrors(2_000)))
         if (captureEnabled)
@@ -1155,17 +1554,33 @@ You are speaking to a non-technical business executive. Follow these rules stric
         void Promise.race([
           Promise.allSettled(drains),
           new Promise<void>((resolve) => { timer = setTimeout(resolve, 2_000) }),
-        ]).finally(() => {
+        ]).finally(async () => {
           clearTimeout(timer)
+          // An interrupted upload is the likeliest to stay on this machine, so say so here too. The count
+          // is local; a second signal still exits at once.
+          const notice = await unsent
+            ?.then((m) => m?.unsentMemoryNoticeAfterRun(process.cwd(), 1_000))
+            .catch(() => null)
+          // process.exit does not wait for a pending write to a piped stderr; wait briefly, never for a
+          // reader that has stopped.
+          if (notice)
+            await new Promise<void>((resolve) => {
+              setTimeout(resolve, 500)
+              try {
+                process.stderr.write(notice + EOL, () => resolve())
+              } catch {
+                resolve()
+              }
+            })
           process.exit(code)
         })
       }
       const onSigint = () => {
-        tracer?.flushSync("Process interrupted")
+        runTracing?.flushSync("Process interrupted")
         exitAfterMirrors(130)
       }
       const onSigterm = () => {
-        tracer?.flushSync("Process interrupted")
+        runTracing?.flushSync("Process interrupted")
         exitAfterMirrors(143)
       }
       // altimate_change end
@@ -1177,7 +1592,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // outcome sticky in the right direction: a spurious firing during an
       // event-loop gap on a run that later completes must not poison the rc —
       // the success path marks the shared guard finished and restores exitCode.
-      const beforeExit = RunAccounting.createBeforeExitGuard(process, () => tracer?.flushSync("Process exited"))
+      const beforeExit = RunAccounting.createBeforeExitGuard(process, () => runTracing?.flushSync("Process exited"))
       const onBeforeExit = beforeExit.onBeforeExit
       // altimate_change end
       process.on("SIGINT", onSigint)
@@ -1231,6 +1646,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // server whether that message landed, and only re-send when it did not.
       const sendMessageID = MessageID.ascending()
       const send = () => {
+        beginRequest(sendMessageID)
+        // altimate_change start — start once at prompt dispatch, never reset on retry or child work
+        startWorkClock()
+        // altimate_change end
         // altimate_change start — first-run health: everything needed to talk to the model is ready,
         // for both the --command branch and the plain prompt branch
         Telemetry.startupReady("run")
@@ -1246,7 +1665,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
               arguments: message,
               variant: args.variant,
             },
-            { signal: eventAbort.signal },
+            // altimate_change start — run effort state covers command prompts as well
+            { signal: AbortSignal.any([eventAbort.signal, timeBudgetStop.signal]), headers: budgetHeaders() },
+            // altimate_change end
           )
         const model = args.model ? Provider.parseModel(args.model) : undefined
         return sdk.session.prompt(
@@ -1259,7 +1680,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
             parts: [...files, { type: "text", text: message }],
             ...(audienceSystem ? { system: audienceSystem } : {}),
           },
-          { signal: eventAbort.signal },
+          // altimate_change start — give the server the lifetime of this run's work phase
+          { signal: AbortSignal.any([eventAbort.signal, timeBudgetStop.signal]), headers: budgetHeaders() },
+          // altimate_change end
         )
       }
       /** Did the server persist this attempt's user message?
@@ -1267,9 +1690,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
        *  evidence that the message did NOT land. Treating an unreachable
        *  server as "absent" would resend a task that may already be running,
        *  which is the duplication this whole mechanism exists to prevent. */
-      const acceptanceState = async (messageID: string): Promise<"accepted" | "absent" | "unknown"> => {
+      const acceptanceState = async (messageID: string, signal?: AbortSignal): Promise<"accepted" | "absent" | "unknown"> => {
         try {
-          const res = (await sdk.session.message({ sessionID, messageID })) as {
+          const res = (await sdk.session.message({ sessionID, messageID }, { signal })) as {
             data?: { info?: unknown }
             error?: unknown
             response?: { status?: number }
@@ -1297,8 +1720,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
       const runSyntheticTurn = async (
         text: string,
         kind: "challenge" | "continuation" | "reply",
+        options?: { turnLimit: number; timeoutMs: number },
       ): Promise<SendResult | undefined> => {
         const turnAbort = new AbortController()
+        let timedOut = false
+        let timer: ReturnType<typeof setTimeout> | undefined
         // altimate_change start — "reply": the silent-turn follow-up (#1334)
         const names = {
           challenge: ["ChallengeEventStreamError", "IdleDoneChallengeFailed", "idle-done challenge", "idle_done_challenge_failed"],
@@ -1317,86 +1743,124 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // (or the JSON `silent_turn_reply` event) and an exit code, with no
         // connection or SSE error to explain it. (bot review on #1345)
         const surface = (name: string, detail: string) => {
+          if (timedOut) return
           accounting.onSessionError(name, detail)
           const line = `${humanName} failed: ${detail}`
           error = error ? error + EOL + line : line
           if (!emit("error", { error: { name, message: detail } })) UI.error(line)
         }
-        const turnEvents = await sdk.event.subscribe(undefined, { signal: turnAbort.signal }).catch((e) => {
-          surface(eventErrorName, e instanceof Error ? e.message : String(e))
-          return undefined
-        })
-        if (!turnEvents) return undefined
-
-        let sendFailed!: () => void
-        const sendFailure = new Promise<void>((resolveFailure) => {
-          sendFailed = resolveFailure
-        })
-        let streamFailed = false
-        const messageID = MessageID.ascending()
-        const promptPromise = (async (): Promise<SendResult | undefined> => {
-          // The previous turn may have published idle just before releasing its
-          // session lock. Retry that narrow race, but only after definitive
-          // proof this exact message was not persisted.
-          for (let attempt = 0; ; attempt++) {
-            const res = (await sdk.session
-              .prompt(
-                {
-                  sessionID,
-                  messageID,
-                  agent,
-                  model: args.model ? Provider.parseModel(args.model) : undefined,
-                  variant: args.variant,
-                  ...(audienceSystem ? { system: audienceSystem } : {}),
-                  // Synthetic harness text must never replace the authoritative
-                  // original task pin when this session is resumed.
-                  parts: [{ type: "text", text, synthetic: true }],
-                },
-                { signal: turnAbort.signal },
-              )
-              .catch((e) => ({ error: e }) as SendResult)) as SendResult
-            if (!res?.error) return res
-            const status = res.response?.status
-            const detail = RunAccounting.serializeSessionError(res.error)
-            const retryable =
-              status === 409 || RunAccounting.isRetryableStatus(status) || RunAccounting.isRetryableThrown(res.error)
-            if (!retryable) throw new Error(`${humanName} prompt failed: ${detail}`)
-
-            const acceptance = await acceptanceState(messageID)
-            if (acceptance === "accepted") return undefined
-            if (acceptance === "unknown") {
-              throw new Error(
-                `${humanName} failed and acceptance could not be determined; ` +
-                  `not retrying to avoid duplication — ${detail}`,
-              )
-            }
-            if (attempt >= 8) {
-              emit(eventName, { error: detail })
-              throw new Error(`${humanName} prompt failed: ${detail}`)
-            }
-            await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
-          }
-        })()
-        promptPromise.catch(() => sendFailed())
-        await Promise.race([
-          loop(turnEvents.stream, { requireBusyFirst: true }).catch((e) => {
-            streamFailed = true
+        const run = async () => {
+          const turnEvents = await sdk.event.subscribe(undefined, { signal: turnAbort.signal }).catch((e) => {
             surface(eventErrorName, e instanceof Error ? e.message : String(e))
-            turnAbort.abort()
-          }),
-          sendFailure,
-        ])
-        const result = await promptPromise.catch((e) => {
-          if (!streamFailed) surface(sendErrorName, e instanceof Error ? e.message : String(e))
-          return undefined
-        })
-        turnAbort.abort()
-        return result
+            return undefined
+          })
+          if (!turnEvents || turnAbort.signal.aborted) return undefined
+
+          // altimate_change start — synthetic work shares the clock; budget finalization has its own allowance
+          if (!options) startWorkClock()
+          // altimate_change end
+
+          let sendFailed!: () => void
+          const sendFailure = new Promise<void>((resolveFailure) => {
+            sendFailed = resolveFailure
+          })
+          let streamFailed = false
+          const messageID = MessageID.ascending()
+          beginRequest(messageID)
+          const promptPromise = (async (): Promise<SendResult | undefined> => {
+            // The previous turn may have published idle just before releasing its
+            // session lock. Retry that narrow race, but only after definitive
+            // proof this exact message was not persisted.
+            for (let attempt = 0; ; attempt++) {
+              if (turnAbort.signal.aborted) return undefined
+              const res = (await sdk.session
+                .prompt(
+                  {
+                    sessionID,
+                    messageID,
+                    agent,
+                    model: args.model ? Provider.parseModel(args.model) : undefined,
+                    variant: args.variant,
+                    ...(audienceSystem ? { system: audienceSystem } : {}),
+                    // Synthetic harness text must never replace the authoritative
+                    // original task pin when this session is resumed.
+                    parts: [{ type: "text", text, synthetic: true }],
+                  },
+                  // altimate_change start — finalization disables tools while preserving its effort setting
+                  { signal: turnAbort.signal, headers: budgetHeaders(options !== undefined) },
+                  // altimate_change end
+                )
+                .catch((e) => ({ error: e }) as SendResult)) as SendResult
+              if (!res?.error) return res
+              const status = res.response?.status
+              const detail = RunAccounting.serializeSessionError(res.error)
+              const retryable =
+                status === 409 || RunAccounting.isRetryableStatus(status) || RunAccounting.isRetryableThrown(res.error)
+              if (!retryable) throw new Error(`${humanName} prompt failed: ${detail}`)
+
+              const acceptance = await acceptanceState(messageID, turnAbort.signal)
+              if (acceptance === "accepted") return undefined
+              if (acceptance === "unknown") {
+                throw new Error(
+                  `${humanName} failed and acceptance could not be determined; ` +
+                    `not retrying to avoid duplication — ${detail}`,
+                )
+              }
+              if (attempt >= 8) {
+                emit(eventName, { error: detail })
+                throw new Error(`${humanName} prompt failed: ${detail}`)
+              }
+              await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)))
+            }
+          })()
+          promptPromise.catch(() => sendFailed())
+          await Promise.race([
+            loop(turnEvents.stream, { requireBusyFirst: true, turnLimit: options?.turnLimit, signal: turnAbort.signal }).catch(
+              (e) => {
+                streamFailed = true
+                surface(eventErrorName, e instanceof Error ? e.message : String(e))
+                turnAbort.abort()
+              },
+            ),
+            sendFailure,
+          ])
+          const result = await promptPromise.catch((e) => {
+            if (!streamFailed) surface(sendErrorName, e instanceof Error ? e.message : String(e))
+            return undefined
+          })
+          return result
+        }
+        try {
+          if (!options) return await run()
+          const deadline = new Promise<undefined>((resolve) => {
+            timer = setTimeout(() => {
+              surface("BudgetFinalizationTimeout", `no final reply within ${options.timeoutMs}ms`)
+              timedOut = true
+              turnAbort.abort()
+              void sdk.session.abort({ sessionID }, { signal: AbortSignal.timeout(5_000) }).catch(() => {})
+              resolve(undefined)
+            }, options.timeoutMs)
+          })
+          return await Promise.race([run(), deadline])
+        } finally {
+          clearTimeout(timer)
+          turnAbort.abort()
+          // altimate_change start — an ended synthetic phase must not fire a late deadline
+          workActive = false
+          // altimate_change end
+        }
       }
       // altimate_change end
       let sendResult: SendResult | undefined
       let sendFailure: unknown
       for (let sendAttempt = 0; ; sendAttempt++) {
+        // altimate_change start — an expired budget must not enqueue another retry
+        if (timeExhausted()) {
+          // A rejected enqueue has no generation that could publish idle.
+          eventAbort.abort()
+          break
+        }
+        // altimate_change end
         let reason: string
         try {
           const res = (await send()) as SendResult
@@ -1417,7 +1881,14 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // evidence that the message did NOT land. Re-sending an accepted prompt
         // duplicates the task; re-sending on an UNKNOWN state risks the same,
         // so that case fails the run loudly instead of guessing.
-        const acceptance = await acceptanceState(sendMessageID)
+        const acceptance = await acceptanceState(
+          sendMessageID,
+          AbortSignal.any([eventAbort.signal, timeBudgetStop.signal]),
+        )
+        if (timeExhausted()) {
+          sendFailure = timeBudgetStop.signal.reason
+          break
+        }
         if (acceptance === "accepted") {
           // The failure was on the response path only — the run is in flight,
           // so fall through and let the event loop drain to idle.
@@ -1448,11 +1919,24 @@ You are speaking to a non-technical business executive. Follow these rules stric
             UI.Style.TEXT_NORMAL + ` retrying prompt (${sendAttempt + 1}/${retryMax}) in ${delay}ms — ${reason}`,
           )
         }
-        await new Promise((resolve) => setTimeout(resolve, delay))
+        // altimate_change start — a retry backoff cannot outlive the work deadline
+        await sleep(delay, undefined, { signal: timeBudgetStop.signal }).catch(() => {})
+        // altimate_change end
       }
       // the prompt response carries the TERMINAL assistant message —
       // inspect it for swallowed abnormal endings (see RunAccounting.onPromptResult).
-      if (sendFailure) {
+      // altimate_change start — cancellation during bootstrap may end the POST without an assistant body
+      const deadlineCancelledRequest =
+        timeBudgetStop.signal.aborted &&
+        [sendFailure, sendResult?.error].some(
+          (cause) => cause === timeBudgetStop.signal.reason || (cause instanceof Error && cause.name === "AbortError"),
+        )
+      if (timeExhausted() && timeAbortRequested && (!assistantStarted || deadlineCancelledRequest) && !eventLoopFailure) {
+        // Intentional POST cancellation preserves the budget finalization allowance,
+        // including an active generation that already emitted an assistant message.
+        eventAbort.abort()
+      } else if (sendFailure) {
+      // altimate_change end
         // Losing SSE intentionally aborts the synchronous POST. Attribute that
         // derivative AbortError to the original stream failure; otherwise it
         // overwrites timeout/error classification and the actionable message.
@@ -1477,6 +1961,11 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change start — close the initial SSE lifetime on every outcome
       eventAbort.abort()
       if (eventLoopFailure && !error) error = RunAccounting.serializeSessionError(eventLoopFailure)
+      // altimate_change end
+      // altimate_change start — settle deadline writes before a new prompt generation can begin
+      workActive = false
+      await timeBudgetReminder
+      await timeBudgetAbort
       // altimate_change end
 
       // altimate_change start — one-shot confirm-DONE challenge phase.
@@ -1550,8 +2039,37 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // synthetic turn asks for it, naming the failed tool so it is not retried.
       // If the model still says nothing, a synthesised line says what happened and
       // the exit code says the request was not answered.
-      if (!answered() && !accounting.fatal && assistantStarted) {
-        const directive = SessionTermination.replyAfterSilentTurn(lastToolFailure)
+      // A budget abort permits one bounded finalization with a local allowance.
+      // Budget attribution is retained; an answered time-budget finalization can
+      // recover the exit status. Turn-limit exhaustion retains its nonzero status.
+      // A silent stop exactly at the work limit has no in-flight generation to
+      // abort. Enter finalization directly instead of spending a reply just to
+      // discover that it exceeds the same budget.
+      if (!answered() && assistantStarted && !accounting.fatal && args.maxTurns && accounting.turnCount >= args.maxTurns) {
+        accounting.onBudgetExhausted()
+        error = `Budget exceeded: reached ${args.maxTurns} assistant turn${args.maxTurns !== 1 ? "s" : ""} limit`
+        if (!emit("budget_exhausted", { limit: args.maxTurns })) {
+          UI.println(UI.Style.TEXT_WARNING_BOLD + "!", UI.Style.TEXT_NORMAL + ` ${error}. Requesting a final reply.`)
+        }
+      }
+      // altimate_change start — time exhaustion during a silent reply still gets the bounded finalization
+      // At most an ordinary silent reply followed by one budget finalization.
+      // A hard deadline must finalize even if the interrupted request emitted text.
+      for (
+        let replyAttempt = 0;
+        replyAttempt < 2 && (timeExhausted() || !answered()) && (assistantStarted || timeExhausted());
+        replyAttempt++
+      ) {
+        await timeBudgetReminder
+        await timeBudgetAbort
+        const finalizationLimit = accounting.takeBudgetFinalizationAllowance()
+        if (accounting.fatal && finalizationLimit === undefined) break
+        if (finalizationLimit !== undefined) stopTimeBudget()
+        // altimate_change end
+        const directive =
+          finalizationLimit !== undefined
+            ? SessionTermination.REPLY_AFTER_BUDGET
+            : SessionTermination.replyAfterSilentTurn(lastToolFailure)
         if (!emit("silent_turn_reply", { failure: lastToolFailure ?? null })) {
           UI.println(
             UI.Style.TEXT_WARNING_BOLD + "!",
@@ -1559,25 +2077,48 @@ You are speaking to a non-technical business executive. Follow these rules stric
               ` the turn ended without a reply${lastToolFailure ? ` after \`${lastToolFailure.tool}\` failed` : ""} — asking for one`,
           )
         }
-        const replyResult = await runSyntheticTurn(directive, "reply")
+        const replyResult = await runSyntheticTurn(
+          directive,
+          "reply",
+          finalizationLimit !== undefined ? { turnLimit: finalizationLimit, timeoutMs: 30_000 } : undefined,
+        )
         accounting.onPromptResult(replyResult?.data?.info)
+        // altimate_change start — only an answered finalization can recover the hard time abort
+        if (finalizationLimit !== undefined) accounting.completeBudgetFinalization(answered())
+        // altimate_change end
+        // altimate_change start — re-enter the same finalization gate if this work reply hit the hard deadline
+        if (!answered() && finalizationLimit === undefined && timeExhausted()) continue
+        // altimate_change end
         // A reply turn that died in transport (stream or send failure) has already
         // recorded its own cause; silence after that is not the model's, so it is
         // neither attributed to it nor allowed to overwrite the real error.
-        if (!answered() && !accounting.fatal) {
+        if (!answered() && (!accounting.fatal || finalizationLimit !== undefined)) {
           // The tool is named; its diagnostic is not repeated here. It was already
           // printed when the call failed, and this line also goes to `--output`, which
           // is documented as the answer — not a place for raw tool output.
-          const line = lastToolFailure
+          const line = finalizationLimit !== undefined
+            ? "No final answer was produced: the work budget was exhausted and the best-effort reply did not provide an answer."
+            : lastToolFailure
             ? `No answer was produced: the turn ended after \`${lastToolFailure.tool}\` failed.`
             : "No answer was produced: the turn ended without a reply."
           if (!emit("silent_turn", { failure: lastToolFailure ?? null, message: line })) {
             process.stdout.write(line + EOL)
           }
-          if (args.output) outputParts.push(line)
-          accounting.onSessionError("SilentTurn", line)
+          // altimate_change start — retain partial findings when bounded finalization cannot answer
+          if (args.output) outputParts.note(line, { preserveLastText: finalizationLimit !== undefined })
+          // altimate_change end
+          if (finalizationLimit === undefined) accounting.onSessionError("SilentTurn", line)
         }
+        // altimate_change start — no repeated silent replies or repeated finalizations
+        break
+        // altimate_change end
       }
+      // altimate_change end
+
+      // altimate_change start — capture model-work elapsed time before unrelated exit flushes
+      stopTimeBudget()
+      const finalBudgetMetadata = budgetMetadata()
+      tracer?.setRunBudget(finalBudgetMetadata)
       // altimate_change end
 
       // altimate_change start — a cold workspace skill sync outlives a short
@@ -1598,6 +2139,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
             .then((m) => m.flushPendingMirrors())
             .catch(() => {}),
         ])
+        // This process does not retry an upload, and nothing else tells the user
+        // that memory stayed on this machine.
+        const notice = await import("../../altimate/cli/unsent-memory")
+          .then((m) => m.unsentMemoryNoticeAfterRun(process.cwd()))
+          .catch(() => null)
+        if (notice) process.stderr.write(notice + EOL)
       }
       // altimate_change end
 
@@ -1636,7 +2183,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // are distinguishable in the run output (rc alone conflates them);
       // done_reason distinguishes explicit_done vs idle_heuristic vs none.
       const termination = accounting.termination()
-      if (!emit("termination", { ...termination }) && process.stdout.isTTY) {
+      // altimate_change start — include wall-clock accounting alongside turn-budget metadata
+      if (!emit("termination", { ...termination, ...finalBudgetMetadata }) && process.stdout.isTTY) {
+      // altimate_change end
         UI.println(
           UI.Style.TEXT_DIM +
             `why_model_stopped=${termination.why_model_stopped} why_harness_stopped=${termination.why_harness_stopped} done_reason=${termination.done_reason}` +
@@ -1649,8 +2198,13 @@ You are speaking to a non-technical business executive. Follow these rules stric
       if (tracer) {
         Tracer.setActive(null)
         // altimate_change start — persist only overflow errors that never reached a recovery event
-        const traceError = [error, ...recoverableOverflowTraceErrors.values()].filter(Boolean).join(EOL) || undefined
-        const tracePath = await tracer.endTrace(traceError)
+        // altimate_change start — warnings become a fatal trace outcome only if no final answer recovered the budget
+        const traceError = [error, ...recoverableOverflowTraceErrors.values(), ...(accounting.fatal ? budgetWarnings : [])]
+          .filter(Boolean).join(EOL) || undefined
+        // altimate_change end
+        traceAbort.abort()
+        await traceEventsDone
+        const tracePath = await runTracing?.finish(traceError)
         // altimate_change end
         if (tracePath) {
           emit("trace_saved", { path: tracePath })
@@ -1663,7 +2217,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // Write accumulated text output to file if --output was specified
       if (args.output) {
         const outputPath = path.resolve(args.output)
-        const content = outputParts.join("\n\n") || "(no text output — tool-only response)"
+        // altimate_change start — render collected assistant text for the output file
+        const content = outputParts.content()
+        // altimate_change end
         await Bun.write(outputPath, content)
         process.stderr.write(`\n✓ Output saved to: ${outputPath}\n`)
       }

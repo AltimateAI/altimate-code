@@ -7,8 +7,9 @@
 
 import { BridgeMethods, type BridgeMethod } from "./types"
 import { Telemetry } from "../telemetry"
+import type { QueryContext } from "./query-execution"
 
-type NativeHandler = (params: any) => Promise<any>
+type NativeHandler = (params: any, context?: QueryContext) => Promise<any>
 
 const nativeHandlers = new Map<string, NativeHandler>()
 
@@ -51,6 +52,7 @@ export function setRegistrationHook(fn: () => Promise<void>): void {
 export async function call<M extends BridgeMethod>(
   method: M,
   params: (typeof BridgeMethods)[M] extends { params: infer P } ? P : never,
+  context?: QueryContext,
 ): Promise<(typeof BridgeMethods)[M] extends { result: infer R } ? R : never> {
   // Lazy registration: load all handler modules on first call. Cache the
   // in-flight promise so concurrent callers share one attempt; on failure
@@ -108,7 +110,7 @@ export async function call<M extends BridgeMethod>(
 
   const startTime = Date.now()
   try {
-    const result = await native(params)
+    const result = await native(params, context)
 
     try {
       Telemetry.track({

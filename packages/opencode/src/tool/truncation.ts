@@ -2,7 +2,9 @@ import fs from "fs/promises"
 import path from "path"
 import { Global } from "../global"
 import { PermissionNext } from "../permission/next"
-import type { Agent } from "../agent/agent"
+// altimate_change start — resolve truncation delegation hints against available subagents.
+import { Agent } from "../agent/agent"
+// altimate_change end
 import { Scheduler } from "../scheduler"
 import { Filesystem } from "../util/filesystem"
 import { Glob } from "../util/glob"
@@ -54,11 +56,17 @@ export namespace Truncate {
     // altimate_change end
   }
 
-  function hasTaskTool(agent?: Agent.Info): boolean {
-    if (!agent?.permission) return false
-    const rule = PermissionNext.evaluate("task", "*", agent.permission)
-    return rule.action !== "deny"
+  // altimate_change start — upstream_fix: named task allow-lists must not suggest denied subagents.
+  async function taskSubagent(agent?: Agent.Info) {
+    if (!agent?.permission) return undefined
+    const agents = (await Agent.list()).filter(
+      (candidate) =>
+        candidate.mode !== "primary" &&
+        PermissionNext.evaluate("task", candidate.name, agent.permission).action !== "deny",
+    )
+    return (agents.find((candidate) => candidate.name === "explore") ?? agents[0])?.name
   }
+  // altimate_change end
 
   // altimate_change start — default direction "middle" (head+tail,
   // tail-weighted elision) via the shared truncate-core.ts algorithm.
@@ -74,14 +82,15 @@ export namespace Truncate {
       return { content: text, truncated: false }
     }
 
+    const subagent = await taskSubagent(agent)
     const preview = TruncateCore.preview(lines, totalBytes, { maxLines, maxBytes, direction, headRatio })
 
     const id = ToolID.ascending()
     const filepath = path.join(DIR, id)
     await Filesystem.write(filepath, text)
 
-    const hint = hasTaskTool(agent)
-      ? `The tool call succeeded but the output was truncated. Full output saved to: ${filepath}\nUse the Task tool to have explore agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
+    const hint = subagent
+      ? `The tool call succeeded but the output was truncated. Full output saved to: ${filepath}\nUse the Task tool to have ${subagent} agent process this file with Grep and Read (with offset/limit). Do NOT read the full file yourself - delegate to save context.`
       : `The tool call succeeded but the output was truncated. Full output saved to: ${filepath}\nUse Grep to search the full content or Read with offset/limit to view specific sections.`
 
     return { content: TruncateCore.assemble(preview, hint, direction), truncated: true, outputPath: filepath }

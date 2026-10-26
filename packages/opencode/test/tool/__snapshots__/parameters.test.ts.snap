@@ -275,6 +275,12 @@ exports[`tool parameters JSON Schema (wire shape) read 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "char_offset": {
+      "description": "Character offset within each selected line (0-indexed, defaults to 0). Use limit=1 for a single long line.",
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer",
+    },
     "filePath": {
       "description": "The absolute path to the file or directory to read",
       "type": "string",
@@ -283,6 +289,13 @@ exports[`tool parameters JSON Schema (wire shape) read 1`] = `
       "description": "The maximum number of lines to read (defaults to 2000)",
       "maximum": 9007199254740991,
       "minimum": 0,
+      "type": "integer",
+    },
+    "max_chars": {
+      "description": "Maximum characters per selected line (defaults to 2000); output remains bounded to 50 KB.",
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991,
+      "minimum": -9007199254740991,
       "type": "integer",
     },
     "offset": {

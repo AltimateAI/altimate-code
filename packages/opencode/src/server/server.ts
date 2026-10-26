@@ -312,6 +312,23 @@ export namespace Server {
         // altimate_change end
         return basicAuth({ username, password })(c, next)
       })
+      // altimate_change start — telemetry: a real external client attached to the event stream.
+      // Emit after next() and only on a 2xx, so a request that fails before the stream is
+      // established doesn't burn the once-per-process latch. Skip the in-process trace consumer
+      // (serve.ts subscribes to /event for observability via x-altimate-trace-consumer): it is not
+      // a real client and would otherwise trip the latch on every `serve` launch before the IDE
+      // attaches.
+      .use(async (c, next) => {
+        const isClientEventStream =
+          c.req.method === "GET" &&
+          (c.req.path === "/event" || c.req.path === "/global/event") &&
+          !c.req.header("x-altimate-trace-consumer")
+        await next()
+        if (isClientEventStream && c.res.ok) {
+          void import("../altimate/telemetry").then((m) => m.Telemetry.clientConnected()).catch(() => {})
+        }
+      })
+      // altimate_change end
       .use(async (c, next) => {
         const skipLogging = c.req.path === "/log"
         if (!skipLogging) {
@@ -1358,6 +1375,35 @@ export namespace Server {
       // The TUI's `/traces` for the IDE extension, which runs this CLI headless: a page of the
       // session traces and one trace's self-contained viewer page. Trace content carries prompts and
       // tool output, so a browser origin is refused on the same terms as the workspace routes.
+      .get("/altimate/trace/event", async (c) => {
+        const refused = browserOriginRefusal(
+          "Traces",
+          c.req.header("origin"),
+          c.req.header("host"),
+          undefined,
+          c.req.header("sec-fetch-site"),
+        )
+        if (refused) return c.json(refused.body, refused.status)
+        const { LLMRequestEvent } = await import("../altimate/observability/tracing")
+        c.header("Cache-Control", "no-cache, no-transform")
+        c.header("X-Accel-Buffering", "no")
+        return streamSSE(c, async (stream) => {
+          const unsubscribe = Bus.subscribe(LLMRequestEvent, (event) =>
+            stream.writeSSE({ data: JSON.stringify(event) }),
+          )
+          await stream.writeSSE({ data: JSON.stringify({ type: "server.connected", properties: {} }) })
+          const heartbeat = setInterval(() => {
+            void stream.writeSSE({ data: JSON.stringify({ type: "server.heartbeat", properties: {} }) })
+          }, 10_000)
+          await new Promise<void>((resolve) =>
+            stream.onAbort(() => {
+              clearInterval(heartbeat)
+              unsubscribe()
+              resolve()
+            }),
+          )
+        })
+      })
       .get("/altimate/trace", async (c) => {
         const refused = browserOriginRefusal(
           "Traces",

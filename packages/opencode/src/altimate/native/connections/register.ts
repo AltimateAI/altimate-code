@@ -8,6 +8,7 @@
 
 import { register } from "../dispatcher"
 import * as Registry from "./registry"
+import { defaultInspectionSchema, resolveInspectionTable, resolveInspectionTarget } from "./inspection-target"
 import { discoverContainers } from "./docker-discovery"
 import { parseDbtProfiles } from "./dbt-profiles"
 import { runDataDiff } from "./data-diff"
@@ -33,7 +34,9 @@ import type {
   DataDiffParams,
   DataDiffResult,
 } from "../types"
-import type { ConnectionConfig } from "@altimateai/drivers"
+import type { ConnectionConfig, SchemaColumn } from "@altimateai/drivers"
+import { isQueryTimeoutError } from "@altimateai/drivers/types"
+import { executeQuery, type QueryContext } from "../query-execution"
 import { Telemetry } from "../../../telemetry"
 
 // ---------------------------------------------------------------------------
@@ -204,17 +207,18 @@ async function adapterTypeFromManifest(): Promise<string | undefined> {
 async function tryExecuteViaDbt(
   sql: string,
   limit?: number,
+  timeoutMs?: number,
+  context?: QueryContext,
 ): Promise<SqlExecuteResult | null> {
-  // altimate_change start — share the single-flight creation path with resolveDefaultTarget;
-  // execute on the adapter this call was handed, not on a global a reset may have moved.
-  const adapter = await ensureDbtAdapter()
-  if (!adapter) return null
-  // altimate_change end
-
   try {
-    const raw = limit
-      ? await adapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
-      : await adapter.immediatelyExecuteSQL(sql, "")
+    const raw = await executeQuery<any>({ type: "dbt" }, { queryTimeoutMs: timeoutMs }, context, async (options) => {
+      const adapter = await ensureDbtAdapter()
+      options.signal?.throwIfAborted()
+      if (!adapter) return null
+      return limit
+        ? adapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
+        : adapter.immediatelyExecuteSQL(sql, "")
+    })
 
     // QueryExecutionResult has: { columnNames, columnTypes, data, rawSql, compiledSql }
     // where data is Record<string, unknown>[] (array of row objects)
@@ -258,7 +262,10 @@ async function tryExecuteViaDbt(
     }
 
     return null // Unknown result format — fall back to native
-  } catch {
+  } catch (e) {
+    // A deadline or abort is not "dbt unavailable": the query may still be running, and
+    // re-running it on the native driver would double the work and the wait.
+    if (isQueryTimeoutError(e) || context?.signal?.aborted || (e instanceof Error && e.name === "AbortError")) throw e
     // dbt execution failed — fall back to native driver silently
     return null
   }
@@ -487,11 +494,15 @@ export function translateExplainError(
   return msg
 }
 
+function isMissingSchemaObject(error: unknown): boolean {
+  return /\b(?:table|schema|relation)\s+(?:(?:"[^"]+"|'[^']+'|[^\s]+)\s+)?(?:was\s+|is\s+)?(?:not found|does not exist)\b|\bno such (?:table|schema|relation)\b|\bnot found:\s*(?:table|dataset)\b/i.test(String(error))
+}
+
 /** Register all connection-related handlers. Exported for test re-registration. */
 export function registerAll(): void {
 
 // --- sql.execute ---
-register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResult> => {
+register("sql.execute", async (params: SqlExecuteParams, context): Promise<SqlExecuteResult> => {
   const startTime = Date.now()
   const warehouseType = getWarehouseType(params.warehouse)
   try {
@@ -512,16 +523,31 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
 
     // Strategy: try dbt adapter first (if in a dbt project), then fall back to native driver.
     // dbt knows how to connect using profiles.yml — no separate connection config needed.
-    if (!params.warehouse) {
-      const dbtResult = await tryExecuteViaDbt(params.sql, params.limit)
+    // altimate_change start — dbt cannot enforce the connector's read-only option.
+    // Protected requests must reach the native driver's transaction handling.
+    if (!params.warehouse && !params.read_only) {
+      const dbtResult = await tryExecuteViaDbt(
+        params.sql,
+        params.limit,
+        params.query_timeout_ms,
+        context,
+      )
       if (dbtResult) return dbtResult
     }
+    // altimate_change end
 
+    // altimate_change start — a protected default cannot fall through to an unprotected connector.
     if (!fallbackName) {
       throw new Error(
-        "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
+        params.read_only
+          ? "No warehouse configured. Read-only SQL execution requires a native PostgreSQL connection. Use warehouse.add or set ALTIMATE_CODE_CONN_* env vars."
+          : "No warehouse configured. Use warehouse.add, set ALTIMATE_CODE_CONN_* env vars, or configure a dbt profile.",
       )
     }
+    if (params.read_only && fallbackType !== "postgres") {
+      throw new Error("Read-only SQL execution requires a native PostgreSQL connection. Configure one with warehouse.add or set ALTIMATE_CODE_CONN_* env vars.")
+    }
+    // altimate_change end
     // altimate_change start — refuse rather than execute under a stale decision.
     if (Registry.canonicalType(Registry.getConfig(fallbackName)?.type) !== fallbackType) {
       throw new Error(
@@ -529,8 +555,19 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
       )
     }
     // altimate_change end
-    const connector = await Registry.get(fallbackName)
-    const result: SqlExecuteResult = await connector.execute(params.sql, params.limit)
+    const result: SqlExecuteResult = await executeQuery(
+      Registry.getConfig(fallbackName),
+      {
+        queryTimeoutMs: params.query_timeout_ms,
+        ...(fallbackType === "postgres" && params.read_only ? { readOnly: true } : {}),
+      },
+      context,
+      async (options) => {
+        const connector = await Registry.get(fallbackName)
+        options.signal?.throwIfAborted()
+        return connector.execute(params.sql, params.limit, undefined, options)
+      },
+    )
     try {
       Telemetry.track({
         type: "warehouse_query",
@@ -578,7 +615,7 @@ register("sql.execute", async (params: SqlExecuteParams): Promise<SqlExecuteResu
 })
 
 // --- sql.explain ---
-register("sql.explain", async (params: SqlExplainParams): Promise<SqlExplainResult> => {
+register("sql.explain", async (params: SqlExplainParams, context?: QueryContext): Promise<SqlExplainResult> => {
   let warehouseName: string | undefined
   let warehouseType: string | undefined
   try {
@@ -613,7 +650,12 @@ register("sql.explain", async (params: SqlExplainParams): Promise<SqlExplainResu
       }
     }
 
-    const result = await connector.execute(`${plan.prefix} ${params.sql}`, 10000)
+    const result = await executeQuery(
+      warehouseName ? Registry.getConfig(warehouseName) : undefined,
+      Registry.canonicalType(warehouseType) === "postgres" ? { readOnly: true } : {},
+      context,
+      (options) => connector.execute(`${plan.prefix} ${params.sql}`, 10000, undefined, options),
+    )
 
     const planText = result.rows.map((r) => String(r[0])).join("\n")
     const planRows = result.rows.map((r, i) => ({
@@ -704,31 +746,78 @@ register("warehouse.discover", async (): Promise<WarehouseDiscoverResult> => {
 })
 
 // --- schema.inspect ---
+function schemaAddressingHint(): string {
+  const warehouses = Registry.list().warehouses
+  if (warehouses.length === 0) return "Available warehouses: none. Configure a warehouse before inspecting tables."
+  const forms = warehouses.map((w) => `warehouse=${w.name}, schema_name=${defaultInspectionSchema(w.name) ?? "<schema>"}`)
+  return (
+    `Available warehouses: ${warehouses.map((w) => w.name).join(", ")}. ` +
+    `Address a table explicitly with ${forms.join("; ")} and table=<table name>.`
+  )
+}
+
 register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaInspectResult> => {
   try {
-    const warehouseName = params.warehouse
-    let connector
+    const target = await resolveInspectionTarget(params)
+    const warehouseName = target.warehouse
+    if (!warehouseName) throw new Error("No warehouse configured.")
+    const connector = await Registry.get(warehouseName)
+    // describeTable accepts only schema/table; params.database remains scoped by
+    // the connection configuration until the driver interface supports it.
+    // altimate_change start — normalize schema qualifiers only after warehouse routing
+    const addressed = await resolveInspectionTable(target, connector)
+    let schemaName = addressed.schema_name
+    const table = addressed.table
+    // altimate_change end
+    const resolution = target.resolution
 
-    if (warehouseName) {
-      connector = await Registry.get(warehouseName)
+    let columns: SchemaColumn[] = []
+    if (schemaName) {
+      columns = await connector.describeTable(schemaName, table)
     } else {
-      const warehouses = Registry.list().warehouses
-      if (warehouses.length === 0) {
-        throw new Error("No warehouse configured.")
+      // altimate_change start — MongoDB schemas are databases, not PostgreSQL public
+      const mongo = Registry.canonicalType(Registry.getConfig(warehouseName)?.type) === "mongodb"
+      const preferred = defaultInspectionSchema(warehouseName) ?? (mongo ? (await connector.listSchemas())[0] : "public")
+      if (!preferred) throw new Error("No MongoDB database is available. Pass its database name as schema_name.")
+      // altimate_change end
+      let missingError: unknown
+      const probe = async (schema: string) => {
+        try {
+          return await connector.describeTable(schema, table)
+        } catch (error) {
+          if (!isMissingSchemaObject(error)) throw error
+          missingError = error
+          return []
+        }
       }
-      connector = await Registry.get(warehouses[0].name)
+      schemaName = preferred
+      columns = await probe(preferred)
+      if (columns.length === 0) {
+        const listed = await Promise.resolve()
+          .then(() => connector.listSchemas())
+          .catch(() => [] as string[])
+        const systemSchemas = new Set(["information_schema", "pg_catalog", "pg_toast", "sys"])
+        // The preferred schema counts toward the 20-probe limit.
+        const candidates = [...new Set(listed)]
+          .filter((s) => s !== preferred && !systemSchemas.has(s.toLowerCase()))
+          .slice(0, 19)
+        for (const candidate of candidates) {
+          columns = await probe(candidate)
+          if (columns.length > 0) {
+            schemaName = candidate
+            break
+          }
+        }
+      }
+      if (columns.length === 0 && missingError) throw missingError
     }
 
-    const schemaName = params.schema_name ?? "public"
-    // NOTE: params.database is accepted in the type contract but the current
-    // Connector.describeTable signature only supports (schema, table). Wiring
-    // database through to each driver is a separate refactor. For connections
-    // that already scope to a single database (the common case), this is a no-op.
-    const columns = await connector.describeTable(schemaName, params.table)
-
     return {
-      table: params.table,
+      table,
       schema_name: schemaName,
+      warehouse: warehouseName,
+      ...(resolution ? { resolution } : {}),
+      ...(columns.length === 0 ? { addressing_hint: schemaAddressingHint() } : {}),
       columns: columns.map((c) => ({
         name: c.name,
         data_type: c.data_type,
@@ -737,11 +826,13 @@ register("schema.inspect", async (params: SchemaInspectParams): Promise<SchemaIn
       })),
     }
   } catch (e) {
+    const error = String(e)
+    const missingObject = isMissingSchemaObject(e)
     return {
       table: params.table,
       schema_name: params.schema_name ?? "public",
       columns: [],
-      error: String(e),
+      error: missingObject ? `${error} ${schemaAddressingHint()}` : error,
     } as SchemaInspectResult & { error: string }
   }
 })

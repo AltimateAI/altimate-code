@@ -79,6 +79,44 @@ async function read(root: string, file: string) {
   }
 }
 
+export const lessonTextHash = (text: string) => Store.sha256(singleLine(text))
+export type ShownSnapshot = {
+  session: string
+  shown: { name: string; id: string; textHash: string; tier: Shown["tier"]; at: string }[]
+}
+
+export async function readShownSnapshots(root: string, options: { limit?: number } = {}) {
+  const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+  const coverage = { sessions_analyzed: 0, sessions_skipped_malformed: 0, truncated: false }
+  const snapshots: ShownSnapshot[] = []
+  await SafeFS.assertSafePath(root, dir)
+  const entries = await fs.readdir(dir).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return []
+    throw error
+  })
+  const files = await Promise.all(entries.filter((name) => name.endsWith(".json")).map(async (name) => {
+    const file = path.join(dir, name)
+    return { file, mtime: await fs.lstat(file).then((stat) => stat.mtimeMs).catch(() => 0) }
+  }))
+  const limit = Math.max(0, Math.floor(options.limit ?? 200))
+  coverage.truncated = files.length > limit
+  for (const { file } of files.sort((a, b) => b.mtime - a.mtime || a.file.localeCompare(b.file)).slice(0, limit)) {
+    try {
+      const state = State.parse(JSON.parse((await read(root, file)) ?? ""))
+      if (path.basename(file) !== Store.sha256(state.session) + ".json") throw new Error("Learn session state belongs to another session")
+      snapshots.push({ session: state.session, shown: state.shown.map(({ name, lesson, tier, at }) => ({
+        name, id: lesson.id, textHash: lessonTextHash(lesson.text), tier, at,
+      })) })
+    } catch (error) {
+      if (error instanceof SafeFS.UnsafeLearnPathError) throw error
+      coverage.sessions_skipped_malformed++
+      log.warn("learn session snapshot skipped", { file, error })
+    }
+  }
+  coverage.sessions_analyzed = snapshots.length
+  return { snapshots, coverage }
+}
+
 /** Persisted text snapshots keep the prefix stable even after edits, ranking changes or a restart. */
 export class Delivery {
   private resolved?: Limits

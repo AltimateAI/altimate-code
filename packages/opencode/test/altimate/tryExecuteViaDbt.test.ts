@@ -4,7 +4,16 @@
  * The dbt adapter returns QueryExecutionResult with { columnNames, data, ... }
  * but tryExecuteViaDbt must convert this to SqlExecuteResult { columns, rows, ... }.
  */
-import { describe, test, expect, beforeEach, mock } from "bun:test"
+import { describe, test, expect, beforeEach, afterAll, mock } from "bun:test"
+import * as realDuckdb from "@altimateai/drivers/duckdb"
+
+// Bun's mock.module leaks across test files in the shared process. Snapshot the
+// genuine exports before mocking and restore them afterwards so DuckDB-backed
+// tests that run later (scratch, sql_materialize, sql_check) see the real driver.
+const genuineDuckdb = { ...realDuckdb }
+afterAll(() => {
+  mock.module("@altimateai/drivers/duckdb", () => genuineDuckdb)
+})
 
 // Mock DuckDB driver
 mock.module("@altimateai/drivers/duckdb", () => ({
