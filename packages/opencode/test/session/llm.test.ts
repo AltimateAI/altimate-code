@@ -398,6 +398,100 @@ describe("session.llm.stream", () => {
     })
   })
 
+  test("inherited object property names report through the hidden fallback", async () => {
+    const providerID = "alibaba"
+    const { model } = await loadFixture(providerID, "qwen-plus")
+    const request = waitRequest(
+      "/chat/completions",
+      createEventResponse(
+        [
+          {
+            id: "chatcmpl-inherited",
+            object: "chat.completion.chunk",
+            choices: [
+              {
+                delta: {
+                  role: "assistant",
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "call-inherited",
+                      type: "function",
+                      function: { name: "constructor", arguments: "{}" },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            id: "chatcmpl-inherited",
+            object: "chat.completion.chunk",
+            choices: [{ delta: {}, finish_reason: "tool_calls" }],
+          },
+        ],
+        true,
+      ),
+    )
+    await using tmp = await tmpdir({
+      config: {
+        enabled_providers: [providerID],
+        provider: { [providerID]: { options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` } } },
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await Provider.getModel(ProviderID.make(providerID), ModelID.make(model.id))
+        const sessionID = SessionID.make("session-inherited-tool")
+        const agent = {
+          name: "custom-builder",
+          mode: "primary",
+          options: {},
+          permission: PermissionNext.fromConfig({ "*": "allow" }),
+        } satisfies Agent.Info
+        const stream = await LLM.stream({
+          user: {
+            id: MessageID.make("msg_inherited-tool"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderID.make(providerID), modelID: resolved.id },
+          },
+          sessionID,
+          model: resolved,
+          agent,
+          system: [],
+          abort: new AbortController().signal,
+          messages: [{ role: "user", content: "Call the requested tool" }],
+          tools: {
+            read: tool({ inputSchema: jsonSchema({ type: "object", properties: {} }), execute: async () => "read" }),
+            invalid: tool({
+              inputSchema: jsonSchema<{ tool: string; error: string }>({
+                type: "object",
+                properties: { tool: { type: "string" }, error: { type: "string" } },
+                required: ["tool", "error"],
+              }),
+              execute: async (input) => input,
+            }),
+          },
+        })
+        const events = []
+        for await (const event of stream.fullStream) events.push(event)
+        expect(events.find((event) => event.type === "tool-result")).toMatchObject({
+          toolName: "invalid",
+          output: { tool: "constructor", error: expect.stringContaining("constructor") },
+        })
+        expect(events.some((event) => event.type === "tool-error" || event.type === "error")).toBe(false)
+        const capture = await request
+        expect((capture.body.tools as { function: { name: string } }[]).map((item) => item.function.name)).toEqual([
+          "read",
+        ])
+      },
+    })
+  })
+
   test.skip("sends temperature, tokens, and reasoning options for openai-compatible models", async () => {
     const server = state.server
     if (!server) {

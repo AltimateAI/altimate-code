@@ -266,7 +266,10 @@ export namespace LLM {
 
     // altimate_change start — finalization must have no executable catalog, even for unsolicited tool calls
     const runBudget = await sessionRunBudget(input.sessionID)
-    const tools: Record<string, Tool> = runBudget?.toolsDisabled ? {} : await resolveTools(input)
+    const resolvedTools: Record<string, Tool> = runBudget?.toolsDisabled ? {} : await resolveTools(input)
+    // The AI SDK checks tool names by property lookup. A null-prototype catalog prevents
+    // inherited Object properties (for example, "constructor") from masquerading as tools.
+    const tools: Record<string, Tool> = Object.assign(Object.create(null), resolvedTools)
     const toolChoice = runBudget?.toolsDisabled ? "none" : input.toolChoice
     // altimate_change end
 
@@ -386,7 +389,7 @@ export namespace LLM {
       // altimate_change end
       async experimental_repairToolCall(failed) {
         const lower = failed.toolCall.toolName.toLowerCase()
-        if (lower !== failed.toolCall.toolName && tools[lower]) {
+        if (lower !== failed.toolCall.toolName && Object.prototype.hasOwnProperty.call(tools, lower)) {
           l.info("repairing tool call", {
             tool: failed.toolCall.toolName,
             repaired: lower,
