@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import os, { tmpdir } from "node:os"
 import path from "node:path"
 import { Telemetry } from "../../src/altimate/telemetry"
 
@@ -43,11 +43,14 @@ async function withEnv(env: Partial<Record<(typeof ENV_KEYS)[number], string>>, 
   for (const key of homeKeys) saved.set(key, process.env[key])
   const home = await mkdtemp(path.join(tmpdir(), "telemetry-home-"))
   for (const key of homeKeys) process.env[key] = home
+  // The machine-id helper reads os.homedir(), which Bun does not derive from HOME.
+  const homedirSpy = spyOn(os, "homedir").mockReturnValue(home)
 
   Object.assign(process.env, env)
   try {
     await fn()
   } finally {
+    homedirSpy.mockRestore()
     for (const key of [...ENV_KEYS, ...homeKeys]) {
       const value = saved.get(key)
       if (value === undefined) delete process.env[key]

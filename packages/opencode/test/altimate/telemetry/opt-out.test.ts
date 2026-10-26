@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
 import os from "os"
 import path from "path"
+import { Auth } from "../../../src/auth"
 import { Telemetry } from "../../../src/altimate/telemetry"
 import { TelemetryIdentity } from "../../../src/altimate/telemetry/identity"
 import { OptOutMarker } from "../../../src/altimate/telemetry/opt-out"
@@ -27,6 +28,7 @@ describe("telemetry opt-out marker", () => {
   let holdTrack: Promise<void> | undefined
   let fetchSpy: ReturnType<typeof spyOn>
   let homedirSpy: ReturnType<typeof spyOn>
+  let authSpy: ReturnType<typeof spyOn>
   const saved: Record<string, string | undefined> = {}
   const ENV = [
     "OPENCODE_TEST_HOME",
@@ -64,6 +66,8 @@ describe("telemetry opt-out marker", () => {
     delete process.env.OPENCODE_DISABLE_TELEMETRY
     delete process.env.ALTIMATE_TELEMETRY_FORCE
     homedirSpy = spyOn(os, "homedir").mockImplementation(() => home)
+    // The auth store lives in the real data directory; never let a test read it.
+    authSpy = spyOn(Auth, "get").mockResolvedValue(undefined)
     Telemetry.allowOptOutUnderTestRunner(true)
     calls = []
     trackStatus = 200
@@ -90,6 +94,7 @@ describe("telemetry opt-out marker", () => {
     Telemetry.allowOptOutUnderTestRunner(false)
     fetchSpy.mockRestore()
     homedirSpy.mockRestore()
+    authSpy.mockRestore()
     for (const k of ENV) {
       if (saved[k] === undefined) delete process.env[k]
       else process.env[k] = saved[k]

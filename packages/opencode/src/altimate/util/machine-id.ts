@@ -38,23 +38,6 @@ function readCappedUtf8(idPath: string): string {
 }
 
 /**
- * Read the machine-id from `~/.altimate/machine-id`, minting a new random UUID
- * with `flag: "wx"` (exclusive create) if the file is absent.
- *
- * - **Race-safe**: two concurrent callers on a fresh install converge on the
- *   same UUID — the winner writes, the loser re-reads.
- * - **Regular-file-only**: uses `lstat` and rejects symlinks / non-regular
- *   files rather than following them to an attacker-chosen target.
- * - **Size-capped**: reads at most 512 bytes through a descriptor (enforced at
- *   read time, not an advisory pre-check) to avoid multi-MB file reads.
- * - **UUID-validated**: rejects content that does not match RFC 4122 v4 UUID
- *   format (corrupt file, injected content, etc.) and returns `""` with a warn
- *   log so callers can omit the field rather than propagate garbage.
- *
- * @param machineIdPath Override path (for tests). Defaults to `~/.altimate/machine-id`.
- * @returns A v4 UUID string, or `""` if the value is invalid or unreadable.
- */
-/**
  * Read an existing machine id without minting one. Same regular-file, size-cap and UUID
  * checks as {@link getOrCreateMachineId}; returns `""` when the file is absent, unreadable,
  * not a regular file, oversized or not a UUID. For callers that must not create a machine
@@ -72,6 +55,23 @@ export function readExistingMachineId(machineIdPath?: string): string {
   }
 }
 
+/**
+ * Read the machine-id from `~/.altimate/machine-id`, minting a new random UUID
+ * with `flag: "wx"` (exclusive create) if the file is absent.
+ *
+ * - **Race-safe**: two concurrent callers on a fresh install converge on the
+ *   same UUID — the winner writes, the loser re-reads.
+ * - **Regular-file-only**: uses `lstat` and rejects symlinks / non-regular
+ *   files rather than following them to an attacker-chosen target.
+ * - **Size-capped**: reads at most 512 bytes through a descriptor (enforced at
+ *   read time, not an advisory pre-check) to avoid multi-MB file reads.
+ * - **UUID-validated**: rejects content that does not match RFC 4122 v4 UUID
+ *   format (corrupt file, injected content, etc.) and returns `""` with a warn
+ *   log so callers can omit the field rather than propagate garbage.
+ *
+ * @param machineIdPath Override path (for tests). Defaults to `~/.altimate/machine-id`.
+ * @returns A v4 UUID string, or `""` if the value is invalid or unreadable.
+ */
 export function getOrCreateMachineId(machineIdPath?: string): string {
   const idPath = machineIdPath ?? path.join(os.homedir(), ".altimate", "machine-id")
 

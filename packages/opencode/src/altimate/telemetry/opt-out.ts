@@ -16,36 +16,37 @@ import { readExistingMachineId } from "@/altimate/util/machine-id"
  * or writes the real home directory; in a real session that is the same directory the machine
  * id lives in.
  */
-export namespace OptOutMarker {
-  function dir(): string {
-    return path.join(Global.Path.home, ".altimate")
-  }
+function dir(): string {
+  return path.join(Global.Path.home, ".altimate")
+}
 
-  export function markerPath(): string {
-    return path.join(dir(), "telemetry-opted-out")
-  }
+export function markerPath(): string {
+  return path.join(dir(), "telemetry-opted-out")
+}
 
-  /** The machine id minted by an earlier telemetry-enabled run, if any. Never mints one: a machine
-   * that never sent telemetry has nothing to mark. Bounded and symlink-safe, like the minting read. */
-  export function readMachineId(): string | undefined {
-    return readExistingMachineId(path.join(dir(), "machine-id")) || undefined
-  }
+/** The machine id minted by an earlier telemetry-enabled run, if any. Never mints one: a machine
+ * that never sent telemetry has nothing to mark. Bounded and symlink-safe, like the minting read. */
+export function readMachineId(): string | undefined {
+  return readExistingMachineId(path.join(dir(), "machine-id")) || undefined
+}
 
-  export function exists(): boolean {
-    return fs.existsSync(markerPath())
-  }
+export function exists(): boolean {
+  return fs.existsSync(markerPath())
+}
 
-  export function write(): void {
-    fs.mkdirSync(dir(), { recursive: true })
-    fs.writeFileSync(markerPath(), `${new Date().toISOString()}\n`, { mode: 0o600 })
-  }
+export function write(): void {
+  fs.mkdirSync(dir(), { recursive: true })
+  // Exclusive create: never follow a planted symlink; an existing entry fails the write.
+  fs.writeFileSync(markerPath(), `${new Date().toISOString()}\n`, { mode: 0o600, flag: "wx" })
+}
 
-  /** Best effort: an unremovable marker (read-only directory) must never fail an init. */
-  export function clear(): void {
-    try {
-      fs.rmSync(markerPath(), { force: true })
-    } catch {
-      // leave it; the next opt-out is then not recorded again, which is the lesser failure
-    }
+/** Best effort: an unremovable marker (read-only directory) must never fail an init. */
+export function clear(): void {
+  try {
+    fs.rmSync(markerPath(), { force: true })
+  } catch {
+    // leave it; the next opt-out is then not recorded again, which is the lesser failure
   }
 }
+
+export * as OptOutMarker from "./opt-out"

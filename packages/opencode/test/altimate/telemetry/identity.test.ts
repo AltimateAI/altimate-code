@@ -23,7 +23,16 @@ function headersOf(init?: RequestInit): Record<string, string> {
   return out
 }
 
+async function until(pred: () => boolean, ms = 2_000) {
+  const end = Date.now() + ms
+  while (!pred() && Date.now() < end) await new Promise((r) => setTimeout(r, 10))
+  return pred()
+}
+
+const DISABLE_FLAGS = ["ALTIMATE_TELEMETRY_DISABLED", "OPENCODE_DISABLE_TELEMETRY"] as const
+
 describe("telemetry identity", () => {
+  const savedFlags: Record<string, string | undefined> = {}
   let home: string
   let calls: Call[]
   let fetchSpy: ReturnType<typeof spyOn>
@@ -57,6 +66,10 @@ describe("telemetry identity", () => {
     home = mkdtempSync(path.join(os.tmpdir(), "telemetry-identity-"))
     savedTestHome = process.env.OPENCODE_TEST_HOME
     savedCs = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+    for (const k of DISABLE_FLAGS) {
+      savedFlags[k] = process.env[k]
+      delete process.env[k]
+    }
     process.env.OPENCODE_TEST_HOME = home
     homedirSpy = spyOn(os, "homedir").mockImplementation(() => home)
     calls = []
@@ -96,6 +109,10 @@ describe("telemetry identity", () => {
     else process.env.OPENCODE_TEST_HOME = savedTestHome
     if (savedCs === undefined) delete process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
     else process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = savedCs
+    for (const k of DISABLE_FLAGS) {
+      if (savedFlags[k] === undefined) delete process.env[k]
+      else process.env[k] = savedFlags[k]
+    }
     rmSync(home, { recursive: true, force: true })
   })
 
@@ -254,6 +271,19 @@ describe("telemetry identity", () => {
     expect(Telemetry.identityForTest()).toBeUndefined()
   })
 
+  test("a sign-in while telemetry is disabled makes no identity request", async () => {
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+      "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(Telemetry.isEnabled()).toBe(false)
+    writeCreds()
+    await Telemetry.refreshIdentity()
+    expect(meCalls()).toHaveLength(0)
+    expect(Telemetry.identityForTest()).toBeUndefined()
+  })
+
   test("a transient failure at startup is retried at a later flush, not on every flush", async () => {
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
       "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
@@ -261,10 +291,9 @@ describe("telemetry identity", () => {
     meStatus = 503
     await Telemetry.shutdown()
     await Telemetry.init()
-    await new Promise((r) => setTimeout(r, 60))
+    expect(await until(() => meCalls().length >= 1)).toBe(true)
     expect(Telemetry.identityForTest()).toBeUndefined()
     const after = meCalls().length
-    expect(after).toBeGreaterThanOrEqual(1)
     await Telemetry.flush()
     await Telemetry.flush()
     await new Promise((r) => setTimeout(r, 30))
@@ -289,21 +318,19 @@ describe("telemetry identity", () => {
     await new Promise((r) => setTimeout(r, 15))
     writeCreds("key-A")
     meStatus = 503
+    const beforeA = meCalls().length
     await Telemetry.flush()
-    await new Promise((r) => setTimeout(r, 60))
+    expect(await until(() => meCalls().length > beforeA)).toBe(true)
     expect(Telemetry.identityForTest()).toBeUndefined()
     meStatus = 200
-    Telemetry.retryIdentityNowForTest()
-    await Telemetry.flush()
-    const ok = await (async () => {
-      const until = Date.now() + 2000
-      while (Date.now() < until) {
-        if (Telemetry.identityForTest()?.user_id === UUID) return true
-        await new Promise((r) => setTimeout(r, 20))
-      }
-      return false
-    })()
-    expect(ok).toBe(true)
+    // The failed answer settles asynchronously; end its backoff and flush until the retry lands.
+    const end = Date.now() + 2000
+    while (Telemetry.identityForTest()?.user_id !== UUID && Date.now() < end) {
+      Telemetry.retryIdentityNowForTest()
+      await Telemetry.flush()
+      await new Promise((r) => setTimeout(r, 20))
+    }
+    expect(Telemetry.identityForTest()?.user_id).toBe(UUID)
   })
 
   test("a resolution that started under the old credential never overwrites a newer sign-in", async () => {

@@ -2202,8 +2202,11 @@ export namespace Telemetry {
 
   /** Re-resolve who the machine is signed in as; clears it when no credential is stored. Events
    * already buffered are flushed under the identity they were tracked with first, and events
-   * tracked while the new answer is pending carry no account rather than the previous one. */
+   * tracked while the new answer is pending carry no account rather than the previous one.
+   * Does nothing while telemetry is disabled. */
   export async function refreshIdentity(): Promise<void> {
+    // Opted out (or not initialised): no lookup; an enabled init resolves from the stored credential.
+    if (!enabled) return
     await flush()
     identity = undefined
     await resolveIdentity({ refresh: true })
