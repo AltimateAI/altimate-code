@@ -65,7 +65,7 @@ Override permissions for specific agents:
 ```json
 {
   "agent": {
-    "analyst": {
+    "builder": {
       "permission": {
         "write": "deny",
         "edit": "deny",
@@ -79,6 +79,8 @@ Override permissions for specific agents:
   }
 }
 ```
+
+The `analyst` agent is read-only regardless of config: its shell and write tools (file edits, SQL writes, memory saves and other built-in write tools) stay denied even if its permission config allows them. Config can still restrict analyst further.
 
 ## All Permissioned Tools
 
@@ -209,15 +211,8 @@ Give each agent only the permissions it needs:
   "agent": {
     "analyst": {
       "permission": {
-        "write": "deny",
-        "edit": "deny",
-        "sql_execute_write": "deny",
-        "bash": {
-          "*": "deny",
-          "ls *": "allow",
-          "cat *": "allow",
-          "dbt list *": "allow"
-        }
+        "webfetch": "deny",
+        "websearch": "deny"
       }
     },
     "builder": {

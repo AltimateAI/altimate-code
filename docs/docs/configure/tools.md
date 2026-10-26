@@ -58,7 +58,7 @@ Disable a tool for a specific agent by setting its permission to `"deny"`:
 ```json
 {
   "agent": {
-    "analyst": {
+    "builder": {
       "permission": {
         "write": "deny",
         "edit": "deny",
@@ -72,8 +72,8 @@ Disable a tool for a specific agent by setting its permission to `"deny"`:
 }
 ```
 
-!!! example "Read-only analyst"
-    The configuration above creates an analyst agent that cannot modify files. It can only read and explore the codebase, and must ask before running shell commands (except `dbt run`, which is blocked entirely).
+!!! example "Read-only builder"
+    The configuration above makes the builder agent unable to modify files. It can only read and explore the codebase, and must ask before running shell commands (except `dbt run`, which is blocked entirely). The `analyst` agent is already read-only: its shell and write tools stay denied whatever its permission config says.
 
 ## Tool Behavior
 

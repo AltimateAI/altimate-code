@@ -674,7 +674,8 @@ export const layer = Layer.effect(
                     "batch",
                   ].map((tool) => [tool, "deny" as const]),
                 ),
-                task: { "*": "deny", "data-explorer": explorer },
+                // A trailing "*" deny is what removes task from the tool list when nothing is allowed.
+                task: explorer === "deny" ? "deny" : { "*": "deny", "data-explorer": explorer },
               }),
             )
           }

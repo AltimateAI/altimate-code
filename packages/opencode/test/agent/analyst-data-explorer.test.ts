@@ -330,6 +330,24 @@ for (const override of ["global", "agent"] as const) {
   )
 }
 
+for (const override of ["global", "agent"] as const) {
+  it.instance(
+    `analyst drops the task tool when ${override} config denies all delegation`,
+    () =>
+      Effect.gen(function* () {
+        const analyst = (yield* Agent.use.get("analyst"))!
+        expect(action(analyst, "task", "data-explorer")).toBe("deny")
+        expect(Permission.disabled(["task"], analyst.permission)).toEqual(new Set(["task"]))
+      }),
+    {
+      config:
+        override === "global"
+          ? { permission: { task: "deny" } }
+          : { agent: { analyst: { permission: { task: "deny" } } } },
+    },
+  )
+}
+
 for (const configured of ["deny", "ask"] as const) {
   for (const override of ["global", "agent"] as const) {
     const task = { "*": "allow" as const, "data-explorer": configured }
@@ -348,9 +366,12 @@ for (const configured of ["deny", "ask"] as const) {
   }
 }
 
-// Every registered built-in tool that a wildcard grant leaves enabled for analyst must be a
-// reviewed read-only tool. A new tool that changes files, memory, config, connections or
-// external systems fails here until it is added to analyst's post-config denies.
+// Every registered built-in tool that a wildcard grant leaves enabled for analyst must be on this
+// reviewed list: read-only tools, plus the local writes analyst is designed to make (training
+// entries, scratch tables, the schema index, session todos). A new tool that changes files,
+// workspace memory, config, connections or external systems fails here until it is added to
+// analyst's post-config denies. Flag-gated tools are listed too, so the check does not depend
+// on the environment.
 const analystConfigEnabled = new Set([
   ...[
     "check",
@@ -404,6 +425,8 @@ const analystConfigEnabled = new Set([
   "impact_analysis",
   "invalid",
   "lineage_check",
+  "lsp",
+  "plan_exit",
   "project_scan",
   "question",
   "read",
@@ -486,4 +509,19 @@ it.instance(
       expect(action(de, "external_directory", path.join(skillDir, "*"))).toBe("deny")
     }),
   { config: { skills: { paths: [externalSkills] } } },
+)
+
+it.instance(
+  "config can still deny analyst access to a skill folder outside the project",
+  () =>
+    Effect.gen(function* () {
+      const analyst = (yield* Agent.use.get("analyst"))!
+      expect(action(analyst, "external_directory", path.join(externalSkills, "naming", "*"))).toBe("deny")
+    }),
+  {
+    config: () => ({
+      skills: { paths: [externalSkills] },
+      agent: { analyst: { permission: { external_directory: { [path.join(externalSkills, "*")]: "deny" } } } },
+    }),
+  },
 )
