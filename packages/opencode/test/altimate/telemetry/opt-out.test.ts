@@ -204,6 +204,25 @@ describe("telemetry opt-out marker", () => {
     expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
   })
 
+  test("a send accepted after a shutdown still writes the marker, so the next opted-out init sends nothing", async () => {
+    writeMachineId()
+    let release: () => void = () => {}
+    holdTrack = new Promise<void>((r) => (release = r))
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(await waitFor(() => trackPosts().length === 1)).toBe(true) // the POST is in flight
+
+    await Telemetry.shutdown() // still opted out: nothing has cleared the marker
+    release()
+    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
+
+    holdTrack = undefined
+    await Telemetry.init()
+    await new Promise((r) => setTimeout(r, 100))
+    expect(optOuts()).toHaveLength(1)
+  })
+
   test("turning telemetry back on clears the marker", async () => {
     writeMachineId()
     OptOutMarker.write()

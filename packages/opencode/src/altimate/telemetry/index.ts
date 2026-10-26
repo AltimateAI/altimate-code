@@ -1903,9 +1903,12 @@ export namespace Telemetry {
   // once by the stamp comparison; the backoff only throttles retries of the unchanged one.
   const IDENTITY_RETRY_MS = 60_000
   let identityRetryAt = 0 // 0: no retry pending
-  // altimate_change — bumped by shutdown(); a detached opt-out send started under an earlier
-  // lifecycle neither posts nor writes its marker once a later init may have cleared it.
+  // altimate_change start — bumped by shutdown(); a detached opt-out send started under an earlier
+  // lifecycle does not post. Its marker write keys on markerGeneration instead, which only an
+  // enabled init bumps: a send accepted across a shutdown while still opted out keeps its marker.
   let lifecycleGeneration = 0
+  let markerGeneration = 0
+  // altimate_change end
   let machineId = ""
   let sessionId = ""
   let projectId = ""
@@ -2151,7 +2154,8 @@ export namespace Telemetry {
       machineId = getOrCreateMachineId()
       enabled = true
       // altimate_change — telemetry is on: forget the opt-out marker, so turning it off again is
-      // recorded again.
+      // recorded again. The bump first, so a send still in flight never recreates it.
+      markerGeneration++
       OptOutMarker.clear()
       log.info("telemetry initialized", { mode: "appinsights" })
       // altimate_change — clear any existing interval before installing a new one. doInit() can
@@ -2230,6 +2234,7 @@ export namespace Telemetry {
   }
   async function recordOptOut(source: "env" | "config"): Promise<void> {
     const lifecycle = lifecycleGeneration
+    const marker = markerGeneration
     try {
       if (underTestRunner() && !optOutUnderTestRunner) return
       // The force flag is a developer knob for running telemetry under a test runner; the opt-out
@@ -2246,8 +2251,8 @@ export namespace Telemetry {
         cfg,
         { machineId: id, identity: await TelemetryIdentity.cached() },
       )
-      // A shutdown since this task started means a later init may own the marker now: neither
-      // send nor write, and let the next disabled init start over.
+      // A shutdown since this task started means a later init may own the marker now: do not
+      // send, and let the next disabled init start over.
       if (lifecycle !== lifecycleGeneration) return
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), OPT_OUT_TIMEOUT_MS)
@@ -2258,7 +2263,8 @@ export namespace Telemetry {
           body: JSON.stringify(envelopes),
           signal: controller.signal,
         })
-        if (res.ok && lifecycle === lifecycleGeneration) OptOutMarker.write()
+        // Accepted: write the marker unless telemetry was turned back on meanwhile.
+        if (res.ok && marker === markerGeneration) OptOutMarker.write()
       } finally {
         clearTimeout(timeout)
       }
