@@ -9,6 +9,8 @@ import { deriveSubagentSessionPermission } from "../../src/agent/subagent-permis
 import { Permission } from "../../src/permission"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { ToolRegistry } from "../../src/tool/registry"
+import { LLM } from "../../src/session/llm"
+import type { MessageV2 } from "../../src/session/message-v2"
 import { assertExternalDirectoryEffect } from "../../src/tool/external-directory"
 import { MessageID, SessionID } from "../../src/session/schema"
 import type { Tool } from "../../src/tool/tool"
@@ -479,7 +481,11 @@ withRegistry.instance(
       const ids = yield* (yield* ToolRegistry.Service).ids()
       const analyst = (yield* Agent.Service.use((svc) => svc.get("analyst")))!
       expect(ids).toContain("batch")
-      const disabled = Permission.disabled(ids, analyst.permission)
+      // The same helper that removes tools from each model request.
+      const disabled = LLM.removedTools(ids, {
+        agent: analyst,
+        user: { tools: undefined } as unknown as MessageV2.User,
+      })
       expect(ids.filter((id) => !disabled.has(id) && !analystConfigEnabled.has(id))).toEqual([])
       for (const tool of analystWrites.filter((tool) => ids.includes(tool))) expect(disabled.has(tool), tool).toBe(true)
     }),

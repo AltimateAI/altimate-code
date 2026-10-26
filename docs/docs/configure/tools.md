@@ -38,9 +38,9 @@ Control which tools agents can use via the [permission system](permissions.md):
 {
   "permission": {
     "bash": {
+      "*": "ask",
       "dbt *": "allow",
-      "rm *": "deny",
-      "*": "ask"
+      "rm *": "deny"
     },
     "write": "ask",
     "read": "allow"
@@ -63,8 +63,8 @@ Disable a tool for a specific agent by setting its permission to `"deny"`:
         "write": "deny",
         "edit": "deny",
         "bash": {
-          "dbt run *": "deny",
-          "*": "ask"
+          "*": "ask",
+          "dbt run *": "deny"
         }
       }
     }
@@ -85,11 +85,11 @@ The `bash` tool executes shell commands in the project directory. Commands run i
 {
   "permission": {
     "bash": {
+      "*": "ask",
       "dbt *": "allow",
       "git *": "allow",
       "python *": "allow",
-      "rm -rf *": "deny",
-      "*": "ask"
+      "rm -rf *": "deny"
     }
   }
 }

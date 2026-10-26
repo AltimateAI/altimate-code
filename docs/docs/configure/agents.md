@@ -67,8 +67,8 @@ Define custom agents in `altimate-code.json`:
         "write": "deny",
         "edit": "deny",
         "bash": {
-          "dbt docs generate": "allow",
-          "*": "deny"
+          "*": "deny",
+          "dbt docs generate": "allow"
         }
       }
     }

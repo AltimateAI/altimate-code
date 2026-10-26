@@ -70,9 +70,9 @@ Override permissions for specific agents:
         "write": "deny",
         "edit": "deny",
         "bash": {
+          "*": "deny",
           "SELECT *": "allow",
-          "dbt docs *": "allow",
-          "*": "deny"
+          "dbt docs *": "allow"
         }
       }
     }
@@ -80,7 +80,9 @@ Override permissions for specific agents:
 }
 ```
 
-The `analyst` agent is read-only regardless of config: its shell and write tools (file edits, SQL writes, memory saves and other built-in write tools) stay denied even if its permission config allows them. Config can still restrict analyst further.
+The `analyst` agent is read-only regardless of config: its shell and write tools (file edits, SQL writes, memory saves and other built-in write tools) stay denied even if its permission config allows them. Training entries remain available through `training_save` and `training_remove`. Config can still restrict analyst further.
+
+Rules are evaluated in order and the last matching rule wins, so put a `"*"` rule before the more specific patterns it should not override.
 
 ## All Permissioned Tools
 
