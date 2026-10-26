@@ -1,7 +1,27 @@
 // altimate_change — tool_call rows for the bound workspace's integration calls.
 import { Telemetry } from "@/altimate/telemetry"
 import { DATAMATE_KEY } from "@/altimate/datamate-transport"
-import { redact } from "@/altimate/debug/report"
+import os from "os"
+import { redact, type RedactContext } from "@/altimate/debug/report"
+
+let redactCtx: RedactContext | undefined
+/** The home folder, user name and host name to strip from error text; gathered once, never throws. */
+function redactContext(): RedactContext {
+  if (redactCtx) return redactCtx
+  const tryGet = (f: () => string) => {
+    try {
+      return f()
+    } catch {
+      return undefined
+    }
+  }
+  redactCtx = {
+    home: tryGet(() => os.homedir()),
+    username: tryGet(() => os.userInfo().username) ?? process.env["USER"] ?? process.env["USERNAME"],
+    hostname: tryGet(() => os.hostname()),
+  }
+  return redactCtx
+}
 
 /** True when the MCP client serving a tool is the engine the workspace overlay manages. */
 export function isWorkspaceClient(clientName: string): boolean {
@@ -37,10 +57,10 @@ export function trackWorkspaceToolCall(input: {
     const error =
       input.error === undefined
         ? undefined
-        : redact(Telemetry.maskString(input.error instanceof Error ? input.error.message : String(input.error))).slice(
-            0,
-            500,
-          )
+        : redact(
+            Telemetry.maskString(input.error instanceof Error ? input.error.message : String(input.error)),
+            redactContext(),
+          ).slice(0, 500)
     Telemetry.track({
       type: "tool_call",
       timestamp: Date.now(),
@@ -59,6 +79,7 @@ export function trackWorkspaceToolCall(input: {
     })
   } catch {
     // telemetry never surfaces into the tool call
+    return false
   }
   return true
 }

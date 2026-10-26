@@ -1753,8 +1753,10 @@ describe("backfill", () => {
       const result = await backfill(bound, BINDING as any)
       expect(result.ok).toBe(2)
       const contributed = events.filter((e) => e.type === "workspace_memory_contributed")
-      expect(contributed).toHaveLength(2)
-      expect(contributed[0]).toEqual(expect.objectContaining({ workspace_id: 42, block_count: 1 }))
+      expect(contributed).toEqual([
+        expect.objectContaining({ workspace_id: 42, block_count: 1 }),
+        expect.objectContaining({ workspace_id: 42, block_count: 1 }),
+      ])
     } finally {
       spy.mockRestore()
     }

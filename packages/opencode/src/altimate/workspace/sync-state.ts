@@ -281,7 +281,7 @@ export function syncFailureReason(error: string | undefined): "auth" | "not_foun
   const e = (error ?? "").toLowerCase()
   if (/\b(401|403)\b|unauthori[sz]ed|forbidden|\bsign(ed)? in\b|credential/.test(e)) return "auth"
   if (/\b404\b|not found|no longer exists|unknown workspace/.test(e)) return "not_found"
-  if (/timed? ?out|cannot reach|unreachable|econn|enotfound|network|socket/.test(e)) return "network"
+  if (/timed? ?out|cannot reach|unreachable|econn|enotfound|network|socket|fetch failed/.test(e)) return "network"
   return "other"
 }
 

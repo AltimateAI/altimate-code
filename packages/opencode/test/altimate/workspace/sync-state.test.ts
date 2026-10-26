@@ -343,6 +343,7 @@ describe("workspace_sync_failed telemetry", () => {
     expect(SyncState.syncFailureReason("Please sign in again")).toBe("auth")
     expect(SyncState.syncFailureReason("Workspace not found (404)")).toBe("not_found")
     expect(SyncState.syncFailureReason("Request to x timed out after 15s")).toBe("network")
+    expect(SyncState.syncFailureReason("TypeError: fetch failed")).toBe("network")
     expect(SyncState.syncFailureReason("The server returned no usable id")).toBe("other")
     expect(SyncState.syncFailureReason(undefined)).toBe("other")
   })

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import os from "os"
 import { Telemetry } from "../../../src/altimate/telemetry"
 import { isWorkspaceClient, trackWorkspaceToolCall } from "../../../src/altimate/workspace/tool-call-telemetry"
 
@@ -67,6 +68,21 @@ describe("workspace integration tool calls", () => {
     expect(rows[1].error).toContain("string failure")
     expect(rows[1].error).not.toContain("abc123secret")
     expect(rows[1].error).not.toContain("u:pw@")
+  })
+
+  test("a failed call's message loses the user name and host name too", () => {
+    const user = os.userInfo().username
+    const host = os.hostname()
+    expect(call("datamate", "error", `login failed for user=${user} on ${host}`)).toBe(true)
+    if (user.length > 2) expect(rows[0].error).not.toContain(`=${user}`)
+    if (host.length > 2) expect(rows[0].error).not.toContain(host)
+  })
+
+  test("a call whose row could not be tracked reports false", () => {
+    spy.mockImplementation(() => {
+      throw new Error("sink down")
+    })
+    expect(call("datamate", "error", "boom")).toBe(false)
   })
 
   test("the engine key in an unbound turn is not the workspace's; the turn's workspace, not the session's entry, names the row", () => {
