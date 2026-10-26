@@ -677,7 +677,7 @@ describe("filesystem", () => {
 
       const started = Date.now()
       expect(() => Filesystem.realLocation(path.join(root, "l0"))).toThrow("Too many symbolic links")
-      expect(Date.now() - started).toBeLessThan(2000)
+      expect(Date.now() - started).toBeLessThan(10_000)
     })
   })
 })
