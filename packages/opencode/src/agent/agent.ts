@@ -647,7 +647,7 @@ export const layer = Layer.effect(
           // denied because it runs other tools without that tool-list filter.
           if (name === "analyst") {
             // Keep what config resolved for data-explorer (it may deny or ask), but nothing broader.
-            const explorer = Permission.evaluate("task", "data-explorer", agent.permission).action
+            const dataExplorerAction = Permission.evaluate("task", "data-explorer", agent.permission).action
             agent.permission = Permission.merge(
               agent.permission,
               Permission.fromConfig({
@@ -675,7 +675,7 @@ export const layer = Layer.effect(
                   ].map((tool) => [tool, "deny" as const]),
                 ),
                 // A trailing "*" deny is what removes task from the tool list when nothing is allowed.
-                task: explorer === "deny" ? "deny" : { "*": "deny", "data-explorer": explorer },
+                task: dataExplorerAction === "deny" ? "deny" : { "*": "deny", "data-explorer": dataExplorerAction },
               }),
             )
           }

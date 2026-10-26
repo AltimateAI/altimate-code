@@ -1,5 +1,6 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { describe, expect } from "bun:test"
+import fs from "fs"
 import path from "path"
 import { Effect } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -103,6 +104,35 @@ describe("tool.assertExternalDirectory", () => {
       expect(requests.length).toBe(0)
     }),
   )
+
+  if (process.platform !== "win32") {
+    it.instance("also asks for the resolved directory of a symlink that points elsewhere", () =>
+      Effect.gen(function* () {
+        const outerTmp = fs.realpathSync(yield* tmpdirScoped())
+        const allowed = path.join(outerTmp, "allowed")
+        const elsewhere = path.join(outerTmp, "elsewhere")
+        fs.mkdirSync(allowed)
+        fs.mkdirSync(elsewhere)
+        fs.writeFileSync(path.join(elsewhere, "secret.txt"), "x")
+        fs.symlinkSync(elsewhere, path.join(allowed, "linked-dir"))
+        fs.symlinkSync(path.join(elsewhere, "secret.txt"), path.join(allowed, "linked-file.txt"))
+
+        for (const target of [path.join(allowed, "linked-dir", "secret.txt"), path.join(allowed, "linked-file.txt")]) {
+          const { requests, ctx } = makeCtx()
+          yield* assertExternalDirectoryEffect(ctx, target)
+          const expected = [glob(path.join(path.dirname(target), "*")), glob(path.join(elsewhere, "*"))]
+          expect(requests[0]!.patterns, target).toEqual(expected)
+          expect(requests[0]!.always, target).toEqual(expected)
+        }
+
+        // A plain file in the allowed directory asks only for that directory.
+        fs.writeFileSync(path.join(allowed, "plain.txt"), "x")
+        const { requests, ctx } = makeCtx()
+        yield* assertExternalDirectoryEffect(ctx, path.join(allowed, "plain.txt"))
+        expect(requests[0]!.patterns).toEqual([glob(path.join(allowed, "*"))])
+      }),
+    )
+  }
 
   if (process.platform === "win32") {
     it.instance(

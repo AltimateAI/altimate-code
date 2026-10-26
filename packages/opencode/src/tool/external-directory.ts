@@ -1,4 +1,7 @@
 import path from "path"
+// altimate_change start — resolve symlinked external_directory targets
+import { realpathSync } from "fs"
+// altimate_change end
 import { Effect } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import type * as Tool from "./tool"
@@ -19,6 +22,29 @@ type Options = {
   kind?: Kind
 }
 
+// altimate_change start — symlink-resolved directory of an external_directory target
+function directoryGlob(dir: string) {
+  return process.platform === "win32"
+    ? FSUtil.normalizePathPattern(path.join(dir, "*"))
+    : path.join(dir, "*").replaceAll("\\", "/")
+}
+
+function resolvedDirectory(full: string, kind: Kind) {
+  try {
+    const real = realpathSync(full)
+    return kind === "directory" ? real : path.dirname(real)
+  } catch {
+    if (kind === "directory") return
+    // A file that does not exist yet (a write target): resolve the directory it would land in.
+    try {
+      return realpathSync(path.dirname(full))
+    } catch {
+      return
+    }
+  }
+}
+// altimate_change end
+
 export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirectory")(function* (
   ctx: Tool.Context,
   target?: string,
@@ -34,15 +60,18 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
 
   const kind = options?.kind ?? "file"
   const dir = kind === "directory" ? full : path.dirname(full)
-  const glob =
-    process.platform === "win32"
-      ? FSUtil.normalizePathPattern(path.join(dir, "*"))
-      : path.join(dir, "*").replaceAll("\\", "/")
+  // altimate_change start — an allowed directory can hold a symlink to somewhere else, so also ask
+  // for the directory the path really resolves to (unless that is inside the project)
+  const glob = directoryGlob(dir)
+  const real = resolvedDirectory(full, kind)
+  const realGlob = real && directoryGlob(real)
+  const patterns = realGlob && realGlob !== glob && !containsPath(real, ins) ? [glob, realGlob] : [glob]
 
   yield* ctx.ask({
     permission: "external_directory",
-    patterns: [glob],
-    always: [glob],
+    patterns,
+    always: patterns,
+    // altimate_change end
     metadata: {
       filepath: full,
       parentDir: dir,

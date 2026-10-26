@@ -9,6 +9,9 @@ import { deriveSubagentSessionPermission } from "../../src/agent/subagent-permis
 import { Permission } from "../../src/permission"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { ToolRegistry } from "../../src/tool/registry"
+import { assertExternalDirectoryEffect } from "../../src/tool/external-directory"
+import { MessageID, SessionID } from "../../src/session/schema"
+import type { Tool } from "../../src/tool/tool"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(Agent.defaultLayer)
@@ -525,3 +528,36 @@ it.instance(
     }),
   },
 )
+
+// A symlink inside a skill folder must not reach a directory analyst is otherwise denied.
+const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "analyst-elsewhere-"))
+fs.writeFileSync(path.join(elsewhere, "secret.txt"), "x")
+if (process.platform !== "win32") fs.symlinkSync(elsewhere, path.join(externalSkills, "naming", "linked"))
+afterAll(() => fs.rmSync(elsewhere, { recursive: true, force: true }))
+
+if (process.platform !== "win32") {
+  it.instance(
+    "analyst cannot read through a symlink in a skill folder that points outside it",
+    () =>
+      Effect.gen(function* () {
+        const analyst = (yield* Agent.use.get("analyst"))!
+        const asked: (readonly string[])[] = []
+        const ctx = {
+          sessionID: SessionID.make("ses_test"),
+          messageID: MessageID.make("msg_test"),
+          callID: "",
+          agent: "analyst",
+          abort: AbortSignal.any([]),
+          messages: [],
+          metadata: () => Effect.void,
+          ask: (req) => Effect.sync(() => void asked.push(req.patterns)),
+        } satisfies Tool.Context
+        yield* assertExternalDirectoryEffect(ctx, path.join(externalSkills, "naming", "linked", "secret.txt"))
+        const [authored, resolved] = asked[0]!
+        expect(action(analyst, "external_directory", authored!)).toBe("allow")
+        expect(resolved).toBe(path.join(fs.realpathSync(elsewhere), "*"))
+        expect(action(analyst, "external_directory", resolved!)).toBe("deny")
+      }),
+    { config: { skills: { paths: [externalSkills] } } },
+  )
+}

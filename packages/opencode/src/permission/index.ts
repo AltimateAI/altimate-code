@@ -4,6 +4,11 @@ import { InstanceState } from "@/effect/instance-state"
 import { Wildcard } from "@opencode-ai/core/util/wildcard"
 import { Deferred, Effect, Layer, Context } from "effect"
 import os from "os"
+// altimate_change start — resolve symlinked external_directory rule paths
+import path from "path"
+import { realpathSync } from "fs"
+import { FSUtil } from "@opencode-ai/core/fs-util"
+// altimate_change end
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -210,12 +215,35 @@ export function fromConfig(permission: ConfigPermissionV1.Info) {
       ruleset.push({ permission: key, action: value, pattern: "*" })
       continue
     }
-    ruleset.push(
-      ...Object.entries(value).map(([pattern, action]) => ({ permission: key, pattern: expand(pattern), action })),
-    )
+    // altimate_change start — external_directory also asks for a path's symlink-resolved directory,
+    // so a directory rule covers its resolved spelling too (e.g. macOS /tmp -> /private/tmp)
+    for (const [pattern, action] of Object.entries(value)) {
+      ruleset.push({ permission: key, pattern: expand(pattern), action })
+      const resolved = key === "external_directory" ? resolvedDirectoryPattern(expand(pattern)) : undefined
+      if (resolved) ruleset.push({ permission: key, pattern: resolved, action })
+    }
+    // altimate_change end
   }
   return ruleset
 }
+
+// altimate_change start — resolved twin of a literal "<dir>/*" external_directory pattern
+function resolvedDirectoryPattern(pattern: string) {
+  const suffix = [`${path.sep}*`, "/*"].find((end) => pattern.endsWith(end))
+  if (!suffix) return
+  const dir = pattern.slice(0, -suffix.length)
+  if (/[*?]/.test(dir)) return
+  try {
+    const resolved = realpathSync(dir)
+    if (resolved === dir) return
+    return process.platform === "win32"
+      ? FSUtil.normalizePathPattern(path.join(resolved, "*"))
+      : path.join(resolved, "*")
+  } catch {
+    return
+  }
+}
+// altimate_change end
 
 export function merge(...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule[] {
   return rulesets.flat()

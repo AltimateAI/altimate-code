@@ -1,6 +1,8 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { test, expect } from "bun:test"
+import fs from "fs"
 import os from "os"
+import path from "path"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -118,6 +120,26 @@ test("fromConfig - expands tilde to home directory", () => {
   const result = Permission.fromConfig({ external_directory: { "~/projects/*": "allow" } })
   expect(result).toEqual([{ permission: "external_directory", pattern: `${os.homedir()}/projects/*`, action: "allow" }])
 })
+
+test.skipIf(process.platform === "win32")(
+  "fromConfig - external_directory rule also covers the symlink-resolved directory",
+  () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "permission-resolved-")))
+    try {
+      fs.mkdirSync(path.join(root, "real"))
+      fs.symlinkSync(path.join(root, "real"), path.join(root, "link"))
+      expect(Permission.fromConfig({ external_directory: { [path.join(root, "link", "*")]: "allow" } })).toEqual([
+        { permission: "external_directory", pattern: path.join(root, "link", "*"), action: "allow" },
+        { permission: "external_directory", pattern: path.join(root, "real", "*"), action: "allow" },
+      ])
+      // Other permissions and non-symlinked directories get no extra rule.
+      expect(Permission.fromConfig({ read: { [path.join(root, "link", "*")]: "allow" } })).toHaveLength(1)
+      expect(Permission.fromConfig({ external_directory: { [path.join(root, "real", "*")]: "allow" } })).toHaveLength(1)
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  },
+)
 
 test("fromConfig - expands $HOME to home directory", () => {
   const result = Permission.fromConfig({ external_directory: { "$HOME/projects/*": "allow" } })
