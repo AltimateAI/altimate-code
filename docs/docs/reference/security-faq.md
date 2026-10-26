@@ -300,7 +300,7 @@ For additional safety:
 
 Altimate Code includes several layers of protection to keep the agent within your project:
 
-- **Project boundary enforcement.** File operations check that paths stay within your project directory (or git worktree for monorepos). Attempts to read or write outside the project trigger an `external_directory` permission prompt.
+- **Project boundary enforcement.** File operations check that paths stay within your project directory (or git worktree for monorepos). Attempts to read or write outside the project trigger an `external_directory` permission prompt. A path that goes through a symlink is also checked against the directory it resolves to, so an allowed directory cannot be used to reach a denied one.
 - **Symlink-aware path resolution.** Symlinks inside the project that point outside are detected and blocked. This prevents an agent from reading or writing outside your project through symlinks.
 - **Path traversal blocking.** Paths containing `../` sequences that would escape the project are rejected with an "Access denied" error.
 - **Sensitive file protection.** Writing to credential files (`.env`, `.ssh/`, `.aws/`, private keys) triggers a confirmation prompt, even inside the project. See [below](#why-am-i-being-prompted-to-edit-env-files) for details.

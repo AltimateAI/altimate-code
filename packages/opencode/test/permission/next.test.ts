@@ -618,8 +618,14 @@ it.instance(
             metadata: { permissionAliases: { "ls /project": [["ls .."]] } },
             always: [],
             ruleset: [{ permission: "bash", pattern: "ls /project", action: "deny" }],
-          }).then(() => "allowed", (err: unknown) => err)
-          const result = await Promise.race([request, new Promise((resolve) => setTimeout(() => resolve("pending"), 100))])
+          }).then(
+            () => "allowed",
+            (err: unknown) => err,
+          )
+          const result = await Promise.race([
+            request,
+            new Promise((resolve) => setTimeout(() => resolve("pending"), 100)),
+          ])
           for (const item of await LegacyPermission.list()) {
             await LegacyPermission.reply({ requestID: item.id, reply: "reject" })
           }
