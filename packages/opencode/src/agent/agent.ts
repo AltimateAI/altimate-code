@@ -640,23 +640,40 @@ export const layer = Layer.effect(
           // Permission.disabled requires the final bash rule to deny "*". Without
           // it, narrower safety rules leave the tool exposed to commands that emit
           // no permission patterns (e.g. `>out.txt`). data-explorer is capped above.
-          // The other write tools are denied again too: last-match-wins would otherwise let a
-          // config grant such as "*": "allow" turn file edits, SQL writes, memory saves or
-          // broader delegation back on for the read-only agent.
+          // The built-in tools that change files, memory, config, connections or external
+          // systems are denied again too: last-match-wins would otherwise let a config grant
+          // such as "*": "allow" turn them back on for the read-only agent. Most of them never
+          // call ctx.ask, so removing them from the tool list is their only gate. batch is
+          // denied because it runs other tools without that tool-list filter.
           if (name === "analyst") {
             // Keep what config resolved for data-explorer (it may deny or ask), but nothing broader.
             const explorer = Permission.evaluate("task", "data-explorer", agent.permission).action
             agent.permission = Permission.merge(
               agent.permission,
               Permission.fromConfig({
-                bash: "deny",
-                sql_execute_write: "deny",
-                edit: "deny",
-                write: "deny",
-                apply_patch: "deny",
-                altimate_memory_write: "deny",
-                altimate_memory_delete: "deny",
-                altimate_memory_extract: "deny",
+                ...Object.fromEntries(
+                  [
+                    "bash",
+                    "sql_execute_write",
+                    "edit",
+                    "write",
+                    "apply_patch",
+                    "altimate_memory_write",
+                    "altimate_memory_delete",
+                    "altimate_memory_extract",
+                    "training_import",
+                    "warehouse_add",
+                    "warehouse_remove",
+                    "warehouse_install_driver",
+                    "mcp_discover",
+                    "datamate_manager",
+                    "sample_setup",
+                    "feedback_submit",
+                    // Runs caller-supplied SQL without the write classification sql_execute applies.
+                    "data_diff",
+                    "batch",
+                  ].map((tool) => [tool, "deny" as const]),
+                ),
                 task: { "*": "deny", "data-explorer": explorer },
               }),
             )

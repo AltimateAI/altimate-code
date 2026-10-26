@@ -274,7 +274,7 @@ Define project-wide conventions in an `AGENTS.md` file at your project root. The
 | Agent   | File writes | SQL writes                 | Bash                              | Training |
 | ------- | ----------- | -------------------------- | --------------------------------- | -------- |
 | Builder | allow       | ask (prompts for approval) | ask                               | allow    |
-| Analyst | deny        | deny (blocked entirely)    | deny (safe commands auto-allowed) | allow    |
+| Analyst | deny        | deny (blocked entirely)    | deny                              | allow    |
 | Plan    | deny        | deny                       | deny                              | deny     |
 
 ---

@@ -12,7 +12,7 @@ Agents define different AI personas with specific models, prompts, permissions, 
 | Agent | Description | Access Level |
 |-------|------------|-------------|
 | `builder` | Create and modify dbt models, SQL pipelines, and data transformations | Full read/write. SQL mutations prompt for approval. |
-| `analyst` | Answer questions about your data — explore it, run SELECT queries, inspect schemas, generate insights | Read-only (enforced). SQL writes, file edits, shell and memory saves denied, even if config allows them. |
+| `analyst` | Answer questions about your data — explore it, run SELECT queries, inspect schemas, generate insights | Read-only (enforced). SQL writes, file edits, shell, memory saves and other write tools denied, even if config allows them. |
 | `plan` | Plan before acting — restricted to planning files only | Minimal — no edits, no bash, no SQL |
 
 ### Builder
@@ -29,7 +29,7 @@ The agent for asking questions about your data. Truly read-only mode for safe da
 - **Web**: Fetch and search allowed without prompts
 - **Schema/warehouse/finops**: All inspection tools available
 - **Workspace knowledge**: Loads workspace and project skills; reads workspace memory and views this checkout's memory audit log. Can read files bundled with skills, including global skills stored outside the project. Reloading memory syncs the local copy with the workspace, which can remove a local copy of a block the workspace archived. Saving memory is done with `builder`.
-- **Config overrides**: A permission config such as `"*": "allow"` cannot turn file edits, SQL writes, shell, memory saves or delegation beyond `data-explorer` back on
+- **Config overrides**: A permission config such as `"*": "allow"` cannot turn file edits, SQL writes (including data diffs of arbitrary queries), shell, memory saves, warehouse connection or MCP config changes, training imports, sample project setup, feedback submission, batch tool calls or delegation beyond `data-explorer` back on
 
 !!! tip
     Use `analyst` when exploring data to ensure no accidental writes. Switch to `builder` when you're ready to create or modify models.

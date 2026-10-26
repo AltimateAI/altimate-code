@@ -1,11 +1,14 @@
 import { afterAll, expect } from "bun:test"
 import { Effect } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import fs from "fs"
 import os from "os"
 import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { deriveSubagentSessionPermission } from "../../src/agent/subagent-permissions"
 import { Permission } from "../../src/permission"
+import { RuntimeFlags } from "../../src/effect/runtime-flags"
+import { ToolRegistry } from "../../src/tool/registry"
 import { testEffect } from "../lib/effect"
 
 const it = testEffect(Agent.defaultLayer)
@@ -287,6 +290,16 @@ const analystWrites = [
   "apply_patch",
   "sql_execute_write",
   "bash",
+  "training_import",
+  "warehouse_add",
+  "warehouse_remove",
+  "warehouse_install_driver",
+  "mcp_discover",
+  "datamate_manager",
+  "sample_setup",
+  "feedback_submit",
+  "data_diff",
+  "batch",
 ]
 const writeGrants = Object.fromEntries(analystWrites.map((tool) => [tool, "allow" as const]))
 
@@ -317,14 +330,134 @@ for (const override of ["global", "agent"] as const) {
   )
 }
 
-it.instance(
-  "analyst keeps a configured deny for delegating to data-explorer",
+for (const configured of ["deny", "ask"] as const) {
+  for (const override of ["global", "agent"] as const) {
+    const task = { "*": "allow" as const, "data-explorer": configured }
+    it.instance(
+      `analyst keeps ${override === "agent" ? "an agent" : "a global"} config ${configured} for delegating to data-explorer`,
+      () =>
+        Effect.gen(function* () {
+          const analyst = (yield* Agent.use.get("analyst"))!
+          expect(action(analyst, "task", "data-explorer")).toBe(configured)
+          expect(action(analyst, "task", "general")).toBe("deny")
+        }),
+      {
+        config: override === "global" ? { permission: { task } } : { agent: { analyst: { permission: { task } } } },
+      },
+    )
+  }
+}
+
+// Every registered built-in tool that a wildcard grant leaves enabled for analyst must be a
+// reviewed read-only tool. A new tool that changes files, memory, config, connections or
+// external systems fails here until it is added to analyst's post-config denies.
+const analystConfigEnabled = new Set([
+  ...[
+    "check",
+    "classify_pii",
+    "column_lineage",
+    "compare",
+    "complete",
+    "correct",
+    "equivalence",
+    "export_ddl",
+    "extract_metadata",
+    "fingerprint",
+    "fix",
+    "grade",
+    "import_ddl",
+    "introspection_sql",
+    "migration",
+    "optimize_context",
+    "parse_dbt",
+    "policy",
+    "prune_schema",
+    "query_pii",
+    "resolve_term",
+    "rewrite",
+    "schema_diff",
+    "semantics",
+    "testgen",
+    "track_lineage",
+    "validate",
+  ].map((name) => `altimate_core_${name}`),
+  "altimate_memory_audit",
+  "altimate_memory_read",
+  "altimate_memory_refresh",
+  "answer_commit",
+  "codesearch",
+  "dbt_lineage",
+  "dbt_manifest",
+  "dbt_pr_review",
+  "dbt_profiles",
+  "dbt_unit_test_gen",
+  "finops_analyze_credits",
+  "finops_expensive_queries",
+  "finops_query_history",
+  "finops_role_grants",
+  "finops_role_hierarchy",
+  "finops_unused_resources",
+  "finops_user_roles",
+  "finops_warehouse_advice",
+  "glob",
+  "grep",
+  "impact_analysis",
+  "invalid",
+  "lineage_check",
+  "project_scan",
+  "question",
+  "read",
+  "schema_cache_status",
+  "schema_detect_pii",
+  "schema_diff",
+  "schema_index",
+  "schema_inspect",
+  "schema_search",
+  "schema_tags",
+  "schema_tags_list",
+  "skill",
+  "sql_analyze",
+  "sql_autocomplete",
+  "sql_check",
+  "sql_diff",
+  "sql_execute",
+  "sql_explain",
+  "sql_fix",
+  "sql_format",
+  "sql_materialize",
+  "sql_optimize",
+  "sql_rewrite",
+  "sql_translate",
+  "task",
+  "todowrite",
+  "tool_lookup",
+  "training_list",
+  "training_remove",
+  "training_save",
+  "warehouse_discover",
+  "warehouse_list",
+  "warehouse_test",
+  "webfetch",
+  "websearch",
+])
+const withRegistry = testEffect(
+  LayerNode.buildLayer(LayerNode.group([ToolRegistry.node, Agent.node]), {
+    replacements: [LayerNode.replace(RuntimeFlags.node, RuntimeFlags.layer())],
+  }),
+)
+
+withRegistry.instance(
+  "a wildcard grant enables only reviewed read-only built-in tools for analyst",
   () =>
     Effect.gen(function* () {
-      const analyst = (yield* Agent.use.get("analyst"))!
-      expect(action(analyst, "task", "data-explorer")).toBe("deny")
+      const ids = yield* (yield* ToolRegistry.Service).ids()
+      const analyst = (yield* Agent.Service.use((svc) => svc.get("analyst")))!
+      expect(ids).toContain("batch")
+      const disabled = Permission.disabled(ids, analyst.permission)
+      expect(ids.filter((id) => !disabled.has(id) && !analystConfigEnabled.has(id))).toEqual([])
+      for (const tool of analystWrites.filter((tool) => ids.includes(tool))) expect(disabled.has(tool), tool).toBe(true)
     }),
-  { config: { agent: { analyst: { permission: { task: { "data-explorer": "deny" } } } } } },
+  { config: { permission: { "*": "allow" }, experimental: { batch_tool: true } } },
 )
 
 // A skill stored outside the project, like a global skill under the home directory.
