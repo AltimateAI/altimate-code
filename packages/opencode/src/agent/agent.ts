@@ -334,8 +334,8 @@ export const layer = Layer.effect(
                 question: "allow",
                 // Skills return instruction text only (no side effects), so they are safe for a read-only agent.
                 skill: "allow",
-                // "*": "deny" above also drops the default allow for skill directories, so files
-                // bundled with a global skill (stored outside the project) could not be read.
+                // "*": "deny" above also overrides the default allow for skill directories; add it back
+                // so files bundled with a global skill (stored outside the project) stay readable.
                 external_directory: Object.fromEntries(skillDirs.map((dir) => [path.join(dir, "*"), "allow"])),
                 // Workspace memory: read, reload and view the audit log. Reloading syncs like the
                 // load every session runs (it can drop a local copy of a block the workspace has
@@ -636,7 +636,7 @@ export const layer = Layer.effect(
         // Ensure Truncate.GLOB is allowed unless explicitly configured
         for (const name in agents) {
           const agent = agents[name]
-          // altimate_change start — keep the analyst shell disabled after config and safety rules
+          // altimate_change start — keep analyst's shell and write tools disabled after config and safety rules
           // Permission.disabled requires the final bash rule to deny "*". Without
           // it, narrower safety rules leave the tool exposed to commands that emit
           // no permission patterns (e.g. `>out.txt`). data-explorer is capped above.
