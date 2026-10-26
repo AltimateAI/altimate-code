@@ -234,12 +234,7 @@ Set tool permissions for each agent mode in `altimate-code.json`:
   "agent": {
     "analyst": {
       "permission": {
-        "write": "deny",
-        "edit": "deny",
-        "bash": {
-          "dbt docs generate": "allow",
-          "*": "deny"
-        }
+        "webfetch": "deny"
       }
     },
     "builder": {
@@ -255,6 +250,8 @@ Set tool permissions for each agent mode in `altimate-code.json`:
   }
 }
 ```
+
+Analyst's shell and write tools are always denied, so config can only restrict analyst further.
 
 ### Project rules with AGENTS.md
 

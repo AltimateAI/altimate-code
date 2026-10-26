@@ -494,7 +494,7 @@ fs.writeFileSync(path.join(externalSkills, "naming", "references", "rules.md"), 
 afterAll(() => fs.rmSync(externalSkills, { recursive: true, force: true }))
 
 it.instance(
-  "analyst can read files bundled with a skill stored outside the project",
+  "analyst allows external_directory access to files bundled with a skill stored outside the project",
   () =>
     Effect.gen(function* () {
       const analyst = (yield* Agent.use.get("analyst"))!

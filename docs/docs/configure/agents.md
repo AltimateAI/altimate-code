@@ -12,7 +12,7 @@ Agents define different AI personas with specific models, prompts, permissions, 
 | Agent | Description | Access Level |
 |-------|------------|-------------|
 | `builder` | Create and modify dbt models, SQL pipelines, and data transformations | Full read/write. SQL mutations prompt for approval. |
-| `analyst` | Answer questions about your data — explore it, run SELECT queries, inspect schemas, generate insights | Read-only (enforced). SQL writes, file edits, shell, memory saves and other write tools denied, even if config allows them. |
+| `analyst` | Answer questions about your data — explore it, run SELECT queries, inspect schemas, generate insights | Read-only (enforced). SQL writes, file edits, shell, memory saves and other write tools denied, even if config allows them. Training entries and session scratch tables are still allowed. |
 | `plan` | Plan before acting — restricted to planning files only | Minimal — no edits, no bash, no SQL |
 
 ### Builder
