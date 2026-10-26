@@ -1,8 +1,17 @@
 import { sortBy, pipe } from "remeda"
 
 export function match(str: string, pattern: string) {
-  if (str) str = str.replaceAll("\\", "/")
-  if (pattern) pattern = pattern.replaceAll("\\", "/")
+  return matchNormalized(str?.replaceAll("\\", "/"), pattern?.replaceAll("\\", "/"))
+}
+
+// altimate_change start — preserve POSIX backslashes when matching filesystem paths
+export function matchPath(str: string, pattern: string) {
+  if (process.platform === "win32") return match(str, pattern)
+  return matchNormalized(str, pattern)
+}
+// altimate_change end
+
+function matchNormalized(str: string, pattern: string) {
   let escaped = pattern
     .replace(/[.+^${}()|[\]\\]/g, "\\$&") // escape special regex chars
     .replace(/\*/g, ".*") // * becomes .*

@@ -24,9 +24,7 @@ type Options = {
 
 // altimate_change start — symlink-resolved directory of an external_directory target
 function directoryGlob(dir: string) {
-  return process.platform === "win32"
-    ? FSUtil.normalizePathPattern(path.join(dir, "*"))
-    : path.join(dir, "*").replaceAll("\\", "/")
+  return process.platform === "win32" ? path.join(path.resolve(FSUtil.windowsPath(dir)), "*") : path.join(dir, "*")
 }
 
 // Globs to ask for: the directory as written, plus the directory it really resolves to when a
@@ -36,6 +34,17 @@ function externalDirectoryPatterns(full: string, real: string | undefined, kind:
   if (!real) return [glob]
   const realGlob = directoryGlob(kind === "directory" ? real : path.dirname(real))
   return realGlob === glob ? [glob] : [glob, realGlob]
+}
+
+function authoredPath(target: string) {
+  if (process.platform !== "win32") return target
+  return path.resolve(FSUtil.windowsPath(target))
+}
+
+function containsAuthoredPath(filepath: string, directory: string, worktree: string) {
+  if (FSUtil.contains(directory, filepath)) return true
+  if (worktree === "/") return false
+  return FSUtil.contains(worktree, filepath)
 }
 // altimate_change end
 
@@ -49,11 +58,14 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
   if (options?.bypass) return false
 
   const ins = yield* InstanceState.context
-  const full = process.platform === "win32" ? FSUtil.normalizePath(target) : target
+  // Keep the authored location separate from its real destination. In particular, resolving
+  // an external symlink here would hide the external directory entry that a delete or move
+  // operates on. Windows still needs its alternate drive spellings converted before comparison.
+  const full = authoredPath(target)
   // altimate_change start — decide containment on where the path really lands: realpath collapses
   // ".." lexically, so "<project>/link/../x" would otherwise pass as inside the project
-  const real = Filesystem.realLocation(full)
-  if (containsPath(real ?? full, ins)) return false
+  const real = Filesystem.realLocation(process.platform === "win32" ? FSUtil.windowsPath(target) : target)
+  if (containsAuthoredPath(full, ins.directory, ins.worktree) && containsPath(real ?? full, ins)) return false
   // altimate_change end
 
   const kind = options?.kind ?? "file"
@@ -141,9 +153,10 @@ export async function assertExternalDirectoryLegacy(
   if (!target) return false
   if (options?.bypass) return false
 
-  const full = process.platform === "win32" ? FSUtil.normalizePath(target) : target
-  const real = Filesystem.realLocation(full)
-  if (Instance.containsPath(real ?? full)) return false
+  const full = authoredPath(target)
+  const real = Filesystem.realLocation(process.platform === "win32" ? FSUtil.windowsPath(target) : target)
+  if (containsAuthoredPath(full, Instance.directory, Instance.worktree) && Instance.containsPath(real ?? full))
+    return false
 
   const kind = options?.kind ?? "file"
   const dir = kind === "directory" ? full : path.dirname(full)

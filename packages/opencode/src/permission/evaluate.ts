@@ -8,6 +8,10 @@ import { Wildcard } from "@opencode-ai/core/util/wildcard"
 // An alias match can never relax a stricter authored match.
 const STRICTNESS = { allow: 0, ask: 1, deny: 2 } as const
 
+function matchPattern(permission: string, input: string, pattern: string) {
+  return permission === "external_directory" ? Wildcard.matchPath(input, pattern) : Wildcard.match(input, pattern)
+}
+
 function evaluatePatterns(
   permission: string,
   pattern: string,
@@ -15,7 +19,7 @@ function evaluatePatterns(
   ...rulesets: PermissionV1.Ruleset[]
 ): PermissionV1.Rule {
   const rules = rulesets.flat().filter((rule) => Wildcard.match(permission, rule.permission))
-  const authored = rules.findLast((rule) => Wildcard.match(pattern, rule.pattern)) ?? {
+  const authored = rules.findLast((rule) => matchPattern(permission, pattern, rule.pattern)) ?? {
     action: "ask" as const,
     permission,
     pattern: "*",
@@ -23,8 +27,8 @@ function evaluatePatterns(
   // Rule order still decides: an allow rule only applies to the authored spelling.
   const aliased = rules.findLast(
     (rule) =>
-      Wildcard.match(pattern, rule.pattern) ||
-      (rule.action !== "allow" && aliases.some((alias) => Wildcard.match(alias, rule.pattern))),
+      matchPattern(permission, pattern, rule.pattern) ||
+      (rule.action !== "allow" && aliases.some((alias) => matchPattern(permission, alias, rule.pattern))),
   )
   return aliased && STRICTNESS[aliased.action] > STRICTNESS[authored.action] ? aliased : authored
 }

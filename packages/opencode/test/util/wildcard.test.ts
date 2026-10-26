@@ -79,6 +79,15 @@ test("match normalizes slashes for cross-platform globbing", () => {
   expect(Wildcard.match("C:/Windows/System32/drivers", "C:\\Windows\\System32\\*")).toBe(true)
 })
 
+test("matchPath preserves literal backslashes on POSIX", () => {
+  if (process.platform === "win32") {
+    expect(Wildcard.matchPath("C:\\Windows\\System32\\drivers", "C:/Windows/System32/*")).toBe(true)
+    return
+  }
+  expect(Wildcard.matchPath("/tmp/skill\\outside/file", "/tmp/skill/*")).toBe(false)
+  expect(Wildcard.matchPath("/tmp/skill/file", "/tmp/skill/*")).toBe(true)
+})
+
 test("match handles case-insensitivity on Windows", () => {
   if (process.platform === "win32") {
     expect(Wildcard.match("C:\\windows\\system32\\hosts", "C:/Windows/System32/*")).toBe(true)

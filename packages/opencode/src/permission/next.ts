@@ -260,7 +260,11 @@ export namespace PermissionNext {
     const merged = merge(...rulesets)
     log.info("evaluate", { permission, pattern, ruleset: merged })
     const match = merged.findLast(
-      (rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern),
+      (rule) =>
+        Wildcard.match(permission, rule.permission) &&
+        (permission === "external_directory"
+          ? Wildcard.matchPath(pattern, rule.pattern)
+          : Wildcard.match(pattern, rule.pattern)),
     )
     return match ?? { action: "ask", permission, pattern: "*" }
   }

@@ -10,7 +10,6 @@ import { Filesystem } from "@/util/filesystem"
 import { InstanceState } from "@/effect/instance-state"
 import { Instance } from "../../src/project/instance"
 import { TestInstance, tmpdirScoped } from "../fixture/fixture"
-import type { Permission } from "../../src/permission"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
 
@@ -26,8 +25,7 @@ const baseCtx: Omit<Tool.Context, "ask"> = {
   metadata: () => Effect.void,
 }
 
-const glob = (p: string) =>
-  process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
+const glob = (p: string) => (process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p)
 
 function makeCtx() {
   const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
@@ -63,7 +61,52 @@ describe("tool.assertExternalDirectory", () => {
     }),
   )
 
+  it.instance("asks for an external directory entry that resolves inside the project", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const outside = yield* tmpdirScoped()
+      const link = path.join(outside, "project-link")
+      fs.symlinkSync(test.directory, link, process.platform === "win32" ? "junction" : "dir")
+      const target = path.join(link, "file.txt")
+      const expected =
+        process.platform === "win32"
+          ? path.join(path.resolve(Filesystem.windowsPath(link)), "*")
+          : glob(path.join(link, "*"))
+
+      const { requests, ctx } = makeCtx()
+      yield* assertExternalDirectoryEffect(ctx, target)
+      expect(requests[0]?.patterns).toContain(expected)
+
+      const legacy: string[][] = []
+      const instance = yield* InstanceState.context
+      yield* Effect.promise(() =>
+        Instance.restore(instance, () =>
+          assertExternalDirectoryLegacy(
+            { ...baseCtx, metadata: () => {}, ask: async (req) => void legacy.push([...req.patterns]) },
+            target,
+          ),
+        ),
+      )
+      expect(legacy[0]).toContain(expected)
+    }),
+  )
+
   if (process.platform !== "win32") {
+    it.instance("preserves a literal backslash in an external POSIX directory", () =>
+      Effect.gen(function* () {
+        const outside = yield* tmpdirScoped()
+        const directory = path.join(outside, "allowed\\sibling")
+        fs.mkdirSync(directory)
+        const target = path.join(directory, "file.txt")
+        const { requests, ctx } = makeCtx()
+
+        yield* assertExternalDirectoryEffect(ctx, target)
+
+        expect(requests[0]?.patterns).toContain(path.join(directory, "*"))
+        expect(requests[0]?.patterns).not.toContain(path.join(outside, "allowed/sibling", "*"))
+      }),
+    )
+
     it.instance("asks when '..' after a link inside the project leads outside it", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance

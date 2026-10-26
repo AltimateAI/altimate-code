@@ -151,6 +151,20 @@ test.skipIf(process.platform === "win32")(
   },
 )
 
+test.skipIf(process.platform === "win32")(
+  "external_directory does not treat a POSIX backslash as a path separator",
+  () => {
+    const allowed = "/tmp/skill"
+    const sibling = `${allowed}\\outside/file.txt`
+    const config = { "*": "deny" as const, external_directory: { [`${allowed}/*`]: "allow" as const } }
+
+    expect(Permission.evaluate("external_directory", sibling, Permission.fromConfig(config)).action).toBe("deny")
+    expect(LegacyPermission.evaluate("external_directory", sibling, LegacyPermission.fromConfig(config)).action).toBe(
+      "deny",
+    )
+  },
+)
+
 test("fromConfig - expands $HOME to home directory", () => {
   const result = Permission.fromConfig({ external_directory: { "$HOME/projects/*": "allow" } })
   expect(result).toEqual([{ permission: "external_directory", pattern: `${os.homedir()}/projects/*`, action: "allow" }])
