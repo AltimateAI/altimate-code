@@ -124,6 +124,7 @@ describe("telemetry opt-out marker", () => {
       type: "startup_ready",
       session_id: "",
       command: "test",
+      surface: "test",
       duration_ms: 1,
       fresh_install: false,
       timestamp: Date.now(),
