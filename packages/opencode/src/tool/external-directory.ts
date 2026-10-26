@@ -31,9 +31,8 @@ function directoryGlob(dir: string) {
 
 // Globs to ask for: the directory as written, plus the directory it really resolves to when a
 // symlink takes it elsewhere, so an allowed directory cannot be used to reach a denied one.
-function externalDirectoryPatterns(full: string, kind: Kind) {
+function externalDirectoryPatterns(full: string, real: string | undefined, kind: Kind) {
   const glob = directoryGlob(kind === "directory" ? full : path.dirname(full))
-  const real = Filesystem.realLocation(full)
   if (!real) return [glob]
   const realGlob = directoryGlob(kind === "directory" ? real : path.dirname(real))
   return realGlob === glob ? [glob] : [glob, realGlob]
@@ -53,13 +52,14 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
   const full = process.platform === "win32" ? FSUtil.normalizePath(target) : target
   // altimate_change start — decide containment on where the path really lands: realpath collapses
   // ".." lexically, so "<project>/link/../x" would otherwise pass as inside the project
-  if (containsPath(Filesystem.realLocation(full) ?? full, ins)) return false
+  const real = Filesystem.realLocation(full)
+  if (containsPath(real ?? full, ins)) return false
   // altimate_change end
 
   const kind = options?.kind ?? "file"
   const dir = kind === "directory" ? full : path.dirname(full)
   // altimate_change start — also ask for the symlink-resolved directory
-  const patterns = externalDirectoryPatterns(full, kind)
+  const patterns = externalDirectoryPatterns(full, real, kind)
 
   yield* ctx.ask({
     permission: "external_directory",
@@ -142,11 +142,12 @@ export async function assertExternalDirectoryLegacy(
   if (options?.bypass) return false
 
   const full = process.platform === "win32" ? FSUtil.normalizePath(target) : target
-  if (Instance.containsPath(Filesystem.realLocation(full) ?? full)) return false
+  const real = Filesystem.realLocation(full)
+  if (Instance.containsPath(real ?? full)) return false
 
   const kind = options?.kind ?? "file"
   const dir = kind === "directory" ? full : path.dirname(full)
-  const patterns = externalDirectoryPatterns(full, kind)
+  const patterns = externalDirectoryPatterns(full, real, kind)
 
   await ctx.ask({
     permission: "external_directory",

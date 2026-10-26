@@ -234,7 +234,14 @@ function resolvedDirectoryPattern(pattern: string) {
   const wildcard = segments.findIndex((segment) => /[*?]/.test(segment))
   if (wildcard <= 0) return
   const dir = segments.slice(0, wildcard).join(path.sep) || path.sep
-  const resolved = Filesystem.realLocation(dir)
+  // A link loop in a configured directory just leaves the rule without a twin.
+  const resolved = (() => {
+    try {
+      return Filesystem.realLocation(dir)
+    } catch {
+      return undefined
+    }
+  })()
   if (!resolved || resolved === dir) return
   const twin = path.join(resolved, ...segments.slice(wildcard))
   return process.platform === "win32" ? FSUtil.normalizePathPattern(twin) : twin

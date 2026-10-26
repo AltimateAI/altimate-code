@@ -4,7 +4,7 @@ import { randomBytes } from "crypto"
 import { lookup } from "mime-types"
 import { realpathSync } from "fs"
 import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve } from "path"
-// altimate_change start — parse() finds the root for Filesystem.realLocation
+// altimate_change start — path and link helpers for Filesystem.realLocation
 import { parse, sep } from "path"
 import { lstatSync, readlinkSync } from "fs"
 // altimate_change end
@@ -211,8 +211,13 @@ export namespace Filesystem {
   // Resolves symlinks one segment at a time, so ".." steps out of where a link really points (as
   // the kernel does; realpath normalizes ".." lexically first) and the segments that do not exist
   // yet are kept as written. A link whose target does not exist yet is followed too, so a write
-  // through it is checked where it lands. Undefined for a relative path.
-  export function realLocation(p: string, hops = 0): string | undefined {
+  // through it is checked where it lands. Undefined for a relative path. Throws, like the kernel's
+  // ELOOP, when more than 40 such links are followed in one resolution.
+  export function realLocation(p: string): string | undefined {
+    return resolveLocation(p, { links: 40 })
+  }
+
+  function resolveLocation(p: string, budget: { links: number }): string | undefined {
     const { root } = parse(p)
     if (!root) return undefined
     const segments = p.slice(root.length).split(process.platform === "win32" ? /[\\/]/ : "/")
@@ -232,21 +237,23 @@ export namespace Filesystem {
       try {
         real = realpathSync(next)
       } catch {
-        real = (hops < 40 && danglingLinkTarget(next, real, hops)) || next
+        real = danglingLinkTarget(next, real, budget) ?? next
       }
     }
     return real
   }
 
-  function danglingLinkTarget(link: string, dir: string, hops: number) {
+  function danglingLinkTarget(link: string, dir: string, budget: { links: number }) {
+    let target: string
     try {
       if (!lstatSync(link).isSymbolicLink()) return undefined
-      const target = readlinkSync(link)
-      // Concatenated, not joined: join would collapse ".." in the target before the walk follows it.
-      return realLocation(isAbsolute(target) ? target : `${dir}${sep}${target}`, hops + 1)
+      target = readlinkSync(link)
     } catch {
       return undefined
     }
+    if (--budget.links < 0) throw new Error(`Too many symbolic links while resolving ${link}`)
+    // Concatenated, not joined: join would collapse ".." in the target before the walk follows it.
+    return resolveLocation(isAbsolute(target) ? target : `${dir}${sep}${target}`, budget)
   }
   // altimate_change end
 

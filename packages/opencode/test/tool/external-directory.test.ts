@@ -92,6 +92,12 @@ describe("tool.assertExternalDirectory", () => {
           ),
         )
         expect(legacy[0]?.at(-1)).toBe(expected)
+
+        // A link in the project whose target does not exist yet: a write through it lands outside.
+        fs.symlinkSync(path.join(outside, "new.txt"), path.join(test.directory, "dangling"))
+        const dangling = makeCtx()
+        yield* assertExternalDirectoryEffect(dangling.ctx, path.join(test.directory, "dangling"))
+        expect(dangling.requests[0]?.patterns.at(-1)).toBe(expected)
       }),
     )
   }
