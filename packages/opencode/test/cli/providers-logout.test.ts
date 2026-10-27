@@ -116,6 +116,11 @@ describe("providers logout", () => {
             }),
             { mode: 0o600 },
           )
+        const altimateFileExists = () =>
+          fs.stat(altimatePath).then(
+            () => true,
+            () => false,
+          )
 
         yield* Effect.promise(() => fs.mkdir(dataDir, { recursive: true }))
         yield* Effect.promise(() => fs.mkdir(path.dirname(altimatePath), { recursive: true }))
@@ -133,14 +138,7 @@ describe("providers logout", () => {
         })
         opencode.expectExit(logout, 0, "providers logout altimate-backend")
         expect(logout.stdout).toContain("Logout successful")
-        expect(
-          yield* Effect.promise(() =>
-            fs.stat(altimatePath).then(
-              () => true,
-              () => false,
-            ),
-          ),
-        ).toBe(false)
+        expect(yield* Effect.promise(() => altimateFileExists())).toBe(false)
         expect(JSON.parse(yield* Effect.promise(() => fs.readFile(authPath, "utf8")))).toEqual({ anthropic })
 
         // Credentials saved only to altimate.json (TUI paste dialog) must still be removable.
@@ -150,14 +148,7 @@ describe("providers logout", () => {
         })
         opencode.expectExit(fileOnlyLogout, 0, "providers logout file-only altimate-backend")
         expect(fileOnlyLogout.stdout).toContain("Logout successful")
-        expect(
-          yield* Effect.promise(() =>
-            fs.stat(altimatePath).then(
-              () => true,
-              () => false,
-            ),
-          ),
-        ).toBe(false)
+        expect(yield* Effect.promise(() => altimateFileExists())).toBe(false)
         expect(JSON.parse(yield* Effect.promise(() => fs.readFile(authPath, "utf8")))).toEqual({ anthropic })
       }),
     120_000,
