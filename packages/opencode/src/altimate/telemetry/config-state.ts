@@ -15,7 +15,7 @@ import { ConfigManaged } from "@/config/managed"
  * before one exists, so there it throws. Treating that as "enabled" let an opted-out user's main
  * thread clear the opt-out marker and resolve their identity. This reads the same files `Config`
  * merges, in the same order (a later source overrides an earlier one), straight from disk:
- * the global config files, `OPENCODE_CONFIG`, the project files and `.altimate-code`/`.opencode`
+ * the global config files (the legacy TOML `config` file included), `OPENCODE_CONFIG`, the project files and `.altimate-code`/`.opencode`
  * directories found from `directory`, the inline `OPENCODE_CONFIG_CONTENT`, the managed config
  * directory and macOS managed preferences. Remote and account configs are not read (they need
  * the network).
@@ -48,7 +48,12 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     const apply = (data: unknown) => {
       const disabled = (data as { telemetry?: { disabled?: unknown } } | undefined)?.telemetry?.disabled
       if (disabled === undefined) return
-      value = Boolean(disabled)
+      // Config's schema accepts only a boolean; anything else makes the whole config invalid there.
+      if (typeof disabled !== "boolean") {
+        unknown = true
+        return
+      }
+      value = disabled
       unknown = false
     }
     const readFile = async (file: string) => {
@@ -74,6 +79,13 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     }
 
     for (const file of GLOBAL_FILES) await readFile(path.join(Global.Path.config, file))
+    // The legacy TOML global config, which Config merges after the JSON files (and migrates).
+    const legacy = path.join(Global.Path.config, "config")
+    try {
+      apply(Bun.TOML.parse(await fs.readFile(legacy, "utf-8")))
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") unknown = true
+    }
     if (Flag.OPENCODE_CONFIG) await readFile(Flag.OPENCODE_CONFIG)
 
     const worktree = worktreeOf(directory)

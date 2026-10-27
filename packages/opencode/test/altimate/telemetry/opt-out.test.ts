@@ -311,9 +311,10 @@ describe("telemetry opt-out marker", () => {
     process.env.ALTIMATE_TELEMETRY_FORCE = "true"
     await Telemetry.shutdown()
     await Telemetry.init()
-    await new Promise((r) => setTimeout(r, 100))
+    await new Promise((r) => setTimeout(r, 100)) // nothing to wait for: the force check returns first
     expect(trackPosts()).toHaveLength(0)
     expect(OptOutMarker.exists()).toBe(false)
+    expect(existsSync(path.join(home, ".altimate", "telemetry-opted-out.sending"))).toBe(false)
   })
 
   test("two disabled inits while the first send is in flight send the event once", async () => {
@@ -364,6 +365,40 @@ describe("telemetry opt-out marker", () => {
     const claimFile = path.join(home, ".altimate", "telemetry-opted-out.sending")
     expect(await waitFor(() => !existsSync(claimFile))).toBe(true)
     expect(OptOutMarker.exists()).toBe(false)
+  })
+
+  test("telemetry turned back on in another process stops an in-flight send from writing the marker", async () => {
+    writeMachineId()
+    let release: () => void = () => {}
+    holdTrack = new Promise<void>((r) => (release = r))
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(await waitFor(() => trackPosts().length === 1)).toBe(true)
+    OptOutMarker.clear() // what an enabled init in another process does
+    release()
+    await new Promise((r) => setTimeout(r, 100))
+    expect(OptOutMarker.exists()).toBe(false)
+  })
+
+  test("an init without an Instance reads the opt-out from the command's project directory", async () => {
+    writeMachineId()
+    const project = mkdtempSync(path.join(os.tmpdir(), "telemetry-opt-out-project-"))
+    mkdirSync(path.join(project, ".altimate-code"))
+    writeFileSync(path.join(project, ".altimate-code", "altimate-code.json"), '{ "telemetry": { "disabled": true } }')
+    const configSpy = spyOn(Config, "get").mockRejectedValue(new Error("InstanceRef not provided"))
+    try {
+      Telemetry.setConfigDirectory(project)
+      await Telemetry.shutdown()
+      await Telemetry.init()
+      expect(Telemetry.isEnabled()).toBe(false)
+      expect(await waitFor(() => optOuts().length === 1)).toBe(true)
+      expect(optOuts()[0].data.baseData.properties.opt_out_source).toBe("config")
+    } finally {
+      Telemetry.setConfigDirectory(undefined)
+      configSpy.mockRestore()
+      rmSync(project, { recursive: true, force: true })
+    }
   })
 
   test("the marker creates a missing ~/.altimate owner-only", () => {

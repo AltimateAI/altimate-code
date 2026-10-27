@@ -134,7 +134,7 @@ You can also set the environment variable:
 export ALTIMATE_TELEMETRY_DISABLED=true
 ```
 
-When telemetry is disabled, a machine that has sent telemetry before sends one final `telemetry_opted_out` event, then nothing: no further events and no requests to the telemetry endpoint until telemetry is turned back on. The event carries only the machine ID, the opt-out source, the CLI version and the client — see the event table above. With it, an opted-out machine can be counted instead of looking like a client that stopped working.
+When telemetry is disabled, a machine with an existing machine ID sends one final `telemetry_opted_out` event, then nothing: no further events and no requests to the telemetry endpoint until telemetry is turned back on. The event carries only the machine ID, the opt-out source, the CLI version and the client — see the event table above. With it, an opted-out machine can be counted instead of looking like a client that stopped working.
 
 - The event is sent only if `~/.altimate/machine-id` already exists. A machine that never ran with telemetry on sends nothing.
 - Once the telemetry endpoint accepts the event, Altimate Code writes the marker file `~/.altimate/telemetry-opted-out`, and later launches send nothing. If the endpoint cannot be reached, no marker is written and a later launch tries again.

@@ -1913,6 +1913,12 @@ export namespace Telemetry {
   // altimate_change — false when this init could not read the user config: an opted-out user may be
   // behind it, so no identity is resolved (at init, at a flush or on refresh) until an init that can.
   let identityAllowed = true
+  // altimate_change — the project the command will run in, for reading the config without an
+  // Instance: the CLI initialises telemetry before a command changes into its `--dir` or project.
+  let configDirectory: string | undefined
+  export function setConfigDirectory(directory: string | undefined) {
+    configDirectory = directory
+  }
   let machineId = ""
   let sessionId = ""
   let projectId = ""
@@ -2128,7 +2134,7 @@ export namespace Telemetry {
           return
         }
       } catch {
-        const state = await TelemetryConfig.disabledState()
+        const state = await TelemetryConfig.disabledState(configDirectory)
         if (state === "disabled") {
           buffer = []
           void recordOptOut("config")
@@ -2279,7 +2285,8 @@ export namespace Telemetry {
       // A shutdown since this task started means a later init may own the marker now: do not
       // send, and let the next disabled init start over.
       if (lifecycle !== lifecycleGeneration) return
-      if (!OptOutMarker.claim()) return
+      const claim = OptOutMarker.claim()
+      if (!claim) return
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), OPT_OUT_TIMEOUT_MS)
       try {
@@ -2291,11 +2298,12 @@ export namespace Telemetry {
           body: JSON.stringify(envelopes),
           signal: controller.signal,
         })
-        // Accepted: write the marker unless telemetry was turned back on meanwhile.
-        if (res.ok && marker === markerGeneration) OptOutMarker.write()
+        // Accepted: write the marker unless telemetry was turned back on meanwhile, in this process
+        // (the generation) or another one (an enabled init removes the claim).
+        if (res.ok && marker === markerGeneration && OptOutMarker.holds(claim)) OptOutMarker.write()
       } finally {
         clearTimeout(timeout)
-        OptOutMarker.release()
+        OptOutMarker.release(claim)
       }
     } catch {
       // The opt-out path never surfaces: a missed marker only means one more attempt next launch.

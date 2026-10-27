@@ -1,4 +1,5 @@
 import fs from "fs"
+import { randomUUID } from "crypto"
 import path from "path"
 import { Global } from "../../global"
 import { readExistingMachineId } from "@/altimate/util/machine-id"
@@ -51,41 +52,57 @@ function claimPath(): string {
 /**
  * Claim the one opt-out send, across threads and processes: an exclusive create of an in-flight
  * file next to the marker. The TUI's main thread and its worker both init telemetry, so without
- * this the first opted-out launch sent the event twice. False when another send holds a fresh
- * claim (or the file cannot be created); a claim left by a process that died is taken over.
+ * this the first opted-out launch sent the event twice. Returns this send's token, or undefined when
+ * another send holds a fresh claim (or the file cannot be created); a claim left by a process that
+ * died is taken over.
  */
-export function claim(): boolean {
-  const create = () => fs.writeFileSync(claimPath(), `${process.pid}\n`, { mode: 0o600, flag: "wx" })
+export function claim(): string | undefined {
+  const token = `${process.pid}:${randomUUID()}`
+  const create = () => fs.writeFileSync(claimPath(), `${token}\n`, { mode: 0o600, flag: "wx" })
   try {
     create()
-    return true
+    return token
   } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return false
+    if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return undefined
   }
   try {
     const age = Date.now() - fs.lstatSync(claimPath()).mtimeMs
-    if (age < CLAIM_STALE_MS) return false
+    if (age < CLAIM_STALE_MS) return undefined
     fs.rmSync(claimPath(), { force: true })
     create()
-    return true
+    return token
+  } catch {
+    return undefined
+  }
+}
+
+/** Whether `token`'s claim still stands. An enabled init in any process removes the claim with the
+ * marker (see `clear`), so a send it outlived must not write the marker back. */
+export function holds(token: string): boolean {
+  try {
+    return fs.readFileSync(claimPath(), "utf-8").trim() === token
   } catch {
     return false
   }
 }
 
-/** Give the claim back: after the marker is written, or when the send failed so a later launch tries. */
-export function release(): void {
+/** Give the claim back, if it is still this send's: after the marker is written, or when the send
+ * failed so a later launch tries. */
+export function release(token: string): void {
   try {
-    fs.rmSync(claimPath(), { force: true })
+    if (holds(token)) fs.rmSync(claimPath(), { force: true })
   } catch {
     // a leftover claim goes stale and is taken over
   }
 }
 
-/** Best effort: an unremovable marker (read-only directory) must never fail an init. */
+/** Telemetry is on again: remove the marker and any in-flight claim, so a send still running in
+ * another process does not write the marker back. Best effort: an unremovable marker (read-only
+ * directory) must never fail an init. */
 export function clear(): void {
   try {
     fs.rmSync(markerPath(), { force: true })
+    fs.rmSync(claimPath(), { force: true })
   } catch {
     // leave it; the next opt-out is then not recorded again, which is the lesser failure
   }
