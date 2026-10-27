@@ -8,11 +8,9 @@ import os from "os"
 import path from "path"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Filesystem } from "@/util/filesystem"
-// altimate_change start — log rules whose resolved twin cannot be built
 import { Log } from "@/util/log"
 
 const log = Log.create({ service: "permission" })
-// altimate_change end
 // altimate_change end
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"

@@ -90,7 +90,7 @@ Analyst mode enforces strict guardrails:
 - **No file writes.** Cannot modify your codebase
 - **No shell.** Bash is denied. Files are read with the read, grep and glob tools
 - **No memory saves.** Workspace memory blocks can be read, but not saved, extracted or deleted (use builder). Training entries can still be saved and removed
-- **Config cannot lift these.** A permission config such as `"*": "allow"` does not turn file edits, SQL writes (including data diffs of arbitrary queries), shell, memory saves, warehouse connection or MCP config changes, training imports, sample project setup, feedback submission, batch tool calls or delegation beyond `data-explorer` back on for analyst MCP and custom tools are not covered: a global `"*": "allow"` turns them on for analyst too, including ones that write.
+- **Config cannot lift these.** A permission config such as `"*": "allow"` does not turn file edits, SQL writes (including data diffs of arbitrary queries), shell, memory saves, warehouse connection or MCP config changes, training imports, sample project setup, feedback submission, batch tool calls or delegation beyond `data-explorer` back on for analyst. MCP and custom tools are not covered: a global `"*": "allow"` turns them on for analyst too, including ones that write.
 - **Skill files readable.** Files bundled with a skill, including global skills stored outside the project, can be read
 - **Full web access.** Fetch and search allowed without prompts
 - **All inspection tools.** Schema, warehouse, finops, lineage, and core analysis tools available
