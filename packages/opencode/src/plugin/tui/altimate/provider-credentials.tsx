@@ -87,6 +87,8 @@ function show(api: TuiPluginApi) {
 async function logout(api: TuiPluginApi) {
   try {
     await AltimateApi.clearCredentials()
+    // A pasted url::instance::key in the auth store keeps the provider loader's fallback path live.
+    await api.client.auth.remove({ providerID: PROVIDER_ID })
     await api.client.instance.dispose()
     api.ui.toast({ variant: "success", message: "Signed out of Altimate LLM Gateway" })
   } catch (err) {

@@ -97,4 +97,69 @@ describe("providers logout", () => {
       }),
     120_000,
   )
+
+  cliIt.live(
+    "removes the saved Altimate gateway key along with the auth-store entry",
+    ({ home, opencode }) =>
+      Effect.gen(function* () {
+        const dataDir = path.join(home, ".local", "share", "altimate-code")
+        const authPath = path.join(dataDir, "auth.json")
+        const altimatePath = path.join(home, ".altimate", "altimate.json")
+        const anthropic = { type: "api", key: "anthropic-test-key" }
+        const writeAltimate = () =>
+          fs.writeFile(
+            altimatePath,
+            JSON.stringify({
+              altimateUrl: "https://api.test",
+              altimateInstanceName: "tenant",
+              altimateApiKey: "gateway-test-key",
+            }),
+            { mode: 0o600 },
+          )
+
+        yield* Effect.promise(() => fs.mkdir(dataDir, { recursive: true }))
+        yield* Effect.promise(() => fs.mkdir(path.dirname(altimatePath), { recursive: true }))
+        yield* Effect.promise(() => writeAltimate())
+        yield* Effect.promise(() =>
+          fs.writeFile(
+            authPath,
+            JSON.stringify({ anthropic, "altimate-backend": { type: "api", key: "gateway-test-key" } }),
+            { mode: 0o600 },
+          ),
+        )
+
+        const logout = yield* opencode.spawn(["providers", "logout", "altimate-backend"], {
+          env: { OPENCODE_AUTH_CONTENT: "" },
+        })
+        opencode.expectExit(logout, 0, "providers logout altimate-backend")
+        expect(logout.stdout).toContain("Logout successful")
+        expect(
+          yield* Effect.promise(() =>
+            fs.stat(altimatePath).then(
+              () => true,
+              () => false,
+            ),
+          ),
+        ).toBe(false)
+        expect(JSON.parse(yield* Effect.promise(() => fs.readFile(authPath, "utf8")))).toEqual({ anthropic })
+
+        // Credentials saved only to altimate.json (TUI paste dialog) must still be removable.
+        yield* Effect.promise(() => writeAltimate())
+        const fileOnlyLogout = yield* opencode.spawn(["providers", "logout", "altimate-backend"], {
+          env: { OPENCODE_AUTH_CONTENT: "" },
+        })
+        opencode.expectExit(fileOnlyLogout, 0, "providers logout file-only altimate-backend")
+        expect(fileOnlyLogout.stdout).toContain("Logout successful")
+        expect(
+          yield* Effect.promise(() =>
+            fs.stat(altimatePath).then(
+              () => true,
+              () => false,
+            ),
+          ),
+        ).toBe(false)
+        expect(JSON.parse(yield* Effect.promise(() => fs.readFile(authPath, "utf8")))).toEqual({ anthropic })
+      }),
+    120_000,
+  )
 })

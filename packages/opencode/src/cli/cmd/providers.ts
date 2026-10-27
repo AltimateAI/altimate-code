@@ -19,6 +19,7 @@ import type { Hooks } from "@opencode-ai/plugin"
 import { Process } from "@/util/process"
 import { errorMessage } from "@/util/error"
 import { FreeTier } from "@/altimate/free/client"
+import { AltimateApi } from "@/altimate/api/client"
 import { text } from "node:stream/consumers"
 import { Effect, Option } from "effect"
 
@@ -605,6 +606,14 @@ export const ProvidersLogoutCommand = effectCmd({
         label: (database[key]?.name || key) + UI.Style.TEXT_DIM + " (" + value.type + ")",
         value: key,
       }))
+    // Credentials saved only to ~/.altimate/altimate.json (TUI paste dialog) have no auth-store entry.
+    const hasAltimateBackendFile = yield* Effect.promise(() => AltimateApi.isConfigured())
+    if (hasAltimateBackendFile && !options.some((option) => option.value === "altimate-backend")) {
+      options.push({
+        label: (database["altimate-backend"]?.name || "altimate-backend") + UI.Style.TEXT_DIM + " (api)",
+        value: "altimate-backend",
+      })
+    }
     if (hasAltimateBaseCredential || hasLegacyAltimateBaseCredential || hasAltimateBaseState) {
       options.push({
         label: "Altimate Base" + UI.Style.TEXT_DIM + " (managed)",
@@ -637,6 +646,11 @@ export const ProvidersLogoutCommand = effectCmd({
       yield* Effect.orDie(authSvc.remove(FreeTier.PROVIDER_ID))
       yield* Prompt.outro("Logout successful")
       return
+    }
+    if (provider === "altimate-backend") {
+      // Browser sign-in persists the gateway key to ~/.altimate/altimate.json, which the provider
+      // loader and every workspace call read first, so sign-out must remove it too.
+      yield* cliTry("Failed to remove Altimate credential: ", () => AltimateApi.clearCredentials())
     }
     // altimate_change end
     yield* Effect.orDie(authSvc.remove(provider))
