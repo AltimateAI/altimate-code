@@ -6,13 +6,14 @@ import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
 import * as OnboardingTelemetry from "../telemetry/onboarding"
 import { Telemetry } from "../telemetry"
-import { TelemetryConfig } from "../telemetry/config-state"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "../util/machine-id"
 import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
+// altimate_change — reads the config telemetry opt-out without an Instance
+import { TelemetryConfig } from "../telemetry/config-state"
 
 /**
  * Why a failure reason is attached at the rejection site rather than inferred from the message:
