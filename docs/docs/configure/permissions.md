@@ -80,7 +80,7 @@ Override permissions for specific agents:
 }
 ```
 
-The `analyst` agent's shell and built-in write tools (file edits, SQL writes, memory saves and the other built-in tools that change state) stay denied even if its permission config allows them. Training entries remain available through `training_save` and `training_remove`, and analyst can create session scratch tables. MCP and custom tools follow your config, and config can still restrict analyst further.
+The `analyst` agent's shell and built-in write tools (file edits, SQL writes, memory saves and the other built-in tools that change state) stay denied even if its permission config allows them. Training entries remain available through `training_save` and `training_remove`, and analyst can create session scratch tables. MCP and custom tools follow your config, so a global `"*": "allow"` turns them on for analyst too, including ones that write. Config can still restrict analyst further.
 
 Rules are evaluated in order and the last matching rule wins, so put a `"*"` rule before the more specific patterns it should not override.
 

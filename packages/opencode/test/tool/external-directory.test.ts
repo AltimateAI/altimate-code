@@ -72,11 +72,12 @@ describe("tool.assertExternalDirectory", () => {
       const outside = yield* tmpdirScoped()
       const link = path.join(outside, "project-link")
       fs.symlinkSync(test.directory, link, process.platform === "win32" ? "junction" : "dir")
-      const target = path.join(link, "file.txt")
+      // The link entry itself: deleting or moving it acts on the outside directory.
+      const target = link
       const expected =
         process.platform === "win32"
-          ? path.join(path.resolve(Filesystem.windowsPath(link)), "*")
-          : glob(path.join(link, "*"))
+          ? path.join(path.resolve(Filesystem.windowsPath(outside)), "*")
+          : glob(path.join(outside, "*"))
 
       const { requests, ctx } = makeCtx()
       yield* assertExternalDirectoryEffect(ctx, target)
@@ -93,6 +94,33 @@ describe("tool.assertExternalDirectory", () => {
         ),
       )
       expect(legacy[0]).toContain(expected)
+    }),
+  )
+
+  it.instance("treats a project file spelled through a link to the project as inside it", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const outside = yield* tmpdirScoped()
+      const link = path.join(outside, "project-link")
+      fs.symlinkSync(test.directory, link, process.platform === "win32" ? "junction" : "dir")
+      // Same shape as /var/... for a project at /private/var/... on macOS.
+      const target = path.join(link, "file.txt")
+
+      const { requests, ctx } = makeCtx()
+      yield* assertExternalDirectoryEffect(ctx, target)
+      expect(requests).toEqual([])
+
+      const legacy: string[][] = []
+      const instance = yield* InstanceState.context
+      yield* Effect.promise(() =>
+        Instance.restore(instance, () =>
+          assertExternalDirectoryLegacy(
+            { ...baseCtx, metadata: () => {}, ask: async (req) => void legacy.push([...req.patterns]) },
+            target,
+          ),
+        ),
+      )
+      expect(legacy).toEqual([])
     }),
   )
 

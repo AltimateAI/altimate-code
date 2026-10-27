@@ -567,3 +567,56 @@ if (process.platform !== "win32") {
     { config: { skills: { paths: [externalSkills] } } },
   )
 }
+
+// A second skill root, plus a sibling folder whose name only extends a skill folder's name.
+const otherSkills = fs.mkdtempSync(path.join(os.tmpdir(), "analyst-team-skills-"))
+fs.mkdirSync(path.join(otherSkills, "style"), { recursive: true })
+fs.writeFileSync(
+  path.join(otherSkills, "style", "SKILL.md"),
+  "---\nname: style\ndescription: SQL style.\n---\n\nSee style.md.\n",
+)
+fs.mkdirSync(path.join(externalSkills, "naming-evil"), { recursive: true })
+afterAll(() => fs.rmSync(otherSkills, { recursive: true, force: true }))
+
+it.instance(
+  "analyst can read every discovered skill folder but not a sibling folder sharing a prefix",
+  () =>
+    Effect.gen(function* () {
+      const analyst = (yield* Agent.use.get("analyst"))!
+      expect(action(analyst, "external_directory", path.join(externalSkills, "naming", "*"))).toBe("allow")
+      expect(action(analyst, "external_directory", path.join(otherSkills, "style", "*"))).toBe("allow")
+      expect(action(analyst, "external_directory", path.join(externalSkills, "naming-evil", "*"))).toBe("deny")
+      expect(action(analyst, "external_directory", path.join(externalSkills, "*"))).toBe("deny")
+    }),
+  { config: { skills: { paths: [externalSkills, otherSkills] } } },
+)
+
+// Patterned grants match only some inputs; the re-applied "*" deny still wins for every input.
+it.instance(
+  "analyst keeps write tools denied under patterned config grants",
+  () =>
+    Effect.gen(function* () {
+      const analyst = (yield* Agent.use.get("analyst"))!
+      expect(action(analyst, "sql_execute_write", "INSERT INTO t VALUES (1)")).toBe("deny")
+      expect(action(analyst, "edit", "models/orders.sql")).toBe("deny")
+      expect(action(analyst, "bash", "ls -la")).toBe("deny")
+      expect(action(analyst, "altimate_memory_write", "naming-rule")).toBe("deny")
+      expect(Permission.disabled(["sql_execute_write", "edit", "bash"], analyst.permission)).toEqual(
+        new Set(["sql_execute_write", "edit", "bash"]),
+      )
+    }),
+  {
+    config: {
+      agent: {
+        analyst: {
+          permission: {
+            sql_execute_write: { "INSERT *": "allow" },
+            edit: { "models/*": "allow" },
+            bash: { "ls *": "allow" },
+            altimate_memory_write: { "naming-*": "allow" },
+          },
+        },
+      },
+    },
+  },
+)

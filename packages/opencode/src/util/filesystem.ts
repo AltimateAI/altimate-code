@@ -251,7 +251,8 @@ export namespace Filesystem {
     } catch {
       return undefined
     }
-    if (--budget.links < 0) throw new Error(`Too many symbolic links while resolving ${link}`)
+    if (--budget.links < 0)
+      throw Object.assign(new Error(`Too many symbolic links while resolving ${link}`), { code: "ELOOP" })
     // Concatenated, not joined: join would collapse ".." in the target before the walk follows it.
     return resolveLocation(isAbsolute(target) ? target : `${dir}${sep}${target}`, budget)
   }

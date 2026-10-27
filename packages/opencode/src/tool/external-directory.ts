@@ -41,7 +41,12 @@ function authoredPath(target: string) {
   return path.resolve(FSUtil.windowsPath(target))
 }
 
-function containsAuthoredPath(filepath: string, directory: string, worktree: string) {
+function containsAuthoredPath(target: string, directory: string, worktree: string) {
+  // Resolve the parent, not the entry: an outside link into the project stays outside (its
+  // delete or move acts on the outside entry), while a project file spelled through a link to
+  // the project (e.g. /var -> /private/var) stays inside.
+  const parent = Filesystem.realLocation(path.dirname(target))
+  const filepath = parent ? path.join(parent, path.basename(target)) : target
   if (FSUtil.contains(directory, filepath)) return true
   if (worktree === "/") return false
   return FSUtil.contains(worktree, filepath)

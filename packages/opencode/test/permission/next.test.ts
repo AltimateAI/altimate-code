@@ -128,13 +128,14 @@ test.skipIf(process.platform === "win32")(
     try {
       fs.mkdirSync(path.join(root, "real"))
       fs.symlinkSync(path.join(root, "real"), path.join(root, "link"))
+      // An allow twin goes before the authored rules, so it never outranks one of them.
       expect(Permission.fromConfig({ external_directory: { [path.join(root, "link", "*")]: "allow" } })).toEqual([
-        { permission: "external_directory", pattern: path.join(root, "link", "*"), action: "allow" },
         { permission: "external_directory", pattern: path.join(root, "real", "*"), action: "allow" },
+        { permission: "external_directory", pattern: path.join(root, "link", "*"), action: "allow" },
       ])
       // Wildcard rules keep their wildcard part, and a directory that does not exist yet resolves
       // through its nearest existing ancestor.
-      expect(Permission.fromConfig({ external_directory: { [path.join(root, "link", "**")]: "allow" } })[1]).toEqual({
+      expect(Permission.fromConfig({ external_directory: { [path.join(root, "link", "**")]: "allow" } })[0]).toEqual({
         permission: "external_directory",
         pattern: path.join(root, "real", "**"),
         action: "allow",
@@ -142,6 +143,28 @@ test.skipIf(process.platform === "win32")(
       expect(
         Permission.fromConfig({ external_directory: { [path.join(root, "link", "later", "*")]: "deny" } })[1],
       ).toEqual({ permission: "external_directory", pattern: path.join(root, "real", "later", "*"), action: "deny" })
+      // A generated twin only tightens: a deny written for the real path keeps winning over a later
+      // allow written for the link, in either order, while an unmatched real path still gets the allow.
+      const deny = (first: "deny" | "allow") =>
+        Permission.fromConfig({
+          external_directory:
+            first === "deny"
+              ? { [path.join(root, "real", "secret", "*")]: "deny", [path.join(root, "link", "*")]: "allow" }
+              : { [path.join(root, "link", "*")]: "allow", [path.join(root, "real", "secret", "*")]: "deny" },
+        })
+      for (const first of ["deny", "allow"] as const) {
+        const rules = deny(first)
+        const at = (...p: string[]) =>
+          Permission.evaluate("external_directory", path.join(root, ...p, "*"), rules).action
+        expect(at("real", "secret"), first).toBe("deny")
+        expect(at("real", "other"), first).toBe("allow")
+        expect(at("link", "other"), first).toBe("allow")
+      }
+      // A deny twin still follows its rule, so it tightens the real spelling too.
+      const denyLink = Permission.fromConfig({
+        external_directory: { [path.join(root, "*")]: "allow", [path.join(root, "link", "*")]: "deny" },
+      })
+      expect(Permission.evaluate("external_directory", path.join(root, "real", "x", "*"), denyLink).action).toBe("deny")
       // Other permissions and non-symlinked directories get no extra rule.
       expect(Permission.fromConfig({ read: { [path.join(root, "link", "*")]: "allow" } })).toHaveLength(1)
       expect(Permission.fromConfig({ external_directory: { [path.join(root, "real", "*")]: "allow" } })).toHaveLength(1)
