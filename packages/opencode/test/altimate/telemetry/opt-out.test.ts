@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
 import os from "os"
 import path from "path"
 import { Auth } from "../../../src/auth"
+import { Config } from "../../../src/config/config"
 import { Telemetry } from "../../../src/altimate/telemetry"
 import { TelemetryIdentity } from "../../../src/altimate/telemetry/identity"
 import { OptOutMarker } from "../../../src/altimate/telemetry/opt-out"
@@ -36,6 +37,7 @@ describe("telemetry opt-out marker", () => {
     "ALTIMATE_TELEMETRY_DISABLED",
     "OPENCODE_DISABLE_TELEMETRY",
     "ALTIMATE_TELEMETRY_FORCE",
+    "OPENCODE_CONFIG_CONTENT",
   ]
 
   const optOuts = () =>
@@ -226,6 +228,56 @@ describe("telemetry opt-out marker", () => {
     await Telemetry.init()
     await new Promise((r) => setTimeout(r, 100))
     expect(optOuts()).toHaveLength(1)
+  })
+
+  test("an init that cannot read the config keeps the marker and resolves no account", async () => {
+    writeMachineId()
+    writeCreds()
+    OptOutMarker.write()
+    const configSpy = spyOn(Config, "get")
+    try {
+      // The main thread's init: no Instance, so Config.get() throws, and the files cannot be read.
+      configSpy.mockRejectedValue(new Error("InstanceRef not provided"))
+      process.env.OPENCODE_CONFIG_CONTENT = "{ not json"
+      await Telemetry.shutdown()
+      await Telemetry.init()
+      expect(Telemetry.isEnabled()).toBe(true) // ordinary rows keep flowing, as before
+      await Telemetry.flush()
+      await Telemetry.refreshIdentity()
+      await new Promise((r) => setTimeout(r, 50))
+      expect(OptOutMarker.exists()).toBe(true)
+      expect(calls.filter((c) => c.url.endsWith("/users/me"))).toHaveLength(0)
+      expect(Telemetry.identityForTest()).toBeUndefined()
+      expect(optOuts()).toHaveLength(0)
+
+      // The worker's init, inside an Instance: the config says disabled, and the marker held.
+      delete process.env.OPENCODE_CONFIG_CONTENT
+      configSpy.mockResolvedValue({ telemetry: { disabled: true } } as never)
+      await Telemetry.shutdown()
+      await Telemetry.init()
+      await new Promise((r) => setTimeout(r, 50))
+      expect(Telemetry.isEnabled()).toBe(false)
+      expect(optOuts()).toHaveLength(0)
+      expect(OptOutMarker.exists()).toBe(true)
+    } finally {
+      configSpy.mockRestore()
+    }
+  })
+
+  test("an init without an Instance honours a config opt-out read from the files", async () => {
+    writeMachineId()
+    const configSpy = spyOn(Config, "get").mockRejectedValue(new Error("InstanceRef not provided"))
+    try {
+      process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ telemetry: { disabled: true } })
+      await Telemetry.shutdown()
+      await Telemetry.init()
+      expect(Telemetry.isEnabled()).toBe(false)
+      expect(await waitFor(() => optOuts().length === 1)).toBe(true)
+      expect(optOuts()[0].data.baseData.properties.opt_out_source).toBe("config")
+      expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
+    } finally {
+      configSpy.mockRestore()
+    }
   })
 
   test("turning telemetry back on clears the marker", async () => {
