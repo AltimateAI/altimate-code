@@ -84,9 +84,9 @@ describe("workspace id on the telemetry context", () => {
   })
 
   test("a turn ends only its own counters; a stale turn's use does not count", () => {
-    const first = Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 42 })
+    const first = Telemetry.setContext({ sessionId: "s7", projectId: "p1" })
     Telemetry.noteWorkspaceUse("s7", "skills")
-    const second = Telemetry.setContext({ sessionId: "s7", projectId: "p1", workspaceId: 42 })
+    const second = Telemetry.setContext({ sessionId: "s7", projectId: "p1" })
     expect(second).toBeGreaterThan(first)
     Telemetry.noteWorkspaceUse("s7", "memory", 2)
     // Counts are per turn: the cancelled turn's rows read its own, the replacement's its own.
@@ -103,9 +103,9 @@ describe("workspace id on the telemetry context", () => {
     Telemetry.endSession("s7", second)
     expect(Telemetry.workspaceUseOf("s7")).toEqual({ skills: 0, memory: 0, integrations: 0 })
     // Tokens never repeat, so a stale end can never hit a later turn.
-    const stale = Telemetry.setContext({ sessionId: "s8", projectId: "p1", workspaceId: 5 })
+    const stale = Telemetry.setContext({ sessionId: "s8", projectId: "p1" })
     Telemetry.endSession("s8", stale)
-    const fresh = Telemetry.setContext({ sessionId: "s8", projectId: "p1", workspaceId: 6 })
+    const fresh = Telemetry.setContext({ sessionId: "s8", projectId: "p1" })
     expect(fresh).toBeGreaterThan(stale)
     Telemetry.noteWorkspaceUse("s8", "skills")
     Telemetry.endSession("s8", stale)
@@ -117,8 +117,9 @@ describe("workspace id on the telemetry context", () => {
   test("a row carries the workspace it names and nothing is stamped from the context", async () => {
     await Telemetry.shutdown()
     await Telemetry.init()
-    Telemetry.setContext({ sessionId: "s1", projectId: "p1", workspaceId: 42 })
-    expect(Telemetry.getContext().workspaceId).toBe(42)
+    Telemetry.setContext({ sessionId: "s1", projectId: "p1" })
+    // The context holds no workspace: a row names its own.
+    expect("workspaceId" in Telemetry.getContext()).toBe(false)
 
     Telemetry.track(startup("bound")) // names none: carries none, whatever the context holds
     Telemetry.track({
@@ -139,5 +140,60 @@ describe("workspace id on the telemetry context", () => {
     const unlinked = envelopes().filter((e) => e.data.baseData.name === "workspace_unlinked")
     expect(unlinked.map((e) => e.data.baseData.properties.workspace_id)).toEqual([undefined, undefined])
     Telemetry.endSession("s1")
+  })
+
+  // Every event type the workspace rows added, one each.
+  const workspaceRows = (): Telemetry.Event[] => {
+    const base = { timestamp: Date.now(), session_id: "s1" }
+    return [
+      { ...base, type: "workspace_linked", workspace_id: 1, how: "bind_existing" },
+      { ...base, type: "workspace_created", workspace_id: 1, how: "create_and_bind" },
+      { ...base, type: "workspace_link_failed", how: "bind_existing", reason: "auth" },
+      { ...base, type: "workspace_unlinked", workspace_id: 1 },
+      { ...base, type: "workspace_switched", to_workspace_id: 2, how: "rebind_remote" },
+      { ...base, type: "workspace_auth_expired", endpoint: "GET /datamates/", status: 401 },
+      { ...base, type: "workspace_api_error", endpoint: "GET /datamates/", status_class: "5xx", status: 500 },
+      { ...base, type: "starter_shown", workspace_id: 1, knowledge: "off" },
+      { ...base, type: "starter_action_picked", workspace_id: 1, action: "done" },
+      { ...base, type: "workspace_memory_contributed", workspace_id: 1, block_count: 1 },
+      { ...base, type: "workspace_sync_failed", workspace_id: 1, kind: "skills", reason: "network" },
+      { ...base, type: "workspace_engine_attach", outcome: "attached", workspace_id: 1 },
+      { ...base, type: "workspace_engine_install_prompt", action: "shown", reason: "engine-missing" },
+      {
+        ...base,
+        type: "workspace_engine_precedence",
+        enabled: true,
+        shadowed_types: 0,
+        shadowed_connections: 0,
+        extensions: 0,
+        escape_hatch: false,
+      },
+      { ...base, type: "workspace_engine_redirect", tool: "datamate", operation: "status", outcome: "refused" },
+      { ...base, type: "workspace_engine_error", stage: "attach", message: "boom" },
+    ]
+  }
+
+  test("the workspace rows are sent when telemetry is on and dropped when it is off", async () => {
+    const names = workspaceRows().map((e) => e.type)
+    expect(new Set(names).size).toBe(16) // plus tool_call rows, which are not new types
+
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    for (const row of workspaceRows()) Telemetry.track(row)
+    await Telemetry.flush()
+    const sent = new Set(envelopes().map((e) => e.data.baseData.name))
+    for (const name of names) expect(sent.has(name)).toBe(true)
+
+    for (const flag of DISABLE_FLAGS) {
+      posts = []
+      await Telemetry.shutdown()
+      process.env[flag] = "1"
+      await Telemetry.init()
+      expect(Telemetry.isEnabled()).toBe(false)
+      for (const row of workspaceRows()) Telemetry.track(row)
+      await Telemetry.flush()
+      expect(posts).toEqual([])
+      delete process.env[flag]
+    }
   })
 })

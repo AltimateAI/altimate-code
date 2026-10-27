@@ -98,8 +98,8 @@ describe("workspace integration tool calls", () => {
       }),
     ).toBe(false)
     expect(rows).toHaveLength(0)
-    // The session's current entry says 7 (a replacement turn), but this call ran for turn 42.
-    Telemetry.setContext({ sessionId: "s1", projectId: "p1", workspaceId: 7 })
+    // A replacement turn is current for the session, but this call ran for workspace 42.
+    Telemetry.setContext({ sessionId: "s1", projectId: "p1" })
     expect(call("datamate", "success")).toBe(true)
     expect(rows[0].workspace_id).toBe(42)
     Telemetry.setContext({ sessionId: "", projectId: "" })

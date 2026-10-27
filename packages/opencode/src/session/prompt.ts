@@ -780,12 +780,11 @@ export namespace SessionPrompt {
     }
     // altimate_change end
     // altimate_change start — the workspace this project is linked to (local binding cache, no
-    // network) goes on the telemetry context, so every row of the turn carries workspace_id.
+    // network), named by the rows of this turn that carry workspace_id.
     const boundWorkspace = await readLocalBinding(Instance.directory).catch(() => null)
     const telemetryTurn = Telemetry.setContext({
       sessionId: sessionID,
       projectId: Instance.project?.id ?? "",
-      workspaceId: boundWorkspace?.datamateId,
     })
     // The turn's own workspace, named on the rows this loop emits at its end: a cancelled turn
     // unwinding after its replacement started must not take the replacement's entry.
@@ -2992,6 +2991,7 @@ export namespace SessionPrompt {
               sessionID: ctx.sessionID,
               messageID: ctx.messageID,
               workspaceId: input.workspaceId,
+              turn: input.turn,
               startedAt,
               outcome: "error",
               error: err,

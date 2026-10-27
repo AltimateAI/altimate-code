@@ -619,7 +619,7 @@ export namespace Telemetry {
         /** Absent when the starter could not tell (unsynced, unreadable, timed out). */
         skills?: number
         integrations?: number
-        knowledge: string
+        knowledge: "off" | "all" | "selected" | "unknown"
         memory_enabled?: boolean
       }
     | {
@@ -2071,10 +2071,6 @@ export namespace Telemetry {
   let machineId = ""
   let sessionId = ""
   let projectId = ""
-  // altimate_change — the workspace the current session's project is linked to (the backend
-  // datamate id), set per prompt turn from the local binding cache and read back through
-  // `getContext()` by callers that ask for it; nothing is stamped from it (see `track`).
-  let workspaceId: number | undefined
   // altimate_change start — the current turn token per session: `setContext` issues one, `endSession`
   // ends only its own, so a cancelled turn unwinding late cannot end the replacement's counters.
   // Tokens come from one process-wide counter, so a token is never reused. The map holds sessions
@@ -2390,10 +2386,9 @@ export namespace Telemetry {
   // altimate_change end
 
   /** Returns the turn generation for the session; pass it to `endSession` so only this turn ends it. */
-  export function setContext(opts: { sessionId: string; projectId: string; workspaceId?: number }): number {
+  export function setContext(opts: { sessionId: string; projectId: string }): number {
     sessionId = opts.sessionId
     projectId = opts.projectId
-    workspaceId = opts.workspaceId
     // altimate_change start — a turn token for the session's counters and its end
     if (!opts.sessionId) return 0
     const turn = ++nextTurn
@@ -2402,8 +2397,8 @@ export namespace Telemetry {
     // altimate_change end
   }
 
-  export function getContext(): { sessionId: string; projectId: string; workspaceId?: number } {
-    return { sessionId, projectId, ...(workspaceId !== undefined ? { workspaceId } : {}) }
+  export function getContext(): { sessionId: string; projectId: string } {
+    return { sessionId, projectId }
   }
 
   /** Returns true only after init() has completed and telemetry is enabled. */
@@ -2771,7 +2766,6 @@ export namespace Telemetry {
     droppedEvents = 0
     sessionId = ""
     projectId = ""
-    workspaceId = undefined
     machineId = ""
     // doInit() only assigns userEmail when Account.active() returns one, so without this a
     // logout followed by a re-init in the same process kept hashing the previous account into
