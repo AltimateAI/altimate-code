@@ -1,0 +1,10 @@
+# Local runtime artifacts — never commit
+__pycache__/
+*.pyc
+
+# e2e_dbt: DuckDB scratch file + dbt build artifacts
+e2e_dbt/dv_test.duckdb
+e2e_dbt/dv_test.duckdb.wal
+e2e_dbt/dv_test_project/target/
+e2e_dbt/dv_test_project/logs/
+e2e_dbt/dv_test_project/dbt_packages/

@@ -1,0 +1,56 @@
+{
+  "timestamp": "2026-09-17T08:51:55.365571+00:00",
+  "total_suites": 6,
+  "suites_passed": 6,
+  "suites_failed": 0,
+  "results": [
+    {
+      "suite": "skill_structure",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_s": 0.056,
+      "stdout_tail": "[PASS] skill_md_iron_rules  (1 pass, 0 fail)\n[PASS] skill_md_non_negotiable_rules  (1 pass, 0 fail)\n[PASS] skill_md_platform_detection  (7 pass, 0 fail)\n[PASS] skill_md_enterprise_probe  (8 pass, 0 fail)\n[PASS] skill_md_companion_skills  (8 pass, 0 fail)\n[PASS] hashing_dialect_coverage  (6 pass, 0 fail)\n[PASS] no_placeholders  (1 pass, 0 fail)\n[PASS] reference_files_substantive  (35 pass, 0 fail)\n[PASS] hard_vs_soft_rules_wired_in  (5 pass, 0 fail)\n\n======================================================================\n16/16 checks passed\n======================================================================\n\nReport written to: /Users/anas/data-vault-skill/altimate-code/experiments/data_vault_skill_validation/skill_structure/results/structure_2026-09-17T08-51-28-048936+00-00.json",
+      "stderr_tail": ""
+    },
+    {
+      "suite": "sql_correctness",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_s": 0.036,
+      "stdout_tail": "sat_missing_hashdiff                        1    0    0  1.000  1.000  1.000\nsat_hashdiff_not_alphabetized               2    0    0  1.000  1.000  1.000\nsat_hashdiff_includes_metadata              2    0    0  1.000  1.000  1.000\nsat_unique_key_wrong_grain                  1    0    0  1.000  1.000  1.000\nsat_inline_md5                              1    0    0  1.000  1.000  1.000\nraw_vault_soft_rule                         4    0    0  1.000  1.000  1.000\nsource_updated_at_as_load_dts               2    0    0  1.000  1.000  1.000\nno_record_source                            2    0    0  1.000  1.000  1.000\nno_load_dts                                 1    0    0  1.000  1.000  1.000\n\n======================================================================\n32/32 cases passed\n======================================================================\n\nReport written to: /Users/anas/data-vault-skill/altimate-code/experiments/data_vault_skill_validation/sql_correctness/results/sql_correctness_2026-09-17T08-51-28-084298+00-00.json",
+      "stderr_tail": ""
+    },
+    {
+      "suite": "knowledge_qa",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_s": 0.027,
+      "stdout_tail": "[PASS] nested_json_hashing: How do you hash a nested/array JSON payload?\n[PASS] multi_tenant_hash: What must be included in the hash for a multi-tenant hub_cus\n[PASS] cross_tenant_same_as: Are same-as links allowed across tenants?\n[PASS] data_contract: What does a data contract for a source feed contain?\n[PASS] shared_hub_change_approval: How do you prevent silent hash-normalization changes on a sh\n[PASS] mdm_pattern_choice: What are the two MDM integration patterns and when do you us\n[PASS] rehashing_playbook: What do you do when a hash-normalization rule must change po\n[PASS] ci_cost_tiers: How do you control CI cost against a multi-billion-row vault\n[PASS] step_0_5_enterprise_probe: What six enterprise-context questions does the skill probe i\n\n======================================================================\n64/64 questions passed all citations\n======================================================================\n\nReport written to: /Users/anas/data-vault-skill/altimate-code/experiments/data_vault_skill_validation/knowledge_qa/results/knowledge_qa_2026-09-17T08-51-28-112208+00-00.json",
+      "stderr_tail": ""
+    },
+    {
+      "suite": "platform_routing",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_s": 0.021,
+      "stdout_tail": "[PASS] bigquery_scheduled_queries: BigQuery with scheduled queries and Cloud Functions.\n[PASS] redshift_dbt: Redshift RA3 with dbt Cloud.\n[PASS] fabric_warehouse: Microsoft Fabric Warehouse with Data Pipelines.\n[PASS] fabric_dbt: Fabric Warehouse with dbt-fabric adapter.\n[PASS] postgres_dev: PostgreSQL for a small dev/proof-of-concept DV.\n[PASS] postgres_dbt: Postgres with dbt-postgres for a small internal warehouse.\n[PASS] snowflake_dbt_gdpr_multitenant: Snowflake + dbt Cloud, B2B SaaS with GDPR-scoped PII, multi-\n[PASS] databricks_dlt_hipaa: Databricks + Delta Live Tables, HIPAA-scoped health data, sh\n[PASS] bigquery_enterprise_scale: BigQuery + dbt, projected 5B satellite rows, 80 feeds, fresh\n\n======================================================================\n14/14 scenarios passed\n======================================================================\n\nReport written to: /Users/anas/data-vault-skill/altimate-code/experiments/data_vault_skill_validation/platform_routing/results/platform_routing_2026-09-17T08-51-28-133801+00-00.json",
+      "stderr_tail": ""
+    },
+    {
+      "suite": "agent_tasks",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_s": 0.027,
+      "stdout_tail": "[PASS] task_hashdiff_evolution  (grader=must_mention_any)\n[PASS] task_ghost_row_reasoning  (grader=must_mention_all)\n[PASS] task_driver_key_analysis  (grader=must_mention_any)\n[PASS] task_load_dts_source  (grader=must_mention_all)\n[PASS] task_pit_when  (grader=must_mention_any)\n[PASS] task_gdpr_erasure_pattern  (grader=must_mention_all)\n[PASS] task_multi_tenant_hash  (grader=must_mention_all)\n[PASS] task_cdc_delete_op  (grader=must_mention_all)\n[PASS] task_shared_hub_change  (grader=must_mention_all)\n\n======================================================================\n14/14 tasks passed\n======================================================================\n\nReport written to: /Users/anas/data-vault-skill/altimate-code/experiments/data_vault_skill_validation/agent_tasks/results/agent_tasks_2026-09-17T08-51-28-160287+00-00.json",
+      "stderr_tail": ""
+    },
+    {
+      "suite": "e2e_dbt",
+      "returncode": 0,
+      "passed": true,
+      "elapsed_s": 27.202,
+      "stdout_tail": "\n\u2500\u2500\u2500 Scenario 9: batch atomicity \u2500\u2500\u2500\n[PASS] hub_customer: exactly 2 distinct non-ghost load_dts (batch1 + batch2)  (0.006s)\n[PASS] sat_customer_details: distinct load_dts count matches distinct source-load-events (2)  (0.006s)\n\n\u2500\u2500\u2500 Scenario 10: PIT \u2500\u2500\u2500\n[PASS] dbt run --select pit_customer  (3.907s)\n[PASS] pit_customer: 16 rows (8 customers \u00d7 2 snapshots)  (0.006s)\n[PASS] pit_customer: unique on (customer_hk, snapshot_dts)  (0.007s)\n[PASS] pit_customer: Bob (C-101) at batch2 snapshot points at his latest sat row  (0.009s)\n\n======================================================================\n60/60 phases passed\nReport written to: /Users/anas/data-vault-skill/altimate-code/experiments/data_vault_skill_validation/e2e_dbt/results/e2e_dbt_2026-09-17T08-51-55-350292+00-00.json\n======================================================================",
+      "stderr_tail": ""
+    }
+  ]
+}

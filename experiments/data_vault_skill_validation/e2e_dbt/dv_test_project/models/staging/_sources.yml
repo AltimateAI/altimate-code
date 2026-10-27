@@ -1,0 +1,13 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: main
+    tables:
+      - name: raw_crm_customers
+      - name: raw_crm_customers_batch2
+      - name: raw_erp_customer_master
+      - name: raw_ecommerce_orders
+      - name: raw_wms_inventory
+      - name: raw_crm_account_manager
+      - name: raw_crm_account_manager_batch2
