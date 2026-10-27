@@ -1,10 +1,10 @@
 ---
 title: "Telemetry — Altimate Code"
-description: "Altimate Code collects anonymous usage telemetry by default. See what's collected and how to opt out."
+description: "Altimate Code collects usage telemetry by default. See what's collected, what identifies you when you sign in, and how to opt out."
 ---
 # Telemetry
 
-Altimate Code collects anonymous usage data to help us improve the product. This page describes what we collect, why, and how to opt out.
+Altimate Code collects usage data to help us improve the product. Events from a machine that is not signed in to Altimate are anonymous; once you sign in, events also carry your Altimate user ID and tenant (see [User Identification](#new-user-identification)). This page describes what we collect, why, and how to opt out.
 
 ## What We Collect
 
@@ -62,8 +62,9 @@ We collect the following categories of events:
 | `altimate_base_register_result` | The registration outcome from a picker-driven selection (the welcome picker, the full catalogue, or the provider dialog): `success`, `rate_limited`, `unavailable`, `network`, or `error`. Optional `origin` is `welcome`, `model`, or `migration` (returning free-default users offered Altimate Base). Auto-registration at startup is reported separately, by `altimate_base_registration` above. No credential or gateway response body is included. |
 | `gateway_device_code_issued` | The Altimate Gateway authorize URL was built and the browser open attempted. **Name note:** the flow is a browser loopback OAuth — there is no device code. The name follows the original event spec. |
 | `gateway_auth_completed` / `gateway_auth_failed` | Gateway sign-in outcome. `reason` is `timeout`, `denied`, or `error` — never the underlying message, which can contain the instance name. An unrecognised callback state does not reject the pending attempt, so a CSRF mismatch surfaces as `timeout`. |
-| `instance_connected` | Credentials received and saved. `time_to_connect_ms` runs from the start of the authorize call, so it includes the browser launch. No instance or tenant name is sent. |
+| `instance_connected` | Credentials received and saved. `time_to_connect_ms` runs from the start of the authorize call, so it includes the browser launch. The event names no instance itself; like every event sent after sign-in, it carries the account's `user_id` and `tenant` once they are resolved (see [User Identification](#new-user-identification)). |
 | `onboarding_completed` | A model is ready and chat is live. |
+| `telemetry_opted_out` | The last event from a machine that turns telemetry off, sent once (see [Disabling Telemetry](#disabling-telemetry)). Contains `opt_out_source` (`env` for an environment variable, `config` for `telemetry.disabled`), the machine ID, the CLI version and the client. It carries no account (`user_id`, `tenant`), project, session or launch ID. |
 | `scan_gate_shown` / `scan_gate_choice` | The "scan your environment?" gate appeared, and what the user did — `scan`, `skip`, or `dismissed` (esc / click-away). |
 | `environment_scan_completed` | A `project_scan` finished during onboarding — `has_dbt`, `has_warehouse`, `is_repo`, `connections_found`, and a bounded list of short `degraded` detection keys. No paths, hostnames, or connection details. Emitted only inside an onboarding session, and only once per session, so scans from `/discover` or a model-initiated call are excluded. |
 | `sample_setup_completed` | The sample dbt project was materialised. `success`, `models`, `tables`, and `reused` — the tool is deliberately re-callable, so this is per invocation. The target path is never sent. |
@@ -74,7 +75,7 @@ We collect the following categories of events:
 | `review_run` | A dbt/SQL review completed or failed — `invocation` (`cli` for `altimate-code review`, `tool` for the `dbt_pr_review` tool), status, duration, and on success the verdict, the pre-gating verdict, mode, risk tier, and finding counts by severity and by category. No file paths, model or column names, finding titles or bodies, SQL, diff content, or repository/branch/PR names. |
 | `review_post_outcome` | Whether a review was published to GitHub — `not_requested`, `not_attempted`, `target_unresolved`, `full`, `partial`, or `summary_failed`, plus duration. Emitted on the **CLI path only** — the `dbt_pr_review` tool completes reviews but never publishes, so a `review_run` with `invocation: tool` has no post event and that is not a failure. Within the CLI path there is exactly one per **completed** review: a review that failed emits `review_run: failed` and no post event, so absence there means the review failed rather than that an event was lost. `not_attempted` is publication requested but never reached (a bad `--output` path, a stdout write error). No repository, PR, or comment content. |
 
-Each event includes a timestamp, anonymous session ID, a per-launch correlation ID (`launch_id` — a random value regenerated every process start, not persisted and not derived from your machine or identity; it exists only to group events from the same run), CLI version, and an anonymous machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and never tied to any personal information).
+Each event includes a timestamp, session ID, a per-launch correlation ID (`launch_id` — a random value regenerated every process start, not persisted and not derived from your machine or identity; it exists only to group events from the same run), CLI version, and a machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and not derived from your hardware or identity). When the machine is signed in to Altimate, each event also carries `user_id` and `tenant`, described under [User Identification](#new-user-identification).
 
 ### Notes on the review events
 
@@ -133,7 +134,13 @@ You can also set the environment variable:
 export ALTIMATE_TELEMETRY_DISABLED=true
 ```
 
-When telemetry is disabled, no events are sent and no network requests are made to the telemetry endpoint.
+When telemetry is disabled, a machine that has sent telemetry before sends one final `telemetry_opted_out` event, then nothing: no further events and no requests to the telemetry endpoint until telemetry is turned back on. The event carries only the machine ID, the opt-out source, the CLI version and the client — see the event table above. With it, an opted-out machine can be counted instead of looking like a client that stopped working.
+
+- The event is sent only if `~/.altimate/machine-id` already exists. A machine that never ran with telemetry on sends nothing.
+- Once the telemetry endpoint accepts the event, Altimate Code writes the marker file `~/.altimate/telemetry-opted-out`, and later launches send nothing. If the endpoint cannot be reached, no marker is written and a later launch tries again.
+- While the event is being sent, a short-lived `~/.altimate/telemetry-opted-out.sending` file stops a second process from sending it too.
+- Turning telemetry back on removes the marker, so a later opt-out is recorded again.
+- No account lookup is made while telemetry is disabled.
 
 ### Test runs are excluded
 
@@ -161,7 +168,7 @@ We take your privacy seriously. Altimate Code telemetry **never** collects:
 - Code content, file contents, or file paths
 - Credentials, API keys, or tokens
 - Database connection strings or hostnames
-- Personally identifiable information (your email is SHA-256 hashed before sending and is used only for anonymous user correlation)
+- Your email address, in any form (when you are signed in, events carry your Altimate user ID and tenant instead — see below)
 - Tool arguments or outputs
 - AI prompt content or responses
 
@@ -169,12 +176,12 @@ Error messages are truncated to 500 characters and scrubbed of file paths before
 
 ### New User Identification
 
-Altimate Code uses two types of anonymous identifiers for analytics, depending on whether you are logged in:
+What identifies the sender of an event depends on whether the machine is signed in to Altimate:
 
-- **Anonymous users (not logged in):** A random UUID is generated using `crypto.randomUUID()` on first run and stored at `~/.altimate/machine-id`. This ID is not tied to your hardware, operating system, or identity — it is purely random and serves only to distinguish one machine from another in aggregate analytics.
-- **Logged-in users (OAuth):** Your email address is SHA-256 hashed before sending. The raw email is never transmitted.
+- **Not signed in:** A random UUID is generated using `crypto.randomUUID()` on first run and stored at `~/.altimate/machine-id`. This ID is not tied to your hardware, operating system, or identity — it is purely random and serves only to distinguish one machine from another in aggregate analytics. It is also the Application Insights user ID (`ai.user.id`).
+- **Signed in to Altimate:** Events also carry `user_id`, your Altimate user ID (a UUID), and `tenant`, the name of your Altimate instance; `ai.user.id` is your user ID instead of the machine ID. These identify your account, so signed-in events are not anonymous. To find them, Altimate Code makes one `GET /users/me` request to the Altimate API with the credential you signed in with, and caches the answer at `~/.altimate/telemetry-identity.json` (readable only by you). The cache holds the user ID, the tenant and a fingerprint of the credential — no API key or token. A new credential is looked up again; a sign-out, or a credential the API rejects, removes the cache. No email address, hashed or not, is sent.
 
-Both identifiers are only sent when telemetry is enabled. Disable telemetry entirely with `ALTIMATE_TELEMETRY_DISABLED=true` or the config option above.
+These identifiers are sent only while telemetry is enabled. The final `telemetry_opted_out` event carries the machine ID and nothing that identifies your account, and no `/users/me` lookup is made while telemetry is disabled. Disable telemetry entirely with `ALTIMATE_TELEMETRY_DISABLED=true` or the config option above.
 
 ### CLI Authentication Flow
 
