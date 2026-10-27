@@ -54,7 +54,7 @@ describe("TelemetryConfig.disabledState (no Instance)", () => {
     const savedFlag = process.env.CONFIG_STATE_PROBE_FLAG
     try {
       process.env.CONFIG_STATE_PROBE_FLAG = "true"
-      writeFileSync(globalFile(), '{ "telemetry": { "disabled": {env:CONFIG_STATE_PROBE_FLAG} }, "x": "${HOME}" }')
+      writeFileSync(globalFile(), '{ "telemetry": { "disabled": {env:CONFIG_STATE_PROBE_FLAG} }, "model": "${HOME}" }')
       expect(await TelemetryConfig.disabledState(dir)).toBe("disabled")
       // The parser tracks its row behind `import("@/altimate/telemetry")`. That module is loaded, so
       // awaiting the same import settles after any such callback queued during the read.
@@ -66,6 +66,22 @@ describe("TelemetryConfig.disabledState (no Instance)", () => {
       else process.env.CONFIG_STATE_PROBE_FLAG = savedFlag
       track.mockRestore()
     }
+  })
+
+  test("a later source the loader would reject cannot override an earlier opt-out", async () => {
+    writeFileSync(globalFile(), JSON.stringify({ telemetry: { disabled: true } }))
+    // Config's schema rejects a numeric model, so the real loader fails on this source.
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ telemetry: { disabled: false }, model: 123 })
+    expect(await TelemetryConfig.disabledState(dir)).toBe("unreadable")
+  })
+
+  test("a missing {file:} reference makes the read unreadable", async () => {
+    writeFileSync(globalFile(), JSON.stringify({ telemetry: { disabled: true } }))
+    process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({
+      telemetry: { disabled: false },
+      model: `{file:${path.join(dir, "no-such-file")}}`,
+    })
+    expect(await TelemetryConfig.disabledState(dir)).toBe("unreadable")
   })
 
   test("nothing sets it: enabled", async () => {
@@ -107,9 +123,9 @@ describe("TelemetryConfig.disabledState (no Instance)", () => {
     expect(await TelemetryConfig.disabledState(dir)).toBe("unreadable")
   })
 
-  test("a later source that sets the value settles an earlier unreadable one", async () => {
+  test("a source that fails anywhere makes the read unreadable, as it fails Config's whole load", async () => {
     writeFileSync(globalFile(), "{ not json")
     process.env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ telemetry: { disabled: true } })
-    expect(await TelemetryConfig.disabledState(dir)).toBe("disabled")
+    expect(await TelemetryConfig.disabledState(dir)).toBe("unreadable")
   })
 })

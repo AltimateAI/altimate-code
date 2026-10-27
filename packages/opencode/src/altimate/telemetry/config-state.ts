@@ -7,6 +7,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "../../global"
 import { ConfigPaths } from "@/config/paths"
 import { ConfigManaged } from "@/config/managed"
+import { validateLoaded } from "@/config/config"
 
 /**
  * Whether the user config turns telemetry off, read without an Instance.
@@ -23,8 +24,9 @@ import { ConfigManaged } from "@/config/managed"
  *
  * - `disabled`: the last source that sets `telemetry.disabled` sets it to `true`.
  * - `enabled`: no source turns it off.
- * - `unreadable`: a source that could not be read or parsed comes after the last one that set
- *   the value, so the answer is unknown. Callers fail closed for anything an opt-out forbids.
+ * - `unreadable`: some source could not be read, parsed or validated as `Config` does (a missing
+ *   `{file:}` reference, a value its schema rejects). `Config` would fail to load at all, so the
+ *   answer is unknown. Callers fail closed for anything an opt-out forbids.
  */
 export type State = "disabled" | "enabled" | "unreadable"
 
@@ -45,17 +47,25 @@ function worktreeOf(directory: string): string | undefined {
 export async function disabledState(directory: string = process.cwd()): Promise<State> {
   try {
     let value: boolean | undefined
+    // Any source that fails to read, parse or validate fails Config's whole load, so the answer
+    // is unknown however the other sources set it.
     let unknown = false
-    const apply = (data: unknown) => {
+    const take = (data: unknown) => {
       const disabled = (data as { telemetry?: { disabled?: unknown } } | undefined)?.telemetry?.disabled
       if (disabled === undefined) return
-      // Config's schema accepts only a boolean; anything else makes the whole config invalid there.
-      if (typeof disabled !== "boolean") {
+      if (typeof disabled !== "boolean") unknown = true
+      else value = disabled
+    }
+    // Parse as the loader does (a missing `{file:}` reference is an error) and validate with the
+    // loader's own schema step, so a source Config would reject cannot set the answer.
+    const parse = async (text: string, input: string | { source: string; dir: string }) => {
+      if (!text.trim()) return // the loader treats an empty file as `{}`
+      const source = typeof input === "string" ? input : input.source
+      try {
+        take(validateLoaded(await ConfigPaths.parseText(text, input, "error", { track: false }), source))
+      } catch {
         unknown = true
-        return
       }
-      value = disabled
-      unknown = false
     }
     const readFile = async (file: string) => {
       let text: string
@@ -65,25 +75,15 @@ export async function disabledState(directory: string = process.cwd()): Promise<
         if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") unknown = true
         return
       }
-      try {
-        apply(await ConfigPaths.parseText(text, file, "empty", { track: false }))
-      } catch {
-        unknown = true
-      }
+      await parse(text, file)
     }
-    const readText = async (text: string, source: string, dir: string) => {
-      try {
-        apply(await ConfigPaths.parseText(text, { source, dir }, "empty", { track: false }))
-      } catch {
-        unknown = true
-      }
-    }
+    const readText = (text: string, source: string, dir: string) => parse(text, { source, dir })
 
     for (const file of GLOBAL_FILES) await readFile(path.join(Global.Path.config, file))
     // The legacy TOML global config, which Config merges after the JSON files (and migrates).
     const legacy = path.join(Global.Path.config, "config")
     try {
-      apply(Bun.TOML.parse(await fs.readFile(legacy, "utf-8")))
+      take(Bun.TOML.parse(await fs.readFile(legacy, "utf-8")))
     } catch (err) {
       if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") unknown = true
     }
