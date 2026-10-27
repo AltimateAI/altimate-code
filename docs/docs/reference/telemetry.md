@@ -83,7 +83,7 @@ These events describe projects linked to an Altimate workspace. A workspace is i
 | Event | Description |
 |-------|-------------|
 | `workspace_linked` | A project was linked to a workspace and the server confirmed it. `how` is `bind_existing`, `create_and_bind`, `rebind_remote` or `rebind_path`. |
-| `workspace_created` | A workspace was created from the CLI. `how` is `create_and_bind`, or `create_unbound` when the link follows as a separate step. |
+| `workspace_created` | A workspace was created from the CLI or the TUI. `how` is `create_and_bind`, or `create_unbound` when the link follows as a separate step. |
 | `workspace_link_failed` | A link step failed. `how` names the step, and `reason` is a class: `auth`, `not_found`, `network`, `conflict` or `other`. No error text. |
 | `workspace_unlinked` | A project was unlinked, with the workspace id when the CLI knew it. |
 | `workspace_switched` | A linked project was moved to another workspace. `how` is `rebind_remote` or `rebind_path`. |
