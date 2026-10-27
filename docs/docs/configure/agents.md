@@ -138,7 +138,7 @@ Each agent can have its own permission overrides:
 }
 ```
 
-`analyst` already denies its shell and built-in write tools whatever its config says, so its config is only useful to restrict it further (for example `"webfetch": "deny"`) or to allow MCP and custom tools.
+`analyst` already denies its shell and built-in write tools whatever its config says, so its config is mainly useful to restrict it further (for example `"webfetch": "deny"`) or to allow MCP and custom tools.
 
 !!! warning
     Agent-specific permissions override global permissions. A `"deny"` at the agent level cannot be overridden by a global `"allow"`.

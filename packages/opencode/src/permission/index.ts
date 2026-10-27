@@ -4,14 +4,6 @@ import { InstanceState } from "@/effect/instance-state"
 import { Wildcard } from "@opencode-ai/core/util/wildcard"
 import { Deferred, Effect, Layer, Context } from "effect"
 import os from "os"
-// altimate_change start — resolve symlinked external_directory rule paths
-import path from "path"
-import { FSUtil } from "@opencode-ai/core/fs-util"
-import { Filesystem } from "@/util/filesystem"
-import { Log } from "@/util/log"
-
-const log = Log.create({ service: "permission" })
-// altimate_change end
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
@@ -218,48 +210,12 @@ export function fromConfig(permission: ConfigPermissionV1.Info) {
       ruleset.push({ permission: key, action: value, pattern: "*" })
       continue
     }
-    // altimate_change start — external_directory also asks for a path's symlink-resolved directory,
-    // so a directory rule covers its resolved spelling too (e.g. macOS /tmp -> /private/tmp).
-    // A generated twin may only tighten: deny/ask twins follow their rule, but allow twins go
-    // before this map's authored rules, so a deny or ask the user wrote for the real path still
-    // wins (last match wins) while an unmatched real path still gets the allow.
-    const allowTwins: PermissionV1.Rule[] = []
-    const rules: PermissionV1.Rule[] = []
-    for (const [pattern, action] of Object.entries(value)) {
-      rules.push({ permission: key, pattern: expand(pattern), action })
-      const resolved = key === "external_directory" ? resolvedDirectoryPattern(expand(pattern)) : undefined
-      if (!resolved) continue
-      const twin = { permission: key, pattern: resolved, action }
-      if (action === "allow") allowTwins.push(twin)
-      else rules.push(twin)
-    }
-    ruleset.push(...allowTwins, ...rules)
-    // altimate_change end
+    ruleset.push(
+      ...Object.entries(value).map(([pattern, action]) => ({ permission: key, pattern: expand(pattern), action })),
+    )
   }
   return ruleset
 }
-
-// altimate_change start — resolved twin of an external_directory pattern: its literal leading
-// directory (up to the first segment with a wildcard) resolved through symlinks, rest unchanged
-function resolvedDirectoryPattern(pattern: string) {
-  const segments = pattern.split(process.platform === "win32" ? /[\\/]/ : "/")
-  const wildcard = segments.findIndex((segment) => /[*?]/.test(segment))
-  if (wildcard <= 0) return
-  const dir = segments.slice(0, wildcard).join(path.sep) || path.sep
-  // A link loop in a configured directory just leaves the rule without a twin.
-  const resolved = (() => {
-    try {
-      return Filesystem.realLocation(dir)
-    } catch (error) {
-      log.debug("no resolved twin for external_directory rule", { pattern, error: String(error) })
-      return undefined
-    }
-  })()
-  if (!resolved || resolved === dir) return
-  const twin = path.join(resolved, ...segments.slice(wildcard))
-  return process.platform === "win32" ? FSUtil.normalizePathPattern(twin) : twin
-}
-// altimate_change end
 
 export function merge(...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule[] {
   return rulesets.flat()

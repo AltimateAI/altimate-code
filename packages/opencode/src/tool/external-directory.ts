@@ -28,7 +28,8 @@ function directoryGlob(dir: string) {
 }
 
 // Globs to ask for: the directory as written, plus the directory it really resolves to when a
-// symlink takes it elsewhere, so an allowed directory cannot be used to reach a denied one.
+// symlink takes it elsewhere, so a symlink inside an allowed directory cannot reach a directory
+// outside it that is not allowed.
 function externalDirectoryPatterns(full: string, real: string | undefined, kind: Kind) {
   const glob = directoryGlob(kind === "directory" ? full : path.dirname(full))
   if (!real) return [glob]
@@ -44,7 +45,8 @@ function authoredPath(target: string) {
 function containsAuthoredPath(target: string, directory: string, worktree: string) {
   // Resolve the parent, not the entry: an outside link into the project stays outside (its
   // delete or move acts on the outside entry), while a project file spelled through a link to
-  // the project (e.g. /var -> /private/var) stays inside.
+  // the project (e.g. /var -> /private/var) stays inside. This check is lexical after the parent;
+  // callers pair it with containsPath(real) so an entry that itself links out stays external.
   const parent = Filesystem.realLocation(path.dirname(target))
   const filepath = parent ? path.join(parent, path.basename(target)) : target
   if (FSUtil.contains(directory, filepath)) return true
@@ -92,12 +94,16 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
   yield* ctx.ask({
     permission: "external_directory",
     patterns,
-    always: patterns,
-    // altimate_change end
+    // Only the path as written is remembered: approving the resolved directory would also allow it
+    // when read directly, past rules configured for it.
+    always: patterns.slice(0, 1),
     metadata: {
       filepath: full,
       parentDir: dir,
+      // Evaluated with each rule's resolved spelling; the path as written is not.
+      resolvedPatterns: patterns.slice(1),
     },
+    // altimate_change end
   })
   return true
 })
@@ -183,10 +189,11 @@ export async function assertExternalDirectoryLegacy(
   await ctx.ask({
     permission: "external_directory",
     patterns,
-    always: patterns,
+    always: patterns.slice(0, 1),
     metadata: {
       filepath: full,
       parentDir: dir,
+      resolvedPatterns: patterns.slice(1),
     },
   })
   return true

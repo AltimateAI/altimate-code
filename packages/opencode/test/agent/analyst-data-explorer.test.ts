@@ -7,6 +7,7 @@ import path from "path"
 import { Agent } from "../../src/agent/agent"
 import { deriveSubagentSessionPermission } from "../../src/agent/subagent-permissions"
 import { Permission } from "../../src/permission"
+import { PermissionEvaluate } from "../../src/permission/evaluate"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { ToolRegistry } from "../../src/tool/registry"
 import { LLM } from "../../src/session/llm"
@@ -620,3 +621,34 @@ it.instance(
     },
   },
 )
+
+// A global deny on a real folder must survive a per-agent allow written through a link to its parent.
+const layered = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agent-twin-layers-")))
+fs.mkdirSync(path.join(layered, "real", "secret"), { recursive: true })
+fs.symlinkSync(path.join(layered, "real"), path.join(layered, "link"))
+afterAll(() => fs.rmSync(layered, { recursive: true, force: true }))
+
+for (const name of ["builder", "analyst"] as const) {
+  it.instance(
+    `${name} keeps a global deny on a real folder when its agent config allows a link to it`,
+    () =>
+      Effect.gen(function* () {
+        const agent = (yield* Agent.use.get(name))!
+        expect(action(agent, "external_directory", path.join(layered, "real", "secret", "*"))).toBe("deny")
+        // Reading through the link: its resolved directory is allowed by the link rule's resolved spelling.
+        expect(
+          PermissionEvaluate.evaluateResolved(
+            "external_directory",
+            path.join(layered, "real", "other", "*"),
+            agent.permission,
+          ).action,
+        ).toBe("allow")
+      }),
+    {
+      config: {
+        permission: { external_directory: { [path.join(layered, "real", "secret", "*")]: "deny" } },
+        agent: { [name]: { permission: { external_directory: { [path.join(layered, "link", "*")]: "allow" } } } },
+      },
+    },
+  )
+}

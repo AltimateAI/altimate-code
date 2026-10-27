@@ -122,52 +122,101 @@ test("fromConfig - expands tilde to home directory", () => {
 })
 
 test.skipIf(process.platform === "win32")(
-  "fromConfig - external_directory rule also covers the symlink-resolved directory",
+  "external_directory - the resolved pattern of a request only tightens the decision",
   () => {
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "permission-resolved-")))
     try {
-      fs.mkdirSync(path.join(root, "real"))
-      fs.symlinkSync(path.join(root, "real"), path.join(root, "link"))
-      // An allow twin goes before the authored rules, so it never outranks one of them.
-      expect(Permission.fromConfig({ external_directory: { [path.join(root, "link", "*")]: "allow" } })).toEqual([
-        { permission: "external_directory", pattern: path.join(root, "real", "*"), action: "allow" },
-        { permission: "external_directory", pattern: path.join(root, "link", "*"), action: "allow" },
-      ])
-      // Wildcard rules keep their wildcard part, and a directory that does not exist yet resolves
-      // through its nearest existing ancestor.
-      expect(Permission.fromConfig({ external_directory: { [path.join(root, "link", "**")]: "allow" } })[0]).toEqual({
-        permission: "external_directory",
-        pattern: path.join(root, "real", "**"),
-        action: "allow",
-      })
-      expect(
-        Permission.fromConfig({ external_directory: { [path.join(root, "link", "later", "*")]: "deny" } })[1],
-      ).toEqual({ permission: "external_directory", pattern: path.join(root, "real", "later", "*"), action: "deny" })
-      // A generated twin only tightens: a deny written for the real path keeps winning over a later
-      // allow written for the link, in either order, while an unmatched real path still gets the allow.
-      const deny = (first: "deny" | "allow") =>
-        Permission.fromConfig({
-          external_directory:
-            first === "deny"
-              ? { [path.join(root, "real", "secret", "*")]: "deny", [path.join(root, "link", "*")]: "allow" }
-              : { [path.join(root, "link", "*")]: "allow", [path.join(root, "real", "secret", "*")]: "deny" },
-        })
-      for (const first of ["deny", "allow"] as const) {
-        const rules = deny(first)
-        const at = (...p: string[]) =>
-          Permission.evaluate("external_directory", path.join(root, ...p, "*"), rules).action
-        expect(at("real", "secret"), first).toBe("deny")
-        expect(at("real", "other"), first).toBe("allow")
-        expect(at("link", "other"), first).toBe("allow")
+      for (const dir of ["real/secret/pub", "real/other", "vol/proj", "elsewhere", "skills/naming"]) {
+        fs.mkdirSync(path.join(root, ...dir.split("/")), { recursive: true })
       }
-      // A deny twin still follows its rule, so it tightens the real spelling too.
-      const denyLink = Permission.fromConfig({
-        external_directory: { [path.join(root, "*")]: "allow", [path.join(root, "link", "*")]: "deny" },
+      fs.symlinkSync(path.join(root, "real"), path.join(root, "link"))
+      fs.symlinkSync(path.join(root, "vol", "proj"), path.join(root, "proj"))
+      fs.symlinkSync(path.join(root, "elsewhere"), path.join(root, "skills", "naming", "linked"))
+      const glob = (...p: string[]) => path.join(root, ...p, "*")
+      const rules = (...layers: Record<string, "allow" | "deny" | "ask">[]) =>
+        Permission.merge(...layers.map((layer) => Permission.fromConfig({ external_directory: layer })))
+      // A request as the external-directory check sends it: the path as written, plus its resolved
+      // directory when a symlink takes it elsewhere. Every pattern must be allowed.
+      const decide = (ruleset: PermissionV1.Ruleset, written: string, resolved?: string) => {
+        const patterns = resolved ? [written, resolved] : [written]
+        const actions = patterns.map(
+          (pattern) =>
+            PermissionEvaluate.evaluateRequest(
+              { permission: "external_directory", metadata: { resolvedPatterns: patterns.slice(1) } },
+              pattern,
+              ruleset,
+            ).action,
+        )
+        return actions.includes("deny") ? "deny" : actions.includes("ask") ? "ask" : "allow"
+      }
+
+      // Configured rules are not rewritten: no generated rule is added.
+      expect(rules({ [glob("link")]: "allow" })).toEqual([
+        { permission: "external_directory", pattern: glob("link"), action: "allow" },
+      ])
+      // An allowed folder reached through a symlink stays allowed.
+      expect(decide(rules({ [glob("link")]: "allow" }), glob("link", "x"), glob("real", "x"))).toBe("allow")
+      expect(
+        PermissionEvaluate.evaluateResolved("external_directory", glob("real", "x"), rules({ [glob("link")]: "allow" }))
+          .action,
+      ).toBe("allow")
+      // The path as written gets exactly the configured decision; the link allow does not reach it.
+      expect(decide(rules({ [glob("link")]: "allow" }), glob("real", "x"))).toBe("ask")
+      // A deny for the real path in an earlier layer keeps winning over a later allow for the link.
+      const layered = rules({ [glob("real", "secret")]: "deny" }, { [glob("link")]: "allow" })
+      expect(decide(layered, glob("real", "secret"))).toBe("deny")
+      expect(decide(layered, glob("link", "other"), glob("real", "other"))).toBe("allow")
+      // A linked folder allowed inside a denied folder stays allowed (deny-volume / allow-project).
+      const carve = rules({ [glob("vol")]: "deny", [glob("proj")]: "allow" })
+      expect(decide(carve, glob("proj", "x"), glob("vol", "proj", "x"))).toBe("allow")
+      expect(decide(carve, glob("vol", "other"))).toBe("deny")
+      // An allow carved out of a deny keeps working through the link.
+      const carved = rules({
+        [glob("real", "secret")]: "deny",
+        [glob("real", "secret", "pub")]: "allow",
+        [glob("link")]: "allow",
       })
-      expect(Permission.evaluate("external_directory", path.join(root, "real", "x", "*"), denyLink).action).toBe("deny")
-      // Other permissions and non-symlinked directories get no extra rule.
-      expect(Permission.fromConfig({ read: { [path.join(root, "link", "*")]: "allow" } })).toHaveLength(1)
-      expect(Permission.fromConfig({ external_directory: { [path.join(root, "real", "*")]: "allow" } })).toHaveLength(1)
+      expect(decide(carved, glob("real", "secret", "pub"))).toBe("allow")
+      expect(decide(carved, glob("real", "secret"))).toBe("deny")
+      // A symlink from an allowed folder into a folder that is not allowed is caught.
+      const skills = rules({ [glob("skills", "naming")]: "allow" })
+      expect(decide(skills, glob("skills", "naming", "linked"), glob("elsewhere"))).toBe("ask")
+      expect(
+        decide(
+          rules({ [glob("skills", "naming")]: "allow", [glob("elsewhere")]: "deny" }),
+          glob("skills", "naming", "linked"),
+          glob("elsewhere"),
+        ),
+      ).toBe("deny")
+      // "Always" remembers only the path as written (allow link/*). A later direct read of the real
+      // path still gets the configured deny, and reads through the link stay allowed.
+      const approved = Permission.fromConfig({ external_directory: { [glob("link")]: "allow" } })
+      const withApproval = Permission.merge(rules({ [glob("real", "secret")]: "deny" }), approved)
+      expect(decide(withApproval, glob("real", "secret"))).toBe("deny")
+      expect(decide(withApproval, glob("link", "x"), glob("real", "x"))).toBe("allow")
+      // A deny written for the link also tightens the real spelling.
+      expect(
+        decide(
+          rules({ [path.join(root, "*")]: "allow", [glob("link")]: "deny" }),
+          glob("link", "x"),
+          glob("real", "x"),
+        ),
+      ).toBe("deny")
+      // Wildcard rules and not-yet-created directories resolve too.
+      expect(
+        PermissionEvaluate.evaluateResolved(
+          "external_directory",
+          path.join(root, "real", "a", "b", "*"),
+          rules({ [path.join(root, "link", "**")]: "allow" }),
+        ).action,
+      ).toBe("allow")
+      expect(
+        PermissionEvaluate.evaluateResolved(
+          "external_directory",
+          glob("real", "later"),
+          rules({ [glob("link", "later")]: "deny" }),
+        ).action,
+      ).toBe("deny")
     } finally {
       fs.rmSync(root, { recursive: true, force: true })
     }

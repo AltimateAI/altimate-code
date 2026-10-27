@@ -240,7 +240,9 @@ describe("tool.assertExternalDirectory", () => {
           yield* assertExternalDirectoryEffect(ctx, target)
           const expected = [glob(path.join(path.dirname(target), "*")), glob(path.join(elsewhere, "*"))]
           expect(requests[0]!.patterns, target).toEqual(expected)
-          expect(requests[0]!.always, target).toEqual(expected)
+          // Only the path as written is remembered; the resolved directory is marked for evaluation.
+          expect(requests[0]!.always, target).toEqual(expected.slice(0, 1))
+          expect(requests[0]!.metadata.resolvedPatterns, target).toEqual(expected.slice(1))
         }
 
         // A directory reached through the link (grep), a file in a subdirectory that does not exist
@@ -265,17 +267,27 @@ describe("tool.assertExternalDirectory", () => {
 
         // glob and ls use the Promise-based variant; it asks for the resolved directory too.
         const legacy: string[][] = []
+        const legacyAsks: Parameters<Tool.Context["ask"]>[0][] = []
         const instance = yield* InstanceState.context
         yield* Effect.promise(() =>
           Instance.restore(instance, () =>
             assertExternalDirectoryLegacy(
-              { ...baseCtx, metadata: () => {}, ask: async (req) => void legacy.push([...req.patterns]) },
+              {
+                ...baseCtx,
+                metadata: () => {},
+                ask: async (req) => {
+                  legacy.push([...req.patterns])
+                  legacyAsks.push(req)
+                },
+              },
               path.join(allowed, "linked-dir"),
               { kind: "directory" },
             ),
           ),
         )
         expect(legacy).toEqual([[glob(path.join(allowed, "linked-dir", "*")), glob(path.join(elsewhere, "*"))]])
+        expect(legacyAsks[0]!.always).toEqual([glob(path.join(allowed, "linked-dir", "*"))])
+        expect(legacyAsks[0]!.metadata.resolvedPatterns).toEqual([glob(path.join(elsewhere, "*"))])
 
         // A plain file in the allowed directory asks only for that directory.
         fs.writeFileSync(path.join(allowed, "plain.txt"), "x")
