@@ -51,14 +51,19 @@ describe("TelemetryConfig.disabledState (no Instance)", () => {
 
   test("reading a config that uses env interpolation emits no telemetry", async () => {
     const track = spyOn(Telemetry, "track")
+    const savedFlag = process.env.CONFIG_STATE_PROBE_FLAG
     try {
       process.env.CONFIG_STATE_PROBE_FLAG = "true"
       writeFileSync(globalFile(), '{ "telemetry": { "disabled": {env:CONFIG_STATE_PROBE_FLAG} }, "x": "${HOME}" }')
       expect(await TelemetryConfig.disabledState(dir)).toBe("disabled")
-      await new Promise((r) => setTimeout(r, 50)) // the parser's row would arrive after a dynamic import
+      // The parser tracks its row behind `import("@/altimate/telemetry")`. That module is loaded, so
+      // awaiting the same import settles after any such callback queued during the read.
+      await import("../../../src/altimate/telemetry")
+      await Promise.resolve()
       expect(track.mock.calls.filter(([event]) => event.type === "config_env_interpolation")).toHaveLength(0)
     } finally {
-      delete process.env.CONFIG_STATE_PROBE_FLAG
+      if (savedFlag === undefined) delete process.env.CONFIG_STATE_PROBE_FLAG
+      else process.env.CONFIG_STATE_PROBE_FLAG = savedFlag
       track.mockRestore()
     }
   })
