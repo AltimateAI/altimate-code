@@ -625,12 +625,16 @@ it.instance(
 // A global deny on a real folder must survive a per-agent allow written through a link to its parent.
 const layered = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "agent-twin-layers-")))
 fs.mkdirSync(path.join(layered, "real", "secret"), { recursive: true })
-fs.symlinkSync(path.join(layered, "real"), path.join(layered, "link"))
+fs.symlinkSync(
+  path.join(layered, "real"),
+  path.join(layered, "link"),
+  process.platform === "win32" ? "junction" : "dir",
+)
 afterAll(() => fs.rmSync(layered, { recursive: true, force: true }))
 
 for (const name of ["builder", "analyst"] as const) {
   it.instance(
-    `${name} keeps a global deny on a real folder when its agent config allows a link to it`,
+    `${name} keeps a global deny for a direct read of the real path when its agent config allows a link to its parent`,
     () =>
       Effect.gen(function* () {
         const agent = (yield* Agent.use.get(name))!

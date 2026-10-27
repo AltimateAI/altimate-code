@@ -194,6 +194,9 @@ test.skipIf(process.platform === "win32")(
       const withApproval = Permission.merge(rules({ [glob("real", "secret")]: "deny" }), approved)
       expect(decide(withApproval, glob("real", "secret"))).toBe("deny")
       expect(decide(withApproval, glob("link", "x"), glob("real", "x"))).toBe("allow")
+      // A path rule under a wildcard permission resolves too, so it keeps allowing reads through the link.
+      const wildcardPermission = Permission.fromConfig({ "*": { [glob("link")]: "allow" } })
+      expect(decide(wildcardPermission, glob("link", "x"), glob("real", "x"))).toBe("allow")
       // A deny written for the link also tightens the real spelling.
       expect(
         decide(

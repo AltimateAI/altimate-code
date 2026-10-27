@@ -31,6 +31,8 @@ function resolvedTwin(pattern: string) {
   const wildcard = segments.findIndex((segment) => /[*?]/.test(segment))
   if (wildcard <= 0) return
   const dir = segments.slice(0, wildcard).join(path.sep) || path.sep
+  // Only path patterns have a directory to resolve; a pattern such as "rm -rf /tmp/*" does not.
+  if (!path.isAbsolute(dir)) return
   const resolved = (() => {
     try {
       return Filesystem.realLocation(dir)
@@ -52,7 +54,8 @@ function withResolvedTwins(rules: PermissionV1.Rule[]) {
     return twins.get(pattern)
   }
   return rules.flatMap((rule) => {
-    const twin = rule.permission === "external_directory" ? twinOf(rule.pattern) : undefined
+    // Every rule here already applies to external_directory, including wildcard-permission rules.
+    const twin = twinOf(rule.pattern)
     return twin ? [rule, { ...rule, pattern: twin }] : [rule]
   })
 }
