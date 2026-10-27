@@ -1,36 +1,66 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs"
 import os from "os"
 import path from "path"
 import { Global } from "../../../src/global"
 import { TelemetryConfig } from "../../../src/altimate/telemetry/config-state"
+import { Telemetry } from "../../../src/altimate/telemetry"
 
 describe("TelemetryConfig.disabledState (no Instance)", () => {
   let dir: string
-  let savedContent: string | undefined
   // The preload points the global config at a per-run temp directory; other suites may have
-  // seeded these files there, so each test puts back what it found.
+  // seeded files there, so every global source the reader takes is set aside and put back.
+  const GLOBAL_SOURCES = [
+    "config.json",
+    "opencode.json",
+    "opencode.jsonc",
+    "altimate-code.json",
+    "altimate-code.jsonc",
+    "config",
+  ]
+  // Both names of the inline config (the documented alias is read first).
+  const INLINE_ENV = ["ALTIMATE_CLI_CONFIG_CONTENT", "OPENCODE_CONFIG_CONTENT"]
   const globalFile = () => path.join(Global.Path.config, "altimate-code.json")
   const legacyFile = () => path.join(Global.Path.config, "config")
   const savedFiles = new Map<string, string | undefined>()
+  const savedEnv = new Map<string, string | undefined>()
 
   beforeEach(() => {
     dir = mkdtempSync(path.join(os.tmpdir(), "telemetry-config-state-"))
-    savedContent = process.env.OPENCODE_CONFIG_CONTENT
-    delete process.env.OPENCODE_CONFIG_CONTENT
-    for (const file of [globalFile(), legacyFile()]) {
+    for (const key of INLINE_ENV) {
+      savedEnv.set(key, process.env[key])
+      delete process.env[key]
+    }
+    for (const name of GLOBAL_SOURCES) {
+      const file = path.join(Global.Path.config, name)
       savedFiles.set(file, existsSync(file) ? readFileSync(file, "utf-8") : undefined)
       rmSync(file, { force: true })
     }
   })
   afterEach(() => {
-    if (savedContent === undefined) delete process.env.OPENCODE_CONFIG_CONTENT
-    else process.env.OPENCODE_CONFIG_CONTENT = savedContent
+    for (const [key, value] of savedEnv) {
+      if (value === undefined) delete process.env[key]
+      else process.env[key] = value
+    }
     for (const [file, text] of savedFiles) {
       if (text === undefined) rmSync(file, { force: true })
       else writeFileSync(file, text)
     }
     rmSync(dir, { recursive: true, force: true })
+  })
+
+  test("reading a config that uses env interpolation emits no telemetry", async () => {
+    const track = spyOn(Telemetry, "track")
+    try {
+      process.env.CONFIG_STATE_PROBE_FLAG = "true"
+      writeFileSync(globalFile(), '{ "telemetry": { "disabled": {env:CONFIG_STATE_PROBE_FLAG} }, "x": "${HOME}" }')
+      expect(await TelemetryConfig.disabledState(dir)).toBe("disabled")
+      await new Promise((r) => setTimeout(r, 50)) // the parser's row would arrive after a dynamic import
+      expect(track.mock.calls.filter(([event]) => event.type === "config_env_interpolation")).toHaveLength(0)
+    } finally {
+      delete process.env.CONFIG_STATE_PROBE_FLAG
+      track.mockRestore()
+    }
   })
 
   test("nothing sets it: enabled", async () => {

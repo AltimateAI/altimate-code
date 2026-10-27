@@ -15,12 +15,13 @@ import { ConfigManaged } from "@/config/managed"
  * before one exists, so there it throws. Treating that as "enabled" let an opted-out user's main
  * thread clear the opt-out marker and resolve their identity. This reads the same files `Config`
  * merges, in the same order (a later source overrides an earlier one), straight from disk:
- * the global config files (the legacy TOML `config` file included), `OPENCODE_CONFIG`, the project files and `.altimate-code`/`.opencode`
- * directories found from `directory`, the inline `OPENCODE_CONFIG_CONTENT`, the managed config
- * directory and macOS managed preferences. Remote and account configs are not read (they need
- * the network).
+ * the global config files (the legacy TOML `config` file included), `OPENCODE_CONFIG`, the project
+ * files and `.altimate-code`/`.opencode` directories found from `directory`, the inline
+ * `OPENCODE_CONFIG_CONTENT`, the managed config directory and macOS managed preferences. Remote and
+ * account configs are not read (they need the network). The read emits no telemetry of its own: it
+ * runs before telemetry knows whether it may.
  *
- * - `disabled`: the last source that sets `telemetry.disabled` sets it truthy.
+ * - `disabled`: the last source that sets `telemetry.disabled` sets it to `true`.
  * - `enabled`: no source turns it off.
  * - `unreadable`: a source that could not be read or parsed comes after the last one that set
  *   the value, so the answer is unknown. Callers fail closed for anything an opt-out forbids.
@@ -65,14 +66,14 @@ export async function disabledState(directory: string = process.cwd()): Promise<
         return
       }
       try {
-        apply(await ConfigPaths.parseText(text, file, "empty"))
+        apply(await ConfigPaths.parseText(text, file, "empty", { track: false }))
       } catch {
         unknown = true
       }
     }
     const readText = async (text: string, source: string, dir: string) => {
       try {
-        apply(await ConfigPaths.parseText(text, { source, dir }, "empty"))
+        apply(await ConfigPaths.parseText(text, { source, dir }, "empty", { track: false }))
       } catch {
         unknown = true
       }
