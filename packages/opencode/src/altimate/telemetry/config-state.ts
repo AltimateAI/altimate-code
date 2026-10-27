@@ -59,7 +59,7 @@ export async function disabledState(directory: string = process.cwd()): Promise<
     // Parse as the loader does (a missing `{file:}` reference is an error) and validate with the
     // loader's own schema step, so a source Config would reject cannot set the answer.
     const parse = async (text: string, input: string | { source: string; dir: string }) => {
-      if (!text.trim()) return // the loader treats an empty file as `{}`
+      if (!text) return // the loader skips only an empty file; whitespace still goes to its parser
       const source = typeof input === "string" ? input : input.source
       try {
         take(validateLoaded(await ConfigPaths.parseText(text, input, "error", { track: false }), source))
