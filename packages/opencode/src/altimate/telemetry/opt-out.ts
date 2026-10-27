@@ -35,9 +35,51 @@ export function exists(): boolean {
 }
 
 export function write(): void {
-  fs.mkdirSync(dir(), { recursive: true })
+  fs.mkdirSync(dir(), { recursive: true, mode: 0o700 })
   // Exclusive create: never follow a planted symlink; an existing entry fails the write.
   fs.writeFileSync(markerPath(), `${new Date().toISOString()}\n`, { mode: 0o600, flag: "wx" })
+}
+
+/** A send older than this is a process that died mid-send; its claim no longer holds. The send
+ * itself is capped at 3 s. */
+const CLAIM_STALE_MS = 30_000
+
+function claimPath(): string {
+  return path.join(dir(), "telemetry-opted-out.sending")
+}
+
+/**
+ * Claim the one opt-out send, across threads and processes: an exclusive create of an in-flight
+ * file next to the marker. The TUI's main thread and its worker both init telemetry, so without
+ * this the first opted-out launch sent the event twice. False when another send holds a fresh
+ * claim (or the file cannot be created); a claim left by a process that died is taken over.
+ */
+export function claim(): boolean {
+  const create = () => fs.writeFileSync(claimPath(), `${process.pid}\n`, { mode: 0o600, flag: "wx" })
+  try {
+    create()
+    return true
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return false
+  }
+  try {
+    const age = Date.now() - fs.lstatSync(claimPath()).mtimeMs
+    if (age < CLAIM_STALE_MS) return false
+    fs.rmSync(claimPath(), { force: true })
+    create()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Give the claim back: after the marker is written, or when the send failed so a later launch tries. */
+export function release(): void {
+  try {
+    fs.rmSync(claimPath(), { force: true })
+  } catch {
+    // a leftover claim goes stale and is taken over
+  }
 }
 
 /** Best effort: an unremovable marker (read-only directory) must never fail an init. */

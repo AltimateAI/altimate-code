@@ -284,6 +284,30 @@ describe("telemetry identity", () => {
     expect(Telemetry.identityForTest()).toBeUndefined()
   })
 
+  test("a rejected key is not polled; only a new credential is looked up again", async () => {
+    process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+      "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+    writeCreds("key-revoked")
+    meStatus = 401
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(await until(() => meCalls().length === 1)).toBe(true)
+    await new Promise((r) => setTimeout(r, 50)) // let the rejection settle
+    for (let i = 0; i < 3; i++) {
+      Telemetry.retryIdentityNowForTest() // a pending backoff would end here; there is none
+      await Telemetry.flush()
+    }
+    await new Promise((r) => setTimeout(r, 50))
+    expect(meCalls()).toHaveLength(1)
+
+    meStatus = 200
+    await new Promise((r) => setTimeout(r, 15))
+    writeCreds("key-new-and-longer")
+    await Telemetry.flush()
+    expect(await until(() => Telemetry.identityForTest()?.user_id !== undefined)).toBe(true)
+    expect(meCalls()).toHaveLength(2)
+  })
+
   test("a transient failure at startup is retried at a later flush, not on every flush", async () => {
     process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
       "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"

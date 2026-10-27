@@ -2206,14 +2206,13 @@ export namespace Telemetry {
     const generation = ++identityGeneration
     identityStamp = TelemetryIdentity.credentialStamp()
     identityRetryAt = 0
-    return TelemetryIdentity.resolve(opts)
-      .then(async (resolved) => {
+    return TelemetryIdentity.resolveWithOutcome(opts)
+      .then(({ identity: resolved, outcome }) => {
         if (generation !== identityGeneration) return
         identity = resolved
-        if (resolved === undefined && (await TelemetryIdentity.hasCredential())) {
-          // Signed in but unresolved: a transient failure. Retry at a later flush.
-          if (generation === identityGeneration) identityRetryAt = Date.now() + IDENTITY_RETRY_MS
-        }
+        // Only a transient failure is retried, at a later flush. A rejected credential (401/403)
+        // stays rejected until it changes, which the stamp comparison notices without polling.
+        if (outcome === "error") identityRetryAt = Date.now() + IDENTITY_RETRY_MS
       })
       .catch(() => {})
   }
@@ -2243,10 +2242,11 @@ export namespace Telemetry {
 
   // altimate_change start — the final event of an opted-out machine. Sent once, only from a
   // machine that has sent telemetry before (a machine id exists; none is minted here), under the
-  // same sink rules as doInit(), with the identity cached by an earlier signed-in run (no request
-  // to resolve it). The marker is written only once the ingest endpoint accepted the event, so an
-  // offline launch tries again next time; after the marker, nothing is sent until telemetry is
-  // re-enabled. Not awaited: an opted-out launch must not wait on the network.
+  // same sink rules as doInit(). It carries the machine id and the opt-out source, never the account,
+  // project or launch. One send at a time across threads and processes (OptOutMarker.claim). The
+  // marker is written only once the ingest endpoint accepted the event, so an offline launch tries
+  // again next time; after the marker, nothing is sent until telemetry is re-enabled. Not awaited:
+  // an opted-out launch must not wait on the network.
   const OPT_OUT_TIMEOUT_MS = 3_000
   let optOutUnderTestRunner = false
   /** Test seam: let a suite that redirects the home directory exercise recordOptOut(). */
@@ -2270,14 +2270,21 @@ export namespace Telemetry {
       const envelopes = toAppInsightsEnvelopes(
         [{ type: "telemetry_opted_out", timestamp: Date.now(), opt_out_source: source }],
         cfg,
-        { machineId: id, identity: await TelemetryIdentity.cached() },
-      )
+        { machineId: id, identity: undefined },
+      ) as Array<{ data: { baseData: { properties: Record<string, string> } } }>
+      for (const envelope of envelopes) {
+        delete envelope.data.baseData.properties.project_id
+        delete envelope.data.baseData.properties.launch_id
+      }
       // A shutdown since this task started means a later init may own the marker now: do not
       // send, and let the next disabled init start over.
       if (lifecycle !== lifecycleGeneration) return
+      if (!OptOutMarker.claim()) return
       const controller = new AbortController()
       const timeout = setTimeout(() => controller.abort(), OPT_OUT_TIMEOUT_MS)
       try {
+        // Another send may have finished between the marker check above and the claim.
+        if (OptOutMarker.exists()) return
         const res = await fetch(cfg.endpoint, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2288,6 +2295,7 @@ export namespace Telemetry {
         if (res.ok && marker === markerGeneration) OptOutMarker.write()
       } finally {
         clearTimeout(timeout)
+        OptOutMarker.release()
       }
     } catch {
       // The opt-out path never surfaces: a missed marker only means one more attempt next launch.

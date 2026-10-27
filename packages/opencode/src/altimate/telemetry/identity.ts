@@ -1,6 +1,6 @@
 import fs from "fs"
 import path from "path"
-import { rm } from "node:fs/promises"
+import fsp, { rm } from "node:fs/promises"
 import { createHash } from "crypto"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
@@ -38,11 +38,6 @@ export function cachePath(): string {
   return path.join(Global.Path.home, ".altimate", "telemetry-identity.json")
 }
 
-/** True when a credential is in use (file or auth store), whatever its validity. */
-export async function hasCredential(): Promise<boolean> {
-  return (await loadCredential()) !== undefined
-}
-
 /** The credential the Altimate provider would use, or undefined when signed out. */
 export async function loadCredential(): Promise<Credential | undefined> {
   try {
@@ -69,7 +64,8 @@ export async function loadCredential(): Promise<Credential | undefined> {
 /**
  * A cheap stamp of the two credential files (mtime and size), so a flush can notice that a
  * sign-in, sign-out or key change happened on disk, in this thread or another, without
- * reading or parsing anything.
+ * reading or parsing anything. Synchronous on purpose: two `stat` calls on small local files,
+ * once per flush (every 5 s at most), cost less than the async round trips would.
  */
 export function credentialStamp(): string {
   const stamp = (p: string) => {
@@ -83,6 +79,9 @@ export function credentialStamp(): string {
   return `${stamp(AltimateApi.credentialsPath())}|${stamp(Auth.filepath())}`
 }
 
+/** A cache key, not a secret: 64 bits of SHA-256 over a high-entropy API key leave no realistic
+ * collision between the credentials one machine sees, and the cache holds nothing the key's
+ * owner could not already read. */
 function fingerprint(c: Credential): string {
   return createHash("sha256")
     .update(`${c.altimateUrl}\n${c.altimateInstanceName}\n${c.altimateApiKey}`)
@@ -124,36 +123,53 @@ export async function cached(): Promise<Identity | undefined> {
  * keeps it. The answer is written and returned only if the same credential is still in use.
  */
 export async function resolve(opts: { refresh?: boolean } = {}): Promise<Identity | undefined> {
+  return (await resolveWithOutcome(opts)).identity
+}
+
+/**
+ * How a resolution ended: `ok` with an identity; `none` when no credential is stored (or it
+ * changed during the request); `rejected` when the backend refused the credential (401/403),
+ * which only a new credential can change; `error` for a transient failure worth retrying.
+ */
+export type Outcome = "ok" | "none" | "rejected" | "error"
+
+/** {@link resolve}, also saying how it ended, so a caller retries only a transient failure. */
+export async function resolveWithOutcome(
+  opts: { refresh?: boolean } = {},
+): Promise<{ identity?: Identity; outcome: Outcome }> {
   try {
     const creds = await loadCredential()
     if (!creds) {
       await clear()
-      return undefined
+      return { outcome: "none" }
     }
     const fp = fingerprint(creds)
     if (!opts.refresh) {
       const hit = await readCache()
-      if (hit && hit.fingerprint === fp) return { user_id: hit.user_id, tenant: hit.tenant }
+      if (hit && hit.fingerprint === fp)
+        return { identity: { user_id: hit.user_id, tenant: hit.tenant }, outcome: "ok" }
     }
     const answer = await fetchMe(creds)
     if (answer.kind === "rejected") {
       const hit = await readCache()
       if (hit && hit.fingerprint === fp) await clear()
-      return undefined
+      return { outcome: "rejected" }
     }
-    if (answer.kind !== "ok") return undefined
+    if (answer.kind !== "ok") return { outcome: "error" }
     const now = await loadCredential()
-    if (!now || fingerprint(now) !== fp) return undefined
-    const identity: Identity = { user_id: answer.uuid, tenant: creds.altimateInstanceName }
+    if (!now || fingerprint(now) !== fp) return { outcome: "none" }
+    const identity: Identity = { user_id: answer.uuid, tenant: now.altimateInstanceName }
     try {
+      // The directory holds the machine id and this cache: owner-only when this creates it.
+      await fsp.mkdir(path.dirname(cachePath()), { recursive: true, mode: 0o700 })
       await Filesystem.writeJson(cachePath(), { ...identity, fingerprint: fp } satisfies Cached, 0o600)
     } catch (err) {
       log.warn("telemetry identity cache not written", { err: String(err) })
     }
-    return identity
+    return { identity, outcome: "ok" }
   } catch (err) {
     log.warn("telemetry identity unresolved", { err: String(err) })
-    return undefined
+    return { outcome: "error" }
   }
 }
 

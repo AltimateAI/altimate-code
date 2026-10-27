@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from "fs"
 import os from "os"
 import path from "path"
 import { Auth } from "../../../src/auth"
@@ -104,7 +104,7 @@ describe("telemetry opt-out marker", () => {
     rmSync(home, { recursive: true, force: true })
   })
 
-  test("an opted-out machine sends one final event with its identity, then nothing", async () => {
+  test("an opted-out machine sends one final event with its machine id only, then nothing", async () => {
     writeMachineId()
     writeCreds()
     expect(await TelemetryIdentity.resolve()).toEqual({ user_id: UUID, tenant: "acme" })
@@ -117,11 +117,12 @@ describe("telemetry opt-out marker", () => {
     const [event] = optOuts()
     expect(event.data.baseData.properties.machine_id).toBe(MACHINE)
     expect(event.data.baseData.properties.opt_out_source).toBe("env")
-    expect(event.data.baseData.properties.user_id).toBe(UUID)
-    expect(event.data.baseData.properties.tenant).toBe("acme")
+    // Never the account, the project or the launch, even with a cached identity on disk.
+    for (const key of ["user_id", "tenant", "project_id", "launch_id"])
+      expect(event.data.baseData.properties[key]).toBeUndefined()
     expect(typeof event.data.baseData.properties.cli_version).toBe("string")
-    expect(event.tags["ai.user.id"]).toBe(UUID)
-    // Identity came from the cache: no request to resolve it while opted out.
+    expect(event.tags["ai.user.id"]).toBe(MACHINE)
+    // No request to resolve an identity while opted out.
     expect(calls.filter((c) => c.url.endsWith("/users/me")).length).toBe(meCallsBefore)
     expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
 
@@ -278,6 +279,97 @@ describe("telemetry opt-out marker", () => {
     } finally {
       configSpy.mockRestore()
     }
+  })
+
+  test("OPENCODE_DISABLE_TELEMETRY records the opt-out with source env", async () => {
+    writeMachineId()
+    process.env.OPENCODE_DISABLE_TELEMETRY = "true"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(await waitFor(() => optOuts().length === 1)).toBe(true)
+    expect(optOuts()[0].data.baseData.properties.opt_out_source).toBe("env")
+    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
+  })
+
+  test("the config opt-out records the event with source config", async () => {
+    writeMachineId()
+    const configSpy = spyOn(Config, "get").mockResolvedValue({ telemetry: { disabled: true } } as never)
+    try {
+      await Telemetry.shutdown()
+      await Telemetry.init()
+      expect(Telemetry.isEnabled()).toBe(false)
+      expect(await waitFor(() => optOuts().length === 1)).toBe(true)
+      expect(optOuts()[0].data.baseData.properties.opt_out_source).toBe("config")
+    } finally {
+      configSpy.mockRestore()
+    }
+  })
+
+  test("ALTIMATE_TELEMETRY_FORCE never sends the opt-out event", async () => {
+    writeMachineId()
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    process.env.ALTIMATE_TELEMETRY_FORCE = "true"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    await new Promise((r) => setTimeout(r, 100))
+    expect(trackPosts()).toHaveLength(0)
+    expect(OptOutMarker.exists()).toBe(false)
+  })
+
+  test("two disabled inits while the first send is in flight send the event once", async () => {
+    writeMachineId()
+    let release: () => void = () => {}
+    holdTrack = new Promise<void>((r) => (release = r))
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(await waitFor(() => trackPosts().length === 1)).toBe(true) // the first send holds the claim
+
+    await Telemetry.shutdown()
+    await Telemetry.init() // a second init, as the TUI's worker beside its main thread
+    await new Promise((r) => setTimeout(r, 100))
+    expect(trackPosts()).toHaveLength(1)
+
+    release()
+    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
+    expect(existsSync(path.join(home, ".altimate", "telemetry-opted-out.sending"))).toBe(false)
+    expect(optOuts()).toHaveLength(1)
+  })
+
+  test("another process's fresh claim holds the send; a stale one is taken over", async () => {
+    writeMachineId()
+    const claimFile = path.join(home, ".altimate", "telemetry-opted-out.sending")
+    writeFileSync(claimFile, "123\n")
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    await new Promise((r) => setTimeout(r, 100))
+    expect(trackPosts()).toHaveLength(0)
+
+    const old = (Date.now() - 60_000) / 1000
+    utimesSync(claimFile, old, old) // the process that held it died mid-send
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(await waitFor(() => optOuts().length === 1)).toBe(true)
+    expect(await waitFor(() => OptOutMarker.exists())).toBe(true)
+  })
+
+  test("a failed send gives the claim back, so the next launch tries again", async () => {
+    writeMachineId()
+    trackStatus = 500
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    expect(await waitFor(() => trackPosts().length === 1)).toBe(true)
+    const claimFile = path.join(home, ".altimate", "telemetry-opted-out.sending")
+    expect(await waitFor(() => !existsSync(claimFile))).toBe(true)
+    expect(OptOutMarker.exists()).toBe(false)
+  })
+
+  test("the marker creates a missing ~/.altimate owner-only", () => {
+    expect(existsSync(path.join(home, ".altimate"))).toBe(false)
+    OptOutMarker.write()
+    expect(statSync(path.join(home, ".altimate")).mode & 0o777).toBe(0o700)
   })
 
   test("turning telemetry back on clears the marker", async () => {

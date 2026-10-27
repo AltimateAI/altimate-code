@@ -414,7 +414,7 @@ describe("altimate features: telemetry fail-safe init", () => {
     // user uuid and tenant resolved by TelemetryIdentity, so there is no Account.active() caller
     // here any more (it used to be awaited; Account.active() became async in v1.4.0).
     expect(src).not.toMatch(/Account\.active\s*\(/)
-    expect(src).toMatch(/TelemetryIdentity\.resolve\(/)
+    expect(src).toMatch(/TelemetryIdentity\.resolve(WithOutcome)?\(/)
   })
 })
 
