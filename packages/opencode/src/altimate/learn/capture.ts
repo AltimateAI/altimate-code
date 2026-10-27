@@ -272,11 +272,13 @@ async function subscribeWhenReady<T>(subscribe: () => T): Promise<T> {
  * Starts capture for one instance when enabled. Called once from instance bootstrap inside the instance
  * context. Never throws.
  */
-export async function startCapture(ctx: { directory: string; worktree: string }): Promise<void> {
+export async function startCapture(ctx: { directory: string; worktree: string }, options: { force?: boolean } = {}): Promise<void> {
   try {
     const root = ctx.worktree !== "/" ? ctx.worktree : ctx.directory
     const { Config } = await import("@/config/config")
-    if (!captureEnabled((await Config.get()).learn)) return
+    // altimate_change start — `force`: workspace rules turned learning on for this project (the person set nothing)
+    if (!options.force && !captureEnabled((await Config.get()).learn)) return
+    // altimate_change end
     const { Bus } = await import("@/bus")
     const { MessageV2 } = await import("../../session/message-v2")
     const { Session } = await import("../../session")

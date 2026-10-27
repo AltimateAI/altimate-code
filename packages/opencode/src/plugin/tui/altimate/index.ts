@@ -18,6 +18,7 @@ import Workspace from "./workspace"
 import WorkspaceSidebar from "./workspace-sidebar"
 import LearnNudge from "./learn-nudge"
 import WorkspaceWelcome from "./workspace-welcome"
+import Rules from "./rules"
 
 // Feature plugins are registered here as they are ported from the pre-merge sources on `main`
 // (see the ADR re-home plan). Each lives in its own file under this directory and default-exports
@@ -35,6 +36,6 @@ export function altimateTuiPlugins(_flags: Pick<RuntimeFlags.Info, "experimental
   // The boot-box welcome section (./workspace-welcome) is back: 0.12.6 took it out because every keybinding
   // stopped working once its lines arrived, which came from its view rendering nothing on first mount (see
   // `WelcomeBlock` there).
-  return Flag.ALTIMATE_DISABLE_WORKSPACE ? base : [...base, Workspace, WorkspaceSidebar, WorkspaceWelcome]
+  return Flag.ALTIMATE_DISABLE_WORKSPACE ? base : [...base, Workspace, WorkspaceSidebar, WorkspaceWelcome, Rules]
 }
 // altimate_change end

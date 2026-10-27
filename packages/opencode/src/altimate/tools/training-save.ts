@@ -8,6 +8,59 @@ import { CitationSchema } from "../../memory/types"
 
 const log = Log.create({ service: "tool.training_save" })
 
+// altimate_change start — workspace rules: route a project rule to the proposal card when linked
+/** The text of the person's latest message in the session. */
+function lastUserText(messages: unknown): string | undefined {
+  if (!Array.isArray(messages)) return undefined
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i] as { info?: { role?: string }; parts?: { type?: string; text?: string; synthetic?: boolean }[] }
+    if (message?.info?.role !== "user") continue
+    const text = (message.parts ?? []).filter((part) => part.type === "text" && !part.synthetic).map((part) => part.text ?? "").join(" ").trim()
+    if (text) return text
+  }
+  return undefined
+}
+
+async function proposeTeamRule(content: string, sessionID: string, said?: string) {
+  const [{ Instance }, { Config }, { RulesStore }, { RuleTrigger }] = await Promise.all([
+    import("../../project/instance"),
+    import("@/config/config"),
+    import("../rules/store"),
+    import("../rules/trigger"),
+  ])
+  const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+  const state = await RulesStore.read(root)
+  if (!state.scope || !state.workspace) return undefined
+  const learn = (await Config.get()).learn
+  const result = await RuleTrigger.explicit({ sessionID, root, directory: Instance.directory, learn, text: content, said })
+  const metadata = { action: "proposed" as string, kind: "rule", name: "", scope: "project" }
+  if (result.status === "memory")
+    return {
+      title: "Not a team rule",
+      metadata: { ...metadata, action: "redirect" },
+      output: `This reads as ${result.cue}, not a team rule. Save it with altimate_memory_write instead (scope "global" for a personal preference, "project" for a fact about this project), then tell the person it was saved to memory.`,
+    }
+  if (result.status === "invalid")
+    return {
+      title: "Team rule: not proposed",
+      metadata: { ...metadata, action: "error" },
+      output: `Not proposed: a team rule must be one line of at most 140 characters with no commands, links or secrets (${result.reason}). Restate it as one short line and call training_save again.`,
+    }
+  const owner = state.workspace.is_owner ? "you (the workspace owner)" : (state.workspace.owner_name ?? "the workspace owner")
+  return {
+    title: `Team rule proposed: "${content.slice(0, 60)}"`,
+    metadata,
+    output: [
+      result.choose
+        ? `The person sees a card asking whether to save this as a memory (just for them, applies now) or as a team rule for ${state.workspace.name} (goes to ${owner} for review), or to skip it.`
+        : `Proposed as a team rule for ${state.workspace.name}. The person sees a card to send it to ${owner} for review` +
+          (state.workspace.is_owner ? " or approve it now" : "") + ", edit the wording, or decline.",
+      "Follow the rule for the rest of this session. Do not save it again, and do not say it is already a team rule: it applies to teammates only after approval.",
+    ].join("\n"),
+  }
+}
+// altimate_change end
+
 export const TrainingSaveTool = Tool.define("training_save", {
   description: [
     "Save a learned pattern, rule, glossary term, or standard to your teammate's training.",
@@ -16,6 +69,10 @@ export const TrainingSaveTool = Tool.define("training_save", {
     "Training kinds:",
     "- pattern: A coding pattern learned from an example file (e.g., how staging models should look)",
     "- rule: A specific rule from a correction (e.g., 'never use FLOAT for financial columns')",
+    "  A rule is an instruction for how work must be done in this repository, for everyone. In a project linked",
+    "  to an Altimate workspace it becomes a proposed team rule the person sends for the owner's review.",
+    "  A personal preference ('I prefer...', 'for me...') or a fact ('our warehouse is...') is not a rule:",
+    "  save it with altimate_memory_write instead.",
     "- glossary: A domain-specific term definition (e.g., 'ARR means Annual Recurring Revenue')",
     "- standard: A team standard from documentation (e.g., SQL style guide rules)",
     "- context: Background knowledge explaining 'why' (e.g., why we chose Snowflake over BigQuery)",
@@ -62,6 +119,12 @@ export const TrainingSaveTool = Tool.define("training_save", {
   }),
   async execute(args, ctx) {
     try {
+      // altimate_change start — in a project linked to a workspace, a project rule is a proposed team rule:
+      // it shows the proposal card (the person sends it to the owner's review, or the owner approves it),
+      // instead of training that applies at once and reaches the team through git without review.
+      const proposed = args.kind === "rule" && args.scope === "project" ? await proposeTeamRule(args.content, ctx.sessionID, lastUserText(ctx.messages)) : undefined
+      if (proposed) return proposed
+      // altimate_change end
       const scopeForCount = args.scope === "global" ? "global" : "project"
 
       // Check if this is an update to an existing entry

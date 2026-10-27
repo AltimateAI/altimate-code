@@ -21,6 +21,9 @@ import { accountScope, boundAttachSnapshot, sidebarAttachLine } from "@/altimate
 // altimate_change end
 import { AltimateApi } from "@/altimate/api/client"
 import { openManageUrl } from "./workspace"
+// altimate_change start — workspace rules line
+import { RulesSummary } from "@/altimate/rules/summary"
+// altimate_change end
 
 const id = "altimate:sidebar-workspace"
 
@@ -68,6 +71,14 @@ function View(props: { api: TuiPluginApi }) {
   const [manageUrl, setManageUrl] = createSignal<string | null>(null)
   // altimate_change start - status lines
   const [detail, setDetail] = createSignal<Manage.StatusReport | null>(null)
+  // altimate_change start — workspace rules: "6 team rules · 3 pending review", from local state
+  const [rules, setRules] = createSignal<RulesSummary.Summary | null>(null)
+  const rulesRoot = () => (props.api.state.path.worktree && props.api.state.path.worktree !== "/" ? props.api.state.path.worktree : props.api.state.path.directory)
+  const readRules = () => {
+    const learn = (props.api.state.config as { learn?: { enabled?: boolean; capture?: boolean } }).learn
+    void RulesSummary.summary(rulesRoot(), learn).then((s) => setRules(s.linked ? s : null)).catch(() => setRules(null))
+  }
+  // altimate_change end
   // altimate_change end
   // altimate_change start - what the last session got, in numbers
   const [attachLine, setAttachLine] = createSignal<string | null>(null)
@@ -216,6 +227,7 @@ function View(props: { api: TuiPluginApi }) {
         return
       }
       setDetail(detail)
+      readRules()
       // altimate_change end
     } finally {
       refreshInFlight = false
@@ -242,10 +254,15 @@ function View(props: { api: TuiPluginApi }) {
     // authoritative. The interval stays: it is what catches a change made by
     // another process, which no in-process listener can see.
     const unsubscribe = onBindingChanged(() => void refresh("notify"))
+    // altimate_change start — rule events from the session server refresh the rules line
+    const on = props.api.event.on as unknown as (type: string, handler: () => void) => () => void
+    const offRules = [on("altimate.rules.changed", readRules), on("rule.proposal.reviewed", readRules)]
+    // altimate_change end
     onCleanup(() => {
       disposed = true
       clearInterval(timer)
       unsubscribe()
+      for (const off of offRules) off()
     })
   })
 
@@ -309,6 +326,14 @@ function View(props: { api: TuiPluginApi }) {
             </Show>
             <Show when={detail()?.memoryLoadedAt}>
               {(at) => <text fg={theme().textMuted}>{`memory loaded ${describeAge(at())}`}</text>}
+            </Show>
+            <Show when={rules()}>
+              {(r) => (
+                <text fg={theme().textMuted}>
+                  {`rules: ${RulesSummary.sidebarLine(r())}`}
+                  {r().pulled_at ? ` · synced ${describeAge(Date.parse(r().pulled_at!))}` : ""}
+                </text>
+              )}
             </Show>
             {/* altimate_change end */}
             {/* ``pinned via --workspace`` means "this SESSION was launched

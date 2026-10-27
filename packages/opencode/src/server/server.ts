@@ -1257,6 +1257,68 @@ export namespace Server {
         }
       })
       // altimate_change end
+      // altimate_change start — workspace rules: the proposal card and rules state for clients
+      // A client (the TUI now, the IDE extension later) renders `rule.proposal.asked` from `/event` and answers
+      // here. The `/altimate/rules/*` routes give the sidebar line, the rule list and "Sync now" for the request's
+      // directory. All rule logic stays in this server; clients only render.
+      .get("/rule-proposal", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const { RuleProposal } = await import("../altimate/rules/proposal")
+        return c.json(RuleProposal.list(Instance.directory))
+      })
+      .post("/rule-proposal/:id/reply", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const read = await readJsonObject(() => c.req.text(), "rule proposal reply")
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const { action, text } = read.body as { action?: unknown; text?: unknown }
+        const actions = ["send", "approve", "edit", "dismiss", "save_local", "save_memory"] as const
+        if (typeof action !== "string" || !actions.includes(action as (typeof actions)[number]))
+          return c.json({ ok: false, error: `action must be one of ${actions.join(", ")}.` }, 400)
+        if (text !== undefined && typeof text !== "string") return c.json({ ok: false, error: "text must be a string." }, 400)
+        try {
+          const { RuleProposal } = await import("../altimate/rules/proposal")
+          const result = await RuleProposal.reply(c.req.param("id"), { action: action as (typeof actions)[number], ...(text !== undefined ? { text } : {}) })
+          return c.json(result, result.ok ? 200 : 409)
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("rule proposal reply failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .get("/altimate/rules/summary", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const { RulesSummary } = await import("../altimate/rules/summary")
+        const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+        const summary = await RulesSummary.summary(root, (await (await import("@/config/config")).Config.get()).learn)
+        return c.json({ ok: true as const, ...summary, line: RulesSummary.sidebarLine(summary) })
+      })
+      .get("/altimate/rules", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const view = c.req.query("view")
+        if (view !== undefined && view !== "active" && view !== "mine") return c.json({ ok: false, error: "view must be active or mine." }, 400)
+        const { RulesSummary } = await import("../altimate/rules/summary")
+        const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+        return c.json({ ok: true as const, rules: await RulesSummary.rows(root, view ?? "all") })
+      })
+      .post("/altimate/rules/sync", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const { RulesService } = await import("../altimate/rules/service")
+          const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+          const report = await RulesService.syncNow(root, Instance.directory, (await (await import("@/config/config")).Config.get()).learn)
+          return c.json({ ok: true as const, ...report })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("rules sync failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
       // altimate_change start — GET /altimate/skill/publishable, POST /altimate/skill/publish
       // The CLI's `skill publish <name>` for the IDE extension. Only `serve` holds the extension's
       // pin, so publishing here targets the workspace selected in the panel — through the same

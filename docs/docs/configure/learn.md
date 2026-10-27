@@ -185,6 +185,26 @@ Delivery runs whenever approved lessons exist in the project, even if `learn.cap
 
 Delivery waits at most about 5 seconds for the learn lock; if another process still holds it, that request goes without lessons. A store whose `approved.json` cannot be read is skipped and the others are still delivered. Every lesson is checked again at delivery, including lessons committed to the repository by hand: lessons over 140 characters or rejected by the curator's lint are left out, and per-request and per-file notes are limited by `learn.budget_tokens`.
 
+## Workspace rules
+
+In a project linked to an Altimate workspace (`altimate-code link`), what you teach the agent can become a **team rule**: a one-line instruction every teammate's sessions in the workspace's repositories follow once the workspace owner approves it.
+
+**When a rule is proposed.** A card appears at the end of a turn when:
+
+- you correct the agent on the same topic in 2 or more sessions;
+- you correct a team rule the session was shown (the card proposes changing it, with the current text struck through);
+- you ask the agent to remember something as a rule.
+
+The card shows the proposed wording, what it applies to, why it was proposed and your correction. **Enter** sends it to the owner's review queue (the workspace's **Rules** tab), **e** edits the wording, **n** ("Not a rule") stops that topic from being proposed for 30 days, and the owner also sees **a** to approve it at once. A rule that tells the agent to skip or disable verification (tests, CI, hooks, `--no-verify`) is flagged and needs "approve anyway". Nothing reaches a teammate until it is approved.
+
+**Rule or memory.** A personal preference ("I prefer CTEs") or a fact ("our warehouse is Snowflake") is saved to memory without review. When the wording does not say which, the card asks: Memory, Team rule, or Skip.
+
+**After review.** Approved rules reach every session within a few minutes (a pull at session start and every 5 minutes; `/rules` → Sync now, or `altimate-code learn sync`). You see a notice when the owner approves or rejects your rule, with the reason. Usage is reported back to the workspace: how many sessions a rule was applied in, and how often you corrected the agent on its topic after it was shown ("corrected again").
+
+**Learning on or off.** Your own setting wins (`learn enable` / `learn disable`, `learn.capture`, or `/rules` → Turn learning on/off); otherwise a linked project follows the workspace's "Learn from sessions" toggle. Approved rules are delivered either way.
+
+**Commands.** `/rules` in the TUI lists team rules and your proposals with their status. `altimate-code learn sync` syncs now; `learn status` shows the workspace rules line, your learning setting and the last proposal check. In a linked project, `learn bootstrap` and `learn import-reviews` send what they find from history to the owner's review instead of staging local candidates.
+
 ## Learn vs memory vs a knowledge base
 
 | | Learn (lessons) | [Memory](../data-engineering/tools/memory-tools.md) | Knowledge base |

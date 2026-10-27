@@ -392,6 +392,9 @@ const StatusCommand = effectCmd({
         ...base,
         // Read-only and advisory: runs after the lock is released; its failure must not hide the rest of the status.
         ...await analyzeRecurrence(root, { name }).then((recurrence) => ({ recurrence }), (error) => ({ recurrence_error: error instanceof Error ? error.message : String(error) })),
+        // altimate_change start — workspace rules (local state only)
+        rules: await import("../../altimate/rules/summary").then((m) => m.RulesSummary.summary(root, learn)),
+        // altimate_change end
       }))
       if (args.json) return out(JSON.stringify(status, null, 2))
       out(`Learning enabled: ${status.enabled ? "yes" : "no"}`)
@@ -420,9 +423,46 @@ const StatusCommand = effectCmd({
         ? `Last reflection: ${status.last_reflection.at} - ${status.last_reflection.result}: ${status.last_reflection.summary}`
         : "Last reflection: never")
       out(`Limits: ${Object.entries(status.limits).map(([key, value]) => `${key}=${value}`).join(", ")}`)
+      // altimate_change start — workspace rules
+      const rules = status.rules
+      if (!rules.linked) out("Workspace rules: not linked (run `altimate-code link`)")
+      else {
+        const { RulesSummary } = await import("../../altimate/rules/summary")
+        out(`Workspace rules: ${rules.workspace?.name ?? "workspace"} — ${RulesSummary.sidebarLine(rules)}${rules.pulled_at ? `; last sync ${rules.pulled_at}` : ""}${rules.last_error ? `; last error: ${rules.last_error}` : ""}`)
+        out(`Learning from sessions: ${rules.learning ? "on" : "off"} (${rules.learning_source === "you" ? "your setting" : "workspace setting"})`)
+        if (rules.last_check) out(`Last proposal check: ${rules.last_check.at} — ${rules.last_check.outcome}`)
+        for (const notice of rules.notices.slice(0, 5))
+          out(`  ${notice.status === "active" ? "approved" : notice.status}${notice.reviewer ? ` by ${notice.reviewer}` : ""}: "${notice.text}"${notice.reason ? ` — ${notice.reason}` : ""}`)
+      }
+      // altimate_change end
     })
   }),
 })
+
+// altimate_change start — workspace rules: send queued proposals, pull approved rules, report usage
+const SyncCommand = effectCmd({
+  command: "sync",
+  describe: "sync workspace rules now: send queued proposals and pull the approved rules",
+  builder: (yargs: Argv) => yargs.option("json", { type: "boolean", default: false, describe: "machine-readable output" }),
+  handler: Effect.fn("Cli.learn.sync")(function* (args) {
+    yield* run("", async () => {
+      const root = await projectRoot()
+      const { Config } = await import("@/config/config")
+      const { RulesSync } = await import("../../altimate/rules/sync")
+      const report = await RulesSync.run(root, process.cwd(), (await Config.get()).learn)
+      if (args.json) return out(JSON.stringify(report, (key, value) => (key === "actAs" ? undefined : value), 2))
+      if (report.context.status !== "ready") return out(`Rules sync skipped: ${report.context.reason}.`)
+      for (const sent of report.push?.sent ?? []) out(`Sent "${sent.text}": ${sent.error ?? sent.status}`)
+      if (report.push?.error) out(`Proposals not sent (kept queued): ${report.push.error}`)
+      if (!report.pull?.ok) throw new Error(`Rules pull failed: ${report.pull?.error ?? "unknown error"}`)
+      out(`Synced: ${report.pull.rules} team ${report.pull.rules === 1 ? "rule" : "rules"}, ${report.pull.pending} pending review.`)
+      for (const notice of report.pull.notices)
+        out(`  ${notice.status === "active" ? "approved" : notice.status}${notice.reviewer ? ` by ${notice.reviewer}` : ""}: "${notice.text}"${notice.reason ? ` — ${notice.reason}` : ""}`)
+      if (report.usage?.error) out(`Usage not reported: ${report.usage.error}`)
+    })
+  }),
+})
+// altimate_change end
 
 const BootstrapCommand = effectCmd({
   command: "bootstrap",
@@ -473,6 +513,16 @@ const BootstrapCommand = effectCmd({
       })
     })
     if (result?.failures) return yield* fail("Bootstrap reflection failed; signals remain queued. Rerun `learn bootstrap` to continue.")
+    // altimate_change start — linked project: the staged lessons go to the workspace owner's review as rules
+    if (!args["dry-run"]) yield* run("", async () => {
+      const { Config } = await import("@/config/config")
+      const { RulesFromHistory } = await import("../../altimate/rules/from-history")
+      const sent = await RulesFromHistory.proposeStaged({
+        root: await projectRoot(), directory: process.cwd(), learn: (await Config.get()).learn, name: args.name as string, origin: "bootstrap",
+      })
+      if (sent.status === "sent") out(sent.message)
+    })
+    // altimate_change end
   }),
 })
 
@@ -532,6 +582,16 @@ const ImportReviewsCommand = effectCmd({
       })
     })
     if (result?.failures) return yield* fail("Review reflection failed; signals remain queued. Rerun `learn import-reviews` to continue.")
+    // altimate_change start — linked project: the staged lessons go to the workspace owner's review as rules
+    if (!args["dry-run"]) yield* run("", async () => {
+      const { Config } = await import("@/config/config")
+      const { RulesFromHistory } = await import("../../altimate/rules/from-history")
+      const sent = await RulesFromHistory.proposeStaged({
+        root: await projectRoot(), directory: process.cwd(), learn: (await Config.get()).learn, name: args.name as string, origin: "import_reviews",
+      })
+      if (sent.status === "sent") out(sent.message)
+    })
+    // altimate_change end
   }),
 })
 
@@ -1060,6 +1120,7 @@ export const LearnCommand = cmd({
       .command(DisableCommand)
       .command(NudgeCommand)
       .command(StatusCommand)
+      .command(SyncCommand)
       .command(BootstrapCommand)
       .command(ImportReviewsCommand)
       .command(ReflectCommand)
