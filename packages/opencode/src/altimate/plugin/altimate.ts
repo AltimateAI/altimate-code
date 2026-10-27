@@ -6,6 +6,7 @@ import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
 import * as OnboardingTelemetry from "../telemetry/onboarding"
 import { Telemetry } from "../telemetry"
+import { TelemetryConfig } from "../telemetry/config-state"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "../util/machine-id"
 import { Config } from "@/config/config"
@@ -92,17 +93,21 @@ export async function buildCliContext(machineIdPath?: string): Promise<string> {
       // Instance.provide() (AsyncLocalStorage-propagated across awaits), so
       // Config.get() resolves during an ordinary browser authorize(). It fires on
       // the paths that skip instance bootstrap: `altimate auth login <url>` and the
-      // create-and-link hand-off of `altimate-code link`. Follow the telemetry
-      // module's own decision for this process: it evaluates the same gates in
-      // doInit() and, with the config unreadable, keeps sending the machine id
-      // itself — so this context carries the id exactly when telemetry does, and
-      // omits it whenever telemetry is off (opted out, no sink, test runner).
-      // Failing closed here instead hid the id from every create-and-link
-      // hand-off, which made the link step unattributable on the funnel.
-      await Telemetry.init().catch(() => {})
-      disabled = !Telemetry.isEnabled()
-      log.info("cli_context: config unreadable, following telemetry state", {
+      // create-and-link hand-off of `altimate-code link`. Read `telemetry.disabled`
+      // from the config files directly: an opt-out there, or files that cannot be
+      // read (an opt-out may be behind them), omit the id. Only a config that
+      // readably leaves telemetry on defers to the telemetry module's own state
+      // (opted out by env, no sink, test runner).
+      const state = await TelemetryConfig.disabledState()
+      if (state === "enabled") {
+        await Telemetry.init().catch(() => {})
+        disabled = !Telemetry.isEnabled()
+      } else {
+        disabled = true
+      }
+      log.info("cli_context: config unavailable, read the opt-out from the files", {
         code: (err as NodeJS.ErrnoException)?.code,
+        state,
         enabled: !disabled,
       })
     }
