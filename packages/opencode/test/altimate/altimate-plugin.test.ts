@@ -216,6 +216,56 @@ describe("buildCliContext", () => {
       })
     })
 
+    test("Config.get() throws: the opt-out of the project the command acts on is read, not the cwd's", async () => {
+      delete process.env.ALTIMATE_TELEMETRY_DISABLED
+      cfg.mockImplementation((async () => {
+        throw new Error("InstanceRef not provided")
+      }) as never)
+      await using dir = await tmpdir()
+      await using project = await tmpdir()
+      fs.mkdirSync(path.join(project.path, ".altimate-code"))
+      fs.writeFileSync(
+        path.join(project.path, ".altimate-code", "altimate-code.json"),
+        JSON.stringify({ telemetry: { disabled: true } }),
+      )
+      const idPath = path.join(dir.path, "machine-id")
+      fs.writeFileSync(idPath, VALID_UUID, "utf8")
+      const saved = {
+        cs: process.env.APPLICATIONINSIGHTS_CONNECTION_STRING,
+        opencodeOptOut: process.env.OPENCODE_DISABLE_TELEMETRY,
+        content: process.env.OPENCODE_CONFIG_CONTENT,
+      }
+      delete process.env.OPENCODE_DISABLE_TELEMETRY
+      delete process.env.OPENCODE_CONFIG_CONTENT
+      process.env.APPLICATIONINSIGHTS_CONNECTION_STRING =
+        "InstrumentationKey=00000000-0000-0000-0000-000000000000;IngestionEndpoint=https://ingest.example.invalid/"
+      const home = spyOn(os, "homedir").mockImplementation(() => dir.path)
+      const net = spyOn(globalThis, "fetch").mockImplementation((async () => new Response("", { status: 200 })) as any)
+      const decode = (encoded: string) =>
+        JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as Record<string, unknown>
+      try {
+        await Telemetry.shutdown()
+        await Telemetry.init()
+        expect(Telemetry.isEnabled()).toBe(true)
+        // The opted-out project: no id.
+        expect("machine_id" in decode(await buildCliContext(idPath, project.path))).toBe(false)
+        // The same process from a directory with no opt-out: the id is sent.
+        expect(decode(await buildCliContext(idPath, dir.path))["machine_id"]).toBe(VALID_UUID)
+      } finally {
+        await Telemetry.shutdown()
+        net.mockRestore()
+        home.mockRestore()
+        for (const [key, value] of [
+          ["APPLICATIONINSIGHTS_CONNECTION_STRING", saved.cs],
+          ["OPENCODE_DISABLE_TELEMETRY", saved.opencodeOptOut],
+          ["OPENCODE_CONFIG_CONTENT", saved.content],
+        ] as const) {
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
+      }
+    })
+
     test("includes machine_id when telemetry is enabled", async () => {
       delete process.env.ALTIMATE_TELEMETRY_DISABLED
       await using dir = await tmpdir()

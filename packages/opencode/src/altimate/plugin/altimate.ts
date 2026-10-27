@@ -77,7 +77,9 @@ const log = Log.create({ service: "altimate-plugin" })
 // and `cli_version` are strings, treat `cli_version: "local"` as a valid dev
 // build, and treat the payload as untrusted (anyone can craft a URL). An absent
 // `machine_id` means "do not attribute" — it must never be aliased on.
-export async function buildCliContext(machineIdPath?: string): Promise<string> {
+/** `directory`: the project the command acts on, whose config may opt out; the process's working
+ * directory when the command has none (`auth login`). */
+export async function buildCliContext(machineIdPath?: string, directory?: string): Promise<string> {
   // altimate_change start — honour both telemetry opt-out gates, mirroring
   // telemetry/index.ts::doInit:
   //   1. ALTIMATE_TELEMETRY_DISABLED / OPENCODE_DISABLE_TELEMETRY env vars
@@ -99,7 +101,7 @@ export async function buildCliContext(machineIdPath?: string): Promise<string> {
       // read (an opt-out may be behind them), omit the id. Only a config that
       // readably leaves telemetry on defers to the telemetry module's own state
       // (opted out by env, no sink, test runner).
-      const state = await TelemetryConfig.disabledState()
+      const state = await TelemetryConfig.disabledState(directory)
       if (state === "enabled") {
         await Telemetry.init().catch(() => {})
         disabled = !Telemetry.isEnabled()
