@@ -150,8 +150,14 @@ describe("workspace link telemetry", () => {
     replies = [{ status: 404, body: { detail: "no binding" } }]
     expect(await WorkspaceApi.unbindProject({ repoRemote: "git@x:y.git" })).toBe(false)
     expect(of("workspace_unlinked")).toHaveLength(0)
+    // "Already unlinked" is an answer, not a failed call.
+    expect(of("workspace_api_error")).toHaveLength(0)
+
+    events = []
+    replies = [{ status: 500, body: { detail: "boom" } }]
+    await expect(WorkspaceApi.unbindProject({ repoRemote: "git@x:y.git" })).rejects.toBeInstanceOf(WorkspaceApiError)
     expect(of("workspace_api_error")).toEqual([
-      expect.objectContaining({ endpoint: "DELETE /datamate-project-bindings/", status: 404, status_class: "4xx" }),
+      expect.objectContaining({ endpoint: "DELETE /datamate-project-bindings/", status: 500, status_class: "5xx" }),
     ])
   })
 
@@ -170,7 +176,19 @@ describe("workspace link telemetry", () => {
     replies = [{ status: 403, body: { detail: "nope" } }]
     await expect(WorkspaceApi.bindExisting(42, { projectPath: "/p" })).rejects.toBeInstanceOf(ForbiddenError)
     expect(of("workspace_link_failed")[0].reason).toBe("auth")
-    expect(of("workspace_auth_expired")).toEqual([expect.objectContaining({ status: 403, workspace_id: 42 })])
+    // A 403 is a refusal, not an expired session.
+    expect(of("workspace_auth_expired")).toHaveLength(0)
+    expect(of("workspace_api_error")).toEqual([
+      expect.objectContaining({ status: 403, status_class: "4xx", workspace_id: 42 }),
+    ])
+
+    events = []
+    replies = [{ status: 401, body: { detail: "expired" } }]
+    await expect(WorkspaceApi.bindExisting(42, { projectPath: "/p" })).rejects.toBeInstanceOf(WorkspaceApiError)
+    expect(of("workspace_link_failed")[0].reason).toBe("auth")
+    expect(of("workspace_auth_expired")).toEqual([
+      expect.objectContaining({ endpoint: "POST /datamate-project-bindings/bind", status: 401, workspace_id: 42 }),
+    ])
     expect(of("workspace_api_error")).toHaveLength(0)
 
     events = []
@@ -202,11 +220,10 @@ describe("workspace link telemetry", () => {
   })
 
   test("endpoints are masked of ids and a timeout is its own class", async () => {
-    replies = [{ status: 404, body: { detail: "x" } }]
-    await expect(WorkspaceApi.getBindingForRemote("git@x:y.git")).resolves.toBeNull()
-    // 404 on a lookup is an answer, not a failure of the link flow: no link_failed, but the API error row stays.
+    replies = [{ status: 500, body: { detail: "x" } }]
+    await expect(WorkspaceApi.getBindingForRemote("git@x:y.git")).rejects.toBeInstanceOf(WorkspaceApiError)
     expect(of("workspace_link_failed")).toHaveLength(0)
-    expect(of("workspace_api_error")[0].endpoint).toMatch(/^GET \/datamate-project-bindings\//)
+    expect(of("workspace_api_error")[0].endpoint).toBe("GET /datamate-project-bindings/by-remote")
 
     events = []
     replies = [{ hang: true }]
@@ -238,7 +255,8 @@ describe("workspace link telemetry", () => {
     expect(endpointOf("PATCH", "/datamates/memory", "/mem_status")).toBe("PATCH /datamates/memory/:id")
     expect(endpointOf("POST", "/datamate-project-bindings", "/bind")).toBe("POST /datamate-project-bindings/bind")
     expect(endpointOf("DELETE", "/datamate-project-bindings", "/")).toBe("DELETE /datamate-project-bindings/")
-    expect(endpointOf("GET", "/users", "/me")).toBe("GET /users/me")
+    // Not a workspace router (whoami reports nothing), so not listed: masked whole.
+    expect(endpointOf("GET", "/users", "/me")).toBe("GET /:id/:id")
     expect(endpointOf("GET", "/unknown-router", "/anything/else")).toBe("GET /:id/:id/:id")
     expect(endpointOf("GET", "/datamates", "/42/skills/pub_Ab12Cd/files/readme.md")).toBe(
       "GET /datamates/:id/:id/:id/:id/:id",
@@ -307,6 +325,70 @@ describe("workspace link telemetry", () => {
       WorkspaceApiError,
     )
     expect(of("workspace_api_error")).toEqual([expect.objectContaining({ status_class: "response", status: 200 })])
+  })
+
+  test("a not-linked lookup is an answer: a 404 from either lookup reports no row", async () => {
+    replies = [
+      { status: 404, body: { detail: "no binding" } },
+      { status: 404, body: { detail: "no binding" } },
+    ]
+    await expect(
+      WorkspaceApi.getBindingForProject({ repoRemote: "git@x:y.git", projectPath: "/p" }),
+    ).resolves.toBeNull()
+    expect(requests.map((r) => new URL(r.url).pathname)).toEqual([
+      "/datamate-project-bindings/by-remote",
+      "/datamate-project-bindings/by-path",
+    ])
+    expect(events).toEqual([])
+  })
+
+  test("a declared status reports nothing; any other failure of the same call still does", async () => {
+    replies = [{ status: 404, body: { detail: "gone" } }]
+    await expect(
+      altimateRequest("GET", "/x", { base: "/skills", expectedStatuses: [404] }),
+    ).rejects.toBeInstanceOf(NotFoundError)
+    expect(events).toEqual([])
+
+    replies = [{ status: 409, body: { detail: "taken" } }]
+    await expect(
+      altimateRequest("GET", "/x", { base: "/skills", expectedStatuses: [404] }),
+    ).rejects.toBeInstanceOf(ConflictError)
+    expect(of("workspace_api_error")).toEqual([expect.objectContaining({ status: 409, status_class: "4xx" })])
+  })
+
+  test("whoami is not a workspace call: its failures report no row", async () => {
+    for (const status of [401, 403, 404, 500]) {
+      replies = [{ status, body: { detail: "x" } }]
+      await expect(WorkspaceApi.whoami()).rejects.toBeInstanceOf(Error)
+    }
+    replies = [{ throw: new Error("ECONNREFUSED") }]
+    await expect(WorkspaceApi.whoami()).rejects.toBeInstanceOf(WorkspaceApiError)
+    expect(events).toEqual([])
+  })
+
+  test("the 409 -> rebind fallback reports the failed bind, then the switch (rows as they are today)", async () => {
+    // `link` with a failed pre-check: bindExisting answers 409, and the command retries as a rebind on
+    // the identifier the conflict names. Pins the rows this sequence emits; the recovered conflict
+    // still counts one link_failed (disclosed, follow-up).
+    replies = [
+      { status: 409, body: { detail: { message: "already linked", project_path: "/p" } } },
+      { status: 200, body: binding(42) },
+    ]
+    await expect(WorkspaceApi.bindExisting(42, { projectPath: "/p" })).rejects.toBeInstanceOf(ConflictError)
+    await WorkspaceApi.rebindByPath({ projectPath: "/p", targetDatamateId: 42 })
+    expect(events.map((e) => e.type)).toEqual([
+      "workspace_api_error",
+      "workspace_link_failed",
+      "workspace_switched",
+      "workspace_linked",
+    ])
+    expect(of("workspace_api_error")[0]).toEqual(expect.objectContaining({ status: 409, workspace_id: 42 }))
+    expect(of("workspace_link_failed")[0]).toEqual(
+      expect.objectContaining({ how: "bind_existing", reason: "conflict", workspace_id: 42 }),
+    )
+    expect(of("workspace_switched")[0]).toEqual(expect.objectContaining({ to_workspace_id: 42, how: "rebind_path" }))
+    expect("from_workspace_id" in of("workspace_switched")[0]).toBe(false)
+    expect(of("workspace_linked")[0]).toEqual(expect.objectContaining({ workspace_id: 42, how: "rebind_path" }))
   })
 
   test("linkFailureReason classifies every error the client throws", () => {

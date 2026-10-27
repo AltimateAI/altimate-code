@@ -178,8 +178,9 @@ async function creds(): Promise<{ url: string; instance: string; apiKey: string 
 }
 
 // altimate_change start — workspace telemetry helpers. Every failed workspace call reports
-// `workspace_api_error` (or `workspace_auth_expired` on 401/403) with the endpoint masked of
-// ids; the link lifecycle functions below report linked / created / switched / unlinked on the
+// `workspace_api_error` (or `workspace_auth_expired` on 401) with the endpoint masked of ids. A
+// status the caller declares expected (a lookup's 404 is "not linked") is an answer, not a failure,
+// and reports nothing; the link lifecycle functions below report linked / created / switched / unlinked on the
 // success response and `workspace_link_failed` with a reason class otherwise.
 /** Endpoint labels come from a ROUTE TABLE, never from how a segment is spelled: an identifier,
  * a memory id or a file path equal to a route word must not reach telemetry. Each router the
@@ -195,7 +196,6 @@ const ROUTES: Record<string, Array<[RegExp, string]>> = {
     [/^\/by-path$/, "/by-path"],
   ],
   "/datamates": [[/^\/?$/, "/"]],
-  "/users": [[/^\/me$/, "/me"]],
   "/skills": [
     [/^\/[^/]+$/, "/:id"],
     [/^\/[^/]+\/datamates$/, "/:id/datamates"],
@@ -229,7 +229,7 @@ function workspaceIdIn(body: unknown): number | undefined {
   return typeof id === "number" && Number.isInteger(id) && id > 0 ? id : undefined
 }
 
-function reportApiError(input: {
+function reportApiErrorRow(input: {
   endpoint: string
   status?: number
   kind: "4xx" | "5xx" | "network" | "timeout" | "response"
@@ -237,7 +237,9 @@ function reportApiError(input: {
 }) {
   const session_id = Telemetry.getContext().sessionId
   const ws = input.workspaceId !== undefined ? { workspace_id: input.workspaceId } : {}
-  if (input.status === 401 || input.status === 403) {
+  // Only a 401 says the session expired. A 403 is a refusal (a teammate's private workspace), so
+  // it is an API error with its status.
+  if (input.status === 401) {
     Telemetry.track({
       type: "workspace_auth_expired",
       timestamp: Date.now(),
@@ -358,6 +360,13 @@ async function req<T>(
      * It still completes as the principal it captured, and the next call fails
      * at its own credential read. */
     actAs?: { url: string; instance: string; apiKey: string }
+    // altimate_change start — telemetry: statuses that are answers for this caller
+    /** Non-2xx statuses this caller handles as an answer, not a failure (a lookup's 404 is "not
+     * linked"). They still throw the typed error, but report no `workspace_api_error`. */
+    expectedStatuses?: readonly number[]
+    /** false for a call that is not a workspace call (`GET /users/me`): it reports no row at all. */
+    reportErrors?: boolean
+    // altimate_change end
   } = {},
 ): Promise<T> {
   const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS
@@ -367,6 +376,9 @@ async function req<T>(
   const target = `${url}${basePath}${subpath}${qs}`
   const endpoint = endpointOf(method, basePath, subpath)
   const bodyWorkspaceId = workspaceIdIn(opts.body)
+  const reportApiError = (input: Parameters<typeof reportApiErrorRow>[0]) => {
+    if (opts.reportErrors !== false) reportApiErrorRow(input)
+  }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), timeoutMs)
   let res: Response
@@ -454,7 +466,7 @@ async function req<T>(
     }
   }
   const detail = (json as { detail?: unknown } | undefined)?.detail
-  if (!res.ok) {
+  if (!res.ok && !opts.expectedStatuses?.includes(res.status)) {
     reportApiError({
       endpoint,
       status: res.status,
@@ -554,6 +566,7 @@ export namespace WorkspaceApi {
     try {
       return await req<GetBindingResponse>("GET", "/by-remote", {
         query: { repo_remote: remote },
+        expectedStatuses: [404],
         ...(actAs ? { actAs } : {}),
       })
     } catch (err) {
@@ -568,6 +581,7 @@ export namespace WorkspaceApi {
     try {
       return await req<GetBindingResponse>("GET", "/by-path", {
         query: { project_path: projectPath },
+        expectedStatuses: [404],
         ...(actAs ? { actAs } : {}),
       })
     } catch (err) {
@@ -618,7 +632,7 @@ export namespace WorkspaceApi {
     else if (id.projectPath) query.project_path = id.projectPath
     else return false
     try {
-      await req<unknown>("DELETE", "/", { query, allowEmptyBody: true })
+      await req<unknown>("DELETE", "/", { query, allowEmptyBody: true, expectedStatuses: [404] })
       Telemetry.track({
         type: "workspace_unlinked",
         timestamp: Date.now(),
@@ -874,7 +888,12 @@ export namespace WorkspaceApi {
    * client must compare ownership — skill attachment requires the caller to
    * OWN the workspace, and the credentials carry no user id of their own. */
   export async function whoami(actAs?: ActAs): Promise<number> {
-    const me = await req<{ id?: unknown }>("GET", "/me", { base: "/users", ...(actAs ? { actAs } : {}) })
+    // Not a workspace call: no workspace_api_error row for it.
+    const me = await req<{ id?: unknown }>("GET", "/me", {
+      base: "/users",
+      reportErrors: false,
+      ...(actAs ? { actAs } : {}),
+    })
     const id = Number(me?.id)
     if (!Number.isInteger(id) || id <= 0) throw new WorkspaceApiError("The server did not say who this account is.")
     return id
