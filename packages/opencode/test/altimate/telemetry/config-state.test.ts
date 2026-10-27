@@ -84,6 +84,16 @@ describe("TelemetryConfig.disabledState (no Instance)", () => {
     expect(await TelemetryConfig.disabledState(dir)).toBe("unreadable")
   })
 
+  test("an empty source is skipped but a whitespace-only one is unreadable, as in the loader", async () => {
+    writeFileSync(globalFile(), "")
+    expect(await TelemetryConfig.disabledState(dir)).toBe("enabled")
+    process.env.OPENCODE_CONFIG_CONTENT = " "
+    expect(await TelemetryConfig.disabledState(dir)).toBe("unreadable")
+    delete process.env.OPENCODE_CONFIG_CONTENT
+    writeFileSync(globalFile(), "  \n")
+    expect(await TelemetryConfig.disabledState(dir)).toBe("unreadable")
+  })
+
   test("nothing sets it: enabled", async () => {
     expect(await TelemetryConfig.disabledState(dir)).toBe("enabled")
   })
