@@ -2204,12 +2204,15 @@ export namespace SessionPrompt {
           lastToolWasError = true
           const errorMsg =
             part.state.status === "error" && typeof part.state.error === "string" ? part.state.error : "unknown"
-          pendingError = {
-            toolName: part.tool,
-            toolCategory,
-            errorClass: Telemetry.classifyError(errorMsg),
-            ...ErrorDetail.describeToolError(errorMsg),
-          }
+          // A user declining a permission prompt is their decision, not a tool failure: no error fingerprint
+          pendingError = ErrorDetail.isUserRejection(errorMsg)
+            ? null
+            : {
+                toolName: part.tool,
+                toolCategory,
+                errorClass: Telemetry.classifyError(errorMsg),
+                ...ErrorDetail.describeToolError(errorMsg),
+              }
         } else {
           if (lastToolWasError && pendingError) {
             errorRecoveryCount++
