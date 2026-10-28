@@ -222,6 +222,32 @@ mcpTest.instance(
   { config: config("test-oauth") },
 )
 
+// altimate_change start — upstream_fix: auth status scoped to the configured server URL (anomalyco/opencode#33924)
+mcpTest.instance(
+  "auth status only reports credentials stored for the configured server URL",
+  () =>
+    Effect.gen(function* () {
+      const mcp = yield* MCP.Service
+      const auth = yield* McpAuth.Service
+
+      yield* auth.updateTokens("test-status-url", { accessToken: "legacy-token" })
+      expect(yield* mcp.getAuthStatus("test-status-url")).toBe("not_authenticated")
+
+      yield* auth.updateTokens("test-status-url", { accessToken: "old-token" }, "https://old.example.com/mcp")
+      expect(yield* mcp.getAuthStatus("test-status-url")).toBe("not_authenticated")
+
+      yield* auth.updateTokens("test-status-url", { accessToken: "current-token" }, "https://example.com/mcp")
+      expect(yield* mcp.getAuthStatus("test-status-url")).toBe("authenticated")
+
+      yield* auth.updateTokens("test-status-url", { accessToken: "expired-token", expiresAt: 1 }, "https://example.com/mcp")
+      expect(yield* mcp.getAuthStatus("test-status-url")).toBe("expired")
+
+      expect(yield* mcp.getAuthStatus("not-configured")).toBe("not_authenticated")
+    }),
+  { config: config("test-status-url") },
+)
+// altimate_change end
+
 mcpTest.instance("state() generates a new state when none is saved", () =>
   Effect.gen(function* () {
     const auth = yield* McpAuth.Service
