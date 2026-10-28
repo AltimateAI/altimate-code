@@ -46,6 +46,7 @@ import { writeFileSync, existsSync, readFileSync, rmSync } from "fs"
 import { loadConfig, repoRoot, type MergeConfig } from "./utils/config.ts"
 import * as logger from "./utils/logger.ts"
 import { bold, cyan, dim, green, yellow, red } from "./utils/logger.ts"
+import { assertSameMajor } from "./utils/version.ts"
 
 // ---------------------------------------------------------------------------
 // CLI args
@@ -477,6 +478,8 @@ async function editSessionLlmTs(report: string[]): Promise<void> {
 
 async function main(): Promise<void> {
   const config = loadConfig()
+  assertSameMajor(VERSION, config.upstreamBaseline)
+
   const { minimatch } = await import("minimatch")
   const report: string[] = []
   report.push(`# Bridge Merge Report — overlay ${VERSION}\n`)

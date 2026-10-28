@@ -36,6 +36,7 @@ const { values: args } = parseArgs({
     branding: { type: "boolean", default: false },
     markers: { type: "boolean", default: false },
     "require-markers": { type: "boolean", default: false },
+    "print-baseline": { type: "boolean", default: false },
     "audit-fixes": { type: "boolean", default: false },
     strict: { type: "boolean", default: false },
     base: { type: "string" },
@@ -622,6 +623,7 @@ function printUsage(): void {
     --version, -v <tag>   Upstream version to analyze
     --branding            Scan codebase for upstream branding leaks
     --markers             Check changed files for missing altimate_change markers
+    --print-baseline      Print only the upstream baseline tag (for CI)
     --audit-fixes         List all upstream_fix: markers (bug fixes we made to upstream code)
     --base <branch>       Base branch for --markers comparison (default: HEAD)
     --strict              Exit with code 1 on warnings (for CI)
@@ -678,30 +680,46 @@ function getChangedFiles(base?: string): string[] {
   }
 }
 
-// Cache for upstream file existence checks (populated on first use)
-let _upstreamFilesCache: Set<string> | null = null
+// Cache by baseline so checks with a different configuration cannot reuse stale ownership.
+let _upstreamFilesCache: { ref: string; files: Set<string> } | null = null
 
-function getUpstreamFiles(config: MergeConfig): Set<string> {
-  if (_upstreamFilesCache) return _upstreamFilesCache
-  const { execSync } = require("child_process")
+export function getUpstreamFiles(config: MergeConfig): Set<string> {
+  const tag = config.upstreamBaseline
+  // Fork releases can use the same tag or branch name as the upstream baseline.
+  const ref = `refs/upstream-baseline/${tag}`
+  if (_upstreamFilesCache?.ref === ref) return _upstreamFilesCache.files
+  const { execFileSync } = require("child_process")
   const root = repoRoot()
-  const refs = [`${config.upstreamRemote}/dev`, `${config.upstreamRemote}/main`]
-  for (const ref of refs) {
+  const readFiles = () =>
+    execFileSync("git", ["ls-tree", "-r", "--name-only", ref], {
+      cwd: root,
+      encoding: "utf-8",
+      maxBuffer: 10 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+  try {
+    let output: string
     try {
-      const output = execSync(`git ls-tree -r --name-only ${ref}`, {
-        cwd: root,
-        encoding: "utf-8",
-        maxBuffer: 10 * 1024 * 1024,
-      })
-      _upstreamFilesCache = new Set(output.trim().split("\n").filter(Boolean))
-      return _upstreamFilesCache
+      output = readFiles()
     } catch {
-      // ref not available, try next
+      try {
+        execFileSync("git", ["fetch", config.upstreamRemote, `refs/tags/${tag}:${ref}`, "--no-tags", "--quiet"], {
+          cwd: root,
+          stdio: "ignore",
+        })
+      } catch {
+        // Retry the local ref even when the best-effort fetch fails.
+      }
+      output = readFiles()
     }
+    _upstreamFilesCache = { ref, files: new Set(output.trim().split("\n").filter(Boolean)) }
+  } catch {
+    console.warn(
+      `Warning: upstream baseline '${tag}' is unavailable. Fetch it with: git fetch ${config.upstreamRemote} refs/tags/${tag}:${ref} --no-tags --quiet. Falling back to directory-based ownership checks.`,
+    )
+    _upstreamFilesCache = { ref, files: new Set() }
   }
-  // Upstream not available — return empty set (all files treated as ours-only)
-  _upstreamFilesCache = new Set()
-  return _upstreamFilesCache
+  return _upstreamFilesCache.files
 }
 
 // altimate_change start — exclude test files, generated code, and config files from marker checks
@@ -721,7 +739,7 @@ const markerExcludePatterns = [
 ]
 // altimate_change end
 
-function isUpstreamShared(file: string, config: MergeConfig): boolean {
+export function isUpstreamShared(file: string, config: MergeConfig): boolean {
   const { minimatch } = require("minimatch")
   if (config.keepOurs.some((p: string) => minimatch(file, p))) return false
   if (config.skipFiles.some((p: string) => minimatch(file, p))) return false
@@ -898,20 +916,6 @@ function checkFileForMarkers(file: string, base?: string): MarkerWarning[] {
 }
 
 function runMarkerCheck(config: MergeConfig, base?: string, strict?: boolean): number {
-  const { execSync } = require("child_process")
-  const root = repoRoot()
-
-  // Ensure upstream remote exists and is fetched so we can check file existence
-  try {
-    execSync(`git remote get-url ${config.upstreamRemote}`, { cwd: root, stdio: "ignore" })
-    // --no-tags: upstream tags (v0.x, v1.x) collide with our own release tags
-    // (see git.ts's fetchRemote(), which this call duplicates but historically omitted the flag).
-    execSync(`git fetch ${config.upstreamRemote} --quiet --no-tags`, { cwd: root, stdio: "ignore" })
-  } catch {
-    // If upstream remote doesn't exist, fall back to pattern-only checks
-    logger.warn(`Could not fetch '${config.upstreamRemote}' remote — falling back to pattern-based detection`)
-  }
-
   const changedFiles = getChangedFiles(base)
   const sharedFiles = changedFiles.filter((f) => isUpstreamShared(f, config))
 
@@ -1030,12 +1034,16 @@ function runRequireMarkersCheck(config: MergeConfig, strict?: boolean): number {
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  const config = loadConfig()
+  if (args["print-baseline"]) {
+    console.log(config.upstreamBaseline)
+    return
+  }
+
   if (args.help) {
     printUsage()
     process.exit(0)
   }
-
-  const config = loadConfig()
 
   const hasVersion = Boolean(args.version)
   const hasBranding = Boolean(args.branding)
