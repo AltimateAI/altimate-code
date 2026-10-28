@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { Database } from "bun:sqlite"
+import { resolveQueryTimeout } from "@altimateai/drivers/query-timeout"
 import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
 import * as Registry from "../../../src/altimate/native/connections/registry"
@@ -242,10 +243,17 @@ describe("schema_inspect value grounding", () => {
     expect(result.output).toContain("group_concat(value: 1 distinct — left␟right (1)")
   })
 
-  test.each(["postgres", "postgresql", "sqlite", "duckdb"])(
-    "profiling protects PostgreSQL reads and preserves other connector options (%s)",
-    async (type) => {
-      Registry.setConfigs({ w: { type } })
+  test.each([
+    ["postgres", undefined],
+    ["postgresql", undefined],
+    ["sqlite", ":memory:"],
+    ["sqlite", "file::memory:"],
+    ["duckdb", ":memory:"],
+    ["duckdb", "md:remote_db"],
+  ])(
+    "profiling protects PostgreSQL reads and preserves other connector options (%s %s)",
+    async (type, path) => {
+      Registry.setConfigs({ w: path ? { type, path } : { type } })
       registerAll()
       Dispatcher.register("schema.inspect" as any, async () => ({
         table: "t", schema_name: "public", warehouse: "w", columns: COLUMNS,
@@ -265,7 +273,11 @@ describe("schema_inspect value grounding", () => {
         expect(sql).toContain('FROM "public"."t"')
         expect(limit).toBe(41)
         expect(binds).toBeUndefined()
-        expect(options.queryTimeoutMs).toBe(15_000)
+        // Local engines keep the connection's own timeout: a shorter deadline would restart the helper.
+        // Remote stores, including MotherDuck, keep the profiling cap.
+        expect(options.queryTimeoutMs).toBe(
+          type === "sqlite" || path === ":memory:" ? resolveQueryTimeout(Registry.getConfig("w")).ms : 15_000,
+        )
         if (type === "postgres" || type === "postgresql") expect(options.readOnly).toBe(true)
         else expect(options).not.toHaveProperty("readOnly")
       } finally {

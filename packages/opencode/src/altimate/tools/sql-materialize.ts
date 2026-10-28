@@ -11,6 +11,7 @@ import { readSql } from "./sql-check"
 import { lintSqlResult } from "./sql-result-lint"
 import * as Precedence from "../workspace/precedence"
 import { executeQuery, type QueryContext } from "../native/query-execution"
+import { firstTime } from "./session-hints"
 
 /** Default and hard ceilings, see the tool description. */
 export const DEFAULT_MAX_ROWS = 2_000_000
@@ -242,7 +243,7 @@ async function executeSource(source: Connector, input: MaterializeInput, sql: st
   const options = {
     queryTimeoutMs: input.query_timeout_ms,
     maxResultBytes: maxBytes,
-    ...(type === "postgres" ? { readOnly: true } : {}),
+    ...(type === "postgres" || context?.forceReadOnly ? { readOnly: true } : {}),
   }
   return executeQuery(config, options, context, (bounded) => source.execute(sql, limit, undefined, bounded))
 }
@@ -315,34 +316,73 @@ async function materializeWithinDeadline(input: MaterializeInput, context: Query
       }
     }
 
-    // Type inference (the drivers expose no column metadata, only names, so the type comes from the values:
-    // integers stay BIGINT, any fractional value widens to DOUBLE, mixed kinds fall back to VARCHAR, an
-    // all-NULL column is VARCHAR).
-    const types: ScratchType[] = []
-    for (let c = 0; c < names.length; c++) {
-      let t: ScratchType | null = null
-      for (const row of result.rows) {
-        const v = row[c]
-        if (t !== "VARCHAR") {
-          const k = kindOf(v)
-          if (k !== null) t = widen(t, k === "JSON" ? "VARCHAR" : k)
-        }
-      }
-      types.push(t ?? "VARCHAR")
-    }
-    return { result, names, types }
+    return { result, names, types: inferTypes(names.length, result.rows) }
   }
 
   // Remote sources are read and buffered before taking the destination's transaction lock. A scratch
   // source is read inside the lock so a derivation sees and replaces consistent state.
   // The buffer reservation spans the destination write too: the buffered rows stay live until then.
-  const writeToScratch = async (prepared?: Awaited<ReturnType<typeof prepare>>) => {
+  const writeToScratch = (prepared?: Prepared) =>
+    writeRows({ table, mode, query_timeout_ms: input.query_timeout_ms }, context, async (scratch) => prepared ?? prepare(scratch))
+  if (isScratch(input.source_warehouse)) return writeToScratch()
+  return withBufferBudget(maxBytes, async () => writeToScratch(await prepare(source)))
+}
+
+/**
+ * Type inference: the drivers expose no column metadata, only names, so the type comes from the values:
+ * integers stay BIGINT, any fractional value widens to DOUBLE, mixed kinds fall back to VARCHAR, an
+ * all-NULL column is VARCHAR.
+ */
+function inferTypes(width: number, rows: unknown[][]): ScratchType[] {
+  const types: ScratchType[] = []
+  for (let c = 0; c < width; c++) {
+    let t: ScratchType | null = null
+    for (const row of rows) {
+      const v = row[c]
+      if (t !== "VARCHAR") {
+        const k = kindOf(v)
+        if (k !== null) t = widen(t, k === "JSON" ? "VARCHAR" : k)
+      }
+    }
+    types.push(t ?? "VARCHAR")
+  }
+  return types
+}
+
+type Prepared = { result: { rows: unknown[][] }; names: string[]; types: ScratchType[] }
+
+/**
+ * Store rows already in memory (a query result) as a new scratch table, typed the same way as
+ * sql_materialize. Fails if the table exists.
+ */
+export async function storeRows(
+  table: string,
+  result: { columns: string[]; rows: unknown[][] },
+  context: QueryContext,
+): Promise<MaterializeResult> {
+  if (!IDENTIFIER.test(table)) throw new MaterializeError(`Invalid scratch table name "${table}".`)
+  await Registry.get(SCRATCH_NAME)
+  const names = uniqueColumnNames(result.columns)
+  return writeRows({ table, mode: "create" }, context, async () => ({
+    result,
+    names,
+    types: inferTypes(names.length, result.rows),
+  }))
+}
+
+async function writeRows(
+  target: { table: string; mode: "create" | "replace" | "append"; query_timeout_ms?: number },
+  context: QueryContext,
+  load: (scratch: Connector) => Promise<Prepared>,
+): Promise<MaterializeResult> {
+  const { table, mode } = target
+  {
     const warnings: string[] = []
     return withScratchConnection(async (scratch, directory) => {
-      const { result, names, types } = prepared ?? (await prepare(scratch))
+      const { result, names, types } = await load(scratch)
       const run = (sql: string) => executeQuery(
         Registry.getConfig(SCRATCH_NAME),
-        { noLimit: true, queryTimeoutMs: input.query_timeout_ms },
+        { noLimit: true, queryTimeoutMs: target.query_timeout_ms },
         context,
         (options) => scratch.execute(sql, undefined, undefined, options),
       )
@@ -439,8 +479,6 @@ async function materializeWithinDeadline(input: MaterializeInput, context: Query
       }
     })
   }
-  if (isScratch(input.source_warehouse)) return writeToScratch()
-  return withBufferBudget(maxBytes, async () => writeToScratch(await prepare(source)))
 }
 
 export const SqlMaterializeTool = Tool.define("sql_materialize", {
@@ -503,7 +541,7 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
     if (verdict.redirect) return verdict.redirect
     // altimate_change end
     try {
-      const r = await materialize(args, { signal: ctx.abort, sessionID: ctx.sessionID })
+      const r = await materialize(args, { signal: ctx.abort, sessionID: ctx.sessionID, ...(ctx.extra?.forceReadOnly === true ? { forceReadOnly: true } : {}) })
       const lint = await lintSqlResult(args.sql, args.source_warehouse, ctx.sessionID)
       const checks = lint ? "\n\n" + lint.output : ""
       const lintMetadata = lint ? { lint_rules: lint.rules } : {}
@@ -524,6 +562,19 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
       }
       const cols = r.columns.map((c) => `${c.name} ${c.type}`).join(", ")
       const rowsLine = r.mode === "append" ? `${r.rows} rows appended (${r.total_rows} total)` : `${r.rows} rows`
+      // altimate_change start — MCP: the client already has its SQL; the join hint is shown once per session
+      const mcp = ctx.extra?.mcpClient === true
+      const joinHint = `Join it in scratch with sql_execute(warehouse: "${SCRATCH_NAME}", query: "SELECT ... FROM ${r.table} ...") `
+      const source = isScratch(args.source_warehouse) ? SCRATCH_NAME : args.source_warehouse
+      const receipt = mcp
+        ? `${label}: ${rowsLine}, ${r.columns.length} columns (${r.mode}) from ${source}.\nColumns: ${cols}` +
+          (firstTime(ctx.sessionID, "materialize-join") ? `\n\n${joinHint.trimEnd()}.` : "")
+        : `${label}: ${rowsLine}, ${r.columns.length} columns (${r.mode === "append" ? "append" : r.mode}).\n` +
+          `Columns: ${cols}\n` +
+          `Source: ${source}. SQL run:\n${args.sql}\n\n` +
+          joinHint +
+          `(the table is also addressable as ${label}).`
+      // altimate_change end
       return Precedence.annotate(verdict, {
         title: `Materialize ${label}: ${r.rows} rows`,
         metadata: {
@@ -534,14 +585,7 @@ export const SqlMaterializeTool = Tool.define("sql_materialize", {
           mode: r.mode,
           ...lintMetadata,
         },
-        output:
-          warning +
-          `${label}: ${rowsLine}, ${r.columns.length} columns (${r.mode === "append" ? "append" : r.mode}).\n` +
-          `Columns: ${cols}\n` +
-          `Source: ${isScratch(args.source_warehouse) ? SCRATCH_NAME : args.source_warehouse}. SQL run:\n${args.sql}\n\n` +
-          `Join it in scratch with sql_execute(warehouse: "${SCRATCH_NAME}", query: "SELECT ... FROM ${r.table} ...") ` +
-          `(the table is also addressable as ${label}).` +
-          checks,
+        output: warning + receipt + checks,
       })
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)

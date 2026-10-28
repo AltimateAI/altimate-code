@@ -94,19 +94,24 @@ function budgetEnding(sessionID: string): boolean {
 }
 
 /**
- * Rejects a fields commit with fewer fields than the items the latest user request joins. Fires at most
- * once per session and request, so the next commit, changed or not, is accepted, and never once the run
- * nears its time budget. Purely lexical: no queries or model calls.
+ * Rejects a commit naming fewer items than the latest user request joins. A commit's items are its
+ * non-blank `asked` labels when given (so a rows commit is checked too), otherwise its field names.
+ * Fires at most once per session and request, so the next commit, changed or not, is accepted, and
+ * never for an unresolved answer or once the run nears its time budget. Purely lexical: no queries or
+ * model calls.
  */
 export function conjunctionRejection(
-  args: { fields?: { name: string }[] },
+  args: { fields?: { name: string }[]; unresolved?: unknown; asked?: string[] },
   messages: Tool.Context["messages"],
   sessionID: string,
 ): string | undefined {
-  if (!args.fields || budgetEnding(sessionID)) return undefined
+  if (args.unresolved || budgetEnding(sessionID)) return undefined
+  const asked = args.asked?.map((item) => item.trim()).filter(Boolean)
+  const names = asked?.length ? asked : args.fields?.map((field) => field.name)
+  if (!names) return undefined
   const text = latestRequest(messages)
   const { count, joins } = requestedItems(text)
-  if (count <= args.fields.length) return undefined
+  if (count <= names.length) return undefined
   const key = `${sessionID}\u0000${text}`
   if (advised.has(key)) return undefined
   const latest = messages.findLastIndex((message) => message.info.role === "user")
@@ -127,9 +132,10 @@ export function conjunctionRejection(
     return undefined
   advised.add(key)
   if (advised.size > MAX_ADVISED_REQUESTS) advised.delete(advised.values().next().value!)
-  const names = args.fields.map((field) => field.name)
-  const fields = `${names.length} field${names.length === 1 ? "" : "s"}`
-  return `${CONJUNCTION_REJECTION_MARKER} the request appears to ask for ${count} items, but this commit has ${fields} (${JSON.stringify(names)}). The request also asks for ${joins.map((join) => `"${join}"`).join(", ")}. Call answer_commit again with each requested item as its own field, named after it. If the request asks for fewer items, recommit unchanged; the next commit is accepted.`
+  const items = asked?.length
+    ? `${names.length} asked item${names.length === 1 ? "" : "s"}`
+    : `${names.length} field${names.length === 1 ? "" : "s"}`
+  return `${CONJUNCTION_REJECTION_MARKER} the request appears to ask for ${count} items, but this commit has ${items} (${JSON.stringify(names)}). The request also asks for ${joins.map((join) => `"${join}"`).join(", ")}. Call answer_commit again with each requested item as its own field (or rows column), named after it, and list them all in \`asked\`. If the request asks for fewer items, recommit unchanged; the next commit is accepted.`
 }
 
 export * as AnswerCommitConjunction from "./answer-commit-conjunction"

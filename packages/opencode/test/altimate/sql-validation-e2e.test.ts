@@ -68,7 +68,10 @@ describe("Tool name consistency in prompts", () => {
         expect(analyst).toBeDefined()
         expect(analyst!.prompt).not.toContain("sql_validate")
         expect(analyst!.prompt).toContain(
-          "keep that reasoning out of the final message. When a rule or policy decides the answer, read its full text (not a preview), enumerate each competing clause, and evaluate every condition as satisfied, violated or unknown against the row's own fields and dates before choosing.",
+          "keep that reasoning out of the final message, and record the chosen and rejected reading as one `answer_commit` `readings` entry. Never reject a reading only because it yields few rows; reject it on the question's own wording or the data's shape.",
+        )
+        expect(analyst!.prompt).toContain(
+          "When a rule or policy decides the answer, read its full text (not a preview), enumerate each competing clause, and evaluate every condition as satisfied, violated or unknown against the row's own fields and dates before choosing",
         )
       },
     })
@@ -109,7 +112,7 @@ describe("Tool name consistency in prompts", () => {
     const paragraph = prompt.trim().split("\n\n").at(-1)
     // altimate_change start - require one field for each requested answer item
     expect(paragraph).toContain(
-      "For a data question, finish by calling `answer_commit` with the single chosen value(s) with one field per item the request asks for (every named item, such as an entity and its related item or count, must be its own field: when the request asks for only the answer, anything left in the basis or prose is dropped), a one-or-two-sentence basis (population, grain, source object/column), or `unresolved` with the reason, then reply with exactly the text it returns and nothing else.",
+      "For a data question, finish by calling `answer_commit` with the single chosen value(s) with one field per item the request asks for (every named item, such as an entity and its related item or count, must be its own field: when the request asks for only the answer, anything left in the basis or prose is dropped), `asked` listing those items from the question in order, a one-or-two-sentence basis (population, grain, source object/column), or `unresolved` with the reason, then reply with exactly the text it returns and nothing else.",
     )
     // altimate_change end
     expect(paragraph).toContain("Always supply `basis`, even when unresolved")

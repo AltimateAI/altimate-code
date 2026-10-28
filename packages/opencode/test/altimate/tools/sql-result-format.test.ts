@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import type { SqlExecuteResult } from "../../../src/altimate/native/types"
 import {
   formatSqlResult,
+  serializeCsv,
   serializeRows,
   SQL_MAX_PREVIEW_BYTES,
   SQL_MAX_PREVIEW_COLUMNS,
@@ -1103,5 +1104,57 @@ describe("SQL full text retrieval", () => {
       { columns: ["id", "grant_date"], values: [2, { $sql_type: "undefined" }] },
       { columns: ["id", "grant_date"], values: [3, null] },
     ])
+  })
+})
+
+describe("MCP compact output", () => {
+  test("serializeCsv writes the header once and keeps NULL, empty strings and special values apart", () => {
+    const chunks: string[] = []
+    serializeCsv(
+      result(
+        [
+          [null, "", " padded", 'say "hi", ok'],
+          [12345678901234567890n, new Date("2024-01-02T03:04:05.006Z"), new Uint8Array([1, 2, 3]), { a: [1, 2n] }],
+        ],
+        ["a", "", "c", "d"],
+      ),
+      (chunk) => chunks.push(chunk),
+    )
+    expect(chunks.join("")).toBe(
+      'a,"",c,d\n' +
+        ',""," padded","say ""hi"", ok"\n' +
+        '12345678901234567890,2024-01-02T03:04:05.006Z,base64:AQID,"{""a"":[1,{""$bigint"":""2""}]}"\n',
+    )
+  })
+
+  test("serializeCsv enforces the spill size limit", () => {
+    expect(() => serializeCsv(result([["x".repeat(SQL_MAX_SPILL_BYTES)]]), () => {})).toThrow(/spill size limit/)
+  })
+
+  test("an MCP inline result has no rule line; the native one keeps it", async () => {
+    const rows = result([[1, "a"]], ["id", "name"])
+    const write = async () => resultPath
+    expect((await formatSqlResult(rows, { limit: 100, write, mcpClient: true })).output).toBe("id | name\n1 | a\n\n(1 rows)")
+    expect((await formatSqlResult(rows, { limit: 100, write })).output).toBe("id | name\n-----+-----\n1 | a\n\n(1 rows)")
+  })
+
+  test("an MCP spill previews ten rows, names the scratch table once in full, then briefly", async () => {
+    const rows = result(Array.from({ length: 30 }, (_, i) => [i, "v".repeat(400)]), ["id", "text"], true)
+    const seen = new Set<string>()
+    const options = {
+      limit: 100,
+      mcpClient: true,
+      write: async () => resultPath,
+      store: async () => "result_1",
+      firstHint: (key: string) => !seen.has(key) && Boolean(seen.add(key)),
+    }
+    const first = await formatSqlResult(rows, options)
+    expect(first.output).toStartWith("Preview: 10 of 30 returned rows. Row limit reached; more rows may exist.")
+    expect(first.output).toContain("instead of reading the file")
+    expect(first.output).not.toContain("v".repeat(161))
+    expect(first.metadata.scratch_table).toBe("result_1")
+    const second = await formatSqlResult(rows, options)
+    expect(second.output).toContain(`scratch table result_1 (CSV copy: ${resultPath}).`)
+    expect(second.output).not.toContain("instead of reading the file")
   })
 })
