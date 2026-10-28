@@ -6,6 +6,8 @@ import { RunBudget } from "../run-budget"
 export interface QueryContext {
   signal?: AbortSignal
   sessionID?: string
+  /** MCP source reads request database protection even when SQL classifies as a read. */
+  forceReadOnly?: boolean
 }
 
 /** Share the session cutoff across probes, extraction and scratch writes. */

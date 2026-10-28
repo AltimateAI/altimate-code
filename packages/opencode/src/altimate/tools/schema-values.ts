@@ -11,6 +11,7 @@ import * as Precedence from "../workspace/precedence"
 import { Dispatcher } from "../native"
 import * as Registry from "../native/connections/registry"
 import { isRecord, normalizeError } from "./response-normalization"
+import { isLocalConnection } from "./warehouse-discovery"
 
 /** Rows scanned per table; keeps wide or large tables cheap. */
 export const PROFILE_SAMPLE_ROWS = 10_000
@@ -449,7 +450,7 @@ export interface ValueProfileInput {
 /** Never throws: a failed profile becomes a one-line note. */
 export async function profileValues(
   input: ValueProfileInput,
-  ctx: Pick<LegacyContext, "sessionID" | "ask"> & { abort?: AbortSignal },
+  ctx: Pick<LegacyContext, "sessionID" | "ask" | "extra"> & { abort?: AbortSignal },
 ): Promise<string> {
   try {
     const list = (await Dispatcher.call("warehouse.list", {})) as unknown
@@ -481,9 +482,14 @@ export async function profileValues(
       sql,
       warehouse: target.name,
       limit: PROFILE_MAX_COLUMNS + 1,
-      query_timeout_ms: PROFILE_TIMEOUT_MS,
+      // A shorter deadline would restart a local engine and drop session temp tables; the sample is
+      // already bounded by its LIMIT. SQLite always runs in the local helper (including `file:` URIs);
+      // remote DuckDB stores (e.g. MotherDuck) keep the profiling cap.
+      ...(dialect === "sqlite" || (dialect === "duckdb" && isLocalConnection(Registry.getConfig(target.name)))
+        ? {}
+        : { query_timeout_ms: PROFILE_TIMEOUT_MS }),
       ...(dialect === "postgres" ? { read_only: true } : {}),
-    }, { signal: ctx.abort, sessionID: ctx.sessionID })) as unknown
+    }, { signal: ctx.abort, sessionID: ctx.sessionID, ...(ctx.extra?.forceReadOnly === true ? { forceReadOnly: true } : {}) })) as unknown
     const data = isRecord(res) && isRecord(res.data) ? res.data : res
     const error = normalizeError(isRecord(res) ? res.error : undefined) ?? normalizeError(isRecord(data) ? data.error : undefined)
     if (error) throw new Error(error)

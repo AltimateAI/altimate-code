@@ -34,6 +34,7 @@ manage MCP (Model Context Protocol) servers
 Commands:
   altimate-code mcp add            add an MCP server
   altimate-code mcp list           list MCP servers and their status                   [aliases: ls]
+  altimate-code mcp serve          serve data tools over MCP stdio (no model required)
   altimate-code mcp status         show MCP server health
   altimate-code mcp auth [name]    authenticate with an OAuth-enabled MCP server
   altimate-code mcp logout [name]  remove OAuth credentials for an MCP server
@@ -524,6 +525,33 @@ Options:
       --format        Output format               [string] [choices: "json", "tsv"] [default: "tsv"]"
 `;
 
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode tool --help 1`] = `
+"altimate-code tool
+
+run altimate-code data tools directly, without a model
+
+Commands:
+  altimate-code tool list             list the data tools available to \`tool run\`
+  altimate-code tool context          print the analyst method and the connections known at startup
+                                      (what \`mcp serve\` sends as instructions)
+  altimate-code tool schema <name>    print one tool's description and JSON input schema
+  altimate-code tool run <name>       run one data tool without a model and print its result
+  altimate-code tool daemon [action]  run, inspect or stop the long-running tool process for a
+                                      project
+
+Options:
+  -h, --help          show help                                                            [boolean]
+  -v, --version       show version number                                                  [boolean]
+      --print-logs    print logs to stderr                                                 [boolean]
+      --log-level     log level                 [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure          run without external plugins                                         [boolean]
+      --yolo          auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                      engine serve the types it provides; 'local' keeps every connection on the
+                      local drivers                         [string] [choices: "workspace", "local"]"
+`;
+
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode mcp list --help 1`] = `
 "altimate-code mcp list
 
@@ -814,4 +842,86 @@ Options:
       --integrations  where warehouse tools run: 'workspace' (default) lets the bound workspace's
                       engine serve the types it provides; 'local' keeps every connection on the
                       local drivers                         [string] [choices: "workspace", "local"]"
+`;
+
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode tool list --help 1`] = `
+"altimate-code tool list
+
+list the data tools available to \`tool run\`
+
+Options:
+  -h, --help             show help                                                         [boolean]
+  -v, --version          show version number                                               [boolean]
+      --print-logs       print logs to stderr                                              [boolean]
+      --log-level        log level              [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure             run without external plugins                                      [boolean]
+      --yolo             auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations     where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                         engine serve the types it provides; 'local' keeps every connection on the
+                         local drivers                      [string] [choices: "workspace", "local"]
+      --json             print id, description and input schema as JSON   [boolean] [default: false]
+      --connections      use only this connections JSON file instead of the project and global
+                         connection configs           [string] [default: $ALTIMATE_TOOL_CONNECTIONS]
+      --workspace-tools  also expose the linked workspace tools (workspace_context, workspace_skill,
+                         workspace_execute)                               [boolean] [default: false]"
+`;
+
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode tool run --help 1`] = `
+"altimate-code tool run <name>
+
+run one data tool without a model and print its result
+
+Positionals:
+  name  tool id (see \`tool list\`)                                                [string] [required]
+
+Options:
+  -h, --help             show help                                                         [boolean]
+  -v, --version          show version number                                               [boolean]
+      --print-logs       print logs to stderr                                              [boolean]
+      --log-level        log level              [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure             run without external plugins                                      [boolean]
+      --yolo             auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations     where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                         engine serve the types it provides; 'local' keeps every connection on the
+                         local drivers                      [string] [choices: "workspace", "local"]
+      --args             tool arguments as a JSON object, or - to read them from stdin      [string]
+      --args-file        read the tool arguments (JSON) from a file                         [string]
+      --allow-write      allow writes (DROP DATABASE, DROP SCHEMA and TRUNCATE stay blocked)
+                                                                          [boolean] [default: false]
+      --daemon           use a long-running process that keeps connections warm; --no-daemon runs in
+                         this process                                      [boolean] [default: true]
+      --json             print {status,title,output,metadata} as JSON     [boolean] [default: false]
+      --connections      use only this connections JSON file instead of the project and global
+                         connection configs           [string] [default: $ALTIMATE_TOOL_CONNECTIONS]
+      --workspace-tools  also expose the linked workspace tools (workspace_context, workspace_skill,
+                         workspace_execute)                               [boolean] [default: false]"
+`;
+
+exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode tool daemon --help 1`] = `
+"altimate-code tool daemon [action]
+
+run, inspect or stop the long-running tool process for a project
+
+Positionals:
+  action  start (default), status or stop
+                                    [string] [choices: "start", "status", "stop"] [default: "start"]
+
+Options:
+  -h, --help             show help                                                         [boolean]
+  -v, --version          show version number                                               [boolean]
+      --print-logs       print logs to stderr                                              [boolean]
+      --log-level        log level              [string] [choices: "DEBUG", "INFO", "WARN", "ERROR"]
+      --pure             run without external plugins                                      [boolean]
+      --yolo             auto-approve all permission prompts (explicit deny rules still enforced)
+                                                                          [boolean] [default: false]
+      --integrations     where warehouse tools run: 'workspace' (default) lets the bound workspace's
+                         engine serve the types it provides; 'local' keeps every connection on the
+                         local drivers                      [string] [choices: "workspace", "local"]
+      --dir              project directory (defaults to cwd)                                [string]
+      --connections      use only this connections JSON file instead of the project and global
+                         connection configs           [string] [default: $ALTIMATE_TOOL_CONNECTIONS]
+      --workspace-tools  also expose the linked workspace tools (workspace_context, workspace_skill,
+                         workspace_execute)                               [boolean] [default: false]"
 `;
