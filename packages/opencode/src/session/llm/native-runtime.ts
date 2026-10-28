@@ -17,6 +17,7 @@ import {
   toDefinitions,
   type JsonSchema,
   type LLMEvent,
+  type ToolCallPart,
 } from "@opencode-ai/llm"
 import type { LLMClientShape } from "@opencode-ai/llm/route"
 import { LLMNative } from "./native-request"
@@ -89,6 +90,7 @@ export function stream(input: StreamInput): StreamResult {
   // — if a field ever needs to differ between the two surfaces, the
   // translation belongs here, not split across both packages.
   const tools = nativeTools(input.tools, input)
+  const advertisedTools = Object.fromEntries(Object.entries(tools).filter(([name]) => name !== "invalid"))
   const request = LLMNative.request({
     model: input.model,
     apiKey: current.apiKey,
@@ -112,26 +114,26 @@ export function stream(input: StreamInput): StreamResult {
         const provider = input.llmClient
           .stream(
             LLMRequest.update(request, {
-              tools: [...request.tools, ...toDefinitions(tools)],
+              tools: [...request.tools, ...toDefinitions(advertisedTools)],
             }),
           )
           .pipe(
-            Stream.flatMap((event) =>
-              event.type !== "tool-call" || event.providerExecuted
-                ? Stream.make(event)
-                : Stream.make(event).pipe(
-                    Stream.concat(
-                      Stream.fromEffectDrain(
-                        ToolRuntime.dispatch(tools, event).pipe(
-                          Effect.flatMap((dispatched) => Queue.offerAll(results, dispatched.events)),
-                          Effect.catchCause((cause) => Queue.failCause(results, cause)),
-                          Effect.asVoid,
-                          FiberSet.run(settlements, { startImmediately: true }),
-                        ),
-                      ),
+            Stream.flatMap((event) => {
+              if (event.type !== "tool-call" || event.providerExecuted) return Stream.make(event)
+              const call = repairToolCall(tools, event)
+              return Stream.make(call).pipe(
+                Stream.concat(
+                  Stream.fromEffectDrain(
+                    ToolRuntime.dispatch(tools, call).pipe(
+                      Effect.flatMap((dispatched) => Queue.offerAll(results, dispatched.events)),
+                      Effect.catchCause((cause) => Queue.failCause(results, cause)),
+                      Effect.asVoid,
+                      FiberSet.run(settlements, { startImmediately: true }),
                     ),
                   ),
-            ),
+                ),
+              )
+            }),
             Stream.concat(
               Stream.fromEffectDrain(
                 FiberSet.awaitEmpty(settlements).pipe(Effect.andThen(Queue.end(results)), Effect.asVoid),
@@ -146,6 +148,19 @@ export function stream(input: StreamInput): StreamResult {
   return {
     ...current,
     stream: fetch ? stream.pipe(Stream.provideService(FetchHttpClient.Fetch, fetch)) : stream,
+  }
+}
+
+function repairToolCall(tools: ReturnType<typeof nativeTools>, call: ToolCallPart): ToolCallPart {
+  const hasTool = (name: string) => Object.prototype.hasOwnProperty.call(tools, name)
+  if (hasTool(call.name)) return call
+  const lower = call.name.toLowerCase()
+  if (hasTool(lower)) return { ...call, name: lower }
+  if (!hasTool("invalid")) return call
+  return {
+    ...call,
+    name: "invalid",
+    input: { tool: call.name, error: `Unknown tool: ${call.name}` },
   }
 }
 

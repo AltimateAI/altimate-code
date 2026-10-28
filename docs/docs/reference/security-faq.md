@@ -96,18 +96,18 @@ Yes. Use pattern-based permissions to deny destructive SQL:
 }
 ```
 
-You can also configure per-agent permissions. For example, restrict the `analyst` agent to read-only:
+You can also configure per-agent permissions. For example, keep the `builder` agent from editing files and allow only `SELECT` shell commands. The `analyst` agent's shell and built-in write tools are already denied whatever its config says. It can still save training entries and create session scratch tables, and MCP or custom tools follow your config.
 
 ```json
 {
   "agent": {
-    "analyst": {
+    "builder": {
       "permission": {
         "write": "deny",
         "edit": "deny",
         "bash": {
-          "SELECT *": "allow",
-          "*": "deny"
+          "*": "deny",
+          "SELECT *": "allow"
         }
       }
     }
@@ -300,8 +300,8 @@ For additional safety:
 
 Altimate Code includes several layers of protection to keep the agent within your project:
 
-- **Project boundary enforcement.** File operations check that paths stay within your project directory (or git worktree for monorepos). Attempts to read or write outside the project trigger an `external_directory` permission prompt.
-- **Symlink-aware path resolution.** Symlinks inside the project that point outside are detected and blocked. This prevents an agent from reading or writing outside your project through symlinks.
+- **Project boundary enforcement.** File operations check that paths stay within your project directory (or git worktree for monorepos). Attempts to read or write outside the project trigger an `external_directory` permission prompt. A path that goes through a symlink is also checked against the directory it resolves to, so a symlink inside an allowed directory cannot be used to reach a directory outside it that is not allowed.
+- **Symlink-aware path resolution.** Symlinks inside the project that point outside are resolved, so following one triggers the same `external_directory` permission check as any other path outside the project. Whether it is allowed depends on that permission.
 - **Path traversal blocking.** Paths containing `../` sequences that would escape the project are rejected with an "Access denied" error.
 - **Sensitive file protection.** Writing to credential files (`.env`, `.ssh/`, `.aws/`, private keys) triggers a confirmation prompt, even inside the project. See [below](#why-am-i-being-prompted-to-edit-env-files) for details.
 - **Bash command analysis.** The bash tool parses commands with tree-sitter to detect file operations (`rm`, `cp`, `mv`, etc.) targeting paths outside your project, and prompts for permission.

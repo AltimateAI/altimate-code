@@ -65,20 +65,24 @@ Override permissions for specific agents:
 ```json
 {
   "agent": {
-    "analyst": {
+    "builder": {
       "permission": {
         "write": "deny",
         "edit": "deny",
         "bash": {
+          "*": "deny",
           "SELECT *": "allow",
-          "dbt docs *": "allow",
-          "*": "deny"
+          "dbt docs *": "allow"
         }
       }
     }
   }
 }
 ```
+
+The `analyst` agent's shell and built-in write tools (file edits, SQL writes, memory saves and the other built-in tools that change state) stay denied even if its permission config allows them. Training entries remain available through `training_save` and `training_remove`, and analyst can create session scratch tables. MCP and custom tools follow your config, so a global `"*": "allow"` turns them on for analyst too, including ones that write. Config can still restrict analyst further.
+
+Rules are evaluated in order and the last matching rule wins, so put a `"*"` rule before the more specific patterns it should not override.
 
 ## All Permissioned Tools
 
@@ -209,15 +213,8 @@ Give each agent only the permissions it needs:
   "agent": {
     "analyst": {
       "permission": {
-        "write": "deny",
-        "edit": "deny",
-        "sql_execute_write": "deny",
-        "bash": {
-          "*": "deny",
-          "ls *": "allow",
-          "cat *": "allow",
-          "dbt list *": "allow"
-        }
+        "webfetch": "deny",
+        "websearch": "deny"
       }
     },
     "builder": {
