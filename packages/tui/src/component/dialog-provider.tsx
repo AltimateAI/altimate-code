@@ -89,7 +89,7 @@ export function providerOptions(list: { id: string; name: string }[]): ProviderO
         value: provider.id,
         providerID: provider.id,
         description: {
-          "altimate-backend": "Recommended · best tool-calling · 10M free tokens",
+          "altimate-backend": "Recommended · best tool-calling · 1M free tokens",
           anthropic: "(API key)",
           openai: "(ChatGPT Plus/Pro or API key)",
           google: "(API key)",
