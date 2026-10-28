@@ -144,7 +144,7 @@ export async function snapshotIsOurs(directory: string): Promise<boolean> {
 /** The snapshot's manifest when it may be served to the current account, else null. Read once:
  * every answer about the snapshot comes from this one object, so a concurrent sync that swaps
  * the tree after the check cannot pair one account's validation with another's contents. */
-async function ownManifest(directory: string): Promise<Manifest | null> {
+export async function ownManifest(directory: string): Promise<Manifest | null> {
   try {
     const manifest = await readManifest(directory)
     if (!manifest) return null
@@ -1022,6 +1022,13 @@ export async function purgeManagedSnapshot(
   directory: string,
   why: string,
 ): Promise<"removed" | "absent" | "refused"> {
+  const outcome = await purgeSnapshot(directory, why)
+  // Unbound, so the Claude Code copies go too, even when the snapshot itself was refused.
+  await mirrorToClaude(directory, { withdraw: true })
+  return outcome
+}
+
+async function purgeSnapshot(directory: string, why: string): Promise<"removed" | "absent" | "refused"> {
   // Joined to the sync's in-flight gate: an in-progress `syncSkills` for this
   // directory would otherwise republish `_workspace` right after unlink removed
   // it. Narrow window, but the fix is one await.
@@ -1140,6 +1147,15 @@ async function retireSyncState(canon: string, before: number): Promise<void> {
 }
 // altimate_change end
 
+/** Mirror the snapshot into `.claude/skills`. Its failure must never change what the sync reports. */
+async function mirrorToClaude(directory: string, opts?: { withdraw?: boolean }): Promise<void> {
+  try {
+    await (await import("./claude-skill-mirror")).mirrorClaudeSkills(directory, opts)
+  } catch (err) {
+    log.warn("could not mirror workspace skills into .claude/skills", { err: String(err) })
+  }
+}
+
 async function removeManaged(directory: string): Promise<void> {
   await fs.rm(managedRoot(directory), { recursive: true, force: true })
 }
@@ -1185,6 +1201,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       const dropped = (await pathsAreReal(canon).catch(() => false))
         ? await deactivate(canon, "the workspace feature is off").catch(() => false)
         : false
+      await mirrorToClaude(canon, { withdraw: true })
       return { changed: dropped, skipped: [] }
     })()
     inFlight.set(canon, purge)
@@ -1683,6 +1700,9 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       if (!changed && validated)
         await fs.writeFile(path.join(managedRoot(canon), SYNCED_MARKER), markerFor(validated, now)).catch(() => {})
     }
+    // After every outcome, once: joiners await this same run. Whatever is on disk now (published,
+    // removed or kept after a failure) is what the Claude Code copies should match.
+    await mirrorToClaude(canon)
     // Cleared here, not by callers, so a clean Refresh or IDE refresh resets it
     // too — otherwise a problem it fixed would stay latched, and its return
     // would never be announced.
