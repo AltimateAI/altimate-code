@@ -206,9 +206,9 @@ export async function setPinned(root: string, name: string, id: string, pinned: 
     const lesson = approved.find((lesson) => lesson.id === id)
     if (!lesson) {
       const matches = (await search(root, name, id)).slice(0, 5)
-      throw new StoreError(`Unknown approved lesson "${id}" in "${name}". ` + (matches.length
+      throw new StoreError(`Unknown approved rule "${id}" in "${name}". ` + (matches.length
         ? `Close matches from \`learn search\`:\n${matches.map(({ lesson, state }) => `  [${lesson.id}] ${state}: ${lesson.text}`).join("\n")}`
-        : "No close matches. Use `learn search <query>` to find approved lessons."))
+        : "No close matches. Use `learn search <query>` to find approved rules."))
     }
     const candidate = await loadCandidateLessons(root, name)
     const staged = candidate?.find((lesson) => lesson.id === id)
@@ -350,7 +350,7 @@ export async function exportSkill(root: string, name: string): Promise<string> {
     const p = paths(root, name)
     const existing = await existingExport(root, name)
     const lessons = await loadApproved(root, name)
-    if (await read(root, p.approved) === undefined) throw new StoreError(`No approved lessons for "${name}".`)
+    if (await read(root, p.approved) === undefined) throw new StoreError(`No approved rules for "${name}".`)
     if (existing !== undefined) await verifyExportHash(root, name, existing)
     await writeExport(root, name, skillText(name, lessons), existing)
     return p.skill
@@ -568,7 +568,7 @@ export function validateCandidate(name: string, text: string, opts: PromoteOptio
       if (bad) return bad
       list = Playbook.bullets(Playbook.parse(text))
     }
-  } catch (error) { return `invalid lesson snapshot: ${error instanceof Error ? error.message : String(error)}` }
+  } catch (error) { return `invalid rule snapshot: ${error instanceof Error ? error.message : String(error)}` }
   const ids = new Set(list.map((b) => b.id))
   for (const b of list) {
     const bad = lint(b.text, { grandfathered: opts.grandfathered?.some((old) => old.id === b.id && old.text === b.text) }) ?? (normalizeText(b.text) !== b.text ? "contains hidden or non-normalized characters" : undefined)
@@ -642,14 +642,14 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
     const warnings = verificationWarnings(source)
     if (warnings.length && !opts.allowFlagged)
       throw new StoreError(
-        `Refusing to promote flagged lessons without explicit approval:\n${warnings.join("\n")}\n` +
+        `Refusing to promote flagged rules without explicit approval:\n${warnings.join("\n")}\n` +
         "Review with `learn promote` interactively, or pass `--yes --allow-flagged` to approve them.",
       )
     // Publish the canonical serialization of what was validated (LF endings), not the raw file.
     const publish = Lessons.canonical(Lessons.parse(source))
     const current = await readPromoted(root, name)
     if (current !== undefined && Lessons.canonical(Lessons.parse(current)) === publish)
-      throw new StoreError(`Candidate is identical to the approved lessons; nothing to promote.`)
+      throw new StoreError(`Candidate is identical to the approved rules; nothing to promote.`)
     // A person's promote ends automatic ownership before anything is written; auto-promote's own publish does not.
     if (opts.history?.action !== "auto-promote") await voidAutoOwnership(root, name)
     let archived: number | undefined
@@ -698,7 +698,7 @@ export async function rollback(root: string, name: string): Promise<{ restored: 
       } catch (error) {
         if (!(error instanceof StoreError)) throw error
         existing = undefined
-        try { process.stderr.write(`learn: left ${p.skill} unchanged; the export needs separate reconciliation. Restoring local approved lessons.\n`) }
+        try { process.stderr.write(`learn: left ${p.skill} unchanged; the export needs separate reconciliation. Restoring local approved rules.\n`) }
         catch { /* Diagnostics must not interrupt the local rollback. */ }
       }
     }

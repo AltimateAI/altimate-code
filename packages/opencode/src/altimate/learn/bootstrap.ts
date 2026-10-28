@@ -225,7 +225,7 @@ export async function bootstrap(options: BootstrapOptions, deps: BootstrapDeps):
   deps.out(`Signals found: ${all.length} (${all.filter((s) => s.kind === "user_correction").length} corrections, ${all.filter((s) => s.kind === "tool_retry").length} tool failures; ${all.length - plans.reduce((n, p) => n + p.signals.length, 0)} pending).`)
   deps.out(`Model/provider: ${label}. Estimated input tokens: ${estimatedInput} for up to ${estimatedReflections} reflection(s), excluding candidate growth.`)
   deps.out(`Limits: ${limit} sessions, ${maxReflections} reflections, ${maxSeconds}s total after confirmation.`)
-  deps.out(model ? "Bootstrap sends redacted excerpts of past sessions to this model and stages candidate lessons only."
+  deps.out(model ? "Bootstrap sends redacted excerpts of past sessions to this model and stages candidate rules only."
     : "Bootstrap imports signals locally without model calls.")
   if (options.dryRun) {
     for (const signal of all) deps.out(`[${signal.sessionID}] [${signal.kind}] ${Signals.clipSignalText(signal.text)}`)
@@ -338,7 +338,7 @@ export async function bootstrap(options: BootstrapOptions, deps: BootstrapDeps):
       }
     }
   }
-  deps.out(`Bootstrap summary: ${summary.signalsFound} signals found, ${summary.signalsAdded} added; ${summary.reflectionsRun} reflections run; candidate lessons: ${summary.candidatesAdded} added, ${summary.candidatesEdited} edited.`)
+  deps.out(`Bootstrap summary: ${summary.signalsFound} signals found, ${summary.signalsAdded} added; ${summary.reflectionsRun} reflections run; candidate rules: ${summary.candidatesAdded} added, ${summary.candidatesEdited} edited.`)
   deps.out(`Tokens${summary.tokensEstimated ? " (estimated)" : ""}: ${summary.inputTokens} input, ${summary.outputTokens} output. Estimated cost: $${summary.estimatedCost.toFixed(6)}.`)
   if (!ready() || stop || (await Signals.readSignalsSnapshot(options.root, name)).some((s) => s.source === "bootstrap" && s.status === "open"))
     deps.out("Unfinished signals remain queued; re-run `learn bootstrap` to continue.")

@@ -43,7 +43,7 @@ test.each([
   await using tmp = await tmpdir()
   await create(tmp.path)
   const text = await fs.readFile(ignoreFile(tmp.path), "utf8")
-  expect(text).toContain("# Share approved lessons")
+  expect(text).toContain("# Share approved rules")
   expect(text.split("\n").filter((line) => line && !line.startsWith("#"))).toEqual([
     "*", "!/*/", "!/*/approved.json", "!/.gitignore",
   ])
@@ -96,7 +96,7 @@ test.each(["\n", ""])("learn appends missing managed rules while preserving a us
   await Store.saveCandidate(tmp.path, NAME, Playbook.create({ name: NAME }))
   const updated = await fs.readFile(file, "utf8")
   expect(updated.startsWith(custom)).toBe(true)
-  expect(updated.match(/# Share approved lessons/g)).toHaveLength(1)
+  expect(updated.match(/# Share approved rules/g)).toHaveLength(1)
   for (const [relative, ignored] of [[`${NAME}/candidate.json`, 0], [`${NAME}/approved.json`, 1]] as const) {
     const result = Bun.spawnSync(["git", "-c", "core.excludesFile=/dev/null", "check-ignore", "--no-index", "--quiet", `.altimate-code/learn/${relative}`], {
       cwd: tmp.path,

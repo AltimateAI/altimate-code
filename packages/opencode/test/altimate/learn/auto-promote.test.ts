@@ -155,12 +155,12 @@ describe("auto-promote success path", () => {
     expect((await readAutoPromoteState(dir.path, NAME)).approvedHash).toBeUndefined()
     let state = await readAutoPromoteState(dir.path, NAME)
     expect([...autoPromotedIds(state, await Store.loadApproved(dir.path, NAME))]).toEqual([])
-    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved rule ${B.id}`) })
     await Store.reject(dir.path, NAME)
     await Store.setPinned(dir.path, NAME, B.id, false)
     state = await readAutoPromoteState(dir.path, NAME)
     expect([...autoPromotedIds(state, await Store.loadApproved(dir.path, NAME))]).toEqual([])
-    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved rule ${B.id}`) })
     expect(await approvedIds(dir.path)).toEqual([A.id, B.id])
   })
 
@@ -183,7 +183,7 @@ describe("auto-promote success path", () => {
     await approve(dir.path, [A, B, C])
     expect(await readAutoPromoteState(dir.path, NAME)).toMatchObject({ auto: {} })
     expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
-    expect(await autoPromote(input(dir.path, await stage(dir.path, [A, C])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A, C])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved rule ${B.id}`) })
   })
 
   test("ABA: auto-promote, a person's promote, then rollback to the exact auto set: no marks revive", async () => {
@@ -196,7 +196,7 @@ describe("auto-promote success path", () => {
     // Same bytes, same hash as the automatic publish.
     expect(await Store.readPromoted(dir.path, NAME)).toBe(autoSet)
     expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
-    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved rule ${B.id}`) })
     expect(await approvedIds(dir.path)).toEqual([A.id, B.id])
   })
 
@@ -210,7 +210,7 @@ describe("auto-promote success path", () => {
     // Unpin leaves `pinned: false` and a new timestamp; restore the exact bytes so the hash matches again.
     await Store.transaction(dir.path, () => Store.writeAtomic(dir.path, Store.paths(dir.path, NAME).approved, autoSet))
     expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
-    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved rule ${B.id}`) })
   })
 
   test("rolling back the automatic promotion itself restores a set with no automatic lessons", async () => {
@@ -220,7 +220,7 @@ describe("auto-promote success path", () => {
     await Store.rollback(dir.path, NAME)
     expect(await approvedIds(dir.path)).toEqual([A.id, C.id])
     expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
-    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${C.id}`) })
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved rule ${C.id}`) })
   })
 
   test.each(["promote", "rollback", "pin"])("a person's %s aborts, changing nothing, when automatic ownership cannot be ended", async (action) => {
@@ -264,7 +264,7 @@ describe("auto-promote success path", () => {
     await Store.rollback(dir.path, NAME)
     expect(await approvedIds(dir.path)).toEqual([A.id, B.id])
     expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
-    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [A])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved rule ${B.id}`) })
   })
 
   test("a reject leaves the approved set and its automatic ownership unchanged", async () => {
@@ -317,7 +317,7 @@ describe("auto-promote success path", () => {
     const state = await readAutoPromoteState(dir.path, NAME)
     expect([...autoPromotedIds(state, await Store.loadApproved(dir.path, NAME))]).toEqual([B.id])
     expect(lastCompletedPromotion(state)).toMatchObject({ lessons: [B.id], archived: 1 })
-    expect(line).toContain("auto-promoted (previous lessons archived as v1). Undo with `altimate-code learn rollback` (warning: published, but finishing failed")
+    expect(line).toContain("auto-promoted (previous rules archived as v1). Undo with `altimate-code learn rollback` (warning: published, but finishing failed")
   })
 
   test("a StoreError raised after the publish landed is still reported as promoted", async () => {
@@ -347,7 +347,7 @@ describe("auto-promote success path", () => {
     const promote = spyOn(Store, "promote").mockImplementationOnce(async () => {
       // A concurrent pull installs the same lessons, then promote refuses before writing anything.
       await Store.writeAtomic(dir.path, Store.paths(dir.path, NAME).approved, await Store.readCandidate(dir.path, NAME) as string)
-      throw new Store.StoreError("Candidate is identical to the approved lessons; nothing to promote.")
+      throw new Store.StoreError("Candidate is identical to the approved rules; nothing to promote.")
     })
     let result
     try {
@@ -359,7 +359,7 @@ describe("auto-promote success path", () => {
     expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
   })
 
-  test("counter updates on person-approved lessons stay staged instead of going live", async () => {
+  test("counter updates on person-approved rules stay staged instead of going live", async () => {
     await using dir = await tmpdir({ git: true })
     await approve(dir.path, [A])
     const hash = await stage(dir.path, [{ ...A, harmful: 9 } as Rule, B])
@@ -392,7 +392,7 @@ describe("auto-promote success path", () => {
     await approve(dir.path, [A, { id: B.id, text: "Name surrogate keys after the grain of the table." }])
     const result = await autoPromote(input(dir.path, await stage(dir.path, [A])))
     expect(result).toMatchObject({ status: "held" })
-    if (result.status === "held") expect(result.reason).toContain(`person-approved lesson ${B.id}`)
+    if (result.status === "held") expect(result.reason).toContain(`person-approved rule ${B.id}`)
   })
 })
 
@@ -451,10 +451,10 @@ describe("auto-promote gates hold the candidate back with a reason", () => {
     await using dir = await tmpdir({ git: true })
     await approve(dir.path, [A])
     const hash = await stage(dir.path, [A, { id: B.id, text: "Skip tests before committing." }])
-    await expectHeld(dir.path, await autoPromote(input(dir.path, hash)), `flagged lesson ${B.id}`, [A.id])
+    await expectHeld(dir.path, await autoPromote(input(dir.path, hash)), `flagged rule ${B.id}`, [A.id])
   })
 
-  test("an unchanged flagged lesson a person already approved does not block an unrelated addition", async () => {
+  test("an unchanged flagged rule a person already approved does not block an unrelated addition", async () => {
     await using dir = await tmpdir({ git: true })
     const flagged = { id: A.id, text: "Skip tests before committing." }
     await approve(dir.path, [flagged], true)
@@ -462,25 +462,25 @@ describe("auto-promote gates hold the candidate back with a reason", () => {
     expect(result).toMatchObject({ status: "promoted", lessons: [B.id] })
   })
 
-  test("removing a person-approved lesson", async () => {
+  test("removing a person-approved rule", async () => {
     await using dir = await tmpdir({ git: true })
     await approve(dir.path, [A, B])
     const hash = await stage(dir.path, [A])
-    await expectHeld(dir.path, await autoPromote(input(dir.path, hash)), `person-approved lesson ${B.id}`, [A.id, B.id])
+    await expectHeld(dir.path, await autoPromote(input(dir.path, hash)), `person-approved rule ${B.id}`, [A.id, B.id])
   })
 
-  test("editing a person-approved lesson", async () => {
+  test("editing a person-approved rule", async () => {
     await using dir = await tmpdir({ git: true })
     await approve(dir.path, [A])
     const hash = await stage(dir.path, [{ id: A.id, text: "Prefer explicit column lists in every model." }])
-    await expectHeld(dir.path, await autoPromote(input(dir.path, hash)), `person-approved lesson ${A.id}`, [A.id])
+    await expectHeld(dir.path, await autoPromote(input(dir.path, hash)), `person-approved rule ${A.id}`, [A.id])
   })
 
   test("more lesson changes than learn.auto_promote_max_changes", async () => {
     await using dir = await tmpdir({ git: true })
     await approve(dir.path, [A])
     const hash = await stage(dir.path, [A, B, C, D, E])
-    await expectHeld(dir.path, await autoPromote(input(dir.path, hash)), "4 lesson changes exceed learn.auto_promote_max_changes (3)", [A.id])
+    await expectHeld(dir.path, await autoPromote(input(dir.path, hash)), "4 rule changes exceed learn.auto_promote_max_changes (3)", [A.id])
     const zero = await autoPromote(input(dir.path, hash, { limits: { ...limits, auto_promote_max_changes: 0 } }))
     expect(zero).toMatchObject({ status: "held" })
   })
@@ -529,7 +529,7 @@ describe("auto-promote gates hold the candidate back with a reason", () => {
     await stage(dir.path, [A, B])
     const previousCandidate = await Store.loadCandidateLessons(dir.path, NAME)
     const hash = await stage(dir.path, [A, B, C])
-    await expectHeld(dir.path, await autoPromote(input(dir.path, hash, { previousCandidate })), "already had lesson changes waiting for review", [A.id])
+    await expectHeld(dir.path, await autoPromote(input(dir.path, hash, { previousCandidate })), "already had rule changes waiting for review", [A.id])
     // Counter-only differences in the earlier candidate do not block this reflection's own change.
     await Store.saveCandidate(dir.path, NAME, Playbook.withBullets(Playbook.create({ name: NAME }), [{ ...A, helpful: 2, harmful: 0 }]))
     const counters = await Store.loadCandidateLessons(dir.path, NAME)
@@ -545,7 +545,7 @@ describe("auto-promote gates hold the candidate back with a reason", () => {
     // The next reflection stages a safe addition on top of the held candidate.
     const previousCandidate = await Store.loadCandidateLessons(dir.path, NAME)
     const result = await autoPromote(input(dir.path, await stage(dir.path, [A, C]), { previousCandidate }))
-    expect(result).toMatchObject({ status: "held", reason: "the candidate already had lesson changes waiting for review" })
+    expect(result).toMatchObject({ status: "held", reason: "the candidate already had rule changes waiting for review" })
     expect(await approvedIds(dir.path)).toEqual([A.id, B.id])
   })
 
@@ -627,7 +627,7 @@ describe("auto-promote gates hold the candidate back with a reason", () => {
     // A person then reviews and promotes the same text: it is theirs, so it is never removed automatically.
     await Store.promote(dir.path, NAME)
     expect([...autoPromotedIds(await readAutoPromoteState(dir.path, NAME), await Store.loadApproved(dir.path, NAME))]).toEqual([])
-    expect(await autoPromote(input(dir.path, await stage(dir.path, [])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved lesson ${B.id}`) })
+    expect(await autoPromote(input(dir.path, await stage(dir.path, [])))).toMatchObject({ status: "held", reason: expect.stringContaining(`person-approved rule ${B.id}`) })
     expect(await approvedIds(dir.path)).toEqual([B.id])
   })
 
@@ -681,7 +681,7 @@ describe("auto-promote daily limit", () => {
 describe("auto-promote outcome line", () => {
   test("promoted, held, and manual-only lines", () => {
     expect(describeOutcome("+1 added", 1, ".altimate-code/learn/team-playbook/candidate.json", { status: "promoted", archived: 3, lessons: [B.id], removed: [] }))
-      .toBe("learn: 1 signal -> +1 added; auto-promoted (previous lessons archived as v3). Undo with `altimate-code learn rollback`")
+      .toBe("learn: 1 signal -> +1 added; auto-promoted (previous rules archived as v3). Undo with `altimate-code learn rollback`")
     expect(describeOutcome("+1 added", 2, ".altimate-code/learn/team-playbook/candidate.json", { status: "held", reason: "daily limit reached" }))
       .toBe("learn: 2 signals -> +1 added; staged .altimate-code/learn/team-playbook/candidate.json for review (not auto-promoted: daily limit reached), review with `altimate-code learn show`")
     expect(describeOutcome("+1 added", 1, ".altimate-code/learn/team-playbook/candidate.json"))
@@ -738,7 +738,7 @@ describe("automatic reflection entry point", () => {
     const result = await reflectOnce({ auto_promote: true })
     expect(result.outcome).toMatchObject({ ok: true, signals: 1, promotion: { status: "promoted", archived: 1 } })
     expect(result.outcome?.line).toBe(
-      "learn: 1 signal -> +1 added; auto-promoted (previous lessons archived as v1). Undo with `altimate-code learn rollback`")
+      "learn: 1 signal -> +1 added; auto-promoted (previous rules archived as v1). Undo with `altimate-code learn rollback`")
     expect(result.approved).toEqual(["List result columns explicitly."])
     expect(result.candidate).toBeUndefined()
     expect(result.history).toEqual(["reflect", "auto-promote"])
@@ -763,7 +763,7 @@ describe("automatic reflection entry point", () => {
 
   test("a candidate staged earlier by manual reflection is never promoted automatically", async () => {
     const result = await reflectOnce({ auto_promote: true }, {}, (root) => stage(root, [B]))
-    expect(result.outcome?.promotion).toMatchObject({ status: "held", reason: "the candidate already had lesson changes waiting for review" })
+    expect(result.outcome?.promotion).toMatchObject({ status: "held", reason: "the candidate already had rule changes waiting for review" })
     expect(result.approved).toEqual([])
     expect(result.candidate?.map((lesson) => lesson.text)).toEqual([B.text, "List result columns explicitly."])
   })
@@ -883,7 +883,7 @@ describe("learn CLI", () => {
     await autoPromote(input(dir.path, await stage(dir.path, [A, B])))
     await autoPromote(input(dir.path, await stage(dir.path, [A])))
     const status = await learn(dir.path, ["status"])
-    expect(status.stdout).toMatch(new RegExp(`Last auto-promotion: \\S+ - removed ${B.id}; previous lessons archived as v2`))
+    expect(status.stdout).toMatch(new RegExp(`Last auto-promotion: \\S+ - removed ${B.id}; previous rules archived as v2`))
     expect(JSON.parse((await learn(dir.path, ["status", "--json"])).stdout).last_auto_promotion).toMatchObject({ lessons: [], removed: [B.id] })
   }, 60_000)
 
@@ -895,9 +895,9 @@ describe("learn CLI", () => {
     const status = await learn(dir.path, ["status"])
     expect(status.code).toBe(0)
     expect(status.stdout).toContain("Automatic promotion: off")
-    expect(status.stdout).toMatch(new RegExp(`Last auto-promotion: \\S+ - ${B.id}; previous lessons archived as v1`))
+    expect(status.stdout).toMatch(new RegExp(`Last auto-promotion: \\S+ - ${B.id}; previous rules archived as v1`))
     expect(status.stdout).toContain(`Last held back: `)
-    expect(status.stdout).toContain(`person-approved lesson ${A.id}`)
+    expect(status.stdout).toContain(`person-approved rule ${A.id}`)
     const show = await learn(dir.path, ["show"])
     expect(show.stdout).toContain(`[${B.id}] ${B.text} (auto-promoted)`)
     expect(show.stdout).toContain(`[${A.id}] ${A.text}\n`)
