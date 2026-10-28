@@ -16,7 +16,7 @@
 import { TextAttributes } from "@opentui/core"
 import type { TuiDialogSelectOption, TuiPlugin, TuiPluginApi, TuiPromptRef } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
-import { createSignal, Show } from "solid-js"
+import { createEffect, createRoot, createSignal, Show } from "solid-js"
 import type { ProposalCard } from "@/altimate/rules/events"
 import { RulesSummary } from "@/altimate/rules/summary"
 import { describeAge } from "@/altimate/workspace/attach-snapshot"
@@ -184,9 +184,15 @@ function installCards(api: TuiPluginApi) {
   const current = () => cards().find((card) => card.sessionID === sessionID)
   const remove = (id: string) => setCards((list) => list.filter((card) => card.id !== id))
 
-  const unfocus = () => {
+  // The card's keys (enter, e, n, h, l, …) only while it is focused and no dialog is open: under a dialog they
+  // would take the dialog's own keys (Enter in "Edit the rule" would re-run the card's selected action).
+  const releaseKeys = () => {
     layer?.()
     layer = undefined
+  }
+
+  const unfocus = () => {
+    releaseKeys()
     setFocused(false)
     prompt?.focus()
   }
@@ -209,18 +215,24 @@ function installCards(api: TuiPluginApi) {
   }
 
   const edit = (card: ProposalCard) => {
-    api.ui.dialog.replace(() => (
-      <api.ui.DialogPrompt
-        title="Edit the rule"
-        description={() => <text fg={api.theme.current.textMuted}>One line, at most 140 characters.</text>}
-        value={card.text}
-        onConfirm={(text) => {
-          api.ui.dialog.clear()
-          void reply(card, "edit", text)
-        }}
-        onCancel={() => api.ui.dialog.clear()}
-      />
-    ))
+    releaseKeys()
+    api.ui.dialog.replace(
+      () => (
+        <api.ui.DialogPrompt
+          title="Edit the rule"
+          description={() => <text fg={api.theme.current.textMuted}>One line, at most 140 characters.</text>}
+          value={card.text}
+          onConfirm={(text) => {
+            api.ui.dialog.clear()
+            void reply(card, "edit", text)
+          }}
+          onCancel={() => api.ui.dialog.clear()}
+        />
+      ),
+      () => {
+        if (focused()) bindKeys()
+      },
+    )
   }
 
   const pick = (index: number) => {
@@ -250,6 +262,11 @@ function installCards(api: TuiPluginApi) {
     setSelected(0)
     setFocused(true)
     prompt?.blur()
+    bindKeys()
+  }
+
+  function bindKeys() {
+    if (layer || api.ui.dialog.open) return
     layer = api.keymap.registerLayer({
       priority: 100,
       bindings: [
@@ -265,6 +282,14 @@ function installCards(api: TuiPluginApi) {
       ],
     })
   }
+
+  // Any other dialog opened while the card is focused (the palette, `/rules`) gets its keys back too.
+  createRoot(() =>
+    createEffect(() => {
+      if (api.ui.dialog.open) releaseKeys()
+      else if (focused()) bindKeys()
+    }),
+  )
 
   const offer = (card: ProposalCard) =>
     setCards((list) => (list.some((c) => c.id === card.id) ? list.map((c) => (c.id === card.id ? card : c)) : [...list, card]))
