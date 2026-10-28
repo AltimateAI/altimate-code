@@ -43,7 +43,7 @@ Managed LLM access with dynamic routing across Sonnet 4.6, Opus 4.6, GPT-5.4, GP
 
 For pricing, security, and data handling details, see the [Altimate LLM Gateway guide](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/).
 
-To sign out, run `altimate providers logout altimate-backend` (or `/logout` in the TUI). This removes the saved key from `~/.altimate/altimate.json` and the auth store, so workspace requests stop until you sign in again.
+To sign out, run `altimate providers logout altimate-backend` (or `/logout` in the TUI). This deletes `~/.altimate/altimate.json` (`%USERPROFILE%\.altimate\altimate.json` on Windows), removes the auth-store entry, and removes datamate MCP servers in the global and current project config that carry the saved key. New sessions stop using the key; restart any session that is already running, or run `/logout` inside it. Datamate MCP servers configured in other projects are not removed.
 
 !!! tip "Automatic model selection"
     When Altimate credentials are configured and no model is explicitly chosen, the Altimate LLM Gateway is selected automatically. You can override this by setting `model` in your config or by restricting the `provider` section to specific providers only.

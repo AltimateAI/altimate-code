@@ -153,4 +153,62 @@ describe("providers logout", () => {
       }),
     120_000,
   )
+
+  cliIt.live(
+    "removes datamate MCP entries that carry the signed-out gateway key",
+    ({ home, opencode }) =>
+      Effect.gen(function* () {
+        const altimatePath = path.join(home, ".altimate", "altimate.json")
+        // The CLI runs with cwd=home, so home is the project directory.
+        const projectConfigPath = path.join(home, "altimate-code.json")
+        const globalConfigPath = path.join(home, ".config", "altimate-code", "altimate-code.json")
+        const datamateEntry = (key: string) => ({
+          type: "remote",
+          url: "https://mcp.test",
+          oauth: false,
+          headers: { Authorization: `Bearer ${key}`, "x-datamate-id": "1", "x-tenant": "tenant" },
+          enabled: true,
+        })
+        const unrelated = datamateEntry("someone-elses-key")
+
+        yield* Effect.promise(() => fs.mkdir(path.dirname(altimatePath), { recursive: true }))
+        yield* Effect.promise(() => fs.mkdir(path.dirname(globalConfigPath), { recursive: true }))
+        yield* Effect.promise(() =>
+          fs.writeFile(
+            altimatePath,
+            JSON.stringify({
+              altimateUrl: "https://api.test",
+              altimateInstanceName: "tenant",
+              altimateApiKey: "gateway-test-key",
+            }),
+            { mode: 0o600 },
+          ),
+        )
+        yield* Effect.promise(() =>
+          fs.writeFile(
+            projectConfigPath,
+            JSON.stringify({ mcp: { "datamate-sales": datamateEntry("gateway-test-key"), unrelated } }),
+          ),
+        )
+        yield* Effect.promise(() =>
+          fs.writeFile(
+            globalConfigPath,
+            JSON.stringify({ mcp: { "datamate-ops": datamateEntry("gateway-test-key") } }),
+          ),
+        )
+
+        const logout = yield* opencode.spawn(["providers", "logout", "altimate-backend"], {
+          env: { OPENCODE_AUTH_CONTENT: "" },
+        })
+        opencode.expectExit(logout, 0, "providers logout altimate-backend with datamate MCP entries")
+        expect(logout.stdout).toContain('Removed MCP server "datamate-sales"')
+        expect(logout.stdout).toContain('Removed MCP server "datamate-ops"')
+        expect(logout.stdout).toContain("Logout successful")
+        expect(JSON.parse(yield* Effect.promise(() => fs.readFile(projectConfigPath, "utf8")))).toEqual({
+          mcp: { unrelated },
+        })
+        expect(JSON.parse(yield* Effect.promise(() => fs.readFile(globalConfigPath, "utf8")))).toEqual({ mcp: {} })
+      }),
+    120_000,
+  )
 })

@@ -3,6 +3,7 @@ import path from "path"
 import { rm } from "node:fs/promises"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
+import { findAllConfigPaths, listMcpInConfig, readMcpEntryFromDisk, removeMcpFromConfig } from "../../mcp/config"
 
 const DEFAULT_MCP_URL = "https://mcpserver.getaltimate.com/sse"
 // altimate_change start — default Altimate API URL when user omits it from the TUI credential entry
@@ -147,9 +148,31 @@ export namespace AltimateApi {
     )
   }
 
-  /** Remove the stored gateway credential file (sign out). No-op if absent. */
+  /** Delete ~/.altimate/altimate.json, including any non-credential fields such as `mcpServerUrl`. No-op if absent. */
   export async function clearCredentials(): Promise<void> {
     await rm(credentialsPath(), { force: true })
+  }
+
+  /** Sign out of the gateway: remove MCP entries that carry the saved key, then delete the credential file.
+   *  Standalone `datamate add` writes the key into MCP headers (`buildMcpConfig`); matching the exact key
+   *  leaves user-authored entries alone. Only the global config and `projectDir` are searched. */
+  export async function signOut(projectDir: string): Promise<Array<{ name: string; path: string }>> {
+    const key = await getCredentials().then(
+      (creds) => creds.altimateApiKey,
+      () => undefined,
+    )
+    const removed: Array<{ name: string; path: string }> = []
+    if (key) {
+      for (const configPath of await findAllConfigPaths(projectDir, Global.Path.config)) {
+        for (const name of await listMcpInConfig(configPath)) {
+          const entry = await readMcpEntryFromDisk(name, configPath)
+          if (entry?.type !== "remote" || entry.headers?.Authorization !== `Bearer ${key}`) continue
+          if (await removeMcpFromConfig(name, configPath)) removed.push({ name, path: configPath })
+        }
+      }
+    }
+    await clearCredentials()
+    return removed
   }
 
   const VALID_TENANT_REGEX = /^[a-z_][a-z0-9_-]*$/
