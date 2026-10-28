@@ -77,7 +77,7 @@ describe("starter_action_picked row", () => {
 
   test("falls back to the process context's session", () => {
     const row = starterActionPickedEvent(7, { action: "done" })
-    expect(row.session_id).toBe(Telemetry.getContext().sessionId)
+    expect(row).toEqual(expect.objectContaining({ session_id: Telemetry.getContext().sessionId }))
   })
 })
 
