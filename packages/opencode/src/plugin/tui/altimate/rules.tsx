@@ -5,7 +5,9 @@
 // - The proposed-rule card: renders `rule.proposal.asked` (and `.updated` after an edit) and answers with
 //   `POST /rule-proposal/:id/reply`. Enter sends for review; `a` approves (owner); `e` edits the wording;
 //   `n` is "Not a rule". When the wording did not say rule or memory, the card asks
-//   "Save as: Memory · Team rule · Skip". Escape closes it, which counts as skip.
+//   "Save as: Memory · Team rule · Skip". Escape closes the card without answering: the proposal stays open in
+//   the session server, and the next queued card shows. Open proposals are loaded at startup, so a card asked
+//   before this TUI subscribed still shows.
 // - Review notices: `rule.proposal.reviewed` becomes a toast ("approved", or "rejected" with the reason).
 // - `/rules`: the team rules, your proposals with their status and reasons, Sync now, and learning on/off.
 //
@@ -21,7 +23,10 @@ import { writeProjectLearning } from "@/altimate/learn/project-config"
 
 const id = "altimate:rules"
 
-type Raw = { post(input: { url: string; body?: unknown; headers?: Record<string, string> }): Promise<{ data?: unknown; error?: unknown }> }
+type Raw = {
+  post(input: { url: string; body?: unknown; headers?: Record<string, string> }): Promise<{ data?: unknown; error?: unknown }>
+  get(input: { url: string }): Promise<{ data?: unknown; error?: unknown }>
+}
 type ReplyResult = { ok: boolean; message?: string; error?: string; card?: ProposalCard }
 
 function raw(api: TuiPluginApi): Raw | undefined {
@@ -125,6 +130,8 @@ function CardView(props: { api: TuiPluginApi; card: ProposalCard; onAction: (act
 
 function installCards(api: TuiPluginApi) {
   const queue: ProposalCard[] = []
+  // The card whose dialog (the card, or its edit prompt) is up. Cleared before any programmatic replace or
+  // clear, whose close callback would otherwise advance the queue a second time.
   let showing: string | undefined
 
   const next = () => {
@@ -133,21 +140,31 @@ function installCards(api: TuiPluginApi) {
     if (card) show(card)
   }
 
+  const close = () => {
+    showing = undefined
+    api.ui.dialog.clear()
+  }
+
   const reply = async (card: ProposalCard, action: string, text?: string) => {
     const result = await post<ReplyResult>(api, `/rule-proposal/${card.id}/reply`, { action, ...(text !== undefined ? { text } : {}) })
+      .catch(() => undefined)
+    // Closed with Escape while the request ran: the queue already moved on, so only report the outcome.
+    const current = showing === card.id
     if (!result) return api.ui.toast({ variant: "error", message: "Could not reach the session server.", duration: 6000 })
     if (!result.ok) {
       api.ui.toast({ variant: "error", message: result.error ?? "Not done.", duration: 8000 })
-      if (result.card) show(result.card)
+      if (result.card && current) show(result.card)
       return
     }
-    if (action === "edit" && result.card) return show(result.card)
+    if (action === "edit" && result.card) return current ? show(result.card) : undefined
     api.ui.toast({ variant: "success", message: result.message ?? "Done.", duration: 6000 })
-    api.ui.dialog.clear()
+    if (!current) return
+    close()
     next()
   }
 
   const edit = (card: ProposalCard) => {
+    showing = undefined
     api.ui.dialog.replace(() => (
       <api.ui.DialogPrompt
         title="Edit the rule"
@@ -157,10 +174,11 @@ function installCards(api: TuiPluginApi) {
         onCancel={() => show(card)}
       />
     ))
+    showing = card.id
   }
 
   const show = (card: ProposalCard) => {
-    showing = card.id
+    showing = undefined
     api.ui.dialog.replace(
       () => (
         <CardView
@@ -173,6 +191,7 @@ function installCards(api: TuiPluginApi) {
         if (showing === card.id) next()
       },
     )
+    showing = card.id
     api.ui.dialog.setSize("large")
   }
 
@@ -182,7 +201,25 @@ function installCards(api: TuiPluginApi) {
     else show(card)
   }
 
+  // Wording edited in another client: a queued copy shows the new wording.
+  const updated = (card: ProposalCard) => {
+    const index = queue.findIndex((c) => c.id === card.id)
+    if (index >= 0) queue[index] = card
+  }
+
+  // A card queued behind another dialog shows once that dialog closes.
+  const drain = setInterval(() => {
+    if (!showing && queue.length && !api.ui.dialog.open) next()
+  }, 1_000)
+  drain.unref?.()
+
+  const load = async () => {
+    const result = await raw(api)?.get({ url: "/rule-proposal" }).catch(() => undefined)
+    if (Array.isArray(result?.data)) for (const card of result.data as ProposalCard[]) offer(card)
+  }
+
   on(api)("rule.proposal.asked", (event) => offer(event.properties as ProposalCard))
+  on(api)("rule.proposal.updated", (event) => updated(event.properties as ProposalCard))
   // Each review is shown once per project, whether it arrived as an event or was pulled before this TUI
   // subscribed (the startup sync): remembered by id and status.
   const seenKey = () => `altimate.rules.notices.${root(api)}`
@@ -196,7 +233,10 @@ function installCards(api: TuiPluginApi) {
   on(api)("rule.proposal.reviewed", (event) => notify(event.properties))
   const replay = () => void RulesSummary.summary(root(api), learnConfig(api)).then((s) => [...s.notices].reverse().forEach(notify)).catch(() => {})
   on(api)("altimate.rules.changed", replay)
-  setTimeout(replay, 4_000)
+  setTimeout(() => {
+    replay()
+    void load()
+  }, 4_000)
 }
 
 function reviewToast(api: TuiPluginApi, p: { text: string; status: string; reason?: string; reviewer?: string }) {

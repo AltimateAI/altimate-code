@@ -449,7 +449,8 @@ const SyncCommand = effectCmd({
       const root = await projectRoot()
       const { Config } = await import("@/config/config")
       const { RulesSync } = await import("../../altimate/rules/sync")
-      const report = await RulesSync.run(root, process.cwd(), (await Config.get()).learn)
+      const { Instance } = await import("@/project/instance")
+      const report = await RulesSync.runFresh(root, Instance.directory, (await Config.get()).learn)
       if (args.json) return out(JSON.stringify(report, (key, value) => (key === "actAs" ? undefined : value), 2))
       if (report.context.status !== "ready") return out(`Rules sync skipped: ${report.context.reason}.`)
       for (const sent of report.push?.sent ?? []) out(`Sent "${sent.text}": ${sent.error ?? sent.status}`)
@@ -475,8 +476,12 @@ const BootstrapCommand = effectCmd({
     .option("dry-run", { type: "boolean", default: false, describe: "print scope and redacted signals; send nothing and leave bootstrap state unchanged" })
     .option("max-reflections", { type: "number", default: DEFAULT_MAX_REFLECTIONS, describe: "maximum reflection batches; 0 imports signals only" })
     .option("max-seconds", { type: "number", default: DEFAULT_MAX_SECONDS, describe: "total time budget after confirmation, in seconds" })
-    .epilog("Bootstrap sends redacted excerpts of past sessions to the chosen model. Review the scope before confirming. Lessons are candidates only: learn show, then learn promote. Rerun to finish pending reflections and continue the history cursor."),
+    .epilog("Bootstrap sends redacted excerpts of past sessions to the chosen model. Review the scope before confirming. Lessons are candidates only: learn show, then learn promote; in a project linked to a workspace they go to the workspace owner's review instead. Rerun to finish pending reflections and continue the history cursor."),
   handler: Effect.fn("Cli.learn.bootstrap")(function* (args) {
+    // altimate_change start — workspace rules: the candidate before this run, so only what it stages is sent
+    const staged = yield* run("", async () =>
+      (await import("../../altimate/rules/from-history")).RulesFromHistory.candidateTexts(await projectRoot(), args.name as string))
+    // altimate_change end
     const result = yield* run("", async () => {
       const [{ Config }, { Provider }, { Instance }, { InstanceRef }, { AppRuntime }] = await Promise.all([
         import("@/config/config"), import("@/provider/provider"), import("@/project/instance"),
@@ -515,10 +520,11 @@ const BootstrapCommand = effectCmd({
     if (result?.failures) return yield* fail("Bootstrap reflection failed; signals remain queued. Rerun `learn bootstrap` to continue.")
     // altimate_change start — linked project: the staged lessons go to the workspace owner's review as rules
     if (!args["dry-run"]) yield* run("", async () => {
-      const { Config } = await import("@/config/config")
+      const [{ Config }, { Instance }] = await Promise.all([import("@/config/config"), import("@/project/instance")])
       const { RulesFromHistory } = await import("../../altimate/rules/from-history")
       const sent = await RulesFromHistory.proposeStaged({
-        root: await projectRoot(), directory: process.cwd(), learn: (await Config.get()).learn, name: args.name as string, origin: "bootstrap",
+        root: await projectRoot(), directory: Instance.directory, learn: (await Config.get()).learn, name: args.name as string, origin: "bootstrap",
+        before: staged,
       })
       if (sent.status === "sent") out(sent.message)
     })
@@ -542,8 +548,12 @@ const ImportReviewsCommand = effectCmd({
     .option("yes", { type: "boolean", default: false, describe: "confirm sending the displayed scope; required outside a TTY" })
     .option("dry-run", { type: "boolean", default: false, describe: "fetch and print redacted review comments; send nothing and leave import state unchanged" })
     .option("max-reflections", { type: "number", default: DEFAULT_MAX_REFLECTIONS, describe: "maximum reflection batches; 0 imports signals only" })
-    .epilog("Requires gh installed and authenticated for the repository host. Review import sends redacted review comments to the chosen model after confirmation. Lessons are candidates only: learn show, then learn promote. Rerun to resume a checkpoint or finish pending reflections."),
+    .epilog("Requires gh installed and authenticated for the repository host. Review import sends redacted review comments to the chosen model after confirmation. Lessons are candidates only: learn show, then learn promote; in a project linked to a workspace they go to the workspace owner's review instead. Rerun to resume a checkpoint or finish pending reflections."),
   handler: Effect.fn("Cli.learn.importReviews")(function* (args) {
+    // altimate_change start — workspace rules: the candidate before this run, so only what it stages is sent
+    const staged = yield* run("", async () =>
+      (await import("../../altimate/rules/from-history")).RulesFromHistory.candidateTexts(await projectRoot(), args.name as string))
+    // altimate_change end
     const result = yield* run("", async () => {
       const [{ Config }, { Provider }, { Instance }, { InstanceRef }, { AppRuntime }] = await Promise.all([
         import("@/config/config"), import("@/provider/provider"), import("@/project/instance"),
@@ -584,10 +594,11 @@ const ImportReviewsCommand = effectCmd({
     if (result?.failures) return yield* fail("Review reflection failed; signals remain queued. Rerun `learn import-reviews` to continue.")
     // altimate_change start — linked project: the staged lessons go to the workspace owner's review as rules
     if (!args["dry-run"]) yield* run("", async () => {
-      const { Config } = await import("@/config/config")
+      const [{ Config }, { Instance }] = await Promise.all([import("@/config/config"), import("@/project/instance")])
       const { RulesFromHistory } = await import("../../altimate/rules/from-history")
       const sent = await RulesFromHistory.proposeStaged({
-        root: await projectRoot(), directory: process.cwd(), learn: (await Config.get()).learn, name: args.name as string, origin: "import_reviews",
+        root: await projectRoot(), directory: Instance.directory, learn: (await Config.get()).learn, name: args.name as string, origin: "import_reviews",
+        before: staged,
       })
       if (sent.status === "sent") out(sent.message)
     })

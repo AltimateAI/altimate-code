@@ -38,6 +38,8 @@ interface Pending {
   root: string
   directory: string
   learn: { enabled?: boolean } | undefined
+  /** A reply is being carried out: a second one is refused. */
+  busy?: boolean
 }
 
 // Process-global like `question`'s registry: the server routes and the session loop may load this module
@@ -85,7 +87,11 @@ export async function ask(input: { sessionID: string; root: string; directory: s
   const state = await RulesStore.read(input.root)
   if (input.draft.origin === "session" && input.draft.topics.some((topic) => RulesStore.dismissed(state, topic))) return undefined
   for (const existing of pending.values())
-    if (existing.root === input.root && existing.card.text.toLowerCase() === input.draft.text.toLowerCase()) return existing.card
+    if (existing.root === input.root && existing.card.text.toLowerCase() === input.draft.text.toLowerCase()) {
+      // Shown again: a client that missed it (or closed it) gets it back; one already showing it ignores it.
+      await publish(RuleEvents.Event.Asked, existing.card)
+      return existing.card
+    }
   const card = build(randomUUID(), input.sessionID, input.draft, state)
   pending.set(card.id, { card, root: input.root, directory: input.directory, learn: input.learn })
   await publish(RuleEvents.Event.Asked, card)
@@ -108,9 +114,20 @@ function editProblem(text: string): string | undefined {
   return normalizeText(text).trim() !== text ? "contains hidden or non-normalized characters" : undefined
 }
 
-export async function reply(id: string, input: { action: ReplyAction; text?: string }): Promise<ReplyResult> {
+/** A memory or training name for a rule: a readable prefix and a hash of the whole text, so two rules that
+ * start alike do not overwrite each other. */
+export function slug(text: string): string {
+  const prefix = text.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 40).replace(/^-+|-+$/g, "")
+  const hash = new Bun.CryptoHasher("sha256").update(text).digest("hex").slice(0, 8)
+  return prefix ? `${prefix}-${hash}` : hash
+}
+
+/** Answer card `id`. With `directory`, only a card of that project is answered. The card stays open until the
+ * chosen action succeeds. */
+export async function reply(id: string, input: { action: ReplyAction; text?: string }, directory?: string): Promise<ReplyResult> {
   const entry = pending.get(id)
-  if (!entry) return { ok: false, error: "This proposal is no longer open." }
+  if (!entry || (directory !== undefined && entry.directory !== directory)) return { ok: false, error: "This proposal is no longer open." }
+  if (entry.busy) return { ok: false, error: "This proposal is already being answered.", card: entry.card }
   const { card } = entry
   if (!card.actions.includes(input.action)) return { ok: false, error: `"${input.action}" is not available for this proposal.`, card }
 
@@ -126,28 +143,46 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
     return { ok: true, message: "Wording updated.", card: next, closed: false }
   }
 
-  pending.delete(id)
+  entry.busy = true
   let message: string
-  if (input.action === "dismiss") {
+  try {
+    message = await act(entry, input.action)
+  } catch (error) {
+    log.warn("rule proposal reply failed", { action: input.action, error })
+    return { ok: false, error: `Not done: ${error instanceof Error ? error.message : String(error)}`, card }
+  } finally {
+    entry.busy = false
+  }
+  pending.delete(id)
+  await publish(RuleEvents.Event.Replied, { id, sessionID: card.sessionID, action: input.action, message })
+  await publish(RuleEvents.Event.Changed, { directory: entry.directory })
+  return { ok: true, message, closed: true }
+}
+
+async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promise<string> {
+  const { card } = entry
+  let message: string
+  if (action === "dismiss") {
     const until = new Date(Date.now() + RulesStore.DISMISS_MS).toISOString()
     await RulesStore.update(entry.root, (state) => {
       for (const topic of card.topics) state.dismissed.push({ topic, until })
     })
-    message = "Not a rule: it won't be proposed again for 30 days."
-  } else if (input.action === "save_memory") {
+    message = card.topics.length ? "Not a rule: it won't be proposed again for 30 days." : "Dismissed: nothing was saved."
+  } else if (action === "save_memory") {
     const [{ MemoryStore }, { RuleClassify }] = await Promise.all([import("../../memory/store"), import("./classify")])
     const scope = RuleClassify.memoryScope(card.text)
-    const id = `notes/${card.text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "note"}`
+    const id = `notes/${slug(card.text)}`
     const now = new Date().toISOString()
     await MemoryStore.write({ id, scope, tags: ["remembered"], created: now, updated: now, content: card.text })
     message = scope === "global" ? "Saved to your memory (all your projects)." : "Saved to this project's memory."
-  } else if (input.action === "save_local") {
+  } else if (action === "save_local") {
     const { TrainingStore } = await import("../training")
-    const name = card.text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 48) || "rule"
-    await TrainingStore.save({ kind: "rule", name, scope: "project", content: card.text, source: "proposed rule" })
+    await TrainingStore.save({ kind: "rule", name: slug(card.text), scope: "project", content: card.text, source: "proposed rule" })
     message = "Saved as a rule for this project."
   } else {
-    const approve = input.action === "approve" ? (card.weakens_verification ? "approve_anyway" : "approve") : undefined
+    const approve = action === "approve" ? (card.weakens_verification ? "approve_anyway" : "approve") : undefined
+    // The workspace decides whether the person's words travel with a proposal.
+    const quotes = (await RulesStore.read(entry.root)).settings?.include_quotes !== false
     await RulesSync.enqueue(entry.root, {
       change: card.change,
       text: card.text,
@@ -156,11 +191,11 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
       origin: card.origin,
       ...(card.replaces ? { replaces: card.replaces.public_id, replaces_version: card.replaces.version } : {}),
       evidence_sessions: card.evidence.sessions,
-      corrections: card.evidence.correction
+      corrections: card.evidence.correction && quotes
         ? [{ excerpt: card.evidence.correction.excerpt, corrected_at: card.evidence.correction.at, session_ref: hashRef(card.sessionID) }]
         : [],
     }, approve)
-    const report = await RulesSync.runShared(entry.root, entry.directory, entry.learn).catch(() => undefined)
+    const report = await RulesSync.runFresh(entry.root, entry.directory, entry.learn).catch(() => undefined)
     const sent = report?.push?.sent.find((s) => s.text === card.text)
     const owner = card.workspace?.owner_name ?? "the workspace owner"
     if (!sent) message = `Queued: it will be sent to ${owner}'s review queue when the workspace is reachable.`
@@ -169,9 +204,7 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
     else if (sent.approved) message = `Approved: now a team rule in ${card.workspace?.name ?? "the workspace"}.`
     else message = `Sent to ${owner}'s review queue in ${card.workspace?.name ?? "the workspace"}.`
   }
-  await publish(RuleEvents.Event.Replied, { id, sessionID: card.sessionID, action: input.action, message })
-  await publish(RuleEvents.Event.Changed, { directory: entry.directory })
-  return { ok: true, message, closed: true }
+  return message
 }
 
 /** A session reference the server can count without learning the session id. */

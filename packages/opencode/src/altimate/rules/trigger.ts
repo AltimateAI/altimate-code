@@ -81,9 +81,11 @@ async function draft(input: {
   signals: readonly Signal[]
   state: RulesStore.State
   target?: string
+  /** Only an ADD is usable (the recurrence path): other deltas are skipped. */
+  addOnly?: boolean
   /** Why no proposal came out, for the check record. */
   note?: (outcome: string) => void
-}): Promise<{ text: string; change: Draft["change"]; replaces?: Draft["replaces"]; reason: string } | undefined> {
+}): Promise<{ text: string; change: Draft["change"]; replaces?: Draft["replaces"]; reason: string } | "covered" | undefined> {
   const source = await input.deps.source(input.sessionID)
   const generate = await input.deps.generate(source)
   const bullets = teamBullets(input.state)
@@ -97,9 +99,10 @@ async function draft(input: {
   const rules = new Map(input.state.rules.map((rule) => [RulesStore.lessonId(rule.rule_key), rule]))
   for (const delta of deltas) {
     const target = delta.id ? rules.get(delta.id) : undefined
+    if (input.addOnly && delta.op !== "ADD") continue
     if (delta.op === "HELPFUL" && target) {
       input.note?.(`the team rule already covers it (${delta.reason})`)
-      return undefined
+      return "covered"
     }
     if (delta.op === "EDIT" && target && delta.text && !lint(delta.text))
       return { text: delta.text.trim(), change: "edit", replaces: { public_id: target.public_id, text: target.text, version: target.version }, reason: delta.reason }
@@ -127,6 +130,7 @@ export async function afterTurn(input: {
   if (running.has(input.sessionID)) return
   running.add(input.sessionID)
   let outcome = "no new corrections"
+  let checked: string[] = []
   const note = (text: string) => { outcome = text }
   try {
     const state = await RulesStore.read(input.root)
@@ -137,7 +141,8 @@ export async function afterTurn(input: {
     if (!fresh.length) return
     // One card at a time per session: an explicit "remember" may already have shown one for this turn.
     if (RuleProposal.list().some((card) => card.sessionID === input.sessionID)) return
-    await RulesStore.update(input.root, (s) => { s.processed_signals.push(...fresh.map((signal) => signal.id)) })
+    // Marked processed once the check completes; a failed check is retried after the next turn.
+    checked = fresh.map((signal) => signal.id)
     const newest = fresh[fresh.length - 1]
     const correction = { excerpt: excerpt(newest.text), at: newest.correctedAt ?? newest.at }
 
@@ -151,13 +156,15 @@ export async function afterTurn(input: {
     const said = words(fresh.map((signal) => signal.text).join(" "))
     const hit = state.rules
       .map((rule) => ({ id: RulesStore.lessonId(rule.rule_key), overlap: [...words(rule.text)].filter((w) => said.has(w)).length }))
-      .filter((rule) => shownIds.has(rule.id) && rule.overlap >= EDIT_OVERLAP)
+      .filter((rule) => shownIds.has(rule.id) && rule.overlap >= EDIT_OVERLAP && !RulesStore.dismissed(state, rule.id))
       .sort((a, b) => b.overlap - a.overlap)[0]
     log.info("rule edit candidate", { session: input.sessionID, hit: hit?.id, overlap: hit?.overlap, shown: shownIds.size })
     if (hit) {
       const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, signals: fresh, state, target: hit.id, note })
+      // The shown rule already says it: no card, and no second drafting call for recurrence.
+      if (drafted === "covered") return
       if (drafted) {
-        await RuleProposal.ask({
+        const card = await RuleProposal.ask({
           sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn,
           draft: {
             text: drafted.text,
@@ -170,7 +177,7 @@ export async function afterTurn(input: {
             origin: "session", evidence: { sessions: 1, correction }, topics: [hit.id],
           },
         })
-        outcome = `showed a ${drafted.change} card for a shown team rule`
+        outcome = card ? `showed a ${drafted.change} card for a shown team rule` : "the proposal for this team rule was dismissed"
         return
       }
     }
@@ -186,9 +193,9 @@ export async function afterTurn(input: {
     }
     const all = await readSignals(input.root, Playbook.DEFAULT_NAME)
     const backing = all.filter((signal) => topic.signal_ids.includes(signal.id))
-    const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, signals: backing, state, note })
-    if (!drafted || drafted.change !== "add") return
-    await RuleProposal.ask({
+    const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, signals: backing, state, addOnly: true, note })
+    if (!drafted || drafted === "covered" || drafted.change !== "add") return
+    const card = await RuleProposal.ask({
       sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn,
       draft: {
         text: drafted.text,
@@ -199,14 +206,21 @@ export async function afterTurn(input: {
         topics: [topic.identifier],
       },
     })
-    outcome = `showed an add card for topic ${topic.identifier}`
+    outcome = card ? `showed an add card for topic ${topic.identifier}` : `topic ${topic.identifier} was dismissed`
   } catch (error) {
+    checked = []
     outcome = `failed: ${error instanceof Error ? error.message : String(error)}`
     log.warn("rule proposal check failed", { error: outcome })
   } finally {
     running.delete(input.sessionID)
-    if (outcome !== "no new corrections")
-      await RulesStore.update(input.root, (s) => { s.last_check = { at: new Date().toISOString(), session: input.sessionID, outcome } }).catch(() => {})
+    if (outcome !== "no new corrections" || checked.length) {
+      // Keep only ids of signals still on disk, so the list cannot grow past them or forget a live one.
+      const live = checked.length ? new Set((await readSignals(input.root, Playbook.DEFAULT_NAME).catch(() => [] as Signal[])).map((signal) => signal.id)) : undefined
+      await RulesStore.update(input.root, (s) => {
+        s.last_check = { at: new Date().toISOString(), session: input.sessionID, outcome }
+        if (live) s.processed_signals = [...s.processed_signals.filter((id) => live.has(id)), ...checked]
+      }).catch(() => {})
+    }
   }
 }
 

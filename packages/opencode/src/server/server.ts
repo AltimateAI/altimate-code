@@ -1279,7 +1279,11 @@ export namespace Server {
         if (text !== undefined && typeof text !== "string") return c.json({ ok: false, error: "text must be a string." }, 400)
         try {
           const { RuleProposal } = await import("../altimate/rules/proposal")
-          const result = await RuleProposal.reply(c.req.param("id"), { action: action as (typeof actions)[number], ...(text !== undefined ? { text } : {}) })
+          const result = await RuleProposal.reply(
+            c.req.param("id"),
+            { action: action as (typeof actions)[number], ...(text !== undefined ? { text } : {}) },
+            Instance.directory,
+          )
           return c.json(result, result.ok ? 200 : 409)
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)

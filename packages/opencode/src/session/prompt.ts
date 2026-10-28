@@ -769,9 +769,11 @@ export namespace SessionPrompt {
     // create state, or even schedule async learning work on that default-off path.
     const learnRoot = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
     // Workspace rules: a pull at session start, bounded, so the first turn delivers newly approved rules.
-    await import("../altimate/rules/sync")
-      .then((m) => m.sessionStart(learnRoot, Instance.directory, altCfg.learn))
-      .catch((error) => log.warn("rules session sync failed", { error }))
+    // Only a project with rules state awaits anything; every other prompt stays on the synchronous path.
+    if (existsSync(path.join(learnRoot, ".altimate-code", "learn", "team", "rules.json")))
+      await import("../altimate/rules/sync")
+        .then((m) => m.sessionStart(learnRoot, Instance.directory, altCfg.learn))
+        .catch((error) => log.warn("rules session sync failed", { error }))
     const lessonState = existsSync(path.join(learnRoot, ".altimate-code", "learn"))
       ? new LessonDelivery(learnRoot, altCfg.learn, Instance.directory)
       : undefined

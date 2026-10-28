@@ -272,7 +272,12 @@ async function subscribeWhenReady<T>(subscribe: () => T): Promise<T> {
  * Starts capture for one instance when enabled. Called once from instance bootstrap inside the instance
  * context. Never throws.
  */
-export async function startCapture(ctx: { directory: string; worktree: string }, options: { force?: boolean } = {}): Promise<void> {
+// altimate_change start — returns a stop function once capture runs (workspace rules stop it when learning turns off)
+export async function startCapture(
+  ctx: { directory: string; worktree: string },
+  options: { force?: boolean } = {},
+): Promise<(() => Promise<void>) | undefined> {
+  // altimate_change end
   try {
     const root = ctx.worktree !== "/" ? ctx.worktree : ctx.directory
     const { Config } = await import("@/config/config")
@@ -297,14 +302,21 @@ export async function startCapture(ctx: { directory: string; worktree: string },
     })
     active.add(capture)
     const subscriptions: Array<() => void> = []
-    const unregister = registerDisposer(async (directory) => {
-      if (directory !== ctx.directory) return
+    // altimate_change start — one stop path for disposal and for workspace rules
+    let stopped = false
+    const stopCapture = async () => {
+      if (stopped) return
+      stopped = true
       for (const stop of subscriptions) stop()
       await capture.flush()
       await flushWrites()
       active.delete(capture)
       unregister()
+    }
+    const unregister = registerDisposer(async (directory) => {
+      if (directory === ctx.directory) await stopCapture()
     })
+    // altimate_change end
     subscriptions.push(
       await subscribeWhenReady(() => Bus.subscribe(MessageV2.Event.Updated, (evt) => capture.onMessage(evt.properties.info))),
     )
@@ -314,7 +326,9 @@ export async function startCapture(ctx: { directory: string; worktree: string },
       ),
     )
     log.info("learn capture started", { root })
+    return stopCapture
   } catch (e) {
     log.warn("learn capture not started", { error: e instanceof Error ? e.message : String(e) })
+    return undefined
   }
 }

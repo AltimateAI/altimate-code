@@ -13,10 +13,11 @@
 // Timing: a pull at session start (bounded wait), then every `REFRESH_MS` in the background, plus
 // "Sync now". Never throws to an automatic caller: failures are recorded and reported.
 import { randomUUID } from "node:crypto"
+import fs from "node:fs/promises"
 import { Log } from "@/util/log"
 import { learnEnabled } from "../learn/config"
 import type { ActAs } from "../workspace/api-client"
-import { RulesApi, RulesApiError, type ProposalItem } from "./api"
+import { RulesApi, RulesApiError, type ProposalItem, type ProposalResult } from "./api"
 import { RulesStore, type Scope, type State } from "./store"
 
 const log = Log.create({ service: "rules.sync" })
@@ -73,10 +74,19 @@ export interface PullResult {
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
+/** State pulled for another account, workspace or remote is dropped, outbox included: it never reaches this scope. */
+export async function adopt(root: string, ctx: Ready): Promise<{ state: State; same: boolean }> {
+  const state = await RulesStore.read(root)
+  const same = RulesStore.sameScope(state.scope, ctx.scope)
+  if (state.scope && !same) {
+    await RulesStore.reset(root)
+    return { state: await RulesStore.read(root), same }
+  }
+  return { state, same }
+}
+
 export async function pull(root: string, ctx: Ready): Promise<PullResult> {
-  const before = await RulesStore.read(root)
-  const same = RulesStore.sameScope(before.scope, ctx.scope)
-  if (before.scope && !same) await RulesStore.reset(root)
+  const { state: before, same } = await adopt(root, ctx)
   try {
     const response = await RulesApi.sync(ctx.actAs, ctx.scope.datamateId, {
       repo_remote: ctx.scope.repoRemote,
@@ -129,31 +139,56 @@ export interface PushResult {
   error?: string
 }
 
-/** Send the outbox. An item is dropped only once the server answered it; a transient failure keeps it. */
+type OutboxEntry = State["outbox"][number]
+type Outcome = { entry: OutboxEntry; result?: ProposalResult; error?: RulesApiError }
+
+/** Send `entries`. A batch the server refused outright is retried one item at a time, so one bad item
+ * cannot hold back the rest. */
+async function send(ctx: Ready, entries: OutboxEntry[]): Promise<Outcome[]> {
+  try {
+    const results = await RulesApi.propose(ctx.actAs, ctx.scope.datamateId, {
+      repo_remote: ctx.scope.repoRemote,
+      items: entries.map((entry) => entry.item as ProposalItem),
+    })
+    const byIndex = new Map(results.map((result) => [result.index, result]))
+    return entries.map((entry, index) => ({ entry, result: byIndex.get(index) }))
+  } catch (error) {
+    const failure = error instanceof RulesApiError ? error : RulesApi.classify(error)
+    if (failure.kind === "rejected" && entries.length > 1) {
+      const outcomes: Outcome[] = []
+      for (const entry of entries) outcomes.push(...(await send(ctx, [entry])))
+      return outcomes
+    }
+    return entries.map((entry) => ({ entry, error: failure }))
+  }
+}
+
+/**
+ * Send the outbox. An item leaves it once the server answered for it, or refused it (`rejected`, reported
+ * as an error); a transient failure, or no answer for that item, keeps it queued.
+ */
 export async function push(root: string, ctx: Ready): Promise<PushResult> {
   const state = await RulesStore.read(root)
   const batch = state.outbox.slice(0, MAX_PROPOSALS)
   if (!batch.length) return { sent: [], queued: 0 }
-  let results
-  try {
-    results = await RulesApi.propose(ctx.actAs, ctx.scope.datamateId, {
-      repo_remote: ctx.scope.repoRemote,
-      items: batch.map((entry) => entry.item as ProposalItem),
-    })
-  } catch (error) {
-    await RulesStore.update(root, (s) => {
-      for (const entry of s.outbox) if (batch.some((b) => b.id === entry.id)) {
-        entry.attempts += 1
-        entry.last_error = errorText(error)
-      }
-    })
-    return { sent: [], queued: state.outbox.length, error: errorText(error) }
-  }
+  const outcomes = await send(ctx, batch)
   const sent: PushResult["sent"] = []
-  const approvals: { entry: (typeof batch)[number]; publicId: string; version: number }[] = []
-  for (const result of results) {
-    const entry = batch[result.index]
-    if (!entry) continue
+  const approvals: { entry: OutboxEntry; publicId: string; version: number }[] = []
+  const done = new Set<string>()
+  const failed = new Map<string, string>()
+  for (const { entry, result, error } of outcomes) {
+    if (error) {
+      if (error.kind === "rejected") {
+        done.add(entry.id)
+        sent.push({ text: entry.item.text, status: "rejected", error: error.message })
+      } else failed.set(entry.id, error.message)
+      continue
+    }
+    if (!result) {
+      failed.set(entry.id, "no result from the server")
+      continue
+    }
+    done.add(entry.id)
     const ok = result.status === "pending" || result.status === "exists" || result.duplicate
     sent.push({
       text: entry.item.text,
@@ -178,8 +213,14 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
     }
   }
   const now = new Date().toISOString()
-  await RulesStore.update(root, (s) => {
-    s.outbox = s.outbox.filter((entry) => !batch.some((b) => b.id === entry.id))
+  const after = await RulesStore.update(root, (s) => {
+    s.outbox = s.outbox.filter((entry) => !done.has(entry.id))
+    for (const entry of s.outbox) {
+      const error = failed.get(entry.id)
+      if (error === undefined) continue
+      entry.attempts += 1
+      entry.last_error = error
+    }
     for (const row of sent) {
       if (!row.public_id || row.status === "exists") continue
       const existing = s.sent.find((x) => x.public_id === row.public_id)
@@ -189,7 +230,8 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
       if (row.status === "pending") s.pending_count += 1
     }
   })
-  return { sent, queued: Math.max(0, state.outbox.length - batch.length) }
+  const error = failed.size ? [...failed.values()][0] : undefined
+  return { sent, queued: after.outbox.length, ...(error ? { error } : {}) }
 }
 
 /** Queue a proposal; it is sent by the next push. */
@@ -209,40 +251,41 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
   const reported = new Set(state.usage_sessions)
   const counts = new Map<string, { applied: number; corrected_again: number }>()
   const sessions: string[] = []
+  // A rule counts at most `MAX_USAGE_DELTA` sessions per report: later sessions wait for the next one.
   for (const snapshot of snapshots) {
     if (reported.has(snapshot.session)) continue
-    const shown = new Set(snapshot.shown.filter((entry) => entry.name === RulesStore.TEAM_STORE).map((entry) => entry.id))
-    if (!shown.size) continue
+    const shown = [...new Set(snapshot.shown.filter((entry) => entry.name === RulesStore.TEAM_STORE).map((entry) => entry.id))]
+      .flatMap((id) => byLesson.get(id)?.public_id ?? [])
+    if (!shown.length) continue
+    if (shown.some((publicId) => (counts.get(publicId)?.applied ?? 0) >= MAX_USAGE_DELTA)) break
     sessions.push(snapshot.session)
-    for (const id of shown) {
-      const rule = byLesson.get(id)
-      if (!rule) continue
-      const row = counts.get(rule.public_id) ?? { applied: 0, corrected_again: 0 }
+    for (const publicId of shown) {
+      const row = counts.get(publicId) ?? { applied: 0, corrected_again: 0 }
       row.applied += 1
-      counts.set(rule.public_id, row)
+      counts.set(publicId, row)
     }
   }
+  // `recurred` is a window over recent snapshots and can fall as old ones age out. The reported baseline
+  // follows it down, so a later rise is reported, and only what was sent is added to it.
   const corrected: Record<string, number> = {}
   const recurrence = await analyzeRecurrence(root).catch(() => undefined)
   for (const row of recurrence?.lessons ?? []) {
     if (row.name !== RulesStore.TEAM_STORE) continue
     const rule = byLesson.get(row.id)
     if (!rule) continue
-    corrected[rule.public_id] = row.recurred
-    const delta = row.recurred - (state.corrected_reported[rule.public_id] ?? 0)
+    const baseline = Math.min(state.corrected_reported[rule.public_id] ?? 0, row.recurred)
+    const delta = Math.min(row.recurred - baseline, MAX_USAGE_DELTA)
+    corrected[rule.public_id] = baseline + Math.max(0, delta)
     if (delta <= 0) continue
     const entry = counts.get(rule.public_id) ?? { applied: 0, corrected_again: 0 }
     entry.corrected_again += delta
     counts.set(rule.public_id, entry)
   }
-  if (!counts.size) return { items: 0 }
-  const items = [...counts].map(([public_id, c]) => ({
-    public_id,
-    applied: Math.min(c.applied, MAX_USAGE_DELTA),
-    helpful: 0,
-    harmful: 0,
-    corrected_again: Math.min(c.corrected_again, MAX_USAGE_DELTA),
-  }))
+  if (!counts.size) {
+    if (Object.keys(corrected).length) await RulesStore.update(root, (s) => { s.corrected_reported = { ...s.corrected_reported, ...corrected } })
+    return { items: 0 }
+  }
+  const items = [...counts].map(([public_id, c]) => ({ public_id, applied: c.applied, helpful: 0, harmful: 0, corrected_again: c.corrected_again }))
   try {
     await RulesApi.usage(ctx.actAs, ctx.scope.datamateId, { batch_id: randomUUID(), items })
   } catch (error) {
@@ -264,42 +307,65 @@ export interface RunReport {
 
 /** Push, pull, then report usage: "Sync now", `learn sync`, and the background refresh. */
 export async function run(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
+  const key = await canonicalRoot(root)
   const ctx = await context(directory, learn)
   if (ctx.status !== "ready") {
     if (ctx.status === "skipped" && ctx.unlinked) {
       const state = await RulesStore.read(root)
       if (state.scope) await RulesStore.reset(root)
     }
+    failedAt.set(key, Date.now())
     return { context: ctx }
   }
+  await adopt(root, ctx)
   const pushed = await push(root, ctx)
   const pulled = await pull(root, ctx)
+  if (pulled.ok) failedAt.delete(key)
+  else failedAt.set(key, Date.now())
   const usage = pulled.ok ? await reportUsage(root, ctx).catch((error) => ({ items: 0, error: errorText(error) })) : undefined
   return { context: ctx, push: pushed, pull: pulled, ...(usage ? { usage } : {}) }
 }
 
+// Keyed by the real path: the service and the session loop may name one project through different paths.
 const inflight = new Map<string, Promise<RunReport>>()
+/** When the last run for a project failed or was skipped; a session start does not wait on it again. */
+const failedAt = new Map<string, number>()
+
+const canonicalRoot = (root: string) => fs.realpath(root).catch(() => root)
 
 /** One run per project at a time; concurrent callers share it. */
-export function runShared(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
-  const existing = inflight.get(root)
+export async function runShared(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
+  const key = await canonicalRoot(root)
+  const existing = inflight.get(key)
   if (existing) return existing
-  const started = run(root, directory, learn).finally(() => inflight.delete(root))
-  inflight.set(root, started)
+  const started = run(root, directory, learn).finally(() => inflight.delete(key))
+  inflight.set(key, started)
   return started
 }
 
-/** A pull is due when none succeeded for this project within `REFRESH_MS`. */
+/** A run that starts after anything already queued: waits out an in-flight run (which may have pushed
+ * already) and starts a new one. */
+export async function runFresh(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
+  await inflight.get(await canonicalRoot(root))?.catch(() => undefined)
+  return runShared(root, directory, learn)
+}
+
+/** A pull is due when none succeeded within `REFRESH_MS`, and no attempt failed within it. */
 export async function due(root: string): Promise<boolean> {
+  const failed = failedAt.get(await canonicalRoot(root))
+  if (failed !== undefined && Date.now() - failed < REFRESH_MS) return false
   const state = await RulesStore.read(root)
   const at = state.pulled_at ? Date.parse(state.pulled_at) : 0
   return !Number.isFinite(at) || Date.now() - at >= REFRESH_MS
 }
 
-/** Session start: refresh when due, waiting at most `waitMs` so the first turn sees fresh rules. */
+/** Session start: wait (at most `waitMs`) for a run in flight, or start one when due, so the first turn sees
+ * fresh rules. */
 export async function sessionStart(root: string, directory: string, learn: LearnConfig, waitMs = SESSION_WAIT_MS): Promise<void> {
-  if (!rulesEnabled(learn) || !(await due(root))) return
-  const running = runShared(root, directory, learn).catch((error) => log.warn("rules session sync failed", { error: errorText(error) }))
+  if (!rulesEnabled(learn)) return
+  const existing = inflight.get(await canonicalRoot(root))
+  if (!existing && !(await due(root))) return
+  const running = (existing ?? runShared(root, directory, learn)).catch((error) => log.warn("rules session sync failed", { error: errorText(error) }))
   await Promise.race([running, new Promise((resolve) => setTimeout(resolve, waitMs).unref?.())])
 }
 

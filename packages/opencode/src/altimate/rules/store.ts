@@ -11,9 +11,11 @@
 //   proposals and review notices, dismissed topics, and what usage has been reported.
 //
 // Writes take the learn lock (delivery reads the same directory) and are atomic.
+import { constants } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import z from "zod"
+import * as SafeFS from "../learn/safe-fs"
 import { canonical, type Lesson } from "../learn/lesson"
 import { withLearnLock } from "../learn/lock"
 import * as Store from "../learn/store"
@@ -24,6 +26,8 @@ export const TEAM_STORE = "team"
 const LOCK = { timeoutMs: 5_000 }
 const MAX_NOTICES = 50
 const MAX_SENT = 200
+/** Safety cap for the session and signal id lists; `processed_signals` is also pruned to live signals. */
+const MAX_TRACKED = 5000
 /** "Not a rule" keeps a topic from being proposed again in this repository for this long. */
 export const DISMISS_MS = 30 * 24 * 60 * 60_000
 
@@ -118,14 +122,26 @@ export function dir(root: string) {
 }
 const stateFile = (root: string) => path.join(dir(root), "rules.json")
 
-export async function read(root: string): Promise<State> {
-  const raw = await fs.readFile(stateFile(root), "utf8").catch(() => undefined)
+/** The state file's text, or undefined when there is none. Other read errors propagate. */
+async function readRaw(root: string): Promise<string | undefined> {
+  return fs.readFile(stateFile(root), "utf8").catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return undefined
+    throw error
+  })
+}
+
+function parse(raw: string | undefined): State | undefined {
   if (!raw) return structuredClone(EMPTY)
   try {
     return State.parse(JSON.parse(raw))
   } catch {
-    return structuredClone(EMPTY)
+    return undefined
   }
+}
+
+/** The client state. A file this version cannot parse reads as empty; `update` sets it aside before writing. */
+export async function read(root: string): Promise<State> {
+  return parse(await readRaw(root)) ?? structuredClone(EMPTY)
 }
 
 /** The lesson id a team rule is delivered and attributed under. */
@@ -148,23 +164,42 @@ export function toLesson(rule: RuleOut): Lesson {
   }
 }
 
+const IGNORE = "*\n"
+
+/** Under the learn lock. The parent learn ignore shares each store's `approved.json`; this one keeps the team
+ * mirror and the client state (per person and per account) out of Git, whatever an older file said. */
 async function ensureDir(root: string) {
-  await fs.mkdir(dir(root), { recursive: true })
+  await SafeFS.mkdir(root, dir(root))
   const ignore = path.join(dir(root), ".gitignore")
-  // The mirror and the client state are per person and per account: never commit them.
-  await fs.writeFile(ignore, "*\n", { flag: "wx" }).catch(() => {})
+  const current = await SafeFS.open(root, ignore, constants.O_RDONLY)
+    .then(async (handle) => { try { return await handle.readFile("utf8") } finally { await handle.close() } })
+    .catch(() => undefined)
+  if (current !== IGNORE) await Store.writeAtomic(root, ignore, IGNORE)
+}
+
+/** Keep every pending proposal; cap only the ones the owner already settled. */
+function capSent(sent: Sent[]): Sent[] {
+  const settled = sent.filter((s) => s.status !== "pending")
+  const drop = new Set(settled.slice(0, Math.max(0, settled.length - MAX_SENT)))
+  return sent.filter((s) => !drop.has(s))
 }
 
 /** Read-modify-write under the learn lock. `change` may return a new state or mutate the one given. */
 export async function update(root: string, change: (state: State) => State | void): Promise<State> {
-  await ensureDir(root)
   return withLearnLock(root, async () => {
-    const current = await read(root)
+    await ensureDir(root)
+    const raw = await readRaw(root)
+    let current = parse(raw)
+    if (!current) {
+      // Written by another version or damaged: keep it for inspection rather than overwrite it.
+      await Store.writeAtomic(root, `${stateFile(root)}.unreadable-${Date.now()}`, raw!, 0o600)
+      current = structuredClone(EMPTY)
+    }
     const next = change(current) ?? current
     next.notices = next.notices.slice(-MAX_NOTICES)
-    next.sent = next.sent.slice(-MAX_SENT)
-    next.usage_sessions = next.usage_sessions.slice(-1000)
-    next.processed_signals = next.processed_signals.slice(-1000)
+    next.sent = capSent(next.sent)
+    next.usage_sessions = next.usage_sessions.slice(-MAX_TRACKED)
+    next.processed_signals = next.processed_signals.slice(-MAX_TRACKED)
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
     await Store.writeAtomic(root, stateFile(root), JSON.stringify(next, null, 2) + "\n")
