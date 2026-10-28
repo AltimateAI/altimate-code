@@ -407,7 +407,7 @@ export function describeToolError(raw: string) {
  * Interruptions the session did not request still produce a fingerprint.
  */
 export function isRequestedToolInterrupt(
-  state: { status: string; metadata?: Record<string, unknown> },
+  state: { status: string; error?: string; metadata?: Record<string, unknown> },
   sessionAborted: boolean,
 ): boolean {
   return sessionAborted && state.status === "error" && state.metadata?.interrupted === true
