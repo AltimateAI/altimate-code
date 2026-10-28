@@ -10,6 +10,7 @@ import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { cmd } from "./cmd"
 import { bootstrap } from "../bootstrap"
 import type { Runner, ToolResult } from "../../altimate/tool-cli/runner"
+import { resolveWorkspaceTools, workspaceContextSection } from "../../altimate/tool-cli/workspace-tools"
 
 /** Reads all of stdin; `readFileSync(0)` works for pipes and for here-docs, which Bun exposes as files. */
 function readStdin(): string {
@@ -72,10 +73,11 @@ const connectionsOption = {
   defaultDescription: "$ALTIMATE_TOOL_CONNECTIONS",
 } as const
 
+// No default: unset means on when the project is linked to a workspace; --no-workspace-tools turns them off.
 const workspaceToolsOption = {
-  describe: "also expose the linked workspace tools (workspace_context, workspace_skill, workspace_execute)",
+  describe:
+    "expose the linked workspace tools (workspace_context, workspace_skill, workspace_execute); on by default when the project is linked, --no-workspace-tools disables",
   type: "boolean",
-  default: false,
 } as const
 
 function firstLine(text: string, width: number): string {
@@ -92,7 +94,8 @@ const ToolListCommand = cmd({
       .option("connections", connectionsOption)
       .option("workspace-tools", workspaceToolsOption),
   handler: async (args) => {
-    const tools = await withRunner(process.cwd(), args.connections, args["workspace-tools"], (runner) => runner.list())
+    const workspaceTools = await resolveWorkspaceTools(args["workspace-tools"], process.cwd())
+    const tools = await withRunner(process.cwd(), args.connections, workspaceTools, (runner) => runner.list())
     if (args.json) {
       console.log(JSON.stringify(tools, null, 2))
       return
@@ -108,15 +111,19 @@ const ToolContextCommand = cmd({
   builder: (yargs: Argv) =>
     yargs
       .option("json", { describe: "print {instructions, connections} as JSON", type: "boolean", default: false })
-      .option("connections", connectionsOption),
+      .option("connections", connectionsOption)
+      .option("workspace-tools", workspaceToolsOption),
   handler: async (args) => {
+    const workspaceTools = await resolveWorkspaceTools(args["workspace-tools"], process.cwd())
     const { instructions, connections } = await bootstrap(process.cwd(), async () => {
       const Registry = await import("../../altimate/native/connections/registry")
       try {
         if (args.connections) await Registry.loadFile(args.connections)
         const { serverInstructions } = await import("../../altimate/mcp-server/server")
         const connections = Registry.list().warehouses.map(({ name, type }) => ({ name, type }))
-        return { instructions: await serverInstructions(), connections }
+        const base = await serverInstructions()
+        const workspace = workspaceTools ? await workspaceContextSection(process.cwd()) : undefined
+        return { instructions: workspace ? `${base}\n\n${workspace}` : base, connections }
       } finally {
         await Registry.closeAll()
       }
@@ -135,7 +142,8 @@ const ToolSchemaCommand = cmd({
       .option("connections", connectionsOption)
       .option("workspace-tools", workspaceToolsOption),
   handler: async (args) => {
-    const tools = await withRunner(process.cwd(), args.connections, args["workspace-tools"], (runner) => runner.list())
+    const workspaceTools = await resolveWorkspaceTools(args["workspace-tools"], process.cwd())
+    const tools = await withRunner(process.cwd(), args.connections, workspaceTools, (runner) => runner.list())
     const tool = tools.find((candidate) => candidate.id === args.name)
     if (!tool) {
       console.error(`Unknown tool: ${args.name}. Run \`tool list\` for the available tools.`)
@@ -173,6 +181,7 @@ const ToolRunCommand = cmd({
     try {
       const toolArgs = await readArgs(args)
       const directory = process.cwd()
+      const workspaceTools = await resolveWorkspaceTools(args["workspace-tools"], directory)
       const daemon = await import("../../altimate/tool-cli/daemon")
       const reply = args.daemon && !daemon.daemonDisabled()
         ? await daemon.runViaDaemon(directory, InstallationVersion, {
@@ -180,9 +189,9 @@ const ToolRunCommand = cmd({
             name,
             args: toolArgs,
             allowWrite: args["allow-write"],
-          }, { connections: args.connections, workspaceTools: args["workspace-tools"] })
+          }, { connections: args.connections, workspaceTools })
         : undefined
-      result = reply ?? (await inProcess(directory, name, toolArgs, args["allow-write"], args.connections, args["workspace-tools"]))
+      result = reply ?? (await inProcess(directory, name, toolArgs, args["allow-write"], args.connections, workspaceTools))
     } catch (error) {
       result = { status: "error", title: "Tool run failed", output: error instanceof Error ? error.message : String(error), metadata: {} }
     }
@@ -211,7 +220,8 @@ const ToolDaemonCommand = cmd({
   handler: async (args) => {
     const daemon = await import("../../altimate/tool-cli/daemon")
     const directory = daemon.resolveDirectory(args.dir ?? process.cwd())
-    const file = daemon.socketPath(directory, InstallationVersion, undefined, args.connections, args["workspace-tools"])
+    const workspaceTools = await resolveWorkspaceTools(args["workspace-tools"], directory)
+    const file = daemon.socketPath(directory, InstallationVersion, undefined, args.connections, workspaceTools)
     if (args.action === "status" || args.action === "stop") {
       const reply = await daemon.send(file, { id: randomUUID(), op: args.action })
       if (!reply) {
@@ -226,7 +236,7 @@ const ToolDaemonCommand = cmd({
     process.chdir(directory)
     await bootstrap(directory, async () => {
       if (args.connections) await (await import("../../altimate/native/connections/registry")).loadFile(args.connections)
-      const runner = await createRunner({ workspaceTools: args["workspace-tools"] })
+      const runner = await createRunner({ workspaceTools })
       try {
         const { releaseFileConnections } = await import("../../altimate/native/connections/registry")
         const running = await daemon.startDaemon({

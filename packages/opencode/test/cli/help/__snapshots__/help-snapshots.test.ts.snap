@@ -863,8 +863,9 @@ Options:
       --json             print id, description and input schema as JSON   [boolean] [default: false]
       --connections      use only this connections JSON file instead of the project and global
                          connection configs           [string] [default: $ALTIMATE_TOOL_CONNECTIONS]
-      --workspace-tools  also expose the linked workspace tools (workspace_context, workspace_skill,
-                         workspace_execute)                               [boolean] [default: false]"
+      --workspace-tools  expose the linked workspace tools (workspace_context, workspace_skill,
+                         workspace_execute); on by default when the project is linked,
+                         --no-workspace-tools disables                                     [boolean]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode tool run --help 1`] = `
@@ -895,8 +896,9 @@ Options:
       --json             print {status,title,output,metadata} as JSON     [boolean] [default: false]
       --connections      use only this connections JSON file instead of the project and global
                          connection configs           [string] [default: $ALTIMATE_TOOL_CONNECTIONS]
-      --workspace-tools  also expose the linked workspace tools (workspace_context, workspace_skill,
-                         workspace_execute)                               [boolean] [default: false]"
+      --workspace-tools  expose the linked workspace tools (workspace_context, workspace_skill,
+                         workspace_execute); on by default when the project is linked,
+                         --no-workspace-tools disables                                     [boolean]"
 `;
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode tool daemon --help 1`] = `
@@ -922,6 +924,7 @@ Options:
       --dir              project directory (defaults to cwd)                                [string]
       --connections      use only this connections JSON file instead of the project and global
                          connection configs           [string] [default: $ALTIMATE_TOOL_CONNECTIONS]
-      --workspace-tools  also expose the linked workspace tools (workspace_context, workspace_skill,
-                         workspace_execute)                               [boolean] [default: false]"
+      --workspace-tools  expose the linked workspace tools (workspace_context, workspace_skill,
+                         workspace_execute); on by default when the project is linked,
+                         --no-workspace-tools disables                                     [boolean]"
 `;

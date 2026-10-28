@@ -34,6 +34,20 @@ describe("tool CLI", () => {
     expect(JSON.parse(stdout).output).toStartWith("--args - was given but stdin is empty.")
   }, 60000)
 
+  test("workspace tools are off for an unlinked project, on with --workspace-tools, and --no-workspace-tools keeps them off", async () => {
+    const ids = async (...flags: string[]) =>
+      (JSON.parse((await cli(["tool", "list", "--json", ...flags])).stdout) as { id: string }[]).map((tool) => tool.id)
+    expect((await ids()).some((id) => id.startsWith("workspace_"))).toBe(false)
+    expect((await ids("--no-workspace-tools")).some((id) => id.startsWith("workspace_"))).toBe(false)
+    expect(await ids("--workspace-tools")).toContain("workspace_context")
+  }, 120000)
+
+  test("context for an unlinked project has no workspace section", async () => {
+    const { stdout, code } = await cli(["tool", "context"])
+    expect(code).toBe(0)
+    expect(stdout).not.toContain("Linked workspace:")
+  }, 60000)
+
   test("schema prints one tool", async () => {
     const { stdout, code } = await cli(["tool", "schema", "sql_execute"])
     expect(code).toBe(0)

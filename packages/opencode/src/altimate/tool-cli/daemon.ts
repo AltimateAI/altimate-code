@@ -264,7 +264,7 @@ export function selfCommand(): string[] {
 
 function spawnDaemon(directory: string, connections?: string, workspaceTools?: boolean) {
   const [command, ...rest] = selfCommand()
-  const extra = [...(connections ? ["--connections", path.resolve(connections)] : []), ...(workspaceTools ? ["--workspace-tools"] : [])]
+  const extra = [...(connections ? ["--connections", path.resolve(connections)] : []), ...(workspaceTools === undefined ? [] : [workspaceTools ? "--workspace-tools" : "--no-workspace-tools"])]
   const child = spawn(command, [...rest, "tool", "daemon", "--dir", directory, ...extra], {
     cwd: directory,
     detached: true,
