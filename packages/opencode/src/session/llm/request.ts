@@ -245,7 +245,8 @@ function resolveTools(input: Pick<PrepareInput, "tools" | "agent" | "permission"
     Object.keys(input.tools),
     Permission.merge(input.agent.permission, input.permission ?? []),
   )
-  return Record.filter(input.tools, (_, k) => input.user.tools?.[k] !== false && !disabled.has(k))
+  // Keep the hidden error handler even when the agent denies every callable tool.
+  return Record.filter(input.tools, (_, k) => k === "invalid" || (input.user.tools?.[k] !== false && !disabled.has(k)))
 }
 
 export function hasToolCalls(messages: ModelMessage[]): boolean {
