@@ -400,6 +400,19 @@ export function describeToolError(raw: string) {
   }
 }
 
+/**
+ * A tool part the processor closed as interrupted (`metadata.interrupted`, "Tool execution
+ * aborted") after the session's own abort signal fired was cancelled on request (Stop/Esc,
+ * dispose, harness abort) and is already the session's "aborted" outcome, not a tool failure.
+ * Interruptions the session did not request still produce a fingerprint.
+ */
+export function isRequestedToolInterrupt(
+  state: { status: string; metadata?: Record<string, unknown> },
+  sessionAborted: boolean,
+): boolean {
+  return sessionAborted && state.status === "error" && state.metadata?.interrupted === true
+}
+
 export function buildErrorFingerprintEvent(
   sessionID: string,
   err: {
