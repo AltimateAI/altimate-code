@@ -30,7 +30,7 @@ Each provider has a key in the `provider` object:
 
 ## Altimate LLM Gateway
 
-Managed LLM access with dynamic routing across Sonnet 4.6, Opus 4.6, GPT-5.4, GPT-5.3, and more. No API keys to manage — 10M tokens free to get started.
+Managed LLM access with dynamic routing across Sonnet 4.6, Opus 4.6, GPT-5.4, GPT-5.3, and more. No API keys to manage — 1M tokens free to get started.
 
 ```json
 {

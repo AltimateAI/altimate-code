@@ -23,7 +23,7 @@ altimate        # Launch the TUI
 
 On a fresh install, a welcome panel appears with a curated 6-provider picker:
 
-- **Altimate LLM Gateway** *(recommended)* — 10M tokens free, no API keys. Routes to the best model per task across Sonnet, Opus, GPT-5, and more. Sign-in opens a browser tab; complete Google or email signup and you're back in the TUI. If your terminal can't open a browser (SSH / tmux / WSL), the CLI prints the URL — paste it into a browser on your desktop.
+- **Altimate LLM Gateway** *(recommended)* — 1M tokens free, no API keys. Routes to the best model per task across Sonnet, Opus, GPT-5, and more. Sign-in opens a browser tab; complete Google or email signup and you're back in the TUI. If your terminal can't open a browser (SSH / tmux / WSL), the CLI prints the URL — paste it into a browser on your desktop.
 - **Anthropic** / **OpenAI** / **Google** — paste an API key or OAuth in.
 - **Altimate Base** — a hosted open model, free and rate limited, with no signup or API key. Requests and responses may be logged and used to improve Altimate's products, so do not send secrets or confidential code. Every install registers it automatically at startup, whichever provider you pick — there is no confirmation dialog — and this notice is shown once, when Base is first used; it only becomes your model when nothing else you configured is usable. Opt out with `ALTIMATE_BASE_AUTO_REGISTER=0`, `altimate providers logout altimate-base`, or `disabled_providers` (see [providers](../configure/providers.md#altimate-base)).
 - **Search all providers…** — full picker if you need Bedrock, Databricks AI Gateway, Cloudflare AI Gateway, Snowflake Cortex, DigitalOcean Inference, etc.
@@ -36,7 +36,7 @@ altimate
 ```
 
 !!! tip "Don't want to manage API keys?"
-    Choose **Altimate Base** for the no-signup, rate-limited model. Choose the [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/) for 10M free tokens and automatic model routing. Gateway sign-in uses a loopback OAuth on `127.0.0.1:7317-7325` (falls back if the preferred port is taken).
+    Choose **Altimate Base** for the no-signup, rate-limited model. Choose the [Altimate LLM Gateway](https://help.altimate.ai/datamates/user-guide/components/llm-gateway/) for 1M free tokens and automatic model routing. Gateway sign-in uses a loopback OAuth on `127.0.0.1:7317-7325` (falls back if the preferred port is taken).
 
 ---
 
