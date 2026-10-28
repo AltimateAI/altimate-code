@@ -2,7 +2,9 @@ import { ServerAuth } from "@/server/auth"
 import { Effect, Encoding, Layer, Redacted } from "effect"
 import { HttpEffect, HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http"
 import { HttpApiError, HttpApiMiddleware } from "effect/unstable/httpapi"
-import { hasPtyConnectTicketURL } from "@/server/shared/pty-ticket"
+// altimate_change start — upstream_fix: authorize PTY ticket bypass from the matched route (anomalyco/opencode#58258)
+import { PTY_CONNECT_PATH, PTY_CONNECT_TICKET_QUERY } from "@/server/shared/pty-ticket"
+// altimate_change end
 import { isPublicUIPath } from "@/server/shared/public-ui"
 export {
   Authorization as ServerAuthorization,
@@ -139,8 +141,13 @@ export const ptyConnectAuthorizationLayer = Layer.effect(
     return PtyConnectAuthorization.of((effect) =>
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest
+        // altimate_change start — upstream_fix: authorize PTY ticket bypass from the matched route (anomalyco/opencode#58258)
+        // Use the route selected by Effect so authorization and dispatch cannot disagree about the request path.
+        const route = yield* HttpRouter.RouteContext
         const url = new URL(request.url, "http://localhost")
-        if (hasPtyConnectTicketURL(url)) return yield* effect
+        if (route.route.path === PTY_CONNECT_PATH && !!url.searchParams.get(PTY_CONNECT_TICKET_QUERY))
+          return yield* effect
+        // altimate_change end
         return yield* credentialFromURL(url, request).pipe(
           Effect.flatMap((credential) => validateCredential(effect, credential, config)),
         )
