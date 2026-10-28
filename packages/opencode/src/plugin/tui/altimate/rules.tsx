@@ -20,7 +20,7 @@ import { createEffect, createRoot, createSignal, Show } from "solid-js"
 import type { ProposalCard } from "@/altimate/rules/events"
 import { RulesSummary } from "@/altimate/rules/summary"
 import { describeAge } from "@/altimate/workspace/attach-snapshot"
-import { writeProjectLearning } from "@/altimate/learn/project-config"
+import { readProjectLearning, writeProjectLearning } from "@/altimate/learn/project-config"
 
 const id = "altimate:rules"
 
@@ -43,7 +43,14 @@ async function post<T>(api: TuiPluginApi, url: string, body?: unknown): Promise<
 
 const on = (api: TuiPluginApi) => api.event.on as unknown as (type: string, handler: (event: { properties: any }) => void) => () => void
 const root = (api: TuiPluginApi) => (api.state.path.worktree && api.state.path.worktree !== "/" ? api.state.path.worktree : api.state.path.directory)
-const learnConfig = (api: TuiPluginApi) => (api.state.config as { learn?: { enabled?: boolean; capture?: boolean } }).learn
+type LearnConfig = { enabled?: boolean; capture?: boolean } | undefined
+/** The loaded config's `learn`, with the project file's `learn` as on disk now: the `/rules` toggle writes that
+ * file, and the loaded config does not change until the next session. */
+const learnConfig = async (api: TuiPluginApi): Promise<LearnConfig> => {
+  const loaded = (api.state.config as { learn?: LearnConfig }).learn
+  const onDisk = (await readProjectLearning(root(api), api.state.path.directory).catch(() => undefined)) as LearnConfig
+  return loaded || onDisk ? { ...loaded, ...onDisk } : undefined
+}
 
 function title(card: ProposalCard) {
   if (card.choose) return "SAVE THIS?"
@@ -371,7 +378,7 @@ function installCards(api: TuiPluginApi) {
     reviewToast(api, p)
   }
   on(api)("rule.proposal.reviewed", (event) => notify(event.properties))
-  const replay = () => void RulesSummary.summary(root(api), learnConfig(api)).then((s) => [...s.notices].reverse().forEach(notify)).catch(() => {})
+  const replay = () => void learnConfig(api).then((learn) => RulesSummary.summary(root(api), learn)).then((s) => [...s.notices].reverse().forEach(notify)).catch(() => {})
   on(api)("altimate.rules.changed", replay)
   setTimeout(() => {
     replay()
@@ -388,7 +395,7 @@ function reviewToast(api: TuiPluginApi, p: { text: string; status: string; reaso
 }
 
 async function showMenu(api: TuiPluginApi) {
-  const summary = await RulesSummary.summary(root(api), learnConfig(api))
+  const summary = await RulesSummary.summary(root(api), await learnConfig(api))
   const rows = await RulesSummary.rows(root(api))
   const team = rows.filter((r) => r.source === "team")
   const mine = rows.filter((r) => r.source === "mine")
@@ -423,9 +430,11 @@ async function showMenu(api: TuiPluginApi) {
       title={`Rules — ${status}`}
       options={options}
       onSelect={async (option) => {
+        // Sync and the learning toggle are actions, not navigation: close the menu, report with a toast.
+        if (option.value === "sync" || option.value === "toggle") api.ui.dialog.clear()
         if (option.value === "sync") {
           api.ui.toast({ variant: "info", message: "Syncing rules…", duration: 3000 })
-          const report = await post<{ ok: boolean; pull?: { ok: boolean; rules: number; pending: number; error?: string; notices: unknown[] }; push?: { sent: unknown[] }; context?: { status: string; reason?: string } }>(api, "/altimate/rules/sync")
+          const report = await post<{ ok: boolean; pull?: { ok: boolean; rules: number; pending: number; error?: string; notices: unknown[] }; push?: { sent: unknown[] }; context?: { status: string; reason?: string } }>(api, "/altimate/rules/sync").catch(() => undefined)
           // A review notice from this pull is its own toast; do not cover it with the summary.
           if (report?.pull?.notices.length) return
           if (report?.context && report.context.status !== "ready")
@@ -433,11 +442,14 @@ async function showMenu(api: TuiPluginApi) {
           else if (report?.pull?.ok)
             api.ui.toast({ variant: "success", message: `Synced: ${report.pull.rules} team ${report.pull.rules === 1 ? "rule" : "rules"}, ${report.pull.pending} pending review${report.push?.sent.length ? `, ${report.push.sent.length} sent` : ""}.`, duration: 6000 })
           else api.ui.toast({ variant: "error", message: `Rules sync failed: ${report?.pull?.error ?? "unknown error"}`, duration: 8000 })
-          return showMenu(api)
+          return
         }
         if (option.value === "toggle") {
-          const file = await writeProjectLearning(root(api), api.state.path.directory, !summary.learning)
-          api.ui.toast({ variant: "success", message: `Learning ${summary.learning ? "off" : "on"} for you in this project (${file}). Applies from the next session.`, duration: 8000 })
+          const file = await writeProjectLearning(root(api), api.state.path.directory, !summary.learning).catch((error) => {
+            api.ui.toast({ variant: "error", message: `Learning not changed: ${error instanceof Error ? error.message : String(error)}`, duration: 8000 })
+            return undefined
+          })
+          if (file) api.ui.toast({ variant: "success", message: `Learning ${summary.learning ? "off" : "on"} for you in this project (${file}). Applies from the next session.`, duration: 8000 })
           return
         }
       }}
