@@ -1,4 +1,6 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, mock, spyOn, test } from "bun:test"
+import * as http from "http"
+import * as browser from "open"
 import { OAUTH_DUMMY_KEY } from "../../src/auth"
 import { oauthScope, SnowflakeCortexAuthPlugin } from "../../src/plugin/snowflake-cortex"
 
@@ -32,6 +34,50 @@ function makeInput() {
 }
 
 describe("plugin.snowflake-cortex", () => {
+  test("escapes provider error_description markup in callback HTML", async () => {
+    const open = spyOn(browser, "default").mockRejectedValue(new Error("Browser launch disabled in tests"))
+    let handleRequest: http.RequestListener | undefined
+    const createServer = spyOn(http, "createServer").mockImplementation((listener) => {
+      handleRequest = listener as http.RequestListener
+      return {
+        listen: (_port: number, _host: string, ready: () => void) => ready(),
+        address: () => ({ port: 12345 }),
+        on: () => {},
+        close: () => {},
+      } as unknown as http.Server
+    })
+    try {
+      const hooks = await SnowflakeCortexAuthPlugin({} as any)
+      const method = hooks.auth!.methods[0]
+      if (method.type !== "oauth") throw new Error("Expected the Snowflake OAuth method")
+      const authorization = await method.authorize({ account: "myorg-myaccount" })
+      if (authorization.method !== "auto") throw new Error("Expected an automatic OAuth callback")
+      const callback = authorization.callback()
+      const authorizeUrl = new URL(authorization.url)
+      const callbackUrl = new URL(authorizeUrl.searchParams.get("redirect_uri")!)
+      const error = `<script>alert("xss" & 'more')</script>`
+      callbackUrl.searchParams.set("state", authorizeUrl.searchParams.get("state")!)
+      callbackUrl.searchParams.set("error", "access_denied")
+      callbackUrl.searchParams.set("error_description", error)
+
+      const response = { writeHead: mock(), end: mock() }
+      handleRequest!(
+        { headers: { host: callbackUrl.host }, url: callbackUrl.pathname + callbackUrl.search } as http.IncomingMessage,
+        response as unknown as http.ServerResponse,
+      )
+      expect(await callback).toEqual({ type: "failed" })
+      const body = String(response.end.mock.calls[0][0])
+
+      expect(response.writeHead).toHaveBeenCalledWith(200, { "Content-Type": "text/html" })
+      expect(body).toContain("&lt;script&gt;alert(&quot;xss&quot; &amp; &#39;more&#39;)&lt;/script&gt;")
+      expect(body).not.toContain(error)
+      expect(open).toHaveBeenCalledWith(authorization.url)
+    } finally {
+      createServer.mockRestore()
+      open.mockRestore()
+    }
+  })
+
   test("oauthScope uses Snowflake-compatible scope values", () => {
     expect(oauthScope(undefined)).toBe("refresh_token")
     expect(oauthScope("PUBLIC")).toBe("refresh_token session:role:PUBLIC")

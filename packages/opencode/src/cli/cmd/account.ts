@@ -5,9 +5,13 @@ import { Account } from "@/account/account"
 import { AccountID, OrgID, PollExpired, type PollResult, type AccountError } from "@/account/schema"
 import { effectCmd } from "../effect-cmd"
 import * as Prompt from "../effect/prompt"
-import open from "open"
+// altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+import { openUrl } from "@opencode-ai/core/open"
+// altimate_change end
 
-const openBrowser = (url: string) => Effect.promise(() => open(url).catch(() => undefined))
+// altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+const openBrowser = (url: string) => Effect.promise(() => openUrl(url).catch(() => undefined))
+// altimate_change end
 
 const println = (msg: string) => Effect.sync(() => UI.println(msg))
 

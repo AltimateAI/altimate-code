@@ -37,7 +37,9 @@ import { McpAuth } from "./auth"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
 import { TuiEvent } from "@/server/tui-event"
-import open from "open"
+// altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+import { openUrl } from "@opencode-ai/core/open"
+// altimate_change end
 import { Cause, Effect, Exit, Layer, Option, Context, Schema, Stream } from "effect"
 // altimate_change start — effect@4 renamed Either → Result (Effect.either → Effect.result)
 import * as Result from "effect/Result"
@@ -1509,7 +1511,8 @@ export const layer = Layer.effect(
 
       const callbackPromise = McpOAuthCallback.waitForCallback(result.oauthState, mcpName)
 
-      yield* Effect.tryPromise(() => open(result.authorizationUrl)).pipe(
+      // altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+      yield* Effect.tryPromise(() => openUrl(result.authorizationUrl)).pipe(
         Effect.flatMap((subprocess) =>
           Effect.callback<void, Error>((resume) => {
             const timer = setTimeout(() => resume(Effect.void), 500)
@@ -1529,6 +1532,7 @@ export const layer = Layer.effect(
           return events.publish(BrowserOpenFailed, { mcpName, url: result.authorizationUrl }).pipe(Effect.ignore)
         }),
       )
+      // altimate_change end
 
       const code = yield* Effect.promise(() => callbackPromise)
 

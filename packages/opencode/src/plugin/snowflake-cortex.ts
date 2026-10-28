@@ -2,7 +2,12 @@ import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { OAUTH_DUMMY_KEY } from "../auth"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { createServer } from "http"
-import open from "open"
+// altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+import { openUrl } from "@opencode-ai/core/open"
+// altimate_change end
+// altimate_change start — upstream_fix: backport e8fea9e63a escape provider text in OAuth callback pages
+import { escapeHtml } from "../util/html"
+// altimate_change end
 
 const OAUTH_CLIENT_ID = "LOCAL_APPLICATION"
 const OAUTH_CALLBACK_HOST = "127.0.0.1"
@@ -170,14 +175,14 @@ const HTML_SUCCESS = `<!doctype html>
 </html>`
 // altimate_change end
 
-// altimate_change start — Snowflake OAuth error copy uses Altimate Code brand
+// altimate_change start — upstream_fix: backport e8fea9e63a escape Snowflake OAuth errors, retaining Altimate Code branding
 const htmlError = (message: string) => `<!doctype html>
 <html>
   <head><title>Altimate Code - Snowflake Authorization Failed</title></head>
   <body style="font-family: system-ui; display:flex; align-items:center; justify-content:center; height:100vh; margin:0; background:#111; color:#eee;">
     <div style="text-align:center; max-width:48rem; padding:2rem;">
       <h1 style="color:#ff7b72;">Authorization Failed</h1>
-      <pre style="white-space:pre-wrap; color:#ffb3ad; background:#2a1210; padding:1rem; border-radius:.5rem;">${message}</pre>
+      <pre style="white-space:pre-wrap; color:#ffb3ad; background:#2a1210; padding:1rem; border-radius:.5rem;">${escapeHtml(message)}</pre>
     </div>
   </body>
 </html>`
@@ -496,7 +501,9 @@ export async function SnowflakeCortexAuthPlugin(_input: PluginInput): Promise<Ho
             const role = (inputs.role || "").trim() || undefined
             const url = buildAuthorizeUrl(account, role, state, pkce)
             const callbackPromise = waitForOAuthCallback(account, pkce, state)
-            await open(url).catch(() => undefined)
+            // altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+            await openUrl(url).catch(() => undefined)
+            // altimate_change end
 
             return {
               url,

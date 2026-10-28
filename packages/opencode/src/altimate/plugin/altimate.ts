@@ -1,7 +1,7 @@
 import type { Hooks, PluginInput } from "@opencode-ai/plugin"
 import { createServer } from "http"
 import { randomBytes } from "crypto"
-import open from "open"
+import { openUrl } from "@opencode-ai/core/open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
 import * as OnboardingTelemetry from "../telemetry/onboarding"
@@ -445,7 +445,7 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
             // to the log file at the top of packages/opencode/src/cli/tui/
             // worker.ts — so that write reached the log, never the terminal.
             // Removed to stop leaking state-bearing authorize URLs into logs.
-            await open(authorizeUrl).catch(() => undefined)
+            await openUrl(authorizeUrl).catch(() => undefined)
 
             // altimate_change start — onboarding funnel: gateway sign-in started.
             // Spec name is `gateway_device_code_issued`; this flow is a browser loopback OAuth

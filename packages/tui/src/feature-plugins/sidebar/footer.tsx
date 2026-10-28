@@ -3,7 +3,9 @@ import type { BuiltinTuiPlugin } from "../builtins"
 // altimate_change — community/docs links: plain copyable text, underlined for
 // affordance; clicking the line opens the browser. (OSC-8 word-links are not
 // supported by the current @opentui/solid JSX layer — raw TextChunk children crash.)
-import open from "open"
+// altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+import { openUrl } from "@opencode-ai/core/open"
+// altimate_change end
 
 const id = "internal:sidebar-footer"
 
@@ -39,12 +41,12 @@ function View(props: { api: TuiPluginApi }) {
         <text
           wrapMode="word"
           width="100%"
-          onMouseUp={() => open("https://altimate.studio/join-agentic-data-engineering-slack").catch(() => {})}
+          onMouseUp={() => openUrl("https://altimate.studio/join-agentic-data-engineering-slack").catch(() => {})}
         >
           <span style={{ fg: theme().textMuted }}>Community · </span>
           <span style={{ fg: theme().accent, underline: true }}>altimate.studio/join-agentic-data-engineering-slack</span>
         </text>
-        <text wrapMode="word" width="100%" onMouseUp={() => open("https://help.altimate.ai/code/").catch(() => {})}>
+        <text wrapMode="word" width="100%" onMouseUp={() => openUrl("https://help.altimate.ai/code/").catch(() => {})}>
           <span style={{ fg: theme().textMuted }}>Docs · </span>
           <span style={{ fg: theme().accent, underline: true }}>help.altimate.ai/code</span>
         </text>
