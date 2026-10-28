@@ -2,20 +2,21 @@
 //
 // Workspace rules in the TUI: a thin renderer of the session server's rule events.
 //
-// - The proposed-rule card: renders `rule.proposal.asked` (and `.updated` after an edit) and answers with
-//   `POST /rule-proposal/:id/reply`. Enter sends for review (member) or approves now (owner); `e` edits the wording;
-//   `n` is "Not a rule". When the wording did not say rule or memory, the card asks
-//   "Save as: Memory · Team rule · Skip". Escape closes the card without answering: the proposal stays open in
-//   the session server, and the next queued card shows. Open proposals are loaded at startup, so a card asked
-//   before this TUI subscribed still shows.
+// - The proposed-rule card, inline above the session's input (the `session_prompt` slot, which renders the
+//   regular input below it): renders `rule.proposal.asked` (and `.updated` after an edit) and answers with
+//   `POST /rule-proposal/:id/reply`. Typing is never blocked. `<leader>p` (or a click) focuses the card; then
+//   Enter takes the selected action (first: send for review for a member, approve now for the owner), `e` edits
+//   the wording, `n` is "Not a rule", Escape goes back to typing and leaves the card. When the wording did not
+//   say rule or memory, the card asks "Memory · Team rule · Skip". Open proposals load at startup, so a card
+//   asked before this TUI subscribed still shows; one answered in another client disappears.
 // - Review notices: `rule.proposal.reviewed` becomes a toast ("approved", or "rejected" with the reason).
 // - `/rules`: the team rules, your proposals with their status and reasons, Sync now, and learning on/off.
 //
 // No rule logic lives here; the IDE extension renders the same events and calls the same routes.
 import { TextAttributes } from "@opentui/core"
-import type { TuiDialogSelectOption, TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
+import type { TuiDialogSelectOption, TuiPlugin, TuiPluginApi, TuiPromptRef } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
-import { Show } from "solid-js"
+import { createSignal, Show } from "solid-js"
 import type { ProposalCard } from "@/altimate/rules/events"
 import { RulesSummary } from "@/altimate/rules/summary"
 import { describeAge } from "@/altimate/workspace/attach-snapshot"
@@ -59,158 +60,272 @@ function meta(card: ProposalCard) {
   return parts.join(" · ")
 }
 
-function options(card: ProposalCard): TuiDialogSelectOption<string>[] {
-  const owner = card.workspace?.owner_name ?? "the workspace owner"
-  const ws = card.workspace?.name ?? "the workspace"
-  const all: Record<string, TuiDialogSelectOption<string>> = {
-    send: {
-      title: card.choose ? "Team rule — send for review" : "Send for review",
-      value: "send",
-      description: `Goes to ${owner}'s queue in ${ws} → Rules. Nothing changes for the team until approved.`,
-    },
-    approve: {
-      title: card.choose ? "Team rule — approve now" : card.weakens_verification ? "Approve anyway" : "Approve now",
-      value: "approve",
-      description: `You own ${ws}: it reaches every teammate's sessions within a few minutes.`,
-    },
-    edit: { title: "Edit wording (e)", value: "edit", description: "Change the text before deciding" },
-    dismiss: card.choose
-      ? { title: "Skip (n)", value: "dismiss", description: "Don't save anything" }
-      : { title: "Not a rule (n)", value: "dismiss", description: "Won't propose this topic again for 30 days" },
-    save_local: { title: "Save for this project", value: "save_local", description: "Not linked to a workspace: saved as project training, no review" },
-    save_memory: { title: "Memory — just for you", value: "save_memory", description: "A fact or preference: saved now, no review, not a team rule" },
+/** Button labels, in the order shown: the team action first, so Enter on a fresh card takes it. */
+function buttons(card: ProposalCard): { action: ProposalCard["actions"][number]; label: string }[] {
+  const label: Record<ProposalCard["actions"][number], string> = {
+    send: card.choose ? "Team rule — send for review" : "Send for review",
+    approve: card.choose ? "Team rule — approve now" : card.weakens_verification ? "Approve anyway" : "Approve now",
+    save_local: "Save for this project",
+    save_memory: "Memory — just for you",
+    edit: "Edit wording",
+    dismiss: card.choose ? "Skip" : "Not a rule",
   }
-  // Enter on the first row takes the team action: "Send for review" (member) or "Approve now" (owner).
-  const order = ["save_memory", "send", "save_local", "approve", "edit", "dismiss"]
-  return [...card.actions].sort((a, b) => order.indexOf(a) - order.indexOf(b)).map((action) => all[action])
+  const order = ["save_memory", "send", "approve", "save_local", "edit", "dismiss"]
+  return [...card.actions].sort((a, b) => order.indexOf(a) - order.indexOf(b)).map((action) => ({ action, label: label[action] }))
 }
 
-function CardView(props: { api: TuiPluginApi; card: ProposalCard; onAction: (action: string) => void }) {
+/** What the team action does, shown under the buttons while the card is focused. */
+function explain(card: ProposalCard, action: string): string {
+  const owner = card.workspace?.owner_name ?? "the workspace owner"
+  const ws = card.workspace?.name ?? "the workspace"
+  if (action === "send") return `Goes to ${owner}'s queue in ${ws} → Rules. Nothing changes for the team until approved.`
+  if (action === "approve") return `You own ${ws}: it reaches every teammate's sessions within a few minutes.`
+  if (action === "save_local") return "Not linked to a workspace: saved as project training, no review."
+  if (action === "save_memory") return "A fact or preference: saved now, no review, not a team rule."
+  if (action === "edit") return "Change the text before deciding."
+  return card.choose || !card.topics.length ? "Don't save anything." : "Won't propose this topic again for 30 days."
+}
+
+const FOCUS_KEY = "<leader>p"
+const FOCUS_COMMAND = "altimate.rules.card.focus"
+
+function InlineCard(props: {
+  api: TuiPluginApi
+  card: ProposalCard
+  more: number
+  focused: boolean
+  selected: number
+  onPick: (index: number) => void
+  onFocus: () => void
+}) {
   const theme = () => props.api.theme.current
-  const card = props.card
-  const shortcut = (action: string, key: string, label: string) =>
-    card.actions.includes(action as ProposalCard["actions"][number])
-      ? [{ command: `rules.card.${action}`, title: label, onTrigger: () => props.onAction(action) }]
-      : []
+  const card = () => props.card
+  const options = () => buttons(card())
+  // The key as configured (the leader can be rebound).
+  const focusHint = () =>
+    props.api.keys.formatSequence(
+      props.api.keymap.getCommandBindings({ visibility: "registered", commands: [FOCUS_COMMAND] }).get(FOCUS_COMMAND)?.[0]?.sequence,
+    ) || "ctrl+x p"
   return (
-    <box>
+    <box
+      backgroundColor={theme().backgroundPanel}
+      border={["left"]}
+      borderColor={props.focused ? theme().accent : card().weakens_verification ? theme().warning : theme().border}
+      flexShrink={0}
+      onMouseUp={() => props.onFocus()}
+    >
       <box paddingLeft={2} paddingRight={2} paddingTop={1} gap={0}>
-        <text attributes={TextAttributes.BOLD} fg={theme().accent}>{title(card)}</text>
-        <Show when={card.replaces && card.change === "edit"}>
-          <text attributes={TextAttributes.STRIKETHROUGH} fg={theme().textMuted}>{card.replaces!.text}</text>
+        <box flexDirection="row" justifyContent="space-between">
+          <text attributes={TextAttributes.BOLD} fg={theme().accent}>{title(card())}</text>
+          <Show when={props.more > 0}>
+            <text fg={theme().textMuted}>{`+${props.more} more`}</text>
+          </Show>
+        </box>
+        <Show when={card().replaces && card().change === "edit"}>
+          <text attributes={TextAttributes.STRIKETHROUGH} fg={theme().textMuted}>{card().replaces!.text}</text>
         </Show>
-        <text fg={theme().text} attributes={card.change === "retire" ? TextAttributes.STRIKETHROUGH : undefined}>{card.text}</text>
-        <text fg={theme().textMuted}>{meta(card)}</text>
-        <Show when={card.why}>
-          <text fg={theme().textMuted}>{`Why: ${card.why}`}</text>
+        <text fg={theme().text} attributes={card().change === "retire" ? TextAttributes.STRIKETHROUGH : undefined}>{card().text}</text>
+        <text fg={theme().textMuted}>{meta(card())}</text>
+        <Show when={props.focused && card().why}>
+          <text fg={theme().textMuted}>{`Why: ${card().why}`}</text>
         </Show>
-        <Show when={card.evidence.correction}>
-          <text fg={theme().textMuted}>{`Your correction: "${card.evidence.correction!.excerpt}"`}</text>
+        <Show when={props.focused && card().evidence.correction}>
+          <text fg={theme().textMuted}>{`Your correction: "${card().evidence.correction!.excerpt}"`}</text>
         </Show>
-        <Show when={card.weakens_verification}>
-          <text fg={theme().warning}>{`⚠ ${card.weakens_verification} — the owner must "approve anyway"`}</text>
+        <Show when={card().weakens_verification}>
+          <text fg={theme().warning}>{`⚠ ${card().weakens_verification} — it needs "approve anyway"`}</text>
         </Show>
       </box>
-      <props.api.ui.DialogSelect
-        title={card.choose ? "Save as" : "What should happen?"}
-        options={options(card)}
-        renderFilter={false}
-        skipFilter
-        onSelect={(option) => props.onAction(option.value)}
-        actions={[...shortcut("edit", "e", "edit"), ...shortcut("dismiss", "n", card.choose ? "skip" : "not a rule")]}
-        bindings={[
-          ...(card.actions.includes("edit") ? [{ key: "e", cmd: "rules.card.edit" }] : []),
-          { key: "n", cmd: "rules.card.dismiss" },
-        ]}
-      />
+      <box flexDirection="row" gap={1} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={props.focused ? 0 : 1} flexWrap="wrap">
+        {options().map((option, index) => (
+          <box
+            paddingLeft={1}
+            paddingRight={1}
+            backgroundColor={props.focused && index === props.selected ? theme().accent : theme().backgroundElement}
+            onMouseUp={() => props.onPick(index)}
+          >
+            <text fg={props.focused && index === props.selected ? theme().background : theme().textMuted}>{option.label}</text>
+          </box>
+        ))}
+        <Show when={!props.focused}>
+          <text fg={theme().text}>
+            {focusHint()} <span style={{ fg: theme().textMuted }}>review</span>
+          </text>
+        </Show>
+      </box>
+      <Show when={props.focused}>
+        <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" justifyContent="space-between" gap={3}>
+          <text fg={theme().textMuted}>{explain(card(), options()[props.selected]?.action ?? "")}</text>
+          <text fg={theme().text}>
+            {"⇆"} <span style={{ fg: theme().textMuted }}>select</span>  enter <span style={{ fg: theme().textMuted }}>confirm</span>
+            {"  "}esc <span style={{ fg: theme().textMuted }}>back to typing</span>
+          </text>
+        </box>
+      </Show>
     </box>
   )
 }
 
+/**
+ * Proposed-rule cards, inline above the session's input. Typing is never blocked: the card waits until the
+ * person focuses it (`<leader>p` or a click), picks an action, or goes back to typing with Escape. One card
+ * shows per session; the rest wait behind "+N more". Permission and question prompts hide it, as they hide
+ * the input.
+ */
 function installCards(api: TuiPluginApi) {
-  const queue: ProposalCard[] = []
-  // The card whose dialog (the card, or its edit prompt) is up. Cleared before any programmatic replace or
-  // clear, whose close callback would otherwise advance the queue a second time.
-  let showing: string | undefined
+  const [cards, setCards] = createSignal<ProposalCard[]>([])
+  const [focused, setFocused] = createSignal(false)
+  const [selected, setSelected] = createSignal(0)
+  const [busy, setBusy] = createSignal(false)
+  let prompt: TuiPromptRef | undefined
+  let sessionID: string | undefined
+  let layer: (() => void) | undefined
 
-  const next = () => {
-    showing = undefined
-    const card = queue.shift()
-    if (card) show(card)
-  }
+  const current = () => cards().find((card) => card.sessionID === sessionID)
+  const remove = (id: string) => setCards((list) => list.filter((card) => card.id !== id))
 
-  const close = () => {
-    showing = undefined
-    api.ui.dialog.clear()
+  const unfocus = () => {
+    layer?.()
+    layer = undefined
+    setFocused(false)
+    prompt?.focus()
   }
 
   const reply = async (card: ProposalCard, action: string, text?: string) => {
+    if (busy()) return
+    setBusy(true)
     const result = await post<ReplyResult>(api, `/rule-proposal/${card.id}/reply`, { action, ...(text !== undefined ? { text } : {}) })
       .catch(() => undefined)
-    // Closed with Escape while the request ran: the queue already moved on, so only report the outcome.
-    const current = showing === card.id
+      .finally(() => setBusy(false))
     if (!result) return api.ui.toast({ variant: "error", message: "Could not reach the session server.", duration: 6000 })
-    if (!result.ok) {
-      api.ui.toast({ variant: "error", message: result.error ?? "Not done.", duration: 8000 })
-      if (result.card && current) show(result.card)
+    if (!result.ok) return api.ui.toast({ variant: "error", message: result.error ?? "Not done.", duration: 8000 })
+    if (action === "edit") {
+      if (result.card) setCards((list) => list.map((c) => (c.id === card.id ? result.card! : c)))
       return
     }
-    if (action === "edit" && result.card) return current ? show(result.card) : undefined
     api.ui.toast({ variant: "success", message: result.message ?? "Done.", duration: 6000 })
-    if (!current) return
-    close()
-    next()
+    remove(card.id)
+    unfocus()
   }
 
   const edit = (card: ProposalCard) => {
-    showing = undefined
     api.ui.dialog.replace(() => (
       <api.ui.DialogPrompt
         title="Edit the rule"
         description={() => <text fg={api.theme.current.textMuted}>One line, at most 140 characters.</text>}
         value={card.text}
-        onConfirm={(text) => void reply(card, "edit", text)}
-        onCancel={() => show(card)}
+        onConfirm={(text) => {
+          api.ui.dialog.clear()
+          void reply(card, "edit", text)
+        }}
+        onCancel={() => api.ui.dialog.clear()}
       />
     ))
-    showing = card.id
   }
 
-  const show = (card: ProposalCard) => {
-    showing = undefined
-    api.ui.dialog.replace(
-      () => (
-        <CardView
-          api={api}
-          card={card}
-          onAction={(action) => (action === "edit" ? edit(card) : void reply(card, action))}
-        />
-      ),
-      () => {
-        if (showing === card.id) next()
+  const pick = (index: number) => {
+    const card = current()
+    const option = card && buttons(card)[index]
+    if (!card || !option) return
+    setSelected(index)
+    if (option.action === "edit") return edit(card)
+    void reply(card, option.action)
+  }
+
+  const shortcut = (action: string) => {
+    const card = current()
+    const index = card ? buttons(card).findIndex((b) => b.action === action) : -1
+    if (index >= 0) pick(index)
+  }
+
+  const move = (step: number) => {
+    const card = current()
+    if (!card) return
+    const count = buttons(card).length
+    setSelected((index) => (index + step + count) % count)
+  }
+
+  const focus = () => {
+    if (!current() || focused()) return
+    setSelected(0)
+    setFocused(true)
+    prompt?.blur()
+    layer = api.keymap.registerLayer({
+      priority: 100,
+      bindings: [
+        { key: "left", cmd: () => move(-1) },
+        { key: "h", cmd: () => move(-1) },
+        { key: "right", cmd: () => move(1) },
+        { key: "l", cmd: () => move(1) },
+        { key: "tab", cmd: () => move(1) },
+        { key: "return", cmd: () => pick(selected()) },
+        { key: "e", cmd: () => shortcut("edit") },
+        { key: "n", cmd: () => shortcut("dismiss") },
+        { key: "escape", cmd: () => unfocus() },
+      ],
+    })
+  }
+
+  const offer = (card: ProposalCard) =>
+    setCards((list) => (list.some((c) => c.id === card.id) ? list.map((c) => (c.id === card.id ? card : c)) : [...list, card]))
+
+  // A card gone elsewhere (answered in another client): drop it here too.
+  const closed = (id: string) => {
+    const wasShown = current()?.id === id
+    remove(id)
+    if (wasShown && focused()) unfocus()
+  }
+
+  api.slots.register({
+    order: 100,
+    slots: {
+      session_prompt(_ctx, props) {
+        sessionID = props.session_id
+        return (
+          <box flexDirection="column" flexShrink={0}>
+            <Show when={cards().find((card) => card.sessionID === props.session_id)}>
+              {(card) => (
+                <InlineCard
+                  api={api}
+                  card={card()}
+                  more={cards().filter((c) => c.sessionID === props.session_id).length - 1}
+                  focused={focused()}
+                  selected={selected()}
+                  onPick={(index) => (focused() ? pick(index) : focus())}
+                  onFocus={focus}
+                />
+              )}
+            </Show>
+            <api.ui.Prompt
+              sessionID={props.session_id}
+              visible={props.visible}
+              disabled={props.disabled}
+              onSubmit={props.on_submit}
+              ref={(ref) => {
+                prompt = ref
+                props.ref?.(ref)
+              }}
+              right={<api.ui.Slot name="session_prompt_right" session_id={props.session_id} />}
+            />
+          </box>
+        )
       },
-    )
-    showing = card.id
-    api.ui.dialog.setSize("large")
-  }
+    },
+  })
 
-  const offer = (card: ProposalCard) => {
-    if (showing === card.id || queue.some((c) => c.id === card.id)) return
-    if (showing || api.ui.dialog.open) queue.push(card)
-    else show(card)
-  }
-
-  // Wording edited in another client: a queued copy shows the new wording.
-  const updated = (card: ProposalCard) => {
-    const index = queue.findIndex((c) => c.id === card.id)
-    if (index >= 0) queue[index] = card
-  }
-
-  // A card queued behind another dialog shows once that dialog closes.
-  const drain = setInterval(() => {
-    if (!showing && queue.length && !api.ui.dialog.open) next()
-  }, 1_000)
-  drain.unref?.()
+  api.keymap.registerLayer({
+    commands: [
+      {
+        name: FOCUS_COMMAND,
+        title: "Review the proposed rule",
+        desc: "Move to the proposed-rule card above the input",
+        category: "Altimate",
+        namespace: "palette",
+        run: focus,
+      },
+    ],
+    bindings: [{ key: FOCUS_KEY, cmd: FOCUS_COMMAND }],
+  })
 
   const load = async () => {
     const result = await raw(api)?.get({ url: "/rule-proposal" }).catch(() => undefined)
@@ -218,7 +333,8 @@ function installCards(api: TuiPluginApi) {
   }
 
   on(api)("rule.proposal.asked", (event) => offer(event.properties as ProposalCard))
-  on(api)("rule.proposal.updated", (event) => updated(event.properties as ProposalCard))
+  on(api)("rule.proposal.updated", (event) => offer(event.properties as ProposalCard))
+  on(api)("rule.proposal.replied", (event) => closed((event.properties as { id: string }).id))
   // Each review is shown once per project, whether it arrived as an event or was pulled before this TUI
   // subscribed (the startup sync): remembered by id and status.
   const seenKey = () => `altimate.rules.notices.${root(api)}`
