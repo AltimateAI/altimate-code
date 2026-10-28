@@ -3,7 +3,7 @@
 // Workspace rules in the TUI: a thin renderer of the session server's rule events.
 //
 // - The proposed-rule card: renders `rule.proposal.asked` (and `.updated` after an edit) and answers with
-//   `POST /rule-proposal/:id/reply`. Enter sends for review; `a` approves (owner); `e` edits the wording;
+//   `POST /rule-proposal/:id/reply`. Enter sends for review (member) or approves now (owner); `e` edits the wording;
 //   `n` is "Not a rule". When the wording did not say rule or memory, the card asks
 //   "Save as: Memory · Team rule · Skip". Escape closes the card without answering: the proposal stays open in
 //   the session server, and the next queued card shows. Open proposals are loaded at startup, so a card asked
@@ -69,7 +69,7 @@ function options(card: ProposalCard): TuiDialogSelectOption<string>[] {
       description: `Goes to ${owner}'s queue in ${ws} → Rules. Nothing changes for the team until approved.`,
     },
     approve: {
-      title: card.weakens_verification ? "Approve anyway (a)" : "Approve now (a)",
+      title: card.choose ? "Team rule — approve now" : card.weakens_verification ? "Approve anyway" : "Approve now",
       value: "approve",
       description: `You own ${ws}: it reaches every teammate's sessions within a few minutes.`,
     },
@@ -80,7 +80,7 @@ function options(card: ProposalCard): TuiDialogSelectOption<string>[] {
     save_local: { title: "Save for this project", value: "save_local", description: "Not linked to a workspace: saved as project training, no review" },
     save_memory: { title: "Memory — just for you", value: "save_memory", description: "A fact or preference: saved now, no review, not a team rule" },
   }
-  // Enter on the first row sends: "Send for review" leads, then "Approve now" for the owner.
+  // Enter on the first row takes the team action: "Send for review" (member) or "Approve now" (owner).
   const order = ["save_memory", "send", "save_local", "approve", "edit", "dismiss"]
   return [...card.actions].sort((a, b) => order.indexOf(a) - order.indexOf(b)).map((action) => all[action])
 }
@@ -117,9 +117,8 @@ function CardView(props: { api: TuiPluginApi; card: ProposalCard; onAction: (act
         renderFilter={false}
         skipFilter
         onSelect={(option) => props.onAction(option.value)}
-        actions={[...shortcut("approve", "a", "approve"), ...shortcut("edit", "e", "edit"), ...shortcut("dismiss", "n", card.choose ? "skip" : "not a rule")]}
+        actions={[...shortcut("edit", "e", "edit"), ...shortcut("dismiss", "n", card.choose ? "skip" : "not a rule")]}
         bindings={[
-          ...(card.actions.includes("approve") ? [{ key: "a", cmd: "rules.card.approve" }] : []),
           ...(card.actions.includes("edit") ? [{ key: "e", cmd: "rules.card.edit" }] : []),
           { key: "n", cmd: "rules.card.dismiss" },
         ]}

@@ -6,7 +6,8 @@
 //
 // The card never blocks the turn. Actions depend on the project:
 // - linked, member: send (to the owner's review queue), edit, dismiss ("Not a rule")
-// - linked, owner: approve too (send and approve in one step; "approve anyway" when flagged)
+// - linked, owner: approve instead of send (send and approve in one step; "approve anyway" when flagged): an owner
+//   reviewing their own proposal later adds nothing, so the card offers one team action, never both
 // - not linked: save_local (project training, no review), edit, dismiss
 import { randomUUID } from "node:crypto"
 import { Bus } from "@/bus"
@@ -60,7 +61,7 @@ function build(id: string, sessionID: string, draft: Draft, state: RulesStore.St
   const linked = !!state.scope && !!state.workspace
   const flag = verificationWarning(draft.text)
   const team: ProposalCard["actions"] = linked
-    ? [...(state.workspace!.is_owner ? (["approve"] as const) : []), "send"]
+    ? [state.workspace!.is_owner ? "approve" : "send"]
     : ["save_local"]
   const actions: ProposalCard["actions"] = draft.choose ? ["save_memory", ...team, "dismiss"] : [...team, "edit", "dismiss"]
   return {

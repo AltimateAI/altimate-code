@@ -133,8 +133,8 @@ describe("proposal card", () => {
     await RulesStore.update(root, (s) => Object.assign(s, linked()))
     expect((await ask())!.actions).toEqual(["send", "edit", "dismiss"])
     await RulesStore.update(root, (s) => { s.workspace = { name: "Team", owner_name: "Olive", is_owner: true } })
-    expect((await ask())!.actions).toEqual(["approve", "send", "edit", "dismiss"])
-    expect((await ask({ ...draft, choose: true } as typeof draft))!.actions).toEqual(["save_memory", "approve", "send", "dismiss"])
+    expect((await ask())!.actions).toEqual(["approve", "edit", "dismiss"])
+    expect((await ask({ ...draft, choose: true } as typeof draft))!.actions).toEqual(["save_memory", "approve", "dismiss"])
   })
 
   test("an edit is linted like any rule and flags verification bypasses", async () => {

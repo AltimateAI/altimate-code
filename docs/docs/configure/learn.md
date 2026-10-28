@@ -195,7 +195,7 @@ In a project linked to an Altimate workspace (`altimate-code link`), what you te
 - you correct a team rule the session was shown (the card proposes changing it, with the current text struck through);
 - you ask the agent to remember something as a rule.
 
-The card shows the proposed wording, what it applies to, why it was proposed and your correction. **Enter** sends it to the owner's review queue (the workspace's **Rules** tab), **e** edits the wording, **n** ("Not a rule") stops that topic from being proposed for 30 days, and the owner also sees **a** to approve it at once. A rule that tells the agent to skip or disable verification (tests, CI, hooks, `--no-verify`) is flagged and needs "approve anyway". Nothing reaches a teammate until it is approved.
+The card shows the proposed wording, what it applies to, why it was proposed and your correction. **Enter** sends it to the owner's review queue (the workspace's **Rules** tab); for the workspace owner, **Enter** approves it at once instead. **e** edits the wording, and **n** ("Not a rule") stops that topic from being proposed for 30 days. A rule that tells the agent to skip or disable verification (tests, CI, hooks, `--no-verify`) is flagged and needs "approve anyway". Nothing reaches a teammate until it is approved.
 
 **Rule or memory.** A personal preference ("I prefer CTEs") or a fact ("our warehouse is Snowflake") is saved to memory without review. When the wording does not say which, the card asks: Memory, Team rule, or Skip.
 
