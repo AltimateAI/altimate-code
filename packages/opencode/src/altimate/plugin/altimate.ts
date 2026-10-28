@@ -504,6 +504,10 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
                     altimateInstanceName: creds.instance,
                     altimateApiKey: authToken,
                   })
+                  // altimate_change start — telemetry is already running in this process; stamp the
+                  // user id and tenant of the account just signed in on the events that follow.
+                  void Telemetry.refreshIdentity().catch(() => {})
+                  // altimate_change end
                   // altimate_change start — onboarding funnel: auth succeeded and the instance
                   // is live. The instance name is the customer's tenant identifier and is never
                   // sent. time_to_connect_ms runs from the start of authorize() — before the

@@ -1,4 +1,3 @@
-import { Account } from "@/account"
 import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -6,6 +5,9 @@ import { Log } from "@/altimate/util/log"
 import { TraceContext } from "@/altimate/observability/trace-context"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "@/altimate/util/machine-id"
+import { TelemetryIdentity } from "./identity"
+import { OptOutMarker } from "./opt-out"
+import { TelemetryConfig } from "./config-state"
 import { createHash, randomUUID } from "crypto"
 // altimate_change — first-run health: the event-loop stall monitor labels which thread stalled
 import { isMainThread } from "node:worker_threads"
@@ -65,9 +67,17 @@ const log = Log.create({ service: "telemetry" })
  */
 function isAutomatedRun(): boolean {
   if (process.env.ALTIMATE_TELEMETRY_FORCE === "true") return false
+  return underTestRunner()
+}
+
+// altimate_change start — the raw test-runner check, without the force flag. The opt-out marker
+// reads and writes files in the real home directory, so under a test runner it stays inert unless
+// a suite opts in through Telemetry.allowOptOutUnderTestRunner(); the force flag must not reach it.
+function underTestRunner(): boolean {
   if (process.env.NODE_ENV === "test") return true
   return Boolean(process.env.BUN_TEST || process.env.VITEST || process.env.JEST_WORKER_ID)
 }
+// altimate_change end
 
 // altimate_change start — composed path-masking rules (shared fragments)
 // R: one path-run character — anything but whitespace/separators/quotes,
@@ -846,6 +856,14 @@ export namespace Telemetry {
     // The 0.11.0 first-run freeze (an in-process @npmcli/arborist install blocking the loop for minutes)
     // was invisible for two months: nothing timed startup or registration, and a blocked loop cannot
     // flush, so a killed process left only `session_start`. These events close that gap.
+    | {
+        /** The last event an opted-out machine sends; nothing follows it until telemetry is
+         * turned back on. Built directly in recordOptOut(), never through track(). */
+        type: "telemetry_opted_out"
+        timestamp: number
+        /** Where the opt-out was set: an environment variable or the user config. */
+        opt_out_source: "env" | "config"
+      }
     | {
         type: "startup_ready"
         timestamp: number
@@ -2067,7 +2085,40 @@ export namespace Telemetry {
   let enabled = false
   let buffer: Event[] = []
   let flushTimer: ReturnType<typeof setInterval> | undefined
-  let userEmail = ""
+  // altimate_change — who the machine is signed in as (backend user uuid + tenant), for the
+  // funnel join with web events. Resolved off the stored credential in doInit(); see identity.ts.
+  let identity: TelemetryIdentity.Identity | undefined
+  // altimate_change — resolutions are detached (doInit does not await the backend), so each one
+  // carries the generation it started in and applies only while it is still the newest: a
+  // resolution started under credential A must not land after a sign-in installed B, nor after
+  // shutdown() cleared the state. shutdown() and every new resolution bump it.
+  let identityGeneration = 0
+  // altimate_change — stamp of the credential files when the current identity was resolved; a
+  // flush that sees a different stamp re-resolves, so a sign-in, sign-out or key change made on
+  // disk by any path (manual file edit, the TUI, another thread's auth flow) is picked up within
+  // one flush interval instead of at the next process start.
+  let identityStamp = ""
+  // altimate_change — a resolution that failed while a credential exists (backend down, timeout)
+  // is tried again at the first flush after this time, not on every 5 s flush. The stamp of the
+  // failed credential is kept, so a different credential appearing in the meantime is noticed at
+  // once by the stamp comparison; the backoff only throttles retries of the unchanged one.
+  const IDENTITY_RETRY_MS = 60_000
+  let identityRetryAt = 0 // 0: no retry pending
+  // altimate_change start — bumped by shutdown(); a detached opt-out send started under an earlier
+  // lifecycle does not post. Its marker write keys on markerGeneration instead, which only an
+  // enabled init bumps: a send accepted across a shutdown while still opted out keeps its marker.
+  let lifecycleGeneration = 0
+  let markerGeneration = 0
+  // altimate_change end
+  // altimate_change — false when this init could not read the user config: an opted-out user may be
+  // behind it, so no identity is resolved (at init, at a flush or on refresh) until an init that can.
+  let identityAllowed = true
+  // altimate_change — the project the command will run in, for reading the config without an
+  // Instance: the CLI initialises telemetry before a command changes into its `--dir` or project.
+  let configDirectory: string | undefined
+  export function setConfigDirectory(directory: string | undefined) {
+    configDirectory = directory
+  }
   let machineId = ""
   let sessionId = ""
   let projectId = ""
@@ -2143,7 +2194,16 @@ export namespace Telemetry {
     return { iKey, endpoint: `${base}v2/track` }
   }
 
-  function toAppInsightsEnvelopes(events: Event[], cfg: AppInsightsConfig): object[] {
+  // altimate_change — `ids` lets a caller build envelopes for a machine and identity other than
+  // the module's current state (the opt-out marker runs while telemetry is disabled and must not
+  // touch the state an enabled init may be using concurrently).
+  function toAppInsightsEnvelopes(
+    events: Event[],
+    cfg: AppInsightsConfig,
+    ids?: { machineId: string; identity: TelemetryIdentity.Identity | undefined },
+  ): object[] {
+    const mid = ids ? ids.machineId : machineId
+    const who = ids ? ids.identity : identity
     // Process-level client, read live from the env flag (defaults to "cli") so events
     // emitted before any prompt runs — startup, connection setup, standalone CLI
     // subcommands — are labelled correctly instead of stuck at a hardcoded default.
@@ -2163,7 +2223,10 @@ export namespace Telemetry {
         client: "altimate-code",
         source: clientSource,
         project_id: fields.project_id ?? projectId,
-        ...(machineId && { machine_id: machineId }),
+        ...(mid && { machine_id: mid }),
+        // altimate_change — the backend user uuid and tenant when signed in to Altimate, so a CLI
+        // row joins the PostHog person and the backend record for the same account.
+        ...(who && { user_id: who.user_id, tenant: who.tenant }),
         // altimate_change — groups every event from one process launch. The onboarding funnel
         // spans the TUI main thread and the server worker, and most of it runs before any chat
         // session exists, so `session_id` is empty for the first half and real for the second —
@@ -2190,12 +2253,10 @@ export namespace Telemetry {
         iKey: cfg.iKey,
         tags: {
           "ai.session.id": sid || "startup",
-          // altimate_change start — use machine_id as fallback for anonymous user identification
-          // This IMPROVES privacy: previously all anonymous users shared ai.user.id=""
-          // which made them appear as one mega-user in analytics. Using the random UUID
-          // (already sent as a custom property) gives each machine a distinct identity
-          // without any PII. machine_id is a crypto.randomUUID() stored locally.
-          "ai.user.id": userEmail || machineId || "",
+          // altimate_change start — the backend user uuid when signed in, else the machine id.
+          // Anonymous machines each keep a distinct identity (the random machine UUID, already a
+          // custom property) instead of sharing ai.user.id="". No email, hashed or not, is sent.
+          "ai.user.id": who?.user_id || mid || "",
           // altimate_change end
           "ai.cloud.role": "altimate",
           "ai.application.ver": InstallationVersion,
@@ -2268,20 +2329,32 @@ export namespace Telemetry {
       // (previously only wired in test fixtures, silent no-op in product).
       if (Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")) {
         buffer = []
+        void recordOptOut("env")
         return
       }
       // Config.get() may throw outside Instance context (e.g. CLI middleware
-      // before Instance.provide()). Treat config failures as "not disabled" —
-      // the env var check above is the early-init escape hatch.
+      // before Instance.provide()). Telemetry stays enabled then, as before.
+      // altimate_change start — but the opt-out still counts: read `telemetry.disabled` from the
+      // config files directly, and when even that fails, skip what an opt-out forbids (clearing the
+      // opt-out marker, resolving the account) while ordinary rows keep flowing.
+      let configUnreadable = false
       try {
         const userConfig = (await Config.get()) as any
         if (userConfig.telemetry?.disabled) {
           buffer = []
+          void recordOptOut("config")
           return
         }
       } catch {
-        // Config unavailable — proceed with telemetry enabled
+        const state = await TelemetryConfig.disabledState(configDirectory)
+        if (state === "disabled") {
+          buffer = []
+          void recordOptOut("config")
+          return
+        }
+        configUnreadable = state === "unreadable"
       }
+      // altimate_change end
       // App Insights: env var overrides default (for dev/testing), otherwise use the baked-in key.
       // The baked-in key is refused under a test runner so suites never ship to the production
       // resource. Note this deliberately does NOT key on CI — see isAutomatedRun.
@@ -2301,21 +2374,25 @@ export namespace Telemetry {
         return
       }
       appInsights = cfg
-      try {
-        // altimate_change start — bridge merge: Account.active() became async in v1.4.0
-        const account = await Account.active()
-        if (account?.email) {
-          userEmail = createHash("sha256").update(account.email.toLowerCase().trim()).digest("hex")
-        }
-        // altimate_change end
-      } catch {
-        // Account unavailable — proceed without user ID
-      }
+      identityAllowed = !configUnreadable
+      // altimate_change start — identity for the funnel join: the backend user uuid and tenant from
+      // the stored Altimate credential, cached per credential so this costs no network unless the
+      // credential changed. Replaces the hashed account email. Not awaited: events flushed before it
+      // resolves carry only the machine id, and telemetry never waits on the backend.
+      if (identityAllowed) void resolveIdentity()
+      // altimate_change end
       // altimate_change — use shared getOrCreateMachineId() from util/machine-id.ts.
       // Returns "" on all error conditions (ENOENT: mints new UUID; EACCES/corrupt/oversized:
       // logs + returns ""). No try/catch needed — all paths are handled inside.
       machineId = getOrCreateMachineId()
       enabled = true
+      // altimate_change — telemetry is on: forget the opt-out marker, so turning it off again is
+      // recorded again. The bump first, so a send still in flight never recreates it. Not when the
+      // config could not be read: the user may have opted out there.
+      if (!configUnreadable) {
+        markerGeneration++
+        OptOutMarker.clear()
+      }
       log.info("telemetry initialized", { mode: "appinsights" })
       // altimate_change — clear any existing interval before installing a new one. doInit() can
       // run more than once per process (init/shutdown cycles per session in prompt.ts), and
@@ -2382,6 +2459,111 @@ export namespace Telemetry {
     workspaceUse.delete(useKey(sessionId, turn))
     if (turn !== undefined && sessionTurns.get(sessionId) !== turn) return
     sessionTurns.delete(sessionId)
+  }
+  // altimate_change end
+
+  // altimate_change start — re-resolve the signed-in user after a sign-in or sign-out in this
+  // process (the browser login flow saves the credential while telemetry is already running).
+  function resolveIdentity(opts: { refresh?: boolean } = {}): Promise<void> {
+    const generation = ++identityGeneration
+    identityStamp = TelemetryIdentity.credentialStamp()
+    identityRetryAt = 0
+    return TelemetryIdentity.resolveWithOutcome(opts)
+      .then(({ identity: resolved, outcome }) => {
+        if (generation !== identityGeneration) return
+        identity = resolved
+        // Only a transient failure is retried, at a later flush. A rejected credential (401/403)
+        // stays rejected until it changes, which the stamp comparison notices without polling.
+        if (outcome === "error") identityRetryAt = Date.now() + IDENTITY_RETRY_MS
+      })
+      .catch(() => {})
+  }
+
+  /** Re-resolve who the machine is signed in as; clears it when no credential is stored. Events
+   * already buffered are flushed under the identity they were tracked with first, and events
+   * tracked while the new answer is pending carry no account rather than the previous one.
+   * Does nothing while telemetry is disabled. */
+  export async function refreshIdentity(): Promise<void> {
+    // Opted out (or not initialised): no lookup; an enabled init resolves from the stored credential.
+    if (!enabled || !identityAllowed) return
+    await flush()
+    identity = undefined
+    await resolveIdentity({ refresh: true })
+  }
+
+  /** Test seam. */
+  export function identityForTest(): TelemetryIdentity.Identity | undefined {
+    return identity
+  }
+
+  /** Test seam: end a pending retry backoff so the next flush re-resolves. */
+  export function retryIdentityNowForTest() {
+    if (identityRetryAt !== 0) identityRetryAt = 1
+  }
+  // altimate_change end
+
+  // altimate_change start — the final event of an opted-out machine. Sent once, only from a
+  // machine that has sent telemetry before (a machine id exists; none is minted here), under the
+  // same sink rules as doInit(). It carries the machine id and the opt-out source, never the account,
+  // project or launch. One send at a time across threads and processes (OptOutMarker.claim). The
+  // marker is written only once the ingest endpoint accepted the event, so an offline launch tries
+  // again next time; after the marker, nothing is sent until telemetry is re-enabled. Not awaited:
+  // an opted-out launch must not wait on the network.
+  const OPT_OUT_TIMEOUT_MS = 3_000
+  let optOutUnderTestRunner = false
+  /** Test seam: let a suite that redirects the home directory exercise recordOptOut(). */
+  export function allowOptOutUnderTestRunner(on: boolean) {
+    optOutUnderTestRunner = on
+  }
+  async function recordOptOut(source: "env" | "config"): Promise<void> {
+    const lifecycle = lifecycleGeneration
+    const marker = markerGeneration
+    try {
+      if (underTestRunner() && !optOutUnderTestRunner) return
+      // The force flag is a developer knob for running telemetry under a test runner; the opt-out
+      // marker is about real users, and "disabled" must keep winning over "force" to the letter.
+      if (process.env.ALTIMATE_TELEMETRY_FORCE === "true") return
+      if (OptOutMarker.exists()) return
+      const id = OptOutMarker.readMachineId()
+      if (!id) return
+      const explicit = process.env.APPLICATIONINSIGHTS_CONNECTION_STRING
+      const cfg = parseConnectionString(explicit ?? DEFAULT_CONNECTION_STRING)
+      if (!cfg) return
+      const envelopes = toAppInsightsEnvelopes(
+        [{ type: "telemetry_opted_out", timestamp: Date.now(), opt_out_source: source }],
+        cfg,
+        { machineId: id, identity: undefined },
+      ) as Array<{ data: { baseData: { properties: Record<string, string> } } }>
+      for (const envelope of envelopes) {
+        delete envelope.data.baseData.properties.project_id
+        delete envelope.data.baseData.properties.launch_id
+      }
+      // A shutdown since this task started means a later init may own the marker now: do not
+      // send, and let the next disabled init start over.
+      if (lifecycle !== lifecycleGeneration) return
+      const claim = OptOutMarker.claim()
+      if (!claim) return
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), OPT_OUT_TIMEOUT_MS)
+      try {
+        // Another send may have finished between the marker check above and the claim.
+        if (OptOutMarker.exists()) return
+        const res = await fetch(cfg.endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(envelopes),
+          signal: controller.signal,
+        })
+        // Accepted: write the marker unless telemetry was turned back on meanwhile, in this process
+        // (the generation) or another one (an enabled init removes the claim).
+        if (res.ok && marker === markerGeneration && OptOutMarker.holds(claim)) OptOutMarker.write()
+      } finally {
+        clearTimeout(timeout)
+        OptOutMarker.release(claim)
+      }
+    } catch {
+      // The opt-out path never surfaces: a missed marker only means one more attempt next launch.
+    }
   }
   // altimate_change end
 
@@ -2605,6 +2787,20 @@ export namespace Telemetry {
   }
 
   async function doFlush(timeoutMs: number) {
+    // altimate_change start — this batch is attributed to the identity in force when it is sent,
+    // captured before the credential check below can start replacing it; then notice a credential
+    // change on disk and re-resolve (cheap: two stats, and the cache answers unless the key changed).
+    const who = identity
+    const mid = machineId
+    if (enabled && identityAllowed) {
+      const stamp = TelemetryIdentity.credentialStamp()
+      const retryDue = identityRetryAt !== 0 && Date.now() >= identityRetryAt
+      if (stamp !== identityStamp || retryDue) {
+        identity = undefined
+        void resolveIdentity()
+      }
+    }
+    // altimate_change end
     if (!enabled || buffer.length === 0 || !appInsights) return
 
     const events = buffer.splice(0, buffer.length)
@@ -2628,7 +2824,7 @@ export namespace Telemetry {
       const response = await fetch(appInsights.endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(toAppInsightsEnvelopes(events, appInsights)),
+        body: JSON.stringify(toAppInsightsEnvelopes(events, appInsights, { machineId: mid, identity: who })),
         signal: controller.signal,
       })
       if (!response.ok) {
@@ -2767,10 +2963,14 @@ export namespace Telemetry {
     sessionId = ""
     projectId = ""
     machineId = ""
-    // doInit() only assigns userEmail when Account.active() returns one, so without this a
-    // logout followed by a re-init in the same process kept hashing the previous account into
-    // ai.user.id.
-    userEmail = ""
+    // Cleared so a sign-out followed by a re-init in the same process does not keep stamping the
+    // previous account on events; doInit() resolves it again from whatever credential is on disk.
+    // The generation bump makes any resolution still in flight a no-op when it settles.
+    identityGeneration++
+    lifecycleGeneration++
+    identity = undefined
+    identityStamp = ""
+    identityRetryAt = 0
     // NOTE: cachedLaunchId is deliberately NOT cleared here. session/prompt.ts shuts telemetry
     // down at the end of every session, so clearing it would mint a fresh launch_id per prompt in
     // a long-lived `serve` process and shatter the per-launch correlation it exists to provide.

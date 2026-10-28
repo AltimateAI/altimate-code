@@ -18,6 +18,10 @@ export function match(str: string, pattern: string) {
   return new RegExp("^" + escaped + "$", flags).test(str)
 }
 
+// altimate_change start — preserve POSIX backslashes when matching filesystem paths
+export { matchPath } from "@opencode-ai/core/util/wildcard"
+// altimate_change end
+
 export function all(input: string, patterns: Record<string, any>) {
   const sorted = pipe(patterns, Object.entries, sortBy([([key]) => key.length, "asc"], [([key]) => key, "asc"]))
   let result = undefined

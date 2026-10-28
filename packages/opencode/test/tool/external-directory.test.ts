@@ -1,13 +1,20 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { describe, expect } from "bun:test"
+import fs from "fs"
 import path from "path"
 import { Effect } from "effect"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import type { Tool } from "@/tool/tool"
-import { assertExternalDirectoryEffect } from "../../src/tool/external-directory"
+import {
+  assertExternalDirectoryEffect,
+  assertExternalDirectoryLegacy,
+  assertSensitiveWrite,
+  assertSensitiveWriteEffect,
+} from "../../src/tool/external-directory"
 import { Filesystem } from "@/util/filesystem"
+import { InstanceState } from "@/effect/instance-state"
+import { Instance } from "../../src/project/instance"
 import { TestInstance, tmpdirScoped } from "../fixture/fixture"
-import type { Permission } from "../../src/permission"
 import { SessionID, MessageID } from "../../src/session/schema"
 import { testEffect } from "../lib/effect"
 
@@ -23,8 +30,7 @@ const baseCtx: Omit<Tool.Context, "ask"> = {
   metadata: () => Effect.void,
 }
 
-const glob = (p: string) =>
-  process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p.replaceAll("\\", "/")
+const glob = (p: string) => (process.platform === "win32" ? Filesystem.normalizePathPattern(p) : p)
 
 function makeCtx() {
   const requests: Array<Omit<PermissionV1.Request, "id" | "sessionID" | "tool">> = []
@@ -59,6 +65,118 @@ describe("tool.assertExternalDirectory", () => {
       expect(requests.length).toBe(0)
     }),
   )
+
+  it.instance("asks for an external directory entry that resolves inside the project", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const outside = yield* tmpdirScoped()
+      const link = path.join(outside, "project-link")
+      fs.symlinkSync(test.directory, link, process.platform === "win32" ? "junction" : "dir")
+      // The link entry itself: deleting or moving it acts on the outside directory.
+      const target = link
+      const expected =
+        process.platform === "win32"
+          ? path.join(path.resolve(Filesystem.windowsPath(outside)), "*")
+          : glob(path.join(outside, "*"))
+
+      const { requests, ctx } = makeCtx()
+      yield* assertExternalDirectoryEffect(ctx, target)
+      expect(requests[0]?.patterns).toContain(expected)
+
+      const legacy: string[][] = []
+      const instance = yield* InstanceState.context
+      yield* Effect.promise(() =>
+        Instance.restore(instance, () =>
+          assertExternalDirectoryLegacy(
+            { ...baseCtx, metadata: () => {}, ask: async (req) => void legacy.push([...req.patterns]) },
+            target,
+          ),
+        ),
+      )
+      expect(legacy[0]).toContain(expected)
+    }),
+  )
+
+  it.instance("treats a project file spelled through a link to the project as inside it", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const outside = yield* tmpdirScoped()
+      const link = path.join(outside, "project-link")
+      fs.symlinkSync(test.directory, link, process.platform === "win32" ? "junction" : "dir")
+      // Same shape as /var/... for a project at /private/var/... on macOS.
+      const target = path.join(link, "file.txt")
+
+      const { requests, ctx } = makeCtx()
+      yield* assertExternalDirectoryEffect(ctx, target)
+      expect(requests).toEqual([])
+
+      const legacy: string[][] = []
+      const instance = yield* InstanceState.context
+      yield* Effect.promise(() =>
+        Instance.restore(instance, () =>
+          assertExternalDirectoryLegacy(
+            { ...baseCtx, metadata: () => {}, ask: async (req) => void legacy.push([...req.patterns]) },
+            target,
+          ),
+        ),
+      )
+      expect(legacy).toEqual([])
+    }),
+  )
+
+  if (process.platform !== "win32") {
+    it.instance("preserves a literal backslash in an external POSIX directory", () =>
+      Effect.gen(function* () {
+        const outside = yield* tmpdirScoped()
+        const directory = path.join(outside, "allowed\\sibling")
+        fs.mkdirSync(directory)
+        const target = path.join(directory, "file.txt")
+        const { requests, ctx } = makeCtx()
+
+        yield* assertExternalDirectoryEffect(ctx, target)
+
+        expect(requests[0]?.patterns).toContain(path.join(directory, "*"))
+        expect(requests[0]?.patterns).not.toContain(path.join(outside, "allowed/sibling", "*"))
+      }),
+    )
+
+    it.instance("asks when '..' after a link inside the project leads outside it", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const outside = fs.realpathSync(yield* tmpdirScoped())
+        fs.mkdirSync(path.join(outside, "deep"))
+        fs.symlinkSync(path.join(outside, "deep"), path.join(test.directory, "link"))
+        // Written by hand so ".." follows the link, as the kernel does. The lexical spelling
+        // (<project>/file.txt) exists, which is what made whole-path realpath call it in-project.
+        fs.writeFileSync(path.join(test.directory, "file.txt"), "decoy")
+        fs.writeFileSync(path.join(outside, "file.txt"), "outside")
+        const target = `${test.directory}/link/../file.txt`
+        const expected = glob(path.join(outside, "*"))
+
+        const { requests, ctx } = makeCtx()
+        yield* assertExternalDirectoryEffect(ctx, target)
+        expect(requests[0]?.patterns.at(-1)).toBe(expected)
+
+        const legacy: string[][] = []
+        const instance = yield* InstanceState.context
+        yield* Effect.promise(() =>
+          Instance.restore(instance, () =>
+            assertExternalDirectoryLegacy(
+              { ...baseCtx, metadata: () => {}, ask: async (req) => void legacy.push([...req.patterns]) },
+              target,
+            ),
+          ),
+        )
+        expect(legacy[0]?.at(-1)).toBe(expected)
+
+        // A link in the project whose target does not exist yet: a write through it lands outside.
+        fs.symlinkSync(path.join(outside, "new.txt"), path.join(test.directory, "dangling"))
+        const dangling = makeCtx()
+        yield* assertExternalDirectoryEffect(dangling.ctx, path.join(test.directory, "dangling"))
+        expect(dangling.requests[0]?.patterns.at(-1)).toBe(expected)
+      }),
+    )
+  }
 
   it.instance("asks with a single canonical glob", () =>
     Effect.gen(function* () {
@@ -103,6 +221,82 @@ describe("tool.assertExternalDirectory", () => {
       expect(requests.length).toBe(0)
     }),
   )
+
+  if (process.platform !== "win32") {
+    it.instance("also asks for the resolved directory of a symlink that points elsewhere", () =>
+      Effect.gen(function* () {
+        const outerTmp = fs.realpathSync(yield* tmpdirScoped())
+        const allowed = path.join(outerTmp, "allowed")
+        const elsewhere = path.join(outerTmp, "elsewhere")
+        fs.mkdirSync(allowed)
+        fs.mkdirSync(elsewhere)
+        fs.writeFileSync(path.join(elsewhere, "secret.txt"), "x")
+        fs.symlinkSync(elsewhere, path.join(allowed, "linked-dir"))
+        fs.symlinkSync(path.join(elsewhere, "secret.txt"), path.join(allowed, "linked-file.txt"))
+        fs.symlinkSync(path.join(elsewhere, "not-yet.txt"), path.join(allowed, "dangling.txt"))
+
+        for (const target of [path.join(allowed, "linked-dir", "secret.txt"), path.join(allowed, "linked-file.txt")]) {
+          const { requests, ctx } = makeCtx()
+          yield* assertExternalDirectoryEffect(ctx, target)
+          const expected = [glob(path.join(path.dirname(target), "*")), glob(path.join(elsewhere, "*"))]
+          expect(requests[0]!.patterns, target).toEqual(expected)
+          // Only the path as written is remembered; the resolved directory is marked for evaluation.
+          expect(requests[0]!.always, target).toEqual(expected.slice(0, 1))
+          expect(requests[0]!.metadata.resolvedPatterns, target).toEqual(expected.slice(1))
+        }
+
+        // A directory reached through the link (grep), a file in a subdirectory that does not exist
+        // yet (write), and ".." after the link all resolve to where the kernel would go.
+        const cases: Array<[string, "file" | "directory", string]> = [
+          [path.join(allowed, "linked-dir"), "directory", elsewhere],
+          [
+            path.join(allowed, "linked-dir", "new", "deeper", "file.txt"),
+            "file",
+            path.join(elsewhere, "new", "deeper"),
+          ],
+          // Written by hand: path.join would collapse the ".." before the link is followed.
+          [`${allowed}/linked-dir/../file.txt`, "file", outerTmp],
+          // A link whose target does not exist yet: a write through it lands in the target's directory.
+          [path.join(allowed, "dangling.txt"), "file", elsewhere],
+        ]
+        for (const [target, kind, real] of cases) {
+          const { requests, ctx } = makeCtx()
+          yield* assertExternalDirectoryEffect(ctx, target, { kind })
+          expect(requests[0]!.patterns.at(-1), target).toBe(glob(path.join(real, "*")))
+        }
+
+        // glob and ls use the Promise-based variant; it asks for the resolved directory too.
+        const legacy: string[][] = []
+        const legacyAsks: Parameters<Tool.Context["ask"]>[0][] = []
+        const instance = yield* InstanceState.context
+        yield* Effect.promise(() =>
+          Instance.restore(instance, () =>
+            assertExternalDirectoryLegacy(
+              {
+                ...baseCtx,
+                metadata: () => {},
+                ask: async (req) => {
+                  legacy.push([...req.patterns])
+                  legacyAsks.push(req)
+                },
+              },
+              path.join(allowed, "linked-dir"),
+              { kind: "directory" },
+            ),
+          ),
+        )
+        expect(legacy).toEqual([[glob(path.join(allowed, "linked-dir", "*")), glob(path.join(elsewhere, "*"))]])
+        expect(legacyAsks[0]!.always).toEqual([glob(path.join(allowed, "linked-dir", "*"))])
+        expect(legacyAsks[0]!.metadata.resolvedPatterns).toEqual([glob(path.join(elsewhere, "*"))])
+
+        // A plain file in the allowed directory asks only for that directory.
+        fs.writeFileSync(path.join(allowed, "plain.txt"), "x")
+        const { requests, ctx } = makeCtx()
+        yield* assertExternalDirectoryEffect(ctx, path.join(allowed, "plain.txt"))
+        expect(requests[0]!.patterns).toEqual([glob(path.join(allowed, "*"))])
+      }),
+    )
+  }
 
   if (process.platform === "win32") {
     it.instance(
@@ -152,4 +346,30 @@ describe("tool.assertExternalDirectory", () => {
       { git: true },
     )
   }
+})
+
+describe("tool.assertSensitiveWrite", () => {
+  it.instance("checks the resolved destination of an innocently named project link", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const outside = yield* tmpdirScoped()
+      const sensitive = path.join(outside, ".ssh")
+      fs.mkdirSync(sensitive)
+      const link = path.join(test.directory, "config")
+      fs.symlinkSync(sensitive, link, process.platform === "win32" ? "junction" : "dir")
+      const target = path.join(link, "credentials")
+
+      const { requests, ctx } = makeCtx()
+      yield* assertSensitiveWriteEffect(ctx, target)
+      expect(requests).toHaveLength(1)
+      expect(requests[0]?.permission).toBe("sensitive_write")
+      expect(requests[0]?.metadata.sensitive).toBe(".ssh")
+
+      const legacy = makeCtx()
+      const instance = yield* InstanceState.context
+      yield* Effect.promise(() => Instance.restore(instance, () => assertSensitiveWrite(legacy.ctx, target)))
+      expect(legacy.requests).toHaveLength(1)
+      expect(legacy.requests[0]?.patterns).toContain(path.relative(test.directory, path.join(sensitive, "credentials")))
+    }),
+  )
 })

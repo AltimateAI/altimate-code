@@ -391,6 +391,7 @@ async function req<T>(
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
         "x-tenant": instance,
+        ...AltimateApi.clientHeaders(),
       },
       signal: controller.signal,
       ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),

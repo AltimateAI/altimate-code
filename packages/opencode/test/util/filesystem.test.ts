@@ -651,4 +651,33 @@ describe("filesystem", () => {
       expect(Filesystem.normalizePathPattern(path.join(root, "*"))).toBe(path.join(root, "*"))
     })
   })
+  describe.skipIf(process.platform === "win32")("realLocation()", () => {
+    test("follows links, '..' after a link, missing segments and dangling links", async () => {
+      await using tmp = await tmpdir()
+      const root = realpathSync(tmp.path)
+      await fs.mkdir(path.join(root, "a", "b"), { recursive: true })
+      await fs.symlink(path.join(root, "a", "b"), path.join(root, "link"))
+      await fs.symlink(path.join(root, "a", "later.txt"), path.join(root, "dangling"))
+
+      expect(Filesystem.realLocation(path.join(root, "link", "x.txt"))).toBe(path.join(root, "a", "b", "x.txt"))
+      expect(Filesystem.realLocation(`${root}/link/../x.txt`)).toBe(path.join(root, "a", "x.txt"))
+      expect(Filesystem.realLocation(path.join(root, "link", "new", "x.txt"))).toBe(
+        path.join(root, "a", "b", "new", "x.txt"),
+      )
+      expect(Filesystem.realLocation(path.join(root, "dangling"))).toBe(path.join(root, "a", "later.txt"))
+      expect(Filesystem.realLocation("relative/path")).toBeUndefined()
+    })
+
+    test("stops a chain of dangling links that would branch exponentially", async () => {
+      await using tmp = await tmpdir()
+      const root = realpathSync(tmp.path)
+      // Each link names the next one twice, so following them per level would double the work.
+      for (let i = 0; i < 30; i++) await fs.symlink(`l${i + 1}/../l${i + 1}`, path.join(root, `l${i}`))
+      await fs.symlink("end", path.join(root, "l30"))
+
+      const started = Date.now()
+      expect(() => Filesystem.realLocation(path.join(root, "l0"))).toThrow("Too many symbolic links")
+      expect(Date.now() - started).toBeLessThan(10_000)
+    })
+  })
 })
