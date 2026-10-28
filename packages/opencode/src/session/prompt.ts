@@ -2196,14 +2196,16 @@ export namespace SessionPrompt {
         if (toolChain.length < 50) toolChain.push(part.tool)
         const isError = part.state?.status === "error"
         if (isError) {
+          const errorMsg =
+            part.state.status === "error" && typeof part.state.error === "string" ? part.state.error : "unknown"
+          // A user declining a permission prompt is a decision, not a tool failure
+          if (ErrorDetail.isUserRejection(errorMsg)) continue
           toolErrorCount++
           // Flush previous unrecovered error before recording new one
           if (pendingError) {
             if (errorRecords.length < 200) errorRecords.push({ ...pendingError, recovered: false, recoveryTool: "" })
           }
           lastToolWasError = true
-          const errorMsg =
-            part.state.status === "error" && typeof part.state.error === "string" ? part.state.error : "unknown"
           pendingError = {
             toolName: part.tool,
             toolCategory,
