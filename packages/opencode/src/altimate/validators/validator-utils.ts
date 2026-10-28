@@ -242,6 +242,36 @@ export async function runWithConcurrencyLimit<In, Out>(
   return results
 }
 
+/**
+ * Re-run, one at a time, the items whose parallel run came back as an error.
+ *
+ * Several `altimate-dbt` processes against one single-writer warehouse (DuckDB
+ * in particular) contend for it, and the loser reports an error that says
+ * nothing about the model. A serial retry removes that contention, so an error
+ * that survives it belongs to the model or the project. Timeouts are not
+ * retried (a second 60 s wait would only add delay) and neither are spawn
+ * failures (`null`).
+ */
+export async function retryErroredSerially<Out>(
+  items: string[],
+  outputs: Array<Out | null>,
+  run: (item: string) => Promise<Out | null>,
+  errorOf: (out: Out) => string | undefined,
+): Promise<{ outputs: Array<Out | null>; retried: number }> {
+  const next = [...outputs]
+  let retried = 0
+  for (let i = 0; i < items.length; i++) {
+    const out = outputs[i]
+    if (out === null || out === undefined) continue
+    const err = errorOf(out)
+    if (!err || err.startsWith("timed out")) continue
+    retried++
+    // A retry that cannot start (null) keeps the first error rather than erasing it.
+    next[i] = (await run(items[i]!)) ?? out
+  }
+  return { outputs: next, retried }
+}
+
 /** Maximum simultaneous altimate-dbt subprocesses per validator run. */
 export const VALIDATOR_CONCURRENCY =
   (() => {
