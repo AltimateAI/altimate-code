@@ -12,6 +12,7 @@ import { defaultInspectionSchema, resolveInspectionTable, resolveInspectionTarge
 import { discoverContainers } from "./docker-discovery"
 import { parseDbtProfiles } from "./dbt-profiles"
 import { runDataDiff } from "./data-diff"
+import { runFaultInjection } from "./fault-injection"
 import type {
   SqlExecuteParams,
   SqlExecuteResult,
@@ -33,6 +34,8 @@ import type {
   DbtProfilesResult,
   DataDiffParams,
   DataDiffResult,
+  DbtFaultInjectionParams,
+  DbtFaultInjectionResult,
 } from "../types"
 import type { ConnectionConfig, SchemaColumn } from "@altimateai/drivers"
 import { isQueryTimeoutError } from "@altimateai/drivers/types"
@@ -859,6 +862,11 @@ register("dbt.profiles", async (params: DbtProfilesParams): Promise<DbtProfilesR
 // --- data.diff ---
 register("data.diff", async (params: DataDiffParams): Promise<DataDiffResult> => {
   return runDataDiff(params)
+})
+
+// --- dbt.fault_injection ---
+register("dbt.fault_injection", async (params: DbtFaultInjectionParams): Promise<DbtFaultInjectionResult> => {
+  return runFaultInjection(params)
 })
 
 } // end registerAll

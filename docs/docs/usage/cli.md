@@ -28,6 +28,7 @@ altimate --agent analyst
 | ----------- | ------------------------------ |
 | `run`       | Run a prompt non-interactively |
 | `check`     | Run deterministic SQL checks (no LLM required) -- see [SQL Check](check.md) |
+| `fault-injection` | Find the upstream data faults a dbt project's tests miss (no LLM required) -- see [dbt Tools](../data-engineering/tools/dbt-tools.md#dbt_fault_injection) |
 | `serve`     | Start the HTTP API server      |
 | `web`       | Start the web UI               |
 | `agent`     | Agent management               |

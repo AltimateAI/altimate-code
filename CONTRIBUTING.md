@@ -87,6 +87,24 @@ bun run local         # build + run
 The script handles platform detection (including Rosetta 2), `NODE_PATH` setup
 for native modules like `@altimateai/altimate-core`, and binary resolution.
 
+#### Running fault injection against a locally built altimate-core
+
+`altimate-code fault-injection` and the `dbt_fault_injection` tool need `FaultInjectionSession`
+from `@altimateai/altimate-core`. To develop against a core build that is not published yet, point
+`ALTIMATE_CORE_DEV_PATH` at the built Node binding (the `crates/altimate-core-node` directory of an
+altimate-core checkout, after `npm run build` there). This is for development only: it loads a
+native addon from an arbitrary path, so published releases (`latest`, `beta`) ignore it, and the
+report says when it was used.
+
+```bash
+ALTIMATE_CORE_DEV_PATH=~/code/altimate-core/crates/altimate-core-node \
+ALTIMATE_DBT_PATH=~/venvs/dbt-duckdb/bin/dbt \
+  bun dev fault-injection path/to/dbt-project
+```
+
+The same two variables enable `test/altimate/fault-injection-e2e.test.ts`, which is skipped when
+dbt-duckdb or the engine class is unavailable.
+
 To compile all 12 platform targets (CI/release):
 
 ```bash

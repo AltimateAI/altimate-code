@@ -53,6 +53,7 @@ import { WarehouseRemoveTool } from "../../../src/altimate/tools/warehouse-remov
 import { WarehouseTestTool } from "../../../src/altimate/tools/warehouse-test"
 import { WarehouseDiscoverTool } from "../../../src/altimate/tools/warehouse-discover"
 import { DataDiffTool } from "../../../src/altimate/tools/data-diff"
+import { DbtFaultInjectionTool } from "../../../src/altimate/tools/dbt-fault-injection"
 
 // altimate-core engine bridge tools (sampling of the 27)
 import { AltimateCoreCheckTool } from "../../../src/altimate/tools/altimate-core-check"
@@ -103,6 +104,7 @@ describe("carry-forward: altimate tools present with stable ids", () => {
     expect(DbtProfilesTool.id).toBe("dbt_profiles")
     expect(DbtUnitTestGenTool.id).toBe("dbt_unit_test_gen")
     expect(DbtPrReviewTool.id).toBe("dbt_pr_review")
+    expect(DbtFaultInjectionTool.id).toBe("dbt_fault_injection")
   })
 
   test("warehouse / connection tools keep their ids", () => {
