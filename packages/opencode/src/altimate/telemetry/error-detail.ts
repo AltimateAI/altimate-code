@@ -2,6 +2,23 @@ import { Telemetry } from "./index"
 
 const MAX_MESSAGE = 200
 const PLACEHOLDER = "<x>"
+const CREDENTIAL_WORDS: ReadonlySet<string> = new Set([
+  "auth",
+  "authorization",
+  "bearer",
+  "cookie",
+  "credential",
+  "credentials",
+  "key",
+  "passphrase",
+  "passwd",
+  "password",
+  "pwd",
+  "secret",
+  "session",
+  "token",
+])
+
 /**
  * Fixed vocabulary of common error and diagnostic words. Credential words (password,
  * secret, token, key, auth, cookie, session, ...) are deliberately absent. Keep sorted.
@@ -375,8 +392,9 @@ export const ERROR_VOCABULARY: ReadonlySet<string> = new Set([
 /**
  * Fixed-vocabulary template of an error's first line. Words are split on any non-letter
  * character and lowercased; a word survives only if it is in ERROR_VOCABULARY, every other
- * run becomes `<x>`. The output holds only vocabulary words, `<x>` and spaces, so user
- * text, identifiers, paths, values and SQL cannot appear.
+ * run becomes `<x>`. A credential word and the rest of the line become one `<x>` too,
+ * because a credential value may itself consist of vocabulary words. The output holds
+ * only vocabulary words, `<x>` and spaces.
  */
 export function templateErrorMessage(raw: string): string {
   const first = raw.split(/[\r\n\u2028\u2029]/, 1)[0]
@@ -385,8 +403,8 @@ export function templateErrorMessage(raw: string): string {
     if (!token) continue
     const word = token.toLowerCase()
     const piece = ERROR_VOCABULARY.has(word) ? word : PLACEHOLDER
-    if (piece === PLACEHOLDER && out[out.length - 1] === PLACEHOLDER) continue
-    out.push(piece)
+    if (piece !== PLACEHOLDER || out[out.length - 1] !== PLACEHOLDER) out.push(piece)
+    if (CREDENTIAL_WORDS.has(word)) break
   }
   // non-letter characters (digits, symbols) only separate words and are dropped; unknown words they separated collapse into one placeholder
   return out.join(" ").slice(0, MAX_MESSAGE)

@@ -12,10 +12,13 @@ const CREDENTIAL_WORDS = [
   "token",
   "key",
   "auth",
+  "authorization",
   "credential",
+  "credentials",
   "bearer",
   "cookie",
   "session",
+  "passphrase",
 ]
 
 describe("templateErrorMessage", () => {
@@ -26,6 +29,30 @@ describe("templateErrorMessage", () => {
     ["Request failed with status 502", "request failed with status"],
   ])("readable: %s", (raw, expected) => {
     expect(templateErrorMessage(raw)).toBe(expected)
+  })
+
+  test.each(CREDENTIAL_WORDS)("masks vocabulary words after %s", (word) => {
+    expect(templateErrorMessage(`request failed with ${word}: connection refused`)).toBe("request failed with <x>")
+  })
+
+  test.each([
+    ["password is connection refused", "<x>"],
+    ["password=wrong user", "<x>"],
+    ["connection failed: PaSsWoRd=wrong user", "connection failed <x>"],
+    ['request failed: "password": "connection refused"', "request failed <x>"],
+    ["request failed: api_key=wrong user", "request failed <x>"],
+    ["request failed: access-token=connection refused", "request failed access <x>"],
+    ["request failed: opaque password=wrong user", "request failed <x>"],
+    ["password", "<x>"],
+    ["password=1234 !!!", "<x>"],
+  ])("masks the credential suffix: %s", (raw, expected) => {
+    expect(templateErrorMessage(raw)).toBe(expected)
+  })
+
+  test("matches whole credential words rather than substrings", () => {
+    expect(templateErrorMessage("keychain keyboard monkey tokenizer failed connection refused")).toBe(
+      "<x> failed connection refused",
+    )
   })
 
   const adversarial = [
@@ -79,6 +106,11 @@ describe("templateErrorMessage", () => {
     expect(templateErrorMessage("first line\nsecond line")).toBe("first line")
     expect(templateErrorMessage("error ".repeat(200)).length).toBeLessThanOrEqual(200)
   })
+
+  test.each(["\n", "\r", "\r\n", "\u2028", "\u2029"])("does not inspect later lines after %j", (newline) => {
+    expect(templateErrorMessage(`connection refused${newline}password is wrong user`)).toBe("connection refused")
+    expect(templateErrorMessage(`password is wrong user${newline}connection refused`)).toBe("<x>")
+  })
 })
 
 describe("error_fingerprint wiring", () => {
@@ -103,6 +135,23 @@ describe("error_fingerprint wiring", () => {
     expect(ev.error_message).toBe("column <x> number does not exist in table <x>")
     expect(ev.error_hash).toBe(d.errorHash)
     expect("stack" in ev).toBe(false)
+  })
+
+  test("credential suffix is hidden in the event without changing the hash", () => {
+    const raw = "request failed: password is connection refused"
+    const detail = describeToolError(raw)
+    const event = buildErrorFingerprintEvent("s1", {
+      ...detail,
+      errorClass: "unknown",
+      toolName: "bash",
+      toolCategory: "shell",
+      recovered: false,
+      recoveryTool: "",
+    })
+    expect(event).toMatchObject({
+      error_message: "request failed <x>",
+      error_hash: Telemetry.hashError(Telemetry.maskString(raw).slice(0, 500)),
+    })
   })
 
   test("prompt.ts emits through these helpers", async () => {
