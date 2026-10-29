@@ -18,7 +18,7 @@ export interface Summary {
   queued: number
   learning: boolean
   /** Who decided `learning`: the person's own setting, or the workspace's "Learn from sessions". */
-  learning_source: "you" | "workspace" | "default"
+  learning_source: RuleTrigger.LearningSource
   /** The person's `/rules` choice, when they made one (absent: following config or the workspace). */
   personal_learning?: boolean
   pulled_at?: string
@@ -31,6 +31,8 @@ export interface Summary {
 export async function summary(root: string, learn: LearnConfig, env: NodeJS.ProcessEnv = process.env): Promise<Summary> {
   const state = await RulesStore.read(root)
   const learning = RuleTrigger.learningDecision(learn, state, env)
+  // Dropped proposals first: the person was told they were queued, and a later pull does not clear it.
+  const lastError = [RulesStore.scopeDropNote(state), state.last_error].filter(Boolean).join("; ")
   return {
     linked: !!state.workspace,
     ...(state.workspace ? { workspace: state.workspace } : {}),
@@ -42,7 +44,7 @@ export async function summary(root: string, learn: LearnConfig, env: NodeJS.Proc
     learning_source: learning.source,
     ...(state.personal_learning !== undefined ? { personal_learning: state.personal_learning } : {}),
     ...(state.pulled_at ? { pulled_at: state.pulled_at } : {}),
-    ...(state.last_error ? { last_error: state.last_error } : {}),
+    ...(lastError ? { last_error: lastError } : {}),
     notices: state.notices.slice(-10).reverse(),
     ...(state.last_check ? { last_check: state.last_check } : {}),
   }

@@ -1,6 +1,6 @@
 import path from "path"
 import { Token } from "@/util/token"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync } from "node:fs"
 import os from "os"
 import fs from "fs/promises"
 import z from "zod"
@@ -151,12 +151,29 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 
 // altimate_change start — workspace rules: sessions that already had their session-start pull in this process
 const rulesSessionsStarted = new Set<string>()
-/** Rules state in this project, or a workspace linked on this machine (the bindings cache): otherwise the project
- * cannot have workspace rules, and the prompt path skips them. Synchronous existence checks only. */
-const mayHaveWorkspaceRules = (root: string) =>
-  existsSync(path.join(root, ".altimate-code", "learn", "workspace-rules", "rules.json")) ||
-  existsSync(path.join(root, ".altimate-code", "learn", "team", "rules.json")) ||
-  existsSync(path.join(Global.Path.state, "altimate-workspace-bindings.json"))
+/** Rules state in this project, or a cached workspace binding for this directory: otherwise the project cannot have
+ * workspace rules, and the prompt path skips them. Synchronous, local checks only (a small JSON read at most). */
+const mayHaveWorkspaceRules = (root: string, directory: string) => {
+  if (existsSync(path.join(root, ".altimate-code", "learn", "workspace-rules", "rules.json"))) return true
+  try {
+    const cache = JSON.parse(readFileSync(path.join(Global.Path.state, "altimate-workspace-bindings.json"), "utf8")) as {
+      bindings?: Record<string, unknown>
+    }
+    const keys = Object.keys(cache.bindings ?? {})
+    if (!keys.length) return false
+    const canonical = (dir: string) => {
+      try {
+        return realpathSync(path.resolve(dir))
+      } catch {
+        return path.resolve(dir)
+      }
+    }
+    const here = canonical(directory)
+    return keys.some((key) => key === here || canonical(key) === here)
+  } catch {
+    return false
+  }
+}
 // altimate_change end
 
 const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
@@ -812,7 +829,7 @@ export namespace SessionPrompt {
     // first prompt of a session awaits anything; every later prompt stays on the synchronous path.
     // A project that cannot have workspace rules pays only the existence checks in `mayHaveWorkspaceRules`: the rules
     // module graph is not loaded on its prompt path.
-    if (!rulesSessionsStarted.has(sessionID) && mayHaveWorkspaceRules(learnRoot)) {
+    if (!rulesSessionsStarted.has(sessionID) && mayHaveWorkspaceRules(learnRoot, Instance.directory)) {
       // Bounded: a long-lived server sees many sessions; the oldest is forgotten first, which only costs it another
       // bounded wait if it is resumed.
       if (rulesSessionsStarted.size >= 1000) rulesSessionsStarted.delete(rulesSessionsStarted.values().next().value!)

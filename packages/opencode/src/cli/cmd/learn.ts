@@ -23,6 +23,7 @@ import { cmd } from "./cmd"
 import { effectCmd, fail } from "../effect-cmd"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { RulesTelemetry } from "../../altimate/rules/telemetry"
+import { printable } from "../../altimate/rules/printable"
 import * as Playbook from "../../altimate/learn/playbook"
 import * as Store from "../../altimate/learn/store"
 import { MAX_TEXT, summarize, describeApplied, describeRejected } from "../../altimate/learn/curator"
@@ -398,7 +399,7 @@ const StatusCommand = effectCmd({
       // altimate_change end
       // One line for learning from sessions, effective value and who decided it (your setting, the linked
       // workspace's "Learn from sessions", or the default); the JSON keeps `capture` (your setting) too.
-      const source = { you: "your setting", workspace: "workspace setting", default: "default" }[status.rules.learning_source]
+      const source = { organization: "organization policy", you: "your setting", workspace: "workspace setting", default: "default" }[status.rules.learning_source]
       out(`Learning from sessions: ${status.rules.learning ? "on" : "off"} (${source}); automatic reflection: ${status.auto_reflect ? "on" : "off"}`)
       // altimate_change start — automatic promotion status
       out(`Automatic promotion: ${status.auto_promote ? "on" : "off"}`)
@@ -436,10 +437,6 @@ const StatusCommand = effectCmd({
 })
 
 // altimate_change start — workspace rules: send queued proposals, pull approved rules, report usage
-/** Server text (a rule, a reviewer's name or reason, an error) without control characters: an owner-written reason
- * must not be able to move the cursor, retitle the terminal or plant a hyperlink. */
-const printable = (text: string | undefined) => (text ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
-
 function noticeLine(notice: { status: string; text: string; reviewer?: string; reason?: string }) {
   const status = notice.status === "active" ? "approved" : printable(notice.status)
   return `  ${status}${notice.reviewer ? ` by ${printable(notice.reviewer)}` : ""}: "${printable(notice.text)}"${notice.reason ? ` — ${printable(notice.reason)}` : ""}`
@@ -458,13 +455,16 @@ const SyncCommand = effectCmd({
       const report = await RulesSync.runFresh(root, Instance.directory, (await Config.get()).learn, "cli")
       if (args.json) {
         out(JSON.stringify(RulesSync.publicReport(report), null, 2))
-        // Same exit status as the text mode: a failed pull is a failed sync.
-        if (report.context.status === "ready" && !report.pull?.ok) process.exitCode = 1
+        // Same exit status as the text mode: a failed pull, or proposals kept back, is a failed sync.
+        if (report.context.status === "ready" && (!report.pull?.ok || report.push?.error)) process.exitCode = 1
         return
       }
-      if (report.context.status !== "ready") return out(`Rules sync skipped: ${report.context.reason}.`)
+      if (report.context.status !== "ready") return out(`Rules sync skipped: ${printable(report.context.reason)}.`)
       for (const sent of report.push?.sent ?? []) out(`Sent "${printable(sent.text)}": ${printable(sent.error ?? sent.status)}`)
-      if (report.push?.error) out(`Proposals not sent (kept queued): ${printable(report.push.error)}`)
+      if (report.push?.error) {
+        out(`Proposals not sent (kept queued): ${printable(report.push.error)}`)
+        process.exitCode = 1
+      }
       if (report.push?.approval_error) out(`Approve now not done yet: ${printable(report.push.approval_error)}`)
       if (!report.pull?.ok) throw new Error(`Rules pull failed: ${printable(report.pull?.error ?? "unknown error")}`)
       out(`Synced: ${report.pull.rules} team ${report.pull.rules === 1 ? "rule" : "rules"}, ${report.pull.pending} pending review.`)
@@ -487,13 +487,17 @@ async function offerStagedForReview(input: { name: string; origin: "bootstrap" |
     import("../../altimate/rules/from-history"),
   ])
   const root = await projectRoot()
-  const staged = await RulesFromHistory.stagedRules({ root, name: input.name, origin: input.origin, before: input.before })
+  const { RulesService } = await import("../../altimate/rules/service")
+  const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
+  const staged = await RulesFromHistory.stagedRules({ root, name: input.name, origin: input.origin, before: input.before, learn })
   if (!staged) return
-  for (const invalid of staged.invalid) out(`Kept local (not a valid rule: ${invalid.reason}): ${invalid.text}`)
+  // Model-written rules from past sessions or reviews, and server-supplied names: shown inert.
+  for (const invalid of staged.invalid) out(`Kept local (not a valid rule: ${printable(invalid.reason)}): ${printable(invalid.text)}`)
   if (!staged.items.length) return
-  const { owner, name } = staged.workspace
+  const owner = printable(staged.workspace.owner)
+  const name = printable(staged.workspace.name)
   out(`Staged ${staged.items.length} ${staged.items.length === 1 ? "rule" : "rules"} that can go to ${owner}'s review in ${name}:`)
-  for (const item of staged.items) out(`  - ${item.text}`)
+  for (const item of staged.items) out(`  - ${printable(item.text)}`)
   let send = input.send
   if (!send && process.stdin.isTTY && process.stdout.isTTY)
     send = (await prompts.confirm({ message: `Send ${staged.items.length === 1 ? "this rule" : `these ${staged.items.length} rules`} to ${owner}'s review in ${name}?`, initialValue: false })) === true
@@ -502,9 +506,9 @@ async function offerStagedForReview(input: { name: string; origin: "bootstrap" |
     return
   }
   const result = await RulesFromHistory.sendStaged({
-    root, directory: Instance.directory, learn: (await Config.get()).learn, name: input.name, staged, before: input.before,
+    root, directory: Instance.directory, learn, name: input.name, staged, before: input.before,
   })
-  out(result.message)
+  out(printable(result.message))
 }
 // altimate_change end
 

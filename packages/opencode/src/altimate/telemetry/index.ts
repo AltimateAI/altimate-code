@@ -795,7 +795,7 @@ export namespace Telemetry {
         trigger: "remember" | "shown_rule" | "recurrence"
         action: "send" | "approve" | "approve_anyway" | "edit" | "dismiss" | "save_local" | "save_memory" | "expired" | "closed"
         /** `ok`, or why the reply did not go through (the card stays open). */
-        status: "ok" | "busy" | "not_available" | "verification_flagged" | "invalid_text" | "failed"
+        status: "ok" | "busy" | "not_available" | "verification_flagged" | "invalid_text" | "refused" | "failed"
         /** For `ok` on a closing action: what happened. */
         outcome?:
           | "sent"
@@ -809,6 +809,7 @@ export namespace Telemetry {
           | "saved_memory_project"
           | "saved_memory_global"
           | "saved_local"
+          | "saved_unanswered"
         /** Wording edits accepted on this card so far. */
         edits: number
         ms_since_shown: number
@@ -850,6 +851,8 @@ export namespace Telemetry {
         notices?: number
         usage_items?: number
         push_failed?: boolean
+        /** A retried "Approve now" failed this run (reported apart from the proposals themselves). */
+        approval_failed?: boolean
         usage_failed?: boolean
       }
     | {
@@ -872,7 +875,7 @@ export namespace Telemetry {
         choice: "on" | "off" | "workspace"
         learning: boolean
         /** Who decides learning now. Not `source`: that is the envelope's client attribution. */
-        decided_by: "you" | "workspace" | "default"
+        decided_by: "organization" | "you" | "workspace" | "default"
       }
     | {
         /** A rules command: `/rules` opened in a client, or a `learn` CLI subcommand. */

@@ -26,6 +26,8 @@ export const ProposalCard = z.object({
   actions: z.array(z.enum(["send", "approve", "edit", "dismiss", "save_local", "save_memory"])),
   /** The wording did not say rule or memory: the card asks "Save as: Memory · Team rule · Skip". */
   choose: z.boolean().optional(),
+  /** Where "Memory" saves it: this project's memory, or the person's own for all their projects. Set with `choose`. */
+  memory_scope: z.enum(["project", "global"]).optional(),
   /** Topics a "Not a rule" suppresses for 30 days. */
   topics: z.array(z.string()),
 })

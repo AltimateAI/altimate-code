@@ -9,7 +9,7 @@ import { Instance } from "../../../src/project/instance"
 import { Session } from "../../../src/session"
 import { MessageID, PartID } from "../../../src/session/schema"
 import { ProviderID, ModelID } from "../../../src/provider/schema"
-import { startCapture, flushCapture } from "../../../src/altimate/learn/capture"
+import { startCapture, flushCapture, setCaptureGate } from "../../../src/altimate/learn/capture"
 import * as Signals from "../../../src/altimate/learn/signals"
 import { tmpdir } from "../../fixture/fixture"
 import { bootstrap } from "../../../src/cli/bootstrap"
@@ -119,6 +119,40 @@ describe("capture over the real session bus", () => {
         const correction = await user(session.id, "No, use explicit column names.", MessageID.make("msg_history_aaa"), 300)
         await settle(dir.path, 1)
         expect(await Signals.readSignals(dir.path)).toMatchObject([{ messageID: correction }])
+      },
+    })
+  })
+
+  test("a learning gate that cannot decide records nothing, and a later update of the message records it", async () => {
+    process.env["ALTIMATE_LEARN_CAPTURE"] = "1"
+    await using dir = await tmpdir({ git: true })
+    await Instance.provide({
+      directory: dir.path,
+      fn: async () => {
+        let unreadable = true
+        setCaptureGate(Instance.directory, async () => {
+          if (unreadable) throw new Error("rules state unreadable")
+          return true
+        })
+        try {
+          const session = await Session.create({})
+          const first = await user(session.id, "Create a file.", MessageID.make("msg_gate_first"), 100)
+          await assistant(session.id, first, true, MessageID.make("msg_gate_zzz"), 200)
+          await startCapture({ directory: Instance.directory, worktree: Instance.worktree })
+          const correction = MessageID.make("msg_gate_corr")
+          const partID = PartID.ascending()
+          await Session.updateMessage({ id: correction, sessionID: session.id, role: "user", time: { created: 300 }, agent: "build", model, tools: {} } as never)
+          await Session.updatePart({ id: partID, sessionID: session.id, messageID: correction, type: "text", text: "No, use explicit column names." } as never)
+          await flushCapture()
+          // Failed closed: nothing written, and the message is not marked recorded.
+          expect(await Signals.readSignals(dir.path)).toEqual([])
+          unreadable = false
+          await Session.updatePart({ id: partID, sessionID: session.id, messageID: correction, type: "text", text: "No, use explicit column names here." } as never)
+          await settle(dir.path, 1)
+          expect(await Signals.readSignals(dir.path)).toMatchObject([{ messageID: correction }])
+        } finally {
+          setCaptureGate(Instance.directory, undefined)
+        }
       },
     })
   })

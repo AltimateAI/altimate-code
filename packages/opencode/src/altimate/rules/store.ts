@@ -1,9 +1,9 @@
 // altimate_change - new file
 //
-// Local state for workspace rules, under `.altimate-code/learn/team/` (git-ignored):
+// Local state for workspace rules, under `.altimate-code/learn/workspace-rules/` (git-ignored):
 //
-// - `approved.json`: the workspace's approved rules for this repository, as lessons of a read-only `team`
-//   store. Delivery, recurrence and `learn show` read it like any other store, so team rules reach the
+// - `approved.json`: the workspace's approved rules for this repository, as lessons of the read-only
+//   `workspace-rules` store (a name reserved for it; the person's own stores, `team` included, are separate). Delivery, recurrence and `learn show` read it like any other store, so team rules reach the
 //   prompt ("Team rules"), their exposure is recorded, and "corrected again" falls out of recurrence.
 //   Only a pull writes it; reflection and promotion never target this store.
 // - `rules.json`: everything else this client keeps: the scope it was pulled for, workspace and owner,
@@ -23,15 +23,18 @@ import * as Store from "../learn/store"
 import { RuleOut, Settings } from "./api"
 
 /** The read-only store team rules are mirrored into (reserved: `learn/store.ts` `RESERVED_STORES`). */
-export const TEAM_STORE = Store.WORKSPACE_RULES_STORE
-/** Where earlier builds of workspace rules kept their state and mirror: moved by `migrateLegacy`. */
-const LEGACY_STORE = "team"
+export const WORKSPACE_RULES_STORE = Store.WORKSPACE_RULES_STORE
 const log = Log.create({ service: "rules.store" })
 const LOCK = { timeoutMs: 5_000 }
 const MAX_NOTICES = 50
 const MAX_SENT = 200
-/** Safety cap for the session and signal id lists; `processed_signals` is also pruned to live signals. */
+/** Safety cap for the signal id list; `processed_signals` is also pruned to live signals. */
 const MAX_TRACKED = 5000
+/** Safety cap for `usage_reported`, which is pruned to sessions that still have a snapshot (`reportUsage`). Above what
+ * the snapshots it is checked against can hold (200 sessions × 40 rules), so a live pair is never trimmed. */
+const MAX_USAGE_PAIRS = 50_000
+/** How long the "queued proposals were dropped" notice of an account or workspace change stays shown. */
+const SCOPE_DROP_NOTICE_MS = 7 * 24 * 60 * 60_000
 /** "Not a rule" keeps a topic from being proposed again in this repository for this long. */
 export const DISMISS_MS = 30 * 24 * 60 * 60_000
 
@@ -101,13 +104,17 @@ export const State = z.object({
   pending_count: z.number().int().default(0),
   pulled_at: z.string().optional(),
   last_error: z.string().optional(),
+  /** Queued proposals dropped because the account or workspace changed. Its own field: a later pull's error (or its
+   * success) does not erase it. Shown for `SCOPE_DROP_NOTICE_MS`. */
+  scope_drop: z.object({ count: z.number().int(), at: z.string() }).optional(),
   rules: z.array(RuleOut).default([]),
   outbox: z.array(OutboxItem).default([]),
   sent: z.array(Sent).default([]),
   notices: z.array(Notice).default([]),
   dismissed: z.array(z.object({ topic: z.string(), until: z.string() })).default([]),
-  /** Sessions whose deliveries were already reported as `applied`. */
-  usage_sessions: z.array(z.string()).default([]),
+  /** (session, rule version) pairs already reported as `applied`, as `session|public_id`: a session keeps showing
+   * rules on later turns (requests, files), and each rule it showed counts once. */
+  usage_reported: z.array(z.string()).default([]),
   /** Per rule, the "corrected again" count already reported. */
   corrected_reported: z.record(z.string(), z.number().int()).default({}),
   /** What the last post-turn check decided, for `learn status`. */
@@ -124,6 +131,9 @@ export const State = z.object({
     public_id: z.string().optional(),
     error: z.string().optional(),
     error_code: z.string().optional(),
+    approved: z.boolean().optional(),
+    approve_error: z.string().optional(),
+    approve_retry: z.boolean().optional(),
   })).default({}),
   /** "Approve now" calls that failed for a reason that can pass (network, 5xx, credential): retried on the next push. */
   pending_approvals: z.array(z.object({
@@ -136,7 +146,7 @@ export const State = z.object({
   pending_usage: z.object({
     batch_id: z.string(),
     items: z.array(z.object({ public_id: z.string(), applied: z.number().int(), helpful: z.number().int(), harmful: z.number().int(), corrected_again: z.number().int() })),
-    sessions: z.array(z.string()),
+    pairs: z.array(z.string()),
     corrected: z.record(z.string(), z.number().int()),
   }).optional(),
 })
@@ -145,50 +155,18 @@ export type State = z.infer<typeof State>
 const EMPTY: State = State.parse({ version: 1 })
 
 export function dir(root: string) {
-  return Store.paths(root, TEAM_STORE).learnDir
+  return Store.paths(root, WORKSPACE_RULES_STORE).learnDir
 }
 const stateFile = (root: string) => path.join(dir(root), "rules.json")
 
-/** The state file's text, or undefined when there is none. Other read errors propagate. Until `update` migrates it,
- * state an earlier build kept under `team/` is read from there. */
+/** The state file's text, or undefined when there is none. Other read errors propagate. */
 async function readRaw(root: string): Promise<string | undefined> {
-  const read = (file: string) => fs.readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
+  return fs.readFile(stateFile(root), "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined
     throw error
   })
-  return (await read(stateFile(root))) ?? (await read(legacyStateFile(root)))
 }
 
-const legacyStateFile = (root: string) => path.join(Store.paths(root, LEGACY_STORE).learnDir, "rules.json")
-
-/**
- * Earlier builds kept the rules state and mirror in the `team` store, which projects also use for their own playbooks.
- * Moves the state to `workspace-rules/`, and removes from `team/` only what was ours: the state file, an `approved.json`
- * that is the mirror, and our `.gitignore`. A playbook that was set aside for the mirror is put back. Under the lock.
- */
-async function migrateLegacy(root: string): Promise<void> {
-  const legacy = Store.paths(root, LEGACY_STORE)
-  const state = await fs.readFile(legacyStateFile(root), "utf8").catch(() => undefined)
-  if (state === undefined) return
-  if (!(await fs.access(stateFile(root)).then(() => true, () => false))) await Store.writeAtomic(root, stateFile(root), state)
-  await fs.rm(legacyStateFile(root), { force: true })
-  const approved = await fs.readFile(legacy.approved, "utf8").catch(() => undefined)
-  if (approved !== undefined && isMirror(approved)) {
-    await fs.rm(legacy.approved, { force: true })
-    const backups = (await fs.readdir(legacy.learnDir).catch(() => [] as string[]))
-      .filter((name) => name.startsWith("approved.json.before-workspace-rules-"))
-      .sort()
-    const latest = backups[backups.length - 1]
-    if (latest) {
-      await Store.writeAtomic(root, legacy.approved, await fs.readFile(path.join(legacy.learnDir, latest), "utf8"))
-      await fs.rm(path.join(legacy.learnDir, latest), { force: true })
-    }
-  }
-  const ignore = path.join(legacy.learnDir, ".gitignore")
-  if ((await fs.readFile(ignore, "utf8").catch(() => undefined)) === IGNORE) await fs.rm(ignore, { force: true })
-  await fs.rmdir(legacy.learnDir).catch(() => {})
-  log.info("workspace rules state moved from the team store", { root })
-}
 
 function parse(raw: string | undefined): State | undefined {
   if (!raw) return structuredClone(EMPTY)
@@ -248,7 +226,6 @@ function capSent(sent: Sent[]): Sent[] {
 export async function update(root: string, change: (state: State) => State | void): Promise<State> {
   return withLearnLock(root, async () => {
     await SafeFS.mkdir(root, dir(root))
-    await migrateLegacy(root)
     const raw = await readRaw(root)
     let current = parse(raw)
     let recovered = false
@@ -262,16 +239,17 @@ export async function update(root: string, change: (state: State) => State | voi
     const next = change(current) ?? current
     next.notices = next.notices.slice(-MAX_NOTICES)
     next.sent = capSent(next.sent)
-    next.usage_sessions = next.usage_sessions.slice(-MAX_TRACKED)
+    next.usage_reported = next.usage_reported.slice(-MAX_USAGE_PAIRS)
     next.processed_signals = next.processed_signals.slice(-MAX_TRACKED)
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
+    if (next.scope_drop && !(now - Date.parse(next.scope_drop.at) < SCOPE_DROP_NOTICE_MS)) delete next.scope_drop
     await Store.writeAtomic(root, stateFile(root), JSON.stringify(next, null, 2) + "\n")
     // Only a linked project (or one whose rules just changed, e.g. a reset) has a mirror to write: in a project with no
     // workspace, only the state file is written (a dismissal, a learning choice), never an `approved.json` that delivery
     // would read. After an unreadable state was set aside, an existing
     // mirror no longer matches any state: rewrite it, so rules nothing vouches for stop being delivered.
-    const staleMirror = recovered && (await fs.access(Store.paths(root, TEAM_STORE).approved).then(() => true, () => false))
+    const staleMirror = recovered && (await fs.access(Store.paths(root, WORKSPACE_RULES_STORE).approved).then(() => true, () => false))
     if (next.workspace || JSON.stringify(next.rules) !== rulesBefore || staleMirror) {
       await ensureIgnore(root)
       await writeMirror(root, next.rules)
@@ -281,7 +259,7 @@ export async function update(root: string, change: (state: State) => State | voi
 }
 
 async function writeMirror(root: string, rules: readonly RuleOut[]) {
-  const file = Store.paths(root, TEAM_STORE).approved
+  const file = Store.paths(root, WORKSPACE_RULES_STORE).approved
   const text = canonical(rules.map(toLesson))
   const previous = await fs.readFile(file, "utf8").catch(() => undefined)
   if (previous === text) return
@@ -294,10 +272,12 @@ async function writeMirror(root: string, rules: readonly RuleOut[]) {
   await Store.writeAtomic(root, file, text)
 }
 
-/** Whether an `approved.json` is this mirror: every entry came from a workspace rule. */
+/** Whether an `approved.json` is this mirror: every entry came from a workspace rule. An empty list is written by the
+ * mirror itself (no rules yet, or the last one retired), and holds nothing to keep either way. */
 function isMirror(text: string): boolean {
   try {
-    return parseLessons(text).every((lesson) => lesson.provenance?.startsWith("workspace rule "))
+    const lessons = parseLessons(text)
+    return lessons.every((lesson) => lesson.provenance?.startsWith("workspace rule "))
   } catch {
     return false
   }
@@ -309,25 +289,43 @@ function isMirror(text: string): boolean {
  * `adopt` drops them before anything is sent to a different scope.
  */
 export async function reset(root: string, options: { keepOutbox?: boolean } = {}): Promise<void> {
-  await update(root, (state) => ({
+  await update(root, (state) => cleared(state, options))
+}
+
+/** `reset` as a state change, for a caller that decides inside its own `update` (`adopt`). */
+export function cleared(state: State, options: { keepOutbox?: boolean } = {}): State {
+  return {
     ...structuredClone(EMPTY),
     dismissed: state.dismissed,
     ...(state.personal_learning !== undefined ? { personal_learning: state.personal_learning } : {}),
     // What was already reported or considered stays: after a relink or an account round trip it must not be counted
     // again (sessions and signals are local; corrected counts are keyed by rule key).
-    usage_sessions: state.usage_sessions,
+    usage_reported: state.usage_reported,
     corrected_reported: state.corrected_reported,
     processed_signals: state.processed_signals,
     // A batch built for this scope can only be resent to it.
+    // The same scope comes back (the link or access returns): its queue, approvals, the person's sent history and the
+    // review cursor stay, so reviews made meanwhile are still announced.
     ...(options.keepOutbox
       ? {
           outbox: state.outbox,
           scope: state.scope,
           pending_approvals: state.pending_approvals,
+          sent: state.sent,
+          ...(state.cursor ? { cursor: state.cursor } : {}),
           ...(state.pending_usage ? { pending_usage: state.pending_usage } : {}),
         }
       : {}),
-  }))
+    // A drop notice outlives a later reset: it is about proposals the person was told were queued.
+    ...(state.scope_drop ? { scope_drop: state.scope_drop } : {}),
+  }
+}
+
+/** The notice for proposals dropped by an account or workspace change, while it is shown. */
+export function scopeDropNote(state: State): string | undefined {
+  const drop = state.scope_drop
+  if (!drop) return undefined
+  return `${drop.count} queued ${drop.count === 1 ? "proposal was" : "proposals were"} for another account or workspace and ${drop.count === 1 ? "was" : "were"} not sent`
 }
 
 /** Queued proposals at most; a new one is refused (the card stays open) rather than an older one dropped. */

@@ -46,6 +46,8 @@ export async function proposeTeamRule(
   said?: string,
   via: "training" | "memory" = "training",
   memory?: { id: string; tags: string[] },
+  /** From `training_save`: the entry it meant to write, saved as such if the card closes unanswered. */
+  training?: { name: string; source?: string; citations?: import("../../memory/types").MemoryBlock["citations"] },
 ) {
   const [{ Instance }, { Config }, { RulesService }] = await Promise.all([
     import("../../project/instance"),
@@ -58,7 +60,33 @@ export async function proposeTeamRule(
   const root = await fs.realpath(raw).catch(() => raw)
   // The project's learn file as it is now, like every other entry point: `learn disable` mid-session takes effect.
   const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
-  return proposeFor({ root, directory: Instance.directory, learn, content, sessionID, said, via, memory })
+  // A subagent's session is not the one a client shows: its card would never be seen.
+  const subagent = await import("@/session")
+    .then(async ({ Session }) => {
+      const { SessionID } = await import("@/session/schema")
+      return !!(await Session.get(SessionID.make(sessionID))).parentID
+    })
+    .catch(() => false)
+  // Bound to this instance, so it saves into this project whenever the card closes unanswered.
+  const unanswered = Instance.bind(async (text: string) => {
+    const now = new Date().toISOString()
+    if (via === "memory" && memory) {
+      const { MemoryStore } = await import("../../memory/store")
+      await MemoryStore.write({ id: memory.id, scope: "project", tags: memory.tags, created: now, updated: now, content: text }, { sessionID })
+      return
+    }
+    const [{ TrainingStore }, { RuleProposal }] = await Promise.all([import("../training"), import("./proposal")])
+    await TrainingStore.save({
+      kind: "rule",
+      name: training?.name ?? RuleProposal.slug(text),
+      scope: "project",
+      content: text,
+      source: training?.source ?? "remember (card closed unanswered)",
+      ...(training?.citations ? { citations: training.citations } : {}),
+      sessionID,
+    })
+  })
+  return proposeFor({ root, directory: Instance.directory, learn, content, sessionID, said, via, memory, subagent, unanswered })
 }
 
 /** `proposeTeamRule` for an explicit project (`root`, `directory`) and learn config. */
@@ -72,6 +100,10 @@ export async function proposeFor(input: {
   via?: "training" | "memory"
   /** From the memory tool: the block it meant to write, used if the person picks Memory on the card. */
   memory?: { id: string; tags: string[] }
+  /** The session is a subagent's: no client shows its cards. */
+  subagent?: boolean
+  /** Saves the request as before cards if its card closes unanswered. */
+  unanswered?: (text: string) => Promise<void>
 }) {
   const { root, learn, content, sessionID, said } = input
   const via = input.via ?? "training"
@@ -91,8 +123,8 @@ export async function proposeFor(input: {
   // Nothing attached to this process shows cards (`altimate-code run`, ACP, a plugin): a card would be lost, so the
   // tool saves as it did before cards (memory, or project training).
   const { RuleProposal } = await import("./proposal")
-  if (!RuleProposal.rendererAttached()) return void RulesTelemetry.routed(sessionID, via, "no_renderer")
-  const result = await RuleTrigger.explicit({ sessionID, root, directory: input.directory, learn, text: content, said, memory: input.memory })
+  if (input.subagent || !RuleProposal.rendererAttached(input.directory)) return void RulesTelemetry.routed(sessionID, via, "no_renderer")
+  const result = await RuleTrigger.explicit({ sessionID, root, directory: input.directory, learn, text: content, said, memory: input.memory, unanswered: input.unanswered })
   RulesTelemetry.routed(
     sessionID,
     via,
@@ -125,8 +157,8 @@ export async function proposeFor(input: {
         : `Proposed as a team rule for ${state.workspace.name}. The person sees a card to ` +
           (state.workspace.is_owner ? "approve it now" : `send it to ${owner} for review`) + ", edit the wording, or decline.",
       via === "memory"
-        ? "Nothing was saved yet: the person chooses on the card. Do not save it again with altimate_memory_write or training_save; follow it for the rest of this session."
-        : "Follow the rule for the rest of this session. Do not save it again, and do not say it is already a team rule: it applies to teammates only after approval.",
+        ? "Nothing was saved yet: the person chooses on the card (if they never answer, it is saved to this project's memory when the card closes). Do not save it again with altimate_memory_write or training_save; follow it for the rest of this session."
+        : "Follow the rule for the rest of this session. Do not save it again, and do not say it is already a team rule: it applies to teammates only after approval (if the card is never answered, it is saved as a rule for this project when it closes).",
     ].join("\n"),
   }
 }

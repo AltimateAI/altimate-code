@@ -35,20 +35,22 @@ export interface TriggerDeps {
   source: (sessionID: string) => Promise<DigestSource>
 }
 
-type LearnConfig = { enabled?: boolean; capture?: boolean } | undefined
+type LearnConfig = { enabled?: boolean; capture?: boolean; capture_policy?: boolean } | undefined
 
-export type LearningSource = "you" | "workspace" | "default"
+export type LearningSource = "organization" | "you" | "workspace" | "default"
 
 /**
  * Whether sessions here learn from corrections (capture them and propose rules), and who decided. In order: the
- * learning kill switch (`ALTIMATE_LEARN`, `learn.enabled`); `ALTIMATE_LEARN_CAPTURE`; the person's `/rules` choice
- * (`personal_learning`, git-ignored); `learn.capture` (`learn enable` / `learn disable`); a linked workspace's
+ * learning kill switch (`ALTIMATE_LEARN`, `learn.enabled`); `ALTIMATE_LEARN_CAPTURE`; `learn.capture` set by a config
+ * layer above project files (`capture_policy`: managed config, MDM, the account's config …); the person's `/rules`
+ * choice (`personal_learning`, git-ignored); `learn.capture` (`learn enable` / `learn disable`); a linked workspace's
  * "Learn from sessions"; otherwise off. Env flags parse like `learn/config.ts`, so the two agree.
  */
 export function learningDecision(learn: LearnConfig, state: RulesStore.State, env: NodeJS.ProcessEnv = process.env): { on: boolean; source: LearningSource } {
   if (!learnEnabled(learn, env)) return { on: false, source: "you" }
   const forced = booleanFlag(env.ALTIMATE_LEARN_CAPTURE)
   if (forced !== undefined) return { on: forced, source: "you" }
+  if (learn?.capture_policy && learn.capture !== undefined) return { on: learn.capture, source: "organization" }
   if (state.personal_learning !== undefined) return { on: state.personal_learning, source: "you" }
   if (learn?.capture !== undefined) return { on: learn.capture, source: "you" }
   if (state.workspace) return { on: state.settings?.learning_enabled === true, source: "workspace" }
@@ -157,12 +159,12 @@ export async function afterTurn(input: {
     if (!fresh.length) return
     // Nothing attached would show a card (`altimate-code run`, ACP, a plugin): the corrections are left unprocessed,
     // so a later turn of this session with a card client attached proposes them.
-    if (!RuleProposal.rendererAttached()) {
+    if (!RuleProposal.rendererAttached(input.directory)) {
       outcome = "no client that shows cards is attached; corrections kept for a later check"
       return RulesTelemetry.skipped(input.sessionID, undefined, "no_renderer")
     }
     // One card at a time per session: an explicit "remember" may already have shown one for this turn.
-    if (RuleProposal.list().some((card) => card.sessionID === input.sessionID))
+    if (RuleProposal.list(input.directory, input.sessionID).length)
       return RulesTelemetry.skipped(input.sessionID, undefined, "card_open")
     // Marked processed once the check completes; a failed check is retried after the next turn.
     checked = fresh.map((signal) => signal.id)
@@ -174,7 +176,7 @@ export async function afterTurn(input: {
     const snapshot = (await readShownSnapshots(input.root)).snapshots.find((s) => s.session === input.sessionID)
     const correctedAt = Date.parse(newest.correctedAt ?? newest.at)
     const shownIds = new Set((snapshot?.shown ?? [])
-      .filter((entry) => entry.name === RulesStore.TEAM_STORE && !(Date.parse(entry.at) >= correctedAt))
+      .filter((entry) => entry.name === RulesStore.WORKSPACE_RULES_STORE && !(Date.parse(entry.at) >= correctedAt))
       .map((entry) => entry.id))
     const said = words(fresh.map((signal) => signal.text).join(" "))
     const hit = state.rules
@@ -268,6 +270,8 @@ export async function explicit(input: {
   said?: string
   /** The memory block the agent meant to write, kept for the card's Memory choice. */
   memory?: { id: string; tags: string[] }
+  /** Saves the request as before cards if the card closes unanswered (`RuleProposal.ask`). */
+  unanswered?: (text: string) => Promise<void>
 }): Promise<
   | { status: "shown"; card: Awaited<ReturnType<typeof RuleProposal.ask>>; choose: boolean }
   | { status: "invalid"; reason: string; kind: "rule" | "ambiguous" }
@@ -286,7 +290,7 @@ export async function explicit(input: {
   // "staging"), and the card has no "add instead". Changing a team rule is the correction path's job, where the
   // drafter decides whether the shown rule is the subject.
   const card = await RuleProposal.ask({
-    sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn,
+    sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, unanswered: input.unanswered,
     draft: {
       text,
       applies_to: appliesTo([text, ...(last ? [last.text] : [])]),

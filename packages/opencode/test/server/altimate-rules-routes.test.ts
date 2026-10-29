@@ -4,13 +4,10 @@
 // cover the ROUTES: browser-origin refusal, input validation and status mapping. What each reply does is covered by
 // test/altimate/rules/rules.test.ts.
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
-import fs from "node:fs/promises"
-import os from "node:os"
-import path from "node:path"
 import { Server } from "../../src/server/server"
 import { RuleProposal } from "../../src/altimate/rules/proposal"
 import { resetDatabase } from "./db"
-import { disposeAllInstances } from "../fixture/fixture"
+import { disposeAllInstances, tmpdir } from "../fixture/fixture"
 
 const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 
@@ -38,7 +35,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   RuleProposal.drop(process.cwd())
-  RuleProposal.setRendererForTest(false)
+  RuleProposal.setRendererForTest(undefined)
   if (ORIGINAL_FLAG === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
   else process.env.ALTIMATE_DISABLE_WORKSPACE = ORIGINAL_FLAG
   await disposeAllInstances()
@@ -68,8 +65,8 @@ describe("rule proposal routes", () => {
     expect(gone.status).toBe(404)
     expect(await gone.json()).toMatchObject({ ok: false, code: "not_open" })
 
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "rules-routes-"))
-    const card = (await RuleProposal.ask({ sessionID: "r1", root, directory: process.cwd(), learn: undefined, draft: draft("Prefix seeds with seed_.") }))!
+    await using root = await tmpdir()
+    const card = (await RuleProposal.ask({ sessionID: "r1", root: root.path, directory: process.cwd(), learn: undefined, draft: draft("Prefix seeds with seed_.") }))!
     const unavailable = await request("POST", `/rule-proposal/${card.id}/reply`, { action: "approve" })
     expect(unavailable.status).toBe(409)
     expect(await unavailable.json()).toMatchObject({ ok: false, code: "not_available" })
@@ -80,20 +77,23 @@ describe("rule proposal routes", () => {
     expect(await listed.json()).toEqual([expect.objectContaining({ id: card.id })])
   })
 
-  test("a renderer lease is validated, and attaches a renderer", async () => {
-    expect(RuleProposal.rendererAttached()).toBe(false)
+  test("a renderer lease is validated, attaches a renderer for the request's directory only, and lapses", async () => {
+    const here = process.cwd()
+    expect(RuleProposal.rendererAttached(here)).toBe(false)
     expect((await request("POST", "/rule-proposal/renderer", { client: "has spaces" })).status).toBe(400)
     expect((await request("POST", "/rule-proposal/renderer", {})).status).toBe(400)
-    expect(RuleProposal.rendererAttached()).toBe(false)
+    expect(RuleProposal.rendererAttached(here)).toBe(false)
     const response = await request("POST", "/rule-proposal/renderer", { client: "vscode" })
     expect(response.status).toBe(200)
     expect(await response.json()).toEqual({ ok: true, renew_ms: RuleProposal.RENDERER_RENEW_MS, lease_ms: RuleProposal.RENDERER_LEASE_MS })
-    expect(RuleProposal.rendererAttached()).toBe(true)
+    expect(RuleProposal.rendererAttached(here)).toBe(true)
+    // Another project served by the same process has no client showing its cards.
+    expect(RuleProposal.rendererAttached(`${here}-elsewhere`)).toBe(false)
     // A lease lapses when it is not renewed.
-    expect(RuleProposal.rendererAttached(Date.now() + RuleProposal.RENDERER_LEASE_MS + 1)).toBe(false)
+    expect(RuleProposal.rendererAttached(here, Date.now() + RuleProposal.RENDERER_LEASE_MS + 1)).toBe(false)
   })
 
-  test("the learning choice accepts only true, false or null", async () => {
+  test("the learning route rejects anything but true, false or null", async () => {
     expect((await request("POST", "/altimate/rules/learning", { on: "yes" })).status).toBe(400)
     expect((await request("POST", "/altimate/rules/learning", {})).status).toBe(400)
   })

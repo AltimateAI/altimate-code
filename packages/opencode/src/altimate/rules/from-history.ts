@@ -36,7 +36,10 @@ export async function stagedRules(input: {
   origin: "bootstrap" | "import_reviews"
   /** `candidateTexts` before the run. */
   before: Set<string> | undefined
+  /** The effective learn config: with learning or workspaces off nothing could be sent, so nothing is offered. */
+  learn: Parameters<typeof RulesSync.run>[2]
 }): Promise<Staged | undefined> {
+  if (!RulesSync.rulesEnabled(input.learn)) return undefined
   const state = await RulesStore.read(input.root)
   if (!state.workspace) return undefined
   const [approved, candidate] = await Promise.all([
@@ -88,29 +91,44 @@ export async function sendStaged(input: {
   staged: Staged
   /** `candidateTexts` before the run: a candidate that existed before is never discarded. */
   before: Set<string> | undefined
-}): Promise<{ sent: number; queued: number; refused: number; message: string }> {
+}): Promise<{ sent: number; queued: number; refused: number; lost: number; message: string }> {
   const ids = await RulesSync.enqueueMany(input.root, input.staged.items.map((item) => ({ item })))
-  const report = await RulesSync.runFresh(input.root, input.directory, input.learn, "import")
-  const state = await RulesStore.read(input.root)
+  // A push sends at most a batch: keep sending until these proposals have left the outbox, or a run sends nothing
+  // more (not ready, or kept back with an error). Bounded by the number of batches they need, plus one.
+  let report = await RulesSync.runFresh(input.root, input.directory, input.learn, "import")
+  let state = await RulesStore.read(input.root)
+  for (let round = 1; round <= Math.ceil(ids.length / RulesSync.MAX_PROPOSALS); round++) {
+    const waiting = ids.some((id) => state.outbox.some((entry) => entry.id === id))
+    if (!waiting || report.context.status !== "ready" || report.push?.error) break
+    report = await RulesSync.runFresh(input.root, input.directory, input.learn, "import")
+    state = await RulesStore.read(input.root)
+  }
   const outcomes = ids.map((id) => RulesSync.outcomeOf(state, report, id))
   const queued = outcomes.filter((o) => o.status === "queued").length
   const refused = outcomes.filter((o) => o.status === "sent" && o.row?.error).length
-  const sent = outcomes.length - queued - refused
+  const sent = outcomes.filter((o) => o.status === "sent" && o.row && !o.row.error).length
+  // Neither queued nor answered: dropped before sending (the account or workspace changed under it).
+  const lost = outcomes.length - queued - refused - sent
   // The workspace's review queue replaces a candidate this run created, once it holds every rule of it: only when the
   // candidate is nothing but the adds that were sent (no local edits or removals, nothing invalid, refused or queued).
-  const discard = !input.before && queued === 0 && refused === 0 && input.staged.invalid.length === 0 &&
+  const discard = !input.before && queued === 0 && refused === 0 && lost === 0 && input.staged.invalid.length === 0 &&
     input.staged.localChanges === 0
   if (discard) await Store.reject(input.root, input.name)
   const { owner, name } = input.staged.workspace
+  // Why some stayed queued, as the run said it: sync not ready (not signed in, link lost …), or kept back with an error.
+  const why = report.context.status !== "ready"
+    ? report.context.reason
+    : report.push?.error ?? "the workspace could not be reached"
   const message = `${sent} ${sent === 1 ? "rule" : "rules"} sent for ${owner}'s review in ${name}` +
-    (queued ? `; ${queued} queued until the workspace is reachable` : "") +
-    (refused ? `; ${refused} refused by the workspace` : "") + "." +
+    (queued ? `; ${queued} kept queued (${why}) and sent on a later sync` : "") +
+    (refused ? `; ${refused} refused by the workspace` : "") +
+    (lost ? `; ${lost} not sent (${RulesStore.scopeDropNote(state) ?? "the account or workspace changed"})` : "") + "." +
     (discard
       ? ""
       : input.staged.localChanges
         ? ` The local candidate was kept: it also changes ${input.staged.localChanges} local ${input.staged.localChanges === 1 ? "rule" : "rules"} (\`learn show\`, \`learn promote\`).`
         : " The local candidate was kept: `learn show`.")
-  return { sent, queued, refused, message }
+  return { sent, queued, refused, lost, message }
 }
 
 export * as RulesFromHistory from "./from-history"

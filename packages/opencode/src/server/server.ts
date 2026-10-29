@@ -1278,7 +1278,7 @@ export namespace Server {
         if (typeof client !== "string" || !/^[a-z0-9_.-]{1,64}$/i.test(client))
           return c.json({ ok: false, error: "client must be a short name (letters, digits, _ . -)." }, 400)
         const { RuleProposal } = await import("../altimate/rules/proposal")
-        RuleProposal.renewRenderer(client)
+        RuleProposal.renewRenderer(Instance.directory, client)
         return c.json({ ok: true as const, renew_ms: RuleProposal.RENDERER_RENEW_MS, lease_ms: RuleProposal.RENDERER_LEASE_MS })
       })
       .post("/rule-proposal/:id/reply", async (c) => {
@@ -1298,7 +1298,7 @@ export namespace Server {
             { action: action as (typeof actions)[number], ...(text !== undefined ? { text } : {}) },
             Instance.directory,
           )
-          const status = result.ok ? 200 : { not_open: 404, busy: 409, not_available: 409, verification_flagged: 409, invalid_text: 422, failed: 500 }[result.code]
+          const status = result.ok ? 200 : { not_open: 404, busy: 409, not_available: 409, verification_flagged: 409, invalid_text: 422, refused: 422, failed: 500 }[result.code]
           return c.json(result, status as 200 | 404 | 409 | 422 | 500)
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
@@ -1309,29 +1309,41 @@ export namespace Server {
       .get("/altimate/rules/summary", async (c) => {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
         if (refused) return c.json(refused.body, refused.status)
-        const [{ RulesSummary }, { RulesService }, { Config }] = await Promise.all([
-          import("../altimate/rules/summary"),
-          import("../altimate/rules/service"),
-          import("@/config/config"),
-        ])
-        const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-        const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
-        const summary = await RulesSummary.summary(root, learn)
-        return c.json({ ok: true as const, ...summary, line: RulesSummary.sidebarLine(summary) })
+        try {
+          const [{ RulesSummary }, { RulesService }, { Config }] = await Promise.all([
+            import("../altimate/rules/summary"),
+            import("../altimate/rules/service"),
+            import("@/config/config"),
+          ])
+          const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+          const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
+          const summary = await RulesSummary.summary(root, learn)
+          return c.json({ ok: true as const, ...summary, line: RulesSummary.sidebarLine(summary) })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("rules summary failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
       })
       .get("/altimate/rules", async (c) => {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
         if (refused) return c.json(refused.body, refused.status)
         const view = c.req.query("view")
         if (view !== undefined && view !== "active" && view !== "mine") return c.json({ ok: false, error: "view must be active or mine." }, 400)
-        const [{ RulesSummary }, { RulesTelemetry }] = await Promise.all([
-          import("../altimate/rules/summary"),
-          import("../altimate/rules/telemetry"),
-        ])
-        const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-        // Only the `/rules` view lists rules (the sidebar reads the summary): one call is one opening.
-        RulesTelemetry.command("view")
-        return c.json({ ok: true as const, rules: await RulesSummary.rows(root, view ?? "all") })
+        try {
+          const [{ RulesSummary }, { RulesTelemetry }] = await Promise.all([
+            import("../altimate/rules/summary"),
+            import("../altimate/rules/telemetry"),
+          ])
+          const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+          // Only the `/rules` view lists rules (the sidebar reads the summary): one call is one opening.
+          RulesTelemetry.command("view")
+          return c.json({ ok: true as const, rules: await RulesSummary.rows(root, view ?? "all") })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("rules list failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
       })
       // The person's own "learning from sessions" choice for this project: `on` true/false, or null to follow the
       // config and the workspace again. Stored per person (git-ignored rules state), never in the project config.

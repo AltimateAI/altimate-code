@@ -14,6 +14,7 @@ import { Bus } from "@/bus"
 import { Log } from "@/util/log"
 import { lint, normalizeText, verificationWarning } from "../learn/curator"
 import { redactSecrets } from "../learn/digest"
+import { RuleClassify } from "./classify"
 import { RuleEvents, type ProposalCard } from "./events"
 import { RulesStore } from "./store"
 import { RulesSync } from "./sync"
@@ -52,47 +53,88 @@ interface Pending {
   /** The session the evidence came from: the card can move to another session, its evidence does not. */
   sourceSession: string
   memory?: Draft["memory"]
+  /** For a card the person asked for: saves it as it would have been saved without a card, when the card closes
+   * unanswered (it expired, or its instance went away). Bound to the asking instance. */
+  unanswered?: (text: string) => Promise<void>
+  /** Closed (expired, or its instance went away) while a reply was running: the reply settles it when it ends. */
+  closed?: { message: string; why: "expired" | "closed"; here: string | undefined }
 }
 
 /** An unanswered card lasts a day; after that it is dropped rather than re-offered to every new client. */
 export const CARD_TTL_MS = 24 * 60 * 60_000
 
-/** Remove a card no client can answer any more, and tell clients so they stop showing it. */
-function close(id: string, entry: Pending, message: string, why: "expired" | "closed", here: string | undefined) {
+/** Remove a card no client can answer any more, and tell clients so they stop showing it. Resolves once a requested
+ * card's fallback save has landed. A card whose reply is running is only marked: the reply's outcome decides. */
+function close(id: string, entry: Pending, message: string, why: "expired" | "closed", here: string | undefined): Promise<void> {
   pending.delete(id)
-  RulesTelemetry.answered({ card: entry.card, trigger: entry.trigger, action: why, status: "ok", edits: entry.edits, shownAt: entry.at })
+  if (entry.busy) {
+    entry.closed = { message, why, here }
+    return Promise.resolve()
+  }
+  return settle(id, entry, message, why, here)
+}
+
+/** A closed card nobody answered: save a requested one as before cards, record it, tell its clients. */
+function settle(id: string, entry: Pending, message: string, why: "expired" | "closed", here: string | undefined): Promise<void> {
+  // A "remember" the person asked for is never silently lost: unanswered, it is saved as it was before cards.
+  const saved = entry.unanswered
+    ? entry.unanswered(entry.card.text).catch((error) => log.warn("unanswered card not saved", { id, error }))
+    : Promise.resolve()
+  RulesTelemetry.answered({
+    card: entry.card,
+    trigger: entry.trigger,
+    action: why,
+    status: "ok",
+    ...(entry.unanswered ? { outcome: "saved_unanswered" as const } : {}),
+    edits: entry.edits,
+    shownAt: entry.at,
+  })
   // The Bus is per project: announced from another project's request it would reach the wrong clients. The card's own
   // clients then learn it is gone from their next list or reply (`not_open`).
   if (here === entry.directory)
     void publish(RuleEvents.Event.Replied, { id, sessionID: entry.card.sessionID, action: "expired", message })
+  return saved
 }
 
-// A client that renders cards (the TUI, the IDE extension) holds a lease: it calls `POST /rule-proposal/renderer` when
-// it starts and every `RENDERER_RENEW_MS` while it runs. While no lease is live, nothing would show a card: the save
-// tools save as they did before cards, and the after-turn check waits (`rendererAttached`). A client that went away
-// stops renewing, so its lease lapses; one that failed to register retries on the next renewal.
+/** After a reply that did not close the card: if the card was closed meanwhile, settle it now. */
+async function settleIfClosed(id: string, entry: Pending): Promise<ReplyResult | undefined> {
+  if (!entry.closed) return undefined
+  const { message, why, here } = entry.closed
+  await settle(id, entry, message, why, here)
+  return { ok: false, code: "not_open", error: "This proposal is no longer open." }
+}
+
+// A client that renders cards (the TUI, the IDE extension) holds a lease for the project it shows: it calls
+// `POST /rule-proposal/renderer` (in that project's directory) when it starts and every `RENDERER_RENEW_MS` while it runs.
+// While no lease is live for a directory, nothing would show its cards: the save tools save as they did before cards, and
+// the after-turn check waits (`rendererAttached`). A client that went away stops renewing, so its lease lapses; one that
+// failed to register retries on the next renewal. A lease for one project says nothing about another one served by the
+// same process.
 export const RENDERER_RENEW_MS = 30_000
 export const RENDERER_LEASE_MS = 3 * RENDERER_RENEW_MS
 const RENDERERS = Symbol.for("altimate.rules.proposal.renderers")
 const renderers = ((globalThis as Record<symbol, unknown>)[RENDERERS] ??= new Map()) as Map<string, number>
+const leaseKey = (directory: string, client: string) => `${directory}\0${client}`
 
-/** A client that shows proposal cards holds a live lease in this process. */
-export function rendererAttached(now = Date.now()) {
-  for (const [client, until] of renderers) {
-    if (until > now) return true
-    renderers.delete(client)
+/** A client that shows proposal cards holds a live lease for `directory`. */
+export function rendererAttached(directory: string, now = Date.now()) {
+  let live = false
+  for (const [key, until] of renderers) {
+    if (until <= now) renderers.delete(key)
+    else if (key.startsWith(`${directory}\0`)) live = true
   }
-  return false
+  return live
 }
 
-/** `POST /rule-proposal/renderer`: `client` shows cards for the next `RENDERER_LEASE_MS`. */
-export function renewRenderer(client: string, now = Date.now()) {
-  renderers.set(client, now + RENDERER_LEASE_MS)
+/** `POST /rule-proposal/renderer`: `client` shows cards of `directory` for the next `RENDERER_LEASE_MS`. */
+export function renewRenderer(directory: string, client: string, now = Date.now()) {
+  renderers.set(leaseKey(directory, client), now + RENDERER_LEASE_MS)
 }
 
-export function setRendererForTest(attached: boolean) {
+/** For tests: a lease for `directory` that never lapses, or none at all. */
+export function setRendererForTest(directory: string | undefined) {
   renderers.clear()
-  if (attached) renderers.set("test", Number.MAX_SAFE_INTEGER)
+  if (directory !== undefined) renderers.set(leaseKey(directory, "test"), Number.MAX_SAFE_INTEGER)
 }
 
 /** Drop cards past `CARD_TTL_MS`. `here`: the directory of the request doing it (its project's clients are told). */
@@ -100,9 +142,13 @@ function expire(here: string | undefined, now = Date.now()) {
   for (const [id, entry] of pending) if (now - entry.at > CARD_TTL_MS) close(id, entry, "This proposal expired.", "expired", here)
 }
 
-/** Drop the cards of a project (its instance is going away; nobody can answer them after that). */
-export function drop(directory: string) {
-  for (const [id, entry] of pending) if (entry.directory === directory) close(id, entry, "This proposal was closed.", "closed", directory)
+/** Drop the cards of a project (its instance is going away; nobody can answer them after that). Resolves once the
+ * requested cards among them are saved, so the instance is not torn down under those writes. */
+export async function drop(directory: string) {
+  const saves: Promise<void>[] = []
+  for (const [id, entry] of pending)
+    if (entry.directory === directory) saves.push(close(id, entry, "This proposal was closed.", "closed", directory))
+  await Promise.allSettled(saves)
 }
 
 // Process-global like `question`'s registry: the server routes and the session loop may load this module
@@ -143,10 +189,13 @@ function build(id: string, sessionID: string, draft: Draft, state: RulesStore.St
     ...(flag ? { weakens_verification: flag } : {}),
     ...(linked ? { workspace: state.workspace! } : {}),
     actions,
-    ...(draft.choose ? { choose: true } : {}),
+    ...(draft.choose ? { choose: true, memory_scope: memoryScopeOf(draft.text, draft.memory) } : {}),
     topics: draft.topics.map((t) => t.toLowerCase()),
   }
 }
+
+/** Where "Memory" saves: the memory tool's block in its scope (project), otherwise as the wording reads. */
+const memoryScopeOf = (text: string, memory: Draft["memory"]) => (memory ? "project" : RuleClassify.memoryScope(text))
 
 /** Show a card for `draft` in `sessionID`. Returns the card, or undefined when its topic was dismissed.
  * `trigger` (telemetry) defaults from the draft's origin. */
@@ -157,6 +206,7 @@ export async function ask(input: {
   learn: Pending["learn"]
   draft: Draft
   trigger?: CardTrigger
+  unanswered?: Pending["unanswered"]
 }) {
   expire(input.directory)
   const trigger = input.trigger ?? (input.draft.origin === "explicit" ? "remember" : "recurrence")
@@ -169,19 +219,25 @@ export async function ask(input: {
     if (existing.root === input.root && existing.card.text.toLowerCase() === input.draft.text.toLowerCase()) {
       // Asked again: the card moves to the session that asked (clients show cards per session), and a client that
       // missed it gets it back.
+      // The latest request's memory block and fallback win, whichever session asked.
+      if (input.draft.memory) {
+        existing.memory = input.draft.memory
+        // The memory tool's block goes to project memory: the card says so.
+        if (existing.card.memory_scope) existing.card = { ...existing.card, memory_scope: "project" }
+      }
+      if (input.unanswered) existing.unanswered = input.unanswered
       if (existing.card.sessionID !== input.sessionID) {
         // The asking session's project directory and config answer it from now on; the evidence keeps its session.
         existing.card = { ...existing.card, sessionID: input.sessionID }
         existing.directory = input.directory
         existing.learn = input.learn
-        if (input.draft.memory) existing.memory = input.draft.memory
         await publish(RuleEvents.Event.Updated, existing.card)
       } else await publish(RuleEvents.Event.Asked, existing.card)
       RulesTelemetry.shown(existing.card, existing.trigger, true)
       return existing.card
     }
   const card = build(randomUUID(), input.sessionID, input.draft, state)
-  pending.set(card.id, { card, root: input.root, directory: input.directory, learn: input.learn, at: Date.now(), trigger, edits: 0, sourceSession: input.sessionID, memory: input.draft.memory })
+  pending.set(card.id, { card, root: input.root, directory: input.directory, learn: input.learn, at: Date.now(), trigger, edits: 0, sourceSession: input.sessionID, memory: input.draft.memory, unanswered: input.unanswered })
   RulesTelemetry.shown(card, trigger, false)
   await publish(RuleEvents.Event.Asked, card)
   return card
@@ -201,7 +257,10 @@ export type ReplyAction = ProposalCard["actions"][number] | "approve_anyway"
 /** Why a reply did not go through, for clients and HTTP status: the card is gone, the request does not fit this
  * card (or another reply is running), a flagged card was approved without confirming, the new wording failed the
  * lint, or the action itself failed. */
-export type ReplyFailure = "not_open" | "busy" | "not_available" | "verification_flagged" | "invalid_text" | "failed"
+export type ReplyFailure = "not_open" | "busy" | "not_available" | "verification_flagged" | "invalid_text" | "refused" | "failed"
+
+/** The workspace refused the proposal's content (a client-side condition, HTTP 422): the card stays open to edit. */
+class RefusedError extends Error {}
 export type ReplyResult =
   | { ok: true; message: string; card?: ProposalCard; closed: boolean }
   | { ok: false; code: ReplyFailure; error: string; card?: ProposalCard }
@@ -271,6 +330,8 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
     } finally {
       entry.busy = false
     }
+    const gone = await settleIfClosed(id, entry)
+    if (gone) return gone
     track("ok")
     return { ok: true, message: "Wording updated.", card: next, closed: false }
   }
@@ -282,9 +343,12 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
     message = done.message
     track("ok", done.outcome)
   } catch (error) {
-    log.warn("rule proposal reply failed", { action: input.action, error })
-    track("failed")
-    return { ok: false, code: "failed", error: `Not done: ${error instanceof Error ? error.message : String(error)}`, card: entry.card }
+    const code = error instanceof RefusedError ? "refused" : "failed"
+    if (code === "failed") log.warn("rule proposal reply failed", { action: input.action, error })
+    track(code)
+    entry.busy = false
+    // Closed while this ran: nothing was saved, so the requested card falls back to saving as before cards.
+    return (await settleIfClosed(id, entry)) ?? { ok: false, code, error: `Not done: ${error instanceof Error ? error.message : String(error)}`, card: entry.card }
   } finally {
     entry.busy = false
   }
@@ -306,10 +370,10 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
     })
     message = card.topics.length ? "Not a rule: it won't be proposed again for 30 days." : "Dismissed: nothing was saved."
   } else if (action === "save_memory") {
-    const [{ MemoryStore }, { RuleClassify }] = await Promise.all([import("../../memory/store"), import("./classify")])
-    // A card from the memory tool saves the block it was writing, in its scope (project): the classifier's guess
-    // could put that block id into personal memory and overwrite an unrelated block there.
-    const scope = entry.memory ? "project" : RuleClassify.memoryScope(card.text)
+    const { MemoryStore } = await import("../../memory/store")
+    // The scope the card showed. A card from the memory tool saves the block it was writing, in its scope (project):
+    // the classifier's guess could put that block id into personal memory and overwrite an unrelated block there.
+    const scope = entry.memory ? "project" : (card.memory_scope ?? RuleClassify.memoryScope(card.text))
     const id = entry.memory?.id ?? `notes/${slug(card.text)}`
     const tags = entry.memory?.tags.length ? entry.memory.tags : ["remembered"]
     const now = new Date().toISOString()
@@ -358,7 +422,7 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
       outcome = "target_changed"
     } else if (sent.row?.error) {
       // Refused (e.g. an invalid wording): the card stays open so the wording can be edited and sent again.
-      throw new Error(`not sent: ${sent.row.error}`)
+      throw new RefusedError(`the workspace refused it: ${sent.row.error}`)
     } else if (sent.row?.status === "exists") {
       message = "Already a team rule (or waiting for review): nothing new sent."
       outcome = "exists"

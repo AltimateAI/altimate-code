@@ -73,7 +73,7 @@ export const TrainingSaveTool = Tool.define("training_save", {
       // altimate_change start — in a project linked to a workspace, a project rule is a proposed team rule:
       // it shows the proposal card (the person sends it to the owner's review, or the owner approves it),
       // instead of training that applies at once and reaches the team through git without review.
-      const proposed = args.kind === "rule" && args.scope === "project" ? await proposeTeamRule(args.content, ctx.sessionID, lastUserText(ctx.messages)) : undefined
+      const proposed = args.kind === "rule" && args.scope === "project" ? await proposeTeamRule(args.content, ctx.sessionID, lastUserText(ctx.messages), "training", undefined, { name: args.name, source: args.source, citations: args.citations }) : undefined
       if (proposed) return proposed
       // altimate_change end
       const scopeForCount = args.scope === "global" ? "global" : "project"

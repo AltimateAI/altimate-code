@@ -10,9 +10,8 @@
 //   capture started here stops when learning turns off (setting changed, or the project unlinked).
 // - The learn config is read on each refresh and each check, so `learn disable` takes effect without a restart.
 // - After each turn (session idle), check the session's new corrections (`RuleTrigger.afterTurn`).
-// - Publish review notices from a pull as `rule.proposal.reviewed`.
+// - Review notices from a pull are published as `rule.proposal.reviewed` by the sync run itself (`RulesSync`).
 import fs from "node:fs/promises"
-import path from "node:path"
 import { Effect } from "effect"
 import { Bus } from "@/bus"
 import { registerDisposer } from "@/effect/instance-registry"
@@ -27,41 +26,25 @@ import { RuleTrigger } from "./trigger"
 
 const log = Log.create({ service: "rules.service" })
 
-type LearnConfig = { enabled?: boolean; capture?: boolean; model?: string } | undefined
+type LearnConfig = { enabled?: boolean; capture?: boolean; model?: string; capture_policy?: boolean } | undefined
 
 /**
- * `loaded` (the session's config) with the project file's `learn` as it is on disk now: `learn enable/disable` write it
- * while the session runs. The layers that outrank project files in `config.ts` (`OPENCODE_CONFIG_CONTENT`, the
- * managed config directory, MDM preferences) are applied again on top, so a committed project setting never beats an
- * organisation's. Shared by the service and the routes so both decide the same way.
+ * `loaded` (the session's config, every layer already merged and expanded) with the project file's `learn` as it is on
+ * disk now: `learn enable/disable` write it while the session runs. Only keys no layer above project files set
+ * (`Config.learnKeysAboveProject`) are taken from the file, so a committed project setting never beats the home or
+ * `OPENCODE_CONFIG_DIR` config, `OPENCODE_CONFIG_CONTENT`, the account's config, managed config or MDM. When one of those
+ * sets `learn.capture`, `capture_policy` marks it: it then also beats the person's `/rules` choice. Shared by the service
+ * and the routes so both decide the same way.
  */
 export async function effectiveLearn(loaded: LearnConfig, root: string, directory: string): Promise<LearnConfig> {
-  const { readProjectLearning } = await import("../learn/project-config")
-  const onDisk = (await readProjectLearning(root, directory).catch(() => undefined)) as LearnConfig
+  const [{ readProjectLearning }, { Config }] = await Promise.all([import("../learn/project-config"), import("@/config/config")])
+  const onDisk = (await readProjectLearning(root, directory).catch(() => undefined)) as Record<string, unknown> | undefined
   if (!loaded && !onDisk) return undefined
-  const above = await higherLearn().catch(() => ({}))
-  return { ...loaded, ...onDisk, ...above }
-}
-
-/** The `learn` keys set by the config layers above project files, in their merge order. */
-async function higherLearn(): Promise<Record<string, unknown>> {
-  const [{ env }, { ConfigManaged }, { parse }] = await Promise.all([
-    import("@opencode-ai/core/flag/flag"),
-    import("@/config/managed"),
-    import("jsonc-parser"),
-  ])
-  const learn: Record<string, unknown> = {}
-  const add = (text: string | undefined) => {
-    if (!text) return
-    const value = (parse(text) as { learn?: unknown } | undefined)?.learn
-    if (value && typeof value === "object" && !Array.isArray(value)) Object.assign(learn, value)
-  }
-  add(env("OPENCODE_CONFIG_CONTENT"))
-  const managedDir = ConfigManaged.managedConfigDir()
-  for (const file of ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"])
-    add(await fs.readFile(path.join(managedDir, file), "utf8").catch(() => undefined))
-  add((await ConfigManaged.readManagedPreferences())?.text)
-  return learn
+  const above = Config.learnKeysAboveProject(directory)
+  const result: Record<string, unknown> = { ...loaded }
+  for (const [key, value] of Object.entries(onDisk ?? {})) if (!above.has(key)) result[key] = value
+  if (above.has("capture")) result.capture_policy = true
+  return result as LearnConfig
 }
 
 async function learnConfig(ctx: InstanceContext): Promise<LearnConfig> {
@@ -95,23 +78,10 @@ function deps(ctx: InstanceContext, model?: string): RuleTrigger.TriggerDeps {
   }
 }
 
-async function publishNotices(directory: string, report: RulesSync.RunReport) {
-  for (const notice of report.pull?.notices ?? [])
-    await Bus.publish(RuleEvents.Event.Reviewed, {
-      public_id: notice.public_id,
-      text: notice.text,
-      status: notice.status,
-      ...(notice.reason ? { reason: notice.reason } : {}),
-      ...(notice.reviewer ? { reviewer: notice.reviewer } : {}),
-    }).catch(() => {})
-  if (report.context.status === "ready") await Bus.publish(RuleEvents.Event.Changed, { directory }).catch(() => {})
-}
-
-/** Sync now, publishing notices and a change event. Shared with routes and the TUI menu. */
+/** Sync now, or join the sync already running. Its notices and change event are published by the run itself, once.
+ * Shared with routes and the TUI menu. */
 export async function syncNow(root: string, directory: string, learn: Parameters<typeof RulesSync.run>[2], trigger: RulesTelemetry.SyncTrigger = "refresh") {
-  const report = await RulesSync.runShared(root, directory, learn, trigger)
-  await publishNotices(directory, report)
-  return report
+  return RulesSync.runShared(root, directory, learn, trigger)
 }
 
 /**
@@ -124,7 +94,7 @@ export async function sessionStart(root: string, directory: string, loaded: Lear
   // A project with no rules state yet only waits for the service's first pull if it is running: starting one here
   // would add up to `SESSION_WAIT_MS` to the first prompt of every session in a project without rules.
   const hasState = !!(await RulesStore.read(root).catch(() => undefined))?.scope
-  await RulesSync.sessionStart(root, directory, learn, { startIfDue: hasState, onReport: (report) => publishNotices(directory, report) })
+  await RulesSync.sessionStart(root, directory, learn, { startIfDue: hasState })
 }
 
 export async function start(ctx: InstanceContext): Promise<void> {
@@ -178,9 +148,13 @@ export async function start(ctx: InstanceContext): Promise<void> {
       })
       if (report) await followLearning(learn)
     })
-    await followLearning(await learnConfig(ctx))
-    void refresh()
-    const timer = setInterval(() => void refresh(), RulesSync.REFRESH_MS)
+    // Background callbacks never reject unhandled: an unreadable rules state or config is logged, and the next tick tries
+    // again.
+    const safely = (what: string, work: () => Promise<unknown>) => () =>
+      void work().catch((error) => log.warn(`rules ${what} failed`, { error: error instanceof Error ? error.message : String(error) }))
+    await followLearning(await learnConfig(ctx)).catch((error) => log.warn("rules learning setup failed", { error: String(error) }))
+    safely("refresh", refresh)()
+    const timer = setInterval(safely("refresh", refresh), RulesSync.REFRESH_MS)
     timer.unref?.()
     const onIdle = Instance.bind(async (sessionID: string) => {
       if (disposed) return
@@ -195,8 +169,9 @@ export async function start(ctx: InstanceContext): Promise<void> {
       if (!disposed) await followLearning(await learnConfig(ctx))
     })
     const stop = Bus.subscribeAll((event) => {
-      if (event.type === "session.idle") void onIdle(event.properties.sessionID)
-      if (event.type === RuleEvents.Event.Changed.type && (event.properties as { directory?: string }).directory === ctx.directory) void onChanged()
+      if (event.type === "session.idle") safely("after-turn check", () => onIdle(event.properties.sessionID))()
+      if (event.type === RuleEvents.Event.Changed.type && (event.properties as { directory?: string }).directory === ctx.directory)
+        safely("learning update", onChanged)()
     })
     const unregister = registerDisposer(async (directory) => {
       if (directory !== ctx.directory) return
@@ -206,7 +181,7 @@ export async function start(ctx: InstanceContext): Promise<void> {
       unregister()
       // Cards nobody answered go with the instance: they cannot be answered after it.
       const { RuleProposal } = await import("./proposal")
-      RuleProposal.drop(ctx.directory)
+      await RuleProposal.drop(ctx.directory)
       // The capture's own disposer stops it too; this covers a stop handle taken before disposal. The gate goes last:
       // signals the stop flushes are still checked against the learning decision.
       await stopCapture?.()

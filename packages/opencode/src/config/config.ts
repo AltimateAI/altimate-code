@@ -52,6 +52,19 @@ import { makeRuntime } from "@/effect/run-service"
 // altimate_change start — bootstrap can inspect config already loaded by service initialization
 // without introducing another asynchronous dependency for opted-out learning capture.
 const loadedConfig = new Map<string, Info>()
+// altimate_change start — workspace rules: per instance directory, the `learn` keys a layer above project files set
+const LEARN_ABOVE_PROJECT = new Map<string, Set<string>>()
+/** The `learn` keys set by config layers that outrank project files, as of the last load for `directory`. A project
+ * file re-read while the session runs (`learn enable`/`disable`) may change only the other keys. */
+export function learnKeysAboveProject(directory: string): ReadonlySet<string> {
+  return LEARN_ABOVE_PROJECT.get(directory) ?? new Set()
+}
+export function setLearnKeysAboveProjectForTest(directory: string, keys: readonly string[] | undefined) {
+  if (keys) LEARN_ABOVE_PROJECT.set(directory, new Set(keys))
+  else LEARN_ABOVE_PROJECT.delete(directory)
+}
+// altimate_change end
+
 export function peek(ctx: InstanceContext): Info | undefined {
   return loadedConfig.get(ctx.directory)
 }
@@ -497,7 +510,26 @@ export const layer = Layer.effect(
           result.plugin_origins = plugins
         })
 
+        // altimate_change start — workspace rules: the `learn` keys set by layers that outrank project files (the home
+        // `.altimate-code`/`.opencode` dirs, `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG_CONTENT`, the account's config,
+        // managed config, MDM), so a project file re-read later never beats them (`learnKeysAboveProject`).
+        const learnAbove = new Set<string>()
+        const homeDirs = [".altimate-code", ".opencode"].map((name) => path.join(Global.Path.home, name))
+        const aboveProject = (source: string) =>
+          source === "OPENCODE_CONFIG_CONTENT" ||
+          source.endsWith("/api/config") ||
+          source.startsWith(ConfigManaged.managedConfigDir() + path.sep) ||
+          (!!Flag.OPENCODE_CONFIG_DIR && path.dirname(source) === path.resolve(Flag.OPENCODE_CONFIG_DIR)) ||
+          homeDirs.includes(path.dirname(source))
+        const noteLearn = (source: string, next: Info | undefined) => {
+          const learn = (next as { learn?: unknown } | undefined)?.learn
+          if (learn && typeof learn === "object" && aboveProject(source)) for (const key of Object.keys(learn)) learnAbove.add(key)
+        }
+        // altimate_change end
         const merge = (source: string, next: Info, kind?: ConfigPlugin.Scope) => {
+          // altimate_change start — workspace rules: see `learnAbove`
+          noteLearn(source, next)
+          // altimate_change end
           result = mergeConfigConcatArrays(result, next)
           return mergePluginOrigins(source, next.plugin, kind)
         }
@@ -700,8 +732,12 @@ export const layer = Layer.effect(
           })
           if (managedPrefs.mcp && DATAMATE_KEY in managedPrefs.mcp) managedOwnsDatamate = true
           result = mergeConfigConcatArrays(result, managedPrefs)
+          for (const key of Object.keys(managedPrefs.learn ?? {})) learnAbove.add(key)
           // altimate_change end
         }
+        // altimate_change start — workspace rules: see `learnAbove`
+        LEARN_ABOVE_PROJECT.set(ctx.directory, learnAbove)
+        // altimate_change end
 
         // altimate_change start — upstream_fix: decide installs only after every config source has
         // merged. Inline, account, managed, and later-directory configs can declare a file plugin

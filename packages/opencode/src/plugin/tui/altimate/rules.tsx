@@ -19,6 +19,7 @@ import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createEffect, createRoot, createSignal, onCleanup, Show } from "solid-js"
 import type { ProposalCard } from "@/altimate/rules/events"
 import { RuleClassify } from "@/altimate/rules/classify"
+import { printable } from "@/altimate/rules/printable"
 import type { RulesSummary } from "@/altimate/rules/summary"
 import { describeAge } from "@/altimate/workspace/attach-snapshot"
 
@@ -40,6 +41,10 @@ async function post<T>(api: TuiPluginApi, url: string, body?: unknown): Promise<
   const result = await client.post({ url, body: body ?? {}, headers: { "Content-Type": "application/json" } })
   return (result.data ?? (result.error as T | undefined)) as T | undefined
 }
+
+/** Who decides learning, as `/rules` says it. */
+const sourceLabel = (source: string) =>
+  source === "organization" ? "organization policy" : source === "you" ? "your setting" : source === "workspace" ? "workspace setting" : "default"
 
 const on = (api: TuiPluginApi) => api.event.on as unknown as (type: string, handler: (event: { properties: any }) => void) => () => void
 const root = (api: TuiPluginApi) => (api.state.path.worktree && api.state.path.worktree !== "/" ? api.state.path.worktree : api.state.path.directory)
@@ -66,12 +71,15 @@ function title(card: ProposalCard) {
 }
 
 function meta(card: ProposalCard) {
-  const parts = [card.applies_to.length ? `applies to ${card.applies_to.join(", ")}` : "applies to the whole repository"]
+  const parts = [card.applies_to.length ? `applies to ${printable(card.applies_to.join(", "))}` : "applies to the whole repository"]
   if (card.evidence.correction) parts.push(`from your correction ${describeAge(Date.parse(card.evidence.correction.at))}`)
   if (card.evidence.sessions > 1) parts.push(`seen in ${card.evidence.sessions} sessions`)
   parts.push(`${card.chars} chars`)
   return parts.join(" · ")
 }
+
+/** Where "Memory" saves, as the server decided (older servers did not say: the wording decides there too). */
+const memoryScope = (card: ProposalCard) => card.memory_scope ?? RuleClassify.memoryScope(card.text)
 
 /** Button labels, in the order shown. Enter on a fresh card takes the first: the team action, or "Memory" on a
  * "Save as" card. */
@@ -80,7 +88,7 @@ function buttons(card: ProposalCard): { action: ProposalCard["actions"][number];
     send: card.choose ? "Team rule — send for review" : "Send for review",
     approve: card.choose ? "Team rule — approve now" : card.weakens_verification ? "Approve anyway" : "Approve now",
     save_local: "Save for this project",
-    save_memory: RuleClassify.memoryScope(card.text) === "global" ? "Memory — just for you" : "Memory — this project",
+    save_memory: memoryScope(card) === "global" ? "Memory — just for you" : "Memory — this project",
     edit: "Edit wording",
     dismiss: card.choose ? "Skip" : "Not a rule",
   }
@@ -90,13 +98,13 @@ function buttons(card: ProposalCard): { action: ProposalCard["actions"][number];
 
 /** What the team action does, shown under the buttons while the card is focused. */
 function explain(card: ProposalCard, action: string): string {
-  const owner = card.workspace?.owner_name ?? "the workspace owner"
-  const ws = card.workspace?.name ?? "the workspace"
+  const owner = card.workspace?.owner_name ? printable(card.workspace.owner_name) : "the workspace owner"
+  const ws = card.workspace?.name ? printable(card.workspace.name) : "the workspace"
   if (action === "send") return `Goes to ${owner}'s queue in ${ws} → Rules. Nothing changes for the team until approved.`
   if (action === "approve") return `You own ${ws}: it reaches every teammate's sessions within a few minutes.`
   if (action === "save_local") return "Not linked to a workspace: saved as project training, no review."
   if (action === "save_memory")
-    return RuleClassify.memoryScope(card.text) === "global"
+    return memoryScope(card) === "global"
       ? "Your preference: saved to your memory now, for all your projects. No review."
       : "A fact about this project: saved to its memory now. Shared with the workspace if its memory sharing is on. Not a team rule."
   if (action === "edit") return "Change the text before deciding."
@@ -141,18 +149,18 @@ function InlineCard(props: {
           </Show>
         </box>
         <Show when={card().replaces && card().change === "edit"}>
-          <text attributes={TextAttributes.STRIKETHROUGH} fg={theme().textMuted}>{card().replaces!.text}</text>
+          <text attributes={TextAttributes.STRIKETHROUGH} fg={theme().textMuted}>{printable(card().replaces!.text)}</text>
         </Show>
-        <text fg={theme().text} attributes={card().change === "retire" ? TextAttributes.STRIKETHROUGH : undefined}>{card().text}</text>
+        <text fg={theme().text} attributes={card().change === "retire" ? TextAttributes.STRIKETHROUGH : undefined}>{printable(card().text)}</text>
         <text fg={theme().textMuted}>{meta(card())}</text>
         <Show when={props.focused && card().why}>
-          <text fg={theme().textMuted}>{`Why: ${card().why}`}</text>
+          <text fg={theme().textMuted}>{`Why: ${printable(card().why)}`}</text>
         </Show>
         <Show when={props.focused && card().evidence.correction}>
-          <text fg={theme().textMuted}>{`Your correction: "${card().evidence.correction!.excerpt}"`}</text>
+          <text fg={theme().textMuted}>{`Your correction: "${printable(card().evidence.correction!.excerpt)}"`}</text>
         </Show>
         <Show when={card().weakens_verification}>
-          <text fg={theme().warning}>{`⚠ ${card().weakens_verification} — it needs "approve anyway"`}</text>
+          <text fg={theme().warning}>{`⚠ ${printable(card().weakens_verification)} — it needs "approve anyway"`}</text>
         </Show>
       </box>
       <box flexDirection="row" gap={1} paddingLeft={2} paddingRight={2} paddingTop={1} paddingBottom={props.focused ? 0 : 1} flexWrap="wrap">
@@ -238,13 +246,13 @@ function installCards(api: TuiPluginApi) {
     if (!result.ok) {
       // Closed on the server (expired, or its instance went away): it can't be answered, so it leaves the queue.
       if ((result as { code?: string }).code === "not_open") remove(card.id)
-      return api.ui.toast({ variant: "error", message: result.error ?? "Not done.", duration: 8000 })
+      return api.ui.toast({ variant: "error", message: printable(result.error ?? "Not done."), duration: 8000 })
     }
     if (action === "edit") {
       if (result.card) setCards((list) => list.map((c) => (c.id === card.id ? result.card! : c)))
       return
     }
-    api.ui.toast({ variant: "success", message: result.message ?? "Done.", duration: 6000 })
+    api.ui.toast({ variant: "success", message: printable(result.message ?? "Done."), duration: 6000 })
     remove(card.id)
     unfocus()
   }
@@ -326,7 +334,7 @@ function installCards(api: TuiPluginApi) {
   // A dialog opened while the card is focused (the edit prompt, the palette, `/rules`) takes the keys, and the card
   // leaves focus: when the dialog closes the host gives focus back to the prompt, so re-binding the card's keys then
   // would take Enter, `e` and `n` from whatever the person types next. `<leader>p` focuses the card again.
-  createRoot(() => {
+  const disposeEffects = createRoot((dispose) => {
     createEffect(() => {
       if (!api.ui.dialog.open || !focused()) return
       releaseKeys()
@@ -338,6 +346,7 @@ function installCards(api: TuiPluginApi) {
     createEffect(() => {
       if (focused() && (!active() || !current())) unfocus()
     })
+    return dispose
   })
 
   const offer = (card: ProposalCard) =>
@@ -374,17 +383,21 @@ function installCards(api: TuiPluginApi) {
                 />
               )}
             </Show>
-            <api.ui.Prompt
-              sessionID={props.session_id}
-              visible={props.visible}
-              disabled={props.disabled}
-              onSubmit={props.on_submit}
-              ref={(ref) => {
-                prompt = ref
-                props.ref?.(ref)
-              }}
-              right={<api.ui.Slot name="session_prompt_right" session_id={props.session_id} />}
-            />
+            {/* A click into the input while the card is focused gives the keys back: otherwise Enter, `e` and `n` typed
+                there would still answer the card. */}
+            <box onMouseDown={() => focused() && unfocus()}>
+              <api.ui.Prompt
+                sessionID={props.session_id}
+                visible={props.visible}
+                disabled={props.disabled}
+                onSubmit={props.on_submit}
+                ref={(ref) => {
+                  prompt = ref
+                  props.ref?.(ref)
+                }}
+                right={<api.ui.Slot name="session_prompt_right" session_id={props.session_id} />}
+              />
+            </box>
           </box>
         )
       },
@@ -411,9 +424,12 @@ function installCards(api: TuiPluginApi) {
     if (Array.isArray(result?.data)) setCards(result.data as ProposalCard[])
   }
 
-  on(api)("rule.proposal.asked", (event) => offer(event.properties as ProposalCard))
-  on(api)("rule.proposal.updated", (event) => offer(event.properties as ProposalCard))
-  on(api)("rule.proposal.replied", (event) => closed((event.properties as { id: string }).id))
+  const offs: (() => void)[] = []
+  let disposed = false
+  const listen = (type: string, handler: (event: { properties: any }) => void) => void offs.push(on(api)(type, handler))
+  listen("rule.proposal.asked", (event) => offer(event.properties as ProposalCard))
+  listen("rule.proposal.updated", (event) => offer(event.properties as ProposalCard))
+  listen("rule.proposal.replied", (event) => closed((event.properties as { id: string }).id))
   // Each review is shown once per project, whether it arrived as an event or was pulled before this TUI
   // subscribed (the startup sync): remembered by id and status.
   // The first time a project is seen, its existing reviews are recorded silently: they are history, not news.
@@ -425,32 +441,48 @@ function installCards(api: TuiPluginApi) {
     api.kv.set(seenKey(), [...seen, key].slice(-200))
     if (!quiet) reviewToast(api, p)
   }
-  on(api)("rule.proposal.reviewed", (event) => notify(event.properties))
+  listen("rule.proposal.reviewed", (event) => notify(event.properties))
   const replay = () =>
     void summaryOf(api).then((summary) => {
       const first = api.kv.get<string[] | undefined>(seenKey(), undefined) === undefined
       if (first) api.kv.set(seenKey(), [])
       for (const notice of [...(summary?.notices ?? [])].reverse()) notify(notice, first)
     })
-  on(api)("altimate.rules.changed", replay)
-  // This TUI shows proposal cards: it holds the server's renderer lease while it runs, renewed at the interval the
-  // server asks for. Without a live lease, the save tools save as before cards and the after-turn check waits. A
-  // failed call is retried after a few seconds.
+  listen("altimate.rules.changed", replay)
+  // This TUI shows proposal cards: it holds the server's renderer lease for its project while it runs, renewed at the
+  // interval the server asks for. Without a live lease, the save tools save as before cards and the after-turn check
+  // waits. No answer (the server may still be starting): tried again in a few seconds. A refusal (workspaces off, an
+  // older server): tried again at the normal interval, not every few seconds.
+  let leaseTimer: ReturnType<typeof setTimeout> | undefined
   const lease = async () => {
+    if (disposed) return
     const result = await post<{ ok: boolean; renew_ms?: number }>(api, "/rule-proposal/renderer", { client: "tui" }).catch(() => undefined)
-    // Not registered yet (the server may still be starting): try again soon, not at the next renewal.
-    const next = result?.ok !== true ? 3_000 : typeof result.renew_ms === "number" && result.renew_ms > 0 ? result.renew_ms : 30_000
-    setTimeout(() => void lease(), next).unref?.()
+    if (disposed) return
+    const next = result === undefined
+      ? 3_000
+      : result.ok === true && typeof result.renew_ms === "number" && result.renew_ms > 0
+        ? result.renew_ms
+        : 30_000
+    leaseTimer = setTimeout(() => void lease(), next)
+    leaseTimer.unref?.()
   }
   void lease()
-  setTimeout(() => {
+  // A plugin that goes away (reloaded, another server) stops renewing and stops listening, so its lease lapses.
+  // Startup: after the session-start sync had a moment, catch up on reviews and cards from before this TUI listened.
+  const startup = setTimeout(() => {
+    if (disposed) return
     replay()
     void load()
   }, 4_000)
+  api.lifecycle?.onDispose?.(() => {
+    disposed = true
+    if (leaseTimer) clearTimeout(leaseTimer)
+    clearTimeout(startup)
+    for (const off of offs.splice(0)) off()
+    disposeEffects()
+  })
 }
 
-/** Server text without control characters (a reviewer's reason must not drive the terminal). */
-const printable = (text: string | undefined) => (text ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
 
 function reviewToast(api: TuiPluginApi, raw: { text: string; status: string; reason?: string; reviewer?: string }) {
   const p = { ...raw, text: printable(raw.text), reason: raw.reason && printable(raw.reason), reviewer: raw.reviewer && printable(raw.reviewer) }
@@ -468,24 +500,24 @@ async function showMenu(api: TuiPluginApi) {
   const team = rows.filter((r) => r.source === "team")
   const mine = rows.filter((r) => r.source === "mine")
   const status = summary.linked
-    ? `${summary.workspace?.name ?? "Workspace"} · ${summary.line}${summary.pulled_at ? ` · synced ${describeAge(Date.parse(summary.pulled_at))}` : ""}`
+    ? printable(`${summary.workspace?.name ?? "Workspace"} · ${summary.line}${summary.pulled_at ? ` · synced ${describeAge(Date.parse(summary.pulled_at))}` : ""}`)
     : "Not linked to a workspace — run `altimate-code link`"
-  const learning = `Learning from sessions: ${summary.learning ? "on" : "off"} (${summary.learning_source === "you" ? "your setting" : summary.learning_source === "workspace" ? "workspace setting" : "default"})`
+  const learning = `Learning from sessions: ${summary.learning ? "on" : "off"} (${sourceLabel(summary.learning_source)})`
   const label: Record<string, string> = { active: "approved", pending: "pending review", rejected: "rejected", queued: "queued", retired: "retired", superseded: "replaced" }
   const options: TuiDialogSelectOption<string>[] = [
     ...team.map((r) => ({
-      title: `${r.pinned ? "📌 " : ""}${r.text}`,
+      title: `${r.pinned ? "📌 " : ""}${printable(r.text)}`,
       value: `rule:${r.public_id}`,
-      description: r.applies_to.length ? `applies to ${r.applies_to.join(", ")}` : "whole repository",
+      description: r.applies_to.length ? `applies to ${printable(r.applies_to.join(", "))}` : "whole repository",
       category: `Team rules (${team.length})`,
     })),
     ...mine.map((r) => ({
-      title: r.text,
+      title: printable(r.text),
       value: `mine:${r.public_id}`,
-      description: `${label[r.status] ?? r.status}${r.reviewer ? ` by ${r.reviewer}` : ""}${r.reason ? ` — ${r.reason}` : ""}`,
+      description: `${label[r.status] ?? printable(r.status)}${r.reviewer ? ` by ${printable(r.reviewer)}` : ""}${r.reason ? ` — ${printable(r.reason)}` : ""}`,
       category: `Your proposals (${mine.length})`,
     })),
-    { title: "Sync now", value: "sync", description: summary.last_error ? `last sync failed: ${summary.last_error}` : "Pull approved rules and send queued proposals", category: "Actions" },
+    { title: "Sync now", value: "sync", description: summary.last_error ? `last sync: ${printable(summary.last_error)}` : "Pull approved rules and send queued proposals", category: "Actions" },
     {
       title: summary.learning ? "Turn learning off for me" : "Turn learning on for me",
       value: "toggle",
@@ -505,21 +537,26 @@ async function showMenu(api: TuiPluginApi) {
         if (option.value === "sync" || option.value === "toggle" || option.value === "follow") api.ui.dialog.clear()
         if (option.value === "sync") {
           api.ui.toast({ variant: "info", message: "Syncing rules…", duration: 3000 })
-          const report = await post<{ ok: boolean; pull?: { ok: boolean; rules: number; pending: number; error?: string; notices: unknown[] }; push?: { sent: unknown[] }; context?: { status: string; reason?: string } }>(api, "/altimate/rules/sync").catch(() => undefined)
+          const report = await post<{ ok: boolean; error?: string; pull?: { ok: boolean; rules: number; pending: number; error?: string; notices: unknown[] }; push?: { sent: unknown[]; queued?: number; error?: string }; context?: { status: string; reason?: string } }>(api, "/altimate/rules/sync").catch(() => undefined)
           // A review notice from this pull is its own toast; do not cover it with the summary.
           if (report?.pull?.notices.length) return
           if (report?.context && report.context.status !== "ready")
-            api.ui.toast({ variant: "warning", message: `Rules sync skipped: ${report.context.reason ?? report.context.status}.`, duration: 8000 })
+            api.ui.toast({ variant: "warning", message: `Rules sync skipped: ${printable(report.context.reason ?? report.context.status)}.`, duration: 8000 })
+          else if (report?.pull?.ok && report.push?.error)
+            api.ui.toast({ variant: "warning", message: `Synced ${report.pull.rules} team ${report.pull.rules === 1 ? "rule" : "rules"}, but ${report.push.queued ?? 0} ${report.push.queued === 1 ? "proposal stays" : "proposals stay"} queued: ${printable(report.push.error)}`, duration: 10000 })
           else if (report?.pull?.ok)
             api.ui.toast({ variant: "success", message: `Synced: ${report.pull.rules} team ${report.pull.rules === 1 ? "rule" : "rules"}, ${report.pull.pending} pending review${report.push?.sent.length ? `, ${report.push.sent.length} sent` : ""}.`, duration: 6000 })
-          else api.ui.toast({ variant: "error", message: `Rules sync failed: ${report?.pull?.error ?? "unknown error"}`, duration: 8000 })
+          else api.ui.toast({ variant: "error", message: `Rules sync failed: ${printable(report?.pull?.error ?? report?.error ?? "the session server did not answer")}`, duration: 8000 })
           return
         }
         if (option.value === "toggle" || option.value === "follow") {
           const on = option.value === "follow" ? null : !summary.learning
           const next = await post<Summary & { error?: string }>(api, "/altimate/rules/learning", { on }).catch(() => undefined)
-          if (!next?.ok) return api.ui.toast({ variant: "error", message: `Learning not changed: ${next?.error ?? "the session server did not answer"}`, duration: 8000 })
-          const source = next.learning_source === "you" ? "your setting" : next.learning_source === "workspace" ? "workspace setting" : "default"
+          if (!next?.ok) return api.ui.toast({ variant: "error", message: `Learning not changed: ${printable(next?.error ?? "the session server did not answer")}`, duration: 8000 })
+          const source = sourceLabel(next.learning_source)
+          // Under an organization policy the choice is kept but does not decide: say so instead of claiming it did.
+          if (next.learning_source === "organization")
+            return api.ui.toast({ variant: "warning", message: `Learning from sessions stays ${next.learning ? "on" : "off"}: your organization's policy decides it.`, duration: 8000 })
           api.ui.toast({ variant: "success", message: `Learning from sessions is ${next.learning ? "on" : "off"} for you in this project (${source}).`, duration: 6000 })
           return
         }

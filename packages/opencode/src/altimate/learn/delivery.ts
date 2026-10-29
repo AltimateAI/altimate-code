@@ -88,6 +88,17 @@ export type ShownSnapshot = {
   shown: { name: string; id: string; textHash: string; tier: Shown["tier"]; at: string }[]
 }
 
+/** The snapshot file names (`<sha256(session)>.json`) present now, all of them: a session whose file is gone can never be
+ * read again. */
+export async function snapshotFiles(root: string): Promise<Set<string>> {
+  const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+  await SafeFS.assertSafePath(root, dir)
+  return new Set(await fs.readdir(dir))
+}
+
+/** The snapshot file name of `session`. */
+export const snapshotFile = (session: string) => Store.sha256(session) + ".json"
+
 export async function readShownSnapshots(root: string, options: { limit?: number } = {}) {
   const dir = path.join(root, ".altimate-code", "learn", ".sessions")
   const coverage = { sessions_analyzed: 0, sessions_skipped_malformed: 0, truncated: false }

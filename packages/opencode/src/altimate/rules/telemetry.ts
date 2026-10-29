@@ -96,6 +96,7 @@ export function synced(trigger: SyncTrigger, report: RulesSync.RunReport, starte
           refused: push.sent.filter((row) => row.error).length,
           queued: push.queued,
           push_failed: !!push.error,
+          approval_failed: !!push.approval_error,
         }
       : {}),
     ...(usage ? { usage_items: usage.items, usage_failed: !!usage.error } : {}),
