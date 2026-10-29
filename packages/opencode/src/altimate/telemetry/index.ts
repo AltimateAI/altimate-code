@@ -1668,6 +1668,16 @@ export namespace Telemetry {
     class: Telemetry.Event & { type: "core_failure" } extends { error_class: infer C } ? C : never
     keywords: string[]
   }> = [
+    // altimate_change start — permission denial/rejection first: these messages embed the user's
+    // rule patterns or feedback (e.g. "dbt parse *"), which would otherwise match parse_error etc.
+    {
+      class: "permission",
+      keywords: [
+        "the user has specified a rule which prevents you from using this specific tool call",
+        "the user rejected permission to use this specific tool call",
+      ],
+    },
+    // altimate_change end
     { class: "parse_error", keywords: ["parse", "syntax", "binder", "unexpected token", "sqlglot"] },
     {
       class: "connection",
