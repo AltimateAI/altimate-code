@@ -18,6 +18,7 @@ import type { TuiDialogSelectOption, TuiPlugin, TuiPluginApi, TuiPromptRef } fro
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createEffect, createRoot, createSignal, onCleanup, Show } from "solid-js"
 import type { ProposalCard } from "@/altimate/rules/events"
+import { RuleClassify } from "@/altimate/rules/classify"
 import type { RulesSummary } from "@/altimate/rules/summary"
 import { describeAge } from "@/altimate/workspace/attach-snapshot"
 
@@ -79,7 +80,7 @@ function buttons(card: ProposalCard): { action: ProposalCard["actions"][number];
     send: card.choose ? "Team rule — send for review" : "Send for review",
     approve: card.choose ? "Team rule — approve now" : card.weakens_verification ? "Approve anyway" : "Approve now",
     save_local: "Save for this project",
-    save_memory: "Memory — just for you",
+    save_memory: RuleClassify.memoryScope(card.text) === "global" ? "Memory — just for you" : "Memory — this project",
     edit: "Edit wording",
     dismiss: card.choose ? "Skip" : "Not a rule",
   }
@@ -94,7 +95,10 @@ function explain(card: ProposalCard, action: string): string {
   if (action === "send") return `Goes to ${owner}'s queue in ${ws} → Rules. Nothing changes for the team until approved.`
   if (action === "approve") return `You own ${ws}: it reaches every teammate's sessions within a few minutes.`
   if (action === "save_local") return "Not linked to a workspace: saved as project training, no review."
-  if (action === "save_memory") return "A fact or preference: saved now, no review, not a team rule."
+  if (action === "save_memory")
+    return RuleClassify.memoryScope(card.text) === "global"
+      ? "Your preference: saved to your memory now, for all your projects. No review."
+      : "A fact about this project: saved to its memory now (shared through the workspace's memory). Not a team rule."
   if (action === "edit") return "Change the text before deciding."
   return card.choose || !card.topics.length ? "Don't save anything." : "Won't propose this topic again for 30 days."
 }

@@ -10,6 +10,7 @@ import { RulesSummary } from "../../../src/altimate/rules/summary"
 import { RulesSync } from "../../../src/altimate/rules/sync"
 import { appliesTo, learningDecision, learningEnabled } from "../../../src/altimate/rules/trigger"
 import { RulesFromHistory } from "../../../src/altimate/rules/from-history"
+import { RulesRemember } from "../../../src/altimate/rules/remember"
 import { parse } from "../../../src/altimate/learn/lesson"
 import * as Store from "../../../src/altimate/learn/store"
 
@@ -579,5 +580,44 @@ describe("self-review fixes", () => {
     expect(moved.sessionID).toBe("second")
     expect(RuleProposal.list(root, "second")).toHaveLength(1)
     RuleProposal.drop(root)
+  })
+})
+
+describe("remember, whichever save tool the agent picks", () => {
+  const env = { ...process.env }
+  beforeAll(() => {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_LEARN
+  })
+  afterAll(() => {
+    if (env.ALTIMATE_DISABLE_WORKSPACE !== undefined) process.env.ALTIMATE_DISABLE_WORKSPACE = env.ALTIMATE_DISABLE_WORKSPACE
+    if (env.ALTIMATE_LEARN !== undefined) process.env.ALTIMATE_LEARN = env.ALTIMATE_LEARN
+  })
+  const linkedRoot = async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => Object.assign(s, linked()))
+    return root
+  }
+
+  test("an unclear \"remember\" saved as project memory becomes the Memory · Team rule · Skip card, and nothing is saved", async () => {
+    const root = await linkedRoot()
+    const said = "Remember: staging models live in models/staging."
+    const result = await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content: "Staging models live in models/staging.", sessionID: "m1", said, via: "memory" })
+    expect(result?.output).toContain("Nothing was saved yet")
+    expect(RuleProposal.list(root, "m1")).toEqual([expect.objectContaining({ choose: true, actions: ["save_memory", "send", "dismiss"] })])
+    RuleProposal.drop(root)
+  })
+
+  test("a fact the person asked to remember, or a note nobody asked for, is saved to memory as usual", async () => {
+    const root = await linkedRoot()
+    const fact = await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content: "Our warehouse is Snowflake in us-east-1.", sessionID: "m2", said: "Remember that our warehouse is Snowflake in us-east-1.", via: "memory" })
+    expect(fact).toBeUndefined()
+    const unasked = await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content: "Staging models live in models/staging.", sessionID: "m3", said: "Add a staging model for customers.", via: "memory" })
+    expect(unasked).toBeUndefined()
+    expect(RuleProposal.list(root)).toEqual([])
+  })
+
+  test("the card's memory option says where a fact goes", () => {
+    expect(RuleClassify.memoryScope("Staging models live in models/staging.")).toBe("project")
   })
 })

@@ -9,59 +9,7 @@ import { CitationSchema } from "../../memory/types"
 const log = Log.create({ service: "tool.training_save" })
 
 // altimate_change start — workspace rules: route a project rule to the proposal card when linked
-/** The text of the person's latest message in the session. */
-function lastUserText(messages: unknown): string | undefined {
-  if (!Array.isArray(messages)) return undefined
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i] as { info?: { role?: string }; parts?: { type?: string; text?: string; synthetic?: boolean }[] }
-    if (message?.info?.role !== "user") continue
-    const text = (message.parts ?? []).filter((part) => part.type === "text" && !part.synthetic).map((part) => part.text ?? "").join(" ").trim()
-    if (text) return text
-  }
-  return undefined
-}
-
-async function proposeTeamRule(content: string, sessionID: string, said?: string) {
-  const [{ Instance }, { Config }, { RulesStore }, { RuleTrigger }, { RulesSync }] = await Promise.all([
-    import("../../project/instance"),
-    import("@/config/config"),
-    import("../rules/store"),
-    import("../rules/trigger"),
-    import("../rules/sync"),
-  ])
-  const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-  const learn = (await Config.get()).learn
-  // With learning or workspaces off, nothing would ever send the card: save it locally as before.
-  if (!RulesSync.rulesEnabled(learn)) return undefined
-  const state = await RulesStore.read(root)
-  if (!state.scope || !state.workspace) return undefined
-  const result = await RuleTrigger.explicit({ sessionID, root, directory: Instance.directory, learn, text: content, said })
-  const metadata = { action: "proposed" as string, kind: "rule", name: "", scope: "project" }
-  if (result.status === "memory")
-    return {
-      title: "Not a team rule",
-      metadata: { ...metadata, action: "redirect" },
-      output: `This reads as ${result.cue}, not a team rule. Save it with altimate_memory_write instead (scope "global" for a personal preference, "project" for a fact about this project), then tell the person it was saved to memory.`,
-    }
-  if (result.status === "invalid")
-    return {
-      title: "Team rule: not proposed",
-      metadata: { ...metadata, action: "error" },
-      output: `Not proposed: a team rule must be one line of at most 140 characters with no commands, links or secrets (${result.reason}). Restate it as one short line and call training_save again.`,
-    }
-  const owner = state.workspace.is_owner ? "you (the workspace owner)" : (state.workspace.owner_name ?? "the workspace owner")
-  return {
-    title: `Team rule proposed: "${content.slice(0, 60)}"`,
-    metadata,
-    output: [
-      result.choose
-        ? `The person sees a card asking whether to save this as a memory (just for them, applies now) or as a team rule for ${state.workspace.name} (goes to ${owner} for review), or to skip it.`
-        : `Proposed as a team rule for ${state.workspace.name}. The person sees a card to ` +
-          (state.workspace.is_owner ? "approve it now" : `send it to ${owner} for review`) + ", edit the wording, or decline.",
-      "Follow the rule for the rest of this session. Do not save it again, and do not say it is already a team rule: it applies to teammates only after approval.",
-    ].join("\n"),
-  }
-}
+import { lastUserText, proposeTeamRule } from "../rules/remember"
 // altimate_change end
 
 export const TrainingSaveTool = Tool.define("training_save", {
