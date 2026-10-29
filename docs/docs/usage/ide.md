@@ -66,7 +66,7 @@ The extension installs the CLI natively: the release archive is fetched over HTT
 You need an LLM to power the chat. Two options:
 
 - **BYOK (Bring Your Own Key)** — Free and unlimited. Configure any of the [35+ supported providers](../configure/providers.md) (Anthropic, OpenAI, AWS Bedrock, Azure OpenAI, etc.)
-- **[Altimate LLM Gateway](https://help.altimate.ai/workspaces/user-guide/components/llm-gateway/)** — Managed LLM access with dynamic model routing. 10M tokens free to get started — no API keys to manage
+- **[Altimate LLM Gateway](https://help.altimate.ai/workspaces/user-guide/components/llm-gateway/)** — Managed LLM access with dynamic model routing. 1M tokens free to get started — no API keys to manage
 
 ## Full Altimate Workspaces documentation
 

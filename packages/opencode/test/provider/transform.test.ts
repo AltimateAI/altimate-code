@@ -12,6 +12,7 @@ import {
   OutputTokenBudgetError,
 } from "@/provider/output-token-budget"
 import { LLMRequestPrep } from "@/session/llm/request"
+import type { Agent } from "@/agent/agent"
 // ProviderTransform.message expects a Provider.Model with the fork's ModelID/ProviderID brands.
 import { ModelID, ProviderID } from "@/provider/schema"
 
@@ -5500,6 +5501,8 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
       readonly modelHeaders?: Record<string, string>
       readonly chatHeaders?: Record<string, string>
       readonly isWorkflow?: boolean
+      readonly permission?: Agent.Info["permission"]
+      readonly userTools?: Record<string, boolean>
     } = {},
   ) =>
     Effect.runPromise(
@@ -5511,6 +5514,7 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
           time: { created: Date.now() },
           agent: "test",
           model: { providerID: "openai-compatible", modelID: "large-window-model" },
+          tools: overrides.userTools,
         } as any,
         sessionID,
         model: { ...model, headers: overrides.modelHeaders ?? model.headers },
@@ -5518,7 +5522,7 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
           name: "test",
           mode: "primary",
           options: overrides.agentOptions ?? {},
-          permission: [],
+          permission: overrides.permission ?? [],
           prompt: systemPrompt,
         } as any,
         system: [],
@@ -5546,6 +5550,20 @@ describe("LLMRequestPrep.prepare - output token reservation", () => {
         isWorkflow: overrides.isWorkflow ?? false,
       }),
     )
+
+  test("wildcard-deny request preparation retains the internal fallback only", async () => {
+    const fallback = tool({ inputSchema: jsonSchema({ type: "object", properties: {} }) })
+    const result = await run("Read only", {
+      permission: [
+        { permission: "*", pattern: "*", action: "deny" },
+        { permission: "read", pattern: "*", action: "allow" },
+      ],
+      userTools: { invalid: false, read: false },
+      tools: { invalid: fallback, write: fallback, read: fallback },
+    })
+    expect(Object.keys(result.tools)).toEqual(["invalid"])
+    expect(result.tools.invalid).toBe(fallback)
+  })
 
   // Prose with no code or JSON characters, so Token.estimate uses its default 3.7 chars/token.
   const PROSE = "the quick brown fox jumps over the lazy dog "

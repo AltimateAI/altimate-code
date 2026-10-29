@@ -1,4 +1,7 @@
 import path from "path"
+// altimate_change start — resolve symlinked external_directory targets
+import { Filesystem } from "@/util/filesystem"
+// altimate_change end
 import { Effect } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import type * as Tool from "./tool"
@@ -19,6 +22,50 @@ type Options = {
   kind?: Kind
 }
 
+// altimate_change start — symlink-resolved directory of an external_directory target
+function directoryGlob(dir: string) {
+  return process.platform === "win32" ? path.join(path.resolve(FSUtil.windowsPath(dir)), "*") : path.join(dir, "*")
+}
+
+// Globs to ask for: the directory as written, plus the directory it really resolves to when a
+// symlink takes it elsewhere, so a symlink inside an allowed directory cannot reach a directory
+// outside it that is not allowed.
+function externalDirectoryPatterns(full: string, real: string | undefined, kind: Kind) {
+  const glob = directoryGlob(kind === "directory" ? full : path.dirname(full))
+  if (!real) return [glob]
+  const realGlob = directoryGlob(kind === "directory" ? real : path.dirname(real))
+  return realGlob === glob ? [glob] : [glob, realGlob]
+}
+
+function authoredPath(target: string) {
+  if (process.platform !== "win32") return target
+  return path.resolve(FSUtil.windowsPath(target))
+}
+
+function containsAuthoredPath(target: string, directory: string, worktree: string) {
+  // Resolve the parent, not the entry: an outside link into the project stays outside (its
+  // delete or move acts on the outside entry), while a project file spelled through a link to
+  // the project (e.g. /var -> /private/var) stays inside. This check is lexical after the parent;
+  // callers pair it with containsPath(real) so an entry that itself links out stays external.
+  const parent = Filesystem.realLocation(path.dirname(target))
+  const filepath = parent ? path.join(parent, path.basename(target)) : target
+  if (FSUtil.contains(directory, filepath)) return true
+  if (worktree === "/") return false
+  return FSUtil.contains(worktree, filepath)
+}
+
+function sensitiveWriteMatches(target: string, directory: string) {
+  const authored = authoredPath(target)
+  const resolved = Filesystem.realLocation(process.platform === "win32" ? FSUtil.windowsPath(target) : target)
+  return [...new Set([authored, resolved].filter((item): item is string => !!item))]
+    .map((filepath) => {
+      const relative = path.relative(directory, filepath)
+      return { filepath, relative, matched: Protected.isSensitiveWrite(relative) }
+    })
+    .filter((item): item is typeof item & { matched: string } => !!item.matched)
+}
+// altimate_change end
+
 export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirectory")(function* (
   ctx: Tool.Context,
   target?: string,
@@ -29,24 +76,34 @@ export const assertExternalDirectoryEffect = Effect.fn("Tool.assertExternalDirec
   if (options?.bypass) return false
 
   const ins = yield* InstanceState.context
-  const full = process.platform === "win32" ? FSUtil.normalizePath(target) : target
-  if (containsPath(full, ins)) return false
+  // Keep the authored location separate from its real destination. In particular, resolving
+  // an external symlink here would hide the external directory entry that a delete or move
+  // operates on. Windows still needs its alternate drive spellings converted before comparison.
+  const full = authoredPath(target)
+  // altimate_change start — decide containment on where the path really lands: realpath collapses
+  // ".." lexically, so "<project>/link/../x" would otherwise pass as inside the project
+  const real = Filesystem.realLocation(process.platform === "win32" ? FSUtil.windowsPath(target) : target)
+  if (containsAuthoredPath(full, ins.directory, ins.worktree) && containsPath(real ?? full, ins)) return false
+  // altimate_change end
 
   const kind = options?.kind ?? "file"
   const dir = kind === "directory" ? full : path.dirname(full)
-  const glob =
-    process.platform === "win32"
-      ? FSUtil.normalizePathPattern(path.join(dir, "*"))
-      : path.join(dir, "*").replaceAll("\\", "/")
+  // altimate_change start — also ask for the symlink-resolved directory
+  const patterns = externalDirectoryPatterns(full, real, kind)
 
   yield* ctx.ask({
     permission: "external_directory",
-    patterns: [glob],
-    always: [glob],
+    patterns,
+    // Only the path as written is remembered: approving the resolved directory would also allow it
+    // when read directly, past rules configured for it.
+    always: patterns.slice(0, 1),
     metadata: {
       filepath: full,
       parentDir: dir,
+      // Evaluated with each rule's resolved spelling; the path as written is not.
+      resolvedPatterns: patterns.slice(1),
     },
+    // altimate_change end
   })
   return true
 })
@@ -69,17 +126,18 @@ export const assertSensitiveWriteEffect = Effect.fn("Tool.assertSensitiveWrite")
 ) {
   if (!target) return
   const ins = yield* InstanceState.context
-  const relativePath = path.relative(ins.directory, target)
-  const matched = Protected.isSensitiveWrite(relativePath)
-  if (!matched) return
+  const matches = sensitiveWriteMatches(target, ins.directory)
+  if (!matches.length) return
+  const patterns = matches.map((item) => item.relative)
+  const matched = matches[0]
   yield* ctx.ask({
     permission: "sensitive_write",
-    patterns: [relativePath],
-    always: [relativePath],
+    patterns,
+    always: patterns,
     metadata: {
-      filepath: target,
-      sensitive: matched,
-      reason: `This file is in a sensitive location (${matched}). Modifications could affect credentials, version control, or security configuration.`,
+      filepath: authoredPath(target),
+      sensitive: matched.matched,
+      reason: `This file is in a sensitive location (${matched.matched}). Modifications could affect credentials, version control, or security configuration.`,
     },
   })
 })
@@ -88,18 +146,19 @@ export const assertSensitiveWriteEffect = Effect.fn("Tool.assertSensitiveWrite")
 // (like the Legacy external-directory variant) rather than InstanceState.context.
 export async function assertSensitiveWrite(ctx: Tool.Context, target?: string): Promise<void> {
   if (!target) return
-  const relativePath = path.relative(Instance.directory, target)
-  const matched = Protected.isSensitiveWrite(relativePath)
-  if (!matched) return
+  const matches = sensitiveWriteMatches(target, Instance.directory)
+  if (!matches.length) return
+  const patterns = matches.map((item) => item.relative)
+  const matched = matches[0]
   await Effect.runPromise(
     ctx.ask({
       permission: "sensitive_write",
-      patterns: [relativePath],
-      always: [relativePath],
+      patterns,
+      always: patterns,
       metadata: {
-        filepath: target,
-        sensitive: matched,
-        reason: `This file is in a sensitive location (${matched}). Modifications could affect credentials, version control, or security configuration.`,
+        filepath: authoredPath(target),
+        sensitive: matched.matched,
+        reason: `This file is in a sensitive location (${matched.matched}). Modifications could affect credentials, version control, or security configuration.`,
       },
     }),
   )
@@ -118,23 +177,23 @@ export async function assertExternalDirectoryLegacy(
   if (!target) return false
   if (options?.bypass) return false
 
-  const full = process.platform === "win32" ? FSUtil.normalizePath(target) : target
-  if (Instance.containsPath(full)) return false
+  const full = authoredPath(target)
+  const real = Filesystem.realLocation(process.platform === "win32" ? FSUtil.windowsPath(target) : target)
+  if (containsAuthoredPath(full, Instance.directory, Instance.worktree) && Instance.containsPath(real ?? full))
+    return false
 
   const kind = options?.kind ?? "file"
   const dir = kind === "directory" ? full : path.dirname(full)
-  const glob =
-    process.platform === "win32"
-      ? FSUtil.normalizePathPattern(path.join(dir, "*"))
-      : path.join(dir, "*").replaceAll("\\", "/")
+  const patterns = externalDirectoryPatterns(full, real, kind)
 
   await ctx.ask({
     permission: "external_directory",
-    patterns: [glob],
-    always: [glob],
+    patterns,
+    always: patterns.slice(0, 1),
     metadata: {
       filepath: full,
       parentDir: dir,
+      resolvedPatterns: patterns.slice(1),
     },
   })
   return true
