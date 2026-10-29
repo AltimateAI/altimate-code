@@ -4,7 +4,7 @@
 // bound workspace's engine has attached. The binding and the engine-attribution read
 // both go through `precedenceInternals`, so these exercise the decision logic without
 // booting an instance, reading config, or touching MCP state.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import {
   INTEGRATION_TYPE,
   MAX_TRACKED_SESSIONS,
@@ -26,6 +26,7 @@ import {
   servedInventory,
 } from "../../../src/altimate/workspace/precedence"
 import * as Registry from "../../../src/altimate/native/connections/registry"
+import { Telemetry } from "../../../src/altimate/telemetry"
 // altimate_change - shared with awareness.test.ts; see precedence-fixture.ts
 import { BIGQUERY_TOOLS, SNOWFLAKE_TOOLS, WAREHOUSE_CONFIGS, bindTo } from "./precedence-fixture"
 import { canonicalType } from "../../../src/altimate/native/connections/registry"
@@ -1403,3 +1404,32 @@ describe("servedInventory — what the model will be told is routed", () => {
   })
 })
 // altimate_change end
+
+describe("telemetry — the precedence snapshot", () => {
+  test("a snapshot is reported when it changes for the session, not on every refresh", async () => {
+    const rows: Array<Record<string, unknown>> = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((e) => {
+      rows.push(e as Record<string, unknown>)
+    })
+    try {
+      await refresh(SESSION, SNOWFLAKE_TOOLS)
+      await refresh(SESSION, SNOWFLAKE_TOOLS)
+      const snapshots = () => rows.filter((r) => r.type === "workspace_engine_precedence")
+      expect(snapshots()).toEqual([
+        expect.objectContaining({ enabled: true, shadowed_types: 1, escape_hatch: false, workspace_id: 42 }),
+      ])
+      // One local snowflake connection in the fixture registry is shadowed; the four served
+      // capabilities are not what is counted.
+      expect(snapshots()[0].shadowed_connections).toBe(1)
+      await refresh(SESSION, {})
+      expect(snapshots().at(-1)).toEqual(
+        expect.objectContaining({ enabled: false, reason: "nothing-materialised", shadowed_types: 0 }),
+      )
+      await refresh("ses_other", SNOWFLAKE_TOOLS)
+      expect(snapshots()).toHaveLength(3)
+      expect(snapshots()[2].session_id).toBe("ses_other")
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})

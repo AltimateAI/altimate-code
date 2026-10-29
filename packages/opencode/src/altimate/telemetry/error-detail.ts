@@ -388,7 +388,7 @@ export function templateErrorMessage(raw: string): string {
     if (piece === PLACEHOLDER && out[out.length - 1] === PLACEHOLDER) continue
     out.push(piece)
   }
-  // non-letter characters that carried a value (digits, symbols) leave a gap that must stay visible
+  // non-letter characters (digits, symbols) only separate words and are dropped; unknown words they separated collapse into one placeholder
   return out.join(" ").slice(0, MAX_MESSAGE)
 }
 
@@ -411,7 +411,7 @@ export function buildErrorFingerprintEvent(
     recovered: boolean
     recoveryTool: string
   },
-): Telemetry.Event {
+): Extract<Telemetry.Event, { type: "error_fingerprint" }> {
   return {
     type: "error_fingerprint",
     timestamp: Date.now(),

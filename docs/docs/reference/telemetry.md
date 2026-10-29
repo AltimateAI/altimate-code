@@ -1,10 +1,10 @@
 ---
 title: "Telemetry — Altimate Code"
-description: "Altimate Code collects anonymous usage telemetry by default. See what's collected and how to opt out."
+description: "Altimate Code collects usage telemetry by default. See what's collected, what identifies you when you sign in, and how to opt out."
 ---
 # Telemetry
 
-Altimate Code collects anonymous usage data to help us improve the product. This page describes what we collect, why, and how to opt out.
+Altimate Code collects usage data to help us improve the product. Events from a machine that is not signed in to Altimate are anonymous; once you sign in, events also carry your Altimate user ID and tenant (see [User Identification](#new-user-identification)). This page describes what we collect, why, and how to opt out.
 
 ## What We Collect
 
@@ -37,13 +37,14 @@ We collect the following categories of events:
 | `error_recovered` | Successful recovery from a transient error (error type, strategy, attempt count) |
 | `mcp_server_census` | MCP server capabilities after connect (tool and resource counts, but no tool names) |
 | `context_overflow_recovered` | Context overflow is handled (strategy) |
-| `skill_used` | A skill is loaded (skill name, source — `builtin`, `global`, or `project`, and trigger — `user`, `auto`, or `suggestion` — no skill content) |
+| `skill_used` | A skill is loaded (skill name, source — `builtin`, `global`, `project`, or `workspace`, and trigger — `user`, `auto`, or `suggestion` — no skill content) |
 | `plan_revision` | A plan revision occurs in Plan mode (revision_number, action: `refine`, `approve`, `reject`, or `cap_reached`) |
 | `feature_suggestion` | A post-connection feature suggestion is shown (suggestion_type, suggestions_shown, warehouse_type — no user input) |
 | `sql_execute_failure` | A SQL execution fails (warehouse type, query type, error message, PII-masked SQL — no raw values) |
 | `core_failure` | An internal tool error occurs (tool name, category, error class, truncated error message, PII-safe input signature, and optionally masked arguments — no raw values or credentials) |
 | `first_launch` | Fired once on the first CLI run after an install or upgrade, triggered by a marker file the installer wrote — the installers themselves send nothing and contact no telemetry endpoint. Contains the installed version, `is_upgrade`, and `install_method` (`curl`, `powershell`, `npm`, `vscode-extension`, `local` for `install --binary`, or `unknown` for markers written before the field existed). `vscode-extension` starts appearing only once an extension build containing the marker write ships, so a zero share for it means the extension has not rolled out yet rather than no extension installs. No PII. **Reading `is_upgrade`:** it means "this machine had run altimate-code before", probed as whether `~/.altimate/machine-id` already existed — *not* "a binary was already present". A reinstall onto a machine that ever ran the CLI reports `is_upgrade: true`, and `altimate uninstall` leaves `machine-id` in place, so a metric excluding upgrades counts installs **per previously-unseen machine** and undercounts reinstalls onto known ones. (`is_upgrade` is a boolean in the event schema; it arrives in Application Insights `customDimensions` as a string, so KQL filters read `tostring(customDimensions.is_upgrade) != "true"`.) Delivery is at-most-once: the marker is deleted before the event flushes, so a process that dies first loses that install rather than re-firing it every launch. Local `--binary` installs report `version: "local"`. |
 | `startup_ready` | Fired once per process when the top-level command can serve its first request or frame (`serve` listening, TUI transport resolved, `run` about to send its first prompt). Contains the command name, `duration_ms` since process start, and `fresh_install` (true when this process also emitted a non-upgrade `first_launch`). No PII. |
+| `client_connected` | Fired once per process when the first client attaches to a running server, which separates "the backend started but no client connected" from "connected but never sent a message". Contains `surface` (the launching command: `serve`, `run` or `tui`, also sent on `startup_ready`) and `since_start_ms`. No PII. |
 | `event_loop_stall` | A 250 ms monitor tick fired more than 1 s late, meaning the event loop was blocked for that long (for example an in-process dependency install). Contains the command name, `thread` (`main` or `worker`), `blocked_ms`, and `since_start_ms`. Capped at 20 per thread (the main thread and the TUI server worker each keep their own counter). No PII. |
 | `altimate_base_registration` | Timing and outcome of each Altimate Base registration, whether triggered automatically at startup, by an explicit picker selection, or through the `POST /altimate/base/register` route an IDE calls (`origin: "server"`) (concurrent calls share one result, and a still-valid cached credential reports `success` without a network round trip): `result` (`success`, `network`, `http`, `response`, `cancelled`, `configuration`, or `error`), `duration_ms`, and the HTTP `status` when the result is `http`. Distinct from `altimate_base_register_result`, which records the onboarding-flow outcome. No gateway URL, response body, credential, or error text is included. |
 | `task_outcome_signal` | Behavioral quality signal at session end — accepted, error, abandoned, or cancelled. Includes tool count, step count, duration, and last tool category. No user content. |
@@ -61,8 +62,9 @@ We collect the following categories of events:
 | `altimate_base_register_result` | The registration outcome from a picker-driven selection (the welcome picker, the full catalogue, or the provider dialog): `success`, `rate_limited`, `unavailable`, `network`, or `error`. Optional `origin` is `welcome`, `model`, or `migration` (returning free-default users offered Altimate Base). Auto-registration at startup is reported separately, by `altimate_base_registration` above. No credential or gateway response body is included. |
 | `gateway_device_code_issued` | The Altimate Gateway authorize URL was built and the browser open attempted. **Name note:** the flow is a browser loopback OAuth — there is no device code. The name follows the original event spec. |
 | `gateway_auth_completed` / `gateway_auth_failed` | Gateway sign-in outcome. `reason` is `timeout`, `denied`, or `error` — never the underlying message, which can contain the instance name. An unrecognised callback state does not reject the pending attempt, so a CSRF mismatch surfaces as `timeout`. |
-| `instance_connected` | Credentials received and saved. `time_to_connect_ms` runs from the start of the authorize call, so it includes the browser launch. No instance or tenant name is sent. |
+| `instance_connected` | Credentials received and saved. `time_to_connect_ms` runs from the start of the authorize call, so it includes the browser launch. The event names no instance itself; like every event sent after sign-in, it carries the account's `user_id` and `tenant` once they are resolved (see [User Identification](#new-user-identification)). |
 | `onboarding_completed` | A model is ready and chat is live. |
+| `telemetry_opted_out` | The last event from a machine that turns telemetry off, sent once (see [Disabling Telemetry](#disabling-telemetry)). Contains `opt_out_source` (`env` for an environment variable, `config` for `telemetry.disabled`), the machine ID, the CLI version and the client. It carries no account (`user_id`, `tenant`), project, session or launch ID. |
 | `scan_gate_shown` / `scan_gate_choice` | The "scan your environment?" gate appeared, and what the user did — `scan`, `skip`, or `dismissed` (esc / click-away). |
 | `environment_scan_completed` | A `project_scan` finished during onboarding — `has_dbt`, `has_warehouse`, `is_repo`, `connections_found`, and a bounded list of short `degraded` detection keys. No paths, hostnames, or connection details. Emitted only inside an onboarding session, and only once per session, so scans from `/discover` or a model-initiated call are excluded. |
 | `sample_setup_completed` | The sample dbt project was materialised. `success`, `models`, `tables`, and `reused` — the tool is deliberately re-callable, so this is per invocation. The target path is never sent. |
@@ -73,7 +75,38 @@ We collect the following categories of events:
 | `review_run` | A dbt/SQL review completed or failed — `invocation` (`cli` for `altimate-code review`, `tool` for the `dbt_pr_review` tool), status, duration, and on success the verdict, the pre-gating verdict, mode, risk tier, and finding counts by severity and by category. No file paths, model or column names, finding titles or bodies, SQL, diff content, or repository/branch/PR names. |
 | `review_post_outcome` | Whether a review was published to GitHub — `not_requested`, `not_attempted`, `target_unresolved`, `full`, `partial`, or `summary_failed`, plus duration. Emitted on the **CLI path only** — the `dbt_pr_review` tool completes reviews but never publishes, so a `review_run` with `invocation: tool` has no post event and that is not a failure. Within the CLI path there is exactly one per **completed** review: a review that failed emits `review_run: failed` and no post event, so absence there means the review failed rather than that an event was lost. `not_attempted` is publication requested but never reached (a bad `--output` path, a stdout write error). No repository, PR, or comment content. |
 
-Each event includes a timestamp, anonymous session ID, a per-launch correlation ID (`launch_id` — a random value regenerated every process start, not persisted and not derived from your machine or identity; it exists only to group events from the same run), CLI version, and an anonymous machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and never tied to any personal information).
+Each event includes a timestamp, session ID, a per-launch correlation ID (`launch_id` — a random value regenerated every process start, not persisted and not derived from your machine or identity; it exists only to group events from the same run), CLI version, and a machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and not derived from your hardware or identity). When the machine is signed in to Altimate, each event also carries `user_id` and `tenant`, described under [User Identification](#new-user-identification).
+
+### Workspace events
+
+These events describe projects linked to an Altimate workspace. A workspace is identified only by its numeric id (`workspace_id`, or `to_workspace_id` and `from_workspace_id` on a switch). No workspace name, project path, repository remote, skill content, memory content or prompt text is sent.
+
+| Event | Description |
+|-------|-------------|
+| `workspace_linked` | A project was linked to a workspace and the server confirmed it. `how` is `bind_existing`, `create_and_bind`, `rebind_remote` or `rebind_path`. |
+| `workspace_created` | A workspace was created from the CLI or the TUI. `how` is `create_and_bind`, or `create_unbound` when the link follows as a separate step. |
+| `workspace_link_failed` | A link step failed. `how` names the step, and `reason` is a class: `auth`, `not_found`, `network`, `conflict` or `other`. No error text. |
+| `workspace_unlinked` | A project was unlinked, with the workspace id when the CLI knew it. |
+| `workspace_switched` | A linked project was moved to another workspace. `how` is `rebind_remote` or `rebind_path`. |
+| `workspace_auth_expired` | A workspace call was answered 401: the sign-in has expired. Carries `endpoint` and `status`. |
+| `workspace_api_error` | A workspace call failed. `status_class` is `4xx`, `5xx`, `network`, `timeout`, or `response` (a success status with an empty or unreadable body), plus the HTTP `status` when there was one. A 403 is reported here, not as expired auth. A status the caller handles as an answer is not a failure and is not reported, such as a 404 from the link lookups ("not linked") or from an unlink ("already unlinked"). `GET /users/me` is not a workspace call and is not reported. |
+| `starter_shown` | The "what this workspace provides" starter was served after a link: to the TUI, to the IDE extension's chat, or printed by `altimate-code link`. It counts the starter being served, so a client that closes before rendering it is still counted. Contains the counts of skills and integrations when known, `knowledge` (`off`, `all`, `selected` or `unknown`) and `memory_enabled`. |
+| `starter_action_picked` | The user chose an option from the TUI starter: `action` is `prompt`, `open` or `done`, with `prompt_index` (its position) for a suggested prompt. Never the prompt's text. |
+| `workspace_memory_contributed` | A memory block was written back to the workspace's shared memory, including the existing blocks seeded when a project is linked. `block_count` is per write. No memory content. |
+| `workspace_sync_failed` | Syncing the workspace's skills or memory to this project changed to failing. `kind` is `skills` or `memory`, and `reason` is a class. Sent once per change, not on every retry. |
+| `workspace_engine_attach` | A session's connection to the workspace integration engine settled on an outcome (`attached`, `engine_missing`, `engine_too_old`, `connect_failed`, `disabled` or `unbound`), with the engine version and counts of integrations. Sent when the outcome changes, not every turn. |
+| `workspace_engine_install_prompt` | The offer to install or update the engine: `action` is `shown`, `accepted`, `installed`, `install_failed`, `copied` or `declined`, with the `reason` and whether Node.js was found and its major version. |
+| `workspace_engine_precedence` | Whether the workspace's integrations take precedence over the project's own connections, with counts of shadowed connection types and connections. Sent when the state changes. |
+| `workspace_engine_redirect` | A `datamate_manager` call was refused because the project is linked to a workspace. Contains the tool and operation names. |
+| `workspace_engine_error` | The engine failed at a stage (`attach`, `install` or `precedence`). `message` is masked (paths, credentials and quoted strings are replaced) and capped at 200 characters. |
+
+Other rows gain workspace fields in a linked project:
+
+- Every event carries `client: "altimate-code"`, which names the product that sent it. `source` still says how the CLI was launched.
+- Rows of a turn in a linked project carry that project's `workspace_id`: `session_start`, `session_end`, `first_prompt_sent`, `first_job_completed`, `skill_used`, `skill_published`, `memory_injection`, `agent_outcome`, `task_classified`, `task_outcome_signal`, `tool_chain_outcome`, `core_failure`, `error_fingerprint`, `plan_revision`, `sql_quality` and `tool_call`.
+- `session_end` counts the workspace skills, memory blocks and integration calls the session used. `memory_injection` counts the workspace's blocks. `task_outcome_signal` says whether workspace context was used.
+- A call to a workspace integration through the engine is reported as a `tool_call` with `tool_type: "mcp"` and `via_workspace: true`. As for other tools, there are no arguments or outputs, and an error message is masked and capped at 500 characters.
+- An `endpoint` value is a route label with every id and path segment replaced by `:id`, for example `POST /datamate-project-bindings/bind`. It never contains an id, a file path or a query string.
 
 ### Notes on the review events
 
@@ -132,7 +165,13 @@ You can also set the environment variable:
 export ALTIMATE_TELEMETRY_DISABLED=true
 ```
 
-When telemetry is disabled, no events are sent and no network requests are made to the telemetry endpoint.
+When telemetry is disabled, a machine with an existing machine ID sends one final `telemetry_opted_out` event, then nothing: no further events and no requests to the telemetry endpoint until telemetry is turned back on. The event carries only the machine ID, the opt-out source, the CLI version and the client — see the event table above. With it, an opted-out machine can be counted instead of looking like a client that stopped working.
+
+- The event is sent only if `~/.altimate/machine-id` already exists. A machine that never ran with telemetry on sends nothing.
+- Once the telemetry endpoint accepts the event, Altimate Code writes the marker file `~/.altimate/telemetry-opted-out`, and later launches send nothing. If the endpoint cannot be reached, no marker is written and a later launch tries again.
+- While the event is being sent, a short-lived `~/.altimate/telemetry-opted-out.sending` file stops a second process from sending it too.
+- Turning telemetry back on removes the marker, so a later opt-out is recorded again.
+- No account lookup is made while telemetry is disabled.
 
 ### Test runs are excluded
 
@@ -160,7 +199,7 @@ We take your privacy seriously. Altimate Code telemetry **never** collects:
 - Code content, file contents, or file paths
 - Credentials, API keys, or tokens
 - Database connection strings or hostnames
-- Personally identifiable information (your email is SHA-256 hashed before sending and is used only for anonymous user correlation)
+- Your email address, in any form (when you are signed in, events carry your Altimate user ID and tenant instead — see below)
 - Tool arguments or outputs
 - AI prompt content or responses
 
@@ -168,12 +207,12 @@ Error messages are truncated to 500 characters and scrubbed of file paths before
 
 ### New User Identification
 
-Altimate Code uses two types of anonymous identifiers for analytics, depending on whether you are logged in:
+What identifies the sender of an event depends on whether the machine is signed in to Altimate:
 
-- **Anonymous users (not logged in):** A random UUID is generated using `crypto.randomUUID()` on first run and stored at `~/.altimate/machine-id`. This ID is not tied to your hardware, operating system, or identity — it is purely random and serves only to distinguish one machine from another in aggregate analytics.
-- **Logged-in users (OAuth):** Your email address is SHA-256 hashed before sending. The raw email is never transmitted.
+- **Not signed in:** A random UUID is generated using `crypto.randomUUID()` on first run and stored at `~/.altimate/machine-id`. This ID is not tied to your hardware, operating system, or identity — it is purely random and serves only to distinguish one machine from another in aggregate analytics. It is also the Application Insights user ID (`ai.user.id`).
+- **Signed in to Altimate:** Events also carry `user_id`, your Altimate user ID (a UUID), and `tenant`, the name of your Altimate instance; `ai.user.id` is your user ID instead of the machine ID. These identify your account, so signed-in events are not anonymous. To find them, Altimate Code makes one `GET /users/me` request to the Altimate API with the credential you signed in with, and caches the answer at `~/.altimate/telemetry-identity.json` (readable only by you). The cache holds the user ID, the tenant and a fingerprint of the credential — no API key or token. A new credential is looked up again; a sign-out, or a credential the API rejects, removes the cache. No email address, hashed or not, is sent.
 
-Both identifiers are only sent when telemetry is enabled. Disable telemetry entirely with `ALTIMATE_TELEMETRY_DISABLED=true` or the config option above.
+These identifiers are sent only while telemetry is enabled. The final `telemetry_opted_out` event carries the machine ID and nothing that identifies your account, and no `/users/me` lookup is made while telemetry is disabled. Disable telemetry entirely with `ALTIMATE_TELEMETRY_DISABLED=true` or the config option above.
 
 ### CLI Authentication Flow
 

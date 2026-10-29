@@ -135,6 +135,15 @@ export const Flag = {
   get ALTIMATE_INTEGRATIONS_LOCAL() {
     return process.env["ALTIMATE_INTEGRATIONS"]?.toLowerCase() === "local"
   },
+  /**
+   * Turns `schema_inspect`'s column value profiles off for every call, whatever the model
+   * passes as `values`, so no cell values are sampled or sent to the model provider. Same
+   * fail-closed parsing as ALTIMATE_DISABLE_WORKSPACE: only empty, `0` or `false` leave it unset.
+   */
+  get ALTIMATE_DISABLE_SCHEMA_VALUES() {
+    const value = env("ALTIMATE_DISABLE_SCHEMA_VALUES")?.trim().toLowerCase()
+    return value !== undefined && value !== "" && value !== "0" && value !== "false"
+  },
   // altimate_change end
 
   // Evaluated at access time (not module load) because tests, the CLI, and

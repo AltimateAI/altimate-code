@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer } from "effect"
 import { Skill } from "../../src/skill"
+import { Agent } from "../../src/agent/agent"
 import { Discovery } from "../../src/skill/discovery"
 import { RuntimeFlags } from "../../src/effect/runtime-flags"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
@@ -768,6 +769,10 @@ description: A skill in the .opencode/skills directory.
           expect(source["project-one"]).toBe("project")
           expect(Object.values(source)).toContain("built-in")
           expect(Object.values(source)).not.toContain(undefined)
+          // The read-only analyst is offered the workspace's skill, labelled as such, like builder.
+          const analyst = yield* Effect.promise(() => Agent.get("analyst"))
+          const listing = Skill.fmt(yield* skill.available(analyst), { verbose: true })
+          expect(listing).toContain('<skill source="workspace">\n    <name>workspace-one</name>')
         }).pipe(provideInstance(project.path)),
       )
     }),

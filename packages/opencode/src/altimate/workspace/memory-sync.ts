@@ -16,6 +16,7 @@
 // Nothing is written to disk: local files are the source of truth, and a cloud
 // record can have been edited elsewhere by a client that does not preserve this
 // CLI's metadata.
+import { Telemetry } from "@/altimate/telemetry"
 import { createHash } from "node:crypto"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { Flag } from "@/flag/flag"
@@ -34,7 +35,9 @@ import {
   type CachedBinding,
 } from "./state"
 import { indexKey, readIndex, readIndexEntry, recordIndexEntry } from "./memory-index"
-import { WorkspaceApi } from "./api-client"
+import { projectIdentity, projectIdentityKey, sameProjectIdentity, type ProjectIdentity } from "./remote-identity"
+import { WorkspaceApi, WorkspaceApiError } from "./api-client"
+import { redact } from "@/altimate/debug/report" // altimate_change — failure text in the sync record
 import { AltimateApi } from "@/altimate/api/client"
 import {
   LIST_LIMIT,
@@ -150,6 +153,52 @@ export function projectKeyFor(binding: CachedBinding): string {
   return binding.repoRemote ?? binding.projectPath ?? "unknown"
 }
 
+/** The project a binding names, for comparison with a record's. Keys written
+ * from `projectKeyFor` keep the cached value as it is; comparisons go through
+ * `sameProjectIdentity`, so a record written under one URL form of a repo still
+ * matches a binding the service has since moved to another. */
+export function projectIdentityFor(binding: CachedBinding): ProjectIdentity | undefined {
+  return projectIdentity(binding.repoRemote, binding.projectPath)
+}
+
+/** The project a record's metadata names: its `repo_remote`, or its
+ * `project_path` when it has no remote, an empty value counting as none, as
+ * `buildMetadata` writes them. `"none"` when it names neither; `"invalid"` when
+ * the value it names isn't a string. */
+function recordProject(meta: Record<string, unknown>): ProjectIdentity | "none" | "invalid" {
+  const named = (value: unknown) => value != null && value !== ""
+  if (named(meta.repo_remote))
+    return typeof meta.repo_remote === "string" ? { kind: "remote", value: meta.repo_remote } : "invalid"
+  if (named(meta.project_path))
+    return typeof meta.project_path === "string" ? { kind: "path", value: meta.project_path } : "invalid"
+  return "none"
+}
+
+/** Does a record belong to this project? The one rule for sync and the reaper
+ * (`mirrorIdentityOf`) and for display (`toBlock`).
+ *
+ * A record that names no project belongs to every project in its workspace:
+ * `buildMetadata` writes one for a binding with neither field. One whose value
+ * isn't a string belongs to none. */
+function recordInProject(meta: Record<string, unknown>, own: ProjectIdentity | undefined): boolean {
+  const project = recordProject(meta)
+  if (project === "none") return true
+  return project !== "invalid" && sameProjectIdentity(project, own)
+}
+
+/** A record's `block_updated`, or "" when it has none. */
+function blockUpdatedOf(record: CloudMemoryRecord | undefined): string {
+  const value = (record?.metadata ?? {}).block_updated
+  return typeof value === "string" ? value : ""
+}
+
+/** The record with the newest `block_updated`, the first on a tie. */
+function newestRecord(records: CloudMemoryRecord[]): CloudMemoryRecord | undefined {
+  let newest: CloudMemoryRecord | undefined
+  for (const record of records) if (!newest || blockUpdatedOf(record) > blockUpdatedOf(newest)) newest = record
+  return newest
+}
+
 /** ``directory`` is the tree that owned the operation. Fire-and-forget mirrors
  * and archives run after their writing context has gone, so resolving the
  * binding from the ambient instance can attribute one project's memory to
@@ -260,6 +309,19 @@ async function memoryEnabled(binding: CachedBinding): Promise<boolean> {
   return (await memoryStatus(binding)) === "enabled"
 }
 
+/** A failed read says what failed, so the sync record can classify it. */
+type MemoryStatusOutcome = "enabled" | "disabled" | { status: "error"; error: string }
+
+// altimate_change start — what failed, for the persisted sync record: the HTTP status when the API
+// answered one (so the reason class sees it whatever the detail says), redacted of secrets, URLs
+// and the user's identity before it is written.
+function failureText(err: unknown): string {
+  const status = err instanceof WorkspaceApiError ? err.status : undefined
+  const base = err instanceof Error ? `${err.name}: ${err.message}` : String(err)
+  return redact(status !== undefined ? `HTTP ${status} ${base}` : base)
+}
+// altimate_change end
+
 /** Three-way, because a read that cannot reach the service must not be reported
  * as "this workspace has no memory" — that reads as success while destroying
  * whatever the session already had. */
@@ -272,7 +334,7 @@ async function memoryStatus(
      * inherit a positive written under a previous account. */
     fresh?: boolean
   } = {},
-): Promise<"enabled" | "disabled" | "error"> {
+): Promise<MemoryStatusOutcome> {
   const cached = opts.fresh ? undefined : memoryEnabledCache.get(binding.datamateId)
   if (cached && Date.now() - cached.checkedAt < MEMORY_ENABLED_TTL_MS) return "enabled"
   try {
@@ -288,7 +350,7 @@ async function memoryStatus(
         missingFromListWarned.add(binding.datamateId)
         log.warn("workspace missing from the workspace list; memory setting unknown", { workspace: binding.datamateId })
       }
-      return "error"
+      return { status: "error", error: "workspace missing from the workspace list" }
     }
     missingFromListWarned.delete(binding.datamateId)
     if (match.memoryEnabled === undefined && !missingFieldWarned.has(binding.datamateId)) {
@@ -315,7 +377,7 @@ async function memoryStatus(
     log.warn("could not confirm workspace memory setting", { err: String(err) })
     // Not cached either way: a transient failure should neither disable the
     // mirror for a minute nor keep it enabled.
-    return "error"
+    return { status: "error", error: failureText(err) }
   }
 }
 
@@ -332,11 +394,7 @@ function stripTrainingMeta(content: string): string {
 /** Fingerprint of everything about a block that reaches the store. Tags and
  * expiry are included because both are mirrored. */
 function contentHash(block: MemoryBlock): string {
-  const payload = JSON.stringify([
-    stripTrainingMeta(block.content),
-    [...block.tags].sort(),
-    block.expires ?? "",
-  ])
+  const payload = JSON.stringify([stripTrainingMeta(block.content), [...block.tags].sort(), block.expires ?? ""])
   // sha-256, not a 32-bit non-cryptographic hash. This value is the single
   // gate deciding whether a save is sent at all: on a collision ``push``
   // returns "unchanged" and a real edit is silently never mirrored, with no
@@ -448,8 +506,7 @@ function mirrorIdentityOf(record: CloudMemoryRecord, binding: CachedBinding | nu
   if (!blockId || !scope) return undefined
   if (scope === "project") {
     if (String(m.datamate_id ?? "") !== String(binding?.datamateId ?? "")) return undefined
-    const recordProject = (m.repo_remote as string | undefined) ?? (m.project_path as string | undefined)
-    if (recordProject && binding && recordProject !== projectKeyFor(binding)) return undefined
+    if (binding && !recordInProject(m, projectIdentityFor(binding))) return undefined
   }
   return `${scope}:${blockId}`
 }
@@ -656,7 +713,9 @@ async function reapArchivedBlocks(
     try {
       const gone = syncInternals.removeBlock
         ? await syncInternals.removeBlock(scope, blockId, directory ?? undefined, block.updated)
-        : await (await import("@/memory/store")).MemoryStore.remove(scope, blockId, directory ?? undefined, {
+        : await (
+            await import("@/memory/store")
+          ).MemoryStore.remove(scope, blockId, directory ?? undefined, {
             expectUpdated: block.updated,
           })
       if (gone) {
@@ -675,6 +734,8 @@ async function push(
   binding: CachedBinding | null,
   known?: KnownRecords,
   directory?: string,
+  /** The session that wrote the block, captured before the queue; the context's when absent. */
+  sessionID?: string,
 ): Promise<PushOutcome> {
   const key = indexKey({
     scope: block.scope,
@@ -724,9 +785,7 @@ async function push(
   // user recreated under an old id gets a fresh record instead of un-archiving
   // the old one (`MemoryApi.update` replaces metadata wholesale, which would
   // drop the archived marker).
-  const indexed = existing?.memoryId
-    ? view.records.find((r) => r.id === existing.memoryId)
-    : undefined
+  const indexed = existing?.memoryId ? view.records.find((r) => r.id === existing.memoryId) : undefined
   // A record the index names but a COMPLETE record set does not hold is gone —
   // deleted in the web app, by another client, or by a wipe. Absence used to
   // read as "still ours", so `match` stayed pointing at a dead id and every
@@ -740,16 +799,22 @@ async function push(
   // that already has one — the duplicate this function works hardest to avoid.
   const indexedGone = existing?.memoryId !== undefined && indexed === undefined && !view.truncated
   const indexUsable = existing?.memoryId && !indexedGone && (!indexed || !isArchived(indexed))
-  const match = (indexUsable ? existing?.memoryId : undefined) ?? view.records.find((r) => isSameBlock(r, block, binding))?.id
+  // Every live record holding this block. More than one are copies: a client
+  // that compared remotes as raw strings wrote a second record once its
+  // binding's cached form of the repo changed.
+  const copies = view.records.filter((r) => isSameBlock(r, block, binding))
+  const newest = newestRecord(copies)
+  const match = (indexUsable ? existing?.memoryId : undefined) ?? newest?.id
   if (match) {
     // Refuse to move a record backwards. Two machines editing the same block,
     // or a stale clone running a sweep, would otherwise overwrite a newer cloud
     // value with older local content — last-request-wins rather than
     // convergence. This narrows the window rather than closing it; closing it
-    // needs a conditional update the service does not offer.
-    const remote = view.records.find((r) => r.id === match)
-    const remoteUpdated = remote && (remote.metadata ?? {}).block_updated
-    if (typeof remoteUpdated === "string" && remoteUpdated > block.updated) {
+    // needs a conditional update the service does not offer. Checked against
+    // the newest copy too: the other copies are archived below, so a newer
+    // one's content would be lost.
+    const remoteUpdated = blockUpdatedOf(newestRecord(view.records.filter((r) => r.id === match || r === newest)))
+    if (remoteUpdated > block.updated) {
       log.warn("declining to overwrite a newer workspace record with older local content", {
         id: block.id,
         localUpdated: block.updated,
@@ -758,7 +823,13 @@ async function push(
       return "deferred"
     }
     await MemoryApi.update(match, block.content, metadata)
+    // One live record per block. Indexed only after the copies are archived:
+    // an entry at this hash makes the next save of the same content return
+    // "unchanged", and a failed archive would then never be retried.
+    const others = copies.filter((r) => r.id !== match).map((r) => r.id)
+    await archiveDuplicates(others, block, metadata, "archiving a second live record of one block")
     await recordIndexEntry(key, { memoryId: match, contentHash: hash, syncedAt: Date.now() })
+    if (block.scope === "project" && binding) trackContributed(binding, sessionID)
     return "stored"
   }
 
@@ -783,18 +854,52 @@ async function push(
   // dict, restoring the block exactly as written.
   const [primary, ...extras] = created
   await MemoryApi.update(primary, block.content, metadata)
-  await recordIndexEntry(key, { memoryId: primary, contentHash: hash, syncedAt: Date.now() })
 
   // An extractor may split one submission into several records, each carrying
   // the metadata we sent. Only one can represent the block; the rest would
   // otherwise be injected as duplicates under the same block id, holding text
-  // the user never wrote.
-  for (const extra of extras) {
-    log.warn("archiving an extra record produced by one create", { id: block.id, memoryId: extra })
-    await MemoryApi.update(extra, "", { ...metadata, archived: "true", archived_at: new Date().toISOString() })
-  }
+  // the user never wrote. Indexed after, as for copies above: a failed archive
+  // leaves the block unindexed, and the next save finds the extras by identity.
+  await archiveDuplicates(extras, block, metadata, "archiving an extra record produced by one create")
+  await recordIndexEntry(key, { memoryId: primary, contentHash: hash, syncedAt: Date.now() })
+  // The write-back is durable once indexed: reported here, so a failed archive above leaves the block
+  // unindexed and the retry that indexes it reports it, once.
+  if (block.scope === "project" && binding) trackContributed(binding, sessionID)
   return "stored"
 }
+
+/** Archive records that duplicate a block's live record: emptied, under the
+ * metadata the live record was just given. Any client that reads one as the
+ * block's tombstone then also reads the live record, and keeps the block. */
+async function archiveDuplicates(
+  ids: string[],
+  block: MemoryBlock,
+  metadata: MirrorMetadata,
+  reason: string,
+): Promise<void> {
+  for (const id of ids) {
+    log.warn(reason, { id: block.id, memoryId: id })
+    await MemoryApi.update(id, "", { ...metadata, archived: "true", archived_at: new Date().toISOString() })
+  }
+}
+
+// altimate_change start — a successful write-back of a project block is the workspace getting something
+// back; a global block is the account's (the live mirror resolves a binding for it too, to consult the
+// memory setting), so it is not reported.
+function trackContributed(binding: CachedBinding, sessionID?: string) {
+  try {
+    Telemetry.track({
+      type: "workspace_memory_contributed",
+      timestamp: Date.now(),
+      session_id: sessionID ?? Telemetry.getContext().sessionId,
+      workspace_id: binding.datamateId,
+      block_count: 1,
+    })
+  } catch {
+    // telemetry never blocks a mirror
+  }
+}
+// altimate_change end
 
 /** Cloud operations for one logical block, run one at a time.
  *
@@ -837,6 +942,25 @@ function serialize<T>(scope: "global" | "project", blockId: string, op: () => Pr
  * `skill-sync.flushPendingSyncs` holds it for a cold skill sync. */
 const mirrorsInFlight = syncState.mirrorsInFlight
 
+/** The linked workspace this process last tried to upload a block to, and the directory it was bound from.
+ * A one-shot `run` reads it at exit and, only then, counts the memory still not in the workspace
+ * (`Manage.status`, given this binding so the count stays local): nothing in `run` retries an upload, so
+ * without the check a block left behind stays on this machine unannounced. Not set when the workspace has
+ * memory turned off, since that block stays here by design. Process-global for the same two-module-graph
+ * reason as `syncState`. */
+const mirrorRequests: { last?: MirrorTarget } = ((globalThis as unknown as Record<symbol, { last?: MirrorTarget } | undefined>)[
+  Symbol.for("altimate.memory-sync.mirror-requests")
+] ??= {})
+
+export interface MirrorTarget {
+  directory: string | undefined
+  binding: CachedBinding
+}
+
+export function lastMirrorTarget(): MirrorTarget | undefined {
+  return mirrorRequests.last
+}
+
 /** Hold a task in `mirrorsInFlight` for its lifetime. */
 async function tracked(task: Promise<void>): Promise<void> {
   mirrorsInFlight.add(task)
@@ -869,8 +993,11 @@ export async function flushPendingMirrors(timeoutMs = 30_000): Promise<void> {
 /** Mirror one block. Safe to call unconditionally — returns immediately when
  * workspaces are disabled, the project is unbound, or the workspace has memory
  * disabled. */
-export async function mirrorBlock(block: MemoryBlock, directory?: string): Promise<void> {
+export async function mirrorBlock(block: MemoryBlock, directory?: string, sessionID?: string): Promise<void> {
   if (!isEnabled()) return
+  // altimate_change — the writer's session: the one the memory tool passed, else the context's read
+  // before the queue (the context can be another session's by the time the mirror lands).
+  const writer = sessionID ?? Telemetry.getContext().sessionId
   // Queued BEFORE the binding lookup, not after. Both are async, so resolving
   // them first let two operations on one block reach `serialize` in the
   // opposite order to the writes that triggered them.
@@ -883,8 +1010,19 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
     // binding governs only whether we upload at all.
     const binding = await currentBinding(directory)
     if (!binding) return
-    if (!(await memoryEnabled(binding))) return
-    await push(block, binding, undefined, directory)
+    // Recorded before the memory-setting lookup, which can wait on the service: an exit while it is pending
+    // leaves this block unsent too. Taken back only on a confirmed "disabled", and only while it is still
+    // this call's record: other blocks mirror concurrently and may have recorded since.
+    const previous = mirrorRequests.last
+    const recorded: MirrorTarget = { directory, binding }
+    mirrorRequests.last = recorded
+    const memory = await memoryStatus(binding)
+    if (memory === "disabled") {
+      if (mirrorRequests.last === recorded) mirrorRequests.last = previous
+      return
+    }
+    if (memory !== "enabled") return
+    await push(block, binding, undefined, directory, writer)
   })
   return tracked(task)
 }
@@ -892,11 +1030,7 @@ export async function mirrorBlock(block: MemoryBlock, directory?: string): Promi
 /** Archive a block's cloud record rather than deleting it, so the workspace
  * keeps the history. Only this client filters the marker — other readers do
  * not — so an archived record stays visible elsewhere. */
-export async function archiveBlock(
-  scope: "global" | "project",
-  blockId: string,
-  directory?: string,
-): Promise<void> {
+export async function archiveBlock(scope: "global" | "project", blockId: string, directory?: string): Promise<void> {
   if (!isEnabled()) return
   // Queued behind any in-flight mirror for the same block, so a delete cannot
   // run before the create it is meant to undo. The binding lookup happens
@@ -915,11 +1049,7 @@ export async function archiveBlock(
   )
 }
 
-async function archiveNow(
-  scope: "global" | "project",
-  blockId: string,
-  binding: CachedBinding,
-): Promise<void> {
+async function archiveNow(scope: "global" | "project", blockId: string, binding: CachedBinding): Promise<void> {
   const key = indexKey({
     scope,
     blockId,
@@ -930,8 +1060,8 @@ async function archiveNow(
 
   // Read through ``fetchKnownRecords`` so a truncated response is detectable
   // — a workspace with >= LIST_LIMIT records that includes the target block
-  // beyond the window would silently fall through the ``!current`` branch and
-  // the delete would no-op. The block then stays live in the cloud and gets
+  // beyond the window would silently fall through the no-live-record branch
+  // and the delete would no-op. The block then stays live in the cloud and gets
   // re-injected on every session with no diagnostic trace. (altimate-harness-
   // bot #1116 comment 3841102064.)
   const { records, truncated } = await fetchKnownRecords()
@@ -941,16 +1071,35 @@ async function archiveNow(
   // that has lost its index leaves the record live, and every later session
   // re-injects it with no way to remove it. Match on logical identity instead,
   // exactly as the write path does.
-  const current = entry
-    ? records.find((r) => r.id === entry.memoryId)
-    : // Matching on workspace alone is too coarse: two projects in one
-      // workspace may hold the same block id, and deleting one would archive
-      // the other's record. Use the write path's own identity test so the
-      // fallback can only ever hit the record this block would have written.
-      records.find((r) =>
-        isSameBlock(r, { id: blockId, scope, tags: [], content: "", created: "", updated: "" } as MemoryBlock, binding),
-      )
-  if (!current) {
+  //
+  // Every live record of the block, not just one: a block can hold copies (see
+  // `push`), and archiving one would leave the block live through the others.
+  // Matching on workspace alone is too coarse: two projects in one workspace
+  // may hold the same block id, and deleting one would archive the other's
+  // record. Use the write path's own identity test so the search can only ever
+  // hit records this block would have written.
+  const indexed = entry ? records.find((r) => r.id === entry.memoryId) : undefined
+  const target = { id: blockId, scope, tags: [], content: "", created: "", updated: "" } as MemoryBlock
+  const live = records.filter((r) => !isArchived(r) && (r.id === indexed?.id || isSameBlock(r, target, binding)))
+  if (live.length === 0) {
+    // The record the index names is already a tombstone: leave it exactly as
+    // it is.
+    //
+    // Not merely a saved request. `archived_at` is read as the moment the record
+    // stopped being wanted, and the reaper on another machine compares a local
+    // block's `updated` against it. Re-stamping it to now moves that moment
+    // forward, so a block legitimately recreated AFTER the original archive
+    // starts looking older than the tombstone and gets deleted — on every
+    // machine, taking the recreated record with it, because this function then
+    // follows the index to whatever the block points at now. (review)
+    if (indexed) {
+      log.info("record is already archived; leaving its tombstone untouched", {
+        blockId,
+        scope,
+        memoryId: indexed.id,
+      })
+      return
+    }
     if (truncated) {
       // Distinguish "record isn't there" (silent no-op is correct) from
       // "record is beyond the LIST_LIMIT window" (silent no-op leaves a
@@ -963,44 +1112,36 @@ async function archiveNow(
     return
   }
 
-  // Already a tombstone: leave it exactly as it is.
-  //
-  // Not merely a saved request. `archived_at` is read as the moment the record
-  // stopped being wanted, and the reaper on another machine compares a local
-  // block's `updated` against it. Re-stamping it to now moves that moment
-  // forward, so a block legitimately recreated AFTER the original archive
-  // starts looking older than the tombstone and gets deleted — on every
-  // machine, taking the recreated record with it, because this function then
-  // follows the index to whatever the block points at now.
-  //
-  // The identity search below already skips archived records, so a caller with
-  // no index entry lands here anyway. This closes the path a caller WITH one
-  // takes. (review)
-  if (isArchived(current)) {
-    log.info("record is already archived; leaving its tombstone untouched", {
+  const now = new Date().toISOString()
+  for (const current of live) {
+    const metadata: MirrorMetadata = {
+      ...((current.metadata ?? {}) as unknown as MirrorMetadata),
+      source: MIRROR_SOURCE,
+      block_id: blockId,
+      block_scope: scope,
+      visibility: "private",
+      archived: "true",
+      archived_at: now,
+    }
+    // Keep the text — archiving hides a record from injection, it does not erase
+    // what it said.
+    await MemoryApi.update(current.id, current.memory ?? "", metadata)
+  }
+  // A cut-short listing can hold one copy of the block and not another.
+  // Archiving the copies in reach is still right; refusing would leave them
+  // live too.
+  if (truncated) {
+    log.warn("archived the copies in reach; the record set is truncated at LIST_LIMIT, so another may still be live", {
       blockId,
       scope,
-      memoryId: current.id,
+      archived: live.length,
+      limit: LIST_LIMIT,
     })
-    return
   }
-
-  const now = new Date().toISOString()
-  const metadata: MirrorMetadata = {
-    ...((current.metadata ?? {}) as unknown as MirrorMetadata),
-    source: MIRROR_SOURCE,
-    block_id: blockId,
-    block_scope: scope,
-    visibility: "private",
-    archived: "true",
-    archived_at: now,
-  }
-  // Keep the text — archiving hides a record from injection, it does not erase
-  // what it said.
-  await MemoryApi.update(current.id, current.memory ?? "", metadata)
-  // Written only after the remote archive lands, so a failure leaves the entry
+  // Written only after the remote archives land, so a failure leaves the entry
   // pointing at a record that is still live rather than losing track of it.
-  await recordIndexEntry(key, { memoryId: current.id, contentHash: "", syncedAt: Date.now() })
+  const kept = live.find((r) => r.id === indexed?.id) ?? live[0]
+  await recordIndexEntry(key, { memoryId: kept.id, contentHash: "", syncedAt: Date.now() })
 }
 
 async function runQueue<T>(
@@ -1082,9 +1223,7 @@ async function pollMemoKey(binding: CachedBinding): Promise<string> {
  *
  * An "unknown" is never memoized: the next tick should ask again rather than
  * inherit a network blip. */
-export async function memoryEnabledForPoller(
-  binding: CachedBinding,
-): Promise<"enabled" | "disabled" | "unknown"> {
+export async function memoryEnabledForPoller(binding: CachedBinding): Promise<"enabled" | "disabled" | "unknown"> {
   // The scoped memo is the poller's only cache. `memoryEnabledCache` is keyed by
   // bare workspace id — right for the write path, which is tenant-bound by its
   // credentials — but consulting it here reopened a 60s cross-tenant window the
@@ -1093,8 +1232,7 @@ export async function memoryEnabledForPoller(
   // minutes per tenant is the price, and `memoryStatus` still warms both.
   const key = await pollMemoKey(binding)
   const memo = pollMemo.get(key)
-  if (memo && Date.now() - memo.at < (memo.status === "unknown" ? POLL_UNKNOWN_TTL_MS : POLL_TTL_MS))
-    return memo.status
+  if (memo && Date.now() - memo.at < (memo.status === "unknown" ? POLL_UNKNOWN_TTL_MS : POLL_TTL_MS)) return memo.status
   // The in-flight ask is memoized too, not only the settled answer. Two
   // refreshes overlapping on a cold memo — a remount while a slow one is
   // still out — both saw it empty and both put a request on the wire.
@@ -1103,7 +1241,7 @@ export async function memoryEnabledForPoller(
   const ask = (async () => {
     try {
       const status = await memoryStatus(binding, { fresh: true })
-      const answer = status === "error" ? ("unknown" as const) : status
+      const answer = typeof status === "string" ? status : ("unknown" as const)
       pollMemo.set(key, { at: Date.now(), status: answer })
       return answer
     } finally {
@@ -1229,15 +1367,18 @@ export async function backfill(
   // ``gated`` says the sweep never ran, as opposed to running and storing
   // nothing. A caller recording "this binding is seeded" must be able to tell
   // those apart: memory being off is not a completed seed.
-  if (!isEnabled()) return { ok: 0, failed: 0, skipped: 0, declined: 0, deferred: 0, gated: true, gateReason: "local-off" }
+  if (!isEnabled())
+    return { ok: 0, failed: 0, skipped: 0, declined: 0, deferred: 0, gated: true, gateReason: "local-off" }
   // The bind path passes the binding it just recorded; there is no ambient
   // instance to resolve one from on the `link` subcommand.
   const binding = explicitBinding ?? (await currentBinding())
   if (!binding)
     return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true, gateReason: "unbound" }
   const status = await memoryStatus(binding)
-  if (status !== "enabled")
-    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true, gateReason: status }
+  if (status !== "enabled") {
+    const gateReason = typeof status === "string" ? status : status.status
+    return { ok: 0, failed: 0, skipped: blocks.length, declined: 0, deferred: 0, gated: true, gateReason }
+  }
   const index = await readIndex()
 
   const { pending, skipped } = partitionPending(blocks, binding, index)
@@ -1259,10 +1400,7 @@ export async function backfill(
   log.info("workspace memory backfill starting", { pending: pending.length, skipped })
   const result = await runQueue(
     pending,
-    (item) =>
-      serialize(item.block.scope, item.block.id, () =>
-        push(item.block, item.binding, known, sweepDirectory),
-      ),
+    (item) => serialize(item.block.scope, item.block.id, () => push(item.block, item.binding, known, sweepDirectory)),
     BACKFILL_CONCURRENCY,
   )
   // `skipped` combines blocks filtered before the queue (already synced, or
@@ -1277,7 +1415,10 @@ export async function backfill(
 function originLabel(meta: Record<string, unknown>): string | undefined {
   const remote = typeof meta.repo_remote === "string" ? meta.repo_remote : undefined
   if (remote) {
-    const trimmed = remote.replace(/[/]+$/, "").replace(/\.git$/, "").replace(/[/]+$/, "")
+    const trimmed = remote
+      .replace(/[/]+$/, "")
+      .replace(/\.git$/, "")
+      .replace(/[/]+$/, "")
     const last = trimmed.split(/[/:]/).pop()
     if (last) return last
   }
@@ -1291,10 +1432,7 @@ function originLabel(meta: Record<string, unknown>): string | undefined {
 
 /** Map a cloud record back to an injectable block, or null if it is not a
  * well-formed mirrored block. */
-export function toBlock(
-  record: CloudMemoryRecord,
-  ownProjectKey: string | undefined,
-): RemoteMemoryBlock | null {
+export function toBlock(record: CloudMemoryRecord, ownProject: ProjectIdentity | undefined): RemoteMemoryBlock | null {
   const meta = record.metadata
   if (!meta || typeof meta !== "object") return null
   const blockId = typeof meta.block_id === "string" ? meta.block_id : undefined
@@ -1307,10 +1445,7 @@ export function toBlock(
     record.updated_at ??
     new Date().toISOString()
 
-  const recordProjectKey =
-    (typeof meta.repo_remote === "string" ? meta.repo_remote : undefined) ??
-    (typeof meta.project_path === "string" ? meta.project_path : undefined)
-  const fromSibling = scope === "project" && !!recordProjectKey && recordProjectKey !== ownProjectKey
+  const fromSibling = scope === "project" && !recordInProject(meta, ownProject)
 
   return {
     id: blockId,
@@ -1323,6 +1458,17 @@ export function toBlock(
     remote: true,
     ...(fromSibling ? { origin: originLabel(meta) } : {}),
   }
+}
+
+/** Which block a loaded record holds: its scope and id, and for a sibling
+ * project's block, that project. Records with one key are copies of one block. */
+function copyKey(record: CloudMemoryRecord, block: RemoteMemoryBlock, ownProject: ProjectIdentity | undefined): string {
+  const id = `${block.scope}:${block.id}`
+  const meta = record.metadata ?? {}
+  if (block.scope === "global" || recordInProject(meta, ownProject)) return id
+  const project = recordProject(meta)
+  // A sibling's record whose project isn't a string can't be paired with another.
+  return typeof project === "object" ? `${id}\u0000${projectIdentityKey(project)}` : `${id}\u0000record:${record.id}`
 }
 
 /** Does this record apply to the workspace the current project is bound to?
@@ -1368,10 +1514,7 @@ export async function hydrate(sessionID: string): Promise<void> {
 
 /** Wait for a session's in-flight hydration, capped. Resolves immediately once
  * the fetch has settled, so only the first injection of a session pays. */
-export async function whenHydrated(
-  sessionID: string,
-  timeoutMs: number = HYDRATION_WAIT_MS,
-): Promise<void> {
+export async function whenHydrated(sessionID: string, timeoutMs: number = HYDRATION_WAIT_MS): Promise<void> {
   const state = sessions.get(sessionID)
   const pending = state?.hydration
   if (!pending || !state) return
@@ -1412,7 +1555,7 @@ type LoadOutcome = (
     }
   | { status: "unlinked"; /** The server confirmed it, rather than a lookup failing. */ confirmed: boolean }
   | { status: "disabled" }
-  | { status: "error" }
+  | { status: "error"; /** What failed, for the sync record and its reason class. */ error: string }
 ) & {
   epoch?: string
   dir?: string | null
@@ -1454,15 +1597,15 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
       stable = before === epoch
     }
     vouched = epoch
-    if (!stable) return { status: "error", epoch, dir, ...stamp }
+    if (!stable) return { status: "error", error: "the workspace link changed while loading", epoch, dir, ...stamp }
     if (!binding) return { status: "unlinked", confirmed, epoch, dir, ...stamp }
     const datamateId = binding.datamateId
     resolved = datamateId
     const enabled = await memoryStatus(binding)
-    if (enabled === "error") return { status: "error", epoch, dir, datamateId, ...stamp }
+    if (typeof enabled !== "string") return { status: "error", error: enabled.error, epoch, dir, datamateId, ...stamp }
     if (enabled === "disabled") return { status: "disabled", epoch, dir, datamateId, ...stamp }
 
-    const ownProjectKey = projectKeyFor(binding)
+    const ownProject = projectIdentityFor(binding)
     const ownWorkspace = String(binding.datamateId)
     // `fetchKnownRecords`, not a bare `list()`: the reap below refuses to act on
     // a truncated view, and it can only refuse if it is told. (review)
@@ -1484,26 +1627,37 @@ async function loadWorkspaceMemory(directory?: string): Promise<LoadOutcome> {
       log.warn("could not reap archived blocks", { err: String(err) }),
     )
 
-    const blocks: RemoteMemoryBlock[] = []
-    const items: Record<string, { label: string; version: string }> = {}
+    // One block per copy key. A block can hold several live records (see
+    // `push`), and serving each would inject it twice, one copy stale; the
+    // newest is served, as `push` keeps it on the block's next save.
+    const newest = new Map<string, { id: string; block: RemoteMemoryBlock }>()
     for (const record of records) {
       if (!record?.id) continue
       if (!isMirrorRecord(record) || isArchived(record)) continue
       if (!belongsHere(record, ownWorkspace)) continue
-      const block = toBlock(record, ownProjectKey)
+      const block = toBlock(record, ownProject)
       if (!block) continue
-      // A TTL'd block must expire everywhere, not just on the machine that
-      // wrote it. The cloud copy is not swept, so honour it on read.
-      if (block.expires && new Date(block.expires) <= new Date()) continue
+      const key = copyKey(record, block, ownProject)
+      const prior = newest.get(key)
+      if (!prior || block.updated > prior.block.updated) newest.set(key, { id: record.id, block })
+    }
+    // A TTL'd block must expire everywhere, not just on the machine that
+    // wrote it. The cloud copy is not swept, so honour it on read. Checked on
+    // the newest copy only: an older one without the TTL must not outlive it.
+    const now = new Date()
+    const blocks: RemoteMemoryBlock[] = []
+    const items: Record<string, { label: string; version: string }> = {}
+    for (const { id, block } of newest.values()) {
+      if (block.expires && new Date(block.expires) <= now) continue
       blocks.push(block)
-      items[record.id] = memoryItem(block)
+      items[id] = memoryItem(block)
     }
     return { status: "loaded", blocks, items, epoch, dir, datamateId, ...stamp }
   } catch (err) {
     log.warn("workspace memory load failed", { err: String(err) })
     // Stamped like any other outcome: without an epoch the session would reload (and make
     // the prompt wait) on every turn for as long as the service is down.
-    return { status: "error", epoch: vouched, dir, datamateId: resolved, ...stamp }
+    return { status: "error", error: failureText(err), epoch: vouched, dir, datamateId: resolved, ...stamp }
   }
 }
 
@@ -1549,7 +1703,9 @@ function recordSyncState(outcome: LoadOutcome): void {
       if (retire) return SyncState.forget(dir, "memory", { isCurrent, before: outcome.observedAt })
       if (outcome.datamateId === undefined) return
       const result =
-        outcome.status === "loaded" ? { items: outcome.items } : { error: "could not load workspace memory" }
+        outcome.status === "loaded"
+          ? { items: outcome.items }
+          : { error: `could not load workspace memory: ${"error" in outcome ? outcome.error : outcome.status}` }
       return SyncState.record(dir, outcome.datamateId, "memory", result, {
         isCurrent,
         scope: outcome.scope,

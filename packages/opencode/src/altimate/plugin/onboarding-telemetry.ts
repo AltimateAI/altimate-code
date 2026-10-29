@@ -261,7 +261,13 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
         OnboardingTelemetry.isSelectedJob(input.sessionID, job) &&
         OnboardingTelemetry.claimFirstJobCompleted(input.sessionID)
       ) {
-        void OnboardingTelemetry.emit({ type: "first_job_completed", job }, input.sessionID)
+        // altimate_change — the workspace of the turn that ran the tool, carried by the hook input
+        // from the trigger site: a tool returning after its turn was cancelled and replaced still
+        // names its own turn's workspace, not the replacement's.
+        void OnboardingTelemetry.emit(
+          { type: "first_job_completed", job, workspace_id: input.workspaceId },
+          input.sessionID,
+        )
       }
     },
   }

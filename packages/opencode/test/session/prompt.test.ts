@@ -35,6 +35,7 @@ import { Session as LegacySession } from "../../src/session"
 import { Session } from "@/session/session"
 import { SessionMessageTable } from "@opencode-ai/core/session/sql"
 import { LLM } from "../../src/session/llm"
+import * as WorkspaceIdentity from "../../src/altimate/workspace/identity"
 import { MessageV2 } from "../../src/session/message-v2"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { SessionCompaction } from "../../src/session/compaction"
@@ -622,6 +623,56 @@ noLLMServer.instance(
   { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
   30_000,
 )
+// altimate_change end
+
+// altimate_change start - the workspace memory line follows the tools the turn keeps
+for (const turn of [
+  { agent: "analyst", tools: undefined, expected: { read: true, write: false } },
+  { agent: "builder", tools: undefined, expected: { read: true, write: true } },
+  { agent: "builder", tools: { altimate_memory_read: false }, expected: { read: false, write: true } },
+  { agent: "analyst", tools: { altimate_memory_read: false }, expected: { read: false, write: false } },
+] as const) {
+  noLLMServer.instance(
+    `prompt loop passes the identity section only the memory tools ${turn.agent} keeps${turn.tools ? " with read switched off on the request" : ""}`,
+    () => Effect.gen(function* () {
+      const section = spyOn(WorkspaceIdentity, "systemSection").mockResolvedValue("")
+      const sent: Pick<LLM.StreamInput, "tools" | "agent" | "user">[] = []
+      const stream = spyOn(LLM, "stream").mockImplementation(async (input) => {
+        sent.push({ tools: input.tools, agent: input.agent, user: input.user })
+        const usage = { inputTokens: 10, outputTokens: 5, totalTokens: 15 }
+        async function* fullStream() {
+          yield { type: "start" }
+          yield { type: "start-step" }
+          yield { type: "text-start", id: "reply" }
+          yield { type: "text-delta", id: "reply", text: "Done." }
+          yield { type: "text-end", id: "reply" }
+          yield { type: "finish-step", finishReason: "stop", usage }
+          yield { type: "finish", finishReason: "stop", totalUsage: usage }
+        }
+        return { fullStream: fullStream() } as unknown as Awaited<ReturnType<typeof LLM.stream>>
+      })
+      try {
+        const { prompt, chat } = yield* boot()
+        yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: turn.agent,
+          model: promptRef,
+          tools: turn.tools,
+          parts: [{ type: "text", text: "What are our naming conventions?" }],
+        })
+        expect(section.mock.calls[0]?.[0]).toEqual({ memoryTools: turn.expected })
+        // Same answer as the filter applied to the tools handed to the model call.
+        const kept = (name: string) => name in sent[0].tools && !LLM.removedTools([name], sent[0]).has(name)
+        expect({ read: kept("altimate_memory_read"), write: kept("altimate_memory_write") }).toEqual(turn.expected)
+      } finally {
+        section.mockRestore()
+        stream.mockRestore()
+      }
+    }),
+    { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
+    30_000,
+  )
+}
 // altimate_change end
 
 // altimate_change start - approved lessons are harness-delivered without changing cached prefixes
@@ -1227,6 +1278,76 @@ for (const mode of [
     30_000,
   )
 }
+// altimate_change end
+
+// altimate_change start - the conjunction check reads the request from the session's own user message
+noLLMServer.instance(
+  "answer_commit rejects an under-asked commit once using the session's user message",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat, sessions } = yield* boot()
+      const requests: Record<string, unknown>[] = []
+      const args = {
+        fields: [{ name: "repository", value: "repo-a" }],
+        basis: "Selected repositories at repository grain from repositories.name.",
+      }
+      const committed = `${args.basis}\n\n**Answer:** repository: repo-a`
+      const language = createOpenAICompatible({
+        name: "test",
+        baseURL: "https://unused.invalid/v1",
+        fetch: Object.assign(
+          async (_url: string | URL | Request, init?: RequestInit) => {
+            if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+            const request = JSON.parse(init.body)
+            requests.push(request)
+            if (requests.length > 3) throw new Error("answer_commit exceeded its generation budget")
+            // The first commit is rejected and the unchanged recommit accepted, then the answer is echoed.
+            const response =
+              requests.length < 3
+                ? reply().tool("answer_commit", args).usage({ input: 1, output: 1 }).item()
+                : reply().text(committed).stop().item()
+            if (response.type !== "sse") throw new Error("expected SSE response")
+            return new Response(
+              [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              { headers: { "Content-Type": "text/event-stream" } },
+            )
+          },
+          { preconnect: () => undefined },
+        ),
+      }).chatModel("test-model")
+      const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+      try {
+        const result = yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "analyst",
+          model: promptRef,
+          parts: [{ type: "text", text: "Which repository has the most forks, and its most copied file?" }],
+        })
+        expect(result.info).not.toHaveProperty("error")
+        expect(requests).toHaveLength(3)
+        const commits = (yield* sessions.messages({ sessionID: chat.id }))
+          .flatMap((message) => message.parts)
+          .filter((part): part is MessageV2.ToolPart => part.type === "tool" && part.tool === "answer_commit")
+        expect(commits.map((part) => part.state.status)).toEqual(["error", "completed"])
+        const rejection = commits[0]!.state.status === "error" ? commits[0]!.state.error : ""
+        expect(rejection).toContain("answer_commit conjunction check:")
+        expect(rejection).toContain('"and its most copied file"')
+        expect(JSON.stringify(requests[1]!.messages)).toContain("answer_commit conjunction check:")
+        expect(commits[1]!.state.status === "completed" && commits[1]!.state.metadata.committed_text).toBe(committed)
+        expect(
+          result.parts
+            .filter((part) => part.type === "text")
+            .map((part) => part.text)
+            .join(""),
+        ).toBe(committed)
+      } finally {
+        languageSpy.mockRestore()
+      }
+    }),
+  { config: { ...cfg, snapshot: false, learn: { enabled: false } } },
+  30_000,
+)
 // altimate_change end
 
 noLLMServer.instance(
@@ -1883,6 +2004,71 @@ it.instance(
         )
       }),
     ),
+  30_000,
+)
+
+// A linked workspace that had no skills at the last sync leaves no snapshot, only the empty record. The
+// first skill added to it must reach the next `run`, which is a fresh process, so that turn waits for the
+// sync like a project with a snapshot does, before the turn's message is written.
+let emptyRecordFile: string | undefined
+it.instance(
+  "a turn waits for the workspace sync when the linked workspace had no skills at the last sync",
+  () =>
+    withWorkspacesOn(
+      Effect.gen(function* () {
+        const { llm } = yield* useServerConfig(providerCfg)
+        const { prompt, chat } = yield* boot()
+        const skillSync = yield* Effect.promise(() => import("../../src/altimate/workspace/skill-sync"))
+        let landedAt: number | undefined
+        let messageAt: number | undefined
+        // `prompt` touches the session right after it creates the user message, so this marks when the
+        // turn's message was written.
+        const realTouch = LegacySession.touch
+        const touch = spyOn(LegacySession, "touch").mockImplementation(((sessionID: SessionID) => {
+          messageAt ??= performance.now()
+          return realTouch(sessionID)
+        }) as typeof LegacySession.touch)
+        const recent = spyOn(skillSync, "recentlySynced").mockResolvedValue(false)
+        const sync = spyOn(skillSync, "syncSkills").mockImplementation(
+          () =>
+            new Promise((resolve) =>
+              setTimeout(() => {
+                landedAt = performance.now()
+                resolve({ changed: false, skipped: [] } as unknown as Awaited<ReturnType<typeof skillSync.syncSkills>>)
+              }, 500),
+            ),
+        )
+        yield* Effect.gen(function* () {
+          yield* llm.text("done")
+          yield* prompt.prompt({
+            sessionID: chat.id, agent: "build", model: promptRef,
+            parts: [{ type: "text", text: "Hello." }],
+          })
+          expect(sync).toHaveBeenCalled()
+          expect(landedAt).toBeDefined()
+          expect(messageAt).toBeDefined()
+          expect(landedAt!).toBeLessThan(messageAt!)
+        }).pipe(
+          Effect.ensuring(
+            Effect.sync(() => {
+              recent.mockRestore()
+              sync.mockRestore()
+              touch.mockRestore()
+              if (emptyRecordFile) require("fs").rmSync(emptyRecordFile, { force: true })
+            }),
+          ),
+        )
+      }),
+    ),
+  {
+    init: (directory: string) =>
+      Effect.promise(async () => {
+        const { emptyRecordPath } = await import("../../src/altimate/workspace/empty-record-path")
+        emptyRecordFile = emptyRecordPath(path.resolve(directory))
+        require("fs").mkdirSync(path.dirname(emptyRecordFile), { recursive: true })
+        require("fs").writeFileSync(emptyRecordFile, "key\nwrite-id")
+      }),
+  },
   30_000,
 )
 // altimate_change end

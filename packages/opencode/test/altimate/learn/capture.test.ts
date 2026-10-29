@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { Capture, RETRY_THRESHOLD, ToolRetryTracker, type PartLike } from "../../../src/altimate/learn/capture"
+import { correctedTurnStart, turnMessages, Capture, RETRY_THRESHOLD, ToolRetryTracker, type PartLike } from "../../../src/altimate/learn/capture"
 import * as Signals from "../../../src/altimate/learn/signals"
 
 const call = (id: string, tool: string, status: "error" | "completed" | "running", error = "boom", messageID = "m1") => ({
@@ -332,5 +332,118 @@ describe("Capture: tool retries", () => {
     c.onPart({ ...tool("active3", "error", "x"), sessionID: "s0" })
     await c.flush()
     expect(await Signals.readSignals(root)).toHaveLength(1)
+  })
+})
+
+describe("correction turn start", () => {
+  const history = [
+    { id: "u1", sessionID: "s", role: "user", time: { created: 1000 } },
+    { id: "tool-step", sessionID: "s", role: "assistant", time: { created: 2000, completed: 2500 } },
+    { id: "final", sessionID: "s", role: "assistant", time: { created: 4000, completed: 4500 } },
+    { id: "correction", sessionID: "s", role: "user", time: { created: 5000 } },
+  ]
+  test("uses the first assistant after the previous user, not the final step", () => {
+    expect(correctedTurnStart(history, "correction")).toBe(2000)
+    expect(correctedTurnStart(history, "missing")).toBeUndefined()
+    expect(correctedTurnStart(history, "u1")).toBeUndefined()
+    expect(correctedTurnStart([history[0], history[3]], "correction")).toBeUndefined()
+    expect(correctedTurnStart(history.slice(1), "correction")).toBeUndefined()
+  })
+  test("a synthetic continuation is not the corrected request's boundary", () => {
+    const continued = [
+      history[0], history[1],
+      { id: "continue", sessionID: "s", role: "user", synthetic: true, time: { created: 3000 } },
+      history[2], history[3],
+    ]
+    expect(correctedTurnStart(continued, "correction")).toBe(2000)
+    expect(correctedTurnStart(continued.map((m) => ({ ...m, synthetic: false })), "correction")).toBe(4000)
+  })
+  test("history parts mark synthetic continuations and compaction markers", () => {
+    const info = (id: string, role: string, created: number) => ({ id, sessionID: "s", role, time: { created, completed: created + 1 } })
+    const mapped = turnMessages([
+      { info: info("u1", "user", 1000), parts: [{ type: "text" }, { type: "file" }] },
+      { info: info("a1", "assistant", 2000), parts: [{ type: "text" }] },
+      { info: info("continue", "user", 3000), parts: [{ type: "text", synthetic: true }] },
+      { info: info("marker", "user", 3500), parts: [{ type: "compaction" }] },
+      { info: info("files", "user", 3600), parts: [{ type: "file" }] },
+    ])
+    expect(mapped.map(({ synthetic, compaction }) => [synthetic, compaction])).toEqual([
+      [false, false], [false, false], [true, false], [false, true], [false, false],
+    ])
+    const [attachment, replay] = turnMessages([
+      { info: info("attach", "user", 4000), parts: [{ type: "text", synthetic: true }, { type: "file" }] },
+      { info: info("replay", "user", 4100), parts: [{ type: "text", metadata: { learnOriginalMessage: "u1" } }] },
+    ])
+    expect([attachment.synthetic, replay.synthetic, replay.replay]).toEqual([false, false, true])
+  })
+  test("a replayed request after compaction has no known turn start", () => {
+    const at = (id: string, role: string, created: number, extra = {}) => ({ id, sessionID: "s", role, time: { created, completed: created + 1 }, ...extra })
+    const compacted = [
+      at("u1", "user", 1000), at("step", "assistant", 2000),
+      at("marker", "user", 3000, { compaction: true }), at("summary", "assistant", 3100),
+      at("replay", "user", 3200), at("final", "assistant", 4000), at("correction", "user", 5000),
+    ]
+    expect(correctedTurnStart(compacted, "correction")).toBeUndefined()
+    // A replay marked by its text metadata is unknown even when no marker precedes it.
+    const marked = compacted.filter((m) => m.id !== "marker").map((m) => m.id === "replay" ? { ...m, replay: true } : m)
+    expect(correctedTurnStart(marked, "correction")).toBeUndefined()
+    // A manual compaction without a replay leaves the original request as the boundary.
+    expect(correctedTurnStart(compacted.filter((m) => m.id !== "replay"), "correction")).toBe(2000)
+  })
+  test("a failed record is retried by a later update", async () => {
+    let attempts = 0
+    const capture = new Capture({
+      hasPriorAssistant: async () => true,
+      turnStart: async (_, id) => correctedTurnStart(history, id),
+      record: async () => { if (attempts++ === 0) throw new Error("lock timeout"); return undefined },
+    })
+    for (const info of history) capture.onMessage(info)
+    for (const text of ["No, use UTC", "No, use UTC instead."])
+      await capture.onPart({ id: "part", messageID: "correction", sessionID: "s", type: "text", text })
+    await capture.flush()
+    expect(attempts).toBe(2)
+  })
+  test("repeated updates of one correction look up history once", async () => {
+    let lookups = 0
+    const capture = new Capture({
+      hasPriorAssistant: async () => true,
+      turnStart: async (_, id) => { lookups++; return correctedTurnStart(history, id) },
+      record: async () => undefined,
+    })
+    for (const info of history) capture.onMessage(info)
+    for (const text of ["No, use UTC", "No, use UTC instead."])
+      await capture.onPart({ id: "part", messageID: "correction", sessionID: "s", type: "text", text })
+    await capture.flush()
+    expect(lookups).toBe(1)
+  })
+  test("records the resolved turn start while preserving the eligibility shortcut", async () => {
+    const recorded: Signals.NewSignal[] = []
+    let lookups = 0
+    const capture = new Capture({
+      hasPriorAssistant: async () => { throw new Error("shortcut should handle eligibility") },
+      turnStart: async (_, id) => { lookups++; return correctedTurnStart(history, id) },
+      record: async (signal) => { recorded.push(signal); return undefined },
+    })
+    for (const info of history) capture.onMessage(info)
+    await capture.onPart({ id: "part", messageID: "correction", sessionID: "s", type: "text", text: "No, use UTC instead." })
+    await capture.flush()
+    expect(lookups).toBe(1)
+    expect(recorded[0].turnStartedAt).toBe(new Date(2000).toISOString())
+    expect(recorded[0].correctedAt).toBe(new Date(5000).toISOString())
+  })
+  test("uncertain history omits the field and lookup failure preserves the signal", async () => {
+    for (const fail of [false, true]) {
+      const recorded: Signals.NewSignal[] = []
+      const capture = new Capture({
+        hasPriorAssistant: async () => true,
+        turnStart: async () => { if (fail) throw new Error("unavailable"); return undefined },
+        record: async (signal) => { recorded.push(signal); return undefined },
+      })
+      capture.onMessage(history[3])
+      await capture.onPart({ id: "part", messageID: "correction", sessionID: "s", type: "text", text: "No, use UTC instead." })
+      await capture.flush()
+      expect(recorded).toHaveLength(1)
+      expect(recorded[0]).not.toHaveProperty("turnStartedAt")
+    }
   })
 })

@@ -1,5 +1,5 @@
 import { describe, test, expect, afterEach } from "bun:test"
-import { extractSshConfig, closeTunnel, closeAllTunnels, getActiveTunnel } from "../../src/altimate/native/connections/ssh-tunnel"
+import { extractSshConfig, closeAllTunnels, openTunnelCount } from "../../src/altimate/native/connections/ssh-tunnel"
 
 afterEach(() => {
   closeAllTunnels()
@@ -71,16 +71,13 @@ describe("extractSshConfig", () => {
 })
 
 // ---------------------------------------------------------------------------
-// closeTunnel / getActiveTunnel — idempotent operations on empty state
+// closeAllTunnels — idempotent on empty state
 // ---------------------------------------------------------------------------
 
 describe("SSH tunnel state management", () => {
-  test("closeTunnel is a no-op for non-existent tunnel", () => {
-    closeTunnel("nonexistent-tunnel-name")
-    expect(getActiveTunnel("nonexistent-tunnel-name")).toBeUndefined()
-  })
-
-  test("getActiveTunnel returns undefined for non-existent tunnel", () => {
-    expect(getActiveTunnel("nonexistent")).toBeUndefined()
+  test("closeAllTunnels is a no-op when nothing is open", () => {
+    closeAllTunnels()
+    closeAllTunnels()
+    expect(openTunnelCount()).toBe(0)
   })
 })

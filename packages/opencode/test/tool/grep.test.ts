@@ -14,6 +14,7 @@ import { Agent } from "../../src/agent/agent"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { testEffect } from "../lib/effect"
+import { PermissionEvaluate } from "@/permission/evaluate"
 import { Permission } from "../../src/permission"
 import type * as Tool from "../../src/tool/tool"
 import { Config } from "@/config/config"
@@ -204,7 +205,7 @@ describe("tool.grep", () => {
         ask: (req) =>
           Effect.sync(() => {
             const needsAsk = req.patterns.some(
-              (pattern) => Permission.evaluate(req.permission, pattern, ruleset).action !== "allow",
+              (pattern) => PermissionEvaluate.evaluateRequest(req, pattern, ruleset).action !== "allow",
             )
             if (needsAsk) requests.push(req)
           }),

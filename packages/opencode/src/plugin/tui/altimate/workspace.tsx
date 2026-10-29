@@ -42,6 +42,8 @@ import {
   type Namesakes,
 } from "@/altimate/workspace/workspace-name"
 import { currentAttachSnapshot } from "@/altimate/workspace/attach-snapshot"
+import { trackEngineError, trackInstallPrompt } from "@/altimate/workspace/engine-telemetry"
+import { trackStarterActionPicked } from "@/altimate/workspace/starter-telemetry"
 import {
   accountScope,
   loadStatusView,
@@ -79,6 +81,7 @@ import {
   projectNameFromRemote,
   resolveProjectIdentifier,
 } from "@/altimate/workspace/detect"
+import { sameIdentifier } from "@/altimate/workspace/remote-identity"
 import {
   accountDigest,
   credentialDigest,
@@ -97,7 +100,7 @@ import {
   OFFER_SKIP_TTL_MS,
   type EngineOffer,
 } from "@/altimate/workspace/engine-offer"
-import { useClipboard } from "@opencode-ai/tui/context/clipboard"
+import { useClipboard, type ClipboardService } from "@opencode-ai/tui/context/clipboard"
 import { AltimateApi } from "@/altimate/api/client"
 import { Log } from "@/altimate/util/log"
 
@@ -447,7 +450,9 @@ function WorkspaceLinkedDialog(props: LinkedProps) {
         if (!props.starter()?.prompts.length && option.value !== initial) setMovedEarly(true)
       }}
       onSelect={(option) => {
-        // altimate_change start - put the chosen prompt in the input without sending it
+        // altimate_change start - the pick, once the starter is on screen (before, this is the bare confirmation)
+        trackStarterActionPicked(props.starter(), option.value)
+        // put the chosen prompt in the input without sending it
         if (option.value.startsWith("prompt:")) {
           fillPrompt(props.api, option.title)
           return
@@ -522,6 +527,7 @@ function WorkspaceStarterDialog(props: { api: TuiPluginApi; starter: Starter }) 
       ]}
       current={props.starter.prompts.length > 0 ? "prompt:0" : "done"}
       onSelect={(option) => {
+        trackStarterActionPicked(props.starter, option.value)
         if (option.value.startsWith("prompt:")) fillPrompt(props.api, option.title)
         else props.api.ui.dialog.clear()
       }}
@@ -1512,13 +1518,16 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     // on remote but the current remote differs from what the binding
     // stored — the repo was renamed / remote swapped. The dialog surfaces
     // this so the user isn't silently attached to a stale binding. (M3)
+    // Remotes compare by the service's rule: it stores `https://github.com/acme/x`
+    // for a clone whose remote reads `git@github.com:acme/x.git`, and that is no drift.
     const boundIdent =
       serverBinding.matchedBy === "remote"
         ? serverBinding.binding.repo_remote
         : serverBinding.binding.project_path
     const currentIdent =
       serverBinding.matchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
-    const hasDrift = boundIdent != null && currentIdent != null && boundIdent !== currentIdent
+    const hasDrift =
+      boundIdent != null && currentIdent != null && !sameIdentifier(serverBinding.matchedBy, boundIdent, currentIdent)
     // Resolved before the dialog renders — see AlreadyLinkedDialog's comment
     // on why this can't be fetched async inside the dialog itself.
     const manageUrl = await resolveManageUrl(serverBinding.datamate.id)
@@ -1589,7 +1598,8 @@ async function runFlow(api: TuiPluginApi, directory: string): Promise<void> {
     const cachedIdent = local.repoRemote ?? local.projectPath ?? ""
     const currentIdent =
       cachedMatchedBy === "remote" ? identifier.repoRemote : identifier.projectPath
-    const hasDrift = cachedIdent !== "" && currentIdent != null && cachedIdent !== currentIdent
+    const hasDrift =
+      cachedIdent !== "" && currentIdent != null && !sameIdentifier(cachedMatchedBy, cachedIdent, currentIdent)
     const manageUrl = await resolveManageUrl(local.datamateId)
     api.ui.dialog.replace(() => (
       <AlreadyLinkedDialog
@@ -1779,6 +1789,8 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   // opened in our place. So completion reports through a toast when we are
   // gone, and only touches the dialog while we still own it.
   let mounted = true
+  // The offer was shown: reported from the surface that rendered it, not from the dispatch.
+  onMount(() => trackInstallPrompt("shown", props.offer, { surface: "dialog", nodeMajor: props.nodeMajor }))
   onCleanup(() => {
     mounted = false
     // Release the single-offer latch however this dialog goes away — chosen,
@@ -1865,6 +1877,8 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   const performInstall = async () => {
     const result = await installEngine()
     if (!result.ok) {
+      trackInstallPrompt("install_failed", props.offer)
+      trackEngineError("install", result.error)
       installing = false
       if (!mounted) {
         // Dismissed mid-install: the failed-phase rows have nowhere to render,
@@ -1880,6 +1894,7 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
       setPhase("failed")
       return
     }
+    trackInstallPrompt("installed", props.offer)
     // Only clear a dialog we still own — by now the user may have opened
     // another, and clearing the stack would take theirs down instead.
     if (mounted) props.api.ui.dialog.clear()
@@ -1900,21 +1915,12 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
   const copyCommand = () => {
     const cmd = command()
     void (async () => {
-      try {
-        await clipboard.write?.(cmd)
-        // A resolved write is NOT proof of a copy. The host's writer picks
-        // xclip/xsel on Linux and otherwise falls back to clipboardy, and it
-        // swallows backend failures (`.catch(() => undefined)`), so on the many
-        // Linux/WSL boxes with neither tool installed the write silently does
-        // nothing. Read back and compare before claiming success. (Caught by
-        // E2E: the toast said "Copied:" while the clipboard was untouched.)
-        const back = await clipboard.read?.()
-        if (back?.data.trim() === cmd) {
-          props.api.ui.toast({ variant: "info", message: `Copied: ${cmd}` })
-          return
-        }
-      } catch {
-        // Unreadable or unwritable clipboard — fall through and show it.
+      if (await confirmedCopy(clipboard, cmd)) {
+        // `copied` only once the read-back confirms the clipboard holds the command: the
+        // selection itself proves nothing (an unconfirmed copy tracks no row).
+        trackInstallPrompt("copied", props.offer)
+        props.api.ui.toast({ variant: "info", message: `Copied: ${cmd}` })
+        return
       }
       props.api.ui.toast({
         variant: "warning",
@@ -1942,8 +1948,13 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
         if (option.value === "install") {
           if (installing) return
           installing = true
+          trackInstallPrompt("accepted", props.offer)
           void runInstall().catch((err) => {
             const message = err instanceof Error ? err.message : String(err)
+            // A rejection (a throw past installEngine's own result) is the same failure to the
+            // funnel as a reported one.
+            trackInstallPrompt("install_failed", props.offer)
+            trackEngineError("install", message)
             installing = false
             if (!mounted) {
               // Same as a reported failure after dismissal: the rows are gone,
@@ -1966,12 +1977,32 @@ function EngineInstallOfferDialog(props: EngineOfferProps) {
           return
         }
         if (option.value === "skip") {
+          trackInstallPrompt("declined", props.offer)
           recordEngineSkip(props.api, props.offer.workspaceId, props.latchScope, Date.now())
         }
         props.api.ui.dialog.clear()
       }}
     />
   )
+}
+
+/** Write `text` to the clipboard and read it back: true only when the clipboard then holds it.
+ *
+ * A resolved write is NOT proof of a copy. The host's writer picks xclip/xsel on Linux and
+ * otherwise falls back to clipboardy, and it swallows backend failures (`.catch(() => undefined)`),
+ * so on the many Linux/WSL boxes with neither tool installed the write silently does nothing.
+ * (Caught by E2E: the toast said "Copied:" while the clipboard was untouched.) An unreadable or
+ * unwritable clipboard is the same unconfirmed outcome. */
+export async function confirmedCopy(clipboard: Pick<ClipboardService, "write" | "read">, text: string) {
+  // No writer means nothing was copied, whatever the clipboard happens to hold.
+  if (!clipboard.write) return false
+  try {
+    await clipboard.write(text)
+    const back = await clipboard.read?.()
+    return back?.data.trim() === text
+  } catch {
+    return false
+  }
 }
 
 /** Show the offer unless the 7-day latch suppresses it.

@@ -594,7 +594,8 @@ async function skillOwner(publicId: string): Promise<number | null> {
     const detail = await altimateRequest<{ created_by?: unknown; skill?: { created_by?: unknown } }>(
       "GET",
       `/${encodeURIComponent(publicId)}`,
-      { base: SKILLS_BASE },
+      // altimate_change - a 404 is the answer "the skill is gone", not a failed call
+      { base: SKILLS_BASE, expectedStatuses: [404] },
     )
     const raw = detail?.skill?.created_by ?? detail?.created_by
     return typeof raw === "number" ? raw : null

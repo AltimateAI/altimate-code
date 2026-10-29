@@ -12,6 +12,13 @@ export const OAUTH_DUMMY_KEY = "opencode-oauth-dummy-key"
 
 const file = path.join(Global.Path.data, "auth.json")
 
+// altimate_change start — telemetry identity stats this file to notice a sign-in or sign-out made
+// through the TUI without parsing the store on every flush.
+export function filepath(): string {
+  return file
+}
+// altimate_change end
+
 const fail = (message: string) => (cause: unknown) => new AuthError({ message, cause })
 
 export class Oauth extends Schema.Class<Oauth>("OAuth")({

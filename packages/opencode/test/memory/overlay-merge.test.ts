@@ -2,7 +2,7 @@
 // Covers the injection-side merge of workspace memory into local memory:
 // which blocks survive, and the guard that keeps a cloud-sourced training
 // block from writing to the local store.
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -141,6 +141,41 @@ describe("the memory refresh tool", () => {
     expect(res.output).toContain("2 block(s)")
   })
 
+  test("a block from the bound workspace's memory is injected under the workspace scope and counted", async () => {
+    const { Telemetry } = await import("../../src/altimate/telemetry")
+    // A project-scope block is the workspace's; a global cloud block is the account's and is
+    // injected too, but not counted as workspace memory.
+    listResponse = [
+      remote("ws/one", "WORKSPACE BLOCK", { block_scope: "project", datamate_id: "7" }),
+      remote("acct/one", "GLOBAL BLOCK"),
+    ]
+    await hydrate(SES)
+    expect(
+      overlayBlocks(SES)
+        .map((b) => b.id)
+        .sort(),
+    ).toEqual(["acct/one", "ws/one"])
+    const events: any[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((e) => {
+      events.push(e)
+    })
+    try {
+      Telemetry.clearWorkspaceUse(SES)
+      const injected = await MemoryPrompt.inject(8000, { sessionID: SES })
+      expect(injected).toContain("WORKSPACE BLOCK")
+      expect(injected).toContain("GLOBAL BLOCK")
+      const injection = events.find((e) => e.type === "memory_injection")
+      expect(injection).toBeDefined()
+      expect(injection.scopes_used).toContain("workspace")
+      expect(injection.scopes_used).toContain("global")
+      expect(injection.workspace_blocks).toBe(1)
+      expect(Telemetry.workspaceUseOf(SES).memory).toBe(1)
+    } finally {
+      spy.mockRestore()
+      Telemetry.clearWorkspaceUse(SES)
+    }
+  })
+
   test("says the workspace is unreachable rather than reporting an empty reload", async () => {
     listResponse = [remote("keep/one", "KEEP")]
     await hydrate(SES)
@@ -252,6 +287,16 @@ describe("the memory read tool", () => {
     expect(out).toContain("A LOCAL FACT")
     expect(out).toContain("A WORKSPACE FACT")
   })
+
+  test("an empty result does not tell a read-only agent to save", async () => {
+    // analyst may read memory but not write it; naming the write tool in the
+    // result steers it toward a call it cannot make.
+    await hydrate(SES)
+    const tool = await initTool(MemoryReadTool)
+    const res: any = await tool.execute({ scope: "all", tags: ["no-such-tag"] }, { sessionID: SES, agent: "analyst" })
+    expect(res.metadata.count).toBe(0)
+    expect(String(res.output)).toEqual("No memory blocks found.")
+  })
 })
 
 describe("on-demand reload", () => {
@@ -270,7 +315,11 @@ describe("on-demand reload", () => {
     const { count, ok } = await refresh(SES)
     expect(ok).toBe(true)
     expect(count).toBe(2)
-    expect(overlayBlocks(SES).map((b) => b.id).sort()).toEqual(["warehouse/one", "warehouse/two"])
+    expect(
+      overlayBlocks(SES)
+        .map((b) => b.id)
+        .sort(),
+    ).toEqual(["warehouse/one", "warehouse/two"])
   })
 
   test("a failed refresh keeps the memory the session already had", async () => {
@@ -303,7 +352,7 @@ describe("on-demand reload", () => {
     await hydrate(SES)
     expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["keep/me"])
 
-    memoryEnabledCache.clear()   // past the 60s positive-cache TTL
+    memoryEnabledCache.clear() // past the 60s positive-cache TTL
     const originalFetch = globalThis.fetch
     globalThis.fetch = (async (_i?: unknown, _n?: unknown) => {
       throw new Error("workspace unreachable")
@@ -341,21 +390,22 @@ describe("on-demand reload", () => {
         firstCall = false
         await gate
         return new Response(JSON.stringify([remote("stale/one", "STALE")]), {
-          status: 200, headers: { "Content-Type": "application/json" },
+          status: 200,
+          headers: { "Content-Type": "application/json" },
         })
       }
       return originalFetch(input, init)
     }) as typeof fetch
 
     try {
-      void hydrate(SES)                        // A — stalls on the gate
+      void hydrate(SES) // A — stalls on the gate
       await new Promise((r) => setTimeout(r, 20))
       listResponse = [remote("fresh/one", "FRESH")]
-      const res = await refresh(SES)           // B — completes first
+      const res = await refresh(SES) // B — completes first
       expect(res.status).toBe("loaded")
       expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["fresh/one"])
 
-      release?.()                              // A resolves late
+      release?.() // A resolves late
       await new Promise((r) => setTimeout(r, 50))
       expect(overlayBlocks(SES).map((b) => b.id)).toEqual(["fresh/one"])
     } finally {

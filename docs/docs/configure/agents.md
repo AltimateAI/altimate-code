@@ -12,7 +12,7 @@ Agents define different AI personas with specific models, prompts, permissions, 
 | Agent | Description | Access Level |
 |-------|------------|-------------|
 | `builder` | Create and modify dbt models, SQL pipelines, and data transformations | Full read/write. SQL mutations prompt for approval. |
-| `analyst` | Answer questions about your data — explore it, run SELECT queries, inspect schemas, generate insights | Read-only (enforced). SQL writes denied. Safe bash commands auto-allowed. |
+| `analyst` | Answer questions about your data — explore it, run SELECT queries, inspect schemas, generate insights | Read-only (enforced). SQL writes, file edits, shell, memory saves and other built-in write tools denied, even if config allows them. MCP and custom tools follow your config. Training entries and session scratch tables are still allowed. |
 | `plan` | Plan before acting — restricted to planning files only | Minimal — no edits, no bash, no SQL |
 
 ### Builder
@@ -25,9 +25,11 @@ The agent for asking questions about your data. Truly read-only mode for safe da
 
 - **File access**: Read, grep, glob — no prompts
 - **SQL**: SELECT queries execute freely. Write queries are denied (not prompted — blocked entirely)
-- **Bash**: Safe commands auto-allowed (`ls`, `grep`, `cat`, `head`, `tail`, `find`, `wc`). dbt read commands allowed (`dbt list`, `dbt ls`, `dbt debug`). Everything else denied.
+- **Bash**: Denied. Use read, grep and glob to read files
 - **Web**: Fetch and search allowed without prompts
 - **Schema/warehouse/finops**: All inspection tools available
+- **Workspace knowledge**: Loads workspace and project skills; reads workspace memory and views this checkout's memory audit log. Can read files bundled with skills, including global skills stored outside the project. Reloading memory syncs the local copy with the workspace, which can remove a local copy of a block the workspace archived. Saving memory is done with `builder`.
+- **Config overrides**: A permission config such as `"*": "allow"` cannot turn file edits, SQL writes (including data diffs of arbitrary queries), shell, memory saves, warehouse connection or MCP config changes, training imports, sample project setup, feedback submission, batch tool calls or delegation beyond `data-explorer` back on. A global `"*": "allow"` does turn on MCP and custom tools for analyst, including ones that write (for example a SQL MCP server); to keep them from analyst, put the `"*": "allow"` under `agent.builder` instead of the global config, or deny those tools under `agent.analyst.permission`.
 
 !!! tip
     Use `analyst` when exploring data to ensure no accidental writes. Switch to `builder` when you're ready to create or modify models.
@@ -65,8 +67,8 @@ Define custom agents in `altimate-code.json`:
         "write": "deny",
         "edit": "deny",
         "bash": {
-          "dbt docs generate": "allow",
-          "*": "deny"
+          "*": "deny",
+          "dbt docs generate": "allow"
         }
       }
     }
@@ -120,7 +122,7 @@ Each agent can have its own permission overrides:
 ```json
 {
   "agent": {
-    "analyst": {
+    "builder": {
       "permission": {
         "write": "deny",
         "edit": "deny",
@@ -135,6 +137,8 @@ Each agent can have its own permission overrides:
   }
 }
 ```
+
+`analyst` already denies its shell and built-in write tools whatever its config says, so its config is mainly useful to restrict it further (for example `"webfetch": "deny"`) or to allow MCP and custom tools.
 
 !!! warning
     Agent-specific permissions override global permissions. A `"deny"` at the agent level cannot be overridden by a global `"allow"`.

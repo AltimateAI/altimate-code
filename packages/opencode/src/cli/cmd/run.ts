@@ -71,7 +71,7 @@ import { SessionTermination } from "../../session/termination"
 // altimate_change start — upstream_fix: type-only import for the tracing-config cast (see tracer setup below)
 import type { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 // altimate_change - render the workspace engine offer in an attached run
-import { OFFER_COMMAND, installCommand } from "@/altimate/workspace/engine-offer"
+import { OFFER_COMMAND, installCommand, trackPrintedOffer } from "@/altimate/workspace/engine-offer"
 import { OutputCollector } from "./run-output"
 // altimate_change end
 
@@ -85,6 +85,15 @@ type ToolProps<T = Tool.Info> = {
   metadata: Tool.InferMetadata<T>
   part: ToolPart
 }
+
+// altimate_change start — upstream_fix: run quoted space-containing prompt arguments, which reached the model as literal quotes
+export function joinRunMessage(args: string[], command: boolean): string {
+  if (!command) return args.join(" ")
+  return args
+    .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
+    .join(" ")
+}
+// altimate_change end
 
 function props<T = Tool.Info>(part: ToolPart): ToolProps<T> {
   const state = part.state
@@ -485,9 +494,9 @@ export const RunCommand = cmd({
     })
     // altimate_change end
 
-    let message = [...args.message, ...(args["--"] || [])]
-      .map((arg) => (arg.includes(" ") ? `"${arg.replace(/"/g, '\\"')}"` : arg))
-      .join(" ")
+    // altimate_change start — upstream_fix: run quoted space-containing prompt arguments, which reached the model as literal quotes
+    let message = joinRunMessage([...args.message, ...(args["--"] || [])], Boolean(args.command))
+    // altimate_change end
 
     const directory = (() => {
       if (!args.dir) return undefined
@@ -552,8 +561,20 @@ export const RunCommand = cmd({
     // Earlier revision used `!process.stdin?.isTTY`, which turned the crash
     // into a stall: undefined stdin satisfied the guard and we then awaited
     // Bun.stdin.text() on a stream that would never EOF. Skip the read
-    // entirely when there is no stdin to read from.
-    if (process.stdin && !process.stdin.isTTY) message += "\n" + (await Bun.stdin.text())
+    // entirely when there is no stdin to read from. An agent's shell tool can
+    // also hand `run` a socket stdin it never writes to or closes, so that
+    // read is bounded when there is a message or command to run without it:
+    // see `readRunStdin`.
+    if (process.stdin && !process.stdin.isTTY) {
+      const { readRunStdin, stdinWaitMs } = await import("../../altimate/cli/run-stdin")
+      const waitMs = stdinWaitMs()
+      const piped = await readRunStdin(undefined, waitMs, message.trim().length > 0 || !!args.command)
+      if (piped.timedOut)
+        process.stderr.write(
+          `No input on stdin after ${waitMs / 1000}s; continuing without it (input sent later is ignored). Redirect stdin from /dev/null to skip the wait, or set ALTIMATE_RUN_STDIN_WAIT_MS=0 to wait for it.${EOL}`,
+        )
+      message += "\n" + piped.text
+    }
     // altimate_change end
 
     if (message.trim().length === 0 && !args.command) {
@@ -1324,6 +1345,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
               `This workspace's integration tools need the local engine on the server. Install it there with: ${installCommand()}` +
                 EOL,
             )
+            // This process is the surface that showed the offer, so it reports `shown` (surface
+            // `bus`) from the fields the event carried; the server's publish is not a display.
+            if (sessionID) trackPrintedOffer((event.properties as { arguments?: unknown }).arguments, sessionID)
             continue
           }
           // altimate_change end
@@ -1519,6 +1543,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // flush takes; what is already on the wire is what gets the 2s.
         eventAbort.abort()
         const drains: Promise<unknown>[] = []
+        // Loaded during the drain, so only the count itself runs after it.
+        const unsent = CoreFlag.ALTIMATE_DISABLE_WORKSPACE
+          ? undefined
+          : import("../../altimate/cli/unsent-memory").catch(() => undefined)
         if (!CoreFlag.ALTIMATE_DISABLE_WORKSPACE)
           drains.push(import("../../altimate/workspace/memory-sync").then((m) => m.flushPendingMirrors(2_000)))
         if (captureEnabled)
@@ -1529,8 +1557,24 @@ You are speaking to a non-technical business executive. Follow these rules stric
         void Promise.race([
           Promise.allSettled(drains),
           new Promise<void>((resolve) => { timer = setTimeout(resolve, 2_000) }),
-        ]).finally(() => {
+        ]).finally(async () => {
           clearTimeout(timer)
+          // An interrupted upload is the likeliest to stay on this machine, so say so here too. The count
+          // is local; a second signal still exits at once.
+          const notice = await unsent
+            ?.then((m) => m?.unsentMemoryNoticeAfterRun(process.cwd(), 1_000))
+            .catch(() => null)
+          // process.exit does not wait for a pending write to a piped stderr; wait briefly, never for a
+          // reader that has stopped.
+          if (notice)
+            await new Promise<void>((resolve) => {
+              setTimeout(resolve, 500)
+              try {
+                process.stderr.write(notice + EOL, () => resolve())
+              } catch {
+                resolve()
+              }
+            })
           process.exit(code)
         })
       }
@@ -2098,6 +2142,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
             .then((m) => m.flushPendingMirrors())
             .catch(() => {}),
         ])
+        // This process does not retry an upload, and nothing else tells the user
+        // that memory stayed on this machine.
+        const notice = await import("../../altimate/cli/unsent-memory")
+          .then((m) => m.unsentMemoryNoticeAfterRun(process.cwd()))
+          .catch(() => null)
+        if (notice) process.stderr.write(notice + EOL)
       }
       // altimate_change end
 

@@ -148,7 +148,10 @@ export namespace PermissionNext {
             timestamp: Date.now(),
             session_id: request.sessionID,
             tool_name: request.permission,
-            tool_category: Telemetry.categorizeToolName(request.permission, request.permission.startsWith("mcp__") ? "mcp" : "standard"),
+            tool_category: Telemetry.categorizeToolName(
+              request.permission,
+              request.permission.startsWith("mcp__") ? "mcp" : "standard",
+            ),
             source: "config_rule",
           })
           throw new DeniedError(ruleset.filter((r) => Wildcard.match(request.permission, r.permission)))
@@ -195,7 +198,10 @@ export namespace PermissionNext {
           timestamp: Date.now(),
           session_id: existing.info.sessionID,
           tool_name: existing.info.permission,
-          tool_category: Telemetry.categorizeToolName(existing.info.permission, existing.info.permission.startsWith("mcp__") ? "mcp" : "standard"),
+          tool_category: Telemetry.categorizeToolName(
+            existing.info.permission,
+            existing.info.permission.startsWith("mcp__") ? "mcp" : "standard",
+          ),
           source: "user",
         })
         existing.reject(input.message ? new CorrectedError(input.message) : new RejectedError())
@@ -260,7 +266,11 @@ export namespace PermissionNext {
     const merged = merge(...rulesets)
     log.info("evaluate", { permission, pattern, ruleset: merged })
     const match = merged.findLast(
-      (rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern),
+      (rule) =>
+        Wildcard.match(permission, rule.permission) &&
+        (permission === "external_directory" || permission === "sensitive_write"
+          ? Wildcard.matchPath(pattern, rule.pattern)
+          : Wildcard.match(pattern, rule.pattern)),
     )
     return match ?? { action: "ask", permission, pattern: "*" }
   }

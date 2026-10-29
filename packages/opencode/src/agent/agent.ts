@@ -334,6 +334,16 @@ export const layer = Layer.effect(
                 question: "allow",
                 // Skills return instruction text only (no side effects), so they are safe for a read-only agent.
                 skill: "allow",
+                // "*": "deny" above also overrides the default allow for skill directories; add it back
+                // so files bundled with a global skill (stored outside the project) stay readable.
+                external_directory: Object.fromEntries(skillDirs.map((dir) => [path.join(dir, "*"), "allow"])),
+                // Workspace memory: read, reload and view the audit log. Reloading syncs like the
+                // load every session runs (it can drop a local copy of a block the workspace has
+                // archived), but cannot create or edit memory. Saving and deleting stay denied, so a
+                // decision is recorded through builder.
+                altimate_memory_read: "allow",
+                altimate_memory_refresh: "allow",
+                altimate_memory_audit: "allow",
                 // Delegation is limited to the read-only data-explorer subagent: general/explore/build
                 // carry broader permissions than analyst, and children do not inherit parent-agent limits.
                 task: {
@@ -626,12 +636,48 @@ export const layer = Layer.effect(
         // Ensure Truncate.GLOB is allowed unless explicitly configured
         for (const name in agents) {
           const agent = agents[name]
-          // altimate_change start — keep the analyst shell disabled after config and safety rules
+          // altimate_change start — keep analyst's shell and write tools disabled after config and safety rules
           // Permission.disabled requires the final bash rule to deny "*". Without
           // it, narrower safety rules leave the tool exposed to commands that emit
           // no permission patterns (e.g. `>out.txt`). data-explorer is capped above.
+          // The built-in tools that change files, memory, config, connections or external
+          // systems are denied again too: last-match-wins would otherwise let a config grant
+          // such as "*": "allow" turn them back on for the read-only agent. Most of them never
+          // call ctx.ask, so removing them from the tool list is their only gate. batch is
+          // denied because it runs other tools without that tool-list filter.
           if (name === "analyst") {
-            agent.permission = Permission.merge(agent.permission, Permission.fromConfig({ bash: "deny" }))
+            // Keep what config resolved for data-explorer (it may deny or ask), but nothing broader.
+            const dataExplorerAction = Permission.evaluate("task", "data-explorer", agent.permission).action
+            agent.permission = Permission.merge(
+              agent.permission,
+              Permission.fromConfig({
+                ...Object.fromEntries(
+                  [
+                    "bash",
+                    "sql_execute_write",
+                    "edit",
+                    "write",
+                    "apply_patch",
+                    "altimate_memory_write",
+                    "altimate_memory_delete",
+                    "altimate_memory_extract",
+                    "training_import",
+                    "warehouse_add",
+                    "warehouse_remove",
+                    "warehouse_install_driver",
+                    "mcp_discover",
+                    "datamate_manager",
+                    "sample_setup",
+                    "feedback_submit",
+                    // Runs caller-supplied SQL without the write classification sql_execute applies.
+                    "data_diff",
+                    "batch",
+                  ].map((tool) => [tool, "deny" as const]),
+                ),
+                // A trailing "*" deny is what removes task from the tool list when nothing is allowed.
+                task: dataExplorerAction === "deny" ? "deny" : { "*": "deny", "data-explorer": dataExplorerAction },
+              }),
+            )
           }
           // altimate_change end
           const explicit = agent.permission.some((r) => {

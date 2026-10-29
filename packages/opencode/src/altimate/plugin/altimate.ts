@@ -5,12 +5,15 @@ import open from "open"
 import { AltimateApi } from "../api/client"
 // altimate_change — onboarding telemetry for the gateway sign-in funnel
 import * as OnboardingTelemetry from "../telemetry/onboarding"
+import { Telemetry } from "../telemetry"
 // altimate_change — shared machine-id helper (race-safe, UUID-validated, size-capped)
 import { getOrCreateMachineId } from "../util/machine-id"
 import { Config } from "@/config/config"
 import { Flag } from "@/flag/flag"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { Log } from "@/altimate/util/log"
+// altimate_change — reads the config telemetry opt-out without an Instance
+import { TelemetryConfig } from "../telemetry/config-state"
 
 /**
  * Why a failure reason is attached at the rejection site rather than inferred from the message:
@@ -74,7 +77,9 @@ const log = Log.create({ service: "altimate-plugin" })
 // and `cli_version` are strings, treat `cli_version: "local"` as a valid dev
 // build, and treat the payload as untrusted (anyone can craft a URL). An absent
 // `machine_id` means "do not attribute" — it must never be aliased on.
-export async function buildCliContext(machineIdPath?: string): Promise<string> {
+/** `directory`: the project the command acts on, whose config may opt out; the process's working
+ * directory when the command has none (`auth login`). */
+export async function buildCliContext(machineIdPath?: string, directory?: string): Promise<string> {
   // altimate_change start — honour both telemetry opt-out gates, mirroring
   // telemetry/index.ts::doInit:
   //   1. ALTIMATE_TELEMETRY_DISABLED / OPENCODE_DISABLE_TELEMETRY env vars
@@ -89,17 +94,25 @@ export async function buildCliContext(machineIdPath?: string): Promise<string> {
     } catch (err) {
       // Config was unreadable — NOT the normal path. Server routes run inside
       // Instance.provide() (AsyncLocalStorage-propagated across awaits), so
-      // Config.get() resolves during an ordinary browser authorize(). The known
-      // exception is `altimate auth login <url>`, which deliberately skips
-      // instance bootstrap (ProvidersLoginCommand `instance: (args) => !isAuthProviderUrl(args.target)`);
-      // on that path this fires. Fail CLOSED — omit the durable machine_id rather
-      // than transmit it for a user who may have opted out via config; a missed
-      // correlation beats leaking a stable identifier. Log so a low correlation
-      // rate is traceable here instead of being mistaken for a lost reply.
-      log.warn("cli_context: config unreadable, omitting machine_id (fail-closed)", {
+      // Config.get() resolves during an ordinary browser authorize(). It fires on
+      // the paths that skip instance bootstrap: `altimate auth login <url>` and the
+      // create-and-link hand-off of `altimate-code link`. Read `telemetry.disabled`
+      // from the config files directly: an opt-out there, or files that cannot be
+      // read (an opt-out may be behind them), omit the id. Only a config that
+      // readably leaves telemetry on defers to the telemetry module's own state
+      // (opted out by env, no sink, test runner).
+      const state = await TelemetryConfig.disabledState(directory)
+      if (state === "enabled") {
+        await Telemetry.init().catch(() => {})
+        disabled = !Telemetry.isEnabled()
+      } else {
+        disabled = true
+      }
+      log.info("cli_context: config unavailable, read the opt-out from the files", {
         code: (err as NodeJS.ErrnoException)?.code,
+        state,
+        enabled: !disabled,
       })
-      disabled = true
     }
   }
   let machineId = ""
@@ -491,6 +504,10 @@ export async function AltimateAuthPlugin(_input: PluginInput): Promise<Hooks> {
                     altimateInstanceName: creds.instance,
                     altimateApiKey: authToken,
                   })
+                  // altimate_change start — telemetry is already running in this process; stamp the
+                  // user id and tenant of the account just signed in on the events that follow.
+                  void Telemetry.refreshIdentity().catch(() => {})
+                  // altimate_change end
                   // altimate_change start — onboarding funnel: auth succeeded and the instance
                   // is live. The instance name is the customer's tenant identifier and is never
                   // sent. time_to_connect_ms runs from the start of authorize() — before the

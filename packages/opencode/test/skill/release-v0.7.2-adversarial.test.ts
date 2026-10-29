@@ -205,8 +205,8 @@ describe("github/action.yml — post-v0.7.1 rename alignment", () => {
   })
 
   test("Action invokes the renamed binary, not the legacy name", () => {
-    // v0.7.1 shipped only `altimate` from the curl path. `altimate-code` does
-    // not exist on PATH after a curl install; the npm path still has both.
+    // `altimate` is the canonical name on every install path; older curl
+    // installs (v0.7.1 until the alias was added) have no `altimate-code`.
     expect(ACTION_YML).toContain("run: altimate github run")
     expect(ACTION_YML).not.toMatch(/run:\s*altimate-code github run/)
   })

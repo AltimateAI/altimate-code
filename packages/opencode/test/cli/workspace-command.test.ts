@@ -6,13 +6,19 @@ import {
   describeRefresh,
   describeStatus,
   describeSync,
+  runList,
   runRefresh,
   runStatus,
   runSync,
   runUnlink,
+  WorkspaceCommand,
   type WorkspaceDeps,
 } from "../../src/cli/cmd/workspace"
-import { linkHeadless, matchWorkspace, type LinkHeadlessDeps } from "../../src/cli/cmd/link"
+import { SIGN_IN_COMMAND, linkHeadless, matchWorkspace, type LinkHeadlessDeps } from "../../src/cli/cmd/link"
+import { AltimateAuthPlugin } from "../../src/altimate/plugin/altimate"
+import { AltimateApi } from "../../src/altimate/api/client"
+import { WorkspaceApi } from "../../src/altimate/workspace/api-client"
+import yargs from "yargs"
 
 const binding = {
   datamateId: 35,
@@ -21,6 +27,17 @@ const binding = {
   projectPath: null,
   linkedAt: 0,
 } as any
+
+describe("SIGN_IN_COMMAND", () => {
+  test("names a login method the altimate-backend provider has, so --method skips the picker", async () => {
+    const hooks = await AltimateAuthPlugin({} as any)
+    expect(hooks.auth?.provider).toBe("altimate-backend")
+    const labels = hooks.auth!.methods.map((m) => m.label)
+    const named = SIGN_IN_COMMAND.match(/--method "([^"]+)"/)?.[1]
+    expect(named).toBeDefined()
+    expect(labels).toContain(named!)
+  })
+})
 
 describe("workspace status wording", () => {
   test("an unlinked project says so and how to link", () => {
@@ -131,6 +148,7 @@ function fakeDeps(over: Partial<WorkspaceDeps> = {}) {
   const json: any[] = []
   const deps: WorkspaceDeps = {
     isConfigured: async () => true,
+    list: async () => (calls.push("list"), [{ id: 35, name: "Growth" }, { id: 9, name: "Fin\u001b]8;;x\u0007ance" }]),
     resolve: async () => ({ status: "bound", binding }),
     status: async () => (calls.push("status"), statusReport),
     refresh: async () => (calls.push("refresh"), { skillsChanged: false, skillsSkipped: [], errors: [] } as any),
@@ -149,6 +167,7 @@ function fakeDeps(over: Partial<WorkspaceDeps> = {}) {
 describe("workspace subcommands", () => {
   test("not signed in: every subcommand exits 2 and touches nothing", async () => {
     for (const run of [
+      (d: WorkspaceDeps) => runList(false, d),
       (d: WorkspaceDeps) => runStatus("/p", false, d),
       (d: WorkspaceDeps) => runRefresh("/p", false, d),
       (d: WorkspaceDeps) => runSync("/p", false, d),
@@ -158,6 +177,24 @@ describe("workspace subcommands", () => {
       expect(await run(f.deps)).toBe(EXIT.USAGE)
       expect(f.calls).toEqual([])
     }
+  })
+
+  test("list prints each workspace's id and name, and how to link to one", async () => {
+    const f = fakeDeps()
+    expect(await runList(false, f.deps)).toBe(EXIT.OK)
+    expect(f.out).toEqual(["35  Growth", "9  Fin]8;;xance", "Link this project to one with `altimate-code link --workspace <id or name>`."])
+    const j = fakeDeps()
+    expect(await runList(true, j.deps)).toBe(EXIT.OK)
+    expect(j.json[0]).toEqual({ ok: true, workspaces: [{ id: 35, name: "Growth" }, { id: 9, name: "Fin\u001b]8;;x\u0007ance" }] })
+  })
+
+  test("list with no workspaces points at --create; a failed request exits 1", async () => {
+    const empty = fakeDeps({ list: async () => [] })
+    expect(await runList(false, empty.deps)).toBe(EXIT.OK)
+    expect(empty.out.join("\n")).toContain("link --create")
+    const down = fakeDeps({ list: async () => Promise.reject(new Error("503")) })
+    expect(await runList(true, down.deps)).toBe(EXIT.FAILED)
+    expect(down.json[0]).toMatchObject({ ok: false, error: "Could not load workspaces: 503" })
   })
 
   test("a service that cannot be reached is a failure (1), never 'not linked' (3)", async () => {
@@ -415,5 +452,33 @@ describe("link --workspace / --create without prompting", () => {
     const f = linkDeps()
     await linkHeadless({ directory: dir, create: "Marketing", yes: false }, f.deps)
     expect(f.calls).toEqual(["create:Marketing"])
+  })
+})
+
+describe("workspace list through the command parser", () => {
+  const original = { isConfigured: AltimateApi.isConfigured, listDatamates: WorkspaceApi.listDatamates, write: process.stdout.write }
+  let priorExitCode: typeof process.exitCode
+  beforeEach(() => {
+    priorExitCode = process.exitCode
+  })
+  afterEach(() => {
+    ;(AltimateApi as any).isConfigured = original.isConfigured
+    ;(WorkspaceApi as any).listDatamates = original.listDatamates
+    process.stdout.write = original.write
+    process.exitCode = priorExitCode ?? 0
+  })
+
+  test("`workspace list --json` is registered and prints the account's workspaces", async () => {
+    ;(AltimateApi as any).isConfigured = async () => true
+    ;(WorkspaceApi as any).listDatamates = async () => [{ id: 35, name: "Growth", memory_enabled: true }]
+    let written = ""
+    process.stdout.write = ((chunk: string) => {
+      written += chunk
+      return true
+    }) as typeof process.stdout.write
+    await yargs(["workspace", "list", "--json"]).command(WorkspaceCommand).strict().fail(false).parseAsync()
+    process.stdout.write = original.write
+    expect(JSON.parse(written)).toEqual({ ok: true, workspaces: [{ id: 35, name: "Growth" }] })
+    expect(process.exitCode).toBe(0)
   })
 })

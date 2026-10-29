@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { LLMEvent, ToolFailure } from "@opencode-ai/llm"
+import { LLMEvent, ToolFailure, type LLMRequest } from "@opencode-ai/llm"
 import { LLMClient, RequestExecutor, WebSocketExecutor, type LLMClientShape } from "@opencode-ai/llm/route"
 import { jsonSchema, tool, type ModelMessage, type Tool } from "ai"
 import { Effect, Fiber, Layer, Stream } from "effect"
@@ -552,6 +552,75 @@ describe("session.llm-native.request", () => {
       const failure = yield* Effect.flip(wrapped.incomplete.execute({}, { id: "call-1", name: "incomplete" }))
       expect(failure).toBeInstanceOf(ToolFailure)
       expect(failure.message).toContain("incomplete")
+    }),
+  )
+
+  it.effect("keeps the invalid fallback dispatchable without advertising it to the provider", () =>
+    Effect.gen(function* () {
+      let advertised: string[] = []
+      const invalidInputs: unknown[] = []
+      let visibleCalls = 0
+      const invalid = tool({
+        description: "Internal fallback",
+        inputSchema: jsonSchema<{ tool: string; error: string }>({
+          type: "object",
+          properties: { tool: { type: "string" }, error: { type: "string" } },
+          required: ["tool", "error"],
+        }),
+        execute: async (input) => {
+          invalidInputs.push(input)
+          return "fallback"
+        },
+      })
+      const visible = tool({
+        description: "Visible tool",
+        inputSchema: jsonSchema({ type: "object" }),
+        execute: async () => {
+          visibleCalls++
+          return "visible"
+        },
+      })
+      const llmClient = {
+        prepare: () => Effect.die("unused"),
+        stream: (request: LLMRequest) => {
+          advertised = request.tools.map((item) => item.name)
+          return Stream.fromIterable([
+            LLMEvent.toolCall({ id: "call-visible", name: "VISIBLE", input: {} }),
+            LLMEvent.toolCall({ id: "call-invalid", name: "write", input: {} }),
+            LLMEvent.toolCall({ id: "call-inherited", name: "constructor", input: {} }),
+            LLMEvent.finish({ reason: "tool-calls" }),
+          ])
+        },
+        generate: () => Effect.die("unused"),
+      } as LLMClientShape
+      const native = LLMNativeRuntime.stream({
+        model: baseModel,
+        provider: providerInfo,
+        auth: undefined,
+        llmClient,
+        messages: [],
+        tools: { visible, invalid },
+        headers: {},
+        abort: new AbortController().signal,
+      })
+      expect(native.type).toBe("supported")
+      if (native.type === "unsupported") throw new Error(native.reason)
+
+      const events = Array.from(yield* native.stream.pipe(Stream.runCollect))
+      expect(advertised).toEqual(["visible"])
+      expect(visibleCalls).toBe(1)
+      expect(invalidInputs).toEqual([
+        { tool: "write", error: "Unknown tool: write" },
+        { tool: "constructor", error: "Unknown tool: constructor" },
+      ])
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "tool-call", name: "visible" }),
+          expect.objectContaining({ type: "tool-result", name: "visible" }),
+          expect.objectContaining({ type: "tool-call", name: "invalid" }),
+          expect.objectContaining({ type: "tool-result", name: "invalid" }),
+        ]),
+      )
     }),
   )
 
