@@ -97,4 +97,118 @@ describe("providers logout", () => {
       }),
     120_000,
   )
+
+  cliIt.live(
+    "removes the saved Altimate gateway key along with the auth-store entry",
+    ({ home, opencode }) =>
+      Effect.gen(function* () {
+        const dataDir = path.join(home, ".local", "share", "altimate-code")
+        const authPath = path.join(dataDir, "auth.json")
+        const altimatePath = path.join(home, ".altimate", "altimate.json")
+        const anthropic = { type: "api", key: "anthropic-test-key" }
+        const writeAltimate = () =>
+          fs.writeFile(
+            altimatePath,
+            JSON.stringify({
+              altimateUrl: "https://api.test",
+              altimateInstanceName: "tenant",
+              altimateApiKey: "gateway-test-key",
+            }),
+            { mode: 0o600 },
+          )
+        const altimateFileExists = () =>
+          fs.stat(altimatePath).then(
+            () => true,
+            () => false,
+          )
+
+        yield* Effect.promise(() => fs.mkdir(dataDir, { recursive: true }))
+        yield* Effect.promise(() => fs.mkdir(path.dirname(altimatePath), { recursive: true }))
+        yield* Effect.promise(() => writeAltimate())
+        yield* Effect.promise(() =>
+          fs.writeFile(
+            authPath,
+            JSON.stringify({ anthropic, "altimate-backend": { type: "api", key: "gateway-test-key" } }),
+            { mode: 0o600 },
+          ),
+        )
+
+        const logout = yield* opencode.spawn(["providers", "logout", "altimate-backend"], {
+          env: { OPENCODE_AUTH_CONTENT: "" },
+        })
+        opencode.expectExit(logout, 0, "providers logout altimate-backend")
+        expect(logout.stdout).toContain("Logout successful")
+        expect(yield* Effect.promise(() => altimateFileExists())).toBe(false)
+        expect(JSON.parse(yield* Effect.promise(() => fs.readFile(authPath, "utf8")))).toEqual({ anthropic })
+
+        // Credentials saved only to altimate.json (TUI paste dialog) must still be removable.
+        yield* Effect.promise(() => writeAltimate())
+        const fileOnlyLogout = yield* opencode.spawn(["providers", "logout", "altimate-backend"], {
+          env: { OPENCODE_AUTH_CONTENT: "" },
+        })
+        opencode.expectExit(fileOnlyLogout, 0, "providers logout file-only altimate-backend")
+        expect(fileOnlyLogout.stdout).toContain("Logout successful")
+        expect(yield* Effect.promise(() => altimateFileExists())).toBe(false)
+        expect(JSON.parse(yield* Effect.promise(() => fs.readFile(authPath, "utf8")))).toEqual({ anthropic })
+      }),
+    120_000,
+  )
+
+  cliIt.live(
+    "removes datamate MCP entries that carry the signed-out gateway key",
+    ({ home, opencode }) =>
+      Effect.gen(function* () {
+        const altimatePath = path.join(home, ".altimate", "altimate.json")
+        // The CLI runs with cwd=home, so home is the project directory.
+        const projectConfigPath = path.join(home, "altimate-code.json")
+        const globalConfigPath = path.join(home, ".config", "altimate-code", "altimate-code.json")
+        const datamateEntry = (key: string) => ({
+          type: "remote",
+          url: "https://mcp.test",
+          oauth: false,
+          headers: { Authorization: `Bearer ${key}`, "x-datamate-id": "1", "x-tenant": "tenant" },
+          enabled: true,
+        })
+        const unrelated = datamateEntry("someone-elses-key")
+
+        yield* Effect.promise(() => fs.mkdir(path.dirname(altimatePath), { recursive: true }))
+        yield* Effect.promise(() => fs.mkdir(path.dirname(globalConfigPath), { recursive: true }))
+        yield* Effect.promise(() =>
+          fs.writeFile(
+            altimatePath,
+            JSON.stringify({
+              altimateUrl: "https://api.test",
+              altimateInstanceName: "tenant",
+              altimateApiKey: "gateway-test-key",
+            }),
+            { mode: 0o600 },
+          ),
+        )
+        yield* Effect.promise(() =>
+          fs.writeFile(
+            projectConfigPath,
+            JSON.stringify({ mcp: { "datamate-sales": datamateEntry("gateway-test-key"), unrelated } }),
+          ),
+        )
+        yield* Effect.promise(() =>
+          fs.writeFile(
+            globalConfigPath,
+            JSON.stringify({ mcp: { "datamate-ops": datamateEntry("gateway-test-key") } }),
+          ),
+        )
+
+        const logout = yield* opencode.spawn(["providers", "logout", "altimate-backend"], {
+          env: { OPENCODE_AUTH_CONTENT: "" },
+        })
+        opencode.expectExit(logout, 0, "providers logout altimate-backend with datamate MCP entries")
+        expect(logout.stdout).toContain('Removed MCP server "datamate-sales"')
+        expect(logout.stdout).toContain('Removed MCP server "datamate-ops"')
+        expect(logout.stdout).toContain("Logout successful")
+        expect(JSON.parse(yield* Effect.promise(() => fs.readFile(projectConfigPath, "utf8")))).toEqual({
+          mcp: { unrelated },
+        })
+        expect(JSON.parse(yield* Effect.promise(() => fs.readFile(globalConfigPath, "utf8")))).toEqual({ mcp: {} })
+      }),
+    120_000,
+  )
 })
