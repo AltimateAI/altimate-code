@@ -1,21 +1,38 @@
 import { Telemetry } from "./index"
+import stripAnsi from "strip-ansi"
 
 const MAX_MESSAGE = 200
 const PLACEHOLDER = "<x>"
-const CREDENTIAL_WORDS: ReadonlySet<string> = new Set([
+export const CREDENTIAL_WORDS: ReadonlySet<string> = new Set([
+  "accesstoken",
+  "apikey",
+  "appsecret",
   "auth",
   "authorization",
+  "authtoken",
   "bearer",
+  "bearertoken",
+  "clientsecret",
+  "connectionstring",
   "cookie",
   "credential",
   "credentials",
+  "jwtsecret",
+  "jwttoken",
   "key",
+  "pass",
   "passphrase",
   "passwd",
   "password",
+  "passwords",
   "pwd",
+  "refreshtoken",
   "secret",
+  "secretkey",
   "session",
+  "sessionid",
+  "sig",
+  "signature",
   "token",
 ])
 
@@ -390,14 +407,21 @@ export const ERROR_VOCABULARY: ReadonlySet<string> = new Set([
 ])
 
 /**
- * Fixed-vocabulary template of an error's first line. Words are split on any non-letter
- * character and lowercased; a word survives only if it is in ERROR_VOCABULARY, every other
- * run becomes `<x>`. A credential word and the rest of the line become one `<x>` too,
- * because a credential value may itself consist of vocabulary words. The output holds
+ * Fixed-vocabulary template of an error's first line, with ANSI escapes removed.
+ * Words are split on any non-letter character and lowercased; a word survives only if
+ * it is in ERROR_VOCABULARY, every other run becomes `<x>`. A credential word and the
+ * rest of the line become one `<x>` too, because a credential value may itself consist
+ * of vocabulary words. This deliberately loses diagnostic text after ambiguous words
+ * such as key or session: privacy takes priority over template detail. The output holds
  * only vocabulary words, `<x>` and spaces.
  */
 export function templateErrorMessage(raw: string): string {
-  const first = raw.split(/[\r\n\u2028\u2029]/, 1)[0]
+  // Split first so an OSC sequence spanning a newline cannot erase the line boundary.
+  // Normalize only this compound credential key; prose "connection string" stays readable.
+  const first = stripAnsi(raw.split(/[\r\n\u2028\u2029]/, 1)[0]).replace(
+    /\bconnection[_-]string\b/gi,
+    "connectionstring",
+  )
   const out: string[] = []
   for (const token of first.split(/[^A-Za-z]+/)) {
     if (!token) continue
