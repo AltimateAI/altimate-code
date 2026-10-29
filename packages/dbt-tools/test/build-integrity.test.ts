@@ -34,7 +34,7 @@ describe("build integrity", () => {
     expect(code).not.toMatch(/var __dirname\s*=\s*"(?:[A-Za-z]:\\\\|\/)/)
   })
 
-  test("the bridge script resolves relative to the bundle at runtime", () => {
+  test("the bundle keeps the references the bridge path is built from at runtime", () => {
     const code = readFileSync(join(dist, "index.js"), "utf8")
     expect(code).toContain("fileURLToPath(import.meta.url)")
     expect(code).toContain(`"node_python_bridge.py"`)

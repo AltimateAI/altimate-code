@@ -286,9 +286,9 @@ jobs:
             echo "::error::dbt-tools bundle contains hardcoded absolute path in __dirname"
             exit 1
           fi
-          # Verify the bridge script resolves relative to the bundle at runtime
+          # The bridge path is built at runtime from the bundle's own URL
           if ! grep -q 'fileURLToPath(import.meta.url)' packages/dbt-tools/dist/index.js; then
-            echo "::error::dbt-tools bundle does not resolve node_python_bridge.py at runtime"
+            echo "::error::dbt-tools bundle lacks fileURLToPath(import.meta.url), which the bridge path is built from"
             exit 1
           fi
           echo "dbt-tools smoke test passed"

@@ -22,14 +22,16 @@ console.log(`Copied node_python_bridge.py → dist/`)
 
 // 3. dbt-integration resolves node_python_bridge.py at runtime from its own
 //    location (`fileURLToPath(import.meta.url)`), which in this bundle is dist/,
-//    where step 2 put the script. Fail the build if the bundle ever carries a
-//    path baked in at build time instead.
+//    where step 2 put the script. This only checks that the bundle still has
+//    the references that path is built from and no path baked in at build time;
+//    test/build-integrity.test.ts runs the packaged CLI from another directory
+//    to check where the script is found.
 const indexPath = join(dist, "index.js")
 const code = readFileSync(indexPath, "utf8")
 const baked = /var __dirname\s*=\s*"(?:[A-Za-z]:\\\\|\/)/
 if (!code.includes("fileURLToPath(import.meta.url)") || !code.includes(`"node_python_bridge.py"`) || baked.test(code)) {
-  console.error(`ERROR: dist/index.js does not resolve node_python_bridge.py relative to itself at runtime`)
+  console.error(`ERROR: dist/index.js lacks the references the bridge path is built from, or has a build-time path`)
   console.error(`  Has the @altimateai/dbt-integration bundle format changed?`)
   process.exit(1)
 }
-console.log(`Verified dist/index.js resolves node_python_bridge.py at runtime`)
+console.log(`Checked dist/index.js: bridge path references present, no build-time path`)
