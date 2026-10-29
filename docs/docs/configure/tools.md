@@ -38,9 +38,9 @@ Control which tools agents can use via the [permission system](permissions.md):
 {
   "permission": {
     "bash": {
+      "*": "ask",
       "dbt *": "allow",
-      "rm *": "deny",
-      "*": "ask"
+      "rm *": "deny"
     },
     "write": "ask",
     "read": "allow"
@@ -58,13 +58,13 @@ Disable a tool for a specific agent by setting its permission to `"deny"`:
 ```json
 {
   "agent": {
-    "analyst": {
+    "builder": {
       "permission": {
         "write": "deny",
         "edit": "deny",
         "bash": {
-          "dbt run *": "deny",
-          "*": "ask"
+          "*": "ask",
+          "dbt run *": "deny"
         }
       }
     }
@@ -72,8 +72,8 @@ Disable a tool for a specific agent by setting its permission to `"deny"`:
 }
 ```
 
-!!! example "Read-only analyst"
-    The configuration above creates an analyst agent that cannot modify files. It can only read and explore the codebase, and must ask before running shell commands (except `dbt run`, which is blocked entirely).
+!!! example "Builder with file edit tools denied"
+    The configuration above denies the builder agent's `write` and `edit` tools. The builder can read and explore the codebase. It must ask before running other shell commands, and `dbt run` is blocked entirely. An approved shell command can still modify files. The `analyst` agent's shell and built-in write tools are already denied whatever its permission config says. It can still save training entries and create session scratch tables for analysis, and MCP or custom tools follow your config.
 
 ## Tool Behavior
 
@@ -85,11 +85,11 @@ The `bash` tool executes shell commands in the project directory. Commands run i
 {
   "permission": {
     "bash": {
+      "*": "ask",
       "dbt *": "allow",
       "git *": "allow",
       "python *": "allow",
-      "rm -rf *": "deny",
-      "*": "ask"
+      "rm -rf *": "deny"
     }
   }
 }

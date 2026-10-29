@@ -142,6 +142,12 @@ describe("session.llm.addHistoricalToolStubs", () => {
 })
 
 describe("session.llm.removedTools", () => {
+  test("keeps the internal fallback under wildcard deny and request switches", () => {
+    const agent = { permission: PermissionNext.fromConfig({ "*": "deny", read: "allow" }) } as Agent.Info
+    const user = { tools: { invalid: false, read: false } } as unknown as MessageV2.User
+    expect(LLM.removedTools(["invalid", "write", "read"], { agent, user })).toEqual(new Set(["write", "read"]))
+  })
+
   test("removes a tool the agent denies or the request switches off, and keeps the rest", () => {
     const agent = {
       permission: PermissionNext.fromConfig({ "*": "allow", altimate_memory_write: "deny" }),
@@ -293,6 +299,199 @@ function createEventResponse(chunks: unknown[], includeDone = false) {
 }
 
 describe("session.llm.stream", () => {
+  test("wildcard-deny agents report the unavailable tool through the hidden fallback", async () => {
+    const providerID = "alibaba"
+    const { model } = await loadFixture(providerID, "qwen-plus")
+    const request = waitRequest(
+      "/chat/completions",
+      createEventResponse(
+        [
+          {
+            id: "chatcmpl-denied",
+            object: "chat.completion.chunk",
+            choices: [
+              {
+                delta: {
+                  role: "assistant",
+                  tool_calls: [
+                    { index: 0, id: "call-denied", type: "function", function: { name: "write", arguments: "{}" } },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            id: "chatcmpl-denied",
+            object: "chat.completion.chunk",
+            choices: [{ delta: {}, finish_reason: "tool_calls" }],
+          },
+        ],
+        true,
+      ),
+    )
+    await using tmp = await tmpdir({
+      config: {
+        enabled_providers: [providerID],
+        provider: { [providerID]: { options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` } } },
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await Provider.getModel(ProviderID.make(providerID), ModelID.make(model.id))
+        const sessionID = SessionID.make("session-denied-tool")
+        const agent = {
+          name: "custom-readonly",
+          mode: "primary",
+          options: {},
+          permission: PermissionNext.fromConfig({ "*": "deny", read: "allow" }),
+        } satisfies Agent.Info
+        let writes = 0
+        const stream = await LLM.stream({
+          user: {
+            id: MessageID.make("msg_denied-tool"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderID.make(providerID), modelID: resolved.id },
+          },
+          sessionID,
+          model: resolved,
+          agent,
+          system: [],
+          abort: new AbortController().signal,
+          messages: [{ role: "user", content: "Write a file" }],
+          tools: {
+            read: tool({ inputSchema: jsonSchema({ type: "object", properties: {} }), execute: async () => "read" }),
+            write: tool({
+              inputSchema: jsonSchema({ type: "object", properties: {} }),
+              execute: async () => {
+                writes++
+                return "written"
+              },
+            }),
+            invalid: tool({
+              inputSchema: jsonSchema<{ tool: string; error: string }>({
+                type: "object",
+                properties: { tool: { type: "string" }, error: { type: "string" } },
+                required: ["tool", "error"],
+              }),
+              execute: async (input) => input,
+            }),
+          },
+        })
+        const events = []
+        for await (const event of stream.fullStream) events.push(event)
+        const result = events.find((event) => event.type === "tool-result")
+        expect(result).toMatchObject({
+          toolName: "invalid",
+          output: { tool: "write", error: expect.stringContaining("write") },
+        })
+        expect(events.some((event) => event.type === "tool-error" || event.type === "error")).toBe(false)
+        expect(writes).toBe(0)
+        const capture = await request
+        expect((capture.body.tools as { function: { name: string } }[]).map((item) => item.function.name)).toEqual([
+          "read",
+        ])
+      },
+    })
+  })
+
+  test("inherited object property names report through the hidden fallback", async () => {
+    const providerID = "alibaba"
+    const { model } = await loadFixture(providerID, "qwen-plus")
+    const request = waitRequest(
+      "/chat/completions",
+      createEventResponse(
+        [
+          {
+            id: "chatcmpl-inherited",
+            object: "chat.completion.chunk",
+            choices: [
+              {
+                delta: {
+                  role: "assistant",
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: "call-inherited",
+                      type: "function",
+                      function: { name: "constructor", arguments: "{}" },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            id: "chatcmpl-inherited",
+            object: "chat.completion.chunk",
+            choices: [{ delta: {}, finish_reason: "tool_calls" }],
+          },
+        ],
+        true,
+      ),
+    )
+    await using tmp = await tmpdir({
+      config: {
+        enabled_providers: [providerID],
+        provider: { [providerID]: { options: { apiKey: "test-key", baseURL: `${state.server!.url.origin}/v1` } } },
+      },
+    })
+    await Instance.provide({
+      directory: tmp.path,
+      fn: async () => {
+        const resolved = await Provider.getModel(ProviderID.make(providerID), ModelID.make(model.id))
+        const sessionID = SessionID.make("session-inherited-tool")
+        const agent = {
+          name: "custom-builder",
+          mode: "primary",
+          options: {},
+          permission: PermissionNext.fromConfig({ "*": "allow" }),
+        } satisfies Agent.Info
+        const stream = await LLM.stream({
+          user: {
+            id: MessageID.make("msg_inherited-tool"),
+            sessionID,
+            role: "user",
+            time: { created: Date.now() },
+            agent: agent.name,
+            model: { providerID: ProviderID.make(providerID), modelID: resolved.id },
+          },
+          sessionID,
+          model: resolved,
+          agent,
+          system: [],
+          abort: new AbortController().signal,
+          messages: [{ role: "user", content: "Call the requested tool" }],
+          tools: {
+            read: tool({ inputSchema: jsonSchema({ type: "object", properties: {} }), execute: async () => "read" }),
+            invalid: tool({
+              inputSchema: jsonSchema<{ tool: string; error: string }>({
+                type: "object",
+                properties: { tool: { type: "string" }, error: { type: "string" } },
+                required: ["tool", "error"],
+              }),
+              execute: async (input) => input,
+            }),
+          },
+        })
+        const events = []
+        for await (const event of stream.fullStream) events.push(event)
+        expect(events.find((event) => event.type === "tool-result")).toMatchObject({
+          toolName: "invalid",
+          output: { tool: "constructor", error: expect.stringContaining("constructor") },
+        })
+        expect(events.some((event) => event.type === "tool-error" || event.type === "error")).toBe(false)
+        const capture = await request
+        expect((capture.body.tools as { function: { name: string } }[]).map((item) => item.function.name)).toEqual([
+          "read",
+        ])
+      },
+    })
+  })
+
   test.skip("sends temperature, tokens, and reasoning options for openai-compatible models", async () => {
     const server = state.server
     if (!server) {

@@ -33,6 +33,10 @@ import { ExportCommand } from "./cli/cmd/export"
 import { ImportCommand } from "./cli/cmd/import"
 import { AttachCommand } from "./cli/cmd/attach"
 import { TuiThreadCommand } from "./cli/cmd/tui"
+// altimate_change start — telemetry: the command's project directory for the config opt-out
+import path from "path"
+import { resolveThreadDirectory } from "./cli/cmd/tui"
+// altimate_change end
 import { AcpCommand } from "./cli/cmd/acp"
 import { EOL } from "os"
 import { WebCommand } from "./cli/cmd/web"
@@ -203,6 +207,15 @@ let cli = yargs(args)
     // `debug bundle --no-network` promises no network access; telemetry would send its events.
     // Any form of "no network" counts (`--no-network`, `--network=false`, `--network false`), as parsed by yargs.
     const noNetwork = firstPositional === "debug" && (opts as { network?: unknown }).network === false
+    // The command changes into its project only after this; the config opt-out is read from there.
+    const target = opts as { dir?: unknown; project?: unknown; attach?: unknown }
+    Telemetry.setConfigDirectory(
+      (firstPositional === "attach" || (firstPositional === "run" && !target.attach)) && typeof target.dir === "string"
+        ? path.resolve(target.dir)
+        : !CLI_COMMAND_NAMES.has(firstPositional) && typeof target.project === "string"
+          ? resolveThreadDirectory(target.project)
+          : undefined,
+    )
     if (!noNetwork) Telemetry.init().catch(() => {})
     // altimate_change end
   })
