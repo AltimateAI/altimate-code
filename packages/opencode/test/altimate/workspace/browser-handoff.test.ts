@@ -7,10 +7,11 @@
 // launching a real browser. The listener itself binds to 127.0.0.1, walks
 // 7317..7325, and processes real HTTP requests — this is genuine end-to-end
 // coverage for the callback validation path.
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { createServer, connect } from "node:net"
 
 import { AltimateApi } from "../../../src/altimate/api/client"
+import * as AltimatePlugin from "../../../src/altimate/plugin/altimate"
 import {
   buildManageUrl,
   openWorkspaceBrowserHandoff,
@@ -341,6 +342,25 @@ describe("runHandoffWithOpener end-to-end", () => {
       expect(result.authorizeUrl).toContain("/create-and-link")
       expect(result.authorizeUrl).toContain("client=altimate-code")
       expect(result.authorizeUrl).toContain("project_name=x")
+    }
+  })
+
+  test("cli_context is built for the linked project's directory, so its config opt-out applies", async () => {
+    const spy = spyOn(AltimatePlugin, "buildCliContext").mockImplementation(async () => "ctx")
+    try {
+      let observed = ""
+      await runHandoffWithOpener(
+        { identifier: { repoRemote: "git@github.com:acme/foo.git", projectPath: "/w/foo" }, projectName: "foo" },
+        async (url) => {
+          observed = url
+          const { state, redirect } = parseHandoffUrl(url)
+          await fireCallback(redirect, { workspace_id: "1", state, tenant: "acme" })
+        },
+      )
+      expect(spy).toHaveBeenCalledWith(undefined, "/w/foo")
+      expect(new URLSearchParams(new URL(observed).hash.replace(/^#/, "")).get("cli_context")).toBe("ctx")
+    } finally {
+      spy.mockRestore()
     }
   })
 

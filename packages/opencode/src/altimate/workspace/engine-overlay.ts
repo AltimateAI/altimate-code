@@ -44,6 +44,7 @@ import {
 } from "./engine-seams"
 import { declaredBounded, fingerprint, notify, printLine, resolveBinding, versionOf, which } from "./engine-probes"
 import { OFFER_RECHECK_MS, OFFER_SKIP_TTL_MS, installCommand, offerOrNotify, type EngineOffer } from "./engine-offer"
+import { attachKey, trackAttach, trackEngineError } from "./engine-telemetry"
 import {
   ENGINE_BINARY,
   INSTALL_HELPS,
@@ -293,6 +294,7 @@ export async function overlay(
     log.warn("workspace engine overlay failed; leaving the MCP config as loaded", { err: String(err) })
     state.current = null
     state.failedAt = now()
+    trackEngineError("attach", String(err))
   }
 }
 
@@ -335,6 +337,12 @@ export function linkedWorkspace(directory: string | null = currentDirectory()): 
   return linked ? { id: linked.id, name: linked.name } : null
 }
 
+/** The linked workspace's account-scoped identity (credential scope plus id), for telemetry's dedupe. */
+export function linkedWorkspaceKey(directory: string | null = currentDirectory()): string | undefined {
+  if (!directory) return undefined
+  return directories.get(directory)?.linked?.key
+}
+
 /** `linkedWorkspace` once the overlay has run for this instance. */
 export async function linkedWorkspaceLoaded(
   directory: string | null = currentDirectory(),
@@ -358,17 +366,33 @@ type SessionRecord = {
   /** The workspace the directory was linked to when the boundary settled this
    * outcome. */
   linked?: { id: string; name: string } | null
+  /** The key of the last attach reported to telemetry (workspace and outcome); a transient record
+   * carries the previous one. */
+  tracked?: string
 }
 const sessions = new Map<string, SessionRecord>()
 const declaredCache = new Map<string, { value: Declared | null; at: number }>()
 /** Verdict signatures a headless process has already printed to stderr. */
 const headlessPrinted = new Set<string>()
 
-function record(sessionID: string, outcome: Outcome): SessionRecord {
+function record(
+  sessionID: string,
+  outcome: Outcome,
+  extra: { engineVersion?: string | null; transient?: boolean } = {},
+): SessionRecord {
   const previous = sessions.get(sessionID)
+  // telemetry: a settled outcome, when it or the workspace it settled for changed. A transient
+  // record (the retry sentinel) reports nothing and keeps the last reported key for the next
+  // comparison.
+  const workspaceId = Number(linkedWorkspace()?.id) || undefined
+  const tracked = extra.transient ? previous?.tracked : attachKey(outcome, linkedWorkspaceKey())
+  if (!extra.transient) {
+    trackAttach(outcome, previous?.tracked, { ...extra, workspaceId, workspaceIdentity: linkedWorkspaceKey() }, sessionID)
+  }
   sessions.delete(sessionID)
   const next: SessionRecord = {
     outcome,
+    tracked,
     announced: previous?.announced,
     announcedAt: previous?.announcedAt,
     retried: previous?.retried,
@@ -490,6 +514,7 @@ export async function atTurnStart<T>(sessionID: string, body: () => Promise<T>):
       await reconcile(sessionID, directory, state)
     } catch (err) {
       log.warn("workspace engine turn hook failed", { sessionID, err: String(err) })
+      trackEngineError("attach", String(err), sessionID)
     }
     // Kept with the outcome, under the lock: the directory's link moves with any
     // later config load, and a turn's notice must name the workspace its own
@@ -828,14 +853,20 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
   let status = statusMap[DATAMATE_KEY]
   const session = sessions.get(sessionID)
   if (status?.status !== "connected" && !session?.retried) {
-    ;(session ?? record(sessionID, { kind: "connect-failed", error: "retrying" })).retried = true
+    ;(session ?? record(sessionID, { kind: "connect-failed", error: "retrying" }, { transient: true })).retried = true
     log.info("workspace engine not connected; retrying once for this session", {
       workspaceId: workspace.id,
       sessionID,
       status: status?.status,
     })
-    await mcp().add(DATAMATE_KEY, overlayNow.entry)
-    status = (await mcp().status())[DATAMATE_KEY]
+    try {
+      await mcp().add(DATAMATE_KEY, overlayNow.entry)
+      status = (await mcp().status())[DATAMATE_KEY]
+    } catch (err) {
+      // A retry that throws settles as a failure for this session, rather than leaving the turn
+      // hook to swallow it with no outcome recorded.
+      status = { status: "failed", error: String(err) }
+    }
   }
   if (status?.status !== "connected") {
     const outcome: Outcome = {
@@ -873,7 +904,7 @@ async function reconcile(sessionID: string, directory: string, state: DirectoryS
     ...(unfulfilled === undefined ? {} : { unfulfilled }),
     ...(declared?.extensions?.length ? { extensions: declared.extensions } : {}),
   }
-  const rec = record(sessionID, outcome)
+  const rec = record(sessionID, outcome, { engineVersion: overlayNow.version })
   const snapshot: AttachSnapshot = {
     workspace: { id: workspace.id, name: workspace.name, key: workspace.key },
     engineVersion: overlayNow.version,

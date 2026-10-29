@@ -64,7 +64,7 @@ export const MemoryWriteTool = Tool.define("altimate_memory_write", {
         expires: args.expires,
         citations: args.citations,
         content: args.content,
-      })
+      }, { sessionID: ctx.sessionID }) // altimate_change — the writer's session, for the workspace row
 
       const action = existing ? "Updated" : "Created"
       let output = `${action} memory block "${args.id}" in ${args.scope} scope.`

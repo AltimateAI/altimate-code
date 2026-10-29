@@ -48,6 +48,7 @@
 // that cache sooner, so it makes the next re-derivation see the change earlier — but the
 // per-turn re-derivation is the mechanism, not the notification.
 import { Config } from "@/config/config"
+import { resetEngineTelemetryForTests, trackEngineError, trackPrecedence } from "./engine-telemetry"
 import { AppRuntime } from "@/effect/app-runtime"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { TuiEvent } from "@/server/tui-event"
@@ -65,6 +66,8 @@ import {
   settledOutcome,
   type EntryLike,
   type Outcome,
+  linkedWorkspace,
+  linkedWorkspaceKey,
 } from "./engine-overlay"
 import { readLocalBindingScopedStrict, resolvePinnedBindingForRouting } from "./state"
 import { liveBridge } from "./engine-probes"
@@ -532,10 +535,22 @@ export async function refresh(
     result = await derive(sessionID, tools)
   } catch (err) {
     log.warn("precedence could not be derived; running locally with a notice", { sessionID, err: String(err) })
+    trackEngineError("precedence", String(err), sessionID)
     result = EMPTY("derive-failed")
   }
   if (ruleset) result.ruleset = ruleset
   remember(sessionID, result)
+  // telemetry: only when the snapshot (or the local connections it shadows) changed
+  trackPrecedence(sessionID, result, {
+    escapeHatch: escapeHatchOn(),
+    // The registry is read only when something can be shadowed: a disabled snapshot shadows nothing.
+    connections: result.enabled ? countShadowedConnections(result) : 0,
+    // Types the session can route through the engine, as the inventory line counts them.
+    types: result.enabled ? servedInventory(result).length : 0,
+    identity: linkedWorkspaceKey(),
+    // Named explicitly for disabled snapshots that carry no binding of their own.
+    workspaceId: Number(linkedWorkspace()?.id) || undefined,
+  })
   // Mechanism 6 — say once, per session, what is now served where. Silence is the one
   // thing this design does not allow, but repeating it every turn would be noise.
   // A session that never had routing is told nothing — there is nothing to say. But a
@@ -689,6 +704,7 @@ export function announcedSessionCount(): number {
 }
 
 export function resetForTests(): void {
+  resetEngineTelemetryForTests()
   bySession.clear()
   incarnations.clear()
   announced.clear()
@@ -1141,7 +1157,7 @@ export function inventoryLine(precedence: Precedence): string {
   return `Workspace integrations — ${parts.join("; ")}. ${shadowedCount} local connection${shadowedCount === 1 ? "" : "s"} shadowed.`
 }
 
-function countShadowedConnections(precedence: Precedence): number {
+export function countShadowedConnections(precedence: Precedence): number {
   try {
     return Registry.list().warehouses.filter((w) => {
       const type = canonicalType(w.type)
