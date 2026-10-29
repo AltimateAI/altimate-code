@@ -94,6 +94,16 @@ export function feedbackId(feedback: string, origin: string): string {
 }
 
 // Callers hold the learn transaction lock. Rename also protects readers from partial files.
+// altimate_change start — workspace rules: the store the team rules are mirrored into is written only by rules sync
+/** Store names learn's own writers refuse: `team` holds the workspace's team rules (`rules/store.ts` `TEAM_STORE`). */
+export const RESERVED_STORES: ReadonlySet<string> = new Set(["team"])
+
+function assertWritable(name: string) {
+  if (RESERVED_STORES.has(name))
+    throw new StoreError(`"${name}" holds the workspace's team rules and is written only by workspace sync; choose another --name.`)
+}
+// altimate_change end
+
 export async function writeAtomic(root: string, file: string, data: string, mode?: number) {
   const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
   let created = false
@@ -201,6 +211,7 @@ export async function search(root: string, name: string, query: string) {
 
 /** Pinning is an explicit edit to approved lessons, serialized with reflection and promotion. */
 export async function setPinned(root: string, name: string, id: string, pinned: boolean): Promise<Lessons.Lesson> {
+  assertWritable(name)
   return transaction(root, async () => {
     const approved = await loadApproved(root, name)
     const lesson = approved.find((lesson) => lesson.id === id)
@@ -252,6 +263,7 @@ export async function loadCandidate(root: string, name: string, opts: SeedOption
 }
 
 export async function saveCandidate(root: string, name: string, pb: Playbook.Playbook, applied: Applied[] = []) {
+  assertWritable(name)
   return transaction(root, async () => {
     const p = paths(root, name)
     const previous = (await loadCandidateLessons(root, name)) ?? await loadApproved(root, name)
@@ -630,6 +642,7 @@ function validateLegacy(name: string, text: string): string | undefined {
 export class StoreError extends Error {}
 
 export async function promote(root: string, name: string, opts: PromoteOptions = {}): Promise<{ archived?: number }> {
+  assertWritable(name)
   return transaction(root, async () => {
     const p = paths(root, name)
     const candidate = await readCandidate(root, name)
@@ -682,6 +695,7 @@ export async function promote(root: string, name: string, opts: PromoteOptions =
 
 /** Restores the most recently archived version and consumes it. */
 export async function rollback(root: string, name: string): Promise<{ restored: number }> {
+  assertWritable(name)
   return transaction(root, async () => {
     const p = paths(root, name)
     await migrate(root, name)
@@ -726,6 +740,7 @@ export async function rollback(root: string, name: string): Promise<{ restored: 
 }
 
 export async function reject(root: string, name: string): Promise<boolean> {
+  assertWritable(name)
   return transaction(root, async () => {
     const p = paths(root, name)
     const hasCandidate = (await readCandidate(root, name)) !== undefined

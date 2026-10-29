@@ -12,6 +12,7 @@
 // an ADD becomes an add card, an EDIT or REMOVE of a team rule becomes an edit or retire card, and a
 // HELPFUL on a team rule (the rule already says it) makes no card.
 import { Log } from "@/util/log"
+import { booleanFlag, learnEnabled } from "../learn/config"
 import { lint } from "../learn/curator"
 import { readShownSnapshots } from "../learn/delivery"
 import { buildDigest, type DigestSource } from "../learn/digest"
@@ -35,17 +36,26 @@ export interface TriggerDeps {
 
 type LearnConfig = { enabled?: boolean; capture?: boolean } | undefined
 
+export type LearningSource = "you" | "workspace" | "default"
+
 /**
- * Whether sessions here learn (capture corrections and propose rules). The person's own setting wins
- * (`learn enable` / `learn disable`, or `ALTIMATE_LEARN_CAPTURE`); otherwise a linked project follows the
- * workspace's "Learn from sessions"; otherwise off.
+ * Whether sessions here learn from corrections (capture them and propose rules), and who decided. In order: the
+ * learning kill switch (`ALTIMATE_LEARN`, `learn.enabled`); `ALTIMATE_LEARN_CAPTURE`; the person's `/rules` choice
+ * (`personal_learning`, git-ignored); `learn.capture` (`learn enable` / `learn disable`); a linked workspace's
+ * "Learn from sessions"; otherwise off. Env flags parse like `learn/config.ts`, so the two agree.
  */
+export function learningDecision(learn: LearnConfig, state: RulesStore.State, env: NodeJS.ProcessEnv = process.env): { on: boolean; source: LearningSource } {
+  if (!learnEnabled(learn, env)) return { on: false, source: "you" }
+  const forced = booleanFlag(env.ALTIMATE_LEARN_CAPTURE)
+  if (forced !== undefined) return { on: forced, source: "you" }
+  if (state.personal_learning !== undefined) return { on: state.personal_learning, source: "you" }
+  if (learn?.capture !== undefined) return { on: learn.capture, source: "you" }
+  if (state.workspace) return { on: state.settings?.learning_enabled === true, source: "workspace" }
+  return { on: false, source: "default" }
+}
+
 export function learningEnabled(learn: LearnConfig, state: RulesStore.State, env: NodeJS.ProcessEnv = process.env): boolean {
-  if (learn?.enabled === false || /^(0|false)$/i.test(env.ALTIMATE_LEARN ?? "")) return false
-  const forced = env.ALTIMATE_LEARN_CAPTURE
-  if (forced !== undefined && forced !== "") return /^(1|true)$/i.test(forced)
-  if (learn?.capture !== undefined) return learn.capture
-  return !!state.scope && state.settings?.learning_enabled === true
+  return learningDecision(learn, state, env).on
 }
 
 const STOP = new Set("the and for with that this from into when then than are was were have has had not use using should must always never only all any each your you our its their them they these those also but can will would could does like just".split(" "))
@@ -214,11 +224,15 @@ export async function afterTurn(input: {
   } finally {
     running.delete(input.sessionID)
     if (outcome !== "no new corrections" || checked.length) {
-      // Keep only ids of signals still on disk, so the list cannot grow past them or forget a live one.
-      const live = checked.length ? new Set((await readSignals(input.root, Playbook.DEFAULT_NAME).catch(() => [] as Signal[])).map((signal) => signal.id)) : undefined
+      // Keep only ids of signals still on disk, so the list cannot grow past them or forget a live one. When the
+      // signals cannot be read, nothing is pruned: an empty read must not wipe what was processed.
+      const signals = checked.length ? await readSignals(input.root, Playbook.DEFAULT_NAME).catch(() => undefined) : undefined
+      const live = signals ? new Set(signals.map((signal) => signal.id)) : undefined
       await RulesStore.update(input.root, (s) => {
         s.last_check = { at: new Date().toISOString(), session: input.sessionID, outcome }
-        if (live) s.processed_signals = [...s.processed_signals.filter((id) => live.has(id)), ...checked]
+        if (!checked.length) return
+        const kept = live ? s.processed_signals.filter((id) => live.has(id)) : s.processed_signals
+        s.processed_signals = [...kept, ...checked.filter((id) => !kept.includes(id))]
       }).catch(() => {})
     }
   }

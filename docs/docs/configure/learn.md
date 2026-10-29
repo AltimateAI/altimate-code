@@ -189,21 +189,21 @@ Delivery waits at most about 5 seconds for the learn lock; if another process st
 
 In a project linked to an Altimate workspace (`altimate-code link`), what you teach the agent can become a **team rule**: a one-line instruction every teammate's sessions in the workspace's repositories follow once the workspace owner approves it.
 
-**When a rule is proposed.** A card appears at the end of a turn when:
+**When a rule is proposed.** A card appears above the input when:
 
 - you correct the agent on the same topic in 2 or more sessions;
 - you correct a team rule the session was shown (the card proposes changing it, with the current text struck through);
-- you ask the agent to remember something as a rule.
+- you ask the agent to remember something as a rule (the card appears as soon as the agent saves it).
 
-The card shows the proposed wording, what it applies to, why it was proposed and your correction. **Enter** sends it to the owner's review queue (the workspace's **Rules** tab); for the workspace owner, **Enter** approves it at once instead. **e** edits the wording, and **n** ("Not a rule") stops that topic from being proposed for 30 days. A rule that tells the agent to skip or disable verification (tests, CI, hooks, `--no-verify`) is flagged and needs "approve anyway". Nothing reaches a teammate until it is approved.
+The card never blocks the input: keep typing, and answer it when you are ready. **ctrl+x p** (or a click) moves to the card; **←/→** choose an action, **Enter** confirms, **Esc** goes back to typing. The card shows the proposed wording, what it applies to, why it was proposed and your correction. **Enter** on the first action sends it to the owner's review queue (the workspace's **Rules** tab); for the workspace owner, it approves it at once instead. **e** edits the wording, and **n** ("Not a rule") stops a correction's topic from being proposed for 30 days (on a card you asked for, it just closes it). A rule that tells the agent to skip or disable verification (tests, CI, hooks, `--no-verify`) is flagged: the owner approves it with "Approve anyway", which takes a second Enter. Nothing reaches a teammate until it is approved. A card nobody answers is dropped when the session server stops, and after a day.
 
 **Rule or memory.** A personal preference ("I prefer CTEs") or a fact ("our warehouse is Snowflake") is saved to memory without review. When the wording does not say which, the card asks: Memory, Team rule, or Skip.
 
 **After review.** Approved rules reach every session within a few minutes (a pull at session start and every 5 minutes; `/rules` → Sync now, or `altimate-code learn sync`). You see a notice when the owner approves or rejects your rule, with the reason. Usage is reported back to the workspace: how many sessions a rule was applied in, and how often you corrected the agent on its topic after it was shown ("corrected again").
 
-**Learning on or off.** Your own setting wins (`learn enable` / `learn disable`, `learn.capture`, or `/rules` → Turn learning on/off); otherwise a linked project follows the workspace's "Learn from sessions" toggle. Approved rules are delivered either way.
+**Learning on or off.** In order: the learning kill switch (`learn.enabled`, `ALTIMATE_LEARN`), `ALTIMATE_LEARN_CAPTURE`, your `/rules` → "Turn learning on/off for me" choice, `learn.capture` (`learn enable` / `learn disable`), then the workspace's "Learn from sessions". The `/rules` choice is yours alone: it is kept in the project's git-ignored rules state, not in the project config, so it never reaches a teammate through a commit ("Follow the workspace setting again" clears it). It takes effect right away. Approved rules are delivered either way.
 
-**Commands.** `/rules` in the TUI lists team rules and your proposals with their status. `altimate-code learn sync` syncs now; `learn status` shows the workspace rules line, your learning setting and the last proposal check. In a linked project, `learn bootstrap` and `learn import-reviews` send what they find from history to the owner's review instead of staging local candidates.
+**Commands.** `/rules` in the TUI lists team rules and your proposals with their status. `altimate-code learn sync` syncs now; `learn status` shows the workspace rules line, your learning setting and the last proposal check. In a linked project, `learn bootstrap` and `learn import-reviews` list the rules they staged from history and ask before sending them to the owner's review in the named workspace (default no). Without a terminal, `--send-for-review` sends them; `--yes` only confirms the model step. Declined rules stay local candidates (`learn show`, `learn promote`).
 
 ## Learn vs memory vs a knowledge base
 

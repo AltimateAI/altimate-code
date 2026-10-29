@@ -131,6 +131,10 @@ import * as RunBudgetEffort from "@/altimate/session/run-budget-effort"
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
 
+// altimate_change start — workspace rules: sessions that already had their session-start pull in this process
+const rulesSessionsStarted = new Set<string>()
+// altimate_change end
+
 const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
 
 IMPORTANT:
@@ -768,12 +772,14 @@ export namespace SessionPrompt {
     // An unused project pays only an existence check; do not load stores, migrate,
     // create state, or even schedule async learning work on that default-off path.
     const learnRoot = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-    // Workspace rules: a pull at session start, bounded, so the first turn delivers newly approved rules.
-    // Only a project with rules state awaits anything; every other prompt stays on the synchronous path.
-    if (existsSync(path.join(learnRoot, ".altimate-code", "learn", "team", "rules.json")))
-      await import("../altimate/rules/sync")
-        .then((m) => m.sessionStart(learnRoot, Instance.directory, altCfg.learn))
+    // Workspace rules: a bounded pull before a session's first turn, so it delivers newly approved rules. Only the
+    // first prompt of a session awaits anything; every later prompt stays on the synchronous path.
+    if (!rulesSessionsStarted.has(sessionID)) {
+      rulesSessionsStarted.add(sessionID)
+      await import("../altimate/rules/service")
+        .then((m) => m.RulesService.sessionStart(learnRoot, Instance.directory, altCfg.learn))
         .catch((error) => log.warn("rules session sync failed", { error }))
+    }
     const lessonState = existsSync(path.join(learnRoot, ".altimate-code", "learn"))
       ? new LessonDelivery(learnRoot, altCfg.learn, Instance.directory)
       : undefined

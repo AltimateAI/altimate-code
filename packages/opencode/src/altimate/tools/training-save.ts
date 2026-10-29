@@ -22,16 +22,19 @@ function lastUserText(messages: unknown): string | undefined {
 }
 
 async function proposeTeamRule(content: string, sessionID: string, said?: string) {
-  const [{ Instance }, { Config }, { RulesStore }, { RuleTrigger }] = await Promise.all([
+  const [{ Instance }, { Config }, { RulesStore }, { RuleTrigger }, { RulesSync }] = await Promise.all([
     import("../../project/instance"),
     import("@/config/config"),
     import("../rules/store"),
     import("../rules/trigger"),
+    import("../rules/sync"),
   ])
   const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+  const learn = (await Config.get()).learn
+  // With learning or workspaces off, nothing would ever send the card: save it locally as before.
+  if (!RulesSync.rulesEnabled(learn)) return undefined
   const state = await RulesStore.read(root)
   if (!state.scope || !state.workspace) return undefined
-  const learn = (await Config.get()).learn
   const result = await RuleTrigger.explicit({ sessionID, root, directory: Instance.directory, learn, text: content, said })
   const metadata = { action: "proposed" as string, kind: "rule", name: "", scope: "project" }
   if (result.status === "memory")
@@ -53,8 +56,8 @@ async function proposeTeamRule(content: string, sessionID: string, said?: string
     output: [
       result.choose
         ? `The person sees a card asking whether to save this as a memory (just for them, applies now) or as a team rule for ${state.workspace.name} (goes to ${owner} for review), or to skip it.`
-        : `Proposed as a team rule for ${state.workspace.name}. The person sees a card to send it to ${owner} for review` +
-          (state.workspace.is_owner ? " or approve it now" : "") + ", edit the wording, or decline.",
+        : `Proposed as a team rule for ${state.workspace.name}. The person sees a card to ` +
+          (state.workspace.is_owner ? "approve it now" : `send it to ${owner} for review`) + ", edit the wording, or decline.",
       "Follow the rule for the rest of this session. Do not save it again, and do not say it is already a team rule: it applies to teammates only after approval.",
     ].join("\n"),
   }

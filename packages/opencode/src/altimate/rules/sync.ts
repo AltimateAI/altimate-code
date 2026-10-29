@@ -25,6 +25,8 @@ export const REFRESH_MS = 5 * 60_000
 export const SESSION_WAIT_MS = 2_000
 const MAX_PROPOSALS = 50
 const MAX_USAGE_DELTA = 50
+/** The server's per-batch limit on usage items (`MAX_USAGE_ITEMS`). */
+const MAX_USAGE_ITEMS = 500
 
 type LearnConfig = { enabled?: boolean } | undefined
 
@@ -122,9 +124,9 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
     })
     return { ok: true, rules: state.rules.length, pending: state.pending_count, notices: fresh }
   } catch (error) {
-    if (error instanceof RulesApiError && (error.kind === "workspace_not_found" || error.kind === "repo_not_bound")) {
-      // The link is gone: stop delivering its rules.
-      await RulesStore.reset(root)
+    if (error instanceof RulesApiError && (error.kind === "workspace_not_found" || error.kind === "repo_not_bound" || error.kind === "forbidden")) {
+      // The link is gone or access was taken away: stop delivering its rules. Queued proposals stay (same scope).
+      await RulesStore.reset(root, { keepOutbox: true })
     } else {
       await RulesStore.update(root, (state) => { state.last_error = errorText(error) })
     }
@@ -134,7 +136,18 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
 }
 
 export interface PushResult {
-  sent: { text: string; status: string; public_id?: string; error?: string; approved?: boolean }[]
+  sent: {
+    /** The outbox entry this answers. */
+    id: string
+    text: string
+    status: string
+    public_id?: string
+    /** Not stored: the server refused it, or answered with a non-storing status. */
+    error?: string
+    approved?: boolean
+    /** Stored for review, but "Approve now" failed (e.g. verification_flagged). */
+    approve_error?: string
+  }[]
   queued: number
   error?: string
 }
@@ -180,7 +193,7 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
     if (error) {
       if (error.kind === "rejected") {
         done.add(entry.id)
-        sent.push({ text: entry.item.text, status: "rejected", error: error.message })
+        sent.push({ id: entry.id, text: entry.item.text, status: "rejected", error: error.message })
       } else failed.set(entry.id, error.message)
       continue
     }
@@ -191,6 +204,7 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
     done.add(entry.id)
     const ok = result.status === "pending" || result.status === "exists" || result.duplicate
     sent.push({
+      id: entry.id,
       text: entry.item.text,
       status: result.status,
       ...(result.public_id ? { public_id: result.public_id } : {}),
@@ -209,7 +223,7 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
       if (row) Object.assign(row, { status: reviewed.status, approved: true })
     } catch (error) {
       const row = sent.find((s) => s.public_id === approval.publicId)
-      if (row) row.error = `sent for review; approving failed: ${errorText(error)}`
+      if (row) row.approve_error = errorText(error)
     }
   }
   const now = new Date().toISOString()
@@ -234,15 +248,61 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
   return { sent, queued: after.outbox.length, ...(error ? { error } : {}) }
 }
 
-/** Queue a proposal; it is sent by the next push. */
-export async function enqueue(root: string, item: ProposalItem, approve?: "approve" | "approve_anyway") {
+/** Queue proposals for the next push, in one write. Returns their outbox ids, in order. Refuses past `MAX_OUTBOX`. */
+export async function enqueueMany(root: string, items: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway" }[]): Promise<string[]> {
+  const ids = items.map(() => randomUUID())
+  const at = new Date().toISOString()
   await RulesStore.update(root, (state) => {
-    state.outbox.push({ id: randomUUID(), created_at: new Date().toISOString(), attempts: 0, item, ...(approve ? { approve } : {}) })
+    if (state.outbox.length + items.length > RulesStore.MAX_OUTBOX)
+      throw new Error(`${state.outbox.length} proposals are already waiting to be sent; sync before proposing more`)
+    items.forEach(({ item, approve }, index) =>
+      state.outbox.push({ id: ids[index], created_at: at, attempts: 0, item, ...(approve ? { approve } : {}) }))
+  })
+  return ids
+}
+
+/** Queue one proposal; it is sent by the next push. Returns its outbox id. */
+export async function enqueue(root: string, item: ProposalItem, approve?: "approve" | "approve_anyway"): Promise<string> {
+  return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}) }]))[0]
+}
+
+/** Where an enqueued proposal stands after a run: still queued, sent (with the server's answer), or gone. */
+export function outcomeOf(state: State, report: RunReport | undefined, outboxId: string, text: string):
+  | { status: "queued"; error?: string }
+  | { status: "sent"; row: PushResult["sent"][number] | undefined; sent?: State["sent"][number] } {
+  const queued = state.outbox.find((entry) => entry.id === outboxId)
+  if (queued) return { status: "queued", ...(queued.last_error ? { error: queued.last_error } : {}) }
+  const row = report?.push?.sent.find((s) => s.id === outboxId)
+  // Sent by another run (background refresh, session start): its record is in `sent`, by text.
+  return { status: "sent", row, sent: row?.public_id ? state.sent.find((s) => s.public_id === row.public_id) : [...state.sent].reverse().find((s) => s.text === text) }
+}
+
+type PendingUsage = NonNullable<State["pending_usage"]>
+
+/** Send one batch; on success advance the reported state and clear it from `pending_usage`. */
+async function sendUsage(root: string, ctx: Ready, batch: PendingUsage): Promise<void> {
+  await RulesApi.usage(ctx.actAs, ctx.scope.datamateId, { batch_id: batch.batch_id, items: batch.items })
+  await RulesStore.update(root, (s) => {
+    s.usage_sessions.push(...batch.sessions.filter((session) => !s.usage_sessions.includes(session)))
+    s.corrected_reported = { ...s.corrected_reported, ...batch.corrected }
+    if (s.pending_usage?.batch_id === batch.batch_id) s.pending_usage = undefined
   })
 }
 
-/** Report usage of team rules: delivered sessions and "corrected again", each counted once. */
+/**
+ * Report usage of team rules: delivered sessions and "corrected again", each counted once. A batch is saved
+ * (`pending_usage`) before it is sent and resent with the same `batch_id` until the server acknowledges it, so a
+ * lost response cannot count twice. At most `MAX_USAGE_ITEMS` rules per batch; the rest go in the next run.
+ */
 export async function reportUsage(root: string, ctx: Ready): Promise<{ items: number; error?: string }> {
+  const before = await RulesStore.read(root)
+  if (before.pending_usage) {
+    try {
+      await sendUsage(root, ctx, before.pending_usage)
+    } catch (error) {
+      return { items: 0, error: errorText(error) }
+    }
+  }
   const state = await RulesStore.read(root)
   if (!state.rules.length) return { items: 0 }
   const byLesson = new Map(state.rules.map((rule) => [RulesStore.lessonId(rule.rule_key), rule]))
@@ -251,13 +311,15 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
   const reported = new Set(state.usage_sessions)
   const counts = new Map<string, { applied: number; corrected_again: number }>()
   const sessions: string[] = []
-  // A rule counts at most `MAX_USAGE_DELTA` sessions per report: later sessions wait for the next one.
+  // A rule counts at most `MAX_USAGE_DELTA` sessions per report, and a batch at most `MAX_USAGE_ITEMS` rules:
+  // later sessions wait for the next report.
   for (const snapshot of snapshots) {
     if (reported.has(snapshot.session)) continue
     const shown = [...new Set(snapshot.shown.filter((entry) => entry.name === RulesStore.TEAM_STORE).map((entry) => entry.id))]
       .flatMap((id) => byLesson.get(id)?.public_id ?? [])
     if (!shown.length) continue
     if (shown.some((publicId) => (counts.get(publicId)?.applied ?? 0) >= MAX_USAGE_DELTA)) break
+    if (new Set([...counts.keys(), ...shown]).size > MAX_USAGE_ITEMS) break
     sessions.push(snapshot.session)
     for (const publicId of shown) {
       const row = counts.get(publicId) ?? { applied: 0, corrected_again: 0 }
@@ -275,6 +337,7 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
     if (!rule) continue
     const baseline = Math.min(state.corrected_reported[rule.public_id] ?? 0, row.recurred)
     const delta = Math.min(row.recurred - baseline, MAX_USAGE_DELTA)
+    if (delta > 0 && !counts.has(rule.public_id) && counts.size >= MAX_USAGE_ITEMS) continue
     corrected[rule.public_id] = baseline + Math.max(0, delta)
     if (delta <= 0) continue
     const entry = counts.get(rule.public_id) ?? { applied: 0, corrected_again: 0 }
@@ -285,17 +348,19 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
     if (Object.keys(corrected).length) await RulesStore.update(root, (s) => { s.corrected_reported = { ...s.corrected_reported, ...corrected } })
     return { items: 0 }
   }
-  const items = [...counts].map(([public_id, c]) => ({ public_id, applied: c.applied, helpful: 0, harmful: 0, corrected_again: c.corrected_again }))
+  const batch: PendingUsage = {
+    batch_id: randomUUID(),
+    items: [...counts].map(([public_id, c]) => ({ public_id, applied: c.applied, helpful: 0, harmful: 0, corrected_again: c.corrected_again })),
+    sessions,
+    corrected,
+  }
+  await RulesStore.update(root, (s) => { s.pending_usage = batch })
   try {
-    await RulesApi.usage(ctx.actAs, ctx.scope.datamateId, { batch_id: randomUUID(), items })
+    await sendUsage(root, ctx, batch)
   } catch (error) {
     return { items: 0, error: errorText(error) }
   }
-  await RulesStore.update(root, (s) => {
-    s.usage_sessions.push(...sessions)
-    s.corrected_reported = { ...s.corrected_reported, ...corrected }
-  })
-  return { items: items.length }
+  return { items: batch.items.length }
 }
 
 export interface RunReport {
@@ -305,6 +370,12 @@ export interface RunReport {
   usage?: { items: number; error?: string }
 }
 
+/** A run report safe to hand to a client or print: the captured credential (`actAs`) is left out. */
+export function publicReport(report: RunReport) {
+  const { context, ...rest } = report
+  return { ...rest, context: context.status === "ready" ? { status: context.status, scope: context.scope } : context }
+}
+
 /** Push, pull, then report usage: "Sync now", `learn sync`, and the background refresh. */
 export async function run(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
   const key = await canonicalRoot(root)
@@ -312,7 +383,7 @@ export async function run(root: string, directory: string, learn: LearnConfig): 
   if (ctx.status !== "ready") {
     if (ctx.status === "skipped" && ctx.unlinked) {
       const state = await RulesStore.read(root)
-      if (state.scope) await RulesStore.reset(root)
+      if (state.workspace) await RulesStore.reset(root, { keepOutbox: true })
     }
     failedAt.set(key, Date.now())
     return { context: ctx }
@@ -361,12 +432,24 @@ export async function due(root: string): Promise<boolean> {
 
 /** Session start: wait (at most `waitMs`) for a run in flight, or start one when due, so the first turn sees
  * fresh rules. */
-export async function sessionStart(root: string, directory: string, learn: LearnConfig, waitMs = SESSION_WAIT_MS): Promise<void> {
+export async function sessionStart(
+  root: string,
+  directory: string,
+  learn: LearnConfig,
+  options: { waitMs?: number; onReport?: (report: RunReport) => Promise<void>; startIfDue?: boolean } = {},
+): Promise<void> {
   if (!rulesEnabled(learn)) return
   const existing = inflight.get(await canonicalRoot(root))
-  if (!existing && !(await due(root))) return
-  const running = (existing ?? runShared(root, directory, learn)).catch((error) => log.warn("rules session sync failed", { error: errorText(error) }))
-  await Promise.race([running, new Promise((resolve) => setTimeout(resolve, waitMs).unref?.())])
+  // With `startIfDue: false` only a run already in flight is waited on (the service's first pull of a freshly
+  // linked project); nothing new is started on the prompt path.
+  if (!existing && (options.startIfDue === false || !(await due(root)))) return
+  // A run this call starts publishes its notices (the service's refresh publishes its own).
+  const running = existing ?? runShared(root, directory, learn).then(async (report) => {
+    await options.onReport?.(report)
+    return report
+  })
+  const settled = running.catch((error) => log.warn("rules session sync failed", { error: errorText(error) }))
+  await Promise.race([settled, new Promise((resolve) => setTimeout(resolve, options.waitMs ?? SESSION_WAIT_MS).unref?.())])
 }
 
 export * as RulesSync from "./sync"

@@ -303,16 +303,17 @@ export async function startCapture(
     active.add(capture)
     const subscriptions: Array<() => void> = []
     // altimate_change start — one stop path for disposal and for workspace rules
-    let stopped = false
-    const stopCapture = async () => {
-      if (stopped) return
-      stopped = true
-      for (const stop of subscriptions) stop()
-      await capture.flush()
-      await flushWrites()
-      active.delete(capture)
-      unregister()
-    }
+    // One stop, shared: a second caller (the instance disposer overlapping a settings change) waits for the
+    // same flush instead of returning before the pending signal writes land.
+    let stopping: Promise<void> | undefined
+    const stopCapture = () =>
+      (stopping ??= (async () => {
+        for (const stop of subscriptions) stop()
+        await capture.flush()
+        await flushWrites()
+        active.delete(capture)
+        unregister()
+      })())
     const unregister = registerDisposer(async (directory) => {
       if (directory === ctx.directory) await stopCapture()
     })

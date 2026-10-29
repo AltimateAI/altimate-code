@@ -8,7 +8,7 @@ interface LearnConfig {
   model?: string
 }
 
-function booleanFlag(value: string | undefined): boolean | undefined {
+export function booleanFlag(value: string | undefined): boolean | undefined {
   if (value === "1" || value?.toLowerCase() === "true") return true
   if (value === "0" || value?.toLowerCase() === "false") return false
   return undefined

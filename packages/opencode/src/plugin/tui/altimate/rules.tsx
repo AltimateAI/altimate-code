@@ -18,9 +18,8 @@ import type { TuiDialogSelectOption, TuiPlugin, TuiPluginApi, TuiPromptRef } fro
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createEffect, createRoot, createSignal, Show } from "solid-js"
 import type { ProposalCard } from "@/altimate/rules/events"
-import { RulesSummary } from "@/altimate/rules/summary"
+import type { RulesSummary } from "@/altimate/rules/summary"
 import { describeAge } from "@/altimate/workspace/attach-snapshot"
-import { readProjectLearning, writeProjectLearning } from "@/altimate/learn/project-config"
 
 const id = "altimate:rules"
 
@@ -43,13 +42,19 @@ async function post<T>(api: TuiPluginApi, url: string, body?: unknown): Promise<
 
 const on = (api: TuiPluginApi) => api.event.on as unknown as (type: string, handler: (event: { properties: any }) => void) => () => void
 const root = (api: TuiPluginApi) => (api.state.path.worktree && api.state.path.worktree !== "/" ? api.state.path.worktree : api.state.path.directory)
-type LearnConfig = { enabled?: boolean; capture?: boolean } | undefined
-/** The loaded config's `learn`, with the project file's `learn` as on disk now: the `/rules` toggle writes that
- * file, and the loaded config does not change until the next session. */
-const learnConfig = async (api: TuiPluginApi): Promise<LearnConfig> => {
-  const loaded = (api.state.config as { learn?: LearnConfig }).learn
-  const onDisk = (await readProjectLearning(root(api), api.state.path.directory).catch(() => undefined)) as LearnConfig
-  return loaded || onDisk ? { ...loaded, ...onDisk } : undefined
+type Summary = RulesSummary.Summary & { ok: boolean; line: string }
+type Row = RulesSummary.RuleRow
+
+async function get<T>(api: TuiPluginApi, url: string): Promise<T | undefined> {
+  const result = await raw(api)?.get({ url }).catch(() => undefined)
+  return result?.data as T | undefined
+}
+
+/** Rules state from the session server: the TUI may be attached to a server on another host or path, so it never
+ * reads the rules files itself. */
+async function summaryOf(api: TuiPluginApi): Promise<Summary | undefined> {
+  const summary = await get<Summary>(api, "/altimate/rules/summary")
+  return summary?.ok ? summary : undefined
 }
 
 function title(card: ProposalCard) {
@@ -67,7 +72,8 @@ function meta(card: ProposalCard) {
   return parts.join(" · ")
 }
 
-/** Button labels, in the order shown: the team action first, so Enter on a fresh card takes it. */
+/** Button labels, in the order shown. Enter on a fresh card takes the first: the team action, or "Memory" on a
+ * "Save as" card. */
 function buttons(card: ProposalCard): { action: ProposalCard["actions"][number]; label: string }[] {
   const label: Record<ProposalCard["actions"][number], string> = {
     send: card.choose ? "Team rule — send for review" : "Send for review",
@@ -102,6 +108,8 @@ function InlineCard(props: {
   more: number
   focused: boolean
   selected: number
+  /** "Approve anyway" was pressed once: say what a second Enter does. */
+  confirming?: boolean
   onPick: (index: number) => void
   onFocus: () => void
 }) {
@@ -162,7 +170,11 @@ function InlineCard(props: {
       </box>
       <Show when={props.focused}>
         <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" justifyContent="space-between" gap={3}>
-          <text fg={theme().textMuted}>{explain(card(), options()[props.selected]?.action ?? "")}</text>
+          <text fg={props.confirming ? theme().warning : theme().textMuted}>
+            {props.confirming
+              ? "It weakens verification for every teammate. Press Enter again to approve anyway."
+              : explain(card(), options()[props.selected]?.action ?? "")}
+          </text>
           <text fg={theme().text}>
             {"⇆"} <span style={{ fg: theme().textMuted }}>select</span>  enter <span style={{ fg: theme().textMuted }}>confirm</span>
             {"  "}esc <span style={{ fg: theme().textMuted }}>back to typing</span>
@@ -184,6 +196,8 @@ function installCards(api: TuiPluginApi) {
   const [focused, setFocused] = createSignal(false)
   const [selected, setSelected] = createSignal(0)
   const [busy, setBusy] = createSignal(false)
+  /** The flagged card whose "Approve anyway" was pressed once and waits for a second Enter. */
+  const [confirming, setConfirming] = createSignal<string | undefined>(undefined)
   let prompt: TuiPromptRef | undefined
   let sessionID: string | undefined
   let layer: (() => void) | undefined
@@ -199,6 +213,7 @@ function installCards(api: TuiPluginApi) {
   }
 
   const unfocus = () => {
+    setConfirming(undefined)
     releaseKeys()
     setFocused(false)
     prompt?.focus()
@@ -248,6 +263,12 @@ function installCards(api: TuiPluginApi) {
     if (!card || !option) return
     setSelected(index)
     if (option.action === "edit") return edit(card)
+    // Approving a rule that weakens verification for the whole workspace takes a second Enter.
+    if (option.action === "approve" && card.weakens_verification && confirming() !== card.id) {
+      setConfirming(card.id)
+      return
+    }
+    setConfirming(undefined)
     void reply(card, option.action)
   }
 
@@ -260,6 +281,7 @@ function installCards(api: TuiPluginApi) {
   const move = (step: number) => {
     const card = current()
     if (!card) return
+    setConfirming(undefined)
     const count = buttons(card).length
     setSelected((index) => (index + step + count) % count)
   }
@@ -323,6 +345,7 @@ function installCards(api: TuiPluginApi) {
                   more={cards().filter((c) => c.sessionID === props.session_id).length - 1}
                   focused={focused()}
                   selected={selected()}
+                  confirming={confirming() === card().id}
                   onPick={(index) => (focused() ? pick(index) : focus())}
                   onFocus={focus}
                 />
@@ -369,16 +392,22 @@ function installCards(api: TuiPluginApi) {
   on(api)("rule.proposal.replied", (event) => closed((event.properties as { id: string }).id))
   // Each review is shown once per project, whether it arrived as an event or was pulled before this TUI
   // subscribed (the startup sync): remembered by id and status.
+  // The first time a project is seen, its existing reviews are recorded silently: they are history, not news.
   const seenKey = () => `altimate.rules.notices.${root(api)}`
-  const notify = (p: { public_id: string; text: string; status: string; reason?: string; reviewer?: string }) => {
+  const notify = (p: { public_id: string; text: string; status: string; reason?: string; reviewer?: string }, quiet = false) => {
     const seen = new Set(api.kv.get<string[]>(seenKey(), []))
     const key = `${p.public_id}:${p.status}`
     if (seen.has(key)) return
     api.kv.set(seenKey(), [...seen, key].slice(-200))
-    reviewToast(api, p)
+    if (!quiet) reviewToast(api, p)
   }
   on(api)("rule.proposal.reviewed", (event) => notify(event.properties))
-  const replay = () => void learnConfig(api).then((learn) => RulesSummary.summary(root(api), learn)).then((s) => [...s.notices].reverse().forEach(notify)).catch(() => {})
+  const replay = () =>
+    void summaryOf(api).then((summary) => {
+      const first = api.kv.get<string[] | undefined>(seenKey(), undefined) === undefined
+      if (first) api.kv.set(seenKey(), [])
+      for (const notice of [...(summary?.notices ?? [])].reverse()) notify(notice, first)
+    })
   on(api)("altimate.rules.changed", replay)
   setTimeout(() => {
     replay()
@@ -395,12 +424,13 @@ function reviewToast(api: TuiPluginApi, p: { text: string; status: string; reaso
 }
 
 async function showMenu(api: TuiPluginApi) {
-  const summary = await RulesSummary.summary(root(api), await learnConfig(api))
-  const rows = await RulesSummary.rows(root(api))
+  const summary = await summaryOf(api)
+  if (!summary) return api.ui.toast({ variant: "error", message: "Rules are not available from the session server.", duration: 6000 })
+  const rows = (await get<{ ok: boolean; rules: Row[] }>(api, "/altimate/rules"))?.rules ?? []
   const team = rows.filter((r) => r.source === "team")
   const mine = rows.filter((r) => r.source === "mine")
   const status = summary.linked
-    ? `${summary.workspace?.name ?? "Workspace"} · ${RulesSummary.sidebarLine(summary)}${summary.pulled_at ? ` · synced ${describeAge(Date.parse(summary.pulled_at))}` : ""}`
+    ? `${summary.workspace?.name ?? "Workspace"} · ${summary.line}${summary.pulled_at ? ` · synced ${describeAge(Date.parse(summary.pulled_at))}` : ""}`
     : "Not linked to a workspace — run `altimate-code link`"
   const learning = `Learning from sessions: ${summary.learning ? "on" : "off"} (${summary.learning_source === "you" ? "your setting" : summary.learning_source === "workspace" ? "workspace setting" : "default"})`
   const label: Record<string, string> = { active: "approved", pending: "pending review", rejected: "rejected", queued: "queued", retired: "retired", superseded: "replaced" }
@@ -421,9 +451,12 @@ async function showMenu(api: TuiPluginApi) {
     {
       title: summary.learning ? "Turn learning off for me" : "Turn learning on for me",
       value: "toggle",
-      description: `${learning}. Your setting overrides the workspace's "Learn from sessions".`,
+      description: `${learning}. Just for you, in this project; it overrides the workspace's "Learn from sessions".`,
       category: "Actions",
     },
+    ...(summary.personal_learning !== undefined
+      ? [{ title: "Follow the workspace setting again", value: "follow", description: "Forget your own choice for this project", category: "Actions" }]
+      : []),
   ]
   api.ui.dialog.replace(() => (
     <api.ui.DialogSelect
@@ -431,7 +464,7 @@ async function showMenu(api: TuiPluginApi) {
       options={options}
       onSelect={async (option) => {
         // Sync and the learning toggle are actions, not navigation: close the menu, report with a toast.
-        if (option.value === "sync" || option.value === "toggle") api.ui.dialog.clear()
+        if (option.value === "sync" || option.value === "toggle" || option.value === "follow") api.ui.dialog.clear()
         if (option.value === "sync") {
           api.ui.toast({ variant: "info", message: "Syncing rules…", duration: 3000 })
           const report = await post<{ ok: boolean; pull?: { ok: boolean; rules: number; pending: number; error?: string; notices: unknown[] }; push?: { sent: unknown[] }; context?: { status: string; reason?: string } }>(api, "/altimate/rules/sync").catch(() => undefined)
@@ -444,12 +477,12 @@ async function showMenu(api: TuiPluginApi) {
           else api.ui.toast({ variant: "error", message: `Rules sync failed: ${report?.pull?.error ?? "unknown error"}`, duration: 8000 })
           return
         }
-        if (option.value === "toggle") {
-          const file = await writeProjectLearning(root(api), api.state.path.directory, !summary.learning).catch((error) => {
-            api.ui.toast({ variant: "error", message: `Learning not changed: ${error instanceof Error ? error.message : String(error)}`, duration: 8000 })
-            return undefined
-          })
-          if (file) api.ui.toast({ variant: "success", message: `Learning ${summary.learning ? "off" : "on"} for you in this project (${file}). Applies from the next session.`, duration: 8000 })
+        if (option.value === "toggle" || option.value === "follow") {
+          const on = option.value === "follow" ? null : !summary.learning
+          const next = await post<Summary & { error?: string }>(api, "/altimate/rules/learning", { on }).catch(() => undefined)
+          if (!next?.ok) return api.ui.toast({ variant: "error", message: `Learning not changed: ${next?.error ?? "the session server did not answer"}`, duration: 8000 })
+          const source = next.learning_source === "you" ? "your setting" : next.learning_source === "workspace" ? "workspace setting" : "default"
+          api.ui.toast({ variant: "success", message: `Learning from sessions is ${next.learning ? "on" : "off"} for you in this project (${source}).`, duration: 6000 })
           return
         }
       }}

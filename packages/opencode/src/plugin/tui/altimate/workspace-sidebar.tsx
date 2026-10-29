@@ -21,9 +21,6 @@ import { accountScope, boundAttachSnapshot, sidebarAttachLine } from "@/altimate
 // altimate_change end
 import { AltimateApi } from "@/altimate/api/client"
 import { openManageUrl } from "./workspace"
-// altimate_change start — workspace rules line
-import { RulesSummary } from "@/altimate/rules/summary"
-// altimate_change end
 
 const id = "altimate:sidebar-workspace"
 
@@ -71,14 +68,20 @@ function View(props: { api: TuiPluginApi }) {
   const [manageUrl, setManageUrl] = createSignal<string | null>(null)
   // altimate_change start - status lines
   const [detail, setDetail] = createSignal<Manage.StatusReport | null>(null)
-  // altimate_change start — workspace rules: "6 team rules · 3 pending review", from local state
-  const [rules, setRules] = createSignal<RulesSummary.Summary | null>(null)
-  const rulesRoot = () => (props.api.state.path.worktree && props.api.state.path.worktree !== "/" ? props.api.state.path.worktree : props.api.state.path.directory)
-  const readRules = () => {
-    const learn = (props.api.state.config as { learn?: { enabled?: boolean; capture?: boolean } }).learn
-    void RulesSummary.summary(rulesRoot(), learn).then((s) => setRules(s.linked ? s : null)).catch(() => setRules(null))
-  }
   // altimate_change end
+  // altimate_change start — workspace rules: "6 team rules · 3 pending review", from the session server (which may
+  // run on another host than this TUI, so never from local files)
+  const [rules, setRules] = createSignal<{ line: string; pulled_at?: string } | null>(null)
+  const readRules = () => {
+    const client = (props.api.client as unknown as { client?: { get(input: { url: string }): Promise<{ data?: unknown }> } }).client
+    void client
+      ?.get({ url: "/altimate/rules/summary" })
+      .then((result) => {
+        const summary = result.data as { ok?: boolean; linked?: boolean; line?: string; pulled_at?: string } | undefined
+        setRules(summary?.ok && summary.linked && summary.line ? { line: summary.line, ...(summary.pulled_at ? { pulled_at: summary.pulled_at } : {}) } : null)
+      })
+      .catch(() => setRules(null))
+  }
   // altimate_change end
   // altimate_change start - what the last session got, in numbers
   const [attachLine, setAttachLine] = createSignal<string | null>(null)
@@ -143,6 +146,9 @@ function View(props: { api: TuiPluginApi }) {
       // one clears.
       const clearRendered = () => {
         setDetail(null)
+        // altimate_change start — workspace rules: the line belongs to the binding being cleared
+        setRules(null)
+        // altimate_change end
         setManageUrl(null)
         setBinding(undefined)
         boundScope = null
@@ -330,7 +336,7 @@ function View(props: { api: TuiPluginApi }) {
             <Show when={rules()}>
               {(r) => (
                 <text fg={theme().textMuted}>
-                  {`rules: ${RulesSummary.sidebarLine(r())}`}
+                  {`rules: ${r().line}`}
                   {r().pulled_at ? ` · synced ${describeAge(Date.parse(r().pulled_at!))}` : ""}
                 </text>
               )}

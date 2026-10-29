@@ -1265,7 +1265,7 @@ export namespace Server {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
         if (refused) return c.json(refused.body, refused.status)
         const { RuleProposal } = await import("../altimate/rules/proposal")
-        return c.json(RuleProposal.list(Instance.directory))
+        return c.json(RuleProposal.list(Instance.directory, c.req.query("session") || undefined))
       })
       .post("/rule-proposal/:id/reply", async (c) => {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
@@ -1284,7 +1284,8 @@ export namespace Server {
             { action: action as (typeof actions)[number], ...(text !== undefined ? { text } : {}) },
             Instance.directory,
           )
-          return c.json(result, result.ok ? 200 : 409)
+          const status = result.ok ? 200 : { not_open: 404, busy: 409, not_available: 409, invalid_text: 422, failed: 500 }[result.code]
+          return c.json(result, status as 200 | 404 | 409 | 422 | 500)
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("rule proposal reply failed", { error })
@@ -1294,9 +1295,14 @@ export namespace Server {
       .get("/altimate/rules/summary", async (c) => {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
         if (refused) return c.json(refused.body, refused.status)
-        const { RulesSummary } = await import("../altimate/rules/summary")
+        const [{ RulesSummary }, { RulesService }, { Config }] = await Promise.all([
+          import("../altimate/rules/summary"),
+          import("../altimate/rules/service"),
+          import("@/config/config"),
+        ])
         const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-        const summary = await RulesSummary.summary(root, (await (await import("@/config/config")).Config.get()).learn)
+        const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
+        const summary = await RulesSummary.summary(root, learn)
         return c.json({ ok: true as const, ...summary, line: RulesSummary.sidebarLine(summary) })
       })
       .get("/altimate/rules", async (c) => {
@@ -1308,14 +1314,49 @@ export namespace Server {
         const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
         return c.json({ ok: true as const, rules: await RulesSummary.rows(root, view ?? "all") })
       })
+      // The person's own "learning from sessions" choice for this project: `on` true/false, or null to follow the
+      // config and the workspace again. Stored per person (git-ignored rules state), never in the project config.
+      .post("/altimate/rules/learning", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const read = await readJsonObject(() => c.req.text(), "rules learning")
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const { on } = read.body as { on?: unknown }
+        if (on !== null && typeof on !== "boolean") return c.json({ ok: false, error: "on must be true, false or null." }, 400)
+        try {
+          const [{ RulesStore }, { RulesSummary }, { RulesService }, { RuleEvents }, { Config }, { Bus }] = await Promise.all([
+            import("../altimate/rules/store"),
+            import("../altimate/rules/summary"),
+            import("../altimate/rules/service"),
+            import("../altimate/rules/events"),
+            import("@/config/config"),
+            import("@/bus"),
+          ])
+          const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+          await RulesStore.update(root, (state) => {
+            if (on === null) delete state.personal_learning
+            else state.personal_learning = on
+          })
+          await Bus.publish(RuleEvents.Event.Changed, { directory: Instance.directory }).catch(() => {})
+          const summary = await RulesSummary.summary(root, await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory))
+          return c.json({ ok: true as const, ...summary, line: RulesSummary.sidebarLine(summary) })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("rules learning update failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
       .post("/altimate/rules/sync", async (c) => {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
         if (refused) return c.json(refused.body, refused.status)
         try {
           const { RulesService } = await import("../altimate/rules/service")
           const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-          const report = await RulesService.syncNow(root, Instance.directory, (await (await import("@/config/config")).Config.get()).learn)
-          return c.json({ ok: true as const, ...report })
+          const { Config } = await import("@/config/config")
+          const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
+          const { RulesSync } = await import("../altimate/rules/sync")
+          // Never the captured credential: the report goes to clients that may log or cache it.
+          return c.json({ ok: true as const, ...RulesSync.publicReport(await RulesService.syncNow(root, Instance.directory, learn)) })
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("rules sync failed", { error })

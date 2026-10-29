@@ -13,8 +13,16 @@
 
 export type Kind = "rule" | "memory" | "ambiguous"
 
+// The person named the kind: these decide on their own, whatever else the text says.
+const ASKED_RULE = /\bas\s+a\s+(?:team\s+)?rule\b/i
+const ASKED_MEMORY = /\b(?:just\s+)?for\s+me\b|\bas\s+a\s+memory\b|\bin\s+(?:my\s+)?memory\b/i
+
+// "I want …" / "I like …" open many ordinary requests ("I want staging models in models/staging"): on its own
+// that is not enough to file a team convention as a personal memory, so it only makes the text ambiguous.
+const WEAK_MEMORY = /\bi\s+(?:like|want)\b/i
+
 const MEMORY_CUES: readonly [RegExp, string][] = [
-  [/\bi\s+(?:prefer|like|want|usually|tend to)\b/i, "a personal preference"],
+  [/\bi\s+(?:prefer|usually|tend to)\b/i, "a personal preference"],
   [/\bfor\s+me\b|\bmy\s+(?:preference|style|default|setup|machine|laptop)\b/i, "a personal preference"],
   [/\bremember\s+(?:that|our|the)\b(?!.*\b(?:always|never|must)\b)/i, "a fact to remember"],
   [/\b(?:our|the)\s+(?:warehouse|database|account|cluster|stack|region|team|company|org)\s+(?:is|uses|runs|lives)\b/i, "a fact about the environment"],
@@ -24,25 +32,27 @@ const MEMORY_CUES: readonly [RegExp, string][] = [
 const RULE_CUES: readonly [RegExp, string][] = [
   [/\b(?:always|never)\b/i, "an always/never instruction"],
   [/\bmust(?:\s+not)?\b|\bshould(?:\s+not|n't)?\s+(?:use|be|have|name|add|run)\b/i, "a must/should instruction"],
-  [/\bwe\s+(?:always|never|use|don't|do not)\b|\b(?:our|team|house|repo|project)\s+(?:convention|standard|rule|style|policy)\b/i, "a team convention"],
+  // Not a bare "we use": "we use Snowflake" is a fact about the environment.
+  [/\bwe\s+(?:always|never|don't|do not)\b|\b(?:our|team|house|repo|project)\s+(?:convention|standard|rule|style|policy)\b/i, "a team convention"],
   [/\buse\s+\S+\s+instead\s+of\b|\b(?:don't|do not|avoid)\s+(?:use|using|add|write|name|cast)\b/i, "a do/don't instruction"],
   [/\b(?:name|prefix|suffix|alias)\s+\S+(?:\s+\S+)?\s+(?:as|with|like)\b/i, "a naming convention"],
-  [/\bas\s+a\s+(?:team\s+)?rule\b/i, "asked for a rule"],
 ]
 
 export function classify(text: string): { kind: Kind; cue?: string } {
+  if (ASKED_RULE.test(text)) return { kind: "rule", cue: "asked for a rule" }
+  if (ASKED_MEMORY.test(text)) return { kind: "memory", cue: "asked to remember it for themselves" }
   const memory = MEMORY_CUES.find(([pattern]) => pattern.test(text))
   const rule = RULE_CUES.find(([pattern]) => pattern.test(text))
-  if (rule && !memory) return { kind: "rule", cue: rule[1] }
+  if (rule && !memory && !WEAK_MEMORY.test(text)) return { kind: "rule", cue: rule[1] }
   if (memory && !rule) return { kind: "memory", cue: memory[1] }
-  // "As a rule" wins over a stray preference cue: the person named the kind.
-  if (rule?.[1] === "asked for a rule") return { kind: "rule", cue: rule[1] }
   return { kind: "ambiguous" }
 }
 
-/** A preference is the person's own (global memory); a fact belongs to the project. */
+/** A preference is the person's own (global memory); a fact belongs to the project, even when it says "my". */
 export function memoryScope(text: string): "global" | "project" {
-  return /\bi\s+(?:prefer|like|want|usually|tend to)\b|\bfor\s+me\b|\bmy\s+/i.test(text) ? "global" : "project"
+  return /\bi\s+(?:prefer|like|want|usually|tend to)\b|\bfor\s+me\b|\bmy\s+(?:preference|style|default|setup|machine|laptop|editor|shell)\b/i.test(text)
+    ? "global"
+    : "project"
 }
 
 export * as RuleClassify from "./classify"

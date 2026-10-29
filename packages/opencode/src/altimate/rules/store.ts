@@ -16,13 +16,15 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import z from "zod"
 import * as SafeFS from "../learn/safe-fs"
-import { canonical, type Lesson } from "../learn/lesson"
+import { Log } from "@/util/log"
+import { canonical, parse as parseLessons, type Lesson } from "../learn/lesson"
 import { withLearnLock } from "../learn/lock"
 import * as Store from "../learn/store"
 import { RuleOut, Settings } from "./api"
 
-/** The read-only store team rules are mirrored into. */
+/** The read-only store team rules are mirrored into (reserved: `learn/store.ts` `RESERVED_STORES`). */
 export const TEAM_STORE = "team"
+const log = Log.create({ service: "rules.store" })
 const LOCK = { timeoutMs: 5_000 }
 const MAX_NOTICES = 50
 const MAX_SENT = 200
@@ -110,8 +112,16 @@ export const State = z.object({
   last_check: z.object({ at: z.string(), session: z.string(), outcome: z.string() }).optional(),
   /** Correction signals already considered for a proposal. */
   processed_signals: z.array(z.string()).default([]),
-  /** Set once `learn bootstrap` proposed rules from history for this scope. */
-  bootstrapped_at: z.string().optional(),
+  /** The person's own "learning from sessions" choice for this project (`/rules`), when they made one. Kept here,
+   * not in the project config, because that file is usually committed and the choice is per person. */
+  personal_learning: z.boolean().optional(),
+  /** A usage report sent but not yet acknowledged: resent with the same `batch_id` so the server counts it once. */
+  pending_usage: z.object({
+    batch_id: z.string(),
+    items: z.array(z.object({ public_id: z.string(), applied: z.number().int(), helpful: z.number().int(), harmful: z.number().int(), corrected_again: z.number().int() })),
+    sessions: z.array(z.string()),
+    corrected: z.record(z.string(), z.number().int()),
+  }).optional(),
 })
 export type State = z.infer<typeof State>
 
@@ -212,13 +222,41 @@ async function writeMirror(root: string, rules: readonly RuleOut[]) {
   const file = Store.paths(root, TEAM_STORE).approved
   const text = canonical(rules.map(toLesson))
   const previous = await fs.readFile(file, "utf8").catch(() => undefined)
-  if (previous !== text) await Store.writeAtomic(root, file, text)
+  if (previous === text) return
+  // A playbook someone named `team` before workspace rules existed: keep a copy instead of overwriting it.
+  if (previous !== undefined && !isMirror(previous)) {
+    const backup = `${file}.before-workspace-rules-${Date.now()}`
+    await Store.writeAtomic(root, backup, previous, 0o600)
+    log.warn("an existing `team` rule store was set aside for the workspace team rules", { backup })
+  }
+  await Store.writeAtomic(root, file, text)
 }
 
-/** Forget everything pulled for another scope (account, workspace or remote changed) or after unlinking. */
-export async function reset(root: string): Promise<void> {
-  await update(root, (state) => ({ ...structuredClone(EMPTY), dismissed: state.dismissed }))
+/** Whether an `approved.json` is this mirror: every entry came from a workspace rule. */
+function isMirror(text: string): boolean {
+  try {
+    return parseLessons(text).every((lesson) => lesson.provenance?.startsWith("workspace rule "))
+  } catch {
+    return false
+  }
 }
+
+/**
+ * Forget what was pulled. The person's dismissals and own learning choice always survive. Queued proposals survive
+ * too when the scope did not change (`keepOutbox`: the link went away or access was refused, possibly for a while);
+ * `adopt` drops them before anything is sent to a different scope.
+ */
+export async function reset(root: string, options: { keepOutbox?: boolean } = {}): Promise<void> {
+  await update(root, (state) => ({
+    ...structuredClone(EMPTY),
+    dismissed: state.dismissed,
+    ...(state.personal_learning !== undefined ? { personal_learning: state.personal_learning } : {}),
+    ...(options.keepOutbox ? { outbox: state.outbox, scope: state.scope } : {}),
+  }))
+}
+
+/** Queued proposals at most; a new one is refused (the card stays open) rather than an older one dropped. */
+export const MAX_OUTBOX = 200
 
 export function dismissed(state: State, topic: string): boolean {
   return state.dismissed.some((d) => d.topic === topic.toLowerCase())

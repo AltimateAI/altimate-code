@@ -87,35 +87,12 @@ const LEARN_DISABLED_HINT =
 // altimate_change start — `autoPromote` writes learn.auto_promote; `false` only clears a key the file already sets
 async function writeProjectLearning(root: string, enabled: boolean, autoPromote?: boolean): Promise<string> {
 // altimate_change end
-  // altimate_change start — match discovered project config precedence from the current directory
-  const [{ Instance }, { Filesystem }] = await Promise.all([
-    import("@/project/instance"), import("@/util/filesystem"),
+  // altimate_change start — one discovery for every project-config writer (`learn/project-config.ts`)
+  const [{ Instance }, { projectConfigFile }] = await Promise.all([
+    import("@/project/instance"), import("../../altimate/learn/project-config"),
   ])
-  // Config merges in the opposite order. Edit the highest-precedence existing project file
-  // so a second supported config cannot silently override the new opt-in setting.
-  const names = ["opencode.jsonc", "opencode.json", "altimate-code.jsonc", "altimate-code.json"]
-  const directories: string[] = []
-  for await (const dir of Filesystem.up({ targets: [".altimate-code", ".opencode"], start: Instance.directory, stop: root }))
-    directories.push(dir)
-  const candidates = directories.reverse().flatMap((dir) => names.map((name) => path.join(dir, name)))
-  for await (const file of Filesystem.up({ targets: ["opencode.jsonc", "opencode.json"], start: Instance.directory, stop: root }))
-    candidates.push(file)
+  let { file, text } = await projectConfigFile(root, Instance.directory)
   // altimate_change end
-  let file = path.join(root, ".altimate-code", "altimate-code.json")
-  let text = "{}\n"
-  for (const candidate of candidates) {
-    // altimate_change start — reject linked project config files and their ancestors before reading
-    await SafeFS.assertSafePath(root, candidate, root)
-    // altimate_change end
-    const current = await fs.readFile(candidate, "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return undefined
-      throw error
-    })
-    if (current === undefined) continue
-    file = candidate
-    text = current
-    break
-  }
   const errors: ParseError[] = []
   const config = parse(text, errors, { allowTrailingComma: true })
   if (errors.length || !config || typeof config !== "object" || Array.isArray(config))
@@ -453,7 +430,12 @@ const SyncCommand = effectCmd({
       const { RulesSync } = await import("../../altimate/rules/sync")
       const { Instance } = await import("@/project/instance")
       const report = await RulesSync.runFresh(root, Instance.directory, (await Config.get()).learn)
-      if (args.json) return out(JSON.stringify(report, (key, value) => (key === "actAs" ? undefined : value), 2))
+      if (args.json) {
+        out(JSON.stringify(RulesSync.publicReport(report), null, 2))
+        // Same exit status as the text mode: a failed pull is a failed sync.
+        if (report.context.status === "ready" && !report.pull?.ok) process.exitCode = 1
+        return
+      }
       if (report.context.status !== "ready") return out(`Rules sync skipped: ${report.context.reason}.`)
       for (const sent of report.push?.sent ?? []) out(`Sent "${sent.text}": ${sent.error ?? sent.status}`)
       if (report.push?.error) out(`Proposals not sent (kept queued): ${report.push.error}`)
@@ -467,6 +449,39 @@ const SyncCommand = effectCmd({
 })
 // altimate_change end
 
+// altimate_change start — workspace rules: rules staged from history go to the owner's review only with consent
+/**
+ * In a linked project, list what this run staged and ask before sending it to the named workspace's review queue
+ * (default no). Without a terminal it needs `--send-for-review`. Declined or skipped rules stay local candidates.
+ */
+async function offerStagedForReview(input: { name: string; origin: "bootstrap" | "import_reviews"; before: Set<string> | undefined; send: boolean }) {
+  const [{ Config }, { Instance }, { RulesFromHistory }] = await Promise.all([
+    import("@/config/config"),
+    import("@/project/instance"),
+    import("../../altimate/rules/from-history"),
+  ])
+  const root = await projectRoot()
+  const staged = await RulesFromHistory.stagedRules({ root, name: input.name, origin: input.origin, before: input.before })
+  if (!staged) return
+  for (const invalid of staged.invalid) out(`Kept local (not a valid rule: ${invalid.reason}): ${invalid.text}`)
+  if (!staged.items.length) return
+  const { owner, name } = staged.workspace
+  out(`Staged ${staged.items.length} ${staged.items.length === 1 ? "rule" : "rules"} that can go to ${owner}'s review in ${name}:`)
+  for (const item of staged.items) out(`  - ${item.text}`)
+  let send = input.send
+  if (!send && process.stdin.isTTY && process.stdout.isTTY)
+    send = (await prompts.confirm({ message: `Send ${staged.items.length === 1 ? "this rule" : `these ${staged.items.length} rules`} to ${owner}'s review in ${name}?`, initialValue: false })) === true
+  if (!send) {
+    out("Not sent; they stay local candidates (`learn show`, `learn promote`). Rerun with --send-for-review to send them.")
+    return
+  }
+  const result = await RulesFromHistory.sendStaged({
+    root, directory: Instance.directory, learn: (await Config.get()).learn, name: input.name, staged, before: input.before,
+  })
+  out(result.message)
+}
+// altimate_change end
+
 const BootstrapCommand = effectCmd({
   command: "bootstrap",
   describe: "seed candidate rules from this project's past sessions",
@@ -476,12 +491,15 @@ const BootstrapCommand = effectCmd({
     .option("model", { type: "string", alias: ["m"], describe: "chosen provider/model (default: learn.model, then the configured default model)" })
     .option("yes", { type: "boolean", default: false, describe: "confirm sending the displayed scope; required outside a TTY" })
     .option("dry-run", { type: "boolean", default: false, describe: "print scope and redacted signals; send nothing and leave bootstrap state unchanged" })
+    // altimate_change start — workspace rules
+    .option("send-for-review", { type: "boolean", default: false, describe: "in a project linked to a workspace, send the staged rules to the owner's review without asking (--yes does not imply it)" })
+    // altimate_change end
     .option("max-reflections", { type: "number", default: DEFAULT_MAX_REFLECTIONS, describe: "maximum reflection batches; 0 imports signals only" })
     .option("max-seconds", { type: "number", default: DEFAULT_MAX_SECONDS, describe: "total time budget after confirmation, in seconds" })
-    .epilog("Bootstrap sends redacted excerpts of past sessions to the chosen model. Review the scope before confirming. Rules are candidates only: learn show, then learn promote; in a project linked to a workspace they go to the workspace owner's review instead. Rerun to finish pending reflections and continue the history cursor."),
+    .epilog("Bootstrap sends redacted excerpts of past sessions to the chosen model. Review the scope before confirming. Rules are candidates only: learn show, then learn promote; in a project linked to a workspace they can be sent to the workspace owner's review (you are asked; --send-for-review skips the question). Rerun to finish pending reflections and continue the history cursor."),
   handler: Effect.fn("Cli.learn.bootstrap")(function* (args) {
     // altimate_change start — workspace rules: the candidate before this run, so only what it stages is sent
-    const staged = yield* run("", async () =>
+    const staged = args["dry-run"] ? undefined : yield* run("", async () =>
       (await import("../../altimate/rules/from-history")).RulesFromHistory.candidateTexts(await projectRoot(), args.name as string))
     // altimate_change end
     const result = yield* run("", async () => {
@@ -519,18 +537,12 @@ const BootstrapCommand = effectCmd({
         },
       })
     })
-    if (result?.failures) return yield* fail("Bootstrap reflection failed; signals remain queued. Rerun `learn bootstrap` to continue.")
-    // altimate_change start — linked project: the staged lessons go to the workspace owner's review as rules
-    if (!args["dry-run"]) yield* run("", async () => {
-      const [{ Config }, { Instance }] = await Promise.all([import("@/config/config"), import("@/project/instance")])
-      const { RulesFromHistory } = await import("../../altimate/rules/from-history")
-      const sent = await RulesFromHistory.proposeStaged({
-        root: await projectRoot(), directory: Instance.directory, learn: (await Config.get()).learn, name: args.name as string, origin: "bootstrap",
-        before: staged,
-      })
-      if (sent.status === "sent") out(sent.message)
-    })
+    // altimate_change start — linked project: offer what was staged (also after a partial failure, or a rerun
+    // would treat it as an earlier candidate and never offer it)
+    if (!args["dry-run"]) yield* run("", () =>
+      offerStagedForReview({ name: args.name as string, origin: "bootstrap", before: staged, send: args["send-for-review"] === true }))
     // altimate_change end
+    if (result?.failures) return yield* fail("Bootstrap reflection failed; signals remain queued. Rerun `learn bootstrap` to continue.")
   }),
 })
 
@@ -549,11 +561,14 @@ const ImportReviewsCommand = effectCmd({
     .option("model", { type: "string", alias: ["m"], describe: "chosen provider/model (default: learn.model, then the configured default model)" })
     .option("yes", { type: "boolean", default: false, describe: "confirm sending the displayed scope; required outside a TTY" })
     .option("dry-run", { type: "boolean", default: false, describe: "fetch and print redacted review comments; send nothing and leave import state unchanged" })
+    // altimate_change start — workspace rules
+    .option("send-for-review", { type: "boolean", default: false, describe: "in a project linked to a workspace, send the staged rules to the owner's review without asking (--yes does not imply it)" })
+    // altimate_change end
     .option("max-reflections", { type: "number", default: DEFAULT_MAX_REFLECTIONS, describe: "maximum reflection batches; 0 imports signals only" })
-    .epilog("Requires gh installed and authenticated for the repository host. Review import sends redacted review comments to the chosen model after confirmation. Rules are candidates only: learn show, then learn promote; in a project linked to a workspace they go to the workspace owner's review instead. Rerun to resume a checkpoint or finish pending reflections."),
+    .epilog("Requires gh installed and authenticated for the repository host. Review import sends redacted review comments to the chosen model after confirmation. Rules are candidates only: learn show, then learn promote; in a project linked to a workspace they can be sent to the workspace owner's review (you are asked; --send-for-review skips the question). Rerun to resume a checkpoint or finish pending reflections."),
   handler: Effect.fn("Cli.learn.importReviews")(function* (args) {
     // altimate_change start — workspace rules: the candidate before this run, so only what it stages is sent
-    const staged = yield* run("", async () =>
+    const staged = args["dry-run"] ? undefined : yield* run("", async () =>
       (await import("../../altimate/rules/from-history")).RulesFromHistory.candidateTexts(await projectRoot(), args.name as string))
     // altimate_change end
     const result = yield* run("", async () => {
@@ -593,18 +608,11 @@ const ImportReviewsCommand = effectCmd({
         },
       })
     })
-    if (result?.failures) return yield* fail("Review reflection failed; signals remain queued. Rerun `learn import-reviews` to continue.")
-    // altimate_change start — linked project: the staged lessons go to the workspace owner's review as rules
-    if (!args["dry-run"]) yield* run("", async () => {
-      const [{ Config }, { Instance }] = await Promise.all([import("@/config/config"), import("@/project/instance")])
-      const { RulesFromHistory } = await import("../../altimate/rules/from-history")
-      const sent = await RulesFromHistory.proposeStaged({
-        root: await projectRoot(), directory: Instance.directory, learn: (await Config.get()).learn, name: args.name as string, origin: "import_reviews",
-        before: staged,
-      })
-      if (sent.status === "sent") out(sent.message)
-    })
+    // altimate_change start — linked project: offer what was staged (also after a partial failure)
+    if (!args["dry-run"]) yield* run("", () =>
+      offerStagedForReview({ name: args.name as string, origin: "import_reviews", before: staged, send: args["send-for-review"] === true }))
     // altimate_change end
+    if (result?.failures) return yield* fail("Review reflection failed; signals remain queued. Rerun `learn import-reviews` to continue.")
   }),
 })
 

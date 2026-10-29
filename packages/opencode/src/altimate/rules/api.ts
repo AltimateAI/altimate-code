@@ -4,8 +4,9 @@
 //
 // Every call takes the credential captured for one scope (`ActAs`), never the ambient one: rules,
 // proposals and usage are per tenant and account, and an account switch part-way through a pull must
-// not send one account's data with another's key. Responses are parsed with zod; a malformed body is a
-// contract break and fails the call.
+// not send one account's data with another's key. Responses are parsed with zod; a malformed body fails the
+// call as `transient` (the server may already have applied it, so the client keeps what it sent and retries).
+// Pulled rules are parsed one by one: an invalid rule is skipped, not a reason to freeze every rule.
 import z from "zod"
 import { altimateRequest, ForbiddenError, NotFoundError, WorkspaceApiError, type ActAs } from "../workspace/api-client"
 
@@ -51,11 +52,12 @@ export const SyncResponse = z.object({
   is_owner: z.boolean(),
   settings: Settings,
   pending_count: z.number().int(),
-  rules: z.array(RuleOut),
+  // Each rule is validated on its own in `sync` below.
+  rules: z.array(z.unknown()),
   my_reviewed: z.array(Reviewed),
   cursor: z.string(),
 })
-export type SyncResponse = z.infer<typeof SyncResponse>
+export type SyncResponse = Omit<z.infer<typeof SyncResponse>, "rules"> & { rules: RuleOut[]; skipped: number }
 
 export const ORIGINS = ["session", "explicit", "bootstrap", "import_reviews"] as const
 export type Origin = (typeof ORIGINS)[number]
@@ -106,7 +108,10 @@ export type FailureKind =
   | "repo_not_bound"
   /** A review refused for a coded reason (verification_flagged, target_changed, version_conflict...). */
   | "conflict"
+  /** The credential was refused (expired or revoked key): nothing is wrong with what was sent. */
+  | "auth"
   | "transient"
+  /** The server refused this request's content (400/422 with a code): sending it again cannot succeed. */
   | "rejected"
 
 export class RulesApiError extends Error {
@@ -135,17 +140,23 @@ export function classify(error: unknown): RulesApiError {
     if (code === "rules_not_available" || !error.detail) return new RulesApiError("unsupported", messageOf(error.detail, message), code, 404)
     return new RulesApiError("rejected", messageOf(error.detail, message), code, 404)
   }
-  if (error instanceof ForbiddenError) return new RulesApiError("forbidden", messageOf(error.detail, message), codeOf(error.detail), 403)
+  if (error instanceof ForbiddenError) {
+    const code = codeOf(error.detail)
+    // A 403 with no code is the credential, not a decision about this workspace.
+    return code ? new RulesApiError("forbidden", messageOf(error.detail, message), code, 403) : new RulesApiError("auth", message, undefined, 403)
+  }
   if (error instanceof WorkspaceApiError) {
     const code = codeOf(error.detail)
     if (code === "repo_not_bound") return new RulesApiError("repo_not_bound", messageOf(error.detail, message), code, error.status)
-    if (error.status === undefined || error.status === 408 || error.status === 429 || error.status >= 500)
-      return new RulesApiError("transient", message, code, error.status)
-    return new RulesApiError("rejected", messageOf(error.detail, message), code, error.status)
+    if (error.status === 401 || error.status === 407) return new RulesApiError("auth", message, code, error.status)
+    // Only a coded 400/422 is about the request's content; anything else (a proxy 413, an uncoded 400) is kept.
+    if ((error.status === 400 || error.status === 422) && code) return new RulesApiError("rejected", messageOf(error.detail, message), code, error.status)
+    return new RulesApiError("transient", message, code, error.status)
   }
   const named = error as { name?: string; detail?: Record<string, unknown> } | undefined
   if (named?.name === "ConflictError") return new RulesApiError("conflict", messageOf(named.detail, message), codeOf(named.detail), 409)
-  return new RulesApiError(named?.name === "ZodError" ? "rejected" : "transient", message)
+  if (named?.name === "PreconditionFailedError") return new RulesApiError("conflict", messageOf(named.detail, message), codeOf(named.detail), 412)
+  return new RulesApiError("transient", message)
 }
 
 async function call<T>(schema: z.ZodType<T>, actAs: ActAs, method: string, datamateId: number, subpath: string, body?: unknown): Promise<T> {
@@ -157,8 +168,13 @@ async function call<T>(schema: z.ZodType<T>, actAs: ActAs, method: string, datam
   }
 }
 
-export function sync(actAs: ActAs, datamateId: number, body: { repo_remote: string; known_revision?: number; reviewed_since?: string }) {
-  return call(SyncResponse, actAs, "POST", datamateId, "/sync", body)
+export async function sync(actAs: ActAs, datamateId: number, body: { repo_remote: string; known_revision?: number; reviewed_since?: string }): Promise<SyncResponse> {
+  const raw = await call(SyncResponse, actAs, "POST", datamateId, "/sync", body)
+  const rules = raw.rules.flatMap((rule) => {
+    const parsed = RuleOut.safeParse(rule)
+    return parsed.success ? [parsed.data] : []
+  })
+  return { ...raw, rules, skipped: raw.rules.length - rules.length }
 }
 
 export async function propose(actAs: ActAs, datamateId: number, body: { repo_remote: string; items: ProposalItem[] }) {

@@ -41,6 +41,20 @@ interface Pending {
   learn: { enabled?: boolean } | undefined
   /** A reply is being carried out: a second one is refused. */
   busy?: boolean
+  /** When the card was asked (ms): cards older than `CARD_TTL_MS` are dropped. */
+  at: number
+}
+
+/** An unanswered card lasts a day; after that it is dropped rather than re-offered to every new client. */
+export const CARD_TTL_MS = 24 * 60 * 60_000
+
+function expire(now = Date.now()) {
+  for (const [id, entry] of pending) if (now - entry.at > CARD_TTL_MS) pending.delete(id)
+}
+
+/** Drop the cards of a project (its instance is going away; nobody can answer them after that). */
+export function drop(directory: string) {
+  for (const [id, entry] of pending) if (entry.directory === directory) pending.delete(id)
 }
 
 // Process-global like `question`'s registry: the server routes and the session loop may load this module
@@ -59,11 +73,14 @@ async function publish<T extends (typeof RuleEvents.Event)[keyof typeof RuleEven
 
 function build(id: string, sessionID: string, draft: Draft, state: RulesStore.State): ProposalCard {
   const linked = !!state.scope && !!state.workspace
-  const flag = verificationWarning(draft.text)
+  // Retiring removes the rule as it stands: there is no wording to edit, and removing a rule weakens nothing.
+  const flag = draft.change === "retire" ? undefined : verificationWarning(draft.text)
   const team: ProposalCard["actions"] = linked
     ? [state.workspace!.is_owner ? "approve" : "send"]
     : ["save_local"]
-  const actions: ProposalCard["actions"] = draft.choose ? ["save_memory", ...team, "dismiss"] : [...team, "edit", "dismiss"]
+  const actions: ProposalCard["actions"] = draft.choose
+    ? ["save_memory", ...team, "dismiss"]
+    : [...team, ...(draft.change === "retire" ? [] : (["edit"] as const)), "dismiss"]
   return {
     id,
     sessionID,
@@ -85,6 +102,7 @@ function build(id: string, sessionID: string, draft: Draft, state: RulesStore.St
 
 /** Show a card for `draft` in `sessionID`. Returns the card, or undefined when its topic was dismissed. */
 export async function ask(input: { sessionID: string; root: string; directory: string; learn: Pending["learn"]; draft: Draft }) {
+  expire()
   const state = await RulesStore.read(input.root)
   if (input.draft.origin === "session" && input.draft.topics.some((topic) => RulesStore.dismissed(state, topic))) return undefined
   for (const existing of pending.values())
@@ -94,19 +112,26 @@ export async function ask(input: { sessionID: string; root: string; directory: s
       return existing.card
     }
   const card = build(randomUUID(), input.sessionID, input.draft, state)
-  pending.set(card.id, { card, root: input.root, directory: input.directory, learn: input.learn })
+  pending.set(card.id, { card, root: input.root, directory: input.directory, learn: input.learn, at: Date.now() })
   await publish(RuleEvents.Event.Asked, card)
   return card
 }
 
-export function list(directory?: string): ProposalCard[] {
-  return [...pending.values()].filter((p) => !directory || p.directory === directory).map((p) => p.card)
+/** Open cards, optionally of one project and one session. */
+export function list(directory?: string, sessionID?: string): ProposalCard[] {
+  expire()
+  return [...pending.values()]
+    .filter((p) => (!directory || p.directory === directory) && (!sessionID || p.card.sessionID === sessionID))
+    .map((p) => p.card)
 }
 
 export type ReplyAction = ProposalCard["actions"][number]
+/** Why a reply did not go through, for clients and HTTP status: the card is gone, the request does not fit this
+ * card (or another reply is running), the new wording failed the lint, or the action itself failed. */
+export type ReplyFailure = "not_open" | "busy" | "not_available" | "invalid_text" | "failed"
 export type ReplyResult =
   | { ok: true; message: string; card?: ProposalCard; closed: boolean }
-  | { ok: false; error: string; card?: ProposalCard }
+  | { ok: false; code: ReplyFailure; error: string; card?: ProposalCard }
 
 /** Lint an edited wording like the curator does for any rule: one line, within the limit, no commands. */
 function editProblem(text: string): string | undefined {
@@ -127,20 +152,27 @@ export function slug(text: string): string {
  * chosen action succeeds. */
 export async function reply(id: string, input: { action: ReplyAction; text?: string }, directory?: string): Promise<ReplyResult> {
   const entry = pending.get(id)
-  if (!entry || (directory !== undefined && entry.directory !== directory)) return { ok: false, error: "This proposal is no longer open." }
-  if (entry.busy) return { ok: false, error: "This proposal is already being answered.", card: entry.card }
+  if (!entry || (directory !== undefined && entry.directory !== directory))
+    return { ok: false, code: "not_open", error: "This proposal is no longer open." }
+  if (entry.busy) return { ok: false, code: "busy", error: "This proposal is already being answered.", card: entry.card }
   const { card } = entry
-  if (!card.actions.includes(input.action)) return { ok: false, error: `"${input.action}" is not available for this proposal.`, card }
+  if (!card.actions.includes(input.action))
+    return { ok: false, code: "not_available", error: `"${input.action}" is not available for this proposal.`, card }
 
   if (input.action === "edit") {
     const text = (input.text ?? "").trim()
     const problem = editProblem(text)
-    if (problem) return { ok: false, error: `Not changed: the rule ${problem}.`, card }
+    if (problem) return { ok: false, code: "invalid_text", error: `Not changed: the rule ${problem}.`, card }
     const flag = verificationWarning(text)
     const next: ProposalCard = { ...card, text, chars: text.length, weakens_verification: flag }
     if (!flag) delete next.weakens_verification
-    entry.card = next
-    await publish(RuleEvents.Event.Updated, next)
+    entry.busy = true
+    try {
+      entry.card = next
+      await publish(RuleEvents.Event.Updated, next)
+    } finally {
+      entry.busy = false
+    }
     return { ok: true, message: "Wording updated.", card: next, closed: false }
   }
 
@@ -150,7 +182,7 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
     message = await act(entry, input.action)
   } catch (error) {
     log.warn("rule proposal reply failed", { action: input.action, error })
-    return { ok: false, error: `Not done: ${error instanceof Error ? error.message : String(error)}`, card }
+    return { ok: false, code: "failed", error: `Not done: ${error instanceof Error ? error.message : String(error)}`, card: entry.card }
   } finally {
     entry.busy = false
   }
@@ -182,13 +214,15 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
     message = "Saved as a rule for this project."
   } else {
     const approve = action === "approve" ? (card.weakens_verification ? "approve_anyway" : "approve") : undefined
-    // The workspace decides whether the person's words travel with a proposal.
+    // The workspace decides whether the person's words travel with a proposal: without quotes, `why` (which can
+    // paraphrase the correction) is replaced by a neutral line too.
     const quotes = (await RulesStore.read(entry.root)).settings?.include_quotes !== false
-    await RulesSync.enqueue(entry.root, {
+    const why = card.why ? (quotes ? redactSecrets(card.why) : neutralWhy(card)) : undefined
+    const outboxId = await RulesSync.enqueue(entry.root, {
       change: card.change,
       text: card.text,
       applies_to: card.applies_to,
-      ...(card.why ? { why: card.why } : {}),
+      ...(why ? { why } : {}),
       origin: card.origin,
       ...(card.replaces ? { replaces: card.replaces.public_id, replaces_version: card.replaces.version } : {}),
       evidence_sessions: card.evidence.sessions,
@@ -197,15 +231,32 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
         : [],
     }, approve)
     const report = await RulesSync.runFresh(entry.root, entry.directory, entry.learn).catch(() => undefined)
-    const sent = report?.push?.sent.find((s) => s.text === card.text)
+    const outcome = RulesSync.outcomeOf(await RulesStore.read(entry.root), report, outboxId, card.text)
     const owner = card.workspace?.owner_name ?? "the workspace owner"
-    if (!sent) message = `Queued: it will be sent to ${owner}'s review queue when the workspace is reachable.`
-    else if (sent.error) message = `Not sent: ${sent.error}`
-    else if (sent.status === "exists") message = "Already a team rule (or waiting for review): nothing new sent."
-    else if (sent.approved) message = `Approved: now a team rule in ${card.workspace?.name ?? "the workspace"}.`
-    else message = `Sent to ${owner}'s review queue in ${card.workspace?.name ?? "the workspace"}.`
+    const ws = card.workspace?.name ?? "the workspace"
+    if (outcome.status === "queued") {
+      message = `Queued: it will be sent to ${owner}'s review queue when the workspace is reachable.`
+    } else if (outcome.row?.error) {
+      // Refused (e.g. an invalid wording): the card stays open so the wording can be edited and sent again.
+      throw new Error(`not sent: ${outcome.row.error}`)
+    } else if (outcome.row?.status === "exists") {
+      message = "Already a team rule (or waiting for review): nothing new sent."
+    } else if (outcome.row?.approved || outcome.sent?.status === "active") {
+      message = `Approved: now a team rule in ${ws}.`
+    } else if (outcome.row?.approve_error) {
+      message = `Sent to ${owner}'s review queue in ${ws}, but approving it failed (${outcome.row.approve_error}). Approve it in the workspace's Rules tab.`
+    } else {
+      message = `Sent to ${owner}'s review queue in ${ws}.`
+    }
   }
   return message
+}
+
+/** `why` without the drafter's wording, for a workspace that keeps the person's words out of proposals. */
+function neutralWhy(card: ProposalCard): string {
+  if (card.origin === "explicit") return "Asked to remember this"
+  if (card.change !== "add") return "Corrected after the rule was shown"
+  return card.evidence.sessions > 1 ? `Corrected in ${card.evidence.sessions} sessions` : "Corrected in a session"
 }
 
 /** A session reference the server can count without learning the session id. */

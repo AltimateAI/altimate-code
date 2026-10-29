@@ -2,7 +2,9 @@
 //
 // Per instance: keep workspace rules fresh and turn a session's corrections into proposal cards.
 //
-// - Sync in the background at start, then every `REFRESH_MS` (approved rules reach sessions within minutes).
+// - Sync in the background at start, then every `REFRESH_MS` (approved rules reach sessions within minutes), for a
+//   project that is linked (local binding or pulled state); others pay no network call. The timer and the idle
+//   hook are always registered and check the settings each time, so turning learning on later needs no restart.
 // - Capture corrections when learning is on for this project: the person's own setting, else the
 //   workspace's "Learn from sessions" (see `learningEnabled`). Capture enabled in config starts on its own;
 //   capture started here stops when learning turns off (setting changed, or the project unlinked).
@@ -25,14 +27,24 @@ const log = Log.create({ service: "rules.service" })
 
 type LearnConfig = { enabled?: boolean; capture?: boolean; model?: string } | undefined
 
-/** The loaded config's `learn`, with the project file's `learn` as it is on disk now (`learn enable/disable`
- * and `/rules` write it while the session runs). */
-async function learnConfig(ctx: InstanceContext): Promise<LearnConfig> {
-  const [{ Config }, { readProjectLearning }] = await Promise.all([import("@/config/config"), import("../learn/project-config")])
-  const loaded = Config.peek(ctx)?.learn as LearnConfig
-  const root = ctx.worktree !== "/" ? ctx.worktree : ctx.directory
-  const onDisk = (await readProjectLearning(root, ctx.directory).catch(() => undefined)) as LearnConfig
+/** `loaded` (the session's config) with the project file's `learn` as it is on disk now: `learn enable/disable`
+ * write it while the session runs. Shared by the service and the routes so both decide the same way. */
+export async function effectiveLearn(loaded: LearnConfig, root: string, directory: string): Promise<LearnConfig> {
+  const { readProjectLearning } = await import("../learn/project-config")
+  const onDisk = (await readProjectLearning(root, directory).catch(() => undefined)) as LearnConfig
   return loaded || onDisk ? { ...loaded, ...onDisk } : undefined
+}
+
+async function learnConfig(ctx: InstanceContext): Promise<LearnConfig> {
+  const { Config } = await import("@/config/config")
+  return effectiveLearn(Config.peek(ctx)?.learn as LearnConfig, ctx.worktree !== "/" ? ctx.worktree : ctx.directory, ctx.directory)
+}
+
+/** Whether a pull can find anything: pulled state, or a local workspace binding. No network. */
+async function linked(root: string, directory: string): Promise<boolean> {
+  if ((await RulesStore.read(root).catch(() => undefined))?.scope) return true
+  const { readLocalBinding } = await import("../workspace/state")
+  return !!(await readLocalBinding(directory).catch(() => null))
 }
 
 function deps(ctx: InstanceContext, model?: string): RuleTrigger.TriggerDeps {
@@ -73,9 +85,20 @@ export async function syncNow(root: string, directory: string, learn: Parameters
   return report
 }
 
+/**
+ * The bounded pull before a session's first turn, so it sees rules approved since the last refresh, with the
+ * notices it brings published. The session loop calls it once per session; later prompts rely on the timer.
+ */
+export async function sessionStart(root: string, directory: string, learn: LearnConfig): Promise<void> {
+  if (!RulesSync.rulesEnabled(learn) || !(await linked(root, directory))) return
+  // A project with no rules state yet only waits for the service's first pull if it is running: starting one here
+  // would add up to `SESSION_WAIT_MS` to the first prompt of every session in a project without rules.
+  const hasState = !!(await RulesStore.read(root).catch(() => undefined))?.scope
+  await RulesSync.sessionStart(root, directory, learn, { startIfDue: hasState, onReport: (report) => publishNotices(directory, report) })
+}
+
 export async function start(ctx: InstanceContext): Promise<void> {
   try {
-    if (!RulesSync.rulesEnabled(await learnConfig(ctx))) return
     const root = await fs.realpath(ctx.worktree !== "/" ? ctx.worktree : ctx.directory)
     const { Instance } = await import("@/project/instance")
     let disposed = false
@@ -106,7 +129,7 @@ export async function start(ctx: InstanceContext): Promise<void> {
     const refresh = Instance.bind(async () => {
       if (disposed) return
       const learn = await learnConfig(ctx)
-      if (!RulesSync.rulesEnabled(learn)) return void (await followLearning(learn))
+      if (!RulesSync.rulesEnabled(learn) || !(await linked(root, ctx.directory))) return void (await followLearning(learn))
       const report = await syncNow(root, ctx.directory, learn).catch((error) => {
         log.warn("rules sync failed", { error: error instanceof Error ? error.message : String(error) })
         return undefined
@@ -125,8 +148,13 @@ export async function start(ctx: InstanceContext): Promise<void> {
       await flushCapture()
       await RuleTrigger.afterTurn({ sessionID, root, directory: ctx.directory, learn, deps: deps(ctx, learn?.model) })
     })
+    // A settings change (`/rules` learning on/off) starts or stops capture now, not at the next refresh.
+    const onChanged = Instance.bind(async () => {
+      if (!disposed) await followLearning(await learnConfig(ctx))
+    })
     const stop = Bus.subscribeAll((event) => {
       if (event.type === "session.idle") void onIdle(event.properties.sessionID)
+      if (event.type === RuleEvents.Event.Changed.type && (event.properties as { directory?: string }).directory === ctx.directory) void onChanged()
     })
     const unregister = registerDisposer(async (directory) => {
       if (directory !== ctx.directory) return
@@ -134,6 +162,9 @@ export async function start(ctx: InstanceContext): Promise<void> {
       clearInterval(timer)
       stop()
       unregister()
+      // Cards nobody answered go with the instance: they cannot be answered after it.
+      const { RuleProposal } = await import("./proposal")
+      RuleProposal.drop(ctx.directory)
       // The capture's own disposer stops it too; this covers a stop handle taken before disposal.
       await stopCapture?.()
       stopCapture = undefined
