@@ -166,14 +166,13 @@ export namespace AltimateApi {
     await rm(credentialsPath(), { force: true })
   }
 
-  /** Directories whose project config a session in `directory` loads: `directory` up to the git root,
-   *  or `directory` alone outside git. Matches where `datamate add` writes project entries. */
+  /** Directories whose project config a session in `directory` loads, mirroring `ConfigPaths`: `directory`
+   *  up to the git root (every ancestor outside git, where the worktree is "/"), plus `~/.altimate-code`. */
   async function projectConfigDirs(directory: string): Promise<string[]> {
-    const dirs: string[] = []
+    const dirs = [Global.Path.home]
     for (let dir = directory; ; dir = path.dirname(dir)) {
       dirs.push(dir)
-      if (await Filesystem.exists(path.join(dir, ".git"))) return dirs
-      if (path.dirname(dir) === dir) return [directory]
+      if (path.dirname(dir) === dir || (await Filesystem.exists(path.join(dir, ".git")))) return [...new Set(dirs)]
     }
   }
 

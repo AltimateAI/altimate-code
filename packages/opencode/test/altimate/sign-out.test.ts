@@ -60,6 +60,26 @@ describe("AltimateApi.signOut", () => {
     expect(await AltimateApi.isConfigured()).toBe(false)
   })
 
+  test("outside git, removes entries in every ancestor config and in ~/.altimate-code", async () => {
+    const plain = path.join(tmpRoot, "plain")
+    const plainConfig = path.join(plain, ".altimate-code", "altimate-code.json")
+    const homeConfig = path.join(home, ".altimate-code", "altimate-code.json")
+    await writeJson(AltimateApi.credentialsPath(), {
+      altimateUrl: "https://api.test",
+      altimateInstanceName: "tenant",
+      altimateApiKey: "gateway-test-key",
+    })
+    await writeJson(plainConfig, { mcp: { "datamate-sales": datamateEntry("gateway-test-key") } })
+    await writeJson(homeConfig, { mcp: { "datamate-ops": datamateEntry("gateway-test-key") } })
+
+    const removed = await AltimateApi.signOut(path.join(plain, "a", "b"))
+
+    expect(removed).toContainEqual({ name: "datamate-sales", path: plainConfig })
+    expect(removed).toContainEqual({ name: "datamate-ops", path: homeConfig })
+    expect(await readJson(plainConfig)).toEqual({ mcp: {} })
+    expect(await readJson(homeConfig)).toEqual({ mcp: {} })
+  })
+
   test("keeps the credential file and MCP entries when the saved key can't be read", async () => {
     delete process.env.SIGN_OUT_TEST_MISSING_KEY
     await writeJson(AltimateApi.credentialsPath(), {
