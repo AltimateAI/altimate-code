@@ -14,6 +14,7 @@ import { Dispatcher } from "../../../src/altimate/native"
 import type { Connector } from "@altimateai/drivers/types"
 import { closeScratch } from "../../../src/altimate/native/connections/scratch"
 import { EXPOSED } from "../../../src/altimate/tool-cli/allow-list"
+import * as CommitChecks from "../../../src/altimate/tools/answer-commit-checks"
 
 // The original data toolset the size budgets below were set for; the allow-list adds more tools around it.
 const CORE_TOOLS = new Set(["answer_commit", "schema_inspect", "sql_check", "sql_execute", "sql_materialize", "warehouse_add", "warehouse_list"])
@@ -176,6 +177,19 @@ mcpTest("schema_inspect lists schemas, then SQLite tables without scanning for r
   }
 })
 // altimate_change end
+
+mcpTest("allTools denies warehouse_remove and driver installs without allow-write", async () => {
+  const { call } = await fixture()
+  for (const [name, args] of [
+    ["warehouse_remove", { name: "source" }],
+    ["warehouse_install_driver", { engine: "duckdb" }],
+  ] as const) {
+    const result = await call(name, args)
+    expect(result.isError).toBe(true)
+    expect(text(result)).toContain("--allow-write")
+  }
+  expect(text(await call("warehouse_list", {}))).toContain("source")
+})
 
 mcpTest("source writes are denied by default and cannot modify the source", async () => {
   const { call } = await fixture()
@@ -605,6 +619,36 @@ mcpTest("answer_commit rejects a missing asked item at most twice, then accepts"
   }
   expect((await call("answer_commit", args)).isError).toBeFalsy()
 })
+
+mcpTest("the session record stays bounded across many accepted commits, and the current turn is intact", async () => {
+  const { call } = await fixture(false, {}, undefined, (db) => {
+    db.run("CREATE TABLE big (v TEXT)")
+    for (let i = 0; i < 400; i++) db.run("INSERT INTO big VALUES (?)", ["z".repeat(190)])
+  })
+  const wide = Array.from({ length: 90 }, (_, i) => `v || '${i}' AS c${i}`).join(", ")
+  let record: { parts: { state?: { output?: unknown } }[] }[] = []
+  const spy = spyOn(CommitChecks, "sessionNumbers").mockImplementation((messages) => {
+    record = messages as typeof record
+    return undefined
+  })
+  try {
+    let produced = 0
+    for (let turn = 0; turn < 280; turn++) {
+      const rows = await call("sql_execute", { warehouse: "source", query: `SELECT ${wide} FROM big` })
+      produced += text(rows).length
+      expect((await call("answer_commit", commit([{ name: "item", value: "apple" }], ["item"]))).isError).toBeFalsy()
+    }
+    expect(produced).toBeGreaterThan(CommitChecks.MAX_SCANNED_CHARACTERS)
+    const retained = record.reduce((n, m) => n + m.parts.reduce((k, p) => k + String(p.state?.output ?? "").length, 0), 0)
+    expect(retained).toBeLessThanOrEqual(CommitChecks.MAX_SCANNED_CHARACTERS)
+    // Rejections of the current turn are still counted after trimming.
+    const args = commit([{ name: "item", value: "apple" }], ["item", "count"])
+    for (let i = 0; i < 2; i++) expect((await call("answer_commit", args)).isError).toBe(true)
+    expect((await call("answer_commit", args)).isError).toBeFalsy()
+  } finally {
+    spy.mockRestore()
+  }
+}, 60_000)
 
 // The server cannot see numbers the client computed in its own shell or code, so over MCP a number
 // absent from this server's query output is accepted on the first commit (native sessions still check).

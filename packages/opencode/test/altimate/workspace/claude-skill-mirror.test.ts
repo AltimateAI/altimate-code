@@ -2,7 +2,8 @@
 // Coverage for the Claude Code skill mirror (src/altimate/workspace/claude-skill-mirror.ts).
 // The marker name, `.gitignore` and layout are shared with the Claude Code plugin's Python
 // script, so the cases follow that script's own tests.
-import { afterAll, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import fsp from "fs/promises"
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -322,6 +323,45 @@ describe("claude skill mirror", () => {
     symlinkSync(path.join(outside, "secret.txt"), path.join(project, MANAGED, "sk_1", "link.txt"))
     await mirrorClaudeSkills(project)
     expect(existsSync(skillPath("a", "link.txt"))).toBe(false)
+  })
+
+  test.each(["sync", "withdraw"])("a symlinked .claude is left alone on %s", async (mode) => {
+    const outside = path.join(SANDBOX, `outside-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(path.join(outside, "skills", "keep"), { recursive: true })
+    writeFileSync(path.join(outside, "skills", "keep", MARKER), "x")
+    rmSync(path.join(project, ".claude"), { recursive: true })
+    symlinkSync(outside, path.join(project, ".claude"))
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha") } })
+    expect(await mirrorClaudeSkills(project, { withdraw: mode === "withdraw" })).toEqual({ changed: false })
+    expect(readdirSync(path.join(outside, "skills"))).toEqual(["keep"])
+  })
+
+  test.each(["sync", "withdraw"])("a symlinked .claude/skills is left alone on %s", async (mode) => {
+    const outside = path.join(SANDBOX, `outside-${Math.random().toString(36).slice(2)}`)
+    mkdirSync(path.join(outside, "keep"), { recursive: true })
+    writeFileSync(path.join(outside, "keep", MARKER), "x")
+    symlinkSync(outside, path.join(project, ".claude", "skills"))
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha") } })
+    expect(await mirrorClaudeSkills(project, { withdraw: mode === "withdraw" })).toEqual({ changed: false })
+    expect(readdirSync(outside)).toEqual(["keep"])
+  })
+
+  test("a failed swap restores the previous copy", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha", "one") } })
+    await mirrorClaudeSkills(project)
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha", "two") } })
+    const rename = fsp.rename.bind(fsp)
+    const spy = spyOn(fsp, "rename").mockImplementation(async (from, to) => {
+      if (!String(from).endsWith(".old") && String(to) === path.join(project, ".claude", "skills", "alpha")) throw new Error("swap failed")
+      return rename(from, to)
+    })
+    try {
+      expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(read(skillPath("alpha"))).toContain('description: "one"')
+    expect(readdirSync(path.join(project, ".claude", "skills"))).toEqual(["alpha"])
   })
 
   test("withdraw removes marked copies whatever the snapshot says", async () => {

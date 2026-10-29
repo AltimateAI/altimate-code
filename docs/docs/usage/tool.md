@@ -53,7 +53,7 @@ Runs are read-only by default. Reads such as `sql_execute` on a SELECT and `sche
 
 ## Daemon
 
-`tool run` starts a background process per project directory and CLI version on first use, and reuses it afterwards so warehouse connections and the schema cache stay warm. If it cannot be reached within about 3 seconds, the call runs in-process. `scratch` tables created by `sql_materialize` live as long as the daemon does.
+`tool run` starts a background process per project directory and CLI version on first use, and reuses it afterwards so warehouse connections and the schema cache stay warm. If it cannot be reached within about 3 seconds, the call runs in-process. `scratch` tables created by `sql_materialize` live as long as the daemon does. Every caller in that directory shares the daemon, so concurrent agents share its `scratch` tables and its `answer_commit` history; use `--no-daemon` to keep a caller separate.
 
 ```bash
 altimate-code tool daemon status

@@ -152,3 +152,5 @@ export const EXPOSED: Record<string, Source> = {
 
 /** Tools that change local configuration or install software; these need `--allow-write`. */
 export const WRITE_TOOLS: ReadonlySet<string> = new Set(["warehouse_add", "warehouse_remove", "warehouse_install_driver"])
+/** Write tools that stay available read-only over MCP: warehouse_add is part of the default lean toolset. */
+export const MCP_OPEN_WRITE_TOOLS: ReadonlySet<string> = new Set(["warehouse_add"])

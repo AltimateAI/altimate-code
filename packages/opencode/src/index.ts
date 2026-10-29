@@ -51,9 +51,9 @@ import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change end
 // altimate_change start — check: deterministic SQL check command
 import { CheckCommand } from "./cli/cmd/check"
+// altimate_change end
 // altimate_change start — tool: model-free data tool access
 import { ToolCommand } from "./cli/cmd/tool"
-// altimate_change end
 // altimate_change end
 // altimate_change start — learn: playbook learning loop command
 import { LearnCommand } from "./cli/cmd/learn"

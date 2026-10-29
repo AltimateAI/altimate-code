@@ -251,6 +251,7 @@ async function sync(directory: string, withdraw: boolean): Promise<boolean> {
     wanted.add(name)
     await fs.mkdir(targetRoot, { recursive: true })
     const staging = await fs.mkdtemp(path.join(targetRoot, `.${name}.`))
+    const aside = `${staging}.old`
     try {
       try {
         await buildCopy(skill, staging)
@@ -260,8 +261,16 @@ async function sync(directory: string, withdraw: boolean): Promise<boolean> {
       }
       const exists = await isDir(target)
       if (exists && (await sameTree(staging, target))) continue
-      if (exists) await fs.rm(target, { recursive: true, force: true })
-      await fs.rename(staging, target)
+      // Move the old copy aside rather than deleting it, so a failed swap leaves it in place.
+      if (exists) await fs.rename(target, aside)
+      try {
+        await fs.rename(staging, target)
+      } catch (err) {
+        if (exists) await fs.rename(aside, target).catch(() => {})
+        throw err
+      }
+      // Only after a successful swap: if restoring failed above, the aside copy is the only one left.
+      await fs.rm(aside, { recursive: true, force: true }).catch(() => {})
       changed = true
     } finally {
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
@@ -296,6 +305,9 @@ export async function mirrorClaudeSkills(
     if (process.env.ALTIMATE_CLAUDE_SKILL_SYNC === "0") return { changed: false }
     const project = path.resolve(directory)
     if (!(await lexists(path.join(project, ".claude")))) return { changed: false }
+    // A symlinked `.claude` or `.claude/skills` could point outside the project; never write or remove through it.
+    for (const link of [path.join(project, ".claude"), path.join(project, SKILLS_DIR)])
+      if (await fs.lstat(link).then((st) => st.isSymbolicLink(), () => false)) return { changed: false }
     return { changed: await sync(project, opts?.withdraw === true) }
   } catch (err) {
     log.warn("workspace skill copy to .claude/skills failed", { err: String(err) })

@@ -1,7 +1,7 @@
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { NodePath } from "@effect/platform-node"
 import { Effect, Layer } from "effect"
-import { mkdir, mkdtemp, chmod, readdir, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, chmod, lstat, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
@@ -11,9 +11,10 @@ import { Truncate } from "@/tool/truncate"
 import { outputLimits } from "./output-settings"
 import { renderAnswer } from "../tools/answer-commit"
 import { AnswerCommitConjunction } from "../tools/answer-commit-conjunction"
+import { MAX_SCANNED_CHARACTERS } from "../tools/answer-commit-checks"
 import * as Precedence from "../workspace/precedence"
 // altimate_change start — one tool set shared by `mcp serve` and `tool`
-import { EXPOSED, WRITE_TOOLS } from "../tool-cli/allow-list"
+import { EXPOSED, MCP_OPEN_WRITE_TOOLS, WRITE_TOOLS } from "../tool-cli/allow-list"
 import { askFor, denied } from "../tool-cli/permissions"
 // altimate_change end
 import { closeScratch } from "../native/connections/scratch"
@@ -325,6 +326,7 @@ const RESULT_RETENTION_MS = 24 * 60 * 60 * 1000
 
 async function persistentDirectory(directory: string) {
   await mkdir(directory, { recursive: true, mode: 0o700 })
+  if ((await lstat(directory)).isSymbolicLink()) throw new Error(`Refusing to use the results directory ${directory}: it is a symlink.`)
   await chmod(directory, 0o700)
   const cutoff = Date.now() - RESULT_RETENTION_MS
   for (const name of await readdir(directory).catch(() => [])) {
@@ -398,6 +400,14 @@ export async function createAdapter(options: AdapterOptions = {}) {
       return result
     }
     messages.push(userMessage())
+    // Earlier turns beyond what the commit checks can scan are dead weight; the new turn is never trimmed.
+    const size = (message: TurnMessage) =>
+      (message.parts as { state?: { output?: unknown }; text?: string }[]).reduce(
+        (total, part) => total + String(part.state?.output ?? part.text ?? "").length,
+        0,
+      )
+    let retained = messages.slice(0, -1).reduce((total, message) => total + size(message), 0)
+    while (retained > MAX_SCANNED_CHARACTERS && messages.length > 1) retained -= size(messages.shift()!)
     return { ...result, output: finalAnswerText(args, result.metadata.committed_text ?? result.output, request) }
   }
   const advertised = new Map([...tools].filter(([name]) => options.allTools || DEFAULT_TOOLS.has(name)))
@@ -438,7 +448,7 @@ export async function createAdapter(options: AdapterOptions = {}) {
       signal.throwIfAborted()
       const tool = advertised.get(name)
       if (!tool) throw new Error(`Unknown tool: ${name}`)
-      if (options.cli && WRITE_TOOLS.has(name) && !allowWrite) throw denied(name, retry)
+      if (WRITE_TOOLS.has(name) && (options.cli || !MCP_OPEN_WRITE_TOOLS.has(name)) && !allowWrite) throw denied(name, retry)
       const ctx: Tool.Context = {
         sessionID,
         messageID: `mcp-${randomUUID()}` as MessageID,

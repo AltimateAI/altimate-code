@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync, symlinkSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import net from "node:net"
 import { tmpdir } from "node:os"
@@ -114,6 +114,28 @@ describe("daemon round trip", () => {
   })
 })
 
+describe("file lock release", () => {
+  test("releases once after concurrent requests finish, never while one is in flight", async () => {
+    const dir = await temp()
+    const file = path.join(dir, "d.sock")
+    const gates: Array<() => void> = []
+    const runner = fakeRunner()
+    runner.run = () =>
+      new Promise((resolve) => gates.push(() => resolve({ status: "ok" as const, title: "t", output: "", metadata: {} })))
+    let releases = 0
+    const daemon = await startDaemon({ directory: dir, version: "1", runner, file, idleMs: 60_000, releaseFiles: async () => void releases++ })
+    cleanups.push(() => daemon.stop())
+    const replies = [send(file, { id: "1", name: "t" }), send(file, { id: "2", name: "t" })]
+    while (gates.length < 2) await new Promise((resolve) => setTimeout(resolve, 10))
+    gates[0]()
+    await replies[0]
+    expect(releases).toBe(0)
+    gates[1]()
+    await replies[1]
+    expect(releases).toBeGreaterThanOrEqual(1)
+  })
+})
+
 describe("idle shutdown", () => {
   test("exits after the idle timeout and removes its socket", async () => {
     const { file, daemon, runner } = await start(150)
@@ -145,12 +167,36 @@ describe("stale and contested sockets", () => {
     expect(existsSync(file)).toBe(true)
   }
 
-  test("a client treats a stale socket as no daemon and removes it", async () => {
+  test("a client treats a stale socket as no daemon and leaves it alone", async () => {
     const dir = await temp()
     const file = path.join(dir, "d.sock")
     await staleSocket(file)
     expect(await send(file, { id: "1", name: "t" })).toBeUndefined()
-    expect(existsSync(file)).toBe(false)
+    expect(existsSync(file)).toBe(true)
+  })
+
+  test("a held fresh lock makes a second daemon report a lost race", async () => {
+    const dir = await temp()
+    const file = path.join(dir, "d.sock")
+    mkdirSync(`${file}.lock`)
+    await expect(startDaemon({ directory: dir, version: "1", runner: fakeRunner(), file })).rejects.toThrow("already running")
+    expect(existsSync(`${file}.lock`)).toBe(true)
+  })
+
+  test("the lock is removed once the daemon is listening", async () => {
+    const { file } = await start()
+    expect(existsSync(`${file}.lock`)).toBe(false)
+  })
+
+  test("refuses a socket directory that is a symlink", async () => {
+    const dir = await temp()
+    const real = path.join(dir, "real")
+    mkdirSync(real)
+    const link = path.join(dir, "link")
+    symlinkSync(real, link)
+    await expect(
+      startDaemon({ directory: dir, version: "1", runner: fakeRunner(), file: path.join(link, "d.sock") }),
+    ).rejects.toThrow("symlink")
   })
 
   test("a new daemon replaces a stale socket", async () => {
