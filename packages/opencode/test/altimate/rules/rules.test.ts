@@ -191,7 +191,12 @@ describe("proposal card", () => {
     const root = await tmp()
     const card = (await RuleProposal.ask({ sessionID: "s3", root, directory: root, learn: undefined, draft }))!
     expect(await RuleProposal.reply(card.id, { action: "dismiss" })).toMatchObject({ ok: true, closed: true })
-    expect(RulesStore.dismissed(await RulesStore.read(root), "ordered_at")).toBe(true)
+    const dismissed = await RulesStore.read(root)
+    expect(RulesStore.dismissed(dismissed, "ordered_at")).toBe(true)
+    // For 30 days, and no longer.
+    const until = Date.parse(dismissed.dismissed.find((d) => d.topic === "ordered_at")!.until)
+    expect(Math.abs(until - (Date.now() + 30 * 24 * 60 * 60_000))).toBeLessThan(60_000)
+    expect(RulesStore.dismissed(dismissed, "ordered_at", until + 1)).toBe(false)
     expect(await RuleProposal.ask({ sessionID: "s3", root, directory: root, learn: undefined, draft: { ...draft, text: "Another wording." } })).toBeUndefined()
     expect(await RuleProposal.reply(card.id, { action: "send" })).toMatchObject({ ok: false })
   })
