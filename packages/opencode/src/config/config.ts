@@ -224,6 +224,13 @@ const LocalInfo = ConfigV1.Info
 type LocalInfo = ConfigV1.Info
 // altimate_change end
 
+// altimate_change start — the loader's validation of one parsed source, side-effect free, for the
+// telemetry opt-out probe that reads the config before an Instance exists. Throws as loadConfig does.
+export function validateLoaded(parsed: unknown, source: string): LocalInfo {
+  return ConfigParse.schema(LocalInfo, normalizeLoadedConfig(parsed), source)
+}
+// altimate_change end
+
 // altimate_change start — opencode config includes local learn settings
 type Info = LocalInfo & {
 // altimate_change end

@@ -4,6 +4,10 @@ import { randomBytes } from "crypto"
 import { lookup } from "mime-types"
 import { realpathSync } from "fs"
 import { basename, dirname, isAbsolute, join, relative, resolve as pathResolve } from "path"
+// altimate_change start — path and link helpers for Filesystem.realLocation
+import { parse, sep } from "path"
+import { lstatSync, readlinkSync } from "fs"
+// altimate_change end
 // altimate_change start — upstream_fix: convert Git Bash/Cygwin/WSL paths before Windows realpath
 import { win32 } from "path"
 // altimate_change end
@@ -202,6 +206,57 @@ export namespace Filesystem {
     if (isAbsolute(rel)) return false
     return !rel.startsWith("..")
   }
+
+  // altimate_change start — real location of a path that may not exist yet
+  // Resolves symlinks one segment at a time, so ".." steps out of where a link really points (as
+  // the kernel does; realpath normalizes ".." lexically first) and the segments that do not exist
+  // yet are kept as written. A link whose target does not exist yet is followed too, so a write
+  // through it is checked where it lands. Undefined for a relative path. Throws, like the kernel's
+  // ELOOP, when more than 40 such links are followed in one resolution.
+  export function realLocation(p: string): string | undefined {
+    return resolveLocation(p, { links: 40 })
+  }
+
+  function resolveLocation(p: string, budget: { links: number }): string | undefined {
+    const { root } = parse(p)
+    if (!root) return undefined
+    const segments = p.slice(root.length).split(process.platform === "win32" ? /[\\/]/ : "/")
+    if (!segments.includes("..")) {
+      try {
+        return realpathSync(p)
+      } catch {}
+    }
+    let real = root
+    for (const segment of segments) {
+      if (!segment || segment === ".") continue
+      if (segment === "..") {
+        real = dirname(real)
+        continue
+      }
+      const next = join(real, segment)
+      try {
+        real = realpathSync(next)
+      } catch {
+        real = danglingLinkTarget(next, real, budget) ?? next
+      }
+    }
+    return real
+  }
+
+  function danglingLinkTarget(link: string, dir: string, budget: { links: number }) {
+    let target: string
+    try {
+      if (!lstatSync(link).isSymbolicLink()) return undefined
+      target = readlinkSync(link)
+    } catch {
+      return undefined
+    }
+    if (--budget.links < 0)
+      throw Object.assign(new Error(`Too many symbolic links while resolving ${link}`), { code: "ELOOP" })
+    // Concatenated, not joined: join would collapse ".." in the target before the walk follows it.
+    return resolveLocation(isAbsolute(target) ? target : `${dir}${sep}${target}`, budget)
+  }
+  // altimate_change end
 
   /**
    * Symlink-aware containment check. Resolves both paths to their real

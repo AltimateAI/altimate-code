@@ -15,6 +15,7 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createSignal, Show } from "solid-js"
 import { AltimateApi } from "@/altimate/api/client"
+import { Telemetry } from "@/altimate/telemetry"
 
 const id = "altimate:provider-credentials"
 
@@ -89,6 +90,8 @@ async function logout(api: TuiPluginApi) {
     const removed = await AltimateApi.signOut(api.state.path.directory)
     // A pasted url::instance::key in the auth store keeps the provider loader's fallback path live.
     await api.client.auth.remove({ providerID: PROVIDER_ID }, { throwOnError: true })
+    // Rows from here on carry no account; the batch already buffered keeps the one it was tracked under.
+    void Telemetry.refreshIdentity().catch(() => {})
     await api.client.instance.dispose()
     const mcpNote = removed.length > 0 ? ` and removed ${removed.map((entry) => entry.name).join(", ")}` : ""
     api.ui.toast({ variant: "success", message: `Signed out of Altimate LLM Gateway${mcpNote}` })

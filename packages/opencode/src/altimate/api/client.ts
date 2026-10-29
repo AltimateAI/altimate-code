@@ -4,6 +4,7 @@ import { rm } from "node:fs/promises"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
 import { findAllConfigPaths, listMcpInConfig, readMcpEntryFromDisk, removeMcpFromConfig } from "../../mcp/config"
+import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 const DEFAULT_MCP_URL = "https://mcpserver.getaltimate.com/sse"
 // altimate_change start — default Altimate API URL when user omits it from the TUI credential entry
@@ -65,6 +66,12 @@ const IntegrationSummary = z.object({
 export namespace AltimateApi {
   export function credentialsPath(): string {
     return path.join(Global.Path.home, ".altimate", "altimate.json")
+  }
+
+  /** Names this client on every backend call so the server can attribute create and link
+   * calls to altimate-code rather than to the web app or the extension. */
+  export function clientHeaders(): Record<string, string> {
+    return { "x-altimate-client": `altimate-code/${InstallationVersion}` }
   }
 
   export async function isConfigured(): Promise<boolean> {
@@ -208,6 +215,7 @@ export namespace AltimateApi {
           "x-tenant": creds.altimateInstanceName,
           Authorization: `Bearer ${creds.altimateApiKey}`,
           "Content-Type": "application/json",
+          ...clientHeaders(),
         },
         // altimate_change start — upstream_fix: attach abort signal
         signal: controller.signal,
@@ -247,6 +255,7 @@ export namespace AltimateApi {
       headers: {
         "x-tenant": instance,
         "Content-Type": "application/json",
+        ...clientHeaders(),
       },
       body: JSON.stringify({ token }),
       signal: controller.signal,
@@ -275,6 +284,7 @@ export namespace AltimateApi {
           "Content-Type": "application/json",
           Authorization: `Bearer ${creds.altimateApiKey}`,
           "x-tenant": creds.altimateInstanceName,
+          ...clientHeaders(),
         },
         ...(body ? { body: JSON.stringify(body) } : {}),
       })

@@ -1,6 +1,8 @@
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { test, expect } from "bun:test"
+import fs from "fs"
 import os from "os"
+import path from "path"
 import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -118,6 +120,139 @@ test("fromConfig - expands tilde to home directory", () => {
   const result = Permission.fromConfig({ external_directory: { "~/projects/*": "allow" } })
   expect(result).toEqual([{ permission: "external_directory", pattern: `${os.homedir()}/projects/*`, action: "allow" }])
 })
+
+test.skipIf(process.platform === "win32")(
+  "external_directory - the resolved pattern of a request only tightens the decision",
+  () => {
+    const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "permission-resolved-")))
+    try {
+      for (const dir of ["real/secret/pub", "real/other", "vol/proj", "elsewhere", "skills/naming"]) {
+        fs.mkdirSync(path.join(root, ...dir.split("/")), { recursive: true })
+      }
+      fs.symlinkSync(path.join(root, "real"), path.join(root, "link"))
+      fs.symlinkSync(path.join(root, "vol", "proj"), path.join(root, "proj"))
+      fs.symlinkSync(path.join(root, "elsewhere"), path.join(root, "skills", "naming", "linked"))
+      const glob = (...p: string[]) => path.join(root, ...p, "*")
+      const rules = (...layers: Record<string, "allow" | "deny" | "ask">[]) =>
+        Permission.merge(...layers.map((layer) => Permission.fromConfig({ external_directory: layer })))
+      // A request as the external-directory check sends it: the path as written, plus its resolved
+      // directory when a symlink takes it elsewhere. Every pattern must be allowed.
+      const decide = (ruleset: PermissionV1.Ruleset, written: string, resolved?: string) => {
+        const patterns = resolved ? [written, resolved] : [written]
+        const actions = patterns.map(
+          (pattern) =>
+            PermissionEvaluate.evaluateRequest(
+              { permission: "external_directory", metadata: { resolvedPatterns: patterns.slice(1) } },
+              pattern,
+              ruleset,
+            ).action,
+        )
+        return actions.includes("deny") ? "deny" : actions.includes("ask") ? "ask" : "allow"
+      }
+
+      // Configured rules are not rewritten: no generated rule is added.
+      expect(rules({ [glob("link")]: "allow" })).toEqual([
+        { permission: "external_directory", pattern: glob("link"), action: "allow" },
+      ])
+      // An allowed folder reached through a symlink stays allowed.
+      expect(decide(rules({ [glob("link")]: "allow" }), glob("link", "x"), glob("real", "x"))).toBe("allow")
+      expect(
+        PermissionEvaluate.evaluateResolved("external_directory", glob("real", "x"), rules({ [glob("link")]: "allow" }))
+          .action,
+      ).toBe("allow")
+      // The path as written gets exactly the configured decision; the link allow does not reach it.
+      expect(decide(rules({ [glob("link")]: "allow" }), glob("real", "x"))).toBe("ask")
+      // A deny for the real path in an earlier layer keeps winning over a later allow for the link.
+      const layered = rules({ [glob("real", "secret")]: "deny" }, { [glob("link")]: "allow" })
+      expect(decide(layered, glob("real", "secret"))).toBe("deny")
+      expect(decide(layered, glob("link", "other"), glob("real", "other"))).toBe("allow")
+      // A linked folder allowed inside a denied folder stays allowed (deny-volume / allow-project).
+      const carve = rules({ [glob("vol")]: "deny", [glob("proj")]: "allow" })
+      expect(decide(carve, glob("proj", "x"), glob("vol", "proj", "x"))).toBe("allow")
+      expect(decide(carve, glob("vol", "other"))).toBe("deny")
+      // An allow carved out of a deny keeps working through the link.
+      const carved = rules({
+        [glob("real", "secret")]: "deny",
+        [glob("real", "secret", "pub")]: "allow",
+        [glob("link")]: "allow",
+      })
+      expect(decide(carved, glob("real", "secret", "pub"))).toBe("allow")
+      expect(decide(carved, glob("real", "secret"))).toBe("deny")
+      // A symlink from an allowed folder into a folder that is not allowed is caught.
+      const skills = rules({ [glob("skills", "naming")]: "allow" })
+      expect(decide(skills, glob("skills", "naming", "linked"), glob("elsewhere"))).toBe("ask")
+      expect(
+        decide(
+          rules({ [glob("skills", "naming")]: "allow", [glob("elsewhere")]: "deny" }),
+          glob("skills", "naming", "linked"),
+          glob("elsewhere"),
+        ),
+      ).toBe("deny")
+      // "Always" remembers only the path as written (allow link/*). A later direct read of the real
+      // path still gets the configured deny, and reads through the link stay allowed.
+      const approved = Permission.fromConfig({ external_directory: { [glob("link")]: "allow" } })
+      const withApproval = Permission.merge(rules({ [glob("real", "secret")]: "deny" }), approved)
+      expect(decide(withApproval, glob("real", "secret"))).toBe("deny")
+      expect(decide(withApproval, glob("link", "x"), glob("real", "x"))).toBe("allow")
+      // A path rule under a wildcard permission resolves too, so it keeps allowing reads through the link.
+      const wildcardPermission = Permission.fromConfig({ "*": { [glob("link")]: "allow" } })
+      expect(decide(wildcardPermission, glob("link", "x"), glob("real", "x"))).toBe("allow")
+      // A deny written for the link also tightens the real spelling.
+      expect(
+        decide(
+          rules({ [path.join(root, "*")]: "allow", [glob("link")]: "deny" }),
+          glob("link", "x"),
+          glob("real", "x"),
+        ),
+      ).toBe("deny")
+      // Wildcard rules and not-yet-created directories resolve too.
+      expect(
+        PermissionEvaluate.evaluateResolved(
+          "external_directory",
+          path.join(root, "real", "a", "b", "*"),
+          rules({ [path.join(root, "link", "**")]: "allow" }),
+        ).action,
+      ).toBe("allow")
+      expect(
+        PermissionEvaluate.evaluateResolved(
+          "external_directory",
+          glob("real", "later"),
+          rules({ [glob("link", "later")]: "deny" }),
+        ).action,
+      ).toBe("deny")
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true })
+    }
+  },
+)
+
+test.skipIf(process.platform === "win32")(
+  "external_directory does not treat a POSIX backslash as a path separator",
+  () => {
+    const allowed = "/tmp/skill"
+    const sibling = `${allowed}\\outside/file.txt`
+    const config = { "*": "deny" as const, external_directory: { [`${allowed}/*`]: "allow" as const } }
+
+    expect(Permission.evaluate("external_directory", sibling, Permission.fromConfig(config)).action).toBe("deny")
+    expect(LegacyPermission.evaluate("external_directory", sibling, LegacyPermission.fromConfig(config)).action).toBe(
+      "deny",
+    )
+  },
+)
+
+test.skipIf(process.platform === "win32")(
+  "sensitive_write does not treat a POSIX backslash as a path separator",
+  () => {
+    const literal = "/tmp/secrets\\credentials"
+    const descendant = "/tmp/secrets/credentials"
+    const config = { "*": "deny" as const, sensitive_write: { [literal]: "allow" as const } }
+
+    expect(Permission.evaluate("sensitive_write", descendant, Permission.fromConfig(config)).action).toBe("deny")
+    expect(LegacyPermission.evaluate("sensitive_write", descendant, LegacyPermission.fromConfig(config)).action).toBe(
+      "deny",
+    )
+  },
+)
 
 test("fromConfig - expands $HOME to home directory", () => {
   const result = Permission.fromConfig({ external_directory: { "$HOME/projects/*": "allow" } })
@@ -596,8 +731,14 @@ it.instance(
             metadata: { permissionAliases: { "ls /project": [["ls .."]] } },
             always: [],
             ruleset: [{ permission: "bash", pattern: "ls /project", action: "deny" }],
-          }).then(() => "allowed", (err: unknown) => err)
-          const result = await Promise.race([request, new Promise((resolve) => setTimeout(() => resolve("pending"), 100))])
+          }).then(
+            () => "allowed",
+            (err: unknown) => err,
+          )
+          const result = await Promise.race([
+            request,
+            new Promise((resolve) => setTimeout(() => resolve("pending"), 100)),
+          ])
           for (const item of await LegacyPermission.list()) {
             await LegacyPermission.reply({ requestID: item.id, reply: "reject" })
           }

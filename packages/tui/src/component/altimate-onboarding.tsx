@@ -235,7 +235,7 @@ export function DialogModelWelcome(props: {
   const rows = createMemo<WelcomeRow[]>(() => [
     {
       name: "Altimate LLM Gateway",
-      note: "Recommended · best for data work · 10M free tokens",
+      note: "Recommended · best for data work · 1M free tokens",
       tone: "success",
       providerID: "altimate-backend",
       activate: () => connectProvider("altimate-backend"),

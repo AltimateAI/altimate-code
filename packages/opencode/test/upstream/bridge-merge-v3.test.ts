@@ -86,9 +86,11 @@ describe("bridge merge cycle 1: Account.active() is async — every caller await
     expect(content).toMatch(/accountSvc\.active\s*\(\s*\)/)
   })
 
-  test("altimate/telemetry/index.ts awaits Account.active()", async () => {
+  test("altimate/telemetry/index.ts no longer calls Account.active()", async () => {
+    // Telemetry stopped reading the account when events gained user_id and tenant from the
+    // stored credential; the generic no-unawaited-call check below still covers any new caller.
     const content = await readText(path.join(srcDir, "altimate", "telemetry", "index.ts"))
-    expect(content).toMatch(/await\s+Account\.active\s*\(\s*\)/)
+    expect(content).not.toMatch(/Account\.active\s*\(/)
   })
 
   test("no source file calls Account.active() without await or assignment", async () => {
