@@ -1265,6 +1265,8 @@ export namespace Server {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
         if (refused) return c.json(refused.body, refused.status)
         const { RuleProposal } = await import("../altimate/rules/proposal")
+        // Only clients that render cards list them: from now on the save tools may show cards in this process.
+        RuleProposal.markRenderer()
         return c.json(RuleProposal.list(Instance.directory, c.req.query("session") || undefined))
       })
       .post("/rule-proposal/:id/reply", async (c) => {
@@ -1273,7 +1275,7 @@ export namespace Server {
         const read = await readJsonObject(() => c.req.text(), "rule proposal reply")
         if ("failure" in read) return c.json(read.failure.body, read.failure.status)
         const { action, text } = read.body as { action?: unknown; text?: unknown }
-        const actions = ["send", "approve", "edit", "dismiss", "save_local", "save_memory"] as const
+        const actions = ["send", "approve", "approve_anyway", "edit", "dismiss", "save_local", "save_memory"] as const
         if (typeof action !== "string" || !actions.includes(action as (typeof actions)[number]))
           return c.json({ ok: false, error: `action must be one of ${actions.join(", ")}.` }, 400)
         if (text !== undefined && typeof text !== "string") return c.json({ ok: false, error: "text must be a string." }, 400)
@@ -1284,7 +1286,7 @@ export namespace Server {
             { action: action as (typeof actions)[number], ...(text !== undefined ? { text } : {}) },
             Instance.directory,
           )
-          const status = result.ok ? 200 : { not_open: 404, busy: 409, not_available: 409, invalid_text: 422, failed: 500 }[result.code]
+          const status = result.ok ? 200 : { not_open: 404, busy: 409, not_available: 409, verification_flagged: 409, invalid_text: 422, failed: 500 }[result.code]
           return c.json(result, status as 200 | 404 | 409 | 422 | 500)
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)

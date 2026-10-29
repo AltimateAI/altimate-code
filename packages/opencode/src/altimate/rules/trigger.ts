@@ -65,6 +65,11 @@ const words = (text: string) => new Set((text.toLowerCase().match(/[a-z][a-z0-9_
 /** Shared content words that make a shown team rule the subject of a correction. */
 export const EDIT_OVERLAP = 3
 
+/** Path globs per proposal, and their length: the server's lint bounds (a glob longer than a rule is not a path the
+ * person meant). Shared with the history path (`from-history.ts`). */
+export const MAX_APPLIES_TO = 4
+export const MAX_GLOB = 140
+
 const KNOWN_DIRS = new Set(["models", "macros", "seeds", "snapshots", "tests", "analyses", "src", "app", "lib", "dags", "sql", "scripts"])
 
 /** Path globs a correction points at: directories of the paths it mentions. */
@@ -79,8 +84,7 @@ export function appliesTo(texts: readonly string[]): string[] {
       if (segments.length === 1 && !/[._]/.test(segments[0]) && !KNOWN_DIRS.has(segments[0])) continue
       globs.add(`${dir}/**`)
     }
-  // Bounded like the server's lint: a glob longer than a rule is not a path the person meant.
-  return [...globs].filter((glob) => glob.length <= 140).slice(0, 4)
+  return [...globs].filter((glob) => glob.length <= MAX_GLOB).slice(0, MAX_APPLIES_TO)
 }
 
 const clip = (text: string, max: number) => (text.length <= max ? text : text.slice(0, max - 1) + "…")
@@ -193,6 +197,8 @@ export async function afterTurn(input: {
         outcome = card ? `showed a ${drafted.change} card for a shown team rule` : "the proposal for this team rule was dismissed"
         return
       }
+      // At most one drafting call per turn: the drafter found nothing to propose about the shown rule's subject.
+      return RulesTelemetry.skipped(input.sessionID, "shown_rule", "no_draft")
     }
 
     // (a) The same topic corrected in 2 or more sessions, with no rule covering it.
@@ -254,9 +260,11 @@ export async function explicit(input: {
   text: string
   /** The person's own message that asked for it: their words decide rule or memory as much as the agent's. */
   said?: string
+  /** The memory block the agent meant to write, kept for the card's Memory choice. */
+  memory?: { id: string; tags: string[] }
 }): Promise<
   | { status: "shown"; card: Awaited<ReturnType<typeof RuleProposal.ask>>; choose: boolean }
-  | { status: "invalid"; reason: string }
+  | { status: "invalid"; reason: string; kind: "rule" | "ambiguous" }
   | { status: "memory"; cue: string }
 > {
   const text = input.text.replace(/\s+/g, " ").trim()
@@ -264,31 +272,25 @@ export async function explicit(input: {
   const { kind, cue } = own.kind === "ambiguous" ? RuleClassify.classify(text) : own
   if (kind === "memory") return { status: "memory", cue: cue ?? "a fact or preference" }
   const reason = lint(text)
-  if (reason) return { status: "invalid", reason }
+  if (reason) return { status: "invalid", reason, kind }
   const signals = (await readSignals(input.root, Playbook.DEFAULT_NAME).catch(() => [] as Signal[]))
     .filter((signal) => signal.kind === "user_correction" && signal.sessionID === input.sessionID)
   const last = signals[signals.length - 1]
-  // A rule that refines an active team rule is an edit of it, shown against the current text.
-  const state = await RulesStore.read(input.root)
-  const said = words(text)
-  const target = state.rules
-    .map((rule) => ({ rule, overlap: [...words(rule.text)].filter((w) => said.has(w)).length }))
-    .filter((r) => r.overlap >= EDIT_OVERLAP && r.rule.text.toLowerCase() !== text.toLowerCase())
-    .sort((a, b) => b.overlap - a.overlap)[0]?.rule
+  // Always a new rule: shared words are not a reason to replace a team rule (dbt rules share "model", "test",
+  // "staging"), and the card has no "add instead". Changing a team rule is the correction path's job, where the
+  // drafter decides whether the shown rule is the subject.
   const card = await RuleProposal.ask({
     sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn,
     draft: {
       text,
-      applies_to: target?.applies_to ?? appliesTo([text, ...(last ? [last.text] : [])]),
-      why: target
-        ? "You asked to remember this; it changes an existing team rule"
-        : kind === "rule" ? "You asked to remember this as a rule" : "You asked to remember this",
-      change: target ? "edit" : "add",
-      ...(target ? { replaces: { public_id: target.public_id, text: target.text, version: target.version } } : {}),
+      applies_to: appliesTo([text, ...(last ? [last.text] : [])]),
+      why: kind === "rule" ? "You asked to remember this as a rule" : "You asked to remember this",
+      change: "add",
       origin: "explicit",
       evidence: { sessions: 1, ...(last ? { correction: { excerpt: excerpt(last.text), at: last.correctedAt ?? last.at } } : {}) },
       topics: [],
       ...(kind === "ambiguous" ? { choose: true } : {}),
+      ...(input.memory ? { memory: input.memory } : {}),
     },
   })
   return { status: "shown", card, choose: kind === "ambiguous" }

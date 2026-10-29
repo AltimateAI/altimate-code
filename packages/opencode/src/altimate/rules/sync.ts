@@ -104,11 +104,15 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.scope = ctx.scope
       state.workspace = { name: response.workspace_name, owner_name: response.owner_name ?? null, is_owner: response.is_owner }
       state.settings = response.settings
-      state.revision = response.revision
+      // A rule this version could not read was skipped: without the revision, the next pull fetches the full list
+      // (a known revision would answer `unchanged` and the rule would stay missing).
+      state.revision = response.skipped ? undefined : response.revision
       state.cursor = response.cursor
       state.pending_count = response.pending_count
       state.pulled_at = new Date().toISOString()
-      state.last_error = undefined
+      state.last_error = response.skipped
+        ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code; update it to get them`
+        : undefined
       if (!response.unchanged) state.rules = response.rules
       for (const reviewed of response.my_reviewed) {
         if (state.notices.some((n) => n.public_id === reviewed.public_id && n.status === reviewed.status)) continue
@@ -151,6 +155,12 @@ export interface PushResult {
     approved?: boolean
     /** Stored for review, but "Approve now" failed (e.g. verification_flagged). */
     approve_error?: string
+    /** "Approve now" failed for a passing reason: it is retried on the next push. */
+    approve_retry?: boolean
+    /** The server's code for a refused item. */
+    error_code?: string
+    /** Refused because the rule an edit or retire was against changed or is gone: resending cannot succeed. */
+    target_gone?: boolean
   }[]
   queued: number
   error?: string
@@ -171,18 +181,38 @@ async function send(ctx: Ready, entries: OutboxEntry[]): Promise<Outcome[]> {
     return entries.map((entry, index) => ({ entry, result: byIndex.get(index) }))
   } catch (error) {
     const failure = error instanceof RulesApiError ? error : RulesApi.classify(error)
-    // A 400/422 is about the request's content even without a code (e.g. a schema validation array): split a batch
-    // to find the item, and refuse a single item rather than resend it forever.
-    const content = failure.kind === "rejected" || failure.status === 400 || failure.status === 422
-    if (content && entries.length > 1) {
+    // Only a refusal of the content splits the batch. Scope and credential failures (`repo_not_bound`,
+    // `workspace_not_found`, `forbidden`, `auth`, `unsupported`) are about the request: every item stays queued.
+    if (entries.length > 1 && (failure.kind === "rejected" || uncodedContent(failure))) {
       const outcomes: Outcome[] = []
       for (const entry of entries) outcomes.push(...(await send(ctx, [entry])))
-      return outcomes
+      if (failure.kind === "rejected") return outcomes
+      // An uncoded 400/422 (e.g. a schema validation array) can be one item or the whole request: items that fail
+      // alone, while others go through, are refused; when every item fails alike, it is the request and all stay queued.
+      const alone = outcomes.filter((outcome) => outcome.error && uncodedContent(outcome.error))
+      if (alone.length === outcomes.length) return entries.map((entry) => ({ entry, error: failure }))
+      return outcomes.map((outcome) =>
+        outcome.error && uncodedContent(outcome.error)
+          ? { entry: outcome.entry, error: new RulesApiError("rejected", outcome.error.message, outcome.error.code, outcome.error.status) }
+          : outcome)
     }
-    if (content && failure.kind !== "rejected") return entries.map((entry) => ({ entry, error: new RulesApiError("rejected", failure.message, failure.code, failure.status) }))
     return entries.map((entry) => ({ entry, error: failure }))
   }
 }
+
+/** A 400/422 without a code, which `classify` keeps `transient`: maybe about one item, maybe the whole request. */
+const uncodedContent = (failure: RulesApiError) =>
+  failure.kind === "transient" && !failure.code && (failure.status === 400 || failure.status === 422)
+
+/** Per-item answers that leave nothing stored for the person: the rule an edit was against changed or went away. */
+const TARGET_GONE = new Set(["target_changed", "target_not_found"])
+
+/** A failed "Approve now" worth retrying: the moment or the credential, not a decision about the rule. */
+const retryableApproval = (error: unknown) => {
+  const kind = error instanceof RulesApiError ? error.kind : RulesApi.classify(error).kind
+  return kind === "transient" || kind === "auth"
+}
+const MAX_APPROVAL_ATTEMPTS = 5
 
 /** Per-item answers that are about now, not about the proposal: it stays queued and is sent again later. */
 const RETRY_LATER = new Set(["too_many_pending"])
@@ -194,10 +224,12 @@ const RETRY_LATER = new Set(["too_many_pending"])
 export async function push(root: string, ctx: Ready): Promise<PushResult> {
   const state = await RulesStore.read(root)
   const batch = state.outbox.slice(0, MAX_PROPOSALS)
-  if (!batch.length) return { sent: [], queued: 0 }
+  const retried = await retryApprovals(root, ctx, state.pending_approvals)
+  if (!batch.length) return { sent: [], queued: 0, ...(retried ? { error: retried } : {}) }
   const outcomes = await send(ctx, batch)
   const sent: PushResult["sent"] = []
   const approvals: { entry: OutboxEntry; publicId: string; version: number }[] = []
+  const pendingApprovals: RulesStore.State["pending_approvals"] = []
   const done = new Set<string>()
   const failed = new Map<string, string>()
   for (const { entry, result, error } of outcomes) {
@@ -222,8 +254,11 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
       id: entry.id,
       text: entry.item.text,
       status: result.status,
-      ...(result.public_id ? { public_id: result.public_id } : {}),
+      // A refused item's `public_id` is not the person's proposal (a `stale` edit carries its target's).
+      ...(ok && result.public_id ? { public_id: result.public_id } : {}),
       ...(!ok ? { error: result.error_detail ?? result.error_code ?? result.status } : {}),
+      ...(!ok && result.error_code ? { error_code: result.error_code } : {}),
+      ...(!ok && result.error_code && TARGET_GONE.has(result.error_code) ? { target_gone: true } : {}),
     })
     if (entry.approve && result.status === "pending" && result.public_id && result.version)
       approvals.push({ entry, publicId: result.public_id, version: result.version })
@@ -239,11 +274,17 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
     } catch (error) {
       const row = sent.find((s) => s.public_id === approval.publicId)
       if (row) row.approve_error = errorText(error)
+      if (retryableApproval(error)) {
+        if (row) row.approve_retry = true
+        pendingApprovals.push({ public_id: approval.publicId, version: approval.version, action: approval.entry.approve!, attempts: 1 })
+      }
     }
   }
   const now = new Date().toISOString()
   const after = await RulesStore.update(root, (s) => {
     s.outbox = s.outbox.filter((entry) => !done.has(entry.id))
+    for (const approval of pendingApprovals)
+      if (!s.pending_approvals.some((p) => p.public_id === approval.public_id)) s.pending_approvals.push(approval)
     for (const entry of s.outbox) {
       const error = failed.get(entry.id)
       if (error === undefined) continue
@@ -253,14 +294,54 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
     for (const row of sent) {
       if (!row.public_id || row.status === "exists") continue
       const existing = s.sent.find((x) => x.public_id === row.public_id)
-      const change = batch.find((b) => b.item.text === row.text)?.item.change ?? "add"
+      const change = batch.find((b) => b.id === row.id)?.item.change ?? "add"
       if (existing) Object.assign(existing, { status: row.status, updated_at: now })
       else s.sent.push({ public_id: row.public_id, text: row.text, change, status: row.status, sent_at: now, updated_at: now })
       if (row.status === "pending") s.pending_count += 1
     }
   })
-  const error = failed.size ? [...failed.values()][0] : undefined
+  const error = failed.size ? [...failed.values()][0] : retried
   return { sent, queued: after.outbox.length, ...(error ? { error } : {}) }
+}
+
+/**
+ * Retry "Approve now" calls that failed for a passing reason. One that succeeds, or is refused for good (the rule
+ * changed, is flagged, the person is no longer the owner), leaves the list; a refusal is recorded on the person's
+ * proposal so `/rules` shows it. Gives up after `MAX_APPROVAL_ATTEMPTS`. Returns the last error, if any.
+ */
+async function retryApprovals(root: string, ctx: Ready, pending: RulesStore.State["pending_approvals"]): Promise<string | undefined> {
+  if (!pending.length) return undefined
+  const settled = new Map<string, { status?: string; reason?: string }>()
+  const retry = new Map<string, number>()
+  let last: string | undefined
+  for (const approval of pending) {
+    try {
+      const reviewed = await RulesApi.review(ctx.actAs, ctx.scope.datamateId, approval.public_id, {
+        action: approval.action,
+        expected_version: approval.version,
+      })
+      settled.set(approval.public_id, { status: reviewed.status })
+    } catch (error) {
+      last = `approving a proposal failed: ${errorText(error)}`
+      if (retryableApproval(error) && approval.attempts + 1 < MAX_APPROVAL_ATTEMPTS) retry.set(approval.public_id, approval.attempts + 1)
+      else settled.set(approval.public_id, { reason: `"Approve now" failed: ${errorText(error)}. Approve it in the workspace's Rules tab.` })
+    }
+  }
+  const now = new Date().toISOString()
+  await RulesStore.update(root, (s) => {
+    s.pending_approvals = s.pending_approvals.flatMap((p) => {
+      if (settled.has(p.public_id)) return []
+      const attempts = retry.get(p.public_id)
+      return [attempts === undefined ? p : { ...p, attempts }]
+    })
+    for (const [publicId, outcome] of settled) {
+      const row = s.sent.find((x) => x.public_id === publicId)
+      if (!row) continue
+      if (outcome.status) Object.assign(row, { status: outcome.status, updated_at: now })
+      if (outcome.reason) Object.assign(row, { reason: outcome.reason, updated_at: now })
+    }
+  })
+  return last
 }
 
 /** Queue proposals for the next push, in one write. Returns their outbox ids, in order. Refuses past `MAX_OUTBOX`. */
@@ -294,6 +375,12 @@ export function outcomeOf(state: State, report: RunReport | undefined, outboxId:
 
 type PendingUsage = NonNullable<State["pending_usage"]>
 
+/** A usage refusal that resending the same batch cannot fix. */
+function permanentUsageFailure(error: unknown) {
+  const failure = error instanceof RulesApiError ? error : RulesApi.classify(error)
+  return failure.kind === "rejected" || failure.kind === "conflict" || (failure.status === 404 && failure.kind !== "unsupported" && failure.kind !== "workspace_not_found")
+}
+
 /** Send one batch; on success advance the reported state and clear it from `pending_usage`. */
 async function sendUsage(root: string, ctx: Ready, batch: PendingUsage): Promise<void> {
   await RulesApi.usage(ctx.actAs, ctx.scope.datamateId, { batch_id: batch.batch_id, items: batch.items })
@@ -315,13 +402,20 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
     try {
       await sendUsage(root, ctx, before.pending_usage)
     } catch (error) {
-      return { items: 0, error: errorText(error) }
+      // Refused for good (`batch_conflict`, a coded 400/422, a rule the server no longer serves): resending can never
+      // succeed and would block every later report, so the batch is dropped. Its sessions stay unreported.
+      if (!permanentUsageFailure(error)) return { items: 0, error: errorText(error) }
+      const batchId = before.pending_usage.batch_id
+      await RulesStore.update(root, (s) => {
+        if (s.pending_usage?.batch_id === batchId) s.pending_usage = undefined
+      })
+      log.warn("rules usage batch refused; dropped", { error: errorText(error) })
     }
   }
   const state = await RulesStore.read(root)
   if (!state.rules.length) return { items: 0 }
   const byLesson = new Map(state.rules.map((rule) => [RulesStore.lessonId(rule.rule_key), rule]))
-  const [{ readShownSnapshots }, { analyzeRecurrence }] = await Promise.all([import("../learn/delivery"), import("../learn/recurrence")])
+  const [{ readShownSnapshots, lessonTextHash }, { analyzeRecurrence }] = await Promise.all([import("../learn/delivery"), import("../learn/recurrence")])
   const { snapshots } = await readShownSnapshots(root)
   const reported = new Set(state.usage_sessions)
   const counts = new Map<string, { applied: number; corrected_again: number }>()
@@ -330,8 +424,14 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
   // later sessions wait for the next report.
   for (const snapshot of snapshots) {
     if (reported.has(snapshot.session)) continue
-    const shown = [...new Set(snapshot.shown.filter((entry) => entry.name === RulesStore.TEAM_STORE).map((entry) => entry.id))]
-      .flatMap((id) => byLesson.get(id)?.public_id ?? [])
+    // Only against the version the session was shown: the lesson id (from `rule_key`) survives an approved edit, the
+    // text does not. A session shown an earlier version is not counted against the current one.
+    const shown = [...new Set(snapshot.shown
+      .filter((entry) => entry.name === RulesStore.TEAM_STORE)
+      .flatMap((entry) => {
+        const rule = byLesson.get(entry.id)
+        return rule && entry.textHash === lessonTextHash(rule.text) ? [rule.public_id] : []
+      }))]
     if (!shown.length) continue
     if (shown.some((publicId) => (counts.get(publicId)?.applied ?? 0) >= MAX_USAGE_DELTA)) break
     if (new Set([...counts.keys(), ...shown]).size > MAX_USAGE_ITEMS) break
@@ -372,8 +472,18 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
     corrected,
   }
   // Another process (a second instance, `learn sync`) may have built a batch from the same unreported sessions in
-  // the meantime: then that one is sent (same batch id, so the server counts it once) and this one is dropped.
-  const saved = (await RulesStore.update(root, (s) => { s.pending_usage ??= batch })).pending_usage ?? batch
+  // the meantime: while it is pending, that one is sent (same batch id, so the server counts it once). If it was
+  // already acknowledged, some of these sessions or corrections are reported: this batch is stale and is dropped
+  // (the next run recounts from what is left).
+  let stale = false
+  const after = await RulesStore.update(root, (s) => {
+    if (s.pending_usage) return
+    stale = sessions.some((session) => s.usage_sessions.includes(session)) ||
+      Object.keys(corrected).some((key) => (s.corrected_reported[key] ?? 0) !== (state.corrected_reported[key] ?? 0))
+    if (!stale) s.pending_usage = batch
+  })
+  if (stale) return { items: 0 }
+  const saved = after.pending_usage ?? batch
   try {
     await sendUsage(root, ctx, saved)
   } catch (error) {

@@ -617,21 +617,22 @@ export namespace Telemetry {
         session_id: string
         card_id: string
         trigger: "remember" | "shown_rule" | "recurrence"
-        action: "send" | "approve" | "edit" | "dismiss" | "save_local" | "save_memory" | "expired" | "closed"
+        action: "send" | "approve" | "approve_anyway" | "edit" | "dismiss" | "save_local" | "save_memory" | "expired" | "closed"
         /** `ok`, or why the reply did not go through (the card stays open). */
-        status: "ok" | "busy" | "not_available" | "invalid_text" | "failed"
+        status: "ok" | "busy" | "not_available" | "verification_flagged" | "invalid_text" | "failed"
         /** For `ok` on a closing action: what happened. */
         outcome?:
           | "sent"
           | "queued"
           | "approved"
           | "approve_failed"
+          | "approve_retry"
+          | "target_changed"
           | "exists"
           | "dismissed"
           | "saved_memory_project"
           | "saved_memory_global"
           | "saved_local"
-        approve_anyway: boolean
         /** Wording edits accepted on this card so far. */
         edits: number
         ms_since_shown: number
@@ -652,7 +653,8 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         via: "training" | "memory"
-        outcome: "card" | "choose_card" | "memory" | "invalid" | "learning_off" | "not_linked"
+        /** `no_renderer`: no client that shows cards is attached, so the tool saved as before cards. */
+        outcome: "card" | "choose_card" | "memory" | "invalid" | "learning_off" | "not_linked" | "no_renderer"
       }
     | {
         /** One rules sync (push queued proposals, pull rules and reviews, report usage). */

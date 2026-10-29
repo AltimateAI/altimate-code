@@ -40,10 +40,14 @@ export const MemoryWriteTool = Tool.define("altimate_memory_write", {
   async execute(args, ctx) {
     try {
       // altimate_change start — workspace rules: when the person asked to remember something that reads as a team
-      // convention (or is unclear), the proposal card decides between memory and a team rule, not this tool choice
-      if (args.scope === "project") {
+      // convention (or is unclear), the proposal card decides between memory and a team rule, not this tool choice.
+      // Not for an update of an existing block, or a save with an expiry or citations: the card would lose them.
+      if (args.scope === "project" && !args.expires && !args.citations?.length && !(await MemoryStore.read(args.scope, args.id))) {
         const { lastUserText, proposeTeamRule } = await import("../../altimate/rules/remember")
-        const proposed = await proposeTeamRule(args.content, ctx.sessionID, lastUserText(ctx.messages), "memory")
+        const proposed = await proposeTeamRule(args.content, ctx.sessionID, lastUserText(ctx.messages), "memory", {
+          id: args.id,
+          tags: args.tags ?? [],
+        })
         if (proposed) return { ...proposed, metadata: { action: "proposed", id: args.id, scope: args.scope, duplicates: 0 } }
       }
       // altimate_change end

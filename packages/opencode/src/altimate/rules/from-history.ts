@@ -11,10 +11,7 @@ import * as Store from "../learn/store"
 import type { ProposalItem } from "./api"
 import { RulesStore } from "./store"
 import { RulesSync } from "./sync"
-
-/** Path globs per proposal, and their length: the same bounds the card applies. */
-const MAX_APPLIES_TO = 4
-const MAX_GLOB = 200
+import { MAX_APPLIES_TO, MAX_GLOB } from "./trigger"
 
 /** The candidate's rule texts before a run, or undefined when there is no candidate. */
 export async function candidateTexts(root: string, name: string): Promise<Set<string> | undefined> {
@@ -28,6 +25,8 @@ export interface Staged {
   items: ProposalItem[]
   /** Staged rules that failed the rule lint and stay local only. */
   invalid: { text: string; reason: string }[]
+  /** Local rules the run edited or removed: not team proposals, and a reason to keep the candidate. */
+  localChanges: number
 }
 
 /** What this run staged that is not approved yet, as proposals. Undefined when not linked or nothing is new. */
@@ -46,10 +45,16 @@ export async function stagedRules(input: {
   ])
   if (!candidate) return undefined
   const known = new Set([...approved.map((lesson) => lesson.text), ...(input.before ?? [])])
+  // The candidate starts as a copy of the approved store: a lesson with an approved id is a local rule (edited if its
+  // text changed), and an approved id missing from it is a removal. Neither is a new team rule.
+  const approvedIds = new Set(approved.map((lesson) => lesson.id))
+  const candidateIds = new Set(candidate.map((lesson) => lesson.id))
+  const edited = candidate.filter((lesson) => approvedIds.has(lesson.id) && !known.has(lesson.text)).length
+  const removed = approved.filter((lesson) => !candidateIds.has(lesson.id)).length
   const items: ProposalItem[] = []
   const invalid: Staged["invalid"] = []
   for (const lesson of candidate) {
-    if (known.has(lesson.text)) continue
+    if (known.has(lesson.text) || approvedIds.has(lesson.id)) continue
     const reason = lint(lesson.text)
     if (reason) {
       invalid.push({ text: lesson.text, reason })
@@ -66,7 +71,12 @@ export async function stagedRules(input: {
     })
   }
   if (!items.length && !invalid.length) return undefined
-  return { workspace: { name: state.workspace.name, owner: state.workspace.owner_name ?? "the workspace owner" }, items, invalid }
+  return {
+    workspace: { name: state.workspace.name, owner: state.workspace.owner_name ?? "the workspace owner" },
+    items,
+    invalid,
+    localChanges: edited + removed,
+  }
 }
 
 /** Queue the confirmed proposals and send them now. */
@@ -86,14 +96,20 @@ export async function sendStaged(input: {
   const queued = outcomes.filter((o) => o.status === "queued").length
   const refused = outcomes.filter((o) => o.status === "sent" && o.row?.error).length
   const sent = outcomes.length - queued - refused
-  // The workspace's review queue replaces a candidate this run created, once it holds every rule of it.
-  const discard = !input.before && queued === 0 && refused === 0 && input.staged.invalid.length === 0
+  // The workspace's review queue replaces a candidate this run created, once it holds every rule of it: only when the
+  // candidate is nothing but the adds that were sent (no local edits or removals, nothing invalid, refused or queued).
+  const discard = !input.before && queued === 0 && refused === 0 && input.staged.invalid.length === 0 &&
+    input.staged.localChanges === 0
   if (discard) await Store.reject(input.root, input.name)
   const { owner, name } = input.staged.workspace
   const message = `${sent} ${sent === 1 ? "rule" : "rules"} sent for ${owner}'s review in ${name}` +
     (queued ? `; ${queued} queued until the workspace is reachable` : "") +
     (refused ? `; ${refused} refused by the workspace` : "") + "." +
-    (discard ? "" : " The local candidate was kept: `learn show`.")
+    (discard
+      ? ""
+      : input.staged.localChanges
+        ? ` The local candidate was kept: it also changes ${input.staged.localChanges} local ${input.staged.localChanges === 1 ? "rule" : "rules"} (\`learn show\`, \`learn promote\`).`
+        : " The local candidate was kept: `learn show`.")
   return { sent, queued, refused, message }
 }
 

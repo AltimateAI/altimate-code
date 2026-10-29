@@ -115,6 +115,13 @@ export const State = z.object({
   /** The person's own "learning from sessions" choice for this project (`/rules`), when they made one. Kept here,
    * not in the project config, because that file is usually committed and the choice is per person. */
   personal_learning: z.boolean().optional(),
+  /** "Approve now" calls that failed for a reason that can pass (network, 5xx, credential): retried on the next push. */
+  pending_approvals: z.array(z.object({
+    public_id: z.string(),
+    version: z.number().int(),
+    action: z.enum(["approve", "approve_anyway"]),
+    attempts: z.number().int().default(0),
+  })).default([]),
   /** A usage report sent but not yet acknowledged: resent with the same `batch_id` so the server counts it once. */
   pending_usage: z.object({
     batch_id: z.string(),
@@ -200,10 +207,12 @@ export async function update(root: string, change: (state: State) => State | voi
     await SafeFS.mkdir(root, dir(root))
     const raw = await readRaw(root)
     let current = parse(raw)
+    let recovered = false
     if (!current) {
       // Written by another version or damaged: keep it for inspection rather than overwrite it.
       await Store.writeAtomic(root, `${stateFile(root)}.unreadable-${Date.now()}`, raw!, 0o600)
       current = structuredClone(EMPTY)
+      recovered = true
     }
     const rulesBefore = JSON.stringify(current.rules)
     const next = change(current) ?? current
@@ -215,8 +224,10 @@ export async function update(root: string, change: (state: State) => State | voi
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
     await Store.writeAtomic(root, stateFile(root), JSON.stringify(next, null, 2) + "\n")
     // Only a linked project (or one whose rules just changed, e.g. a reset) has a mirror to write: a project with no
-    // workspace must not have its `team` directory touched.
-    if (next.workspace || JSON.stringify(next.rules) !== rulesBefore) {
+    // workspace must not have its `team` directory touched. After an unreadable state was set aside, an existing
+    // mirror no longer matches any state: rewrite it, so rules nothing vouches for stop being delivered.
+    const staleMirror = recovered && (await fs.access(Store.paths(root, TEAM_STORE).approved).then(() => true, () => false))
+    if (next.workspace || JSON.stringify(next.rules) !== rulesBefore || staleMirror) {
       await ensureIgnore(root)
       await writeMirror(root, next.rules)
     }

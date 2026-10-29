@@ -176,13 +176,14 @@ export async function start(ctx: InstanceContext): Promise<void> {
       clearInterval(timer)
       stop()
       unregister()
-      if (gated) (await import("../learn/capture")).setCaptureGate(ctx.directory, undefined)
       // Cards nobody answered go with the instance: they cannot be answered after it.
       const { RuleProposal } = await import("./proposal")
       RuleProposal.drop(ctx.directory)
-      // The capture's own disposer stops it too; this covers a stop handle taken before disposal.
+      // The capture's own disposer stops it too; this covers a stop handle taken before disposal. The gate goes last:
+      // signals the stop flushes are still checked against the learning decision.
       await stopCapture?.()
       stopCapture = undefined
+      if (gated) (await import("../learn/capture")).setCaptureGate(ctx.directory, undefined)
     })
     log.info("rules service started", { root })
   } catch (error) {

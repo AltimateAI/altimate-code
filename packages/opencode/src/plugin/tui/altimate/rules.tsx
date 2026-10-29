@@ -98,7 +98,7 @@ function explain(card: ProposalCard, action: string): string {
   if (action === "save_memory")
     return RuleClassify.memoryScope(card.text) === "global"
       ? "Your preference: saved to your memory now, for all your projects. No review."
-      : "A fact about this project: saved to its memory now (shared through the workspace's memory). Not a team rule."
+      : "A fact about this project: saved to its memory now. Shared with the workspace if its memory sharing is on. Not a team rule."
   if (action === "edit") return "Change the text before deciding."
   return card.choose || !card.topics.length ? "Don't save anything." : "Won't propose this topic again for 30 days."
 }
@@ -264,9 +264,6 @@ function installCards(api: TuiPluginApi) {
           onCancel={() => api.ui.dialog.clear()}
         />
       ),
-      () => {
-        if (focused()) bindKeys()
-      },
     )
   }
 
@@ -282,7 +279,8 @@ function installCards(api: TuiPluginApi) {
       return
     }
     setConfirming(undefined)
-    void reply(card, option.action)
+    // The confirmed approval is its own action: a plain `approve` on a flagged card is refused by the server.
+    void reply(card, option.action === "approve" && card.weakens_verification ? "approve_anyway" : option.action)
   }
 
   const shortcut = (action: string) => {
@@ -325,11 +323,15 @@ function installCards(api: TuiPluginApi) {
     })
   }
 
-  // Any other dialog opened while the card is focused (the palette, `/rules`) gets its keys back too.
+  // A dialog opened while the card is focused (the edit prompt, the palette, `/rules`) takes the keys, and the card
+  // leaves focus: when the dialog closes the host gives focus back to the prompt, so re-binding the card's keys then
+  // would take Enter, `e` and `n` from whatever the person types next. `<leader>p` focuses the card again.
   createRoot(() => {
     createEffect(() => {
-      if (api.ui.dialog.open) releaseKeys()
-      else if (focused()) bindKeys()
+      if (!api.ui.dialog.open || !focused()) return
+      releaseKeys()
+      setConfirming(undefined)
+      setFocused(false)
     })
     // The card left the screen (a prompt hid the input, another session, home) or its card went away: give the keys
     // back. Without this a focused card's Enter would answer a card nobody can see, or a permission prompt's Enter.

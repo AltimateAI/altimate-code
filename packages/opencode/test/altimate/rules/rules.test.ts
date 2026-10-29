@@ -49,6 +49,10 @@ describe("rule or memory", () => {
     ["Remember that our warehouse is Snowflake in us-east-1", "memory"],
     ["ARR means annual recurring revenue", "memory"],
     ["Staging models live in models/staging", "ambiguous"],
+    ["Can you fix this model for me? Remember: never use FLOAT for money.", "rule"],
+    ["Never load the fact table in memory", "rule"],
+    ["Remember just for me: I like trailing commas", "memory"],
+    ["Keep this as a memory: the dev schema is dbt_sarav", "memory"],
   ])("%s → %s", (text, kind) => {
     expect(RuleClassify.classify(text).kind).toBe(kind as RuleClassify.Kind)
   })
@@ -149,6 +153,26 @@ describe("proposal card", () => {
     const flagged = await RuleProposal.reply(card.id, { action: "edit", text: "Skip dbt tests on staging models." })
     expect(flagged).toMatchObject({ ok: true, closed: false })
     expect(flagged.ok && flagged.card?.weakens_verification).toBe("mentions skipping or disabling verification")
+  })
+
+  test("a flagged card is approved only with approve_anyway; a plain approve is refused", async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => Object.assign(s, linked(), { workspace: { name: "Team", owner_name: "Olive", is_owner: true } }))
+    const card = (await RuleProposal.ask({ sessionID: "a1", root, directory: root, learn: undefined, draft: { ...draft, text: "Skip dbt tests on staging models." } }))!
+    expect(card.weakens_verification).toBeTruthy()
+    expect(await RuleProposal.reply(card.id, { action: "approve" })).toMatchObject({ ok: false, code: "verification_flagged" })
+    const plain = (await RuleProposal.ask({ sessionID: "a1", root, directory: root, learn: undefined, draft: { ...draft, text: "Prefix seeds with seed_ in every project." } }))!
+    expect(await RuleProposal.reply(plain.id, { action: "approve_anyway" })).toMatchObject({ ok: false, code: "not_available" })
+    RuleProposal.drop(root)
+  })
+
+  test("a card asked again from another session moves there with that session's directory", async () => {
+    const root = await tmp()
+    const other = await tmp()
+    const card = (await RuleProposal.ask({ sessionID: "m1", root, directory: root, learn: undefined, draft: { ...draft, text: "Name snapshots snap_<entity>." } }))!
+    await RuleProposal.ask({ sessionID: "m2", root, directory: other, learn: undefined, draft: { ...draft, text: "Name snapshots snap_<entity>." } })
+    expect(RuleProposal.list(other, "m2")).toEqual([expect.objectContaining({ id: card.id })])
+    expect(await RuleProposal.reply(card.id, { action: "dismiss" }, other)).toMatchObject({ ok: true })
   })
 
   test("Not a rule suppresses the topic for 30 days", async () => {
@@ -399,6 +423,97 @@ describe("the workspace API, by path", () => {
     expect(shown).not.toContain("secret-key")
     expect(shown).not.toContain("actAs")
   })
+
+  test("a repo_not_bound refusal of the proposals keeps the whole outbox, in one request", async () => {
+    const root = await tmp()
+    for (const text of ["first", "second", "third"]) await RulesSync.enqueue(root, item(text))
+    seen.length = 0
+    answer = () => Response.json({ detail: { code: "repo_not_bound", message: "not bound" } }, { status: 422 })
+    expect((await RulesSync.push(root, ready())).queued).toBe(3)
+    expect(seen.filter((r) => r.path === "/proposals")).toHaveLength(1)
+    expect((await RulesStore.read(root)).outbox).toHaveLength(3)
+  })
+
+  test("an uncoded 422 refuses only the items that fail alone; when every item fails, all stay queued", async () => {
+    const root = await tmp()
+    for (const text of ["good", "bad"]) await RulesSync.enqueue(root, item(text))
+    const uncoded = () => Response.json({ detail: [{ msg: "invalid" }] }, { status: 422 })
+    answer = (_path, body) => (body.items.some((i: { text: string }) => i.text === "bad") ? uncoded() : Response.json({ results: [{ index: 0, status: "pending", public_id: "p-good", version: 1 }] }))
+    const mixed = await RulesSync.push(root, ready())
+    expect(mixed.sent.map((s) => [s.text, s.status])).toEqual([["good", "pending"], ["bad", "rejected"]])
+    const all = await tmp()
+    for (const text of ["one", "two"]) await RulesSync.enqueue(all, item(text))
+    answer = uncoded
+    expect((await RulesSync.push(all, ready())).queued).toBe(2)
+  })
+
+  test("a stale edit is not recorded under the target's id, and its card closes with a message", async () => {
+    const root = await tmp()
+    await RulesSync.enqueue(root, { ...item("Edited wording."), change: "edit" as const, replaces: "p-target", replaces_version: 1 })
+    answer = () => Response.json({ results: [{ index: 0, status: "stale", public_id: "p-target", version: 2, error_code: "target_changed", error_detail: "changed" }] })
+    const pushed = await RulesSync.push(root, ready())
+    expect(pushed.sent[0]).toMatchObject({ status: "stale", target_gone: true, error_code: "target_changed" })
+    expect(pushed.sent[0].public_id).toBeUndefined()
+    expect((await RulesStore.read(root)).sent).toEqual([])
+  })
+
+  test("a failed Approve now is retried on the next push when it can pass, and dropped with a reason when it cannot", async () => {
+    const root = await tmp()
+    await RulesSync.enqueue(root, item("Approve me."), "approve")
+    answer = (path) => (path === "/proposals"
+      ? Response.json({ results: [{ index: 0, status: "pending", public_id: "p-approve", version: 1 }] })
+      : new Response("unavailable", { status: 503 }))
+    const first = await RulesSync.push(root, ready())
+    expect(first.sent[0]).toMatchObject({ approve_retry: true })
+    expect((await RulesStore.read(root)).pending_approvals).toEqual([expect.objectContaining({ public_id: "p-approve", action: "approve" })])
+    answer = () => Response.json({ public_id: "p-approve", status: "active", version: 1 })
+    await RulesSync.push(root, ready())
+    const state = await RulesStore.read(root)
+    expect(state.pending_approvals).toEqual([])
+    expect(state.sent.find((s) => s.public_id === "p-approve")?.status).toBe("active")
+  })
+
+  test("a usage batch the server refuses for good is dropped, so later usage is reported", async () => {
+    const root = await tmp()
+    answer = () => Response.json(syncBody([rule("aaaaaaaaaaaa", "Name staging models stg_<source>.")]))
+    await RulesSync.pull(root, ready())
+    await RulesStore.update(root, (s) => {
+      s.pending_usage = { batch_id: "batch-x", items: [{ public_id: "p-aaaaaaaaaaaa", applied: 1, helpful: 0, harmful: 0, corrected_again: 0 }], sessions: ["s1"], corrected: {} }
+    })
+    answer = () => Response.json({ detail: { code: "batch_conflict", message: "conflict" } }, { status: 409 })
+    await RulesSync.reportUsage(root, ready())
+    expect((await RulesStore.read(root)).pending_usage).toBeUndefined()
+  })
+
+  test("a pull that skipped an unreadable rule does not keep the revision, so the next pull fetches all rules", async () => {
+    const root = await tmp()
+    answer = () => Response.json(syncBody([rule("aaaaaaaaaaaa", "Name staging models stg_<source>."), { ...rule("bbbbbbbbbbbb", "broken"), rule_key: "nope" }]))
+    await RulesSync.pull(root, ready())
+    const state = await RulesStore.read(root)
+    expect(state.revision).toBeUndefined()
+    expect(state.last_error).toContain("1 team rule could not be read")
+    seen.length = 0
+    await RulesSync.pull(root, ready())
+    expect(seen[0].body.known_revision).toBeUndefined()
+  })
+
+  test("usage counts a session only against the rule version it was shown", async () => {
+    const root = await tmp()
+    answer = () => Response.json(syncBody([{ ...rule("aaaaaaaaaaaa", "Name staging models stg_<source>__<entity>."), public_id: "p-v2", version: 2 }]))
+    await RulesSync.pull(root, ready())
+    const lessonId = RulesStore.lessonId("R-aaaaaaaaaaaa")
+    const lesson = (text: string) => ({ id: lessonId, text, tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0, created: "2026-10-27T00:00:00Z", updated: "2026-10-27T00:00:00Z" })
+    const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+    await fs.mkdir(dir, { recursive: true })
+    for (const [session, text] of [["shown-v1", "Name staging models stg_<source>."], ["shown-v2", "Name staging models stg_<source>__<entity>."]]) {
+      const state = { version: 1, session, firstMessage: "m", query: "q", touchedPaths: [], section: "", shown: [{ name: "team", lesson: lesson(text), tier: "core", at: "2026-10-28T00:00:00Z", queryHash: "h" }], requests: [], requestParts: [], compactions: [], counted: [] }
+      await fs.writeFile(path.join(dir, `${Store.sha256(session)}.json`), JSON.stringify(state))
+    }
+    seen.length = 0
+    answer = () => Response.json({ duplicate: false, applied_items: 1, skipped_items: 0 })
+    await RulesSync.reportUsage(root, ready())
+    expect(seen.find((r) => r.path === "/usage")?.body.items).toEqual([expect.objectContaining({ public_id: "p-v2", applied: 1 })])
+  })
 })
 
 describe("learning decision", () => {
@@ -515,6 +630,24 @@ describe("rules from history need consent", () => {
     expect(staged.items[0].applies_to).toHaveLength(4)
     expect(staged.invalid).toHaveLength(1)
   })
+
+  test("local rules the run edited or removed are not proposed, and they keep the candidate", async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => Object.assign(s, linked()))
+    const lesson = (id: string, text: string) =>
+      ({ id, text, tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0, created: "2026-01-01T00:00:00Z", updated: "2026-01-01T00:00:00Z" })
+    const p = Store.paths(root, "team-playbook")
+    await fs.mkdir(path.dirname(p.candidate), { recursive: true })
+    await fs.writeFile(p.approved, JSON.stringify([lesson("L-aaaaaaaaaaaa", "Name seeds seed_<entity>."), lesson("L-bbbbbbbbbbbb", "Quote reserved words.")]))
+    await fs.writeFile(p.candidate, JSON.stringify([
+      lesson("L-aaaaaaaaaaaa", "Name seeds seed_<entity>, in snake case."),
+      lesson("L-cccccccccccc", "Prefix views with v_."),
+    ]))
+    const staged = (await RulesFromHistory.stagedRules({ root, name: "team-playbook", origin: "bootstrap", before: undefined }))!
+    expect(staged.items.map((i) => i.text)).toEqual(["Prefix views with v_."])
+    // One local rule edited, one removed.
+    expect(staged.localChanges).toBe(2)
+  })
 })
 
 describe("self-review fixes", () => {
@@ -590,16 +723,60 @@ describe("remember, whichever save tool the agent picks", () => {
   beforeAll(() => {
     delete process.env.ALTIMATE_DISABLE_WORKSPACE
     delete process.env.ALTIMATE_LEARN
+    RuleProposal.markRenderer()
   })
   afterAll(() => {
     if (env.ALTIMATE_DISABLE_WORKSPACE !== undefined) process.env.ALTIMATE_DISABLE_WORKSPACE = env.ALTIMATE_DISABLE_WORKSPACE
     if (env.ALTIMATE_LEARN !== undefined) process.env.ALTIMATE_LEARN = env.ALTIMATE_LEARN
+    RuleProposal.setRendererForTest(false)
   })
   const linkedRoot = async () => {
     const root = await tmp()
     await RulesStore.update(root, (s) => Object.assign(s, linked()))
     return root
   }
+
+  test("with no client that shows cards attached, both save tools save as before cards", async () => {
+    const root = await linkedRoot()
+    RuleProposal.setRendererForTest(false)
+    try {
+      const said = "Remember as a rule: always use CTEs in staging models."
+      const content = "Always use CTEs in staging models."
+      expect(await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content, sessionID: "r0", said, via: "memory" })).toBeUndefined()
+      expect(await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content, sessionID: "r0", said })).toBeUndefined()
+      expect(RuleProposal.list(root)).toEqual([])
+    } finally {
+      RuleProposal.markRenderer()
+    }
+  })
+
+  test("from the memory tool, only the text the person asked to remember gets a card", async () => {
+    const root = await linkedRoot()
+    const said = "Remember as a rule: always use CTEs in staging models."
+    const other = await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content: "The orders model joins customers on customer_id.", sessionID: "r1", said, via: "memory" })
+    expect(other).toBeUndefined()
+    const asked = await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content: "Always use CTEs in staging models.", sessionID: "r1", said, via: "memory" })
+    expect(asked?.output).toContain("Nothing was saved yet")
+    RuleProposal.drop(root)
+  })
+
+  test("a requested rule that is not one line is sent back, not saved to memory; a long note is saved", async () => {
+    const root = await linkedRoot()
+    const long = "Always use CTEs in staging models and " + "keep every column explicit in the final select ".repeat(4)
+    const rule = await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content: long, sessionID: "r2", said: `Remember as a rule: ${long}`, via: "memory" })
+    expect(rule?.title).toBe("Team rule: not proposed")
+    const note = "The orders model joins customers on customer_id and filters test accounts in the final select " + "with a long explanation ".repeat(4)
+    expect(await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content: note, sessionID: "r2", said: `Remember: ${note}`, via: "memory" })).toBeUndefined()
+  })
+
+  test("an explicit rule is always a new rule, even when it shares words with a team rule", async () => {
+    const root = await linkedRoot()
+    await RulesStore.update(root, (s) => { s.rules = [rule("Staging models list their columns and never select star.")] })
+    await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content: "Staging models always have a not_null test on the primary key columns.", sessionID: "r3", said: "Remember as a rule: staging models always have a not_null test on the primary key columns." })
+    expect(RuleProposal.list(root, "r3")).toEqual([expect.objectContaining({ change: "add" })])
+    expect(RuleProposal.list(root, "r3")[0].replaces).toBeUndefined()
+    RuleProposal.drop(root)
+  })
 
   test("an unclear \"remember\" saved as project memory becomes the Memory · Team rule · Skip card, and nothing is saved", async () => {
     const root = await linkedRoot()
@@ -619,7 +796,7 @@ describe("remember, whichever save tool the agent picks", () => {
     expect(RuleProposal.list(root)).toEqual([])
   })
 
-  test("the card's memory option says where a fact goes", () => {
+  test("a project fact is classified as project-scoped memory", () => {
     expect(RuleClassify.memoryScope("Staging models live in models/staging.")).toBe("project")
   })
 })

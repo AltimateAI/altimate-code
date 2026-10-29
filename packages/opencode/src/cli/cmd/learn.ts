@@ -68,6 +68,18 @@ async function projectRoot() {
   return Instance.worktree !== "/" ? Instance.worktree : Instance.directory
 }
 
+// altimate_change start — workspace rules: `learn enable` / `learn disable` are the person's newest choice, so they
+// replace an earlier `/rules` learning choice (which outranks the project config) instead of being silently overridden.
+async function clearPersonalLearning(root: string) {
+  const { RulesStore } = await import("../../altimate/rules/store")
+  const state = await RulesStore.read(root).catch(() => undefined)
+  if (state?.personal_learning === undefined) return
+  await RulesStore.update(root, (s) => {
+    delete s.personal_learning
+  })
+}
+// altimate_change end
+
 const run = <A>(label: string, f: () => Promise<A>) =>
   Effect.tryPromise({
     try: f,
@@ -182,6 +194,7 @@ const EnableCommand = effectCmd({
       const root = await projectRoot()
       const requested = args["auto-promote"] as boolean | undefined
       const file = await writeProjectLearning(root, true, requested)
+      await clearPersonalLearning(root)
       // altimate_change end
       // altimate_change start — explicit capture opt-in checks effective config and preserves the learning kill switch
       try {
@@ -233,7 +246,9 @@ const DisableCommand = effectCmd({
   handler: Effect.fn("Cli.learn.disable")(function* () {
     yield* run("", async () => {
       // altimate_change start — disable also turns automatic promotion off
-      const file = await writeProjectLearning(await projectRoot(), false, false)
+      const root = await projectRoot()
+      const file = await writeProjectLearning(root, false, false)
+      await clearPersonalLearning(root)
       // altimate_change end
       // altimate_change start — verify effective settings before reporting learning disabled
       const { Config } = await import("@/config/config")
@@ -473,7 +488,7 @@ async function offerStagedForReview(input: { name: string; origin: "bootstrap" |
   if (!send && process.stdin.isTTY && process.stdout.isTTY)
     send = (await prompts.confirm({ message: `Send ${staged.items.length === 1 ? "this rule" : `these ${staged.items.length} rules`} to ${owner}'s review in ${name}?`, initialValue: false })) === true
   if (!send) {
-    out("Not sent; they stay local candidates (`learn show`, `learn promote`). Rerun with --send-for-review to send them.")
+    out("Not sent; they stay local candidates for this project only (`learn show`, `learn promote`).")
     return
   }
   const result = await RulesFromHistory.sendStaged({

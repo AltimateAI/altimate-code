@@ -6,6 +6,16 @@
 
 /** The person asked for something to be remembered (not the agent deciding to take a note). */
 const ASKED_TO_REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note (?:that|this)|save (?:this|that)|from now on)\b/i
+const contentWords = (text: string) => new Set(text.toLowerCase().match(/[a-z0-9_]{3,}/g) ?? [])
+
+/** Does `content` restate what the person said? Most of its words appear in their message. */
+export function restates(content: string, said: string): boolean {
+  const words = [...contentWords(content)]
+  if (!words.length) return false
+  const spoken = contentWords(said)
+  return words.filter((word) => spoken.has(word)).length / words.length >= 0.6
+}
+
 /** The text of the person's latest message in the session. */
 export function lastUserText(messages: unknown): string | undefined {
   if (!Array.isArray(messages)) return undefined
@@ -25,10 +35,22 @@ export function lastUserText(messages: unknown): string | undefined {
  * and only when it does not read as a memory; then the card (team rule, or "Memory · Team rule · Skip" when unclear)
  * replaces the memory write, so the person decides, not the agent's tool choice.
  */
-export async function proposeTeamRule(content: string, sessionID: string, said?: string, via: "training" | "memory" = "training") {
-  const [{ Instance }, { Config }] = await Promise.all([import("../../project/instance"), import("@/config/config")])
+export async function proposeTeamRule(
+  content: string,
+  sessionID: string,
+  said?: string,
+  via: "training" | "memory" = "training",
+  memory?: { id: string; tags: string[] },
+) {
+  const [{ Instance }, { Config }, { RulesService }] = await Promise.all([
+    import("../../project/instance"),
+    import("@/config/config"),
+    import("./service"),
+  ])
   const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-  return proposeFor({ root, directory: Instance.directory, learn: (await Config.get()).learn, content, sessionID, said, via })
+  // The project's learn file as it is now, like every other entry point: `learn disable` mid-session takes effect.
+  const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
+  return proposeFor({ root, directory: Instance.directory, learn, content, sessionID, said, via, memory })
 }
 
 /** `proposeTeamRule` for an explicit project (`root`, `directory`) and learn config. */
@@ -40,10 +62,14 @@ export async function proposeFor(input: {
   sessionID: string
   said?: string
   via?: "training" | "memory"
+  /** From the memory tool: the block it meant to write, used if the person picks Memory on the card. */
+  memory?: { id: string; tags: string[] }
 }) {
   const { root, learn, content, sessionID, said } = input
   const via = input.via ?? "training"
-  if (via === "memory" && !(said && ASKED_TO_REMEMBER.test(said))) return undefined
+  // From the memory tool, only the thing the person asked to remember gets a card: their message decides rule or
+  // memory for that text, not for an unrelated note the agent saves in the same turn.
+  if (via === "memory" && !(said && ASKED_TO_REMEMBER.test(said) && restates(content, said))) return undefined
   const [{ RulesStore }, { RuleTrigger }, { RulesSync }, { RulesTelemetry }] = await Promise.all([
     import("./store"),
     import("./trigger"),
@@ -54,15 +80,21 @@ export async function proposeFor(input: {
   if (!RulesSync.rulesEnabled(learn)) return void RulesTelemetry.routed(sessionID, via, "learning_off")
   const state = await RulesStore.read(root)
   if (!state.scope || !state.workspace) return void RulesTelemetry.routed(sessionID, via, "not_linked")
-  const result = await RuleTrigger.explicit({ sessionID, root, directory: input.directory, learn, text: content, said })
+  // Nothing attached to this process shows cards (`altimate-code run`, ACP, a plugin): a card would be lost, so the
+  // tool saves as it did before cards (memory, or project training).
+  const { RuleProposal } = await import("./proposal")
+  if (!RuleProposal.rendererAttached()) return void RulesTelemetry.routed(sessionID, via, "no_renderer")
+  const result = await RuleTrigger.explicit({ sessionID, root, directory: input.directory, learn, text: content, said, memory: input.memory })
   RulesTelemetry.routed(
     sessionID,
     via,
     result.status === "shown" ? (result.choose ? "choose_card" : "card") : result.status,
   )
   const metadata = { action: "proposed" as string, kind: "rule", name: "", scope: "project" }
-  // From the memory tool, a memory (or a text that can't be a one-line rule) is simply saved as asked.
-  if (via === "memory" && (result.status === "memory" || result.status === "invalid")) return undefined
+  // From the memory tool, a memory is simply saved as asked; so is a long note that did not ask to be a rule. A
+  // requested rule that is not one line is sent back to be restated: saved as project memory, it would reach
+  // teammates through the workspace's memory without review.
+  if (via === "memory" && (result.status === "memory" || (result.status === "invalid" && result.kind !== "rule"))) return undefined
   if (result.status === "memory")
     return {
       title: "Not a team rule",
@@ -73,11 +105,11 @@ export async function proposeFor(input: {
     return {
       title: "Team rule: not proposed",
       metadata: { ...metadata, action: "error" },
-      output: `Not proposed: a team rule must be one line of at most 140 characters with no commands, links or secrets (${result.reason}). Restate it as one short line and call training_save again.`,
+      output: `Not proposed: a team rule must be one line of at most 140 characters with no commands, links or secrets (${result.reason}). Restate it as one short line and save it again.`,
     }
   const owner = state.workspace.is_owner ? "you (the workspace owner)" : (state.workspace.owner_name ?? "the workspace owner")
   return {
-    title: `Team rule proposed: "${content.slice(0, 60)}"`,
+    title: result.choose ? `Team rule or memory: "${content.slice(0, 60)}"` : `Team rule proposed: "${content.slice(0, 60)}"`,
     metadata,
     output: [
       result.choose

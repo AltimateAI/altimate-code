@@ -301,7 +301,10 @@ export async function startCapture(
     const { SessionID } = await import("../../session/schema")
     const capture = new Capture({
       record: async (signal) => {
-        if ((await gates.get(ctx.directory)?.().catch(() => true)) === false) return
+        // Fails closed: a gate that cannot decide (unreadable rules state) must not record a correction the person
+        // may have turned off.
+        const gate = gates.get(ctx.directory)
+        if (gate && !(await gate().catch(() => false))) return
         return appendSignal(root, signal)
       },
       turnStart: async (sessionID, messageID) => {

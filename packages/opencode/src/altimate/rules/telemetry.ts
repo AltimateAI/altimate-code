@@ -64,7 +64,6 @@ export function answered(input: {
     action: input.action,
     status: input.status,
     ...(input.outcome ? { outcome: input.outcome } : {}),
-    approve_anyway: input.action === "approve" && !!input.card.weakens_verification,
     edits: input.edits,
     ms_since_shown: Math.max(0, Date.now() - input.shownAt),
   })
