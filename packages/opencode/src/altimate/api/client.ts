@@ -3,7 +3,13 @@ import path from "path"
 import { rm } from "node:fs/promises"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
-import { findAllConfigPaths, listMcpInConfig, readMcpEntryFromDisk, removeMcpFromConfig } from "../../mcp/config"
+import {
+  findGlobalConfigPaths,
+  findProjectConfigPaths,
+  listMcpInConfig,
+  readMcpEntryFromDisk,
+  removeMcpFromConfig,
+} from "../../mcp/config"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 const DEFAULT_MCP_URL = "https://mcpserver.getaltimate.com/sse"
@@ -160,22 +166,43 @@ export namespace AltimateApi {
     await rm(credentialsPath(), { force: true })
   }
 
+  /** Directories whose project config a session in `directory` loads: `directory` up to the git root,
+   *  or `directory` alone outside git. Matches where `datamate add` writes project entries. */
+  async function projectConfigDirs(directory: string): Promise<string[]> {
+    const dirs: string[] = []
+    for (let dir = directory; ; dir = path.dirname(dir)) {
+      dirs.push(dir)
+      if (await Filesystem.exists(path.join(dir, ".git"))) return dirs
+      if (path.dirname(dir) === dir) return [directory]
+    }
+  }
+
   /** Sign out of the gateway: remove MCP entries that carry the saved key, then delete the credential file.
    *  Standalone `datamate add` writes the key into MCP headers (`buildMcpConfig`); matching the exact key
-   *  leaves user-authored entries alone. Only the global config and `projectDir` are searched. */
+   *  leaves user-authored entries alone. Searches the global config and every project config a session in
+   *  `projectDir` loads. Fails without deleting the file when the key can't be read: the file holds the
+   *  only copy, and without it leftover MCP entries can never be matched. */
   export async function signOut(projectDir: string): Promise<Array<{ name: string; path: string }>> {
-    const key = await getCredentials().then(
-      (creds) => creds.altimateApiKey,
-      () => undefined,
-    )
+    if (!(await isConfigured())) return []
+    let key: string
+    try {
+      key = (await getCredentials()).altimateApiKey
+    } catch (err) {
+      throw new Error(
+        `could not read the saved key from ${credentialsPath()} (${err instanceof Error ? err.message : err}); ` +
+          "fix the file and sign out again so MCP servers that carry the key are removed too",
+      )
+    }
+    const configPaths = [
+      ...(await Promise.all((await projectConfigDirs(projectDir)).map(findProjectConfigPaths))).flat(),
+      ...(await findGlobalConfigPaths(Global.Path.config)),
+    ]
     const removed: Array<{ name: string; path: string }> = []
-    if (key) {
-      for (const configPath of await findAllConfigPaths(projectDir, Global.Path.config)) {
-        for (const name of await listMcpInConfig(configPath)) {
-          const entry = await readMcpEntryFromDisk(name, configPath)
-          if (entry?.type !== "remote" || entry.headers?.Authorization !== `Bearer ${key}`) continue
-          if (await removeMcpFromConfig(name, configPath)) removed.push({ name, path: configPath })
-        }
+    for (const configPath of configPaths) {
+      for (const name of await listMcpInConfig(configPath)) {
+        const entry = await readMcpEntryFromDisk(name, configPath)
+        if (entry?.type !== "remote" || entry.headers?.Authorization !== `Bearer ${key}`) continue
+        if (await removeMcpFromConfig(name, configPath)) removed.push({ name, path: configPath })
       }
     }
     await clearCredentials()

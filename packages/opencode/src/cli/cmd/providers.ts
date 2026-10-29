@@ -650,9 +650,10 @@ export const ProvidersLogoutCommand = effectCmd({
     if (provider === "altimate-backend") {
       // Browser sign-in persists the gateway key to ~/.altimate/altimate.json, which the provider
       // loader and every workspace call read first, so sign-out must remove it too.
-      const removed = yield* cliTry(
-        `Failed to sign out of Altimate (if ${AltimateApi.credentialsPath()} remains, delete it manually): `,
-        () => AltimateApi.signOut(process.cwd()),
+      // On failure the saved key and the auth-store entry are both kept, so fixing the cause and
+      // re-running logout can still match and remove every copy of the key.
+      const removed = yield* cliTry("Failed to sign out of Altimate; fix the cause below and run logout again: ", () =>
+        AltimateApi.signOut(process.cwd()),
       )
       for (const entry of removed) yield* Prompt.log.info(`Removed MCP server "${entry.name}" from ${entry.path}`)
       if (removed.length > 0) yield* Prompt.log.info("Add the datamate again after signing in to restore it.")
