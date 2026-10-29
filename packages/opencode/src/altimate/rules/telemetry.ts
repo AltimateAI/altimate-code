@@ -85,9 +85,10 @@ export function synced(trigger: SyncTrigger, report: RulesSync.RunReport, starte
   const base = { type: "rules_sync" as const, timestamp: Date.now(), session_id: "", trigger, duration_ms: Date.now() - startedAt }
   const { context, push, pull, usage } = report
   if (context.status !== "ready") return send({ ...base, status: context.status, reason: context.code })
+  // `ok` only when the pull worked and nothing that was to be sent stayed back; usage has its own flag.
   send({
     ...base,
-    status: pull?.ok ? "ok" : "failed",
+    status: pull?.ok && !push?.error ? "ok" : "failed",
     ...(pull?.ok ? { rules: pull.rules, pending: pull.pending, notices: pull.notices.length } : {}),
     ...(push
       ? {
@@ -99,6 +100,10 @@ export function synced(trigger: SyncTrigger, report: RulesSync.RunReport, starte
       : {}),
     ...(usage ? { usage_items: usage.items, usage_failed: !!usage.error } : {}),
   })
+}
+
+export function syncThrew(trigger: SyncTrigger, startedAt: number) {
+  send({ type: "rules_sync", timestamp: Date.now(), session_id: "", trigger, status: "failed", reason: "error", duration_ms: Date.now() - startedAt })
 }
 
 export function delivered(input: Omit<Of<"rules_delivered">, "type" | "timestamp">) {

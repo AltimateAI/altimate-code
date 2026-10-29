@@ -602,7 +602,7 @@ export namespace Telemetry {
         choose: boolean
         linked: boolean
         is_owner: boolean
-        actions: string[]
+        actions: ("send" | "approve" | "edit" | "dismiss" | "save_local" | "save_memory")[]
         weakens_verification: boolean
         evidence_sessions: number
         from_correction: boolean
@@ -644,7 +644,7 @@ export namespace Telemetry {
         session_id: string
         /** Absent when the check stopped before choosing a path (a card already open, a failure). */
         trigger?: "shown_rule" | "recurrence"
-        reason: "card_open" | "covered" | "no_draft" | "topic_dismissed" | "no_topic" | "failed"
+        reason: "card_open" | "no_renderer" | "covered" | "no_draft" | "topic_dismissed" | "no_topic" | "failed"
       }
     | {
         /** The agent saved something the person asked to remember (`training_save` kind rule, or the memory tool

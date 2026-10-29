@@ -302,9 +302,15 @@ export async function startCapture(
     const capture = new Capture({
       record: async (signal) => {
         // Fails closed: a gate that cannot decide (unreadable rules state) must not record a correction the person
-        // may have turned off.
+        // may have turned off. It throws rather than returns, so the correction is not marked recorded and a later
+        // update of the message can try again; `track` logs it.
         const gate = gates.get(ctx.directory)
-        if (gate && !(await gate().catch(() => false))) return
+        if (gate) {
+          const on = await gate().catch((error: unknown) => {
+            throw new Error(`learning decision unavailable, correction not recorded: ${error instanceof Error ? error.message : String(error)}`)
+          })
+          if (!on) return
+        }
         return appendSignal(root, signal)
       },
       turnStart: async (sessionID, messageID) => {

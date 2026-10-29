@@ -299,8 +299,7 @@ export class Delivery {
       session_id: state.session,
       tier,
       rules: added.length,
-      // The workspace's team rules are the `team` store (`rules/store.ts` `TEAM_STORE`).
-      team_rules: added.filter((entry) => entry.name === "team").length,
+      team_rules: added.filter((entry) => entry.name === Store.WORKSPACE_RULES_STORE).length,
       chars: added.reduce((sum, entry) => sum + entry.lesson.text.length, 0),
       session_rules: state.shown.length,
       budget_tokens: this.limits.budget_tokens,
@@ -384,6 +383,7 @@ export class Delivery {
       }
       const approved = await this.approved()
       if (!state && !approved.length) return { ...EMPTY }
+      let added: { before: number; tier: "start" | "request" } | undefined
       if (!state) {
         // Count earlier deliveries before replacing an unsafe snapshot; retain the session ledger
         // so selecting its approved replacement cannot count the same ID twice.
@@ -395,7 +395,7 @@ export class Delivery {
         const start = selectStart(corpus(approved), initialQuery, this.limits)
         state = { version: 1, session, firstMessage: message, query: redactedQuery, touchedPaths: previous?.touchedPaths ?? [], section: start.section, shown: [], requests: [], requestParts: previous?.requestParts ?? [], compactions: [], counted: previous?.counted ?? [] }
         for (const item of start.lessons) this.add(state, approved, [item.lesson], item.tier, initialQuery)
-        this.delivered(state, 0, "start")
+        added = { before: 0, tier: "start" }
         state.requests.push({ message, note: "" })
       } else {
         state.query = redactedQuery
@@ -405,12 +405,13 @@ export class Delivery {
           paths: [...state.touchedPaths, ...this.mentionedPaths(query)],
         })
         const rendered = renderSection(matches, this.limits.budget_tokens, "Team rules for this request:")
-        const before = state.shown.length
+        added = { before: state.shown.length, tier: "request" }
         this.add(state, approved, rendered.lessons, "request", query)
-        this.delivered(state, before, "request")
         state.requests.push({ message, note: rendered.section })
       }
       await this.save(state)
+      // Reported once saved: a save that throws is retried, and would otherwise count the same rules twice.
+      if (added) this.delivered(state, added.before, added.tier)
       await this.log(state)
       return { section: state.section, requestNote: state.requests.find((request) => request.message === message)!.note }
     }, LOCK_OPTIONS)
@@ -467,8 +468,8 @@ export class Delivery {
       const rendered = renderSection(matches, this.limits.budget_tokens, `Team rules for ${singleLine(relative)}:`)
       const before = state.shown.length
       const added = this.add(state, approved, rendered.lessons, "file", relative)
-      this.delivered(state, before, "file")
       if (touched || added.length) await this.save(state)
+      this.delivered(state, before, "file")
       if (!added.length) return ""
       await this.log(state)
       return rendered.section

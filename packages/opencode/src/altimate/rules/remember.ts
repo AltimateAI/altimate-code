@@ -4,14 +4,19 @@
 // whichever save tool the agent reached for. `training_save` (kind rule) and `altimate_memory_write` (project scope,
 // when the person asked to remember) both come here first.
 
+import fs from "node:fs/promises"
+
 /** The person asked for something to be remembered (not the agent deciding to take a note). */
 const ASKED_TO_REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note (?:that|this)|save (?:this|that)|from now on)\b/i
 const contentWords = (text: string) => new Set(text.toLowerCase().match(/[a-z0-9_]{3,}/g) ?? [])
+const NEGATION = /\b(?:never|not|no|don'?t|do not|avoid|without)\b/i
 
-/** Does `content` restate what the person said? Most of its words appear in their message. */
+/** Does `content` restate what the person said? Most of its words appear in their message, and it does not drop or add
+ * a negation ("never use FLOAT" is not restated by "use FLOAT"). */
 export function restates(content: string, said: string): boolean {
   const words = [...contentWords(content)]
   if (!words.length) return false
+  if (NEGATION.test(content) !== NEGATION.test(said)) return false
   const spoken = contentWords(said)
   return words.filter((word) => spoken.has(word)).length / words.length >= 0.6
 }
@@ -47,7 +52,10 @@ export async function proposeTeamRule(
     import("@/config/config"),
     import("./service"),
   ])
-  const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+  // Canonical, like the after-turn path (`service.ts`): a card is deduplicated by root, and a symlinked checkout or
+  // `/var` → `/private/var` would otherwise show the same rule twice.
+  const raw = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+  const root = await fs.realpath(raw).catch(() => raw)
   // The project's learn file as it is now, like every other entry point: `learn disable` mid-session takes effect.
   const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
   return proposeFor({ root, directory: Instance.directory, learn, content, sessionID, said, via, memory })

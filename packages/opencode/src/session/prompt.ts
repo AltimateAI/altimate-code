@@ -11,6 +11,8 @@ import { MessageV2, isEchoTransportError } from "./message-v2"
 // altimate_change end
 // altimate_change — a linked workspace with no skills yet still waits for the skill sync; see `prompt`
 import { emptyRecordPath } from "../altimate/workspace/empty-record-path"
+// altimate_change — workspace rules: the prompt path skips them in a project that cannot have any
+import { Global } from "../global"
 import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "."
@@ -133,6 +135,12 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 
 // altimate_change start — workspace rules: sessions that already had their session-start pull in this process
 const rulesSessionsStarted = new Set<string>()
+/** Rules state in this project, or a workspace linked on this machine (the bindings cache): otherwise the project
+ * cannot have workspace rules, and the prompt path skips them. Synchronous existence checks only. */
+const mayHaveWorkspaceRules = (root: string) =>
+  existsSync(path.join(root, ".altimate-code", "learn", "workspace-rules", "rules.json")) ||
+  existsSync(path.join(root, ".altimate-code", "learn", "team", "rules.json")) ||
+  existsSync(path.join(Global.Path.state, "altimate-workspace-bindings.json"))
 // altimate_change end
 
 const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
@@ -774,7 +782,9 @@ export namespace SessionPrompt {
     const learnRoot = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
     // Workspace rules: a bounded pull before a session's first turn, so it delivers newly approved rules. Only the
     // first prompt of a session awaits anything; every later prompt stays on the synchronous path.
-    if (!rulesSessionsStarted.has(sessionID)) {
+    // A project that cannot have workspace rules pays only the existence checks in `mayHaveWorkspaceRules`: the rules
+    // module graph is not loaded on its prompt path.
+    if (!rulesSessionsStarted.has(sessionID) && mayHaveWorkspaceRules(learnRoot)) {
       // Bounded: a long-lived server sees many sessions; the oldest is forgotten first, which only costs it another
       // bounded wait if it is resumed.
       if (rulesSessionsStarted.size >= 1000) rulesSessionsStarted.delete(rulesSessionsStarted.values().next().value!)

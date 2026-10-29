@@ -92,7 +92,7 @@ export async function sendStaged(input: {
   const ids = await RulesSync.enqueueMany(input.root, input.staged.items.map((item) => ({ item })))
   const report = await RulesSync.runFresh(input.root, input.directory, input.learn, "import")
   const state = await RulesStore.read(input.root)
-  const outcomes = ids.map((id, index) => RulesSync.outcomeOf(state, report, id, input.staged.items[index].text))
+  const outcomes = ids.map((id) => RulesSync.outcomeOf(state, report, id))
   const queued = outcomes.filter((o) => o.status === "queued").length
   const refused = outcomes.filter((o) => o.status === "sent" && o.row?.error).length
   const sent = outcomes.length - queued - refused

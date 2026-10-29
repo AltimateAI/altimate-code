@@ -1265,9 +1265,21 @@ export namespace Server {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
         if (refused) return c.json(refused.body, refused.status)
         const { RuleProposal } = await import("../altimate/rules/proposal")
-        // Only clients that render cards list them: from now on the save tools may show cards in this process.
-        RuleProposal.markRenderer()
         return c.json(RuleProposal.list(Instance.directory, c.req.query("session") || undefined))
+      })
+      // A client that shows proposal cards renews its lease here while it runs (`RENDERER_RENEW_MS`). Without a live
+      // lease the save tools save as before cards and the after-turn check waits for one.
+      .post("/rule-proposal/renderer", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const read = await readJsonObject(() => c.req.text(), "rule proposal renderer")
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const { client } = read.body as { client?: unknown }
+        if (typeof client !== "string" || !/^[a-z0-9_.-]{1,64}$/i.test(client))
+          return c.json({ ok: false, error: "client must be a short name (letters, digits, _ . -)." }, 400)
+        const { RuleProposal } = await import("../altimate/rules/proposal")
+        RuleProposal.renewRenderer(client)
+        return c.json({ ok: true as const, renew_ms: RuleProposal.RENDERER_RENEW_MS, lease_ms: RuleProposal.RENDERER_LEASE_MS })
       })
       .post("/rule-proposal/:id/reply", async (c) => {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))

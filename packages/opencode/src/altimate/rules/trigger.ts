@@ -155,6 +155,12 @@ export async function afterTurn(input: {
     const fresh = (await readSignals(input.root, Playbook.DEFAULT_NAME)).filter((signal) =>
       signal.kind === "user_correction" && signal.sessionID === input.sessionID && !processed.has(signal.id))
     if (!fresh.length) return
+    // Nothing attached would show a card (`altimate-code run`, ACP, a plugin): the corrections are left unprocessed,
+    // so a later turn of this session with a card client attached proposes them.
+    if (!RuleProposal.rendererAttached()) {
+      outcome = "no client that shows cards is attached; corrections kept for a later check"
+      return RulesTelemetry.skipped(input.sessionID, undefined, "no_renderer")
+    }
     // One card at a time per session: an explicit "remember" may already have shown one for this turn.
     if (RuleProposal.list().some((card) => card.sessionID === input.sessionID))
       return RulesTelemetry.skipped(input.sessionID, undefined, "card_open")

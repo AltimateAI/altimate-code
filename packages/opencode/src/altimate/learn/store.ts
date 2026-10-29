@@ -95,8 +95,11 @@ export function feedbackId(feedback: string, origin: string): string {
 
 // Callers hold the learn transaction lock. Rename also protects readers from partial files.
 // altimate_change start — workspace rules: the store the team rules are mirrored into is written only by rules sync
-/** Store names learn's own writers refuse: `team` holds the workspace's team rules (`rules/store.ts` `TEAM_STORE`). */
-export const RESERVED_STORES: ReadonlySet<string> = new Set(["team"])
+/** The store a linked project's workspace team rules are mirrored into: written only by rules sync. Not `team`, which
+ * existing projects use for their own (often committed) playbooks. */
+export const WORKSPACE_RULES_STORE = "workspace-rules"
+/** Store names learn's own writers refuse. */
+export const RESERVED_STORES: ReadonlySet<string> = new Set([WORKSPACE_RULES_STORE])
 
 function assertWritable(name: string) {
   if (RESERVED_STORES.has(name))

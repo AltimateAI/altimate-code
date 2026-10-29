@@ -504,3 +504,17 @@ test("rules added to a session are reported by tier, as counts only; a cached an
   expect(delivered[1].chars).toBe("Use the `shipping` route for parcel tracking.".length)
   expect(JSON.stringify(events)).not.toContain("shipping")
 })
+
+test("rules from the workspace-rules store are counted as team rules", async () => {
+  await approve([lesson("L-0101", "Keep the project rules explicit.", { pinned: true })])
+  await approve([lesson("L-0102", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
+  const events: Telemetry.Event[] = []
+  const spy = spyOn(Telemetry, "track").mockImplementation((event: Telemetry.Event) => void events.push(event))
+  try {
+    await new Delivery(root, { ...limits, core_lessons: 2 }).prepare("session", "first", "staging")
+  } finally {
+    spy.mockRestore()
+  }
+  const start = events.find((e): e is Extract<Telemetry.Event, { type: "rules_delivered" }> => e.type === "rules_delivered")
+  expect(start).toMatchObject({ tier: "start", rules: 2, team_rules: 1 })
+})

@@ -16,8 +16,9 @@ export type Kind = "rule" | "memory" | "ambiguous"
 // The person named the kind: these decide on their own, whatever else the text says.
 const ASKED_RULE = /\bas\s+a\s+(?:team\s+)?rule\b/i
 // Only the named forms: a bare "for me" opens ordinary requests ("fix this model for me"), and "in memory" describes
-// data ("never load the fact table in memory").
-const ASKED_MEMORY = /\bas\s+a\s+memory\b|\bin\s+my\s+memory\b|\bremember\b[^.!?\n]*\b(?:just\s+)?for\s+me\b/i
+// data ("never load the fact table in memory"). "Just for me" always names a personal scope; "remember … for me" only
+// within one clause, so a later "for me" does not turn a team instruction into a memory.
+const ASKED_MEMORY = /\bas\s+a\s+memory\b|\bin\s+my\s+memory\b|\bjust\s+for\s+me\b|\bremember\b[^.!?\n,;:]*\bfor\s+me\b/i
 
 // "I want …" / "I like …" open many ordinary requests ("I want staging models in models/staging"): on its own
 // that is not enough to file a team convention as a personal memory, so it only makes the text ambiguous.

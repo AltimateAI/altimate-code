@@ -12,6 +12,9 @@ import { appliesTo, learningDecision, learningEnabled } from "../../../src/altim
 import { RulesFromHistory } from "../../../src/altimate/rules/from-history"
 import { RulesRemember } from "../../../src/altimate/rules/remember"
 import { RulesTelemetry } from "../../../src/altimate/rules/telemetry"
+import { RulesService } from "../../../src/altimate/rules/service"
+import { RuleTrigger } from "../../../src/altimate/rules/trigger"
+import { appendSignal } from "../../../src/altimate/learn/signals"
 import { Telemetry } from "../../../src/altimate/telemetry"
 import { parse } from "../../../src/altimate/learn/lesson"
 import * as Store from "../../../src/altimate/learn/store"
@@ -506,13 +509,54 @@ describe("the workspace API, by path", () => {
     const dir = path.join(root, ".altimate-code", "learn", ".sessions")
     await fs.mkdir(dir, { recursive: true })
     for (const [session, text] of [["shown-v1", "Name staging models stg_<source>."], ["shown-v2", "Name staging models stg_<source>__<entity>."]]) {
-      const state = { version: 1, session, firstMessage: "m", query: "q", touchedPaths: [], section: "", shown: [{ name: "team", lesson: lesson(text), tier: "core", at: "2026-10-28T00:00:00Z", queryHash: "h" }], requests: [], requestParts: [], compactions: [], counted: [] }
+      const state = { version: 1, session, firstMessage: "m", query: "q", touchedPaths: [], section: "", shown: [{ name: RulesStore.TEAM_STORE, lesson: lesson(text), tier: "core", at: "2026-10-28T00:00:00Z", queryHash: "h" }], requests: [], requestParts: [], compactions: [], counted: [] }
       await fs.writeFile(path.join(dir, `${Store.sha256(session)}.json`), JSON.stringify(state))
     }
     seen.length = 0
     answer = () => Response.json({ duplicate: false, applied_items: 1, skipped_items: 0 })
     await RulesSync.reportUsage(root, ready())
     expect(seen.find((r) => r.path === "/usage")?.body.items).toEqual([expect.objectContaining({ public_id: "p-v2", applied: 1 })])
+  })
+
+  test("a card's outcome is the one recorded for its outbox id, even when another run sent it", async () => {
+    const root = await tmp()
+    const id = await RulesSync.enqueue(root, item("Refused elsewhere."))
+    answer = () => Response.json({ detail: { code: "invalid", message: "too vague" } }, { status: 422 })
+    await RulesSync.push(root, ready())
+    // This run did not send it: its outcome comes from what the other run recorded, not "sent".
+    expect(RulesSync.outcomeOf(await RulesStore.read(root), undefined, id)).toMatchObject({ status: "sent", row: { status: "rejected", error: "too vague" } })
+  })
+
+  test("one item refused with an uncoded 422 is retried a few times, then refused", async () => {
+    const root = await tmp()
+    await RulesSync.enqueue(root, item("Unclear."))
+    answer = () => Response.json({ detail: [{ msg: "invalid" }] }, { status: 422 })
+    expect((await RulesSync.push(root, ready())).queued).toBe(1)
+    expect((await RulesSync.push(root, ready())).queued).toBe(1)
+    const last = await RulesSync.push(root, ready())
+    expect(last.queued).toBe(0)
+    expect(last.sent[0]).toMatchObject({ status: "rejected" })
+  })
+
+  test("a dropped usage batch marks its sessions reported, so the same batch is not rebuilt", async () => {
+    const root = await tmp()
+    answer = () => Response.json(syncBody([rule("aaaaaaaaaaaa", "Name staging models stg_<source>.")]))
+    await RulesSync.pull(root, ready())
+    await RulesStore.update(root, (s) => {
+      s.pending_usage = { batch_id: "batch-y", items: [{ public_id: "p-aaaaaaaaaaaa", applied: 1, helpful: 0, harmful: 0, corrected_again: 0 }], sessions: ["s9"], corrected: { "R-aaaaaaaaaaaa": 1 } }
+    })
+    answer = () => Response.json({ detail: { code: "batch_conflict", message: "conflict" } }, { status: 409 })
+    await RulesSync.reportUsage(root, ready())
+    const state = await RulesStore.read(root)
+    expect(state.pending_usage).toBeUndefined()
+    expect(state.usage_sessions).toContain("s9")
+    expect(state.corrected_reported["R-aaaaaaaaaaaa"]).toBe(1)
+  })
+
+  test("too many proposals at once say so", async () => {
+    const root = await tmp()
+    const many = Array.from({ length: RulesStore.MAX_OUTBOX + 1 }, (_, i) => ({ item: item(`Rule ${i}.`) }))
+    await expect(RulesSync.enqueueMany(root, many)).rejects.toThrow(`${RulesStore.MAX_OUTBOX + 1} proposals are more than can wait to be sent at once`)
   })
 })
 
@@ -723,7 +767,7 @@ describe("remember, whichever save tool the agent picks", () => {
   beforeAll(() => {
     delete process.env.ALTIMATE_DISABLE_WORKSPACE
     delete process.env.ALTIMATE_LEARN
-    RuleProposal.markRenderer()
+    RuleProposal.setRendererForTest(true)
   })
   afterAll(() => {
     if (env.ALTIMATE_DISABLE_WORKSPACE !== undefined) process.env.ALTIMATE_DISABLE_WORKSPACE = env.ALTIMATE_DISABLE_WORKSPACE
@@ -746,7 +790,7 @@ describe("remember, whichever save tool the agent picks", () => {
       expect(await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content, sessionID: "r0", said })).toBeUndefined()
       expect(RuleProposal.list(root)).toEqual([])
     } finally {
-      RuleProposal.markRenderer()
+      RuleProposal.setRendererForTest(true)
     }
   })
 
@@ -874,3 +918,109 @@ describe("telemetry", () => {
     expect(of("rule_remember_routed").map((e) => [e.via, e.outcome])).toEqual([["training", "learning_off"], ["training", "not_linked"]])
   })
 })
+
+describe("review round three", () => {
+  test("organisation-managed learn config beats a committed project setting", async () => {
+    const root = await tmp()
+    const managed = await tmp()
+    await fs.mkdir(path.join(root, ".altimate-code"), { recursive: true })
+    await fs.writeFile(path.join(root, ".altimate-code", "altimate-code.json"), JSON.stringify({ learn: { enabled: true, capture: true } }))
+    await fs.writeFile(path.join(managed, "altimate-code.json"), JSON.stringify({ learn: { enabled: false } }))
+    const env = process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR
+    process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR = managed
+    try {
+      expect(await RulesService.effectiveLearn({ enabled: false }, root, root)).toMatchObject({ enabled: false, capture: true })
+    } finally {
+      if (env === undefined) delete process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR
+      else process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR = env
+    }
+    expect(await RulesService.effectiveLearn({ enabled: false }, root, root)).toMatchObject({ enabled: true, capture: true })
+  })
+
+  test("team rules live in workspace-rules; a team playbook is the person's own store again", async () => {
+    const root = await tmp()
+    // An earlier build: state and mirror under `team/`, the person's own team playbook set aside.
+    const legacy = path.join(root, ".altimate-code", "learn", "team")
+    await fs.mkdir(legacy, { recursive: true })
+    const own = JSON.stringify([{ id: "L-000000000001", text: "Our own rule.", tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0, created: "2026-01-01T00:00:00Z", updated: "2026-01-01T00:00:00Z" }])
+    await fs.writeFile(path.join(legacy, "approved.json.before-workspace-rules-1"), own)
+    await fs.writeFile(path.join(legacy, "rules.json"), JSON.stringify({ ...linked(), rules: [rule("Name staging models stg_<source>.")] }))
+    await fs.writeFile(path.join(legacy, "approved.json"), canonicalMirror())
+    await fs.writeFile(path.join(legacy, ".gitignore"), "*\n")
+    expect((await RulesStore.read(root)).rules).toHaveLength(1)
+    await RulesStore.update(root, () => {})
+    expect(await fs.readFile(path.join(legacy, "approved.json"), "utf8")).toBe(own)
+    expect(await fs.readdir(legacy)).toEqual(["approved.json"])
+    expect(RulesStore.TEAM_STORE).toBe("workspace-rules")
+    expect(parse(await fs.readFile(Store.paths(root, RulesStore.TEAM_STORE).approved, "utf8"))).toHaveLength(1)
+  })
+
+  test("a team playbook that is not ours is left alone by the migration", async () => {
+    const root = await tmp()
+    const legacy = path.join(root, ".altimate-code", "learn", "team")
+    await fs.mkdir(legacy, { recursive: true })
+    const own = JSON.stringify([{ id: "L-000000000001", text: "Our own rule.", tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0, created: "2026-01-01T00:00:00Z", updated: "2026-01-01T00:00:00Z" }])
+    await fs.writeFile(path.join(legacy, "approved.json"), own)
+    await RulesStore.update(root, (s) => Object.assign(s, linked()))
+    expect(await fs.readFile(path.join(legacy, "approved.json"), "utf8")).toBe(own)
+  })
+
+  test("with no card client attached, the after-turn check leaves corrections for later", async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => Object.assign(s, linked()))
+    await appendSignal(root, { kind: "user_correction", sessionID: "t9", text: "no, call it ordered_at", reason: "correction" })
+    RuleProposal.setRendererForTest(false)
+    const deps = { source: async () => { throw new Error("not reached") }, generate: async () => { throw new Error("not reached") } } as unknown as RuleTrigger.TriggerDeps
+    await RuleTrigger.afterTurn({ sessionID: "t9", root, directory: root, learn: { enabled: true, capture: true }, deps })
+    const state = await RulesStore.read(root)
+    expect(state.processed_signals).toEqual([])
+    expect(state.last_check?.outcome).toContain("no client that shows cards")
+  })
+
+  test("a card already open in the session skips the after-turn check, and its corrections stay unprocessed", async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => Object.assign(s, linked()))
+    await appendSignal(root, { kind: "user_correction", sessionID: "t10", text: "no, call it shipped_at", reason: "correction" })
+    RuleProposal.setRendererForTest(true)
+    try {
+      await RuleProposal.ask({ sessionID: "t10", root, directory: root, learn: undefined, draft: { text: "Name timestamps <event>_at.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } })
+      const deps = { source: async () => { throw new Error("not reached") }, generate: async () => { throw new Error("not reached") } } as unknown as RuleTrigger.TriggerDeps
+      await RuleTrigger.afterTurn({ sessionID: "t10", root, directory: root, learn: { enabled: true, capture: true }, deps })
+      expect((await RulesStore.read(root)).processed_signals).toEqual([])
+    } finally {
+      RuleProposal.drop(root)
+      RuleProposal.setRendererForTest(false)
+    }
+  })
+
+  test("a dismissal stops counting once it expires, before any write drops it", () => {
+    const state = RulesStore.State.parse({ version: 1, dismissed: [{ topic: "ordered_at", until: "2026-01-01T00:00:00Z" }] })
+    expect(RulesStore.dismissed(state, "ordered_at", Date.parse("2025-12-31T00:00:00Z"))).toBe(true)
+    expect(RulesStore.dismissed(state, "ordered_at", Date.parse("2026-01-02T00:00:00Z"))).toBe(false)
+  })
+
+  test("a restatement keeps the person's negation; just for me is personal; remember … for me stays in its clause", () => {
+    expect(RulesRemember.restates("Use FLOAT for money.", "Remember: never use FLOAT for money")).toBe(false)
+    expect(RulesRemember.restates("Never use FLOAT for money.", "Remember: never use FLOAT for money")).toBe(true)
+    expect(RuleClassify.classify("Just for me, always use trailing commas").kind).toBe("memory")
+    expect(RuleClassify.classify("Remember: the team always names models stg_, which is easier for me").kind).toBe("rule")
+    expect(RuleClassify.classify("Remember this for me: I like trailing commas").kind).toBe("memory")
+  })
+
+  test("a sync whose push failed is not ok", () => {
+    const events: unknown[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((event: Telemetry.Event) => void events.push(event))
+    try {
+      const ready = { status: "ready" as const, actAs: { url: "http://x", instance: "t", apiKey: "k" }, scope: { apiUrl: "http://x", tenant: "t", account: "a", datamateId: 1, repoRemote: "https://github.com/acme/demo" } }
+      RulesTelemetry.synced("refresh", { context: ready, push: { sent: [], queued: 2, error: "not bound" }, pull: { ok: true, rules: 1, pending: 0, notices: [] } }, Date.now())
+    } finally {
+      spy.mockRestore()
+    }
+    expect(events).toEqual([expect.objectContaining({ type: "rules_sync", status: "failed", push_failed: true, queued: 2 })])
+  })
+})
+
+function canonicalMirror() {
+  return JSON.stringify([{ id: "L-0123456789ab", text: "Name staging models stg_<source>.", tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0, created: "2026-10-27T00:00:00Z", updated: "2026-10-27T00:00:00Z", provenance: "workspace rule 11111111-1111-1111-1111-111111111111 v1" }])
+}
+

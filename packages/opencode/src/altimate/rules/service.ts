@@ -12,6 +12,7 @@
 // - After each turn (session idle), check the session's new corrections (`RuleTrigger.afterTurn`).
 // - Publish review notices from a pull as `rule.proposal.reviewed`.
 import fs from "node:fs/promises"
+import path from "node:path"
 import { Effect } from "effect"
 import { Bus } from "@/bus"
 import { registerDisposer } from "@/effect/instance-registry"
@@ -28,12 +29,39 @@ const log = Log.create({ service: "rules.service" })
 
 type LearnConfig = { enabled?: boolean; capture?: boolean; model?: string } | undefined
 
-/** `loaded` (the session's config) with the project file's `learn` as it is on disk now: `learn enable/disable`
- * write it while the session runs. Shared by the service and the routes so both decide the same way. */
+/**
+ * `loaded` (the session's config) with the project file's `learn` as it is on disk now: `learn enable/disable` write it
+ * while the session runs. The layers that outrank project files in `config.ts` (`OPENCODE_CONFIG_CONTENT`, the
+ * managed config directory, MDM preferences) are applied again on top, so a committed project setting never beats an
+ * organisation's. Shared by the service and the routes so both decide the same way.
+ */
 export async function effectiveLearn(loaded: LearnConfig, root: string, directory: string): Promise<LearnConfig> {
   const { readProjectLearning } = await import("../learn/project-config")
   const onDisk = (await readProjectLearning(root, directory).catch(() => undefined)) as LearnConfig
-  return loaded || onDisk ? { ...loaded, ...onDisk } : undefined
+  if (!loaded && !onDisk) return undefined
+  const above = await higherLearn().catch(() => ({}))
+  return { ...loaded, ...onDisk, ...above }
+}
+
+/** The `learn` keys set by the config layers above project files, in their merge order. */
+async function higherLearn(): Promise<Record<string, unknown>> {
+  const [{ env }, { ConfigManaged }, { parse }] = await Promise.all([
+    import("@opencode-ai/core/flag/flag"),
+    import("@/config/managed"),
+    import("jsonc-parser"),
+  ])
+  const learn: Record<string, unknown> = {}
+  const add = (text: string | undefined) => {
+    if (!text) return
+    const value = (parse(text) as { learn?: unknown } | undefined)?.learn
+    if (value && typeof value === "object" && !Array.isArray(value)) Object.assign(learn, value)
+  }
+  add(env("OPENCODE_CONFIG_CONTENT"))
+  const managedDir = ConfigManaged.managedConfigDir()
+  for (const file of ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"])
+    add(await fs.readFile(path.join(managedDir, file), "utf8").catch(() => undefined))
+  add((await ConfigManaged.readManagedPreferences())?.text)
+  return learn
 }
 
 async function learnConfig(ctx: InstanceContext): Promise<LearnConfig> {

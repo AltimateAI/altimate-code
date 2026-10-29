@@ -194,7 +194,6 @@ const EnableCommand = effectCmd({
       const root = await projectRoot()
       const requested = args["auto-promote"] as boolean | undefined
       const file = await writeProjectLearning(root, true, requested)
-      await clearPersonalLearning(root)
       // altimate_change end
       // altimate_change start — explicit capture opt-in checks effective config and preserves the learning kill switch
       try {
@@ -216,6 +215,8 @@ const EnableCommand = effectCmd({
         })
         throw new Error(`Wrote project config: ${file}, but capture remains off (effective learn.capture=false). ${hint}`)
       } else {
+        // Only once it worked: a failed enable must not also delete the person's `/rules` choice.
+        await clearPersonalLearning(root)
         out(`Project learning enabled: learn.capture=true, learn.auto_reflect=${autoReflectEnabled(learn)}.`)
       }
       // altimate_change end
@@ -248,7 +249,6 @@ const DisableCommand = effectCmd({
       // altimate_change start — disable also turns automatic promotion off
       const root = await projectRoot()
       const file = await writeProjectLearning(root, false, false)
-      await clearPersonalLearning(root)
       // altimate_change end
       // altimate_change start — verify effective settings before reporting learning disabled
       const { Config } = await import("@/config/config")
@@ -268,6 +268,8 @@ const DisableCommand = effectCmd({
         throw new Error(`Wrote project config: ${file}, but learning remains active (effective learn.capture=${capture}, learn.auto_reflect=${automatic}). ${hints.join(" ")}`)
       }
       // altimate_change end
+      // Only once it worked: a failed disable must not also delete the person's `/rules` choice.
+      await clearPersonalLearning(root)
       out("Project learning disabled: learn.capture=false, learn.auto_reflect=false.")
       out(`Project config: ${file}`)
     })
@@ -424,10 +426,9 @@ const StatusCommand = effectCmd({
       if (!rules.linked) out("Workspace rules: not linked (run `altimate-code link`)")
       else {
         const { RulesSummary } = await import("../../altimate/rules/summary")
-        out(`Workspace rules: ${rules.workspace?.name ?? "workspace"} — ${RulesSummary.sidebarLine(rules)}${rules.pulled_at ? `; last sync ${rules.pulled_at}` : ""}${rules.last_error ? `; last error: ${rules.last_error}` : ""}`)
-        if (rules.last_check) out(`Last proposal check: ${rules.last_check.at} — ${rules.last_check.outcome}`)
-        for (const notice of rules.notices.slice(0, 5))
-          out(`  ${notice.status === "active" ? "approved" : notice.status}${notice.reviewer ? ` by ${notice.reviewer}` : ""}: "${notice.text}"${notice.reason ? ` — ${notice.reason}` : ""}`)
+        out(`Workspace rules: ${printable(rules.workspace?.name ?? "workspace")} — ${RulesSummary.sidebarLine(rules)}${rules.pulled_at ? `; last sync ${rules.pulled_at}` : ""}${rules.last_error ? `; last error: ${printable(rules.last_error)}` : ""}`)
+        if (rules.last_check) out(`Last proposal check: ${rules.last_check.at} — ${printable(rules.last_check.outcome)}`)
+        for (const notice of rules.notices.slice(0, 5)) out(noticeLine(notice))
       }
       // altimate_change end
     })
@@ -435,6 +436,15 @@ const StatusCommand = effectCmd({
 })
 
 // altimate_change start — workspace rules: send queued proposals, pull approved rules, report usage
+/** Server text (a rule, a reviewer's name or reason, an error) without control characters: an owner-written reason
+ * must not be able to move the cursor, retitle the terminal or plant a hyperlink. */
+const printable = (text: string | undefined) => (text ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+
+function noticeLine(notice: { status: string; text: string; reviewer?: string; reason?: string }) {
+  const status = notice.status === "active" ? "approved" : printable(notice.status)
+  return `  ${status}${notice.reviewer ? ` by ${printable(notice.reviewer)}` : ""}: "${printable(notice.text)}"${notice.reason ? ` — ${printable(notice.reason)}` : ""}`
+}
+
 const SyncCommand = effectCmd({
   command: "sync",
   describe: "sync workspace rules now: send queued proposals and pull the approved rules",
@@ -453,13 +463,13 @@ const SyncCommand = effectCmd({
         return
       }
       if (report.context.status !== "ready") return out(`Rules sync skipped: ${report.context.reason}.`)
-      for (const sent of report.push?.sent ?? []) out(`Sent "${sent.text}": ${sent.error ?? sent.status}`)
-      if (report.push?.error) out(`Proposals not sent (kept queued): ${report.push.error}`)
-      if (!report.pull?.ok) throw new Error(`Rules pull failed: ${report.pull?.error ?? "unknown error"}`)
+      for (const sent of report.push?.sent ?? []) out(`Sent "${printable(sent.text)}": ${printable(sent.error ?? sent.status)}`)
+      if (report.push?.error) out(`Proposals not sent (kept queued): ${printable(report.push.error)}`)
+      if (report.push?.approval_error) out(`Approve now not done yet: ${printable(report.push.approval_error)}`)
+      if (!report.pull?.ok) throw new Error(`Rules pull failed: ${printable(report.pull?.error ?? "unknown error")}`)
       out(`Synced: ${report.pull.rules} team ${report.pull.rules === 1 ? "rule" : "rules"}, ${report.pull.pending} pending review.`)
-      for (const notice of report.pull.notices)
-        out(`  ${notice.status === "active" ? "approved" : notice.status}${notice.reviewer ? ` by ${notice.reviewer}` : ""}: "${notice.text}"${notice.reason ? ` — ${notice.reason}` : ""}`)
-      if (report.usage?.error) out(`Usage not reported: ${report.usage.error}`)
+      for (const notice of report.pull.notices) out(noticeLine(notice))
+      if (report.usage?.error) out(`Usage not reported: ${printable(report.usage.error)}`)
     })
   }),
 })
@@ -1143,7 +1153,7 @@ const LEARN_HELP = [
 
 const LEARN_SUBCOMMANDS = new Set([
   "enable", "disable", "nudge", "status", "sync", "bootstrap", "import-reviews", "reflect", "signals", "signal",
-  "add", "show", "search", "pin", "unpin", "promote", "rollback", "reject",
+  "show", "search", "pin", "unpin", "promote", "rollback", "reject",
 ])
 
 export const LearnCommand = cmd({

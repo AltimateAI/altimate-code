@@ -163,7 +163,10 @@ export interface PushResult {
     target_gone?: boolean
   }[]
   queued: number
+  /** Proposals that were not sent (kept queued). */
   error?: string
+  /** A retried "Approve now" failed (the proposals themselves may all have been sent). */
+  approval_error?: string
 }
 
 type OutboxEntry = State["outbox"][number]
@@ -213,6 +216,8 @@ const retryableApproval = (error: unknown) => {
   return kind === "transient" || kind === "auth"
 }
 const MAX_APPROVAL_ATTEMPTS = 5
+const MAX_UNCODED_ATTEMPTS = 3
+const MAX_PUSH_OUTCOMES = 200
 
 /** Per-item answers that are about now, not about the proposal: it stays queued and is sent again later. */
 const RETRY_LATER = new Set(["too_many_pending"])
@@ -225,7 +230,7 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
   const state = await RulesStore.read(root)
   const batch = state.outbox.slice(0, MAX_PROPOSALS)
   const retried = await retryApprovals(root, ctx, state.pending_approvals)
-  if (!batch.length) return { sent: [], queued: 0, ...(retried ? { error: retried } : {}) }
+  if (!batch.length) return { sent: [], queued: 0, ...(retried ? { approval_error: retried } : {}) }
   const outcomes = await send(ctx, batch)
   const sent: PushResult["sent"] = []
   const approvals: { entry: OutboxEntry; publicId: string; version: number }[] = []
@@ -234,7 +239,9 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
   const failed = new Map<string, string>()
   for (const { entry, result, error } of outcomes) {
     if (error) {
-      if (error.kind === "rejected") {
+      // An uncoded 400/422 for one item cannot tell the item from the request: kept for a few attempts, then refused
+      // so it is not resent forever.
+      if (error.kind === "rejected" || (uncodedContent(error) && entry.attempts + 1 >= MAX_UNCODED_ATTEMPTS)) {
         done.add(entry.id)
         sent.push({ id: entry.id, text: entry.item.text, status: "rejected", error: error.message })
       } else failed.set(entry.id, error.message)
@@ -291,6 +298,15 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
       entry.attempts += 1
       entry.last_error = error
     }
+    for (const row of sent)
+      s.push_outcomes[row.id] = {
+        status: row.status,
+        ...(row.public_id ? { public_id: row.public_id } : {}),
+        ...(row.error ? { error: row.error } : {}),
+        ...(row.error_code ? { error_code: row.error_code } : {}),
+      }
+    const ids = Object.keys(s.push_outcomes)
+    for (const id of ids.slice(0, Math.max(0, ids.length - MAX_PUSH_OUTCOMES))) delete s.push_outcomes[id]
     for (const row of sent) {
       if (!row.public_id || row.status === "exists") continue
       const existing = s.sent.find((x) => x.public_id === row.public_id)
@@ -300,8 +316,8 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
       if (row.status === "pending") s.pending_count += 1
     }
   })
-  const error = failed.size ? [...failed.values()][0] : retried
-  return { sent, queued: after.outbox.length, ...(error ? { error } : {}) }
+  const error = failed.size ? [...failed.values()][0] : undefined
+  return { sent, queued: after.outbox.length, ...(error ? { error } : {}), ...(retried ? { approval_error: retried } : {}) }
 }
 
 /**
@@ -350,7 +366,11 @@ export async function enqueueMany(root: string, items: readonly { item: Proposal
   const at = new Date().toISOString()
   await RulesStore.update(root, (state) => {
     if (state.outbox.length + items.length > RulesStore.MAX_OUTBOX)
-      throw new Error(`${state.outbox.length} proposals are already waiting to be sent; sync before proposing more`)
+      throw new Error(
+        items.length > RulesStore.MAX_OUTBOX
+          ? `${items.length} proposals are more than can wait to be sent at once (${RulesStore.MAX_OUTBOX}); send fewer`
+          : `${state.outbox.length} proposals are already waiting to be sent, and ${items.length} more would pass the limit of ${RulesStore.MAX_OUTBOX}; sync before proposing more`,
+      )
     items.forEach(({ item, approve }, index) =>
       state.outbox.push({ id: ids[index], created_at: at, attempts: 0, item, ...(approve ? { approve } : {}) }))
   })
@@ -362,15 +382,30 @@ export async function enqueue(root: string, item: ProposalItem, approve?: "appro
   return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}) }]))[0]
 }
 
-/** Where an enqueued proposal stands after a run: still queued, sent (with the server's answer), or gone. */
-export function outcomeOf(state: State, report: RunReport | undefined, outboxId: string, text: string):
+/**
+ * Where an enqueued proposal stands after a run: still queued, or sent with the server's answer. Looked up by outbox
+ * id: this run's report first, then the outcome another run (the timer, a session start, `learn sync`) recorded. Never
+ * by text, which an older proposal can share.
+ */
+export function outcomeOf(state: State, report: RunReport | undefined, outboxId: string):
   | { status: "queued"; error?: string }
   | { status: "sent"; row: PushResult["sent"][number] | undefined; sent?: State["sent"][number] } {
   const queued = state.outbox.find((entry) => entry.id === outboxId)
   if (queued) return { status: "queued", ...(queued.last_error ? { error: queued.last_error } : {}) }
-  const row = report?.push?.sent.find((s) => s.id === outboxId)
-  // Sent by another run (background refresh, session start): its record is in `sent`, by text.
-  return { status: "sent", row, sent: row?.public_id ? state.sent.find((s) => s.public_id === row.public_id) : [...state.sent].reverse().find((s) => s.text === text) }
+  const recorded = state.push_outcomes[outboxId]
+  const row = report?.push?.sent.find((s) => s.id === outboxId) ??
+    (recorded
+      ? {
+          id: outboxId,
+          text: "",
+          status: recorded.status,
+          ...(recorded.public_id ? { public_id: recorded.public_id } : {}),
+          ...(recorded.error ? { error: recorded.error } : {}),
+          ...(recorded.error_code ? { error_code: recorded.error_code } : {}),
+          ...(recorded.error_code && TARGET_GONE.has(recorded.error_code) ? { target_gone: true } : {}),
+        }
+      : undefined)
+  return { status: "sent", row, sent: row?.public_id ? state.sent.find((s) => s.public_id === row.public_id) : undefined }
 }
 
 type PendingUsage = NonNullable<State["pending_usage"]>
@@ -402,14 +437,8 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
     try {
       await sendUsage(root, ctx, before.pending_usage)
     } catch (error) {
-      // Refused for good (`batch_conflict`, a coded 400/422, a rule the server no longer serves): resending can never
-      // succeed and would block every later report, so the batch is dropped. Its sessions stay unreported.
       if (!permanentUsageFailure(error)) return { items: 0, error: errorText(error) }
-      const batchId = before.pending_usage.batch_id
-      await RulesStore.update(root, (s) => {
-        if (s.pending_usage?.batch_id === batchId) s.pending_usage = undefined
-      })
-      log.warn("rules usage batch refused; dropped", { error: errorText(error) })
+      await dropUsage(root, before.pending_usage, error)
     }
   }
   const state = await RulesStore.read(root)
@@ -487,9 +516,24 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
   try {
     await sendUsage(root, ctx, saved)
   } catch (error) {
+    if (permanentUsageFailure(error)) await dropUsage(root, saved, error)
     return { items: 0, error: errorText(error) }
   }
   return { items: saved.items.length }
+}
+
+/**
+ * Drop a batch the server refused for good (`batch_conflict`, a coded 400/422, a rule it no longer serves): resending
+ * can never succeed and would block every later report. Its sessions and corrections are marked reported, so the same
+ * batch is not rebuilt and refused again; those counts are lost, which is the lesser harm.
+ */
+async function dropUsage(root: string, batch: PendingUsage, error: unknown) {
+  await RulesStore.update(root, (s) => {
+    if (s.pending_usage?.batch_id === batch.batch_id) s.pending_usage = undefined
+    s.usage_sessions.push(...batch.sessions.filter((session) => !s.usage_sessions.includes(session)))
+    s.corrected_reported = { ...s.corrected_reported, ...batch.corrected }
+  })
+  log.warn("rules usage batch refused; dropped", { error: errorText(error) })
 }
 
 export interface RunReport {
@@ -509,9 +553,15 @@ export function publicReport(report: RunReport) {
  * for telemetry. */
 export async function run(root: string, directory: string, learn: LearnConfig, trigger: SyncTrigger = "refresh"): Promise<RunReport> {
   const startedAt = Date.now()
-  const report = await runUntracked(root, directory, learn)
-  RulesTelemetry.synced(trigger, report, startedAt)
-  return report
+  try {
+    const report = await runUntracked(root, directory, learn)
+    RulesTelemetry.synced(trigger, report, startedAt)
+    return report
+  } catch (error) {
+    // A run that threw (the learn lock timed out, the state is not writable): still one `failed` sync.
+    RulesTelemetry.syncThrew(trigger, startedAt)
+    throw error
+  }
 }
 
 async function runUntracked(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {

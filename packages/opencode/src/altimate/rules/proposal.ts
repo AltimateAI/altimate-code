@@ -67,23 +67,32 @@ function close(id: string, entry: Pending, message: string, why: "expired" | "cl
     void publish(RuleEvents.Event.Replied, { id, sessionID: entry.card.sessionID, action: "expired", message })
 }
 
-// A client that renders cards (the TUI, the IDE extension) lists them when it attaches: `GET /rule-proposal`. Until
-// one has, nothing would show a card, so the save tools save as they did before cards (`rendererAttached`).
-const RENDERER = Symbol.for("altimate.rules.proposal.renderer")
-const renderer = ((globalThis as Record<symbol, unknown>)[RENDERER] ??= { attached: false }) as { attached: boolean }
+// A client that renders cards (the TUI, the IDE extension) holds a lease: it calls `POST /rule-proposal/renderer` when
+// it starts and every `RENDERER_RENEW_MS` while it runs. While no lease is live, nothing would show a card: the save
+// tools save as they did before cards, and the after-turn check waits (`rendererAttached`). A client that went away
+// stops renewing, so its lease lapses; one that failed to register retries on the next renewal.
+export const RENDERER_RENEW_MS = 30_000
+export const RENDERER_LEASE_MS = 3 * RENDERER_RENEW_MS
+const RENDERERS = Symbol.for("altimate.rules.proposal.renderers")
+const renderers = ((globalThis as Record<symbol, unknown>)[RENDERERS] ??= new Map()) as Map<string, number>
 
-/** A client that shows proposal cards is attached to this process. */
-export function rendererAttached() {
-  return renderer.attached
+/** A client that shows proposal cards holds a live lease in this process. */
+export function rendererAttached(now = Date.now()) {
+  for (const [client, until] of renderers) {
+    if (until > now) return true
+    renderers.delete(client)
+  }
+  return false
 }
 
-/** Called by `GET /rule-proposal`: the caller renders cards. */
-export function markRenderer() {
-  renderer.attached = true
+/** `POST /rule-proposal/renderer`: `client` shows cards for the next `RENDERER_LEASE_MS`. */
+export function renewRenderer(client: string, now = Date.now()) {
+  renderers.set(client, now + RENDERER_LEASE_MS)
 }
 
 export function setRendererForTest(attached: boolean) {
-  renderer.attached = attached
+  renderers.clear()
+  if (attached) renderers.set("test", Number.MAX_SAFE_INTEGER)
 }
 
 /** Drop cards past `CARD_TTL_MS`. `here`: the directory of the request doing it (its project's clients are told). */
@@ -165,6 +174,7 @@ export async function ask(input: {
         existing.card = { ...existing.card, sessionID: input.sessionID }
         existing.directory = input.directory
         existing.learn = input.learn
+        if (input.draft.memory) existing.memory = input.draft.memory
         await publish(RuleEvents.Event.Updated, existing.card)
       } else await publish(RuleEvents.Event.Asked, existing.card)
       RulesTelemetry.shown(existing.card, existing.trigger, true)
@@ -297,7 +307,9 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
     message = card.topics.length ? "Not a rule: it won't be proposed again for 30 days." : "Dismissed: nothing was saved."
   } else if (action === "save_memory") {
     const [{ MemoryStore }, { RuleClassify }] = await Promise.all([import("../../memory/store"), import("./classify")])
-    const scope = RuleClassify.memoryScope(card.text)
+    // A card from the memory tool saves the block it was writing, in its scope (project): the classifier's guess
+    // could put that block id into personal memory and overwrite an unrelated block there.
+    const scope = entry.memory ? "project" : RuleClassify.memoryScope(card.text)
     const id = entry.memory?.id ?? `notes/${slug(card.text)}`
     const tags = entry.memory?.tags.length ? entry.memory.tags : ["remembered"]
     const now = new Date().toISOString()
@@ -328,12 +340,18 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
         : [],
     }, approve)
     const report = await RulesSync.runFresh(entry.root, entry.directory, entry.learn, "card").catch(() => undefined)
-    const sent = RulesSync.outcomeOf(await RulesStore.read(entry.root), report, outboxId, card.text)
+    const sent = RulesSync.outcomeOf(await RulesStore.read(entry.root), report, outboxId)
     const owner = card.workspace?.owner_name ?? "the workspace owner"
     const ws = card.workspace?.name ?? "the workspace"
     if (sent.status === "queued") {
-      message = `Queued: it will be sent to ${owner}'s review queue when the workspace is reachable.`
+      message = sent.error
+        ? `Not sent yet (${sent.error}): kept queued and sent again on the next sync.`
+        : `Queued: it will be sent to ${owner}'s review queue when the workspace is reachable.`
       outcome = "queued"
+    } else if (!sent.row) {
+      // Sent by another run whose answer is no longer recorded.
+      message = `Sent by another sync: \`/rules\` shows where it stands in ${ws}.`
+      outcome = "sent"
     } else if (sent.row?.target_gone) {
       // The rule this card edits or retires changed or was removed since it was shown: resending cannot succeed.
       message = "Not sent: the team rule this changes was edited or removed since. Check `/rules` and propose it again if it still applies."

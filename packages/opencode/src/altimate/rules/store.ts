@@ -23,7 +23,9 @@ import * as Store from "../learn/store"
 import { RuleOut, Settings } from "./api"
 
 /** The read-only store team rules are mirrored into (reserved: `learn/store.ts` `RESERVED_STORES`). */
-export const TEAM_STORE = "team"
+export const TEAM_STORE = Store.WORKSPACE_RULES_STORE
+/** Where earlier builds of workspace rules kept their state and mirror: moved by `migrateLegacy`. */
+const LEGACY_STORE = "team"
 const log = Log.create({ service: "rules.store" })
 const LOCK = { timeoutMs: 5_000 }
 const MAX_NOTICES = 50
@@ -115,6 +117,14 @@ export const State = z.object({
   /** The person's own "learning from sessions" choice for this project (`/rules`), when they made one. Kept here,
    * not in the project config, because that file is usually committed and the choice is per person. */
   personal_learning: z.boolean().optional(),
+  /** The last push outcome per outbox id, so a card can tell what happened to its proposal even when another run (the
+   * timer, a session start, `learn sync`) sent it. Capped. */
+  push_outcomes: z.record(z.string(), z.object({
+    status: z.string(),
+    public_id: z.string().optional(),
+    error: z.string().optional(),
+    error_code: z.string().optional(),
+  })).default({}),
   /** "Approve now" calls that failed for a reason that can pass (network, 5xx, credential): retried on the next push. */
   pending_approvals: z.array(z.object({
     public_id: z.string(),
@@ -139,12 +149,45 @@ export function dir(root: string) {
 }
 const stateFile = (root: string) => path.join(dir(root), "rules.json")
 
-/** The state file's text, or undefined when there is none. Other read errors propagate. */
+/** The state file's text, or undefined when there is none. Other read errors propagate. Until `update` migrates it,
+ * state an earlier build kept under `team/` is read from there. */
 async function readRaw(root: string): Promise<string | undefined> {
-  return fs.readFile(stateFile(root), "utf8").catch((error: NodeJS.ErrnoException) => {
+  const read = (file: string) => fs.readFile(file, "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined
     throw error
   })
+  return (await read(stateFile(root))) ?? (await read(legacyStateFile(root)))
+}
+
+const legacyStateFile = (root: string) => path.join(Store.paths(root, LEGACY_STORE).learnDir, "rules.json")
+
+/**
+ * Earlier builds kept the rules state and mirror in the `team` store, which projects also use for their own playbooks.
+ * Moves the state to `workspace-rules/`, and removes from `team/` only what was ours: the state file, an `approved.json`
+ * that is the mirror, and our `.gitignore`. A playbook that was set aside for the mirror is put back. Under the lock.
+ */
+async function migrateLegacy(root: string): Promise<void> {
+  const legacy = Store.paths(root, LEGACY_STORE)
+  const state = await fs.readFile(legacyStateFile(root), "utf8").catch(() => undefined)
+  if (state === undefined) return
+  if (!(await fs.access(stateFile(root)).then(() => true, () => false))) await Store.writeAtomic(root, stateFile(root), state)
+  await fs.rm(legacyStateFile(root), { force: true })
+  const approved = await fs.readFile(legacy.approved, "utf8").catch(() => undefined)
+  if (approved !== undefined && isMirror(approved)) {
+    await fs.rm(legacy.approved, { force: true })
+    const backups = (await fs.readdir(legacy.learnDir).catch(() => [] as string[]))
+      .filter((name) => name.startsWith("approved.json.before-workspace-rules-"))
+      .sort()
+    const latest = backups[backups.length - 1]
+    if (latest) {
+      await Store.writeAtomic(root, legacy.approved, await fs.readFile(path.join(legacy.learnDir, latest), "utf8"))
+      await fs.rm(path.join(legacy.learnDir, latest), { force: true })
+    }
+  }
+  const ignore = path.join(legacy.learnDir, ".gitignore")
+  if ((await fs.readFile(ignore, "utf8").catch(() => undefined)) === IGNORE) await fs.rm(ignore, { force: true })
+  await fs.rmdir(legacy.learnDir).catch(() => {})
+  log.info("workspace rules state moved from the team store", { root })
 }
 
 function parse(raw: string | undefined): State | undefined {
@@ -205,6 +248,7 @@ function capSent(sent: Sent[]): Sent[] {
 export async function update(root: string, change: (state: State) => State | void): Promise<State> {
   return withLearnLock(root, async () => {
     await SafeFS.mkdir(root, dir(root))
+    await migrateLegacy(root)
     const raw = await readRaw(root)
     let current = parse(raw)
     let recovered = false
@@ -223,8 +267,9 @@ export async function update(root: string, change: (state: State) => State | voi
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
     await Store.writeAtomic(root, stateFile(root), JSON.stringify(next, null, 2) + "\n")
-    // Only a linked project (or one whose rules just changed, e.g. a reset) has a mirror to write: a project with no
-    // workspace must not have its `team` directory touched. After an unreadable state was set aside, an existing
+    // Only a linked project (or one whose rules just changed, e.g. a reset) has a mirror to write: in a project with no
+    // workspace, only the state file is written (a dismissal, a learning choice), never an `approved.json` that delivery
+    // would read. After an unreadable state was set aside, an existing
     // mirror no longer matches any state: rewrite it, so rules nothing vouches for stop being delivered.
     const staleMirror = recovered && (await fs.access(Store.paths(root, TEAM_STORE).approved).then(() => true, () => false))
     if (next.workspace || JSON.stringify(next.rules) !== rulesBefore || staleMirror) {
@@ -240,11 +285,11 @@ async function writeMirror(root: string, rules: readonly RuleOut[]) {
   const text = canonical(rules.map(toLesson))
   const previous = await fs.readFile(file, "utf8").catch(() => undefined)
   if (previous === text) return
-  // A playbook someone named `team` before workspace rules existed: keep a copy instead of overwriting it.
+  // A playbook someone named `workspace-rules` before workspace rules existed: keep a copy instead of overwriting it.
   if (previous !== undefined && !isMirror(previous)) {
     const backup = `${file}.before-workspace-rules-${Date.now()}`
     await Store.writeAtomic(root, backup, previous, 0o600)
-    log.warn("an existing `team` rule store was set aside for the workspace team rules", { backup })
+    log.warn("an existing `workspace-rules` store was set aside for the workspace team rules", { backup })
   }
   await Store.writeAtomic(root, file, text)
 }
@@ -274,15 +319,23 @@ export async function reset(root: string, options: { keepOutbox?: boolean } = {}
     corrected_reported: state.corrected_reported,
     processed_signals: state.processed_signals,
     // A batch built for this scope can only be resent to it.
-    ...(options.keepOutbox ? { outbox: state.outbox, scope: state.scope, ...(state.pending_usage ? { pending_usage: state.pending_usage } : {}) } : {}),
+    ...(options.keepOutbox
+      ? {
+          outbox: state.outbox,
+          scope: state.scope,
+          pending_approvals: state.pending_approvals,
+          ...(state.pending_usage ? { pending_usage: state.pending_usage } : {}),
+        }
+      : {}),
   }))
 }
 
 /** Queued proposals at most; a new one is refused (the card stays open) rather than an older one dropped. */
 export const MAX_OUTBOX = 200
 
-export function dismissed(state: State, topic: string): boolean {
-  return state.dismissed.some((d) => d.topic === topic.toLowerCase())
+/** Whether `topic` is dismissed now. Expired entries are dropped on the next write, and do not count before it. */
+export function dismissed(state: State, topic: string, now = Date.now()): boolean {
+  return state.dismissed.some((d) => d.topic === topic.toLowerCase() && Date.parse(d.until) > now)
 }
 
 export * as RulesStore from "./store"

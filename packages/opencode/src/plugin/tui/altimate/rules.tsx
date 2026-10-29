@@ -433,13 +433,27 @@ function installCards(api: TuiPluginApi) {
       for (const notice of [...(summary?.notices ?? [])].reverse()) notify(notice, first)
     })
   on(api)("altimate.rules.changed", replay)
+  // This TUI shows proposal cards: it holds the server's renderer lease while it runs, renewed at the interval the
+  // server asks for. Without a live lease, the save tools save as before cards and the after-turn check waits. A
+  // failed call is retried after a few seconds.
+  const lease = async () => {
+    const result = await post<{ ok: boolean; renew_ms?: number }>(api, "/rule-proposal/renderer", { client: "tui" }).catch(() => undefined)
+    // Not registered yet (the server may still be starting): try again soon, not at the next renewal.
+    const next = result?.ok !== true ? 3_000 : typeof result.renew_ms === "number" && result.renew_ms > 0 ? result.renew_ms : 30_000
+    setTimeout(() => void lease(), next).unref?.()
+  }
+  void lease()
   setTimeout(() => {
     replay()
     void load()
   }, 4_000)
 }
 
-function reviewToast(api: TuiPluginApi, p: { text: string; status: string; reason?: string; reviewer?: string }) {
+/** Server text without control characters (a reviewer's reason must not drive the terminal). */
+const printable = (text: string | undefined) => (text ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+
+function reviewToast(api: TuiPluginApi, raw: { text: string; status: string; reason?: string; reviewer?: string }) {
+  const p = { ...raw, text: printable(raw.text), reason: raw.reason && printable(raw.reason), reviewer: raw.reviewer && printable(raw.reviewer) }
   const who = p.reviewer ? ` by ${p.reviewer}` : ""
   const quoted = `"${p.text.length > 80 ? p.text.slice(0, 79) + "…" : p.text}"`
   if (p.status === "active") api.ui.toast({ variant: "success", message: `Your rule was approved${who}: ${quoted}. It now applies to the team.`, duration: 10000 })
