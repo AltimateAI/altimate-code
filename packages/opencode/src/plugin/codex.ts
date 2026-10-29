@@ -199,6 +199,15 @@ export const OAUTH_ALLOWED_MODELS = new Set([
   "gpt-5.6-luna",
   "gpt-5.6-sol",
   "gpt-5.6-terra",
+  // altimate_change start — allowlisted on catalog evidence and NOT
+  // backend-probed: the exception to "every entry was verified" above.
+  // openai/codex's shipped codex-rs/models-manager/models.json lists it with
+  // visibility "list", upgrade null, and plus/pro in available_in_plans
+  // (added in openai/codex@126a0ee92e, 2026-10-26); models.dev carries it under
+  // openai. Probe it against the endpoint above and move it into
+  // VERIFIED_ACCEPTED (or out of this set) in the test file.
+  "gpt-6.1-terra",
+  // altimate_change end
 ])
 
 /** OAuth (ChatGPT-subscription) model-filter policy for the ACTIVE plugin
