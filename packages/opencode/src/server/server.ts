@@ -1310,8 +1310,13 @@ export namespace Server {
         if (refused) return c.json(refused.body, refused.status)
         const view = c.req.query("view")
         if (view !== undefined && view !== "active" && view !== "mine") return c.json({ ok: false, error: "view must be active or mine." }, 400)
-        const { RulesSummary } = await import("../altimate/rules/summary")
+        const [{ RulesSummary }, { RulesTelemetry }] = await Promise.all([
+          import("../altimate/rules/summary"),
+          import("../altimate/rules/telemetry"),
+        ])
         const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+        // Only the `/rules` view lists rules (the sidebar reads the summary): one call is one opening.
+        RulesTelemetry.command("view")
         return c.json({ ok: true as const, rules: await RulesSummary.rows(root, view ?? "all") })
       })
       // The person's own "learning from sessions" choice for this project: `on` true/false, or null to follow the
@@ -1339,6 +1344,8 @@ export namespace Server {
           })
           await Bus.publish(RuleEvents.Event.Changed, { directory: Instance.directory }).catch(() => {})
           const summary = await RulesSummary.summary(root, await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory))
+          const { RulesTelemetry } = await import("../altimate/rules/telemetry")
+          RulesTelemetry.learningChanged(on, summary.learning, summary.learning_source)
           return c.json({ ok: true as const, ...summary, line: RulesSummary.sidebarLine(summary) })
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
@@ -1356,7 +1363,7 @@ export namespace Server {
           const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
           const { RulesSync } = await import("../altimate/rules/sync")
           // Never the captured credential: the report goes to clients that may log or cache it.
-          return c.json({ ok: true as const, ...RulesSync.publicReport(await RulesService.syncNow(root, Instance.directory, learn)) })
+          return c.json({ ok: true as const, ...RulesSync.publicReport(await RulesService.syncNow(root, Instance.directory, learn, "manual")) })
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("rules sync failed", { error })

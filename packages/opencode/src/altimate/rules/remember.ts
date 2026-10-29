@@ -44,16 +44,22 @@ export async function proposeFor(input: {
   const { root, learn, content, sessionID, said } = input
   const via = input.via ?? "training"
   if (via === "memory" && !(said && ASKED_TO_REMEMBER.test(said))) return undefined
-  const [{ RulesStore }, { RuleTrigger }, { RulesSync }] = await Promise.all([
+  const [{ RulesStore }, { RuleTrigger }, { RulesSync }, { RulesTelemetry }] = await Promise.all([
     import("./store"),
     import("./trigger"),
     import("./sync"),
+    import("./telemetry"),
   ])
   // With learning or workspaces off, nothing would ever send the card: save it locally as before.
-  if (!RulesSync.rulesEnabled(learn)) return undefined
+  if (!RulesSync.rulesEnabled(learn)) return void RulesTelemetry.routed(sessionID, via, "learning_off")
   const state = await RulesStore.read(root)
-  if (!state.scope || !state.workspace) return undefined
+  if (!state.scope || !state.workspace) return void RulesTelemetry.routed(sessionID, via, "not_linked")
   const result = await RuleTrigger.explicit({ sessionID, root, directory: input.directory, learn, text: content, said })
+  RulesTelemetry.routed(
+    sessionID,
+    via,
+    result.status === "shown" ? (result.choose ? "choose_card" : "card") : result.status,
+  )
   const metadata = { action: "proposed" as string, kind: "rule", name: "", scope: "project" }
   // From the memory tool, a memory (or a text that can't be a one-line rule) is simply saved as asked.
   if (via === "memory" && (result.status === "memory" || result.status === "invalid")) return undefined

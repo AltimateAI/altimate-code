@@ -21,6 +21,7 @@ import { captureEnabled } from "../learn/config"
 import { RuleEvents } from "./events"
 import { RulesStore } from "./store"
 import { RulesSync } from "./sync"
+import type { RulesTelemetry } from "./telemetry"
 import { RuleTrigger } from "./trigger"
 
 const log = Log.create({ service: "rules.service" })
@@ -79,8 +80,8 @@ async function publishNotices(directory: string, report: RulesSync.RunReport) {
 }
 
 /** Sync now, publishing notices and a change event. Shared with routes and the TUI menu. */
-export async function syncNow(root: string, directory: string, learn: Parameters<typeof RulesSync.run>[2]) {
-  const report = await RulesSync.runShared(root, directory, learn)
+export async function syncNow(root: string, directory: string, learn: Parameters<typeof RulesSync.run>[2], trigger: RulesTelemetry.SyncTrigger = "refresh") {
+  const report = await RulesSync.runShared(root, directory, learn, trigger)
   await publishNotices(directory, report)
   return report
 }

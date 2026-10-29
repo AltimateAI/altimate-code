@@ -23,6 +23,7 @@ import { readSignals, type Signal } from "../learn/signals"
 import { RuleClassify } from "./classify"
 import { RuleProposal, excerpt, type Draft } from "./proposal"
 import { RulesStore } from "./store"
+import { RulesTelemetry } from "./telemetry"
 
 const log = Log.create({ service: "rules.trigger" })
 export const RECURRENCE_SESSIONS = 2
@@ -151,7 +152,8 @@ export async function afterTurn(input: {
       signal.kind === "user_correction" && signal.sessionID === input.sessionID && !processed.has(signal.id))
     if (!fresh.length) return
     // One card at a time per session: an explicit "remember" may already have shown one for this turn.
-    if (RuleProposal.list().some((card) => card.sessionID === input.sessionID)) return
+    if (RuleProposal.list().some((card) => card.sessionID === input.sessionID))
+      return RulesTelemetry.skipped(input.sessionID, undefined, "card_open")
     // Marked processed once the check completes; a failed check is retried after the next turn.
     checked = fresh.map((signal) => signal.id)
     const newest = fresh[fresh.length - 1]
@@ -173,10 +175,10 @@ export async function afterTurn(input: {
     if (hit) {
       const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, signals: fresh, state, target: hit.id, note })
       // The shown rule already says it: no card, and no second drafting call for recurrence.
-      if (drafted === "covered") return
+      if (drafted === "covered") return RulesTelemetry.skipped(input.sessionID, "shown_rule", "covered")
       if (drafted) {
         const card = await RuleProposal.ask({
-          sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn,
+          sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "shown_rule",
           draft: {
             text: drafted.text,
             // An edit or retire keeps the rule's scope; a new rule beside it takes the correction's.
@@ -200,14 +202,17 @@ export async function afterTurn(input: {
       t.sessions >= RECURRENCE_SESSIONS && t.signal_ids.some((id) => freshIds.has(id)) && !RulesStore.dismissed(state, t.identifier))
     if (!topic) {
       if (!hit) outcome = "no team rule shown on this subject and no topic corrected in 2+ sessions"
-      return
+      const dismissed = recurrence.unmatched_topics.some((t) =>
+        t.sessions >= RECURRENCE_SESSIONS && t.signal_ids.some((id) => freshIds.has(id)) && RulesStore.dismissed(state, t.identifier))
+      return RulesTelemetry.skipped(input.sessionID, "recurrence", dismissed ? "topic_dismissed" : "no_topic")
     }
     const all = await readSignals(input.root, Playbook.DEFAULT_NAME)
     const backing = all.filter((signal) => topic.signal_ids.includes(signal.id))
     const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, signals: backing, state, addOnly: true, note })
-    if (!drafted || drafted === "covered" || drafted.change !== "add") return
+    if (!drafted || drafted === "covered" || drafted.change !== "add")
+      return RulesTelemetry.skipped(input.sessionID, "recurrence", drafted === "covered" ? "covered" : "no_draft")
     const card = await RuleProposal.ask({
-      sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn,
+      sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "recurrence",
       draft: {
         text: drafted.text,
         applies_to: appliesTo(backing.map((signal) => signal.text)),
@@ -221,6 +226,7 @@ export async function afterTurn(input: {
   } catch (error) {
     checked = []
     outcome = `failed: ${error instanceof Error ? error.message : String(error)}`
+    RulesTelemetry.skipped(input.sessionID, undefined, "failed")
     log.warn("rule proposal check failed", { error: outcome })
   } finally {
     running.delete(input.sessionID)

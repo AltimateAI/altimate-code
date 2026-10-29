@@ -22,6 +22,7 @@ import { applyEdits, modify, parse, type ParseError } from "jsonc-parser"
 import { cmd } from "./cmd"
 import { effectCmd, fail } from "../effect-cmd"
 import { Flag } from "@opencode-ai/core/flag/flag"
+import { RulesTelemetry } from "../../altimate/rules/telemetry"
 import * as Playbook from "../../altimate/learn/playbook"
 import * as Store from "../../altimate/learn/store"
 import { MAX_TEXT, summarize, describeApplied, describeRejected } from "../../altimate/learn/curator"
@@ -429,7 +430,7 @@ const SyncCommand = effectCmd({
       const { Config } = await import("@/config/config")
       const { RulesSync } = await import("../../altimate/rules/sync")
       const { Instance } = await import("@/project/instance")
-      const report = await RulesSync.runFresh(root, Instance.directory, (await Config.get()).learn)
+      const report = await RulesSync.runFresh(root, Instance.directory, (await Config.get()).learn, "cli")
       if (args.json) {
         out(JSON.stringify(RulesSync.publicReport(report), null, 2))
         // Same exit status as the text mode: a failed pull is a failed sync.
@@ -1125,12 +1126,23 @@ const LEARN_HELP = [
   // altimate_change end
 ].join(EOL)
 
+const LEARN_SUBCOMMANDS = new Set([
+  "enable", "disable", "nudge", "status", "sync", "bootstrap", "import-reviews", "reflect", "signals", "signal",
+  "add", "show", "search", "pin", "unpin", "promote", "rollback", "reject",
+])
+
 export const LearnCommand = cmd({
   command: "learn",
   describe: "learn team conventions from sessions and feedback into a rule store",
   builder: (yargs: Argv) =>
     yargs
       .epilog(LEARN_HELP)
+      // The subcommand's name only (`learn status`, `learn sync`, …), and only a known one: a mistyped
+      // subcommand is the person's text.
+      .middleware((argv) => {
+        const sub = String(argv._[1] ?? "")
+        RulesTelemetry.command(LEARN_SUBCOMMANDS.has(sub) ? `learn ${sub}` : sub ? "learn other" : "learn")
+      })
       // Bad options get one line, not the whole help screen.
       .fail((msg, err) => {
         if (err) throw err

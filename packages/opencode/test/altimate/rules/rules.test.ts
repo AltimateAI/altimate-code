@@ -1,5 +1,5 @@
 // altimate_change - new file
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
@@ -11,6 +11,8 @@ import { RulesSync } from "../../../src/altimate/rules/sync"
 import { appliesTo, learningDecision, learningEnabled } from "../../../src/altimate/rules/trigger"
 import { RulesFromHistory } from "../../../src/altimate/rules/from-history"
 import { RulesRemember } from "../../../src/altimate/rules/remember"
+import { RulesTelemetry } from "../../../src/altimate/rules/telemetry"
+import { Telemetry } from "../../../src/altimate/telemetry"
 import { parse } from "../../../src/altimate/learn/lesson"
 import * as Store from "../../../src/altimate/learn/store"
 
@@ -619,5 +621,79 @@ describe("remember, whichever save tool the agent picks", () => {
 
   test("the card's memory option says where a fact goes", () => {
     expect(RuleClassify.memoryScope("Staging models live in models/staging.")).toBe("project")
+  })
+})
+
+describe("telemetry", () => {
+  const draft = { text: "Name boolean columns `is_<state>`.", applies_to: ["models/**"], change: "add" as const, origin: "session" as const, evidence: { sessions: 2, correction: { excerpt: "call it is_active", at: "2026-10-27T00:00:00Z" } }, topics: ["is_active"] }
+  let events: Telemetry.Event[] = []
+  let spy: ReturnType<typeof spyOn>
+  beforeEach(() => {
+    events = []
+    spy = spyOn(Telemetry, "track").mockImplementation((event: Telemetry.Event) => void events.push(event))
+  })
+  afterEach(() => spy.mockRestore())
+  const of = <T extends Telemetry.Event["type"]>(type: T) => events.filter((e): e is Extract<Telemetry.Event, { type: T }> => e.type === type)
+
+  test("a card's showing and every answer are tracked, without its words", async () => {
+    const root = await tmp()
+    const card = (await RuleProposal.ask({ sessionID: "t1", root, directory: root, learn: undefined, draft }))!
+    expect(of("rule_proposal_shown")).toEqual([expect.objectContaining({
+      session_id: "t1", card_id: card.id, trigger: "recurrence", change: "add", linked: false, is_owner: false,
+      actions: ["save_local", "edit", "dismiss"], evidence_sessions: 2, from_correction: true, applies_to_count: 1, repeat: false,
+    })])
+    await RuleProposal.reply(card.id, { action: "send" })
+    await RuleProposal.reply(card.id, { action: "edit", text: "line one\nline two" })
+    await RuleProposal.reply(card.id, { action: "edit", text: "Boolean columns start with `is_`." })
+    await RuleProposal.reply(card.id, { action: "dismiss" })
+    expect(of("rule_proposal_answered").map((e) => [e.action, e.status, e.outcome, e.edits])).toEqual([
+      ["send", "not_available", undefined, 0],
+      ["edit", "invalid_text", undefined, 0],
+      ["edit", "ok", undefined, 1],
+      ["dismiss", "ok", "dismissed", 1],
+    ])
+    const sent = JSON.stringify(events)
+    for (const words of [draft.text, "Boolean columns", "is_active", "models/**"]) expect(sent).not.toContain(words)
+  })
+
+  test("asking again is a repeat; a dismissed topic is a skip, not a card", async () => {
+    const root = await tmp()
+    await RuleProposal.ask({ sessionID: "t2", root, directory: root, learn: undefined, draft: { ...draft, text: "Prefix views with `v_`." }, trigger: "shown_rule" })
+    await RuleProposal.ask({ sessionID: "t2", root, directory: root, learn: undefined, draft: { ...draft, text: "Prefix views with `v_`." } })
+    expect(of("rule_proposal_shown").map((e) => [e.trigger, e.repeat])).toEqual([["shown_rule", false], ["shown_rule", true]])
+    await RulesStore.update(root, (s) => { s.dismissed.push({ topic: "is_active", until: new Date(Date.now() + 60_000).toISOString() }) })
+    expect(await RuleProposal.ask({ sessionID: "t2", root, directory: root, learn: undefined, draft })).toBeUndefined()
+    expect(of("rule_proposal_skipped")).toEqual([expect.objectContaining({ session_id: "t2", trigger: "recurrence", reason: "topic_dismissed" })])
+  })
+
+  test("a sync reports its trigger and outcome, never the reason text", async () => {
+    const root = await tmp()
+    await RulesSync.run(root, root, { enabled: false }, "manual")
+    expect(of("rules_sync")).toEqual([expect.objectContaining({ trigger: "manual", status: "off", reason: "learning_off" })])
+    const ready = { status: "ready" as const, actAs: { url: "http://x", instance: "t", apiKey: "k" }, scope: { apiUrl: "http://x", tenant: "t", account: "a", datamateId: 1, repoRemote: "https://github.com/acme/demo" } }
+    RulesTelemetry.synced("refresh", {
+      context: ready,
+      push: { sent: [{ id: "o1", text: "Secret wording", status: "pending" }, { id: "o2", text: "x", status: "rejected", error: "too long" }], queued: 1 },
+      pull: { ok: true, rules: 4, pending: 2, notices: [] },
+      usage: { items: 3 },
+    }, Date.now())
+    expect(of("rules_sync")[1]).toMatchObject({ trigger: "refresh", status: "ok", rules: 4, pending: 2, sent: 1, refused: 1, queued: 1, notices: 0, usage_items: 3, push_failed: false, usage_failed: false })
+    expect(JSON.stringify(events)).not.toContain("Secret wording")
+  })
+
+  test("\"remember\" with workspaces off, or in an unlinked project, is routed without a card", async () => {
+    const root = await tmp()
+    const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+    const remember = () => RulesRemember.proposeFor({ root, directory: root, learn: { enabled: true }, content: "Use CTEs.", sessionID: "t4", said: "remember: use CTEs" })
+    try {
+      process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+      expect(await remember()).toBeUndefined()
+      process.env.ALTIMATE_DISABLE_WORKSPACE = "0"
+      expect(await remember()).toBeUndefined()
+    } finally {
+      if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+    }
+    expect(of("rule_remember_routed").map((e) => [e.via, e.outcome])).toEqual([["training", "learning_off"], ["training", "not_linked"]])
   })
 })

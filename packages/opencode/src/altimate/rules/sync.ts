@@ -19,6 +19,7 @@ import { learnEnabled } from "../learn/config"
 import type { ActAs } from "../workspace/api-client"
 import { RulesApi, RulesApiError, type ProposalItem, type ProposalResult } from "./api"
 import { RulesStore, type Scope, type State } from "./store"
+import { RulesTelemetry, type SyncTrigger } from "./telemetry"
 
 const log = Log.create({ service: "rules.sync" })
 export const REFRESH_MS = 5 * 60_000
@@ -30,10 +31,13 @@ const MAX_USAGE_ITEMS = 500
 
 type LearnConfig = { enabled?: boolean } | undefined
 
+/** `code`: a stable value for telemetry; `reason` is for people. */
 export type Context =
-  | { status: "off"; reason: string }
-  | { status: "skipped"; reason: string; unlinked?: boolean }
+  | { status: "off"; code: "learning_off"; reason: string }
+  | { status: "skipped"; code: SkipCode; reason: string; unlinked?: boolean }
   | { status: "ready"; scope: Scope; actAs: ActAs }
+
+type SkipCode = "not_signed_in" | "not_linked" | "link_unconfirmed" | "no_remote" | "account_changed"
 
 /** Rules need learning on and workspaces on. */
 export function rulesEnabled(learn: LearnConfig, env: NodeJS.ProcessEnv = process.env): boolean {
@@ -43,20 +47,20 @@ export function rulesEnabled(learn: LearnConfig, env: NodeJS.ProcessEnv = proces
 
 /** Resolve the gate and scope. Binding resolution may ask the server; never call this under the learn lock. */
 export async function context(directory: string, learn: LearnConfig): Promise<Context> {
-  if (!rulesEnabled(learn)) return { status: "off", reason: "learning or workspaces are turned off" }
+  if (!rulesEnabled(learn)) return { status: "off", code: "learning_off", reason: "learning or workspaces are turned off" }
   const [{ WorkspaceApi }, { resolveBindingOutcome, credentialDigest, accountDigest }] = await Promise.all([
     import("../workspace/api-client"),
     import("../workspace/state"),
   ])
   const actAs = await WorkspaceApi.captureCredentials()
-  if (!actAs) return { status: "skipped", reason: "not signed in to Altimate" }
+  if (!actAs) return { status: "skipped", code: "not_signed_in", reason: "not signed in to Altimate" }
   const outcome = await resolveBindingOutcome(directory).catch(() => ({ status: "unknown" as const }))
-  if (outcome.status === "unbound") return { status: "skipped", reason: "this project is not linked to a workspace", unlinked: true }
-  if (outcome.status !== "bound") return { status: "skipped", reason: "the workspace link could not be confirmed" }
-  if (!outcome.binding.repoRemote) return { status: "skipped", reason: "this project has no git remote" }
+  if (outcome.status === "unbound") return { status: "skipped", code: "not_linked", reason: "this project is not linked to a workspace", unlinked: true }
+  if (outcome.status !== "bound") return { status: "skipped", code: "link_unconfirmed", reason: "the workspace link could not be confirmed" }
+  if (!outcome.binding.repoRemote) return { status: "skipped", code: "no_remote", reason: "this project has no git remote" }
   const account = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
   // The binding was resolved with the ambient credential: it must still be the captured one.
-  if ((await accountDigest()) !== account) return { status: "skipped", reason: "the Altimate account changed" }
+  if ((await accountDigest()) !== account) return { status: "skipped", code: "account_changed", reason: "the Altimate account changed" }
   return {
     status: "ready",
     actAs,
@@ -391,8 +395,16 @@ export function publicReport(report: RunReport) {
   return { ...rest, context: context.status === "ready" ? { status: context.status, scope: context.scope } : context }
 }
 
-/** Push, pull, then report usage: "Sync now", `learn sync`, and the background refresh. */
-export async function run(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
+/** Push, pull, then report usage: "Sync now", `learn sync`, and the background refresh. `trigger` says which,
+ * for telemetry. */
+export async function run(root: string, directory: string, learn: LearnConfig, trigger: SyncTrigger = "refresh"): Promise<RunReport> {
+  const startedAt = Date.now()
+  const report = await runUntracked(root, directory, learn)
+  RulesTelemetry.synced(trigger, report, startedAt)
+  return report
+}
+
+async function runUntracked(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
   const key = await canonicalRoot(root)
   const ctx = await context(directory, learn)
   if (ctx.status !== "ready") {
@@ -420,20 +432,20 @@ const failedAt = new Map<string, number>()
 const canonicalRoot = (root: string) => fs.realpath(root).catch(() => root)
 
 /** One run per project at a time; concurrent callers share it. */
-export async function runShared(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
+export async function runShared(root: string, directory: string, learn: LearnConfig, trigger: SyncTrigger = "refresh"): Promise<RunReport> {
   const key = await canonicalRoot(root)
   const existing = inflight.get(key)
   if (existing) return existing
-  const started = run(root, directory, learn).finally(() => inflight.delete(key))
+  const started = run(root, directory, learn, trigger).finally(() => inflight.delete(key))
   inflight.set(key, started)
   return started
 }
 
 /** A run that starts after anything already queued: waits out an in-flight run (which may have pushed
  * already) and starts a new one. */
-export async function runFresh(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
+export async function runFresh(root: string, directory: string, learn: LearnConfig, trigger: SyncTrigger = "refresh"): Promise<RunReport> {
   await inflight.get(await canonicalRoot(root))?.catch(() => undefined)
-  return runShared(root, directory, learn)
+  return runShared(root, directory, learn, trigger)
 }
 
 /** A pull is due when none succeeded within `REFRESH_MS`, and no attempt failed within it. */
@@ -459,7 +471,7 @@ export async function sessionStart(
   // linked project); nothing new is started on the prompt path.
   if (!existing && (options.startIfDue === false || !(await due(root)))) return
   // A run this call starts publishes its notices (the service's refresh publishes its own).
-  const running = existing ?? runShared(root, directory, learn).then(async (report) => {
+  const running = existing ?? runShared(root, directory, learn, "session_start").then(async (report) => {
     await options.onReport?.(report)
     return report
   })

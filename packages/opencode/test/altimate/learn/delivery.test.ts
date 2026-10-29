@@ -6,6 +6,7 @@ import path from "node:path"
 import { Delivery } from "../../../src/altimate/learn/delivery"
 import { canonical, type Lesson } from "../../../src/altimate/learn/lesson"
 import * as Store from "../../../src/altimate/learn/store"
+import { Telemetry } from "../../../src/altimate/telemetry"
 
 let root: string
 const NAME = "team-playbook"
@@ -481,4 +482,25 @@ test("resuming a synthetic continuation restores the section without preparing a
   expect(await resumed.section("session")).toBe(first.section)
   expect(resumed.active).toBe(true)
   expect(await log()).toHaveLength(2)
+})
+
+test("rules added to a session are reported by tier, as counts only; a cached answer adds nothing", async () => {
+  await approve()
+  const events: Telemetry.Event[] = []
+  const spy = spyOn(Telemetry, "track").mockImplementation((event: Telemetry.Event) => void events.push(event))
+  try {
+    const delivery = new Delivery(root, limits)
+    await delivery.prepare("session", "first", "billing")
+    await delivery.prepare("session", "second", "shipping")
+    await delivery.prepare("session", "second", "shipping")
+  } finally {
+    spy.mockRestore()
+  }
+  const delivered = events.filter((e): e is Extract<Telemetry.Event, { type: "rules_delivered" }> => e.type === "rules_delivered")
+  expect(delivered.map((e) => [e.tier, e.rules, e.team_rules, e.session_rules, e.budget_tokens])).toEqual([
+    ["start", 2, 0, 2, 500],
+    ["request", 1, 0, 3, 500],
+  ])
+  expect(delivered[1].chars).toBe("Use the `shipping` route for parcel tracking.".length)
+  expect(JSON.stringify(events)).not.toContain("shipping")
 })

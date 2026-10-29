@@ -12,6 +12,9 @@ import { assertLearnLock } from "./lock"
 import { validateName } from "./playbook"
 import { estimateTokens, fileHookEnabled, renderSection, resolveLimits, retrieve, selectFile, selectStart, type Limits } from "./select"
 import * as Store from "./store"
+// altimate_change start — workspace rules telemetry: rules added to a session's context
+import { RulesTelemetry } from "../rules/telemetry"
+// altimate_change end
 
 const log = Log.create({ service: "learn.delivery" })
 const LOCK_OPTIONS = { timeoutMs: 5000 }
@@ -288,6 +291,23 @@ export class Delivery {
     return added
   }
 
+  // altimate_change start — workspace rules telemetry
+  /** Report the rules `add` put into the session since `before` (counts and size only). */
+  private delivered(state: State, before: number, tier: "start" | "request" | "file") {
+    const added = state.shown.slice(before)
+    RulesTelemetry.delivered({
+      session_id: state.session,
+      tier,
+      rules: added.length,
+      // The workspace's team rules are the `team` store (`rules/store.ts` `TEAM_STORE`).
+      team_rules: added.filter((entry) => entry.name === "team").length,
+      chars: added.reduce((sum, entry) => sum + entry.lesson.text.length, 0),
+      session_rules: state.shown.length,
+      budget_tokens: this.limits.budget_tokens,
+    })
+  }
+  // altimate_change end
+
   private mentionedPaths(query: string) {
     // Paths mentioned for creation count too; never traverse the project tree.
     const found = new Set<string>()
@@ -375,6 +395,7 @@ export class Delivery {
         const start = selectStart(corpus(approved), initialQuery, this.limits)
         state = { version: 1, session, firstMessage: message, query: redactedQuery, touchedPaths: previous?.touchedPaths ?? [], section: start.section, shown: [], requests: [], requestParts: previous?.requestParts ?? [], compactions: [], counted: previous?.counted ?? [] }
         for (const item of start.lessons) this.add(state, approved, [item.lesson], item.tier, initialQuery)
+        this.delivered(state, 0, "start")
         state.requests.push({ message, note: "" })
       } else {
         state.query = redactedQuery
@@ -384,7 +405,9 @@ export class Delivery {
           paths: [...state.touchedPaths, ...this.mentionedPaths(query)],
         })
         const rendered = renderSection(matches, this.limits.budget_tokens, "Team rules for this request:")
+        const before = state.shown.length
         this.add(state, approved, rendered.lessons, "request", query)
+        this.delivered(state, before, "request")
         state.requests.push({ message, note: rendered.section })
       }
       await this.save(state)
@@ -442,7 +465,9 @@ export class Delivery {
         exclude: state.shown.map((entry) => identity(entry.name, entry.lesson.id)),
       })
       const rendered = renderSection(matches, this.limits.budget_tokens, `Team rules for ${singleLine(relative)}:`)
+      const before = state.shown.length
       const added = this.add(state, approved, rendered.lessons, "file", relative)
+      this.delivered(state, before, "file")
       if (touched || added.length) await this.save(state)
       if (!added.length) return ""
       await this.log(state)
