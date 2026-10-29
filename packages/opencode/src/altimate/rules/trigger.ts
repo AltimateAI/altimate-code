@@ -78,7 +78,8 @@ export function appliesTo(texts: readonly string[]): string[] {
       if (segments.length === 1 && !/[._]/.test(segments[0]) && !KNOWN_DIRS.has(segments[0])) continue
       globs.add(`${dir}/**`)
     }
-  return [...globs].slice(0, 4)
+  // Bounded like the server's lint: a glob longer than a rule is not a path the person meant.
+  return [...globs].filter((glob) => glob.length <= 140).slice(0, 4)
 }
 
 const clip = (text: string, max: number) => (text.length <= max ? text : text.slice(0, max - 1) + "…")

@@ -176,10 +176,10 @@ export function toLesson(rule: RuleOut): Lesson {
 
 const IGNORE = "*\n"
 
-/** Under the learn lock. The parent learn ignore shares each store's `approved.json`; this one keeps the team
- * mirror and the client state (per person and per account) out of Git, whatever an older file said. */
-async function ensureDir(root: string) {
-  await SafeFS.mkdir(root, dir(root))
+/** Under the learn lock. The parent learn ignore already keeps `rules.json` out of Git but shares each store's
+ * `approved.json`, so the mirror needs this one too (whatever an older file said). Written with the mirror only,
+ * so a project without a workspace never gets it. */
+async function ensureIgnore(root: string) {
   const ignore = path.join(dir(root), ".gitignore")
   const current = await SafeFS.open(root, ignore, constants.O_RDONLY)
     .then(async (handle) => { try { return await handle.readFile("utf8") } finally { await handle.close() } })
@@ -197,7 +197,7 @@ function capSent(sent: Sent[]): Sent[] {
 /** Read-modify-write under the learn lock. `change` may return a new state or mutate the one given. */
 export async function update(root: string, change: (state: State) => State | void): Promise<State> {
   return withLearnLock(root, async () => {
-    await ensureDir(root)
+    await SafeFS.mkdir(root, dir(root))
     const raw = await readRaw(root)
     let current = parse(raw)
     if (!current) {
@@ -205,6 +205,7 @@ export async function update(root: string, change: (state: State) => State | voi
       await Store.writeAtomic(root, `${stateFile(root)}.unreadable-${Date.now()}`, raw!, 0o600)
       current = structuredClone(EMPTY)
     }
+    const rulesBefore = JSON.stringify(current.rules)
     const next = change(current) ?? current
     next.notices = next.notices.slice(-MAX_NOTICES)
     next.sent = capSent(next.sent)
@@ -213,7 +214,12 @@ export async function update(root: string, change: (state: State) => State | voi
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
     await Store.writeAtomic(root, stateFile(root), JSON.stringify(next, null, 2) + "\n")
-    await writeMirror(root, next.rules)
+    // Only a linked project (or one whose rules just changed, e.g. a reset) has a mirror to write: a project with no
+    // workspace must not have its `team` directory touched.
+    if (next.workspace || JSON.stringify(next.rules) !== rulesBefore) {
+      await ensureIgnore(root)
+      await writeMirror(root, next.rules)
+    }
     return next
   }, LOCK)
 }
@@ -251,7 +257,13 @@ export async function reset(root: string, options: { keepOutbox?: boolean } = {}
     ...structuredClone(EMPTY),
     dismissed: state.dismissed,
     ...(state.personal_learning !== undefined ? { personal_learning: state.personal_learning } : {}),
-    ...(options.keepOutbox ? { outbox: state.outbox, scope: state.scope } : {}),
+    // What was already reported or considered stays: after a relink or an account round trip it must not be counted
+    // again (sessions and signals are local; corrected counts are keyed by rule key).
+    usage_sessions: state.usage_sessions,
+    corrected_reported: state.corrected_reported,
+    processed_signals: state.processed_signals,
+    // A batch built for this scope can only be resent to it.
+    ...(options.keepOutbox ? { outbox: state.outbox, scope: state.scope, ...(state.pending_usage ? { pending_usage: state.pending_usage } : {}) } : {}),
   }))
 }
 

@@ -775,6 +775,8 @@ export namespace SessionPrompt {
     // Workspace rules: a bounded pull before a session's first turn, so it delivers newly approved rules. Only the
     // first prompt of a session awaits anything; every later prompt stays on the synchronous path.
     if (!rulesSessionsStarted.has(sessionID)) {
+      // Bounded: a long-lived server sees many sessions; forgetting an old one only costs it another bounded wait.
+      if (rulesSessionsStarted.size >= 1000) rulesSessionsStarted.clear()
       rulesSessionsStarted.add(sessionID)
       await import("../altimate/rules/service")
         .then((m) => m.RulesService.sessionStart(learnRoot, Instance.directory, altCfg.learn))

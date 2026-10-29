@@ -248,6 +248,17 @@ export class Capture {
 // Keep every active capture drainable when more than one instance is open.
 const active = new Set<Capture>()
 
+// altimate_change start — workspace rules: a per-project gate the rules service sets from the full learning decision
+// (the person's /rules choice can turn learning off while config still has learn.capture on). No gate: record.
+const gates = new Map<string, () => Promise<boolean>>()
+
+/** Set (or clear, with undefined) whether corrections are recorded for the project at `directory`. */
+export function setCaptureGate(directory: string, gate: (() => Promise<boolean>) | undefined) {
+  if (gate) gates.set(directory, gate)
+  else gates.delete(directory)
+}
+// altimate_change end
+
 export async function flushCapture() {
   await Promise.all([...active].map((capture) => capture.flush()))
   await flushWrites()
@@ -289,7 +300,10 @@ export async function startCapture(
     const { Session } = await import("../../session")
     const { SessionID } = await import("../../session/schema")
     const capture = new Capture({
-      record: (signal) => appendSignal(root, signal),
+      record: async (signal) => {
+        if ((await gates.get(ctx.directory)?.().catch(() => true)) === false) return
+        return appendSignal(root, signal)
+      },
       turnStart: async (sessionID, messageID) => {
         const messages = await Session.messages({ sessionID: SessionID.make(sessionID) })
         return correctedTurnStart(turnMessages(messages), messageID)

@@ -48,13 +48,19 @@ interface Pending {
 /** An unanswered card lasts a day; after that it is dropped rather than re-offered to every new client. */
 export const CARD_TTL_MS = 24 * 60 * 60_000
 
+/** Remove a card no client can answer any more, and tell clients so they stop showing it. */
+function close(id: string, entry: Pending, message: string) {
+  pending.delete(id)
+  void publish(RuleEvents.Event.Replied, { id, sessionID: entry.card.sessionID, action: "expired", message })
+}
+
 function expire(now = Date.now()) {
-  for (const [id, entry] of pending) if (now - entry.at > CARD_TTL_MS) pending.delete(id)
+  for (const [id, entry] of pending) if (now - entry.at > CARD_TTL_MS) close(id, entry, "This proposal expired.")
 }
 
 /** Drop the cards of a project (its instance is going away; nobody can answer them after that). */
 export function drop(directory: string) {
-  for (const [id, entry] of pending) if (entry.directory === directory) pending.delete(id)
+  for (const [id, entry] of pending) if (entry.directory === directory) close(id, entry, "This proposal was closed.")
 }
 
 // Process-global like `question`'s registry: the server routes and the session loop may load this module
@@ -107,8 +113,12 @@ export async function ask(input: { sessionID: string; root: string; directory: s
   if (input.draft.origin === "session" && input.draft.topics.some((topic) => RulesStore.dismissed(state, topic))) return undefined
   for (const existing of pending.values())
     if (existing.root === input.root && existing.card.text.toLowerCase() === input.draft.text.toLowerCase()) {
-      // Shown again: a client that missed it (or closed it) gets it back; one already showing it ignores it.
-      await publish(RuleEvents.Event.Asked, existing.card)
+      // Asked again: the card moves to the session that asked (clients show cards per session), and a client that
+      // missed it gets it back.
+      if (existing.card.sessionID !== input.sessionID) {
+        existing.card = { ...existing.card, sessionID: input.sessionID }
+        await publish(RuleEvents.Event.Updated, existing.card)
+      } else await publish(RuleEvents.Event.Asked, existing.card)
       return existing.card
     }
   const card = build(randomUUID(), input.sessionID, input.draft, state)

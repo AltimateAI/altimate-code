@@ -148,10 +148,10 @@ export function classify(error: unknown): RulesApiError {
   if (error instanceof WorkspaceApiError) {
     const code = codeOf(error.detail)
     if (code === "repo_not_bound") return new RulesApiError("repo_not_bound", messageOf(error.detail, message), code, error.status)
-    if (error.status === 401 || error.status === 407) return new RulesApiError("auth", message, code, error.status)
+    if (error.status === 401 || error.status === 407) return new RulesApiError("auth", messageOf(error.detail, message), code, error.status)
     // Only a coded 400/422 is about the request's content; anything else (a proxy 413, an uncoded 400) is kept.
     if ((error.status === 400 || error.status === 422) && code) return new RulesApiError("rejected", messageOf(error.detail, message), code, error.status)
-    return new RulesApiError("transient", message, code, error.status)
+    return new RulesApiError("transient", messageOf(error.detail, message), code, error.status)
   }
   const named = error as { name?: string; detail?: Record<string, unknown> } | undefined
   if (named?.name === "ConflictError") return new RulesApiError("conflict", messageOf(named.detail, message), codeOf(named.detail), 409)

@@ -16,7 +16,7 @@
 import { TextAttributes } from "@opentui/core"
 import type { TuiDialogSelectOption, TuiPlugin, TuiPluginApi, TuiPromptRef } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
-import { createEffect, createRoot, createSignal, Show } from "solid-js"
+import { createEffect, createRoot, createSignal, onCleanup, Show } from "solid-js"
 import type { ProposalCard } from "@/altimate/rules/events"
 import type { RulesSummary } from "@/altimate/rules/summary"
 import { describeAge } from "@/altimate/workspace/attach-snapshot"
@@ -199,10 +199,15 @@ function installCards(api: TuiPluginApi) {
   /** The flagged card whose "Approve anyway" was pressed once and waits for a second Enter. */
   const [confirming, setConfirming] = createSignal<string | undefined>(undefined)
   let prompt: TuiPromptRef | undefined
-  let sessionID: string | undefined
   let layer: (() => void) | undefined
+  // The session whose input slot is mounted and visible now. Permission and question prompts hide the slot, and
+  // home has none: the card (and its keys) exist only while this is set.
+  const [active, setActive] = createSignal<string | undefined>(undefined)
 
-  const current = () => cards().find((card) => card.sessionID === sessionID)
+  const current = () => {
+    const sessionID = active()
+    return sessionID ? cards().find((card) => card.sessionID === sessionID) : undefined
+  }
   const remove = (id: string) => setCards((list) => list.filter((card) => card.id !== id))
 
   // The card's keys (enter, e, n, h, l, …) only while it is focused and no dialog is open: under a dialog they
@@ -226,7 +231,11 @@ function installCards(api: TuiPluginApi) {
       .catch(() => undefined)
       .finally(() => setBusy(false))
     if (!result) return api.ui.toast({ variant: "error", message: "Could not reach the session server.", duration: 6000 })
-    if (!result.ok) return api.ui.toast({ variant: "error", message: result.error ?? "Not done.", duration: 8000 })
+    if (!result.ok) {
+      // Closed on the server (expired, or its instance went away): it can't be answered, so it leaves the queue.
+      if ((result as { code?: string }).code === "not_open") remove(card.id)
+      return api.ui.toast({ variant: "error", message: result.error ?? "Not done.", duration: 8000 })
+    }
     if (action === "edit") {
       if (result.card) setCards((list) => list.map((c) => (c.id === card.id ? result.card! : c)))
       return
@@ -287,7 +296,7 @@ function installCards(api: TuiPluginApi) {
   }
 
   const focus = () => {
-    if (!current() || focused()) return
+    if (!active() || !current() || focused()) return
     setSelected(0)
     setFocused(true)
     prompt?.blur()
@@ -295,7 +304,7 @@ function installCards(api: TuiPluginApi) {
   }
 
   function bindKeys() {
-    if (layer || api.ui.dialog.open) return
+    if (layer || api.ui.dialog.open || !active() || !current()) return
     layer = api.keymap.registerLayer({
       priority: 100,
       bindings: [
@@ -313,12 +322,17 @@ function installCards(api: TuiPluginApi) {
   }
 
   // Any other dialog opened while the card is focused (the palette, `/rules`) gets its keys back too.
-  createRoot(() =>
+  createRoot(() => {
     createEffect(() => {
       if (api.ui.dialog.open) releaseKeys()
       else if (focused()) bindKeys()
-    }),
-  )
+    })
+    // The card left the screen (a prompt hid the input, another session, home) or its card went away: give the keys
+    // back. Without this a focused card's Enter would answer a card nobody can see, or a permission prompt's Enter.
+    createEffect(() => {
+      if (focused() && (!active() || !current())) unfocus()
+    })
+  })
 
   const offer = (card: ProposalCard) =>
     setCards((list) => (list.some((c) => c.id === card.id) ? list.map((c) => (c.id === card.id ? card : c)) : [...list, card]))
@@ -334,7 +348,10 @@ function installCards(api: TuiPluginApi) {
     order: 100,
     slots: {
       session_prompt(_ctx, props) {
-        sessionID = props.session_id
+        createEffect(() => setActive(props.visible === false ? undefined : props.session_id))
+        onCleanup(() => {
+          if (active() === props.session_id) setActive(undefined)
+        })
         return (
           <box flexDirection="column" flexShrink={0}>
             <Show when={cards().find((card) => card.sessionID === props.session_id)}>
@@ -384,7 +401,8 @@ function installCards(api: TuiPluginApi) {
 
   const load = async () => {
     const result = await raw(api)?.get({ url: "/rule-proposal" }).catch(() => undefined)
-    if (Array.isArray(result?.data)) for (const card of result.data as ProposalCard[]) offer(card)
+    // The server's open cards are the truth: anything else here was closed while this TUI was not listening.
+    if (Array.isArray(result?.data)) setCards(result.data as ProposalCard[])
   }
 
   on(api)("rule.proposal.asked", (event) => offer(event.properties as ProposalCard))

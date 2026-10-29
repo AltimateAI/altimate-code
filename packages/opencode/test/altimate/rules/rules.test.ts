@@ -185,7 +185,7 @@ describe("client state", () => {
     const root = await tmp()
     await fs.mkdir(RulesStore.dir(root), { recursive: true })
     await fs.writeFile(path.join(RulesStore.dir(root), ".gitignore"), "!approved.json\n")
-    await RulesStore.update(root, () => {})
+    await RulesStore.update(root, (s) => Object.assign(s, linked()))
     expect(await fs.readFile(path.join(RulesStore.dir(root), ".gitignore"), "utf8")).toBe("*\n")
   })
 
@@ -328,7 +328,9 @@ describe("the workspace API, by path", () => {
     expect((await RulesSync.push(root, ready())).queued).toBe(1)
     answer = () => new Response("not json", { status: 200 })
     expect((await RulesSync.push(root, ready())).queued).toBe(1)
-    answer = () => Response.json({ detail: "too large" }, { status: 400 })
+    answer = () => new Response("payload too large", { status: 413 })
+    expect((await RulesSync.push(root, ready())).queued).toBe(1)
+    answer = () => Response.json({ detail: { code: "too_many_pending", message: "busy" } }, { status: 503 })
     expect((await RulesSync.push(root, ready())).queued).toBe(1)
     answer = () => Response.json({ detail: { code: "invalid", message: "bad" } }, { status: 422 })
     const refused = await RulesSync.push(root, ready())
@@ -509,5 +511,73 @@ describe("rules from history need consent", () => {
     expect(staged.items.map((i) => i.text)).toEqual(["Name staging models stg_<source>."])
     expect(staged.items[0].applies_to).toHaveLength(4)
     expect(staged.invalid).toHaveLength(1)
+  })
+})
+
+describe("self-review fixes", () => {
+  let server: ReturnType<typeof Bun.serve>
+  let answer: (path: string, body: any) => Response = () => new Response("{}")
+  const seen: { path: string; body: any }[] = []
+  beforeAll(() => {
+    server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        const path = new URL(request.url).pathname.replace(/^\/datamates\/\d+\/rules/, "")
+        const body = await request.json().catch(() => undefined)
+        seen.push({ path, body })
+        return answer(path, body)
+      },
+    })
+  })
+  afterAll(() => server.stop(true))
+  const ready = () => ({ status: "ready" as const, actAs: { url: `http://127.0.0.1:${server.port}`, instance: "t", apiKey: "k" }, scope: { apiUrl: `http://127.0.0.1:${server.port}`, tenant: "t", account: "a", datamateId: 1, repoRemote: "https://github.com/acme/demo" } })
+  const item = (text: string) => ({ change: "add" as const, text, applies_to: [], origin: "session" as const, evidence_sessions: 1, corrections: [] })
+
+  test("too_many_pending keeps the proposal queued; an uncoded 422 splits the batch and refuses only the bad item", async () => {
+    const root = await tmp()
+    await RulesSync.enqueue(root, item("waits"))
+    answer = () => Response.json({ results: [{ index: 0, status: "invalid", error_code: "too_many_pending", error_detail: "50 pending" }] })
+    expect((await RulesSync.push(root, ready())).queued).toBe(1)
+    const root2 = await tmp()
+    for (const text of ["fine", "bad"]) await RulesSync.enqueue(root2, item(text))
+    answer = (_path, body) => body.items.some((i: { text: string }) => i.text === "bad")
+      ? Response.json({ detail: [{ loc: ["body", "items", 0], msg: "too long" }] }, { status: 422 })
+      : Response.json({ results: body.items.map((_: unknown, index: number) => ({ index, status: "pending", public_id: "p", version: 1 })) })
+    const result = await RulesSync.push(root2, ready())
+    expect(result.sent.map((s) => [s.text, s.status])).toEqual([["fine", "pending"], ["bad", "rejected"]])
+    expect((await RulesStore.read(root2)).outbox).toEqual([])
+  })
+
+  test("a reset keeps what was already reported, so a relink does not count it again", async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => {
+      Object.assign(s, linked())
+      s.usage_sessions = ["s1"]
+      s.corrected_reported = { "R-0123456789ab": 2 }
+      s.processed_signals = ["sig"]
+    })
+    await RulesStore.reset(root)
+    const state = await RulesStore.read(root)
+    expect(state).toMatchObject({ usage_sessions: ["s1"], corrected_reported: { "R-0123456789ab": 2 }, processed_signals: ["sig"] })
+  })
+
+  test("a project without a workspace never touches the team directory's playbook", async () => {
+    const root = await tmp()
+    const file = Store.paths(root, RulesStore.TEAM_STORE).approved
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, "[]")
+    await RulesStore.update(root, (s) => { s.personal_learning = false })
+    expect((await fs.readdir(path.dirname(file))).filter((n) => n.startsWith("approved.json.before"))).toEqual([])
+    expect(await fs.readdir(path.dirname(file))).not.toContain(".gitignore")
+  })
+
+  test("asking again from another session moves the card there", async () => {
+    const root = await tmp()
+    const draft = { text: "Use snake_case model names.", applies_to: [], change: "add" as const, origin: "explicit" as const, evidence: { sessions: 1 }, topics: [] }
+    await RuleProposal.ask({ sessionID: "first", root, directory: root, learn: undefined, draft })
+    const moved = (await RuleProposal.ask({ sessionID: "second", root, directory: root, learn: undefined, draft }))!
+    expect(moved.sessionID).toBe("second")
+    expect(RuleProposal.list(root, "second")).toHaveLength(1)
+    RuleProposal.drop(root)
   })
 })

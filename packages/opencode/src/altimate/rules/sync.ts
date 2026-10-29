@@ -167,14 +167,21 @@ async function send(ctx: Ready, entries: OutboxEntry[]): Promise<Outcome[]> {
     return entries.map((entry, index) => ({ entry, result: byIndex.get(index) }))
   } catch (error) {
     const failure = error instanceof RulesApiError ? error : RulesApi.classify(error)
-    if (failure.kind === "rejected" && entries.length > 1) {
+    // A 400/422 is about the request's content even without a code (e.g. a schema validation array): split a batch
+    // to find the item, and refuse a single item rather than resend it forever.
+    const content = failure.kind === "rejected" || failure.status === 400 || failure.status === 422
+    if (content && entries.length > 1) {
       const outcomes: Outcome[] = []
       for (const entry of entries) outcomes.push(...(await send(ctx, [entry])))
       return outcomes
     }
+    if (content && failure.kind !== "rejected") return entries.map((entry) => ({ entry, error: new RulesApiError("rejected", failure.message, failure.code, failure.status) }))
     return entries.map((entry) => ({ entry, error: failure }))
   }
 }
+
+/** Per-item answers that are about now, not about the proposal: it stays queued and is sent again later. */
+const RETRY_LATER = new Set(["too_many_pending"])
 
 /**
  * Send the outbox. An item leaves it once the server answered for it, or refused it (`rejected`, reported
@@ -199,6 +206,10 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
     }
     if (!result) {
       failed.set(entry.id, "no result from the server")
+      continue
+    }
+    if (result.error_code && RETRY_LATER.has(result.error_code)) {
+      failed.set(entry.id, result.error_detail ?? result.error_code)
       continue
     }
     done.add(entry.id)
@@ -335,10 +346,12 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
     if (row.name !== RulesStore.TEAM_STORE) continue
     const rule = byLesson.get(row.id)
     if (!rule) continue
-    const baseline = Math.min(state.corrected_reported[rule.public_id] ?? 0, row.recurred)
+    // Keyed by rule key, which survives an approved edit (a new version gets a new public id), so the old version's
+    // corrections are not reported again against the new one.
+    const baseline = Math.min(state.corrected_reported[rule.rule_key] ?? 0, row.recurred)
     const delta = Math.min(row.recurred - baseline, MAX_USAGE_DELTA)
     if (delta > 0 && !counts.has(rule.public_id) && counts.size >= MAX_USAGE_ITEMS) continue
-    corrected[rule.public_id] = baseline + Math.max(0, delta)
+    corrected[rule.rule_key] = baseline + Math.max(0, delta)
     if (delta <= 0) continue
     const entry = counts.get(rule.public_id) ?? { applied: 0, corrected_again: 0 }
     entry.corrected_again += delta
@@ -354,13 +367,15 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
     sessions,
     corrected,
   }
-  await RulesStore.update(root, (s) => { s.pending_usage = batch })
+  // Another process (a second instance, `learn sync`) may have built a batch from the same unreported sessions in
+  // the meantime: then that one is sent (same batch id, so the server counts it once) and this one is dropped.
+  const saved = (await RulesStore.update(root, (s) => { s.pending_usage ??= batch })).pending_usage ?? batch
   try {
-    await sendUsage(root, ctx, batch)
+    await sendUsage(root, ctx, saved)
   } catch (error) {
     return { items: 0, error: errorText(error) }
   }
-  return { items: batch.items.length }
+  return { items: saved.items.length }
 }
 
 export interface RunReport {

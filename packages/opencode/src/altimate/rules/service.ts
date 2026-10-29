@@ -89,7 +89,8 @@ export async function syncNow(root: string, directory: string, learn: Parameters
  * The bounded pull before a session's first turn, so it sees rules approved since the last refresh, with the
  * notices it brings published. The session loop calls it once per session; later prompts rely on the timer.
  */
-export async function sessionStart(root: string, directory: string, learn: LearnConfig): Promise<void> {
+export async function sessionStart(root: string, directory: string, loaded: LearnConfig): Promise<void> {
+  const learn = await effectiveLearn(loaded, root, directory)
   if (!RulesSync.rulesEnabled(learn) || !(await linked(root, directory))) return
   // A project with no rules state yet only waits for the service's first pull if it is running: starting one here
   // would add up to `SESSION_WAIT_MS` to the first prompt of every session in a project without rules.
@@ -108,12 +109,24 @@ export async function start(ctx: InstanceContext): Promise<void> {
     let starting = false
     // Follow the learning setting each time: the person's config can change, and a sync can change the
     // workspace's setting or unlink the project.
+    // While capture runs (whoever started it), every correction is checked against the whole learning decision, so
+    // "off for me" stops recording even with learn.capture on. Set only once capture runs: a project with learning off
+    // never loads the capture module.
+    let gated = false
+    const gate = async () => {
+      if (gated) return
+      gated = true
+      const { setCaptureGate } = await import("../learn/capture")
+      setCaptureGate(ctx.directory, async () => RuleTrigger.learningEnabled(await learnConfig(ctx), await RulesStore.read(root)))
+    }
     const followLearning = async (learn: LearnConfig) => {
-      if (disposed || starting || captureEnabled(learn)) return
+      if (disposed || starting) return
+      if (captureEnabled(learn)) return void (await gate())
       const on = RuleTrigger.learningEnabled(learn, await RulesStore.read(root))
       if (on && !stopCapture) {
         starting = true
         try {
+          await gate()
           const stop = await import("../learn/capture").then((m) => m.startCapture(ctx, { force: true }))
           if (disposed) await stop?.()
           else stopCapture = stop
@@ -162,6 +175,7 @@ export async function start(ctx: InstanceContext): Promise<void> {
       clearInterval(timer)
       stop()
       unregister()
+      if (gated) (await import("../learn/capture")).setCaptureGate(ctx.directory, undefined)
       // Cards nobody answered go with the instance: they cannot be answered after it.
       const { RuleProposal } = await import("./proposal")
       RuleProposal.drop(ctx.directory)
