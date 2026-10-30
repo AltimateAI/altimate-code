@@ -56,6 +56,9 @@ describe("templateErrorMessage", () => {
     "secretKey",
     "sessionId",
     "connectionString",
+    "privatekey",
+    "privateKey",
+    "PRIVATEKEY",
   ])("masks the exact credential alias %s", (key) => {
     expect(templateErrorMessage(`request failed: ${key}=wrong user`)).toBe("request failed <x>")
     expect(templateErrorMessage(`${key}: connection refused`)).toBe("<x>")
@@ -72,13 +75,62 @@ describe("templateErrorMessage", () => {
   })
 
   test.each([
+    ["DATABASE_CONNECTION_STRING=wrong user", "database <x>"],
+    ["db_connection_string=wrong user", "<x>"],
+    ["connection_string_value=wrong user", "<x>"],
+    ["request failed: DB_Connection_String_Value=connection refused", "request failed <x>"],
+    ["request failed: 123connection_string456=wrong user", "request failed <x>"],
+    ["request failed: _connection-string_=wrong user", "request failed <x>"],
+    ["request failed: éconnection_string中=wrong user", "request failed <x>"],
+    ["request failed: \x1b[31mDATABASE_CONNECTION_STRING\x1b[0m=wrong user", "request failed database <x>"],
+    ["request failed: db_connection_string_value=wrong user", "request failed <x>"],
+  ])("uses tokenizer boundaries for connection string keys: %j", (raw, expected) => {
+    expect(templateErrorMessage(raw)).toBe(expected)
+  })
+
+  test.each([
+    ["connection string=wrong user", "<x>"],
+    ["connection string:wrong user", "<x>"],
+    ["connection string: invalid", "<x>"],
+    ["request failed: connection string=wrong user", "request failed <x>"],
+    ["request failed: Connection String : connection refused", "request failed <x>"],
+    ["request failed: CONNECTION\tSTRING\t=\twrong user", "request failed <x>"],
+    ["request failed: connection  string   = connection refused", "request failed <x>"],
+    ['request failed: "connection string" = "wrong user"', "request failed <x>"],
+    ["request failed: 'connection string': 'wrong user'", "request failed <x>"],
+    ["request failed: `connection string` = wrong user", "request failed <x>"],
+    ["request failed: \x1b[31mconnection string\x1b[0m=wrong user", "request failed <x>"],
+    ["request failed: connec\x1b[31mtion str\x1b[0ming=wrong user", "request failed <x>"],
+  ])("masks spaced connection string assignments: %j", (raw, expected) => {
+    expect(templateErrorMessage(raw)).toBe(expected)
+  })
+
+  test.each(["\n", "\r", "\r\n", "\u2028", "\u2029"])(
+    "keeps spaced key assignments on the first line: %j",
+    (newline) => {
+      expect(templateErrorMessage(`connection${newline}string=wrong user`)).toBe("connection")
+      expect(templateErrorMessage(`connection string${newline}=wrong user`)).toBe("connection string")
+      expect(templateErrorMessage(`connection string: wrong user${newline}connection refused`)).toBe("<x>")
+    },
+  )
+
+  test.each([
     ["connection string is invalid", "connection string is invalid"],
+    ["connection string", "connection string"],
+    ["connection string invalid", "connection string invalid"],
+    ['"connection string" is invalid', "connection string is invalid"],
+    ["disconnection string=wrong user", "<x> string wrong user"],
+    ["connection stringify=wrong user", "connection <x> wrong user"],
+    ["connection strings: invalid", "connection <x> invalid"],
     ["connection refused", "connection refused"],
     ["signal received", "signal received"],
     ["connection_stringify is invalid", "connection <x> is invalid"],
     ["disconnection_string is invalid", "<x> string is invalid"],
     ["connection_strings are invalid", "connection <x> are invalid"],
-    ["apikeyboard sigil signatured tokenizer failed", "<x> failed"],
+    ["db_disconnection_string is invalid", "<x> string is invalid"],
+    ["db_connection_stringify is invalid", "<x> connection <x> is invalid"],
+    ["connection_strings_value is invalid", "connection <x> value is invalid"],
+    ["privatekeyboard apikeyboard sigil signatured tokenizer failed", "<x> failed"],
   ])("keeps diagnostics without an exact credential marker: %s", (raw, expected) => {
     expect(templateErrorMessage(raw)).toBe(expected)
   })

@@ -25,6 +25,7 @@ export const CREDENTIAL_WORDS: ReadonlySet<string> = new Set([
   "passwd",
   "password",
   "passwords",
+  "privatekey",
   "pwd",
   "refreshtoken",
   "secret",
@@ -417,11 +418,10 @@ export const ERROR_VOCABULARY: ReadonlySet<string> = new Set([
  */
 export function templateErrorMessage(raw: string): string {
   // Split first so an OSC sequence spanning a newline cannot erase the line boundary.
-  // Normalize only this compound credential key; prose "connection string" stays readable.
-  const first = stripAnsi(raw.split(/[\r\n\u2028\u2029]/, 1)[0]).replace(
-    /\bconnection[_-]string\b/gi,
-    "connectionstring",
-  )
+  // Use the tokenizer's letter boundaries; spaced keys require an assignment separator.
+  const first = stripAnsi(raw.split(/[\r\n\u2028\u2029]/, 1)[0])
+    .replace(/(?<![A-Za-z])connection[_-]string(?![A-Za-z])/gi, "connectionstring")
+    .replace(/(?<![A-Za-z])connection[ \t]+string["'`]?[ \t]*(?=[:=])/gi, "connectionstring")
   const out: string[] = []
   for (const token of first.split(/[^A-Za-z]+/)) {
     if (!token) continue
