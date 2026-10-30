@@ -526,28 +526,36 @@ export class ScopeChangedError extends Error {
  * `scope`: the scope they were shown for; checked in the same write, so they never join another scope's outbox. */
 export async function enqueueMany(
   root: string,
-  items: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway" }[],
+  items: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway"; id?: string }[],
   scope?: Scope,
 ): Promise<string[]> {
-  const ids = items.map(() => randomUUID())
+  const ids = items.map((entry) => entry.id ?? randomUUID())
   const at = new Date().toISOString()
   await RulesStore.update(root, (state) => {
     if (scope && !RulesStore.sameScope(state.scope, scope)) throw new ScopeChangedError()
-    if (state.outbox.length + items.length > RulesStore.MAX_OUTBOX)
+    // An item queued again under its id (a stored proposal answered again after its process died) replaces the queued
+    // one: it is sent once.
+    const queued = new Set(state.outbox.map((entry) => entry.id))
+    const fresh = items.filter((_, index) => !queued.has(ids[index])).length
+    if (state.outbox.length + fresh > RulesStore.MAX_OUTBOX)
       throw new Error(
         items.length > RulesStore.MAX_OUTBOX
           ? `${items.length} proposals are more than can wait to be sent at once (${RulesStore.MAX_OUTBOX}); send fewer`
           : `${state.outbox.length} proposals are already waiting to be sent, and ${items.length} more would pass the limit of ${RulesStore.MAX_OUTBOX}; sync before proposing more`,
       )
-    items.forEach(({ item, approve }, index) =>
-      state.outbox.push({ id: ids[index], created_at: at, attempts: 0, item, ...(approve ? { approve } : {}) }))
+    items.forEach(({ item, approve }, index) => {
+      const entry = { id: ids[index], created_at: at, attempts: 0, item, ...(approve ? { approve } : {}) }
+      const existing = state.outbox.findIndex((queuedEntry) => queuedEntry.id === entry.id)
+      if (existing >= 0) state.outbox[existing] = entry
+      else state.outbox.push(entry)
+    })
   })
   return ids
 }
 
-/** Queue one proposal; it is sent by the next push. Returns its outbox id. */
-export async function enqueue(root: string, item: ProposalItem, approve?: "approve" | "approve_anyway", scope?: Scope): Promise<string> {
-  return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}) }], scope))[0]
+/** Queue one proposal; it is sent by the next push. Returns its outbox id: `id` when given (still queued under it: replaced). */
+export async function enqueue(root: string, item: ProposalItem, approve?: "approve" | "approve_anyway", scope?: Scope, id?: string): Promise<string> {
+  return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}), ...(id ? { id } : {}) }], scope))[0]
 }
 
 /**

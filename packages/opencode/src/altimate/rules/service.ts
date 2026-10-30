@@ -55,7 +55,7 @@ async function learnConfig(ctx: InstanceContext): Promise<LearnConfig> {
 }
 
 /** Whether a pull can find anything: pulled state, or a local workspace binding. No network. */
-async function linked(root: string, directory: string): Promise<boolean> {
+export async function linked(root: string, directory: string): Promise<boolean> {
   if ((await RulesStore.read(root).catch(() => undefined))?.scope) return true
   const { readLocalBinding } = await import("../workspace/state")
   return !!(await readLocalBinding(directory).catch(() => null))

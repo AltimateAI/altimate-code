@@ -151,13 +151,15 @@ async function draft(input: {
 
 const running = new Set<string>()
 
-/** Check the session's new corrections and show at most one card. Never throws. */
+/** Check the session's new corrections and show at most one card. Never throws. With `persist` (a host session through
+ * the plugin, `learn check`): no client shows cards, so the proposal is kept on disk for `learn proposals` instead. */
 export async function afterTurn(input: {
   sessionID: string
   root: string
   directory: string
   learn: LearnConfig
   deps: TriggerDeps
+  persist?: boolean
 }): Promise<void> {
   // Idle can fire twice for one turn; one check per session at a time.
   if (running.has(input.sessionID)) return
@@ -174,19 +176,22 @@ export async function afterTurn(input: {
     if (!fresh.length) return
     // Nothing attached would show a card (`altimate-code run`, ACP, a plugin): the corrections are left unprocessed,
     // so a later turn of this session with a card client attached proposes them.
-    if (!RuleProposal.rendererAttached(input.directory)) {
+    if (!input.persist && !RuleProposal.rendererAttached(input.directory)) {
       outcome = "no client that shows cards is attached; corrections kept for a later check"
       return RulesTelemetry.skipped(input.sessionID, undefined, "no_renderer")
     }
     // One card at a time per session: an explicit "remember" may already have shown one for this turn.
-    if (RuleProposal.list(input.directory, input.sessionID).length)
+    const open = input.persist
+      ? (await RuleProposal.stored(input.root)).filter((card) => card.sessionID === input.sessionID)
+      : RuleProposal.list(input.directory, input.sessionID)
+    if (open.length)
       return RulesTelemetry.skipped(input.sessionID, undefined, "card_open")
     // Marked processed once the check completes; a failed check is retried after the next turn.
     checked = fresh.map((signal) => signal.id)
     // The model call takes a while: if the client that shows cards went away meanwhile, the card would not be seen,
     // so the corrections are left for a later check instead.
     const stillShown = () => {
-      if (RuleProposal.rendererAttached(input.directory)) return true
+      if (input.persist || RuleProposal.rendererAttached(input.directory)) return true
       checked = []
       outcome = "the client that shows cards went away during the check; corrections kept for a later check"
       RulesTelemetry.skipped(input.sessionID, undefined, "no_renderer")
@@ -215,7 +220,7 @@ export async function afterTurn(input: {
       if (drafted) {
         if (!stillShown()) return
         const card = await RuleProposal.ask({
-          sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "shown_rule",
+          sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "shown_rule", persist: input.persist,
           draft: {
             text: drafted.text,
             // An edit or retire keeps the rule's scope; a new rule beside it takes the correction's.
@@ -227,7 +232,9 @@ export async function afterTurn(input: {
             origin: "session", evidence: { sessions: 1, correction }, topics: [hit.id],
           },
         })
-        outcome = card ? `showed a ${drafted.change} card for a shown team rule` : "the proposal for this team rule was dismissed"
+        outcome = card
+          ? `${input.persist ? "stored" : "showed"} a ${drafted.change} ${input.persist ? "proposal" : "card"} for a shown team rule`
+          : input.persist ? "the proposal for this team rule was not stored (dismissed, or too many waiting)" : "the proposal for this team rule was dismissed"
         return
       }
       // At most one drafting call per turn: the drafter found nothing to propose about the shown rule's subject.
@@ -251,7 +258,7 @@ export async function afterTurn(input: {
       return RulesTelemetry.skipped(input.sessionID, "recurrence", drafted === "covered" ? "covered" : "no_draft")
     if (!stillShown()) return
     const card = await RuleProposal.ask({
-      sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "recurrence",
+      sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "recurrence", persist: input.persist,
       draft: {
         text: drafted.text,
         applies_to: appliesTo(backing.map((signal) => signal.text)),
@@ -261,7 +268,9 @@ export async function afterTurn(input: {
         topics: [topic.identifier],
       },
     })
-    outcome = card ? `showed an add card for topic ${topic.identifier}` : `topic ${topic.identifier} was dismissed`
+    outcome = card
+      ? `${input.persist ? "stored an add proposal" : "showed an add card"} for topic ${topic.identifier}`
+      : input.persist ? `topic ${topic.identifier} was not stored (dismissed, or too many waiting)` : `topic ${topic.identifier} was dismissed`
   } catch (error) {
     checked = []
     outcome = `failed: ${error instanceof Error ? error.message : String(error)}`
@@ -299,6 +308,8 @@ export async function explicit(input: {
   unanswered?: (text: string) => Promise<void>
   /** What to keep on disk while the card is open (`RuleProposal.ask`). */
   request?: import("./proposal").RequestRecord
+  /** No client shows cards: store the proposal for `learn proposals` (`RuleProposal.ask`). */
+  persist?: boolean
 }): Promise<
   | { status: "shown"; card: Awaited<ReturnType<typeof RuleProposal.ask>>; choose: boolean }
   | { status: "invalid"; reason: string; kind: "rule" | "ambiguous" }
@@ -321,6 +332,7 @@ export async function explicit(input: {
   // drafter decides whether the shown rule is the subject.
   const card = await RuleProposal.ask({
     sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, unanswered: input.unanswered, request: input.request,
+    persist: input.persist,
     draft: {
       text,
       applies_to: appliesTo([text, ...(last ? [last.text] : [])]),

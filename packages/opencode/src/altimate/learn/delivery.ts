@@ -364,6 +364,35 @@ export class Delivery {
     })
   }
 
+  // altimate_change start — workspace rules: a host session (Claude Code, Codex through the plugin) is given one store's
+  // rules at its start
+  /**
+   * Record that host session `session` was given the approved rules of store `name` at its start, within the start
+   * budget, as a delivered start: recurrence ("corrected again"), usage and the shown-rule edit path then count it like
+   * an altimate-code session. Returns the rules given; a session that already has a snapshot (resumed, cleared,
+   * compacted) is given the same ones again.
+   */
+  async recordStart(session: string, name: string): Promise<Lesson[]> {
+    if (!await this.exists()) return []
+    return Store.transaction(this.root, async () => {
+      const existing = await this.state(session)
+      if (existing) return existing.shown.filter((entry) => entry.name === name).map((entry) => entry.lesson)
+      const approved = (await this.approved()).filter((entry) => entry.name === name)
+      if (!approved.length) return []
+      const rendered = renderSection(corpus(approved), this.limits.budget_tokens)
+      const state: State = {
+        version: 1, session, firstMessage: "host session start", query: "", touchedPaths: [], section: rendered.section,
+        shown: [], requests: [], requestParts: [], compactions: [], counted: [],
+      }
+      this.add(state, approved, rendered.lessons, "core", "")
+      await this.save(state)
+      this.delivered(state, 0, "start")
+      await this.log(state)
+      return state.shown.map((entry) => entry.lesson)
+    }, LOCK_OPTIONS)
+  }
+  // altimate_change end
+
   /** Provenance lives in server-side state, never in client-editable message metadata. */
   async requestParts(session: string, message: string) {
     return (await this.state(session, false))?.requestParts.filter((part) => part.message === message) ?? []

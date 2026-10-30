@@ -785,6 +785,8 @@ export namespace Telemetry {
         applies_to_count: number
         chars: number
         repeat: boolean
+        /** Kept on disk for `learn proposals` (no attached client shows cards), not shown as a card. */
+        stored: boolean
       }
     | {
         /** A card was answered, or closed without an answer (`expired`, `closed`). */
@@ -833,7 +835,7 @@ export namespace Telemetry {
         session_id: string
         /** Absent when the check stopped before choosing a path (a card already open, a failure). */
         trigger?: "shown_rule" | "recurrence"
-        reason: "card_open" | "no_renderer" | "covered" | "no_draft" | "topic_dismissed" | "no_topic" | "failed"
+        reason: "card_open" | "no_renderer" | "covered" | "no_draft" | "topic_dismissed" | "no_topic" | "failed" | "stored_full"
       }
     | {
         /** The agent saved something the person asked to remember (`training_save` kind rule, or the memory tool
@@ -842,8 +844,9 @@ export namespace Telemetry {
         timestamp: number
         session_id: string
         via: "training" | "memory"
-        /** `no_renderer`: no client that shows cards is attached, so the tool saved as before cards. */
-        outcome: "card" | "choose_card" | "memory" | "invalid" | "learning_off" | "not_linked" | "no_renderer"
+        /** `stored` / `choose_stored`: no client that shows cards is attached, so the proposal waits in `learn proposals`;
+         *  `no_renderer`: a subagent's session, or the stored proposals are full, so the tool saved as before cards. */
+        outcome: "card" | "choose_card" | "stored" | "choose_stored" | "memory" | "invalid" | "learning_off" | "not_linked" | "no_renderer"
       }
     | {
         /** One rules sync (push queued proposals, pull rules and reviews, report usage). */
