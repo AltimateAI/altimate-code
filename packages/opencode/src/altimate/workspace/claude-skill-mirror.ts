@@ -39,7 +39,8 @@ const STAGING_PATTERN = /^\.[a-z0-9][a-z0-9-]{0,63}\.altimate-staging-[A-Za-z0-9
  * leaves the copies as they are. */
 const LOCK_DIR = ".altimate-workspace-sync.lock"
 const LOCK_STALE_MS = 120_000
-const LOCK_WAIT_MS = 10_000
+// Shorter than the plugin's: a sync waits on this, and a lock that is not free changes nothing.
+const LOCK_WAIT_MS = 2_000
 /** Staging older than this is abandoned; a retired snapshot younger than this is a swap in progress. */
 const SWAP_MS = 600_000
 /** Where the snapshot is moved aside while a new one is swapped in. */
@@ -147,17 +148,22 @@ interface WorkspaceSkill {
   body: string
 }
 
-/** True while some process has moved the live snapshot aside to swap a new one in. Judged by
- * ctime: the rename that retires the snapshot updates it but keeps the old mtime. */
+/** True while some process has moved the live snapshot aside to swap a new one in: a `retired-*`
+ * entry, in a staging directory changed within SWAP_MS. The rename into it updates the
+ * directory's mtime on every platform; the retired tree keeps its old mtime. */
 async function snapshotIsSwapping(directory: string): Promise<boolean> {
   const staging = path.join(directory, SNAPSHOT_STAGING)
+  const st = await fs.lstat(staging).catch(() => null)
+  if (!st || Date.now() - st.mtimeMs >= SWAP_MS) return false
   const entries = await fs.readdir(staging).catch(() => [] as string[])
-  for (const entry of entries) {
-    if (!entry.startsWith("retired-")) continue
-    const st = await fs.lstat(path.join(staging, entry)).catch(() => null)
-    if (st && Date.now() - st.ctimeMs < SWAP_MS) return true
-  }
-  return false
+  return entries.some((entry) => entry.startsWith("retired-"))
+}
+
+/** The manifest is the one read, and still belongs to the signed-in account (no sign-out or
+ * switch since). */
+async function snapshotUnchanged(directory: string, manifest: string | null): Promise<boolean> {
+  if ((await manifestText(directory)) !== manifest) return false
+  return manifest === null || (await ownManifest(directory)) !== null
 }
 
 interface Snapshot {
@@ -242,8 +248,9 @@ async function readSnapshot(directory: string): Promise<Snapshot | null> {
     }
     let bytes: Buffer
     try {
-      // lstat too: Windows has no O_NOFOLLOW.
-      if ((await fs.lstat(path.join(source, "SKILL.md"))).isSymbolicLink()) continue
+      // A skill without a regular SKILL.md (missing, a link, a directory) is skipped; lstat also
+      // covers Windows, which has no O_NOFOLLOW.
+      if (!(await fs.lstat(path.join(source, "SKILL.md"))).isFile()) continue
       bytes = await readNoFollow(path.join(source, "SKILL.md"))
     } catch (err) {
       // A skill without a SKILL.md, or with a symlinked one, is skipped; one that cannot be read
@@ -273,8 +280,11 @@ async function readSnapshot(directory: string): Promise<Snapshot | null> {
 async function isOurs(dir: string): Promise<boolean> {
   try {
     if ((await fs.lstat(dir)).isSymbolicLink()) return false
-    const names = (await fs.readFile(path.join(dir, MARKER), "utf8"))
-      .split(/\r?\n/)
+    // Strict UTF-8 and \r\n, \r or \n line ends, as the plugin's Python reads it.
+    // ignoreBOM keeps a leading U+FEFF in the text, as Python's utf-8 codec does.
+    const names = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
+      .decode(await fs.readFile(path.join(dir, MARKER)))
+      .split(/\r\n?|\n/)
       .filter((line) => line.startsWith("skill: "))
       .map((line) => line.slice("skill: ".length))
     return names.length === 0 || names[0] === path.basename(dir)
@@ -487,8 +497,10 @@ async function reconcile(
       }
       const exists = await isDir(target)
       if (exists && (await sameTree(staging, target))) continue
-      // Building can outlast the lock; a holder taken over meanwhile swaps nothing more.
-      if (!(await renewLock(lock))) return changed
+      // Building can outlast the lock, and the snapshot can be swapped while it is copied: either
+      // way nothing more is published; the next sync picks up the new state.
+      if (!(await renewLock(lock)) || (checkManifest && !(await snapshotUnchanged(directory, snapshot.manifest))))
+        return changed
       // Move the old copy aside rather than deleting it, so a failed swap leaves it in place.
       try {
         if (exists) await fs.rename(target, aside)
