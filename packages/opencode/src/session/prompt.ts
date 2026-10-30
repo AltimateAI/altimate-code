@@ -2244,6 +2244,8 @@ export namespace SessionPrompt {
         const isError = part.state?.status === "error"
         if (isError) {
           toolErrorCount++
+          // A tool cancelled by the session's requested abort is not a tool failure fingerprint
+          if (ErrorDetail.isRequestedToolInterrupt(part.state, abort.aborted)) continue
           // Flush previous unrecovered error before recording new one
           if (pendingError) {
             if (errorRecords.length < 200) errorRecords.push({ ...pendingError, recovered: false, recoveryTool: "" })
