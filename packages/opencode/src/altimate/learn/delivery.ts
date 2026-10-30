@@ -18,6 +18,9 @@ import { workspacesOn } from "./config"
 // altimate_change end
 
 const log = Log.create({ service: "learn.delivery" })
+// altimate_change start — workspace rules: the first message of a host session's delivery state (it has no message ids)
+const HOST_START = "host session start"
+// altimate_change end
 const LOCK_OPTIONS = { timeoutMs: 5000 }
 const singleLine = (text: string) => normalizeText(text.replace(/[\s\u0085]+/g, " ")).trim()
 
@@ -367,28 +370,32 @@ export class Delivery {
   // altimate_change start — workspace rules: a host session (Claude Code, Codex through the plugin) is given one store's
   // rules at its start
   /**
-   * Record that host session `session` was given the approved rules of store `name` at its start, within the start
-   * budget, as a delivered start: recurrence ("corrected again"), usage and the shown-rule edit path then count it like
-   * an altimate-code session. Returns the rules given; a session that already has a snapshot (resumed, cleared,
-   * compacted) is given the same ones again.
+   * Record that host session `session` was given the approved rules of store `name` at its start, pinned first and within
+   * the start budget, as a delivered start: recurrence ("corrected again"), usage and the shown-rule edit path then count
+   * it like an altimate-code session. Returns the rules given, as they are approved now: a session started again (resumed,
+   * cleared, compacted) gets the current rules, not the ones it was given before (a retired or edited rule is not
+   * repeated). What it was shown before stays recorded, for attribution.
    */
   async recordStart(session: string, name: string): Promise<Lesson[]> {
     if (!await this.exists()) return []
     return Store.transaction(this.root, async () => {
       const existing = await this.state(session)
-      if (existing) return existing.shown.filter((entry) => entry.name === name).map((entry) => entry.lesson)
       const approved = (await this.approved()).filter((entry) => entry.name === name)
+        .sort((a, b) => Number(!!b.lesson.pinned) - Number(!!a.lesson.pinned))
       if (!approved.length) return []
       const rendered = renderSection(corpus(approved), this.limits.budget_tokens)
-      const state: State = {
-        version: 1, session, firstMessage: "host session start", query: "", touchedPaths: [], section: rendered.section,
+      const state: State = existing ?? {
+        version: 1, session, firstMessage: HOST_START, query: "", touchedPaths: [], section: rendered.section,
         shown: [], requests: [], requestParts: [], compactions: [], counted: [],
       }
+      const before = state.shown.length
       this.add(state, approved, rendered.lessons, "core", "")
-      await this.save(state)
-      this.delivered(state, 0, "start")
-      await this.log(state)
-      return state.shown.map((entry) => entry.lesson)
+      if (!existing || state.shown.length > before) {
+        await this.save(state)
+        this.delivered(state, before, "start")
+        await this.log(state)
+      }
+      return rendered.lessons.map((lesson) => approved.find((entry) => identity(entry.name, entry.lesson.id) === lesson.id)!.lesson)
     }, LOCK_OPTIONS)
   }
   // altimate_change end

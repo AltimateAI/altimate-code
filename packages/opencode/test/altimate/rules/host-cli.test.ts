@@ -9,32 +9,30 @@ import { RulesStore } from "../../../src/altimate/rules/store"
 import { readSignals } from "../../../src/altimate/learn/signals"
 import { readShownSnapshots } from "../../../src/altimate/learn/delivery"
 import { tmpdir } from "../../fixture/fixture"
+import { credentialDigest } from "../../../src/altimate/workspace/state"
 
 const entry = path.resolve(import.meta.dir, "../../../src/index.ts")
 
-/** Signed in, as far as the CLI can tell: no network. */
-async function signedIn(dir: string) {
-  const preload = path.join(dir, "signed-in.ts")
-  const api = JSON.stringify(import.meta.resolve("../../../src/altimate/workspace/api-client"))
-  await fs.writeFile(preload, `
-import { mock } from "bun:test"
-const original = await import(${api})
-mock.module(${api}, () => ({
-  ...original,
-  WorkspaceApi: { ...original.WorkspaceApi, captureCredentials: async () => ({ url: "http://x", instance: "t", apiKey: "k" }) },
-}))
-`)
-  return preload
+const CREDENTIALS = { altimateUrl: "http://x", altimateInstanceName: "t", altimateApiKey: "k" }
+/** The digest of the credential the test projects' rules were pulled with. */
+const ME = credentialDigest(CREDENTIALS.altimateUrl, CREDENTIALS.altimateInstanceName, CREDENTIALS.altimateApiKey)
+
+/** A home signed in as the account the rules were pulled for (no network), or, with `signed: false`, signed out. */
+async function home(dir: string, signed = true): Promise<Record<string, string>> {
+  const at = path.join(dir, signed ? "home-in" : "home-out")
+  await fs.mkdir(path.join(at, ".altimate"), { recursive: true })
+  if (signed) await fs.writeFile(path.join(at, ".altimate", "altimate.json"), JSON.stringify(CREDENTIALS))
+  return { OPENCODE_TEST_HOME: at }
 }
 
-async function cli(cwd: string, args: string[], options: { stdin?: string; preload?: string; env?: Record<string, string> } = {}) {
+async function cli(cwd: string, args: string[], options: { stdin?: string; env?: Record<string, string> } = {}) {
   const env: Record<string, string | undefined> = {
     ...process.env, ALTIMATE_DISABLE_TELEMETRY: "1", OPENCODE_DISABLE_AUTOUPDATE: "1", NO_COLOR: "1",
     OPENCODE_TEST_STATE_HOME: path.join(cwd, "state"), ...options.env,
   }
   // The test preload turns workspaces off; these tests need them on.
   if (!options.env?.ALTIMATE_DISABLE_WORKSPACE) delete env.ALTIMATE_DISABLE_WORKSPACE
-  const proc = Bun.spawn(["bun", "run", "--conditions=browser", ...(options.preload ? ["--preload", options.preload] : []), entry, ...args], {
+  const proc = Bun.spawn(["bun", "run", "--conditions=browser", entry, ...args], {
     cwd, env, stdin: options.stdin === undefined ? "ignore" : new Blob([options.stdin]), stdout: "pipe", stderr: "pipe",
   })
   const [stdout, stderr, code] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
@@ -49,6 +47,7 @@ async function linkedProject(dir: string, extra: Partial<RulesStore.State> = {})
     workspace: { name: "Team", owner_name: "Olive", is_owner: false },
     settings: { learning_enabled: true, include_quotes: true, share_across_repos: false },
     pulled_at: new Date().toISOString(),
+    pulled_with: ME,
   }), extra))
   return root
 }
@@ -63,7 +62,7 @@ describe("learn hook", () => {
     await using dir = await tmpdir({ git: true })
     const root = await linkedProject(dir.path, { rules: [teamRule] })
     const result = await cli(dir.path, ["learn", "hook", "session-start", "--host", "claude"], {
-      stdin: JSON.stringify({ session_id: "abc", hook_event_name: "SessionStart" }), preload: await signedIn(dir.path),
+      stdin: JSON.stringify({ session_id: "abc", hook_event_name: "SessionStart" }), env: await home(dir.path),
     })
     expect(result.code).toBe(0)
     const output = JSON.parse(result.stdout)
@@ -75,13 +74,13 @@ describe("learn hook", () => {
   test("prints nothing and succeeds on bad input, signed out, or with learning off", async () => {
     await using dir = await tmpdir({ git: true })
     await linkedProject(dir.path, { rules: [teamRule] })
-    const preload = await signedIn(dir.path)
-    const runs: { stdin: string; preload?: string; env?: Record<string, string> }[] = [
-      { stdin: "not json", preload },
-      { stdin: "{}", preload },
-      { stdin: JSON.stringify({ session_id: "abc" }) },
-      { stdin: JSON.stringify({ session_id: "abc" }), preload, env: { ALTIMATE_LEARN: "0" } },
-      { stdin: JSON.stringify({ session_id: "abc" }), preload, env: { ALTIMATE_DISABLE_WORKSPACE: "1" } },
+    const signedIn = await home(dir.path)
+    const runs: { stdin: string; env: Record<string, string> }[] = [
+      { stdin: "not json", env: signedIn },
+      { stdin: "{}", env: signedIn },
+      { stdin: JSON.stringify({ session_id: "abc" }), env: await home(dir.path, false) },
+      { stdin: JSON.stringify({ session_id: "abc" }), env: { ...signedIn, ALTIMATE_LEARN: "0" } },
+      { stdin: JSON.stringify({ session_id: "abc" }), env: { ...signedIn, ALTIMATE_DISABLE_WORKSPACE: "1" } },
     ]
     for (const run of runs) {
       const result = await cli(dir.path, ["learn", "hook", "session-start"], run)
@@ -92,9 +91,10 @@ describe("learn hook", () => {
   test("prompt submit records a correction of the host session, nothing else, and nothing with learning off", async () => {
     await using dir = await tmpdir({ git: true })
     const root = await linkedProject(dir.path)
-    const preload = await signedIn(dir.path)
+    const signedIn = await home(dir.path)
+    const signedOut = await home(dir.path, false)
     const prompt = (text: string, env: Record<string, string> = {}, signed = true) =>
-      cli(dir.path, ["learn", "hook", "user-prompt-submit", "--host", "codex"], { stdin: JSON.stringify({ session_id: "s1", prompt: text }), env, ...(signed ? { preload } : {}) })
+      cli(dir.path, ["learn", "hook", "user-prompt-submit", "--host", "codex"], { stdin: JSON.stringify({ session_id: "s1", prompt: text }), env: { ...(signed ? signedIn : signedOut), ...env } })
     expect(await prompt("add a staging model for customers")).toMatchObject({ code: 0, stdout: "" })
     expect(await prompt("no, that's wrong", {}, false)).toMatchObject({ code: 0, stdout: "" })
     expect(await prompt("no, we never use FLOAT for money", { ALTIMATE_LEARN: "0" })).toMatchObject({ code: 0, stdout: "" })
@@ -121,8 +121,8 @@ describe("learn check", () => {
 describe("learn signal add --detect", () => {
   test("records only a correction, only where learning is on", async () => {
     await using dir = await tmpdir({ git: true })
-    const preload = await signedIn(dir.path)
-    const add = (text: string) => cli(dir.path, ["learn", "signal", "add", "--kind", "user", "--detect", "--session", "claude:x", "--text", text], { preload })
+    const env = await home(dir.path)
+    const add = (text: string) => cli(dir.path, ["learn", "signal", "add", "--kind", "user", "--detect", "--session", "claude:x", "--text", text], { env })
     expect((await add("no, that's wrong")).stdout).toContain("not linked")
     await linkedProject(dir.path)
     expect((await add("thanks, looks good")).stdout).toContain("Not a correction")

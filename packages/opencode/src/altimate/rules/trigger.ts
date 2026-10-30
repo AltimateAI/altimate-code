@@ -151,8 +151,9 @@ async function draft(input: {
 
 const running = new Set<string>()
 
-/** Check the session's new corrections and show at most one card. Never throws. With `persist` (a host session through
- * the plugin, `learn check`): no client shows cards, so the proposal is kept on disk for `learn proposals` instead. */
+/** Check the session's new corrections and show at most one card. Never throws; returns what the check decided. With
+ * `persist` (a host session through the plugin, `learn check`): no client shows cards, so the proposal is kept on disk
+ * for `learn proposals` instead. */
 export async function afterTurn(input: {
   sessionID: string
   root: string
@@ -160,14 +161,16 @@ export async function afterTurn(input: {
   learn: LearnConfig
   deps: TriggerDeps
   persist?: boolean
-}): Promise<void> {
+}): Promise<string> {
   // Idle can fire twice for one turn; one check per session at a time.
-  if (running.has(input.sessionID)) return
+  if (running.has(input.sessionID)) return "another check of this session is running"
   running.add(input.sessionID)
   let outcome = "no new corrections"
   let checked: string[] = []
   const note = (text: string) => { outcome = text }
   try {
+    // The check's early exits leave this function; `outcome` says what it decided.
+    await (async () => {
     const state = await RulesStore.read(input.root)
     if (!learningEnabled(input.learn, state)) return
     const processed = new Set(state.processed_signals)
@@ -271,6 +274,7 @@ export async function afterTurn(input: {
     outcome = card
       ? `${input.persist ? "stored an add proposal" : "showed an add card"} for topic ${topic.identifier}`
       : input.persist ? `topic ${topic.identifier} was not stored (dismissed, or too many waiting)` : `topic ${topic.identifier} was dismissed`
+    })()
   } catch (error) {
     checked = []
     outcome = `failed: ${error instanceof Error ? error.message : String(error)}`
@@ -291,6 +295,7 @@ export async function afterTurn(input: {
       }).catch(() => {})
     }
   }
+  return outcome
 }
 
 /** "Remember this as a rule": a card right away, worded as the agent saved it. */

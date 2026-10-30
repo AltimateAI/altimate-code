@@ -1094,6 +1094,7 @@ const SignalAddCommand = effectCmd({
         const project = await rulesProject()
         const result = await RulesHost.recordCorrection({ ...project, session: args.session as string, text })
         return out({
+          proposed: "Proposed as a team rule: it waits in `altimate-code learn proposals`.",
           recorded: `Recorded a correction for session ${args.session}.`,
           duplicate: "Already recorded; nothing added.",
           not_correction: "Not a correction; nothing recorded.",

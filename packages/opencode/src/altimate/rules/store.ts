@@ -133,8 +133,9 @@ export const StoredProposal = z.object({
   request: RememberRequest.pick({ session: true, via: true, memory: true, training: true }).optional(),
   edits: z.number().int().default(0),
   at: z.string(),
-  /** A reply in progress: another process refuses to act on it while `pid` lives. */
-  claim: z.object({ pid: z.number().int(), at: z.string() }).optional(),
+  /** A reply in progress: another process refuses to act on it while `pid` lives. `answering`: the closing action it
+   * took; until it is recorded as done, only that action finishes the proposal. */
+  claim: z.object({ pid: z.number().int(), at: z.string(), answering: z.string().optional() }).optional(),
 })
 export type StoredProposal = z.infer<typeof StoredProposal>
 /** Kept at most. A session proposal past it is not raised; a "remember" is saved as before cards instead. */
@@ -149,6 +150,9 @@ export const State = z.object({
   cursor: z.string().optional(),
   pending_count: z.number().int().default(0),
   pulled_at: z.string().optional(),
+  /** The credential (`credentialDigest`) the last successful pull was made with: a host session is given the rules only
+   * while the same credential is signed in. */
+  pulled_with: z.string().optional(),
   last_error: z.string().optional(),
   /** Queued proposals dropped because the account or workspace changed. Its own field: a later pull's error (or its
    * success) does not erase it. Shown for `SCOPE_DROP_NOTICE_MS`. */
@@ -196,7 +200,12 @@ export const State = z.object({
   /** Review notices already reported at a host session start (`public_id|status`). */
   host_notices_seen: z.array(z.string()).default([]),
   /** The after-turn check running for a host session, per session: one at a time across processes. */
-  host_checks: z.record(z.string(), z.object({ pid: z.number().int(), at: z.string() })).default({}),
+  host_checks: z.record(z.string(), z.object({
+    pid: z.number().int(),
+    at: z.string(),
+    /** Work that arrived while the check ran (another Stop, a new correction): it checks again before releasing. */
+    pending: z.number().int().optional(),
+  })).default({}),
   /** A usage report sent but not yet acknowledged: resent with the same `batch_id` so the server counts it once. */
   pending_usage: z.object({
     batch_id: z.string(),

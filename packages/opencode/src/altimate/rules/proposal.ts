@@ -298,17 +298,31 @@ export async function ask(input: {
 export const STORED_TTL_MS = 14 * 24 * 60 * 60_000
 const storedLive = (p: RulesStore.StoredProposal, now = Date.now()) => !!p.request || now - Date.parse(p.at) <= STORED_TTL_MS
 
-/** `ask` with no client to show the card: keep it on disk, once per wording. Undefined when the list is full. */
+/** What makes two stored proposals the same: the account and workspace, the change and the rule it replaces (at its
+ * version), where it applies, and the wording. */
+const identity = (scope: RulesStore.Scope | undefined, card: Pick<ProposalCard, "change" | "replaces" | "applies_to" | "text">) =>
+  JSON.stringify([
+    scope ? [scope.apiUrl, scope.tenant, scope.account, scope.datamateId, scope.repoRemote] : null,
+    card.change, card.replaces?.public_id ?? null, card.replaces?.version ?? null,
+    [...card.applies_to].sort(), card.text.trim().toLowerCase(),
+  ])
+
+/** `ask` with no client to show the card: keep it on disk, once per proposal (`identity`). Undefined when the list is
+ * full. */
 async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Promise<ProposalCard | undefined> {
   let card: ProposalCard | undefined
   let repeat = false
   await RulesStore.update(input.root, (s) => {
     s.proposals = s.proposals.filter((p) => storedLive(p))
-    const existing = s.proposals.find((p) => p.card.text.toLowerCase() === input.draft.text.toLowerCase())
+    const wanted = identity(s.scope, input.draft)
+    const existing = s.proposals.find((p) => identity(p.scope, p.card) === wanted)
     if (existing) {
-      // Asked again: as for a card, the latest session, memory block and request win.
       repeat = true
-      existing.card = { ...existing.card, sessionID: input.sessionID }
+      // Being answered by another process: left as it is (the answer decides it).
+      if (existing.claim && existing.claim.pid !== process.pid && alive(existing.claim.pid)) return void (card = existing.card)
+      // Asked again: as for a card, the latest session, its evidence, memory block and request win.
+      existing.card = { ...existing.card, sessionID: input.sessionID, evidence: input.draft.evidence }
+      existing.source_session = input.sessionID
       existing.directory = input.directory
       if (input.draft.memory) {
         existing.memory = input.draft.memory
@@ -368,6 +382,7 @@ async function answerStored(
   const { root, id } = input
   let record: RulesStore.StoredProposal | undefined
   let held = false
+  let conflict: string | undefined
   await RulesStore.update(root, (s) => {
     const found = s.proposals.find((p) => p.card.id === id && storedLive(p))
     if (!found) return
@@ -378,10 +393,16 @@ async function answerStored(
     const live = found.claim && found.claim.pid !== process.pid && alive(found.claim.pid) &&
       Date.now() - Date.parse(found.claim.at) < CLAIM_STALE_MS
     if (live) return void (held = true)
-    found.claim = { pid: process.pid, at: new Date().toISOString() }
+    // An answer that acted (sent, saved, dismissed) and was not recorded as done: only the same answer finishes it, so
+    // one proposal is never both sent and dismissed. Repeating it is safe: the send is skipped once recorded as sent.
+    const unfinished = found.claim?.answering
+    if (unfinished && unfinished !== answer.action) return void (conflict = unfinished)
+    found.claim = { pid: process.pid, at: new Date().toISOString(), ...(answer.action === "edit" ? {} : { answering: answer.action }) }
   })
   if (!record) return { ok: false, code: "not_open", error: "This proposal is no longer open." }
   if (held) return { ok: false, code: "busy", error: "This proposal is already being answered.", card: record.card }
+  if (conflict)
+    return { ok: false, code: "not_available", error: `This proposal was being answered with "${conflict}" when that stopped: answer it with "${conflict}" again to finish.`, card: record.card }
   const request = record.request
   const entry: Pending = {
     card: record.card, root, directory: input.directory, learn: input.learn, at: Date.parse(record.at), trigger: record.trigger,
@@ -397,16 +418,33 @@ async function answerStored(
     pending.delete(id)
   }
   const gone = result.ok ? result.closed : result.code === "not_open"
-  await RulesStore.update(root, (s) => {
+  const writeBack = () => RulesStore.update(root, (s) => {
     const found = s.proposals.find((p) => p.card.id === id)
     if (!found) return
     if (gone) return void (s.proposals = s.proposals.filter((p) => p !== found))
     delete found.claim
     found.card = entry.card
     found.edits = entry.edits
-  }).catch((error) => log.warn("stored proposal not updated after its reply", { id, error }))
+  })
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await writeBack()
+      return result
+    } catch (error) {
+      log.warn("stored proposal not updated after its reply", { id, attempt, error })
+      if (attempt >= WRITE_BACK_ATTEMPTS) break
+      await Bun.sleep(WRITE_BACK_RETRY_MS)
+    }
+  }
+  // A new wording that was not saved was not made: a later send would send the old one.
+  if (answer.action === "edit" && result.ok)
+    return { ok: false, code: "failed", error: "Not changed: the new wording could not be saved. Try again.", card: record.card }
+  // A closing answer acted, and its claim keeps `answering`: the next reply with the same answer finishes it.
   return result
 }
+
+const WRITE_BACK_ATTEMPTS = 3
+const WRITE_BACK_RETRY_MS = 200
 
 /** Open cards, optionally of one project and one session. */
 export function list(directory?: string, sessionID?: string): ProposalCard[] {
@@ -573,7 +611,20 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
     const approve = action === "approve" || action === "approve_anyway" ? action : undefined
     // The workspace decides whether the person's words travel with a proposal: without quotes, `why` (which can
     // paraphrase the correction) is replaced by a neutral line too.
-    const quotes = (await RulesStore.read(entry.root)).settings?.include_quotes !== false
+    const current = await RulesStore.read(entry.root)
+    const owner = card.workspace?.owner_name ?? "the workspace owner"
+    const ws = card.workspace?.name ?? "the workspace"
+    // Already sent under this card's id with this wording (an answer repeated after its process died): not sent again.
+    // A refused or failed send, or one of another wording, is sent again.
+    const prior = current.push_outcomes[card.id]
+    const priorSent = prior && !prior.error && prior.public_id
+      ? current.sent.find((sent) => sent.public_id === prior.public_id && sent.text === card.text)
+      : undefined
+    if (priorSent && (!approve || prior!.approved || priorSent.status === "active"))
+      return approve
+        ? { message: `Approved: now a team rule in ${ws}.`, outcome: "approved" }
+        : { message: `Sent to ${owner}'s review queue in ${ws}.`, outcome: "sent" }
+    const quotes = current.settings?.include_quotes !== false
     const why = card.why ? (quotes ? redactSecrets(card.why) : neutralWhy(card)) : undefined
     const outboxId = await RulesSync.enqueue(entry.root, {
       change: card.change,
@@ -589,8 +640,6 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
     }, approve, entry.scope, card.id)
     const report = await RulesSync.runFresh(entry.root, entry.directory, entry.learn, "card").catch(() => undefined)
     const sent = RulesSync.outcomeOf(await RulesStore.read(entry.root), report, outboxId)
-    const owner = card.workspace?.owner_name ?? "the workspace owner"
-    const ws = card.workspace?.name ?? "the workspace"
     if (sent.status === "queued") {
       message = sent.error
         ? `Not sent yet (${sent.error}): kept queued and sent again on the next sync.`

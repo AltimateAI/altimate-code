@@ -125,6 +125,8 @@ export async function adopt(root: string, ctx: Ready): Promise<{ state: State; s
 const ownedBy = (state: State, ctx: Ready) => !state.scope || RulesStore.sameScope(state.scope, ctx.scope)
 
 export async function pull(root: string, ctx: Ready): Promise<PullResult> {
+  const { credentialDigest } = await import("../workspace/state")
+  const pulledWith = credentialDigest(ctx.actAs.url, ctx.actAs.instance, ctx.actAs.apiKey)
   const { state: before, same } = await adopt(root, ctx)
   try {
     const response = await RulesApi.sync(ctx.actAs, ctx.scope.datamateId, {
@@ -147,6 +149,7 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.cursor = response.cursor
       state.pending_count = response.pending_count
       state.pulled_at = new Date().toISOString()
+      state.pulled_with = pulledWith
       state.last_error = response.skipped
         ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code; update it to get them`
         : undefined
@@ -746,16 +749,7 @@ export async function run(root: string, directory: string, learn: LearnConfig, t
 async function runUntracked(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
   const key = await canonicalRoot(root)
   const ctx = await context(directory, learn)
-  if (ctx.status !== "ready") {
-    // Unlinked, or signed out: nothing vouches for the pulled rules any more, so they stop being delivered (the queue
-    // stays for when the link or the sign-in returns). Other skips (unconfirmed for now) keep them.
-    if (ctx.status === "skipped" && (ctx.unlinked || ctx.code === "not_signed_in")) {
-      const state = await RulesStore.read(root)
-      if (state.workspace) await RulesStore.reset(root, { keepOutbox: true })
-    }
-    failedAt.set(key, Date.now())
-    return { context: ctx }
-  }
+  if (ctx.status !== "ready") return unready(root, key, ctx)
   const { state } = await adopt(root, ctx)
   const pushed = await push(root, ctx)
   // Usage before the pull: it is counted against the rule versions sessions were shown, which a pull that edits or
@@ -765,6 +759,41 @@ async function runUntracked(root: string, directory: string, learn: LearnConfig)
   if (pulled.ok) failedAt.delete(key)
   else failedAt.set(key, Date.now())
   return { context: ctx, push: pushed, pull: pulled, ...(usage ? { usage } : {}) }
+}
+
+/** A run that cannot sync. Unlinked, or signed out: nothing vouches for the pulled rules any more, so they stop being
+ * delivered (the queue stays for when the link or the sign-in returns). Other skips (unconfirmed for now) keep them. */
+async function unready(root: string, key: string, ctx: Exclude<Context, Ready>): Promise<RunReport> {
+  if (ctx.status === "skipped" && (ctx.unlinked || ctx.code === "not_signed_in")) {
+    const state = await RulesStore.read(root)
+    if (state.workspace) await RulesStore.reset(root, { keepOutbox: true })
+  }
+  failedAt.set(key, Date.now())
+  return { context: ctx }
+}
+
+/** A pull without a push or a usage report, for a process that may exit before it ends (a host's session-start hook):
+ * abandoning it leaves nothing half-sent. Queued proposals and usage go with the next full run. */
+export async function pullOnly(root: string, directory: string, learn: LearnConfig, trigger: SyncTrigger = "session_start"): Promise<RunReport> {
+  const startedAt = Date.now()
+  const key = await canonicalRoot(root)
+  try {
+    const ctx = await context(directory, learn)
+    const report = ctx.status === "ready" ? { context: ctx, pull: await pull(root, ctx) } : await unready(root, key, ctx)
+    if (report.pull?.ok) failedAt.delete(key)
+    else if (report.pull) failedAt.set(key, Date.now())
+    RulesTelemetry.synced(trigger, report, startedAt)
+    return report
+  } catch (error) {
+    RulesTelemetry.syncThrew(trigger, startedAt)
+    throw error
+  }
+}
+
+/** `pullOnly`, waited for at most `waitMs`; never throws. */
+export async function pullWithin(root: string, directory: string, learn: LearnConfig, waitMs: number): Promise<void> {
+  const pulling = pullOnly(root, directory, learn).catch((error) => log.warn("rules pull failed", { error: errorText(error) }))
+  await Promise.race([pulling, new Promise((resolve) => setTimeout(resolve, waitMs).unref?.())])
 }
 
 // Keyed by the real path: the service and the session loop may name one project through different paths.
