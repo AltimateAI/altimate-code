@@ -1,7 +1,42 @@
 import { Telemetry } from "./index"
+import stripAnsi from "strip-ansi"
 
 const MAX_MESSAGE = 200
 const PLACEHOLDER = "<x>"
+export const CREDENTIAL_WORDS: ReadonlySet<string> = new Set([
+  "accesstoken",
+  "apikey",
+  "appsecret",
+  "auth",
+  "authorization",
+  "authtoken",
+  "bearer",
+  "bearertoken",
+  "clientsecret",
+  "connectionstring",
+  "cookie",
+  "credential",
+  "credentials",
+  "jwtsecret",
+  "jwttoken",
+  "key",
+  "pass",
+  "passphrase",
+  "passwd",
+  "password",
+  "passwords",
+  "privatekey",
+  "pwd",
+  "refreshtoken",
+  "secret",
+  "secretkey",
+  "session",
+  "sessionid",
+  "sig",
+  "signature",
+  "token",
+])
+
 /**
  * Fixed vocabulary of common error and diagnostic words. Credential words (password,
  * secret, token, key, auth, cookie, session, ...) are deliberately absent. Keep sorted.
@@ -373,20 +408,27 @@ export const ERROR_VOCABULARY: ReadonlySet<string> = new Set([
 ])
 
 /**
- * Fixed-vocabulary template of an error's first line. Words are split on any non-letter
- * character and lowercased; a word survives only if it is in ERROR_VOCABULARY, every other
- * run becomes `<x>`. The output holds only vocabulary words, `<x>` and spaces, so user
- * text, identifiers, paths, values and SQL cannot appear.
+ * Fixed-vocabulary template of an error's first line, with ANSI escapes removed.
+ * Words are split on any non-letter character and lowercased; a word survives only if
+ * it is in ERROR_VOCABULARY, every other run becomes `<x>`. A credential word and the
+ * rest of the line become one `<x>` too, because a credential value may itself consist
+ * of vocabulary words. This deliberately loses diagnostic text after ambiguous words
+ * such as key or session: privacy takes priority over template detail. The output holds
+ * only vocabulary words, `<x>` and spaces.
  */
 export function templateErrorMessage(raw: string): string {
-  const first = raw.split(/[\r\n\u2028\u2029]/, 1)[0]
+  // Split first so an OSC sequence spanning a newline cannot erase the line boundary.
+  // Use the tokenizer's letter boundaries; spaced keys require an assignment separator.
+  const first = stripAnsi(raw.split(/[\r\n\u2028\u2029]/, 1)[0])
+    .replace(/(?<![A-Za-z])connection[_-]string(?![A-Za-z])/gi, "connectionstring")
+    .replace(/(?<![A-Za-z])connection[ \t]+string["'`]?[ \t]*(?=[:=])/gi, "connectionstring")
   const out: string[] = []
   for (const token of first.split(/[^A-Za-z]+/)) {
     if (!token) continue
     const word = token.toLowerCase()
     const piece = ERROR_VOCABULARY.has(word) ? word : PLACEHOLDER
-    if (piece === PLACEHOLDER && out[out.length - 1] === PLACEHOLDER) continue
-    out.push(piece)
+    if (piece !== PLACEHOLDER || out[out.length - 1] !== PLACEHOLDER) out.push(piece)
+    if (CREDENTIAL_WORDS.has(word)) break
   }
   // non-letter characters (digits, symbols) only separate words and are dropped; unknown words they separated collapse into one placeholder
   return out.join(" ").slice(0, MAX_MESSAGE)
