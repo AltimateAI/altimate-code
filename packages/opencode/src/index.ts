@@ -304,13 +304,15 @@ try {
     await cli.parse()
   }
 } catch (e) {
+  // altimate_change start — set the default before FormatError so a CliError's own exitCode (e.g. 130) wins
+  process.exitCode = 1
   const formatted = FormatError(e)
+  // altimate_change end
   if (formatted) UI.error(formatted)
   if (formatted === undefined) {
     UI.error("Unexpected error" + EOL)
     process.stderr.write(errorMessage(e) + EOL)
   }
-  process.exitCode = 1
 } finally {
   // altimate_change start - telemetry flush
   // Flush any buffered telemetry events before exiting.
