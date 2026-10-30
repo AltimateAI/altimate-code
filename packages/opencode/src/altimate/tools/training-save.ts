@@ -8,6 +8,10 @@ import { CitationSchema } from "../../memory/types"
 
 const log = Log.create({ service: "tool.training_save" })
 
+// altimate_change start — workspace rules: route a project rule to the proposal card when linked
+import { lastUserText, proposeTeamRule } from "../rules/remember"
+// altimate_change end
+
 export const TrainingSaveTool = Tool.define("training_save", {
   description: [
     "Save a learned pattern, rule, glossary term, or standard to your teammate's training.",
@@ -16,6 +20,10 @@ export const TrainingSaveTool = Tool.define("training_save", {
     "Training kinds:",
     "- pattern: A coding pattern learned from an example file (e.g., how staging models should look)",
     "- rule: A specific rule from a correction (e.g., 'never use FLOAT for financial columns')",
+    "  A rule is an instruction for how work must be done in this repository, for everyone. In a project linked",
+    "  to an Altimate workspace it becomes a proposed team rule the person sends for the owner's review.",
+    "  A personal preference ('I prefer...', 'for me...') or a fact ('our warehouse is...') is not a rule:",
+    "  save it with altimate_memory_write instead.",
     "- glossary: A domain-specific term definition (e.g., 'ARR means Annual Recurring Revenue')",
     "- standard: A team standard from documentation (e.g., SQL style guide rules)",
     "- context: Background knowledge explaining 'why' (e.g., why we chose Snowflake over BigQuery)",
@@ -62,6 +70,12 @@ export const TrainingSaveTool = Tool.define("training_save", {
   }),
   async execute(args, ctx) {
     try {
+      // altimate_change start — in a project linked to a workspace, a project rule is a proposed team rule:
+      // it shows the proposal card (the person sends it to the owner's review, or the owner approves it),
+      // instead of training that applies at once and reaches the team through git without review.
+      const proposed = args.kind === "rule" && args.scope === "project" ? await proposeTeamRule(args.content, ctx.sessionID, lastUserText(ctx.messages), "training", undefined, { name: args.name, source: args.source, citations: args.citations }) : undefined
+      if (proposed) return proposed
+      // altimate_change end
       const scopeForCount = args.scope === "global" ? "global" : "project"
 
       // Check if this is an update to an existing entry

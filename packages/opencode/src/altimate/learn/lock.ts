@@ -61,6 +61,7 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
           // Every learn writer enters here after Flock creates the directory. Share approved
           // lessons with the team while keeping operational state local; preserve user edits.
           const file = path.join(dir, ".gitignore")
+          // The text, comment included, is how an installed block is recognised: changing it would append it again.
           const rules = "# Share approved lessons; keep signals and other local learning state out of Git.\n*\n!/*/\n!/*/approved.json\n!/.gitignore\n"
           await assertLearnLock(key)
           await SafeFS.open(key, file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL).then(async (handle) => {

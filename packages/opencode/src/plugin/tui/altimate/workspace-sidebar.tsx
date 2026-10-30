@@ -69,6 +69,20 @@ function View(props: { api: TuiPluginApi }) {
   // altimate_change start - status lines
   const [detail, setDetail] = createSignal<Manage.StatusReport | null>(null)
   // altimate_change end
+  // altimate_change start — workspace rules: "6 team rules · 3 pending review", from the session server (which may
+  // run on another host than this TUI, so never from local files)
+  const [rules, setRules] = createSignal<{ line: string; pulled_at?: string } | null>(null)
+  const readRules = () => {
+    const client = (props.api.client as unknown as { client?: { get(input: { url: string }): Promise<{ data?: unknown }> } }).client
+    void client
+      ?.get({ url: "/altimate/rules/summary" })
+      .then((result) => {
+        const summary = result.data as { ok?: boolean; linked?: boolean; line?: string; pulled_at?: string } | undefined
+        setRules(summary?.ok && summary.linked && summary.line ? { line: summary.line, ...(summary.pulled_at ? { pulled_at: summary.pulled_at } : {}) } : null)
+      })
+      .catch(() => setRules(null))
+  }
+  // altimate_change end
   // altimate_change start - what the last session got, in numbers
   const [attachLine, setAttachLine] = createSignal<string | null>(null)
   const readAttachLine = (bound: CachedBinding | null) => {
@@ -132,6 +146,9 @@ function View(props: { api: TuiPluginApi }) {
       // one clears.
       const clearRendered = () => {
         setDetail(null)
+        // altimate_change start — workspace rules: the line belongs to the binding being cleared
+        setRules(null)
+        // altimate_change end
         setManageUrl(null)
         setBinding(undefined)
         boundScope = null
@@ -216,6 +233,7 @@ function View(props: { api: TuiPluginApi }) {
         return
       }
       setDetail(detail)
+      readRules()
       // altimate_change end
     } finally {
       refreshInFlight = false
@@ -242,10 +260,15 @@ function View(props: { api: TuiPluginApi }) {
     // authoritative. The interval stays: it is what catches a change made by
     // another process, which no in-process listener can see.
     const unsubscribe = onBindingChanged(() => void refresh("notify"))
+    // altimate_change start — rule events from the session server refresh the rules line
+    const on = props.api.event.on as unknown as (type: string, handler: () => void) => () => void
+    const offRules = [on("altimate.rules.changed", readRules), on("rule.proposal.reviewed", readRules)]
+    // altimate_change end
     onCleanup(() => {
       disposed = true
       clearInterval(timer)
       unsubscribe()
+      for (const off of offRules) off()
     })
   })
 
@@ -309,6 +332,14 @@ function View(props: { api: TuiPluginApi }) {
             </Show>
             <Show when={detail()?.memoryLoadedAt}>
               {(at) => <text fg={theme().textMuted}>{`memory loaded ${describeAge(at())}`}</text>}
+            </Show>
+            <Show when={rules()}>
+              {(r) => (
+                <text fg={theme().textMuted}>
+                  {`rules: ${r().line}`}
+                  {r().pulled_at ? ` · synced ${describeAge(Date.parse(r().pulled_at!))}` : ""}
+                </text>
+              )}
             </Show>
             {/* altimate_change end */}
             {/* ``pinned via --workspace`` means "this SESSION was launched

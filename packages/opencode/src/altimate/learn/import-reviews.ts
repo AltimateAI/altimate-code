@@ -176,7 +176,7 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
   deps.out(`Review import scope: ${key}; ${prs.length} PR(s), ${summary.commentsFetched} comment(s) fetched, ${all.length} signal(s) (${all.length - signals.length} pending).`)
   deps.out(`Merged since ${new Date(fetched?.cursor.since ?? since).toISOString()}; newest updated PRs first; limit ${limit}.`)
   deps.out(`Model/provider: ${label}. Estimated input tokens: ${estimatedInput} for up to ${estimatedReflections} reflection(s), excluding candidate growth.`)
-  deps.out(model ? "Review import sends these redacted comments to this model and stages candidate lessons only."
+  deps.out(model ? "Review import sends these redacted comments to this model and stages candidate rules only."
     : "No comments will be sent to a model; eligible review signals are stored locally only.")
   if (fetched?.paused) deps.out(`GitHub rate limit low; fetch paused${fetched.resetAt ? ` until ${fetched.resetAt}` : ""}. Rerun to resume from the last completed PR.`)
   if (fetched?.truncated) deps.out("GitHub's 1,000-result search ceiling was reached. Use a narrower --since for further imports; the completed comments remain available below.")
@@ -285,7 +285,7 @@ export async function importReviews(options: ImportReviewsOptions, deps: ImportR
       s.messageID && pr.messageIDs.includes(s.messageID)))
   }, name)
   deps.out(summaryLine(summary))
-  deps.out(`${summary.reflectionsRun} reflections run; candidate lessons: ${summary.candidatesAdded} added, ${summary.candidatesEdited} edited.`)
+  deps.out(`${summary.reflectionsRun} reflections run; candidate rules: ${summary.candidatesAdded} added, ${summary.candidatesEdited} edited.`)
   deps.out(`Tokens${summary.tokensEstimated ? " (estimated)" : ""}: ${summary.inputTokens} input, ${summary.outputTokens} output. Estimated cost: $${summary.estimatedCost.toFixed(6)}.`)
   if (updated.repositories[key].cursor?.truncated)
     deps.out("GitHub search was truncated; use a narrower --since for further fetching.")

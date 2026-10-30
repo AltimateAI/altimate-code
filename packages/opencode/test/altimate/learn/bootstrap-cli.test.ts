@@ -128,7 +128,7 @@ describe("learn bootstrap CLI", () => {
     const result = await run(dir.path, ["--model", "fake/model", "--yes"], await fixture(dir.path))
     expect(result.code).toBe(0)
     expect(result.stdout).not.toContain("CONFIRM:")
-    expect(result.stdout).toContain("candidate lessons: 1 added, 0 edited")
+    expect(result.stdout).toContain("candidate rules: 1 added, 0 edited")
     expect(result.stdout).toContain("41 input, 9 output")
     expect(result.stdout).toContain("$0.000059")
     expect(result.stdout).toContain("`learn show`")

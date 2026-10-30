@@ -302,7 +302,7 @@ describe("bootstrap continuation and reflection", () => {
       candidatesAdded: 1, candidatesEdited: 1, inputTokens: 200, outputTokens: 50, tokensEstimated: false, estimatedCost: 0.0006 })
     expect(await Store.loadApproved(root, DEFAULT_NAME)).toEqual([])
     expect((await Store.loadCandidateLessons(root, DEFAULT_NAME))![0].text).toContain("qualify joined column names")
-    expect(h.output.join("\n")).toContain("candidate lessons: 1 added, 1 edited")
+    expect(h.output.join("\n")).toContain("candidate rules: 1 added, 1 edited")
     expect(h.output.join("\n")).toContain("`learn show`, then `learn promote`")
   })
 

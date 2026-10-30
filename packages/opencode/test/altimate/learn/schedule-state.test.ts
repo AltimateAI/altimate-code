@@ -86,10 +86,10 @@ describe("persisted reflection state", () => {
     await recordReflection(root, "session", "failure", "unavailable", undefined, 1_000)
     await recordReflection(root, "session", "failure", "unavailable", undefined, 2_000)
     await recordReflection(root, "other", "failure", "unavailable", undefined, 3_000)
-    await recordReflection(root, "session", "success", "2 candidate lessons", undefined, 4_000)
+    await recordReflection(root, "session", "success", "2 candidate rules", undefined, 4_000)
     expect(await readScheduleState(root)).toEqual({
       lastReflection: {
-        at: new Date(4_000).toISOString(), sessionID: "session", result: "success", summary: "2 candidate lessons",
+        at: new Date(4_000).toISOString(), sessionID: "session", result: "success", summary: "2 candidate rules",
       },
       recoveries: { other: { failures: 1, retryAt: 63_000 } },
     })

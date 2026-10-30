@@ -248,11 +248,20 @@ const ALL_EVENT_TYPES: Telemetry.Event["type"][] = [
   "sql_pre_validation",
   "config_env_interpolation",
   "plan_no_tool_generation",
+  "rule_proposal_shown",
+  "rule_proposal_answered",
+  "rule_drafted",
+  "rule_proposal_skipped",
+  "rule_remember_routed",
+  "rules_sync",
+  "rules_delivered",
+  "rules_learning_changed",
+  "rules_command",
 ]
 
 describe("telemetry.event-types", () => {
   test("all event types are valid", () => {
-    expect(ALL_EVENT_TYPES.length).toBe(45)
+    expect(ALL_EVENT_TYPES.length).toBe(54)
   })
 })
 

@@ -109,7 +109,7 @@ export async function voidAutoOwnership(root: string, name: string): Promise<voi
     state = await readAutoPromoteState(root, name)
   } catch (error) {
     // Its marks could become readable again later, so a person action must not go ahead without voiding them.
-    throw new Error(`Cannot read ${autoPromoteStateFile(root, name)} to record that lessons are no longer automatic ` +
+    throw new Error(`Cannot read ${autoPromoteStateFile(root, name)} to record that rules are no longer automatic ` +
       `(${redactSecrets(errText(error))}); nothing was changed. Fix the file's permissions or delete it, then retry.`)
   }
   if (Object.keys(state.auto).length === 0 && state.approvedHash === undefined) return
@@ -117,7 +117,7 @@ export async function voidAutoOwnership(root: string, name: string): Promise<voi
   try {
     await writeState(root, name, { ...rest, auto: {} })
   } catch (error) {
-    throw new Error(`Cannot record that lessons are no longer automatic in ${autoPromoteStateFile(root, name)} ` +
+    throw new Error(`Cannot record that rules are no longer automatic in ${autoPromoteStateFile(root, name)} ` +
       `(${redactSecrets(errText(error))}); nothing was changed. Fix the file's permissions or delete it, then retry.`)
   }
 }
@@ -244,22 +244,22 @@ export async function autoPromote(input: AutoPromoteInput): Promise<AutoPromoteR
       if (input.previousCandidate) {
         const earlier = lessonChanges(approved, input.previousCandidate)
         if (earlier.added.length + earlier.edited.length + earlier.removed.length)
-          return held("the candidate already had lesson changes waiting for review")
+          return held("the candidate already had rule changes waiting for review")
       }
       const { added, edited, removed } = lessonChanges(approved, candidate)
       const changed = [...added, ...edited]
-      if (changed.length + removed.length === 0) return held("no lesson text changed (counter updates only)")
+      if (changed.length + removed.length === 0) return held("no rule text changed (counter updates only)")
       // Gate: verification-weakening lessons always need a person. Unchanged flagged lessons were already approved.
       const flagged = changed.filter((lesson) => verificationWarning(lesson.text))
-      if (flagged.length) return held(`flagged lesson ${ids(flagged)} mentions skipping or weakening verification`)
+      if (flagged.length) return held(`flagged rule ${ids(flagged)} mentions skipping or weakening verification`)
       // Gate: a person's approval is never undone automatically.
       const auto = autoPromotedIds(state, approved)
       const person = [...edited, ...removed].filter((lesson) => !auto.has(lesson.id))
-      if (person.length) return held(`it would edit or remove person-approved lesson ${ids(person)}`)
+      if (person.length) return held(`it would edit or remove person-approved rule ${ids(person)}`)
       // Gate: size.
       const count = changed.length + removed.length
       if (count > input.limits.auto_promote_max_changes)
-        return held(`${count} lesson changes exceed learn.auto_promote_max_changes (${input.limits.auto_promote_max_changes})`)
+        return held(`${count} rule changes exceed learn.auto_promote_max_changes (${input.limits.auto_promote_max_changes})`)
       // Gate: rate. Reservations count; timestamps in the future count, so a clock change cannot reopen the window.
       const recent = state.promotions.filter((promotion) => Date.parse(promotion.at) > now - DAY_MS)
       if (recent.length >= input.limits.auto_promote_daily)

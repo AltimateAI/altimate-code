@@ -129,7 +129,7 @@ describe("learn pin and unpin", () => {
     expect(shown.stdout).toContain("[L-0001] Document naming conventions. (pinned)")
     const status = await learn(dir.path, "status", "--name", name)
     expect(status.code).toBe(0)
-    expect(status.stdout).toContain("Pinned lessons: 1 (L-0001)")
+    expect(status.stdout).toContain("Pinned rules: 1 (L-0001)")
     const json = await learn(dir.path, "status", "--name", name, "--json")
     expect(json.code).toBe(0)
     expect(JSON.parse(json.stdout)).toMatchObject({ approved: 1, pinned: ["L-0001"] })
@@ -160,7 +160,7 @@ describe("learn pin and unpin", () => {
     expect(search.stdout).toContain("[L-1234] approved: Document naming conventions.")
     const result = await learn(dir.path, command, "L-1235")
     expect(result.code).not.toBe(0)
-    expect(result.stderr).toContain('Unknown approved lesson "L-1235"')
+    expect(result.stderr).toContain('Unknown approved rule "L-1235"')
     expect(result.stderr).toContain("Close matches from `learn search`")
     expect(result.stderr).toContain(search.stdout.trim())
     expect(await Store.readPromoted(dir.path, name)).toBe(before)
@@ -178,7 +178,7 @@ describe("learn opt-in and status", () => {
     })
     const shown = await runLearn(dir.path, ["status"], undefined, { ALTIMATE_LEARN: "0" })
     expect(shown.stdout).toContain("Recurrence (observed counts need capture on)")
-    expect(shown.stdout).toContain("no matching current lesson")
+    expect(shown.stdout).toContain("no matching current rule")
   })
 
   test("status still reports when recurrence analysis fails", async () => {
@@ -205,7 +205,7 @@ describe("learn opt-in and status", () => {
     const shown = await runLearn(dir.path, ["status"], undefined, env)
     expect(shown.code).toBe(0)
     expect(shown.stdout).toContain("Learning enabled: no")
-    expect(shown.stdout).toContain("Capture: off; automatic reflection: off")
+    expect(shown.stdout).toContain("Learning from sessions: off (your setting); automatic reflection: off")
     expect(shown.stdout).toContain("learn.enabled=true or ALTIMATE_LEARN=1")
     const json = await runLearn(dir.path, ["status", "--json"], undefined, env)
     expect(json.code).toBe(0)
@@ -634,8 +634,8 @@ spyOn(fs, "open").mockImplementation(async (target, ...args) => {
     const shown = await learn(dir.path, "status")
     expect(shown.code).toBe(0)
     expect(shown.stdout).toContain("Learning enabled: yes")
-    expect(shown.stdout).toContain("Capture: off; automatic reflection: off")
-    expect(shown.stdout).toContain("Lessons: 0 approved, 0 candidate, 0 retired")
+    expect(shown.stdout).toContain("Learning from sessions: off (default); automatic reflection: off")
+    expect(shown.stdout).toContain("Rules: 0 approved, 0 candidate, 0 retired")
     expect(shown.stdout).toContain("Open signals: 0")
     expect(shown.stdout).toContain("Pending recoveries: 0")
     expect(shown.stdout).toContain("Last reflection: never")
@@ -828,7 +828,7 @@ test.each([false, true])("learn promote explains approval before review (yes=%s)
   await Store.saveCandidate(dir.path, name, candidate)
 
   const result = await learn(dir.path, "promote", ...(yes ? ["--yes"] : []))
-  const notice = "Review the lessons below before making this candidate the approved set (and sharing it with your team if you publish)."
+  const notice = "Review the rules below before making this candidate the approved set (and sharing it with your team if you publish)."
   const diff = "Run unit tests before committing."
   expect(result.stdout).toContain(notice)
   expect(result.stdout).toContain(diff)
@@ -910,8 +910,8 @@ test("learn search matches approved and retired lessons by case-insensitive toke
   const retired = await learn(dir.path, "search", "CURRENCY", "--name", name)
   expect(retired.code).toBe(0)
   expect(retired.stdout).toContain(`[${old.id}] retired: ${old.text}`)
-  expect((await learn(dir.path, "search", "validate_time", "--name", name)).stdout).toContain("No matching lessons.")
-  expect((await learn(dir.path, "search", "currency nonexistent", "--name", name)).stdout).toContain("No matching lessons.")
+  expect((await learn(dir.path, "search", "validate_time", "--name", name)).stdout).toContain("No matching rules.")
+  expect((await learn(dir.path, "search", "currency nonexistent", "--name", name)).stdout).toContain("No matching rules.")
 }, 60_000)
 
 test("learn.max_stored loads from project config and invalid values fail before reflection", async () => {
