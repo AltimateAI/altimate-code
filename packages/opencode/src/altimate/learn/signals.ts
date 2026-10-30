@@ -22,6 +22,10 @@ export type SignalKind = (typeof SIGNAL_KINDS)[number]
 
 /** Session id for signals recorded by integrations that have no session. */
 export const EXTERNAL_SESSION = "external"
+// altimate_change start — workspace rules: corrections from a host agent's session (Claude Code, Codex through the plugin)
+/** A host agent's session (`claude:<id>`, `codex:<id>`): not an altimate-code session, so it has no transcript here. */
+export const isHostSession = (sessionID: string) => /^(?:claude|codex):/.test(sessionID)
+// altimate_change end
 export const SIGNAL_TEXT_CAP = 2000
 
 export interface Signal {

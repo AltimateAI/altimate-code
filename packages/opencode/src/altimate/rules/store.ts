@@ -21,6 +21,7 @@ import { canonical, parse as parseLessons, type Lesson } from "../learn/lesson"
 import { withLearnLock } from "../learn/lock"
 import * as Store from "../learn/store"
 import { RuleOut, Settings } from "./api"
+import { ProposalCard } from "./events"
 
 /** The read-only store team rules are mirrored into (reserved: `learn/store.ts` `RESERVED_STORES`). */
 export const WORKSPACE_RULES_STORE = Store.WORKSPACE_RULES_STORE
@@ -113,6 +114,33 @@ export type RememberRequest = z.infer<typeof RememberRequest>
 /** Requests kept at most; the oldest beyond it are dropped (each is also bounded by its card's day). */
 const MAX_REMEMBER_REQUESTS = 50
 
+/**
+ * A proposal raised while no client that shows cards was attached (a Claude Code or Codex session through the plugin,
+ * a headless `run`): kept here until the person answers it with `learn proposals reply` (the plugin's
+ * `/altimate-code:rules`). Answering claims it first (`claim`), so two processes cannot act on it twice.
+ */
+export const StoredProposal = z.object({
+  card: ProposalCard,
+  /** The instance directory that raised it. */
+  directory: z.string(),
+  /** The account and workspace it was raised for: sent or approved only for them. */
+  scope: Scope.optional(),
+  trigger: z.enum(["remember", "recurrence", "shown_rule"]),
+  /** The session the evidence came from. */
+  source_session: z.string(),
+  memory: z.object({ id: z.string(), tags: z.array(z.string()) }).optional(),
+  /** A "remember" the person asked for: saved as before cards if the proposal is closed without an answer. */
+  request: RememberRequest.pick({ session: true, via: true, memory: true, training: true }).optional(),
+  edits: z.number().int().default(0),
+  at: z.string(),
+  /** A reply in progress: another process refuses to act on it while `pid` lives. `answering`: the closing action it
+   * took; until it is recorded as done, only that action finishes the proposal. */
+  claim: z.object({ pid: z.number().int(), at: z.string(), answering: z.string().optional() }).optional(),
+})
+export type StoredProposal = z.infer<typeof StoredProposal>
+/** Kept at most. A session proposal past it is not raised; a "remember" is saved as before cards instead. */
+export const MAX_STORED_PROPOSALS = 20
+
 export const State = z.object({
   version: z.literal(1),
   scope: Scope.optional(),
@@ -122,6 +150,9 @@ export const State = z.object({
   cursor: z.string().optional(),
   pending_count: z.number().int().default(0),
   pulled_at: z.string().optional(),
+  /** The credential (`credentialDigest`) the last successful pull was made with: a host session is given the rules only
+   * while the same credential is signed in. */
+  pulled_with: z.string().optional(),
   last_error: z.string().optional(),
   /** Queued proposals dropped because the account or workspace changed. Its own field: a later pull's error (or its
    * success) does not erase it. Shown for `SCOPE_DROP_NOTICE_MS`. */
@@ -163,6 +194,18 @@ export const State = z.object({
     attempts: z.number().int().default(0),
   })).default([]),
   remember_requests: z.array(RememberRequest).default([]),
+  /** Proposals waiting for an answer outside a card (`StoredProposal`). Never trimmed: `MAX_STORED_PROPOSALS` is
+   * enforced when one is added. */
+  proposals: z.array(StoredProposal).default([]),
+  /** Review notices already reported at a host session start (`public_id|status`). */
+  host_notices_seen: z.array(z.string()).default([]),
+  /** The after-turn check running for a host session, per session: one at a time across processes. */
+  host_checks: z.record(z.string(), z.object({
+    pid: z.number().int(),
+    at: z.string(),
+    /** Work that arrived while the check ran (another Stop, a new correction): it checks again before releasing. */
+    pending: z.number().int().optional(),
+  })).default({}),
   /** A usage report sent but not yet acknowledged: resent with the same `batch_id` so the server counts it once. */
   pending_usage: z.object({
     batch_id: z.string(),
@@ -260,6 +303,7 @@ export async function update(root: string, change: (state: State) => State | voi
     next.sent = capSent(next.sent)
     next.processed_signals = next.processed_signals.slice(-MAX_TRACKED)
     next.remember_requests = next.remember_requests.slice(-MAX_REMEMBER_REQUESTS)
+    next.host_notices_seen = next.host_notices_seen.slice(-MAX_NOTICES)
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
     if (next.scope_drop && !scopeDropShown(next.scope_drop, now)) delete next.scope_drop
@@ -344,8 +388,12 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
       : {}),
     // A drop notice outlives a later reset: it is about proposals the person was told were queued.
     ...(state.scope_drop ? { scope_drop: state.scope_drop } : {}),
-    // A "remember" is saved locally whatever the workspace: no reset loses it.
+    // A "remember" is saved locally whatever the workspace: no reset loses it. Nor an open proposal: its answer checks
+    // the scope it was raised for.
     remember_requests: state.remember_requests,
+    proposals: state.proposals,
+    host_notices_seen: state.host_notices_seen,
+    host_checks: state.host_checks,
   }
 }
 

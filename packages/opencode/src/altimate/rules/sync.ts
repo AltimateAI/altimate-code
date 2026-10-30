@@ -125,6 +125,8 @@ export async function adopt(root: string, ctx: Ready): Promise<{ state: State; s
 const ownedBy = (state: State, ctx: Ready) => !state.scope || RulesStore.sameScope(state.scope, ctx.scope)
 
 export async function pull(root: string, ctx: Ready): Promise<PullResult> {
+  const { credentialDigest } = await import("../workspace/state")
+  const pulledWith = credentialDigest(ctx.actAs.url, ctx.actAs.instance, ctx.actAs.apiKey)
   const { state: before, same } = await adopt(root, ctx)
   try {
     const response = await RulesApi.sync(ctx.actAs, ctx.scope.datamateId, {
@@ -147,6 +149,7 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.cursor = response.cursor
       state.pending_count = response.pending_count
       state.pulled_at = new Date().toISOString()
+      state.pulled_with = pulledWith
       state.last_error = response.skipped
         ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code; update it to get them`
         : undefined
@@ -526,28 +529,36 @@ export class ScopeChangedError extends Error {
  * `scope`: the scope they were shown for; checked in the same write, so they never join another scope's outbox. */
 export async function enqueueMany(
   root: string,
-  items: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway" }[],
+  items: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway"; id?: string }[],
   scope?: Scope,
 ): Promise<string[]> {
-  const ids = items.map(() => randomUUID())
+  const ids = items.map((entry) => entry.id ?? randomUUID())
   const at = new Date().toISOString()
   await RulesStore.update(root, (state) => {
     if (scope && !RulesStore.sameScope(state.scope, scope)) throw new ScopeChangedError()
-    if (state.outbox.length + items.length > RulesStore.MAX_OUTBOX)
+    // An item queued again under its id (a stored proposal answered again after its process died) replaces the queued
+    // one: it is sent once.
+    const queued = new Set(state.outbox.map((entry) => entry.id))
+    const fresh = items.filter((_, index) => !queued.has(ids[index])).length
+    if (state.outbox.length + fresh > RulesStore.MAX_OUTBOX)
       throw new Error(
         items.length > RulesStore.MAX_OUTBOX
           ? `${items.length} proposals are more than can wait to be sent at once (${RulesStore.MAX_OUTBOX}); send fewer`
           : `${state.outbox.length} proposals are already waiting to be sent, and ${items.length} more would pass the limit of ${RulesStore.MAX_OUTBOX}; sync before proposing more`,
       )
-    items.forEach(({ item, approve }, index) =>
-      state.outbox.push({ id: ids[index], created_at: at, attempts: 0, item, ...(approve ? { approve } : {}) }))
+    items.forEach(({ item, approve }, index) => {
+      const entry = { id: ids[index], created_at: at, attempts: 0, item, ...(approve ? { approve } : {}) }
+      const existing = state.outbox.findIndex((queuedEntry) => queuedEntry.id === entry.id)
+      if (existing >= 0) state.outbox[existing] = entry
+      else state.outbox.push(entry)
+    })
   })
   return ids
 }
 
-/** Queue one proposal; it is sent by the next push. Returns its outbox id. */
-export async function enqueue(root: string, item: ProposalItem, approve?: "approve" | "approve_anyway", scope?: Scope): Promise<string> {
-  return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}) }], scope))[0]
+/** Queue one proposal; it is sent by the next push. Returns its outbox id: `id` when given (still queued under it: replaced). */
+export async function enqueue(root: string, item: ProposalItem, approve?: "approve" | "approve_anyway", scope?: Scope, id?: string): Promise<string> {
+  return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}), ...(id ? { id } : {}) }], scope))[0]
 }
 
 /**
@@ -738,16 +749,7 @@ export async function run(root: string, directory: string, learn: LearnConfig, t
 async function runUntracked(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
   const key = await canonicalRoot(root)
   const ctx = await context(directory, learn)
-  if (ctx.status !== "ready") {
-    // Unlinked, or signed out: nothing vouches for the pulled rules any more, so they stop being delivered (the queue
-    // stays for when the link or the sign-in returns). Other skips (unconfirmed for now) keep them.
-    if (ctx.status === "skipped" && (ctx.unlinked || ctx.code === "not_signed_in")) {
-      const state = await RulesStore.read(root)
-      if (state.workspace) await RulesStore.reset(root, { keepOutbox: true })
-    }
-    failedAt.set(key, Date.now())
-    return { context: ctx }
-  }
+  if (ctx.status !== "ready") return unready(root, key, ctx)
   const { state } = await adopt(root, ctx)
   const pushed = await push(root, ctx)
   // Usage before the pull: it is counted against the rule versions sessions were shown, which a pull that edits or
@@ -757,6 +759,41 @@ async function runUntracked(root: string, directory: string, learn: LearnConfig)
   if (pulled.ok) failedAt.delete(key)
   else failedAt.set(key, Date.now())
   return { context: ctx, push: pushed, pull: pulled, ...(usage ? { usage } : {}) }
+}
+
+/** A run that cannot sync. Unlinked, or signed out: nothing vouches for the pulled rules any more, so they stop being
+ * delivered (the queue stays for when the link or the sign-in returns). Other skips (unconfirmed for now) keep them. */
+async function unready(root: string, key: string, ctx: Exclude<Context, Ready>): Promise<RunReport> {
+  if (ctx.status === "skipped" && (ctx.unlinked || ctx.code === "not_signed_in")) {
+    const state = await RulesStore.read(root)
+    if (state.workspace) await RulesStore.reset(root, { keepOutbox: true })
+  }
+  failedAt.set(key, Date.now())
+  return { context: ctx }
+}
+
+/** A pull without a push or a usage report, for a process that may exit before it ends (a host's session-start hook):
+ * abandoning it leaves nothing half-sent. Queued proposals and usage go with the next full run. */
+export async function pullOnly(root: string, directory: string, learn: LearnConfig, trigger: SyncTrigger = "session_start"): Promise<RunReport> {
+  const startedAt = Date.now()
+  const key = await canonicalRoot(root)
+  try {
+    const ctx = await context(directory, learn)
+    const report = ctx.status === "ready" ? { context: ctx, pull: await pull(root, ctx) } : await unready(root, key, ctx)
+    if (report.pull?.ok) failedAt.delete(key)
+    else if (report.pull) failedAt.set(key, Date.now())
+    RulesTelemetry.synced(trigger, report, startedAt)
+    return report
+  } catch (error) {
+    RulesTelemetry.syncThrew(trigger, startedAt)
+    throw error
+  }
+}
+
+/** `pullOnly`, waited for at most `waitMs`; never throws. */
+export async function pullWithin(root: string, directory: string, learn: LearnConfig, waitMs: number): Promise<void> {
+  const pulling = pullOnly(root, directory, learn).catch((error) => log.warn("rules pull failed", { error: errorText(error) }))
+  await Promise.race([pulling, new Promise((resolve) => setTimeout(resolve, waitMs).unref?.())])
 }
 
 // Keyed by the real path: the service and the session loop may name one project through different paths.

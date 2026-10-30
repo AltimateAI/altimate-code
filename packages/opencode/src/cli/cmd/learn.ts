@@ -23,7 +23,7 @@ import { cmd } from "./cmd"
 import { effectCmd, fail } from "../effect-cmd"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { RulesTelemetry } from "../../altimate/rules/telemetry"
-import { printable } from "../../altimate/rules/printable"
+import { printable, printableDeep } from "../../altimate/rules/printable"
 import * as Playbook from "../../altimate/learn/playbook"
 import * as Store from "../../altimate/learn/store"
 import { MAX_TEXT, summarize, describeApplied, describeRejected } from "../../altimate/learn/curator"
@@ -477,6 +477,186 @@ const SyncCommand = effectCmd({
 })
 // altimate_change end
 
+// altimate_change start — workspace rules outside a client that shows cards: team rules for a host agent's session, its
+// corrections, the after-turn check, and the proposals waiting for an answer (the Claude Code and Codex plugins)
+/**
+ * Run `fn` in this directory's project without the instance bootstrap (plugins, LSP, capture, the scheduler, the rules
+ * service's own sync): these commands run from the plugins' hooks on every session start, prompt and turn, and a
+ * bootstrap would start a sync the process exits under.
+ */
+async function inProject<A>(fn: () => Promise<A>): Promise<A> {
+  const { Instance } = await import("@/project/instance")
+  return Instance.provide({ directory: process.cwd(), fn })
+}
+
+/** The project's real root, its directory and the learn config the rules service would use. */
+async function rulesProject() {
+  const [{ Config }, { Instance }, { RulesService }] = await Promise.all([
+    import("@/config/config"), import("@/project/instance"), import("../../altimate/rules/service"),
+  ])
+  const raw = await projectRoot()
+  const root = await fs.realpath(raw).catch(() => raw)
+  const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
+  return { root, directory: Instance.directory, learn: learn as typeof learn & { model?: string } }
+}
+
+const RulesCommand = effectCmd({
+  instance: false,
+  command: "rules",
+  describe: "show the workspace's approved team rules for this repository (with --session: record them as shown to a host agent's session)",
+  builder: (yargs: Argv) =>
+    yargs
+      .option("session", { type: "string", describe: "a host agent's session id (claude:<id>, codex:<id>) the rules are given to" })
+      .option("json", { type: "boolean", default: false, describe: "machine-readable output" }),
+  handler: Effect.fn("Cli.learn.rules")(function* (args) {
+    if (args.session !== undefined && !Signals.isHostSession(args.session as string))
+      return yield* fail("--session takes a host agent's session id: claude:<id> or codex:<id>.")
+    yield* run("", () => inProject(async () => {
+      const { RulesHost } = await import("../../altimate/rules/host")
+      const start = await RulesHost.start({ ...(await rulesProject()), session: args.session as string | undefined })
+      if (args.json) return out(JSON.stringify(printableDeep({ ...start, context: RulesHost.context(start) }), null, 2))
+      out(RulesHost.context(start) || "No team rules apply here (learning or workspaces are off, signed out, or this project is not linked).")
+    }))
+  }),
+})
+
+const CheckCommand = effectCmd({
+  instance: false,
+  command: "check",
+  describe: "check a host agent's session for corrections that make a proposed rule (at most one model call)",
+  builder: (yargs: Argv) =>
+    yargs
+      .option("session", { type: "string", demandOption: true, describe: "the session whose new corrections are checked" })
+      .option("transcript", { type: "string", describe: "the host's transcript file (JSON lines), read for context" })
+      .option("json", { type: "boolean", default: false, describe: "machine-readable output" }),
+  handler: Effect.fn("Cli.learn.check")(function* (args) {
+    // An altimate-code session is checked after each of its turns by the session server itself.
+    if (!Signals.isHostSession(args.session as string))
+      return yield* fail("--session takes a host agent's session id: claude:<id> or codex:<id>.")
+    yield* run("", () => inProject(async () => {
+      const { RulesHost } = await import("../../altimate/rules/host")
+      const project = await rulesProject()
+      const outcome = await RulesHost.check({ ...project, session: args.session as string, transcript: args.transcript as string | undefined })
+      const { RuleProposal } = await import("../../altimate/rules/proposal")
+      const waiting = (await RuleProposal.stored(project.root)).length
+      if (args.json) return out(JSON.stringify({ outcome, proposals: waiting }, null, 2))
+      out(`Check: ${printable(outcome)}.`)
+      if (waiting) out(`${waiting} proposed ${waiting === 1 ? "rule is" : "rules are"} waiting: \`altimate-code learn proposals\`.`)
+    }))
+  }),
+})
+
+const REPLY_FLAGS = {
+  send: "send",
+  approve: "approve",
+  "approve-anyway": "approve_anyway",
+  dismiss: "dismiss",
+  memory: "save_memory",
+  local: "save_local",
+} as const
+
+const ProposalsReplyCommand = effectCmd({
+  instance: false,
+  command: "reply <id>",
+  describe: "answer a proposed rule",
+  builder: (yargs: Argv) =>
+    yargs
+      .positional("id", { type: "string", demandOption: true })
+      .option("send", { type: "boolean", describe: "send it to the workspace owner's review" })
+      .option("approve", { type: "boolean", describe: "approve it now (workspace owner)" })
+      .option("approve-anyway", { type: "boolean", describe: "approve a rule flagged as weakening verification" })
+      .option("edit", { type: "string", describe: "change the wording (it stays open)" })
+      .option("dismiss", { type: "boolean", describe: "not a rule: don't propose this topic again for 30 days" })
+      .option("memory", { type: "boolean", describe: "save it as a memory instead" })
+      .option("local", { type: "boolean", describe: "save it as a rule for this project only (not linked)" })
+      .option("json", { type: "boolean", default: false, describe: "machine-readable output" }),
+  handler: Effect.fn("Cli.learn.proposals.reply")(function* (args) {
+    const chosen = (Object.keys(REPLY_FLAGS) as (keyof typeof REPLY_FLAGS)[]).filter((flag) => args[flag] === true)
+    const edit = args.edit as string | undefined
+    if (chosen.length + (edit === undefined ? 0 : 1) !== 1)
+      return yield* fail("Pass exactly one of --send, --approve, --approve-anyway, --edit <text>, --dismiss, --memory or --local.")
+    yield* run("", () => inProject(async () => {
+      const { RuleProposal } = await import("../../altimate/rules/proposal")
+      const project = await rulesProject()
+      const result = await RuleProposal.replyStored(
+        { ...project, id: args.id as string },
+        edit === undefined ? { action: REPLY_FLAGS[chosen[0]] } : { action: "edit", text: edit },
+      )
+      if (!result.ok) process.exitCode = 1
+      if (args.json) return out(JSON.stringify(printableDeep(result), null, 2))
+      out(printable(result.ok ? result.message : result.error))
+    }))
+  }),
+})
+
+const ProposalsCommand = effectCmd({
+  instance: false,
+  command: "proposals",
+  describe: "list proposed rules waiting for your answer, the team rules and your proposals' review status",
+  builder: (yargs: Argv) =>
+    yargs
+      .command(ProposalsReplyCommand)
+      .option("json", { type: "boolean", default: false, describe: "machine-readable output" }),
+  handler: Effect.fn("Cli.learn.proposals")(function* (args) {
+    yield* run("", () => inProject(async () => {
+      const [{ RuleProposal }, { RulesSummary }, { RulesStore }] = await Promise.all([
+        import("../../altimate/rules/proposal"), import("../../altimate/rules/summary"), import("../../altimate/rules/store"),
+      ])
+      const { root } = await rulesProject()
+      const [proposals, active, mine, state] = await Promise.all([
+        RuleProposal.stored(root), RulesSummary.rows(root, "active"), RulesSummary.rows(root, "mine"), RulesStore.read(root),
+      ])
+      if (args.json) return out(JSON.stringify(printableDeep({ workspace: state.workspace ?? null, proposals, team_rules: active, mine }), null, 2))
+      if (!proposals.length) out("No proposed rules are waiting.")
+      for (const card of proposals) {
+        out(`${card.id}  ${card.change}${card.choose ? " (memory or team rule?)" : ""}: ${printable(card.text)}`)
+        if (card.replaces) out(`  replaces: ${printable(card.replaces.text)}`)
+        if (card.why) out(`  why: ${printable(card.why)}`)
+        if (card.weakens_verification) out(`  warning: this rule ${printable(card.weakens_verification)}`)
+        out(`  answer: ${card.actions.map((action) => `--${action === "save_memory" ? "memory" : action === "save_local" ? "local" : action}`).join(" ")}`)
+      }
+      if (state.workspace) out(`Team rules in ${printable(state.workspace.name)}: ${active.length}`)
+      for (const row of mine.slice(0, 10))
+        out(`  yours, ${printable(row.status)}: "${printable(row.text)}"${row.reason ? ` — ${printable(row.reason)}` : ""}`)
+    }))
+  }),
+})
+
+/** Output for a host hook: only for session start (context for the host agent), in the shape both hosts read. */
+const HookCommand = effectCmd({
+  instance: false,
+  command: "hook <event>",
+  describe: "run a Claude Code or Codex plugin hook; reads the host's hook input on stdin and never fails the host",
+  builder: (yargs: Argv) =>
+    yargs
+      .positional("event", { type: "string", choices: ["session-start", "user-prompt-submit", "stop"], demandOption: true })
+      .option("host", { type: "string", choices: ["claude", "codex"], default: "claude", describe: "the host agent" }),
+  handler: Effect.fn("Cli.learn.hook")(function* (args) {
+    yield* Effect.promise(() => inProject(async () => {
+      try {
+        const { RulesHost } = await import("../../altimate/rules/host")
+        const input = JSON.parse((await Bun.stdin.text()) || "{}") as import("../../altimate/rules/host").HookInput
+        if (typeof input.session_id !== "string" || !input.session_id) return
+        const session = RulesHost.hostSession(args.host as "claude" | "codex", input.session_id)
+        const project = await rulesProject()
+        if (args.event === "session-start") {
+          const context = RulesHost.context(await RulesHost.start({ ...project, session }))
+          if (context) out(JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context } }))
+        } else if (args.event === "user-prompt-submit") {
+          if (typeof input.prompt === "string" && input.prompt.trim())
+            await RulesHost.recordCorrection({ ...project, session, text: input.prompt })
+        } else {
+          await RulesHost.check({ ...project, session, ...(typeof input.transcript_path === "string" ? { transcript: input.transcript_path } : {}) })
+        }
+      } catch (error) {
+        // The host's session must never fail because of this hook: logged, nothing printed.
+        log.warn("learn hook failed", { event: args.event, error: errText(error) })
+      }
+    }).catch((error) => log.warn("learn hook failed", { event: args.event, error: errText(error) })))
+  }),
+})
+// altimate_change end
+
 // altimate_change start — workspace rules: rules staged from history go to the owner's review only with consent
 /**
  * In a linked project, list what this run staged and ask before sending it to the named workspace's review queue
@@ -887,9 +1067,19 @@ const SignalAddCommand = effectCmd({
       .option("kind", { type: "string", choices: SIGNAL_ADD_KINDS, demandOption: true, describe: "where the signal comes from" })
       .option("text", { type: "string", describe: "the signal text" })
       .option("file", { type: "string", describe: "read the signal text from this file" })
-      .option("session", { type: "string", default: Signals.EXTERNAL_SESSION, describe: "session the signal belongs to" }),
+      .option("session", { type: "string", default: Signals.EXTERNAL_SESSION, describe: "session the signal belongs to" })
+      // altimate_change start — workspace rules: a host agent's messages, recorded only when they read as a correction
+      .option("detect", {
+        type: "boolean",
+        default: false,
+        describe: "with --kind user: record only text that reads as a correction, and only in a linked project with learning on",
+      }),
+      // altimate_change end
   handler: Effect.fn("Cli.learn.signal.add")(function* (args) {
     if (!args.text === !args.file) return yield* fail("Pass exactly one of --text or --file.")
+    // altimate_change start — workspace rules: --detect
+    if (args.detect && args.kind !== "user") return yield* fail("--detect applies to --kind user.")
+    // altimate_change end
     yield* run("", async () => {
       const root = await projectRoot()
       const text =
@@ -898,6 +1088,20 @@ const SignalAddCommand = effectCmd({
           throw new Error(`Cannot read ${args.file}: ${e.code === "ENOENT" ? "no such file" : e.message}`)
         }))
       if (!text.trim()) throw new Error("Signal text is empty.")
+      // altimate_change start — workspace rules: --detect
+      if (args.detect) {
+        const { RulesHost } = await import("../../altimate/rules/host")
+        const project = await rulesProject()
+        const result = await RulesHost.recordCorrection({ ...project, session: args.session as string, text })
+        return out({
+          proposed: "Proposed as a team rule: it waits in `altimate-code learn proposals`.",
+          recorded: `Recorded a correction for session ${args.session}.`,
+          duplicate: "Already recorded; nothing added.",
+          not_correction: "Not a correction; nothing recorded.",
+          off: "Not recorded: learning or workspaces are off, or this project is not linked.",
+        }[result])
+      }
+      // altimate_change end
       const kind = args.kind === "user" ? "user_correction" : (args.kind as "review" | "ci")
       const signal = await Signals.appendSignal(root, {
         kind,
@@ -1160,6 +1364,9 @@ const LEARN_HELP = [
 const LEARN_SUBCOMMANDS = new Set([
   "enable", "disable", "nudge", "status", "sync", "bootstrap", "import-reviews", "reflect", "signals", "signal",
   "show", "search", "pin", "unpin", "promote", "rollback", "reject",
+  // altimate_change start — workspace rules outside a card client
+  "rules", "check", "proposals",
+  // altimate_change end
 ])
 
 export const LearnCommand = cmd({
@@ -1172,6 +1379,8 @@ export const LearnCommand = cmd({
       // subcommand is the person's text.
       .middleware((argv) => {
         const sub = String(argv._[1] ?? "")
+        // `learn hook` runs on every prompt and turn of a host session: not a command the person ran.
+        if (sub === "hook") return
         RulesTelemetry.command(LEARN_SUBCOMMANDS.has(sub) ? `learn ${sub}` : sub ? "learn other" : "learn")
       })
       // Bad options get one line, not the whole help screen.
@@ -1185,6 +1394,12 @@ export const LearnCommand = cmd({
       .command(NudgeCommand)
       .command(StatusCommand)
       .command(SyncCommand)
+      // altimate_change start — workspace rules outside a card client
+      .command(RulesCommand)
+      .command(CheckCommand)
+      .command(ProposalsCommand)
+      .command(HookCommand)
+      // altimate_change end
       .command(BootstrapCommand)
       .command(ImportReviewsCommand)
       .command(ReflectCommand)

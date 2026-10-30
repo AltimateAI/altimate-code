@@ -19,6 +19,7 @@ import { RuleEvents, type ProposalCard } from "./events"
 import { RulesStore } from "./store"
 import { RulesSync } from "./sync"
 import { RulesTelemetry, type AnswerOutcome, type CardTrigger } from "./telemetry"
+import { alive, saveAsBefore } from "./remember"
 
 const log = Log.create({ service: "rules.proposal" })
 export const MAX_EXCERPT = 280
@@ -247,6 +248,8 @@ export async function ask(input: {
   unanswered?: Pending["unanswered"]
   /** With `unanswered`: what to keep on disk, so the request is saved even if this process dies. */
   request?: RequestRecord
+  /** Nothing attached shows cards: keep the proposal on disk for `learn proposals` instead (`StoredProposal`). */
+  persist?: boolean
 }) {
   expire(input.directory)
   const trigger = input.trigger ?? (input.draft.origin === "explicit" ? "remember" : "recurrence")
@@ -255,6 +258,7 @@ export async function ask(input: {
     if (trigger !== "remember") RulesTelemetry.skipped(input.sessionID, trigger, "topic_dismissed")
     return undefined
   }
+  if (input.persist) return store(input, trigger)
   for (const existing of pending.values())
     if (existing.root === input.root && existing.card.text.toLowerCase() === input.draft.text.toLowerCase()) {
       // Asked again: the card moves to the session that asked (clients show cards per session), and a client that
@@ -288,6 +292,159 @@ export async function ask(input: {
   await publish(RuleEvents.Event.Asked, card)
   return card
 }
+
+/** A stored proposal nobody asked for is dropped after this long: its corrections can raise it again. A "remember" the
+ * person asked for waits until it is answered. */
+export const STORED_TTL_MS = 14 * 24 * 60 * 60_000
+const storedLive = (p: RulesStore.StoredProposal, now = Date.now()) => !!p.request || now - Date.parse(p.at) <= STORED_TTL_MS
+
+/** What makes two stored proposals the same: the account and workspace, the change and the rule it replaces (at its
+ * version), where it applies, and the wording. */
+const identity = (scope: RulesStore.Scope | undefined, card: Pick<ProposalCard, "change" | "replaces" | "applies_to" | "text">) =>
+  JSON.stringify([
+    scope ? [scope.apiUrl, scope.tenant, scope.account, scope.datamateId, scope.repoRemote] : null,
+    card.change, card.replaces?.public_id ?? null, card.replaces?.version ?? null,
+    [...card.applies_to].sort(), card.text.trim().toLowerCase(),
+  ])
+
+/** `ask` with no client to show the card: keep it on disk, once per proposal (`identity`). Undefined when the list is
+ * full. */
+async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Promise<ProposalCard | undefined> {
+  let card: ProposalCard | undefined
+  let repeat = false
+  await RulesStore.update(input.root, (s) => {
+    s.proposals = s.proposals.filter((p) => storedLive(p))
+    const wanted = identity(s.scope, input.draft)
+    const existing = s.proposals.find((p) => identity(p.scope, p.card) === wanted)
+    if (existing) {
+      repeat = true
+      // Being answered by another process: left as it is (the answer decides it).
+      if (existing.claim && existing.claim.pid !== process.pid && alive(existing.claim.pid)) return void (card = existing.card)
+      // Asked again: as for a card, the latest session, its evidence, memory block and request win.
+      existing.card = { ...existing.card, sessionID: input.sessionID, evidence: input.draft.evidence }
+      existing.source_session = input.sessionID
+      existing.directory = input.directory
+      if (input.draft.memory) {
+        existing.memory = input.draft.memory
+        if (existing.card.memory_scope) existing.card.memory_scope = "project"
+      }
+      if (input.request) existing.request = input.request
+      card = existing.card
+      return
+    }
+    if (s.proposals.length >= RulesStore.MAX_STORED_PROPOSALS) return
+    card = build(randomUUID(), input.sessionID, input.draft, s)
+    s.proposals.push({
+      card, directory: input.directory, ...(s.scope ? { scope: s.scope } : {}), trigger, source_session: input.sessionID,
+      ...(input.draft.memory ? { memory: input.draft.memory } : {}), ...(input.request ? { request: input.request } : {}),
+      edits: 0, at: new Date().toISOString(),
+    })
+  })
+  if (card) RulesTelemetry.shown(card, trigger, repeat, true)
+  else if (trigger !== "remember") RulesTelemetry.skipped(input.sessionID, trigger, "stored_full")
+  return card
+}
+
+/** A reply runs a sync at most: a claim older than this belongs to a reply that died. */
+export const CLAIM_STALE_MS = 10 * 60_000
+
+/** Proposals kept on disk, waiting for `learn proposals reply`. */
+export async function stored(root: string): Promise<ProposalCard[]> {
+  return (await RulesStore.read(root)).proposals.filter((p) => storedLive(p)).map((p) => p.card)
+}
+
+/**
+ * Answer a stored proposal: claimed on disk first (another live process answering it makes this one `busy`), then
+ * answered exactly like a card, then removed once closed or written back (new wording, claim released). A process that
+ * dies while answering leaves a claim the next reply takes over.
+ */
+export async function replyStored(
+  input: { root: string; directory: string; learn: Pending["learn"]; id: string },
+  answer: { action: ReplyAction; text?: string },
+): Promise<ReplyResult> {
+  const { root, id } = input
+  if (replying.has(id)) return { ok: false, code: "busy", error: "This proposal is already being answered." }
+  replying.add(id)
+  try {
+    return await answerStored(input, answer)
+  } finally {
+    replying.delete(id)
+  }
+}
+
+/** Stored proposals this process is answering now. */
+const replying = new Set<string>()
+
+async function answerStored(
+  input: Parameters<typeof replyStored>[0],
+  answer: Parameters<typeof replyStored>[1],
+): Promise<ReplyResult> {
+  const { root, id } = input
+  let record: RulesStore.StoredProposal | undefined
+  let held = false
+  let conflict: string | undefined
+  await RulesStore.update(root, (s) => {
+    const found = s.proposals.find((p) => p.card.id === id && storedLive(p))
+    if (!found) return
+    record = structuredClone(found)
+    // Held by another live process. This process's own claim is left from a write-back that failed (a reply running
+    // here is refused above). A claim past `CLAIM_STALE_MS` is taken over: its process may be gone with its pid reused,
+    // or live in another pid namespace.
+    const live = found.claim && found.claim.pid !== process.pid && alive(found.claim.pid) &&
+      Date.now() - Date.parse(found.claim.at) < CLAIM_STALE_MS
+    if (live) return void (held = true)
+    // An answer that acted (sent, saved, dismissed) and was not recorded as done: only the same answer finishes it, so
+    // one proposal is never both sent and dismissed. Repeating it is safe: the send is skipped once recorded as sent.
+    const unfinished = found.claim?.answering
+    if (unfinished && unfinished !== answer.action) return void (conflict = unfinished)
+    found.claim = { pid: process.pid, at: new Date().toISOString(), ...(answer.action === "edit" ? {} : { answering: answer.action }) }
+  })
+  if (!record) return { ok: false, code: "not_open", error: "This proposal is no longer open." }
+  if (held) return { ok: false, code: "busy", error: "This proposal is already being answered.", card: record.card }
+  if (conflict)
+    return { ok: false, code: "not_available", error: `This proposal was being answered with "${conflict}" when that stopped: answer it with "${conflict}" again to finish.`, card: record.card }
+  const request = record.request
+  const entry: Pending = {
+    card: record.card, root, directory: input.directory, learn: input.learn, at: Date.parse(record.at), trigger: record.trigger,
+    edits: record.edits, sourceSession: record.source_session, memory: record.memory, scope: record.scope,
+    // Closed without an answer (the account or workspace changed): a requested "remember" is saved as before cards.
+    ...(request ? { unanswered: (text: string) => saveAsBefore({ ...request, text }) } : {}),
+  }
+  pending.set(id, entry)
+  let result: ReplyResult
+  try {
+    result = await reply(id, answer)
+  } finally {
+    pending.delete(id)
+  }
+  const gone = result.ok ? result.closed : result.code === "not_open"
+  const writeBack = () => RulesStore.update(root, (s) => {
+    const found = s.proposals.find((p) => p.card.id === id)
+    if (!found) return
+    if (gone) return void (s.proposals = s.proposals.filter((p) => p !== found))
+    delete found.claim
+    found.card = entry.card
+    found.edits = entry.edits
+  })
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await writeBack()
+      return result
+    } catch (error) {
+      log.warn("stored proposal not updated after its reply", { id, attempt, error })
+      if (attempt >= WRITE_BACK_ATTEMPTS) break
+      await Bun.sleep(WRITE_BACK_RETRY_MS)
+    }
+  }
+  // A new wording that was not saved was not made: a later send would send the old one.
+  if (answer.action === "edit" && result.ok)
+    return { ok: false, code: "failed", error: "Not changed: the new wording could not be saved. Try again.", card: record.card }
+  // A closing answer acted, and its claim keeps `answering`: the next reply with the same answer finishes it.
+  return result
+}
+
+const WRITE_BACK_ATTEMPTS = 3
+const WRITE_BACK_RETRY_MS = 200
 
 /** Open cards, optionally of one project and one session. */
 export function list(directory?: string, sessionID?: string): ProposalCard[] {
@@ -454,7 +611,20 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
     const approve = action === "approve" || action === "approve_anyway" ? action : undefined
     // The workspace decides whether the person's words travel with a proposal: without quotes, `why` (which can
     // paraphrase the correction) is replaced by a neutral line too.
-    const quotes = (await RulesStore.read(entry.root)).settings?.include_quotes !== false
+    const current = await RulesStore.read(entry.root)
+    const owner = card.workspace?.owner_name ?? "the workspace owner"
+    const ws = card.workspace?.name ?? "the workspace"
+    // Already sent under this card's id with this wording (an answer repeated after its process died): not sent again.
+    // A refused or failed send, or one of another wording, is sent again.
+    const prior = current.push_outcomes[card.id]
+    const priorSent = prior && !prior.error && prior.public_id
+      ? current.sent.find((sent) => sent.public_id === prior.public_id && sent.text === card.text)
+      : undefined
+    if (priorSent && (!approve || prior!.approved || priorSent.status === "active"))
+      return approve
+        ? { message: `Approved: now a team rule in ${ws}.`, outcome: "approved" }
+        : { message: `Sent to ${owner}'s review queue in ${ws}.`, outcome: "sent" }
+    const quotes = current.settings?.include_quotes !== false
     const why = card.why ? (quotes ? redactSecrets(card.why) : neutralWhy(card)) : undefined
     const outboxId = await RulesSync.enqueue(entry.root, {
       change: card.change,
@@ -467,11 +637,9 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
       corrections: card.evidence.correction && quotes
         ? [{ excerpt: card.evidence.correction.excerpt, corrected_at: card.evidence.correction.at, session_ref: hashRef(entry.sourceSession) }]
         : [],
-    }, approve, entry.scope)
+    }, approve, entry.scope, card.id)
     const report = await RulesSync.runFresh(entry.root, entry.directory, entry.learn, "card").catch(() => undefined)
     const sent = RulesSync.outcomeOf(await RulesStore.read(entry.root), report, outboxId)
-    const owner = card.workspace?.owner_name ?? "the workspace owner"
-    const ws = card.workspace?.name ?? "the workspace"
     if (sent.status === "queued") {
       message = sent.error
         ? `Not sent yet (${sent.error}): kept queued and sent again on the next sync.`

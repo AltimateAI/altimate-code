@@ -25,7 +25,7 @@ function send(event: Event, betweenTurns = true) {
   } catch {}
 }
 
-export function shown(card: ProposalCard, trigger: CardTrigger, repeat: boolean) {
+export function shown(card: ProposalCard, trigger: CardTrigger, repeat: boolean, stored = false) {
   send({
     type: "rule_proposal_shown",
     timestamp: Date.now(),
@@ -43,6 +43,7 @@ export function shown(card: ProposalCard, trigger: CardTrigger, repeat: boolean)
     applies_to_count: card.applies_to.length,
     chars: card.chars,
     repeat,
+    stored,
   })
 }
 
