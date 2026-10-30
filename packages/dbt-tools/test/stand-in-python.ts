@@ -14,7 +14,7 @@ export function standInPython(root: string) {
     python,
     [
       "#!/bin/sh",
-      `printf '%s\\n' "$*" >> '${argvLog}'`,
+      `printf '%s\\n' "$*" >> '${argvLog.replaceAll("'", "'\\''")}'`,
       'case "$1" in',
       '  --version) echo "Python 3.11.9"; exit 0 ;;',
       '  -c) echo "1.10.0"; exit 0 ;;',

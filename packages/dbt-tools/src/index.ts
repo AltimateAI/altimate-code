@@ -37,12 +37,6 @@ function flag(args: string[], name: string): string | undefined {
 
 function diagnose(err: Error): { error: string; fix?: string } {
   const msg = err.message || String(err)
-  if (msg.includes("private field") || msg.includes("#stdin") || msg.includes("#stdout")) {
-    return {
-      error: "Internal error: Bun runtime incompatibility in the dbt adapter. Please report this issue.",
-      fix: "Try updating: bun install, or file a bug at https://github.com/AltimateAI/altimate-code/issues",
-    }
-  }
   if (msg.includes("IPC channel") || msg.includes("ERR_IPC_CHANNEL_CLOSED")) {
     return {
       error: "Failed to start Python bridge. The dbt Python process exited unexpectedly.",
