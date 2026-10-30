@@ -7,6 +7,7 @@
 // offered: the caller snapshots the candidate first (`candidateTexts`). A candidate this run created is discarded
 // once everything in it was sent; otherwise, and when the person declines, it stays for `learn show` / `learn promote`.
 import { lint } from "../learn/curator"
+import * as Lessons from "../learn/lesson"
 import * as Store from "../learn/store"
 import type { ProposalItem } from "./api"
 import { RulesStore } from "./store"
@@ -29,6 +30,8 @@ export interface Staged {
   invalid: { text: string; reason: string }[]
   /** Local rules the run edited or removed: not team proposals, and a reason to keep the candidate. */
   localChanges: number
+  /** The candidate file these were listed from: it is discarded only while it still reads exactly this. */
+  candidate: string
 }
 
 /** What this run staged that is not approved yet, as proposals. Undefined when not linked or nothing is new. */
@@ -44,11 +47,12 @@ export async function stagedRules(input: {
   if (!RulesSync.rulesEnabled(input.learn)) return undefined
   const state = await RulesStore.read(input.root)
   if (!state.workspace || !state.scope) return undefined
-  const [approved, candidate] = await Promise.all([
+  const [approved, raw] = await Promise.all([
     Store.loadApproved(input.root, input.name),
-    Store.loadCandidateLessons(input.root, input.name),
+    Store.readCandidate(input.root, input.name),
   ])
-  if (!candidate) return undefined
+  if (raw === undefined) return undefined
+  const candidate = Lessons.parse(raw)
   const known = new Set([...approved.map((lesson) => lesson.text), ...(input.before ?? [])])
   // The candidate starts as a copy of the approved store: a lesson with an approved id is a local rule (edited if its
   // text changed), and an approved id missing from it is a removal. Neither is a new team rule.
@@ -84,6 +88,7 @@ export async function stagedRules(input: {
     items,
     invalid,
     localChanges: edited + removed,
+    candidate: raw,
   }
 }
 
@@ -130,10 +135,11 @@ export async function sendStaged(input: {
   // Neither queued nor answered: dropped before sending (the account or workspace changed under it).
   const lost = outcomes.length - queued - refused - sent
   // The workspace's review queue replaces a candidate this run created, once it holds every rule of it: only when the
-  // candidate is nothing but the adds that were sent (no local edits or removals, nothing invalid, refused or queued).
+  // candidate is nothing but the adds that were sent (no local edits or removals, nothing invalid, refused or queued),
+  // and only while it is still the candidate they were listed from: a reflection that wrote to it meanwhile keeps it.
   const discard = !input.before && queued === 0 && refused === 0 && lost === 0 && held === 0 && input.staged.invalid.length === 0 &&
     input.staged.localChanges === 0
-  if (discard) await Store.reject(input.root, input.name)
+  const discarded = discard && await Store.reject(input.root, input.name, { ifCandidate: input.staged.candidate })
   // Why some stayed queued, as the run said it: sync not ready (not signed in, link lost …), kept back with an error, or
   // not reached yet behind older proposals.
   const why = report.context.status !== "ready"
@@ -143,9 +149,11 @@ export async function sendStaged(input: {
     (queued ? `; ${queued} kept queued (${why}) and sent on a later sync` : "") +
     (refused ? `; ${refused} refused by the workspace` : "") +
     (lost ? `; ${lost} not sent (${RulesStore.scopeDropNote(state) ?? "the account or workspace changed"})` : "") + heldNote + "." +
-    (discard
+    (discarded
       ? ""
-      : input.staged.localChanges
+      : discard
+        ? " The local candidate changed while these were sent, so it was kept: `learn show`."
+        : input.staged.localChanges
         ? ` The local candidate was kept: it also changes ${input.staged.localChanges} local ${input.staged.localChanges === 1 ? "rule" : "rules"} (\`learn show\`, \`learn promote\`).`
         : " The local candidate was kept: `learn show`.")
   return { sent, queued, refused, lost, held, message }

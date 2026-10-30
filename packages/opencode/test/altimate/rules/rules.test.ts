@@ -626,7 +626,7 @@ describe("the workspace API, by path", () => {
       // The scope this identity resolves to, as an earlier pull would have stored it.
       await RulesStore.update(root, (s) => Object.assign(s, linked(), { scope: { apiUrl: url, tenant: "t", account: "user:7", datamateId: 1, repoRemote: "https://github.com/acme/demo" } }))
       const items = Array.from({ length: 60 }, (_, i) => item(`Staged rule ${i}.`))
-      const staged = { workspace: { name: "Team", owner: "Olive" }, scope: (await RulesStore.read(root)).scope!, items, invalid: [], localChanges: 0 }
+      const staged = { workspace: { name: "Team", owner: "Olive" }, scope: (await RulesStore.read(root)).scope!, items, invalid: [], localChanges: 0, candidate: "[]" }
       const result = await RulesFromHistory.sendStaged({ root, directory: root, learn: { enabled: true }, name: "team-playbook", staged, before: new Set() })
       expect(result).toMatchObject({ sent: 50, queued: 10, refused: 0, lost: 0 })
       expect(result.message).toContain("10 kept queued (50 proposals are waiting for review)")
@@ -888,10 +888,39 @@ describe("the workspace API, by path", () => {
     answer = (p, body) => p === "/proposals"
       ? Response.json({ results: body.items.map((it: { text: string }, index: number) => ({ index, status: "pending", public_id: `p-${it.text}`, version: 1 })) })
       : p === "/sync" ? Response.json(syncBody([])) : Response.json({ duplicate: false, applied_items: 0, skipped_items: 0 })
-    const staged = { workspace: { name: "Team", owner: "Olive" }, scope: user.scope, items: [item("Mine, last in line.")], invalid: [], localChanges: 0 }
+    const staged = { workspace: { name: "Team", owner: "Olive" }, scope: user.scope, items: [item("Mine, last in line.")], invalid: [], localChanges: 0, candidate: "[]" }
     const result = await RulesFromHistory.sendStaged({ root, directory: root, learn: { enabled: true }, name: "team-playbook", staged, before: new Set() })
     expect(result).toMatchObject({ sent: 1, queued: 0 })
     expect((await RulesStore.read(root)).outbox).toEqual([])
+  })
+
+  test("a candidate this run created is discarded once sent, unless something wrote to it meanwhile", async () => {
+    const lesson = (id: string, text: string) =>
+      ({ id, text, tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0, created: "2026-01-01T00:00:00Z", updated: "2026-01-01T00:00:00Z" })
+    answer = (p, body) => p === "/proposals"
+      ? Response.json({ results: body.items.map((it: { text: string }, index: number) => ({ index, status: "pending", public_id: `p-${it.text}`, version: 1 })) })
+      : p === "/sync" ? Response.json(syncBody([])) : Response.json({ duplicate: false, applied_items: 0, skipped_items: 0 })
+    const run = async (meanwhile?: (file: string) => Promise<void>) => {
+      const root = await tmp()
+      using user = asUser(7)
+      await RulesStore.update(root, (s) => Object.assign(s, linked(), { scope: user.scope }))
+      const file = Store.paths(root, "team-playbook").candidate
+      await fs.mkdir(path.dirname(file), { recursive: true })
+      await fs.writeFile(file, JSON.stringify([lesson("L-aaaaaaaaaaaa", "Prefix views with v_.")]))
+      const staged = (await RulesFromHistory.stagedRules({ root, name: "team-playbook", origin: "bootstrap", before: undefined, learn: { enabled: true } }))!
+      await meanwhile?.(file)
+      const result = await RulesFromHistory.sendStaged({ root, directory: root, learn: { enabled: true }, name: "team-playbook", staged, before: undefined })
+      return { result, candidate: await fs.readFile(file, "utf8").catch(() => undefined) }
+    }
+    const untouched = await run()
+    expect(untouched.result.sent).toBe(1)
+    expect(untouched.candidate).toBeUndefined()
+    // A reflection in another session adds a rule while the confirmation prompt waits: the candidate and that rule stay.
+    const reflected = JSON.stringify([lesson("L-aaaaaaaaaaaa", "Prefix views with v_."), lesson("L-bbbbbbbbbbbb", "Quote reserved words.")])
+    const changed = await run((file) => fs.writeFile(file, reflected))
+    expect(changed.result.sent).toBe(1)
+    expect(changed.candidate).toBe(reflected)
+    expect(changed.result.message).toContain("changed while these were sent, so it was kept")
   })
 
   test("signing out stops delivering the pulled team rules, and keeps the queue", async () => {
@@ -993,7 +1022,7 @@ describe("the workspace API, by path", () => {
     await RulesSync.enqueueMany(root, Array.from({ length: RulesStore.MAX_OUTBOX - 5 }, (_, i) => ({ item: item(`Older ${i}.`) })))
     // The workspace is unreachable for this run: everything stays queued.
     answer = () => new Response("unavailable", { status: 503 })
-    const staged = { workspace: { name: "Team", owner: "Olive" }, scope: user.scope, items: Array.from({ length: 8 }, (_, i) => item(`Mine ${i}.`)), invalid: [], localChanges: 0 }
+    const staged = { workspace: { name: "Team", owner: "Olive" }, scope: user.scope, items: Array.from({ length: 8 }, (_, i) => item(`Mine ${i}.`)), invalid: [], localChanges: 0, candidate: "[]" }
     const result = await RulesFromHistory.sendStaged({ root, directory: root, learn: { enabled: true }, name: "team-playbook", staged, before: new Set() })
     expect(result).toMatchObject({ held: 3, queued: 5 })
     expect(result.message).toContain("3 not sent: the queue of proposals waiting to be sent is full")
@@ -1003,7 +1032,7 @@ describe("the workspace API, by path", () => {
   test("bootstrap does not queue rules listed for another account or workspace", async () => {
     const root = await tmp()
     await RulesStore.update(root, (s) => Object.assign(s, linked(), { scope: { ...scope(), account: "someone-else" } }))
-    const staged = { workspace: { name: "Team", owner: "Olive" }, scope: scope(), items: [item("Listed for the other one.")], invalid: [], localChanges: 0 }
+    const staged = { workspace: { name: "Team", owner: "Olive" }, scope: scope(), items: [item("Listed for the other one.")], invalid: [], localChanges: 0, candidate: "[]" }
     const result = await RulesFromHistory.sendStaged({ root, directory: root, learn: { enabled: true }, name: "team-playbook", staged, before: new Set() })
     expect(result).toMatchObject({ sent: 0, held: 1 })
     expect((await RulesStore.read(root)).outbox).toEqual([])

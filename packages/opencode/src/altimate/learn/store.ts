@@ -742,11 +742,14 @@ export async function rollback(root: string, name: string): Promise<{ restored: 
   })
 }
 
-export async function reject(root: string, name: string): Promise<boolean> {
+/** `ifCandidate`: discard only while the candidate file still reads exactly this; a changed candidate is kept (false). */
+export async function reject(root: string, name: string, opts: { ifCandidate?: string } = {}): Promise<boolean> {
   assertWritable(name)
   return transaction(root, async () => {
     const p = paths(root, name)
-    const hasCandidate = (await readCandidate(root, name)) !== undefined
+    const current = await readCandidate(root, name)
+    if (opts.ifCandidate !== undefined && current !== opts.ifCandidate) return false
+    const hasCandidate = current !== undefined
     await assertLearnLock(root)
     await SafeFS.remove(root, p.candidate)
     await assertLearnLock(root)
