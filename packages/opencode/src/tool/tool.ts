@@ -8,6 +8,7 @@ import { Agent } from "@/agent/agent"
 // altimate_change start — telemetry instrumentation + legacy zod-tool adapter
 import z from "zod"
 import { Telemetry } from "../altimate/telemetry"
+import { ErrorDetail } from "../altimate/telemetry/error-detail" // altimate_change
 // altimate_change start — debug mode tool tracing
 import { traceToolCall } from "@/altimate/debug/mode"
 // altimate_change end
@@ -169,6 +170,8 @@ export type InferDef<T> =
 function altimateTrackError(id: string, args: unknown, ctx: Context, startTime: number, error: unknown) {
   try {
     const errorMsg = error instanceof Error ? error.message : String(error)
+    // The user declining a permission prompt is not a tool failure.
+    if (ErrorDetail.isUserRejection(errorMsg)) return
     const maskedErrorMsg = Telemetry.maskString(errorMsg).slice(0, 500)
     Telemetry.track({
       type: "tool_call",
