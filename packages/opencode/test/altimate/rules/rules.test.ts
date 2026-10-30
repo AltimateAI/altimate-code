@@ -26,7 +26,7 @@ import { MemoryStore } from "../../../src/memory/store"
 import { TrainingStore } from "../../../src/altimate/training"
 import { Instance } from "../../../src/project/instance"
 import { Session } from "../../../src/session"
-import { tmpdir } from "../../fixture/fixture"
+import { disposeAllInstances, tmpdir } from "../../fixture/fixture"
 
 const tmp = () => fs.mkdtemp(path.join(os.tmpdir(), "rules-"))
 
@@ -421,7 +421,10 @@ describe("the workspace API, by path", () => {
     const root = await tmp()
     answer = () => Response.json(syncBody([rule("aaaaaaaaaaaa", "Name staging models stg_<source>.")]))
     await RulesSync.pull(root, ready())
-    // Pretend a batch went out and its answer was lost.
+    // Pretend a batch went out and its answer was lost. Its sessions still have snapshots, so their pairs stay reported.
+    const sessions = path.join(root, ".altimate-code", "learn", ".sessions")
+    await fs.mkdir(sessions, { recursive: true })
+    for (const session of ["s1", "s2"]) await fs.writeFile(path.join(sessions, `${Store.sha256(session)}.json`), "{}")
     await RulesStore.update(root, (s) => {
       s.pending_usage = { batch_id: "batch-1", items: [{ public_id: "p-aaaaaaaaaaaa", applied: 2, helpful: 0, harmful: 0, corrected_again: 0 }], pairs: ["s1|p-aaaaaaaaaaaa", "s2|p-aaaaaaaaaaaa"], corrected: {} }
     })
@@ -623,7 +626,7 @@ describe("the workspace API, by path", () => {
       // The scope this identity resolves to, as an earlier pull would have stored it.
       await RulesStore.update(root, (s) => Object.assign(s, linked(), { scope: { apiUrl: url, tenant: "t", account: "user:7", datamateId: 1, repoRemote: "https://github.com/acme/demo" } }))
       const items = Array.from({ length: 60 }, (_, i) => item(`Staged rule ${i}.`))
-      const staged = { workspace: { name: "Team", owner: "Olive" }, items, invalid: [], localChanges: 0 }
+      const staged = { workspace: { name: "Team", owner: "Olive" }, scope: (await RulesStore.read(root)).scope!, items, invalid: [], localChanges: 0 }
       const result = await RulesFromHistory.sendStaged({ root, directory: root, learn: { enabled: true }, name: "team-playbook", staged, before: new Set() })
       expect(result).toMatchObject({ sent: 50, queued: 10, refused: 0, lost: 0 })
       expect(result.message).toContain("10 kept queued (50 proposals are waiting for review)")
@@ -658,6 +661,10 @@ describe("the workspace API, by path", () => {
     await RulesStore.update(root, (s) => {
       s.pending_usage = { batch_id: "batch-y", items: [{ public_id: "p-aaaaaaaaaaaa", applied: 1, helpful: 0, harmful: 0, corrected_again: 0 }], pairs: ["s9|p-aaaaaaaaaaaa"], corrected: { "R-aaaaaaaaaaaa": 1 } }
     })
+    // s9 still has a snapshot, so its pair is kept (a pair whose session is gone is let go).
+    const sessions = path.join(root, ".altimate-code", "learn", ".sessions")
+    await fs.mkdir(sessions, { recursive: true })
+    await fs.writeFile(path.join(sessions, `${Store.sha256("s9")}.json`), "{}")
     answer = () => Response.json({ detail: { code: "batch_conflict", message: "conflict" } }, { status: 409 })
     await RulesSync.reportUsage(root, ready())
     const state = await RulesStore.read(root)
@@ -750,7 +757,7 @@ describe("the workspace API, by path", () => {
     const update = RulesStore.update
     let failures = 0
     const spy = spyOn(RulesStore, "update").mockImplementation((async (...args: Parameters<typeof update>) => {
-      if (failures++ === 0) throw new Error("Timed out waiting for lock")
+      if (failures++ === 0) throw new Error("Timed out waiting for lock: learn-state")
       return update(...args)
     }) as never)
     try {
@@ -760,6 +767,88 @@ describe("the workspace API, by path", () => {
     }
     expect(failures).toBe(2)
     expect((await RulesStore.read(root)).outbox).toEqual([])
+  })
+
+  test("a write that fails after the state was saved is not applied again, and is not taken for another sender", async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => { s.scope = scope() })
+    await RulesSync.enqueue(root, item("Counted once."))
+    answer = () => Response.json({ results: [{ index: 0, status: "pending", public_id: "p-once", version: 1 }] })
+    const update = RulesStore.update
+    let calls = 0
+    // As if the mirror write failed after `rules.json` was written.
+    const spy = spyOn(RulesStore, "update").mockImplementation((async (...args: Parameters<typeof update>) => {
+      const written = await update(...args)
+      if (calls++ === 0) throw new Error("EACCES: approved.json")
+      return written
+    }) as never)
+    try {
+      await expect(RulesSync.push(root, ready())).rejects.toThrow("EACCES")
+    } finally {
+      spy.mockRestore()
+    }
+    expect(calls).toBe(1)
+    const state = await RulesStore.read(root)
+    expect(state.pending_count).toBe(1)
+    expect(state.sent.filter((s) => s.public_id === "p-once")).toHaveLength(1)
+  })
+
+  test("a learn lock that stays busy fails the push; it is not reported as another sync sending", async () => {
+    const root = await tmp()
+    await RulesSync.enqueue(root, item("Lock busy."))
+    answer = () => Response.json({ results: [{ index: 0, status: "pending", public_id: "p-busy", version: 1 }] })
+    const update = RulesStore.update
+    const spy = spyOn(RulesStore, "update").mockImplementation((async () => {
+      throw new Error("Timed out waiting for lock: learn-state")
+    }) as never)
+    try {
+      await expect(RulesSync.push(root, ready())).rejects.toThrow("learn-state")
+    } finally {
+      spy.mockRestore()
+    }
+    void update
+  })
+
+  test("an \"Approve now\" is kept as pending before its review is asked, so a crash cannot lose it", async () => {
+    const root = await tmp()
+    await RulesSync.enqueue(root, item("Approve durably."), "approve")
+    let intent: unknown
+    answer = async (p) => {
+      if (p === "/proposals") return Response.json({ results: [{ index: 0, status: "pending", public_id: "p-durable", version: 1 }] })
+      // While the review is being asked, the intent is already on disk.
+      intent = (await RulesStore.read(root)).pending_approvals
+      return Response.json({ public_id: "p-durable", status: "active", version: 1 })
+    }
+    await RulesSync.push(root, ready())
+    expect(intent).toEqual([expect.objectContaining({ public_id: "p-durable", action: "approve" })])
+    const state = await RulesStore.read(root)
+    expect(state.outbox).toEqual([])
+    expect(state.pending_approvals).toEqual([])
+    expect(state.sent.find((s) => s.public_id === "p-durable")?.status).toBe("active")
+  })
+
+  test("a committed project file cannot pose as an organization policy", async () => {
+    const root = await tmp()
+    await fs.mkdir(path.join(root, ".altimate-code"), { recursive: true })
+    await fs.writeFile(path.join(root, ".altimate-code", "altimate-code.json"), JSON.stringify({ learn: { capture: true, capture_policy: true } }))
+    const learn = await RulesService.effectiveLearn(undefined, root, root)
+    expect(learn).toEqual({ capture: true })
+    expect(learningDecision(learn, RulesStore.State.parse({ version: 1, personal_learning: false }), {})).toEqual({ on: false, source: "you" })
+  })
+
+  test("the dropped-proposals notice stops showing after a week, without any write", () => {
+    const state = RulesStore.State.parse({ version: 1, scope_drop: { count: 2, at: "2026-10-01T00:00:00Z" } })
+    expect(RulesStore.scopeDropNote(state, Date.parse("2026-10-07T00:00:00Z"))).toContain("2 queued proposals")
+    expect(RulesStore.scopeDropNote(state, Date.parse("2026-10-09T00:00:00Z"))).toBeUndefined()
+  })
+
+  test("with no session snapshots at all, reported usage is let go", async () => {
+    const root = await tmp()
+    answer = () => Response.json(syncBody([{ ...rule("aaaaaaaaaaaa", "Name staging models stg_<source>."), public_id: "p-a" }]))
+    await RulesSync.pull(root, ready())
+    await RulesStore.update(root, (s) => { s.usage_reported = ["gone|p-a"] })
+    await RulesSync.reportUsage(root, ready())
+    expect((await RulesStore.read(root)).usage_reported).toEqual([])
   })
 
   test("reported usage is kept while its session has a snapshot, and let go once the snapshot is gone", async () => {
@@ -789,6 +878,135 @@ describe("the workspace API, by path", () => {
     const file = Store.paths(root, RulesStore.WORKSPACE_RULES_STORE).approved
     expect(parse(await fs.readFile(file, "utf8"))).toHaveLength(1)
     expect((await fs.readdir(path.dirname(file))).filter((name) => name.startsWith("approved.json.before"))).toEqual([])
+  })
+
+  test("bootstrap keeps sending while older queued proposals are ahead of its own", async () => {
+    const root = await tmp()
+    using user = asUser(7)
+    await RulesStore.update(root, (s) => Object.assign(s, linked(), { scope: user.scope }))
+    await RulesSync.enqueueMany(root, Array.from({ length: 120 }, (_, i) => ({ item: item(`Older ${i}.`) })))
+    answer = (p, body) => p === "/proposals"
+      ? Response.json({ results: body.items.map((it: { text: string }, index: number) => ({ index, status: "pending", public_id: `p-${it.text}`, version: 1 })) })
+      : p === "/sync" ? Response.json(syncBody([])) : Response.json({ duplicate: false, applied_items: 0, skipped_items: 0 })
+    const staged = { workspace: { name: "Team", owner: "Olive" }, scope: user.scope, items: [item("Mine, last in line.")], invalid: [], localChanges: 0 }
+    const result = await RulesFromHistory.sendStaged({ root, directory: root, learn: { enabled: true }, name: "team-playbook", staged, before: new Set() })
+    expect(result).toMatchObject({ sent: 1, queued: 0 })
+    expect((await RulesStore.read(root)).outbox).toEqual([])
+  })
+
+  test("signing out stops delivering the pulled team rules, and keeps the queue", async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => Object.assign(s, linked(), { scope: scope(), rules: [rule("aaaaaaaaaaaa", "Name staging models stg_<source>.")] }))
+    await RulesSync.enqueue(root, item("Still queued."))
+    const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    const spies: { mockRestore(): void }[] = [
+      spyOn(WorkspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 1, repoRemote: "https://github.com/acme/demo" } } as never),
+      spyOn(WorkspaceApi, "captureCredentials").mockResolvedValue(undefined as never),
+    ]
+    try {
+      expect((await RulesSync.run(root, root, { enabled: true })).context).toMatchObject({ status: "skipped", code: "not_signed_in" })
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+      if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+    }
+    const state = await RulesStore.read(root)
+    expect(state.rules).toEqual([])
+    expect(state.workspace).toBeUndefined()
+    expect(state.outbox.map((e) => e.item.text)).toEqual(["Still queued."])
+    expect(parse(await fs.readFile(Store.paths(root, RulesStore.WORKSPACE_RULES_STORE).approved, "utf8"))).toEqual([])
+  })
+
+  test("a pull's answer is not applied to state another process adopted or advanced meanwhile", async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => Object.assign(s, linked(), { scope: scope(), revision: 2 }))
+    answer = async () => {
+      // Meanwhile another process adopted someone else's scope.
+      await RulesStore.update(root, (s) => { s.scope = { ...scope(), account: "someone-else" } })
+      return Response.json(syncBody([rule("aaaaaaaaaaaa", "Name staging models stg_<source>.")], { revision: 3 }))
+    }
+    await RulesSync.pull(root, ready())
+    let state = await RulesStore.read(root)
+    expect(state.scope?.account).toBe("someone-else")
+    expect(state.rules).toEqual([])
+    // An older revision than the one already applied is not applied either.
+    const newer = await tmp()
+    await RulesStore.update(newer, (s) => Object.assign(s, linked(), { scope: scope(), revision: 9, rules: [rule("bbbbbbbbbbbb", "Seeds live under seeds/reference.")] }))
+    answer = () => Response.json(syncBody([], { revision: 4 }))
+    await RulesSync.pull(newer, ready())
+    state = await RulesStore.read(newer)
+    expect(state.revision).toBe(9)
+    expect(state.rules.map((r) => r.text)).toEqual(["Seeds live under seeds/reference."])
+  })
+
+  test("a retried \"Approve now\" whose earlier attempt landed counts as approved", async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => {
+      Object.assign(s, linked(), { scope: scope() })
+      s.sent.push({ public_id: "p-landed", text: "Approved already.", change: "add", status: "pending", sent_at: "2026-10-28T00:00:00Z", updated_at: "2026-10-28T00:00:00Z" })
+      s.pending_approvals.push({ public_id: "p-landed", version: 1, action: "approve", attempts: 1 })
+    })
+    answer = () => Response.json({ detail: { code: "invalid_status", message: "The rule is active", status: "active", version: 1 } }, { status: 409 })
+    const pushed = await RulesSync.push(root, ready())
+    expect(pushed.approval_error).toBeUndefined()
+    const state = await RulesStore.read(root)
+    expect(state.pending_approvals).toEqual([])
+    expect(state.sent[0]).toMatchObject({ status: "active" })
+    expect(state.sent[0].reason).toBeUndefined()
+  })
+
+  test("a resend the server answers as an already-pending proposal is not counted twice", async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => {
+      Object.assign(s, linked(), { scope: scope(), pending_count: 1 })
+      s.sent.push({ public_id: "p-dup", text: "Once.", change: "add", status: "pending", sent_at: "2026-10-28T00:00:00Z", updated_at: "2026-10-28T00:00:00Z" })
+    })
+    await RulesSync.enqueue(root, item("Once."))
+    answer = () => Response.json({ results: [{ index: 0, status: "pending", public_id: "p-dup", version: 1, duplicate: true }] })
+    await RulesSync.push(root, ready())
+    expect((await RulesStore.read(root)).pending_count).toBe(1)
+  })
+
+  test("usage is reported before a pull that retires the rule it counts", async () => {
+    const root = await tmp()
+    using user = asUser(7)
+    await RulesStore.update(root, (s) => Object.assign(s, linked(), { scope: user.scope, rules: [{ ...rule("aaaaaaaaaaaa", "Name staging models stg_<source>."), public_id: "p-old" }] }))
+    const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+    await fs.mkdir(dir, { recursive: true })
+    const lesson = { id: RulesStore.lessonId("R-aaaaaaaaaaaa"), text: "Name staging models stg_<source>.", tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0, created: "2026-10-27T00:00:00Z", updated: "2026-10-27T00:00:00Z" }
+    await fs.writeFile(path.join(dir, `${Store.sha256("s-old")}.json`), JSON.stringify({
+      version: 1, session: "s-old", firstMessage: "m", query: "q", touchedPaths: [], section: "", requests: [], requestParts: [], compactions: [], counted: [],
+      shown: [{ name: RulesStore.WORKSPACE_RULES_STORE, lesson, tier: "core", at: "2026-10-28T00:00:00Z", queryHash: "h" }],
+    }))
+    seen.length = 0
+    answer = (p) => p === "/sync" ? Response.json(syncBody([])) : Response.json({ duplicate: false, applied_items: 1, skipped_items: 0 })
+    await RulesSync.run(root, root, { enabled: true }, "manual")
+    expect(seen.find((r) => r.path === "/usage")?.body.items).toEqual([expect.objectContaining({ public_id: "p-old", applied: 1 })])
+    expect((await RulesStore.read(root)).rules).toEqual([])
+  })
+
+  test("bootstrap queues only what the outbox has room for and keeps the rest local", async () => {
+    const root = await tmp()
+    using user = asUser(7)
+    await RulesStore.update(root, (s) => Object.assign(s, linked(), { scope: user.scope }))
+    await RulesSync.enqueueMany(root, Array.from({ length: RulesStore.MAX_OUTBOX - 5 }, (_, i) => ({ item: item(`Older ${i}.`) })))
+    // The workspace is unreachable for this run: everything stays queued.
+    answer = () => new Response("unavailable", { status: 503 })
+    const staged = { workspace: { name: "Team", owner: "Olive" }, scope: user.scope, items: Array.from({ length: 8 }, (_, i) => item(`Mine ${i}.`)), invalid: [], localChanges: 0 }
+    const result = await RulesFromHistory.sendStaged({ root, directory: root, learn: { enabled: true }, name: "team-playbook", staged, before: new Set() })
+    expect(result).toMatchObject({ held: 3, queued: 5 })
+    expect(result.message).toContain("3 not sent: the queue of proposals waiting to be sent is full")
+    expect((await RulesStore.read(root)).outbox).toHaveLength(RulesStore.MAX_OUTBOX)
+  })
+
+  test("bootstrap does not queue rules listed for another account or workspace", async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => Object.assign(s, linked(), { scope: { ...scope(), account: "someone-else" } }))
+    const staged = { workspace: { name: "Team", owner: "Olive" }, scope: scope(), items: [item("Listed for the other one.")], invalid: [], localChanges: 0 }
+    const result = await RulesFromHistory.sendStaged({ root, directory: root, learn: { enabled: true }, name: "team-playbook", staged, before: new Set() })
+    expect(result).toMatchObject({ sent: 0, held: 1 })
+    expect((await RulesStore.read(root)).outbox).toEqual([])
   })
 
   test("too many proposals at once say so", async () => {
@@ -1180,8 +1398,9 @@ describe("remember, whichever save tool the agent picks", () => {
       const card = (await RuleProposal.ask({ sessionID: "b1", root, directory: root, learn: undefined, draft: asked("Prefix seeds with seed_."), unanswered: async (text) => void saved.push(text) }))!
       const replying = RuleProposal.reply(card.id, { action: "send" })
       await gate.entered
-      await RuleProposal.drop(root)
+      const dropping = RuleProposal.drop(root)
       gate.release()
+      await dropping
       expect(await replying).toMatchObject({ ok: true })
       expect(saved).toEqual([])
       expect((await RulesStore.read(root)).outbox.map((e) => e.item.text)).toEqual(["Prefix seeds with seed_."])
@@ -1203,10 +1422,15 @@ describe("remember, whichever save tool the agent picks", () => {
       const card = (await RuleProposal.ask({ sessionID: "b2", root, directory: root, learn: undefined, draft: asked("Quote reserved words."), unanswered: async (text) => void saved.push(text) }))!
       const replying = RuleProposal.reply(card.id, { action: "send" })
       await gate.entered
-      await RuleProposal.drop(root)
+      // Dropping waits for the running reply: its fallback has to land before the instance goes.
+      let dropped = false
+      const dropping = RuleProposal.drop(root).then(() => void (dropped = true))
+      await Bun.sleep(20)
+      expect(dropped).toBe(false)
       gate.release()
-      expect(await replying).toMatchObject({ ok: false, code: "not_open" })
+      await dropping
       expect(saved).toEqual(["Quote reserved words."])
+      expect(await replying).toMatchObject({ ok: false, code: "not_open" })
     } finally {
       enqueue.mockRestore()
     }
@@ -1227,24 +1451,55 @@ describe("remember, whichever save tool the agent picks", () => {
     await using dir = await tmpdir({ git: true })
     const said = "Remember as a rule: always use CTEs in staging models."
     const content = "Always use CTEs in staging models."
-    const directory = await Instance.provide({ directory: dir.path, fn: async () => {
-      const root = await fs.realpath(Instance.worktree)
-      await RulesStore.update(root, (s) => Object.assign(s, linked()))
-      RuleProposal.setRendererForTest(Instance.directory)
-      const session = await Session.create({})
-      const result = await RulesRemember.proposeTeamRule(content, session.id, said, "training", undefined, { name: "staging-ctes", source: "the agent", citations: [] })
-      expect(result?.title).toContain("Team rule proposed")
-      expect(await TrainingStore.get("project", "rule", "staging-ctes")).toBeUndefined()
-      return Instance.directory
-    } })
-    // Closed from outside the instance (as on dispose): the fallback still writes into the project that asked.
-    await RuleProposal.drop(directory)
-    await Instance.provide({ directory: dir.path, fn: async () => {
-      const entry = await TrainingStore.get("project", "rule", "staging-ctes")
-      expect(entry?.content).toContain(content)
-      expect(entry?.meta.source).toBe("the agent")
-    } })
-    RuleProposal.setRendererForTest(undefined)
+    let directory: string | undefined
+    try {
+      directory = await Instance.provide({ directory: dir.path, fn: async () => {
+        const root = await fs.realpath(Instance.worktree)
+        await RulesStore.update(root, (s) => Object.assign(s, linked()))
+        RuleProposal.setRendererForTest(Instance.directory)
+        const session = await Session.create({})
+        const result = await RulesRemember.proposeTeamRule(content, session.id, said, "training", undefined, { name: "staging-ctes", source: "the agent", citations: [] })
+        expect(result?.title).toContain("Team rule proposed")
+        expect(await TrainingStore.get("project", "rule", "staging-ctes")).toBeUndefined()
+        return Instance.directory
+      } })
+      // Closed from outside the instance (as on dispose): the fallback still writes into the project that asked.
+      await RuleProposal.drop(directory)
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        const entry = await TrainingStore.get("project", "rule", "staging-ctes")
+        expect(entry?.content).toContain(content)
+        expect(entry?.meta.source).toBe("the agent")
+      } })
+    } finally {
+      if (directory) await RuleProposal.drop(directory)
+      RuleProposal.setRendererForTest(undefined)
+      await disposeAllInstances()
+    }
+  })
+
+  test("the fallback keeps training_save's per-kind limit: a new rule past it is not saved", async () => {
+    await using dir = await tmpdir({ git: true })
+    const count = spyOn(TrainingStore, "count").mockResolvedValue({ rule: 50 } as never)
+    let directory: string | undefined
+    try {
+      directory = await Instance.provide({ directory: dir.path, fn: async () => {
+        const root = await fs.realpath(Instance.worktree)
+        await RulesStore.update(root, (s) => Object.assign(s, linked()))
+        RuleProposal.setRendererForTest(Instance.directory)
+        const session = await Session.create({})
+        await RulesRemember.proposeTeamRule("Never select star in marts.", session.id, "Remember as a rule: never select star in marts.", "training", undefined, { name: "no-star" })
+        return Instance.directory
+      } })
+      await RuleProposal.drop(directory)
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        expect(await TrainingStore.get("project", "rule", "no-star")).toBeUndefined()
+      } })
+    } finally {
+      count.mockRestore()
+      if (directory) await RuleProposal.drop(directory)
+      RuleProposal.setRendererForTest(undefined)
+      await disposeAllInstances()
+    }
   })
 
   test("a project fact is classified as project-scoped memory", () => {
@@ -1467,3 +1722,135 @@ describe("learning precedence, stores and the after-turn check", () => {
   })
 })
 
+
+describe("cards across the feature's edges", () => {
+  const env = { ...process.env }
+  beforeAll(() => {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_LEARN
+  })
+  afterAll(() => {
+    if (env.ALTIMATE_DISABLE_WORKSPACE !== undefined) process.env.ALTIMATE_DISABLE_WORKSPACE = env.ALTIMATE_DISABLE_WORKSPACE
+    if (env.ALTIMATE_LEARN !== undefined) process.env.ALTIMATE_LEARN = env.ALTIMATE_LEARN
+    RuleProposal.setRendererForTest(undefined)
+  })
+  const linkedRoot = async () => {
+    const root = await tmp()
+    await RulesStore.update(root, (s) => Object.assign(s, linked()))
+    RuleProposal.setRendererForTest(root)
+    return root
+  }
+  const add = (text: string) => ({ deltas: [{ op: "ADD", text, reason: "corrected in two sessions" }] })
+  const deps = (result: unknown, during?: () => void): RuleTrigger.TriggerDeps => ({
+    source: async () => ({ prompts: ["fix the orders model"], calls: [] }),
+    generate: async (_source, onUsage) => async () => {
+      during?.()
+      onUsage?.({ inputTokens: 120, outputTokens: 30, estimatedCost: 0.002 } as never)
+      return result
+    },
+  })
+
+  test("the same correction in two sessions proposes a workspace's first rule, and the drafting call's usage is reported", async () => {
+    const root = await linkedRoot()
+    await appendSignal(root, { kind: "user_correction", sessionID: "c1", text: "no, the column is ordered_at", reason: "correction" })
+    await appendSignal(root, { kind: "user_correction", sessionID: "c2", text: "use ordered_at for the order time", reason: "correction" })
+    const events: Telemetry.Event[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((event: Telemetry.Event) => void events.push(event))
+    try {
+      await RuleTrigger.afterTurn({ sessionID: "c2", root, directory: root, learn: { enabled: true, capture: true }, deps: deps(add("Name order timestamps ordered_at.")) })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(RuleProposal.list(root, "c2")).toEqual([expect.objectContaining({ text: "Name order timestamps ordered_at.", change: "add" })])
+    expect(events).toContainEqual(expect.objectContaining({ type: "rule_drafted", trigger: "recurrence", status: "ok", input_tokens: 120, output_tokens: 30 }))
+    await RuleProposal.drop(root)
+  })
+
+  test("a client that goes away while the card is drafted leaves the corrections for a later check", async () => {
+    const root = await linkedRoot()
+    await appendSignal(root, { kind: "user_correction", sessionID: "g1", text: "no, call it shipped_at", reason: "correction" })
+    await appendSignal(root, { kind: "user_correction", sessionID: "g2", text: "shipped_at, not ship_date", reason: "correction" })
+    const other = await tmp()
+    await RuleTrigger.afterTurn({ sessionID: "g2", root, directory: root, learn: { enabled: true, capture: true }, deps: deps(add("Name ship timestamps shipped_at."), () => RuleProposal.setRendererForTest(other)) })
+    expect(RuleProposal.list(root)).toEqual([])
+    const state = await RulesStore.read(root)
+    expect(state.processed_signals).toEqual([])
+    expect(state.last_check?.outcome).toContain("went away")
+  })
+
+  test("an explicit remember carries a correction only when it is about the same thing", async () => {
+    const root = await linkedRoot()
+    await appendSignal(root, { kind: "user_correction", sessionID: "e1", text: "no, the column is ordered_at", reason: "correction" })
+    const unrelated = await RuleTrigger.explicit({ sessionID: "e1", root, directory: root, learn: undefined, text: "Never use FLOAT for money columns.", said: "Remember as a rule: never use FLOAT for money columns." })
+    expect(unrelated.status === "shown" && unrelated.card?.evidence.correction).toBeFalsy()
+    await appendSignal(root, { kind: "user_correction", sessionID: "e1", text: "money columns must not be FLOAT, use integer cents", reason: "correction" })
+    await RuleProposal.drop(root)
+    const related = await RuleTrigger.explicit({ sessionID: "e1", root, directory: root, learn: undefined, text: "Never use FLOAT for money columns.", said: "Remember as a rule: never use FLOAT for money columns." })
+    expect(related.status === "shown" && related.card?.evidence.correction?.excerpt).toContain("integer cents")
+    await RuleProposal.drop(root)
+  })
+
+  test("a card answered after the account or workspace changed is not sent there; a requested one is saved as before", async () => {
+    const root = await linkedRoot()
+    const saved: string[] = []
+    const card = (await RuleProposal.ask({ sessionID: "s1", root, directory: root, learn: undefined, unanswered: async (text) => void saved.push(text), draft: { text: "Prefix seeds with seed_.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } }))!
+    await RulesStore.update(root, (s) => { s.scope = { ...s.scope!, account: "someone-else" } })
+    expect(await RuleProposal.reply(card.id, { action: "send" })).toMatchObject({ ok: false, code: "not_open" })
+    expect((await RulesStore.read(root)).outbox).toEqual([])
+    expect(saved).toEqual(["Prefix seeds with seed_."])
+    expect(RuleProposal.list(root)).toEqual([])
+  })
+
+  test("a requested card is kept on disk while open, cleared once answered", async () => {
+    const root = await linkedRoot()
+    const card = (await RuleProposal.ask({ sessionID: "k1", root, directory: root, learn: undefined, unanswered: async () => {}, request: { session: "k1", via: "training" }, draft: { text: "Quote reserved words.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } }))!
+    expect((await RulesStore.read(root)).remember_requests).toEqual([expect.objectContaining({ card: card.id, text: "Quote reserved words.", pid: process.pid })])
+    await RuleProposal.reply(card.id, { action: "dismiss" })
+    expect((await RulesStore.read(root)).remember_requests).toEqual([])
+  })
+
+  test("a requested card whose process died is saved as before by the next process, once", async () => {
+    await using dir = await tmpdir({ git: true })
+    const dead = Bun.spawn(["true"])
+    await dead.exited
+    try {
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        const root = await fs.realpath(Instance.worktree)
+        await RulesStore.update(root, (s) => {
+          s.remember_requests.push({ card: "c-dead", text: "Alias every joined table.", session: "x1", directory: Instance.directory, via: "training", training: { name: "alias-joins" }, pid: dead.pid, at: new Date().toISOString() })
+          s.remember_requests.push({ card: "c-live", text: "Still open here.", session: "x2", directory: Instance.directory, via: "training", pid: process.pid, at: new Date().toISOString() })
+        })
+        await RulesRemember.recoverRequests(root, Instance.directory)
+        await RulesRemember.recoverRequests(root, Instance.directory)
+        expect((await TrainingStore.get("project", "rule", "alias-joins"))?.content).toContain("Alias every joined table.")
+        // A card this process still shows is its own to save.
+        expect((await RulesStore.read(root)).remember_requests.map((r) => r.card)).toEqual(["c-live"])
+      } })
+    } finally {
+      await disposeAllInstances()
+    }
+  })
+
+  test("with project config disabled, the live re-read ignores the project file", async () => {
+    const root = await tmp()
+    await fs.mkdir(path.join(root, ".altimate-code"), { recursive: true })
+    await fs.writeFile(path.join(root, ".altimate-code", "altimate-code.json"), JSON.stringify({ learn: { capture: true } }))
+    const flag = process.env.OPENCODE_DISABLE_PROJECT_CONFIG
+    process.env.OPENCODE_DISABLE_PROJECT_CONFIG = "1"
+    try {
+      expect(await RulesService.effectiveLearn(undefined, root, root)).toBeUndefined()
+    } finally {
+      if (flag === undefined) delete process.env.OPENCODE_DISABLE_PROJECT_CONFIG
+      else process.env.OPENCODE_DISABLE_PROJECT_CONFIG = flag
+    }
+  })
+
+  test("a team-rules mirror left behind by a failed write is repaired by the next write", async () => {
+    const root = await tmp()
+    const file = Store.paths(root, RulesStore.WORKSPACE_RULES_STORE).approved
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    await fs.writeFile(file, JSON.stringify([{ ...RulesStore.toLesson(rule("Stale team rule.")) }]))
+    await RulesStore.update(root, (s) => { s.personal_learning = false })
+    expect(parse(await fs.readFile(file, "utf8"))).toEqual([])
+  })
+})

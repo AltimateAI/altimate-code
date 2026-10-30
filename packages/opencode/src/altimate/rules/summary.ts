@@ -17,7 +17,8 @@ export interface Summary {
   mine_pending: number
   queued: number
   learning: boolean
-  /** Who decided `learning`: the person's own setting, or the workspace's "Learn from sessions". */
+  /** Who decided `learning`: an organization policy (`learn.capture` above project files), the person's own setting,
+   * the workspace's "Learn from sessions", or the default. */
   learning_source: RuleTrigger.LearningSource
   /** The person's `/rules` choice, when they made one (absent: following config or the workspace). */
   personal_learning?: boolean

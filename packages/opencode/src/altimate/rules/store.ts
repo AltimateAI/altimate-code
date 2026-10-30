@@ -30,9 +30,6 @@ const MAX_NOTICES = 50
 const MAX_SENT = 200
 /** Safety cap for the signal id list; `processed_signals` is also pruned to live signals. */
 const MAX_TRACKED = 5000
-/** Safety cap for `usage_reported`, which is pruned to sessions that still have a snapshot (`reportUsage`). Above what
- * the snapshots it is checked against can hold (200 sessions × 40 rules), so a live pair is never trimmed. */
-const MAX_USAGE_PAIRS = 50_000
 /** How long the "queued proposals were dropped" notice of an account or workspace change stays shown. */
 const SCOPE_DROP_NOTICE_MS = 7 * 24 * 60 * 60_000
 /** "Not a rule" keeps a topic from being proposed again in this repository for this long. */
@@ -94,6 +91,28 @@ export const Notice = z.object({
 })
 export type Notice = z.infer<typeof Notice>
 
+/** A "remember …" the person asked for, shown as a card and not yet answered: kept on disk so it is saved as before
+ * cards even if the process that showed the card dies (`RulesRemember.recoverRequests`). Removed once the card is
+ * answered, or its fallback ran. */
+export const RememberRequest = z.object({
+  card: z.string(),
+  text: z.string(),
+  session: z.string(),
+  /** The instance directory that asked: the request is saved into that project. */
+  directory: z.string(),
+  via: z.enum(["training", "memory"]),
+  /** The memory tool's block (`via: "memory"`). */
+  memory: z.object({ id: z.string(), tags: z.array(z.string()) }).optional(),
+  /** `training_save`'s entry (`via: "training"`). */
+  training: z.object({ name: z.string(), source: z.string().optional(), citations: z.array(z.unknown()).optional() }).optional(),
+  /** The process that shows the card: while it lives, its own fallback saves the request. */
+  pid: z.number().int(),
+  at: z.string(),
+})
+export type RememberRequest = z.infer<typeof RememberRequest>
+/** Requests kept at most; the oldest beyond it are dropped (each is also bounded by its card's day). */
+const MAX_REMEMBER_REQUESTS = 50
+
 export const State = z.object({
   version: z.literal(1),
   scope: Scope.optional(),
@@ -113,7 +132,8 @@ export const State = z.object({
   notices: z.array(Notice).default([]),
   dismissed: z.array(z.object({ topic: z.string(), until: z.string() })).default([]),
   /** (session, rule version) pairs already reported as `applied`, as `session|public_id`: a session keeps showing
-   * rules on later turns (requests, files), and each rule it showed counts once. */
+   * rules on later turns (requests, files), and each rule it showed counts once. Kept while the session has a snapshot
+   * file (`reportUsage` prunes the rest), never trimmed by count: a trimmed live pair would be counted again. */
   usage_reported: z.array(z.string()).default([]),
   /** Per rule, the "corrected again" count already reported. */
   corrected_reported: z.record(z.string(), z.number().int()).default({}),
@@ -142,6 +162,7 @@ export const State = z.object({
     action: z.enum(["approve", "approve_anyway"]),
     attempts: z.number().int().default(0),
   })).default([]),
+  remember_requests: z.array(RememberRequest).default([]),
   /** A usage report sent but not yet acknowledged: resent with the same `batch_id` so the server counts it once. */
   pending_usage: z.object({
     batch_id: z.string(),
@@ -228,34 +249,39 @@ export async function update(root: string, change: (state: State) => State | voi
     await SafeFS.mkdir(root, dir(root))
     const raw = await readRaw(root)
     let current = parse(raw)
-    let recovered = false
     if (!current) {
       // Written by another version or damaged: keep it for inspection rather than overwrite it.
       await Store.writeAtomic(root, `${stateFile(root)}.unreadable-${Date.now()}`, raw!, 0o600)
       current = structuredClone(EMPTY)
-      recovered = true
     }
     const rulesBefore = JSON.stringify(current.rules)
     const next = change(current) ?? current
     next.notices = next.notices.slice(-MAX_NOTICES)
     next.sent = capSent(next.sent)
-    next.usage_reported = next.usage_reported.slice(-MAX_USAGE_PAIRS)
     next.processed_signals = next.processed_signals.slice(-MAX_TRACKED)
+    next.remember_requests = next.remember_requests.slice(-MAX_REMEMBER_REQUESTS)
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
-    if (next.scope_drop && !(now - Date.parse(next.scope_drop.at) < SCOPE_DROP_NOTICE_MS)) delete next.scope_drop
+    if (next.scope_drop && !scopeDropShown(next.scope_drop, now)) delete next.scope_drop
     await Store.writeAtomic(root, stateFile(root), JSON.stringify(next, null, 2) + "\n")
     // Only a linked project (or one whose rules just changed, e.g. a reset) has a mirror to write: in a project with no
     // workspace, only the state file is written (a dismissal, a learning choice), never an `approved.json` that delivery
-    // would read. After an unreadable state was set aside, an existing
-    // mirror no longer matches any state: rewrite it, so rules nothing vouches for stop being delivered.
-    const staleMirror = recovered && (await fs.access(Store.paths(root, WORKSPACE_RULES_STORE).approved).then(() => true, () => false))
+    // would read. A mirror left behind by a write that failed after the state was saved (or by an unreadable state set
+    // aside) no longer matches the state: it is rewritten, so rules nothing vouches for stop being delivered.
+    const staleMirror = !next.workspace && JSON.stringify(next.rules) === rulesBefore && (await mirrorDiffers(root, next.rules))
     if (next.workspace || JSON.stringify(next.rules) !== rulesBefore || staleMirror) {
       await ensureIgnore(root)
       await writeMirror(root, next.rules)
     }
     return next
   }, LOCK)
+}
+
+/** An existing mirror (not someone's own playbook) whose rules are not `rules`. */
+async function mirrorDiffers(root: string, rules: readonly RuleOut[]) {
+  const previous = await fs.readFile(Store.paths(root, WORKSPACE_RULES_STORE).approved, "utf8").catch(() => undefined)
+  if (previous === undefined || !isMirror(previous)) return false
+  return canonical(parseLessons(previous)) !== canonical(rules.map(toLesson))
 }
 
 async function writeMirror(root: string, rules: readonly RuleOut[]) {
@@ -318,13 +344,18 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
       : {}),
     // A drop notice outlives a later reset: it is about proposals the person was told were queued.
     ...(state.scope_drop ? { scope_drop: state.scope_drop } : {}),
+    // A "remember" is saved locally whatever the workspace: no reset loses it.
+    remember_requests: state.remember_requests,
   }
 }
 
-/** The notice for proposals dropped by an account or workspace change, while it is shown. */
-export function scopeDropNote(state: State): string | undefined {
+const scopeDropShown = (drop: NonNullable<State["scope_drop"]>, now: number) => now - Date.parse(drop.at) < SCOPE_DROP_NOTICE_MS
+
+/** The notice for proposals dropped by an account or workspace change, while it is shown. Checked on read: a project
+ * nothing writes to any more (unlinked) still stops showing it. */
+export function scopeDropNote(state: State, now = Date.now()): string | undefined {
   const drop = state.scope_drop
-  if (!drop) return undefined
+  if (!drop || !scopeDropShown(drop, now)) return undefined
   return `${drop.count} queued ${drop.count === 1 ? "proposal was" : "proposals were"} for another account or workspace and ${drop.count === 1 ? "was" : "were"} not sent`
 }
 

@@ -519,7 +519,7 @@ export const layer = Layer.effect(
           source === "OPENCODE_CONFIG_CONTENT" ||
           source.endsWith("/api/config") ||
           source.startsWith(ConfigManaged.managedConfigDir() + path.sep) ||
-          (!!Flag.OPENCODE_CONFIG_DIR && path.dirname(source) === path.resolve(Flag.OPENCODE_CONFIG_DIR)) ||
+          (!!Flag.OPENCODE_CONFIG_DIR && path.resolve(path.dirname(source)) === path.resolve(Flag.OPENCODE_CONFIG_DIR)) ||
           homeDirs.includes(path.dirname(source))
         const noteLearn = (source: string, next: Info | undefined) => {
           const learn = (next as { learn?: unknown } | undefined)?.learn
@@ -883,8 +883,12 @@ export const layer = Layer.effect(
         // altimate_change start — keep the synchronous view scoped to this config instance
         const loaded = yield* loadInstanceState(ctx).pipe(Effect.orDie)
         loadedConfig.set(ctx.directory, loaded.config)
+        const learnAbove = LEARN_ABOVE_PROJECT.get(ctx.directory)
         yield* Effect.addFinalizer(() => Effect.sync(() => {
           if (loadedConfig.get(ctx.directory) === loaded.config) loadedConfig.delete(ctx.directory)
+          // altimate_change start — workspace rules: a disposed instance's precedence goes with it
+          if (LEARN_ABOVE_PROJECT.get(ctx.directory) === learnAbove) LEARN_ABOVE_PROJECT.delete(ctx.directory)
+          // altimate_change end
         }))
         return loaded
         // altimate_change end

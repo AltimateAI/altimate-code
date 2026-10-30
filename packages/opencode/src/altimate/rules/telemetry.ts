@@ -77,6 +77,27 @@ export function skipped(
   send({ type: "rule_proposal_skipped", timestamp: Date.now(), session_id: sessionID, ...(trigger ? { trigger } : {}), reason })
 }
 
+/** One drafting model call after a turn: its token and cost usage, whether it answered (no wording or text). */
+export function drafted(input: {
+  sessionID: string
+  trigger: Of<"rule_drafted">["trigger"]
+  ok: boolean
+  usage: { inputTokens: number; outputTokens: number; estimatedCost: number }
+  startedAt: number
+}) {
+  send({
+    type: "rule_drafted",
+    timestamp: Date.now(),
+    session_id: input.sessionID,
+    trigger: input.trigger,
+    status: input.ok ? "ok" : "failed",
+    input_tokens: input.usage.inputTokens,
+    output_tokens: input.usage.outputTokens,
+    estimated_cost: input.usage.estimatedCost,
+    duration_ms: Date.now() - input.startedAt,
+  })
+}
+
 export function routed(sessionID: string, via: "training" | "memory", outcome: Of<"rule_remember_routed">["outcome"]) {
   send({ type: "rule_remember_routed", timestamp: Date.now(), session_id: sessionID, via, outcome }, false)
 }

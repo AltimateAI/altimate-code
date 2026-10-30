@@ -56,51 +56,89 @@ interface Pending {
   /** For a card the person asked for: saves it as it would have been saved without a card, when the card closes
    * unanswered (it expired, or its instance went away). Bound to the asking instance. */
   unanswered?: (text: string) => Promise<void>
-  /** Closed (expired, or its instance went away) while a reply was running: the reply settles it when it ends. */
-  closed?: { message: string; why: "expired" | "closed"; here: string | undefined }
+  /** The account and workspace the card was shown for: a send or approve is queued only for them. */
+  scope?: RulesStore.Scope
+  /** The request is kept on disk (`RulesStore.RememberRequest`) until the card is answered or its fallback ran. */
+  persisted?: boolean
+  /** Closed (expired, or its instance went away) while a reply was running: the reply settles it when it ends, then
+   * calls `done`, which resolves the promise `close` returned (`drop` waits on it). */
+  closed?: { message: string; why: "expired" | "closed"; here: string | undefined; done: () => void }
 }
 
 /** An unanswered card lasts a day; after that it is dropped rather than re-offered to every new client. */
 export const CARD_TTL_MS = 24 * 60 * 60_000
 
 /** Remove a card no client can answer any more, and tell clients so they stop showing it. Resolves once a requested
- * card's fallback save has landed. A card whose reply is running is only marked: the reply's outcome decides. */
+ * card is saved: by its fallback, or, for a card whose reply is running, once that reply ended (it saved the card, or
+ * failed and the fallback saved it). */
 function close(id: string, entry: Pending, message: string, why: "expired" | "closed", here: string | undefined): Promise<void> {
   pending.delete(id)
-  if (entry.busy) {
-    entry.closed = { message, why, here }
-    return Promise.resolve()
-  }
+  if (entry.busy) return new Promise((done) => void (entry.closed = { message, why, here, done }))
   return settle(id, entry, message, why, here)
 }
 
+/** What a "remember" card keeps on disk so the request survives the process (`RulesRemember.recoverRequests`). */
+export type RequestRecord = Pick<RulesStore.RememberRequest, "session" | "via" | "memory" | "training">
+
+async function persistRequest(entry: Pending, request: RequestRecord) {
+  const record: RulesStore.RememberRequest = {
+    ...request,
+    card: entry.card.id,
+    text: entry.card.text,
+    directory: entry.directory,
+    pid: process.pid,
+    at: new Date().toISOString(),
+  }
+  // Best effort: the card and its in-memory fallback work without it; only a crash would then lose the request.
+  await RulesStore.update(entry.root, (s) => {
+    s.remember_requests = [...s.remember_requests.filter((r) => r.card !== record.card), record]
+  }).then(
+    () => void (entry.persisted = true),
+    (error) => log.warn("remember request not kept on disk", { card: record.card, error }),
+  )
+}
+
+/** The card was answered, or its fallback ran: its request no longer needs keeping. */
+async function forgetRequest(id: string, entry: Pending) {
+  if (!entry.persisted) return
+  entry.persisted = false
+  await RulesStore.update(entry.root, (s) => {
+    s.remember_requests = s.remember_requests.filter((r) => r.card !== id)
+  }).catch((error) => log.warn("remember request not cleared", { id, error }))
+}
+
 /** A closed card nobody answered: save a requested one as before cards, record it, tell its clients. */
-function settle(id: string, entry: Pending, message: string, why: "expired" | "closed", here: string | undefined): Promise<void> {
-  // A "remember" the person asked for is never silently lost: unanswered, it is saved as it was before cards.
-  const saved = entry.unanswered
-    ? entry.unanswered(entry.card.text).catch((error) => log.warn("unanswered card not saved", { id, error }))
-    : Promise.resolve()
-  RulesTelemetry.answered({
-    card: entry.card,
-    trigger: entry.trigger,
-    action: why,
-    status: "ok",
-    ...(entry.unanswered ? { outcome: "saved_unanswered" as const } : {}),
-    edits: entry.edits,
-    shownAt: entry.at,
-  })
+async function settle(id: string, entry: Pending, message: string, why: "expired" | "closed", here: string | undefined): Promise<void> {
   // The Bus is per project: announced from another project's request it would reach the wrong clients. The card's own
   // clients then learn it is gone from their next list or reply (`not_open`).
   if (here === entry.directory)
     void publish(RuleEvents.Event.Replied, { id, sessionID: entry.card.sessionID, action: "expired", message })
-  return saved
+  // A "remember" the person asked for is saved as it was before cards. That save can still fail (the project's memory
+  // or training is full): recorded as a failed close, not as saved.
+  const saved = entry.unanswered
+    ? await entry.unanswered(entry.card.text).then(() => true, (error) => {
+        log.warn("unanswered card not saved", { id, error })
+        return false
+      })
+    : undefined
+  // Saved, or failed for good (the project's memory or training is full): either way nothing is left to recover.
+  await forgetRequest(id, entry)
+  RulesTelemetry.answered({
+    card: entry.card,
+    trigger: entry.trigger,
+    action: why,
+    status: saved === false ? "failed" : "ok",
+    ...(saved ? { outcome: "saved_unanswered" as const } : {}),
+    edits: entry.edits,
+    shownAt: entry.at,
+  })
 }
 
 /** After a reply that did not close the card: if the card was closed meanwhile, settle it now. */
 async function settleIfClosed(id: string, entry: Pending): Promise<ReplyResult | undefined> {
   if (!entry.closed) return undefined
-  const { message, why, here } = entry.closed
-  await settle(id, entry, message, why, here)
+  const { message, why, here, done } = entry.closed
+  await settle(id, entry, message, why, here).finally(done)
   return { ok: false, code: "not_open", error: "This proposal is no longer open." }
 }
 
@@ -207,6 +245,8 @@ export async function ask(input: {
   draft: Draft
   trigger?: CardTrigger
   unanswered?: Pending["unanswered"]
+  /** With `unanswered`: what to keep on disk, so the request is saved even if this process dies. */
+  request?: RequestRecord
 }) {
   expire(input.directory)
   const trigger = input.trigger ?? (input.draft.origin === "explicit" ? "remember" : "recurrence")
@@ -233,11 +273,17 @@ export async function ask(input: {
         existing.learn = input.learn
         await publish(RuleEvents.Event.Updated, existing.card)
       } else await publish(RuleEvents.Event.Asked, existing.card)
+      if (input.unanswered && input.request) await persistRequest(existing, input.request)
       RulesTelemetry.shown(existing.card, existing.trigger, true)
       return existing.card
     }
   const card = build(randomUUID(), input.sessionID, input.draft, state)
-  pending.set(card.id, { card, root: input.root, directory: input.directory, learn: input.learn, at: Date.now(), trigger, edits: 0, sourceSession: input.sessionID, memory: input.draft.memory, unanswered: input.unanswered })
+  const entry: Pending = {
+    card, root: input.root, directory: input.directory, learn: input.learn, at: Date.now(), trigger, edits: 0,
+    sourceSession: input.sessionID, memory: input.draft.memory, unanswered: input.unanswered, scope: state.scope,
+  }
+  pending.set(card.id, entry)
+  if (input.unanswered && input.request) await persistRequest(entry, input.request)
   RulesTelemetry.shown(card, trigger, false)
   await publish(RuleEvents.Event.Asked, card)
   return card
@@ -326,6 +372,11 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
     try {
       entry.card = next
       entry.edits += 1
+      // A kept request saves the wording as it stands (best effort, like keeping it).
+      if (entry.persisted)
+        await RulesStore.update(entry.root, (s) => {
+          for (const r of s.remember_requests) if (r.card === id) r.text = text
+        }).catch((error) => log.warn("remember request wording not updated", { id, error }))
       await publish(RuleEvents.Event.Updated, next)
     } finally {
       entry.busy = false
@@ -343,6 +394,17 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
     message = done.message
     track("ok", done.outcome)
   } catch (error) {
+    if (error instanceof RulesSync.ScopeChangedError) {
+      // Shown for another account or workspace: it is not sent to this one. The card closes; one the person asked for
+      // is saved as before cards.
+      entry.busy = false
+      track("not_open")
+      if (entry.closed) return (await settleIfClosed(id, entry))!
+      pending.delete(id)
+      const message = "The account or workspace changed since this proposal was shown: it was not sent."
+      await settle(id, entry, message, "closed", entry.directory)
+      return { ok: false, code: "not_open", error: message }
+    }
     const code = error instanceof RefusedError ? "refused" : "failed"
     if (code === "failed") log.warn("rule proposal reply failed", { action: input.action, error })
     track(code)
@@ -353,6 +415,9 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
     entry.busy = false
   }
   pending.delete(id)
+  await forgetRequest(id, entry)
+  // Closed while this ran: the answer saved it, which is what the close was waiting for.
+  entry.closed?.done()
   await publish(RuleEvents.Event.Replied, { id, sessionID: card.sessionID, action: input.action, message })
   await publish(RuleEvents.Event.Changed, { directory: entry.directory })
   return { ok: true, message, closed: true }
@@ -377,12 +442,12 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
     const id = entry.memory?.id ?? `notes/${slug(card.text)}`
     const tags = entry.memory?.tags.length ? entry.memory.tags : ["remembered"]
     const now = new Date().toISOString()
-    await MemoryStore.write({ id, scope, tags, created: now, updated: now, content: card.text })
+    await MemoryStore.write({ id, scope, tags, created: now, updated: now, content: card.text }, { sessionID: entry.sourceSession })
     message = scope === "global" ? "Saved to your memory (all your projects)." : "Saved to this project's memory."
     outcome = scope === "global" ? "saved_memory_global" : "saved_memory_project"
   } else if (action === "save_local") {
     const { TrainingStore } = await import("../training")
-    await TrainingStore.save({ kind: "rule", name: slug(card.text), scope: "project", content: card.text, source: "proposed rule" })
+    await TrainingStore.save({ kind: "rule", name: slug(card.text), scope: "project", content: card.text, source: "proposed rule", sessionID: entry.sourceSession })
     message = "Saved as a rule for this project."
     outcome = "saved_local"
   } else {
@@ -402,7 +467,7 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
       corrections: card.evidence.correction && quotes
         ? [{ excerpt: card.evidence.correction.excerpt, corrected_at: card.evidence.correction.at, session_ref: hashRef(entry.sourceSession) }]
         : [],
-    }, approve)
+    }, approve, entry.scope)
     const report = await RulesSync.runFresh(entry.root, entry.directory, entry.learn, "card").catch(() => undefined)
     const sent = RulesSync.outcomeOf(await RulesStore.read(entry.root), report, outboxId)
     const owner = card.workspace?.owner_name ?? "the workspace owner"

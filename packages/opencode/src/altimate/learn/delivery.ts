@@ -12,8 +12,9 @@ import { assertLearnLock } from "./lock"
 import { validateName } from "./playbook"
 import { estimateTokens, fileHookEnabled, renderSection, resolveLimits, retrieve, selectFile, selectStart, type Limits } from "./select"
 import * as Store from "./store"
-// altimate_change start — workspace rules telemetry: rules added to a session's context
+// altimate_change start — workspace rules: telemetry of rules added to a session's context, and the workspaces switch
 import { RulesTelemetry } from "../rules/telemetry"
+import { workspacesOn } from "./config"
 // altimate_change end
 
 const log = Log.create({ service: "learn.delivery" })
@@ -93,7 +94,10 @@ export type ShownSnapshot = {
 export async function snapshotFiles(root: string): Promise<Set<string>> {
   const dir = path.join(root, ".altimate-code", "learn", ".sessions")
   await SafeFS.assertSafePath(root, dir)
-  return new Set(await fs.readdir(dir))
+  return new Set(await fs.readdir(dir).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return []
+    throw error
+  }))
 }
 
 /** The snapshot file name of `session`. */
@@ -214,6 +218,9 @@ export class Delivery {
       }).map((entry) => entry.name).sort()
     for (const name of names) {
       try { validateName(name) } catch { continue }
+      // altimate_change start — workspace rules: with workspaces turned off, the last pulled team rules are not delivered
+      if (name === Store.WORKSPACE_RULES_STORE && !workspacesOn()) continue
+      // altimate_change end
       // Read approved snapshots directly: migration/capture may write, and merely opening a
       // candidate-only project must not mutate it. Capture being off does NOT disable these
       // rules: a person already approved them. An unused project only pays the existence check.

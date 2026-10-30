@@ -815,6 +815,18 @@ export namespace Telemetry {
         ms_since_shown: number
       }
     | {
+        /** One model call that drafted a proposal after a turn (it runs in the background, so its cost is reported here). */
+        type: "rule_drafted"
+        timestamp: number
+        session_id: string
+        trigger: "shown_rule" | "recurrence"
+        status: "ok" | "failed"
+        input_tokens: number
+        output_tokens: number
+        estimated_cost: number
+        duration_ms: number
+      }
+    | {
         /** Corrections were checked after a turn and no card was shown. */
         type: "rule_proposal_skipped"
         timestamp: number

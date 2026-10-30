@@ -7,6 +7,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { parse } from "jsonc-parser"
 import * as SafeFS from "./safe-fs"
+import { Flag } from "@opencode-ai/core/flag/flag"
 
 /**
  * The highest-precedence existing project config file, from `directory` up to `root`, and its text; the default
@@ -44,6 +45,8 @@ export async function projectConfigFile(root: string, directory: string): Promis
  * rather than when the session's config is next loaded (`learn enable` / `learn disable` write it). Undefined when the file has no `learn` object.
  */
 export async function readProjectLearning(root: string, directory: string): Promise<Record<string, unknown> | undefined> {
+  // Like the config loader: with project config disabled, the project's files are not read.
+  if (Flag.OPENCODE_DISABLE_PROJECT_CONFIG) return undefined
   const { text } = await projectConfigFile(root, directory)
   const learn = parse(text, [], { allowTrailingComma: true })?.learn
   return learn && typeof learn === "object" && !Array.isArray(learn) ? learn : undefined

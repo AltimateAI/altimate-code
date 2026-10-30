@@ -505,16 +505,28 @@ test("rules added to a session are reported by tier, as counts only; a cached an
   expect(JSON.stringify(events)).not.toContain("shipping")
 })
 
-test("rules from the workspace-rules store are counted as team rules", async () => {
+test("rules from the workspace-rules store are counted as team rules, and are not delivered with workspaces off", async () => {
   await approve([lesson("L-0101", "Keep the project rules explicit.", { pinned: true })])
   await approve([lesson("L-0102", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
-  const events: Telemetry.Event[] = []
-  const spy = spyOn(Telemetry, "track").mockImplementation((event: Telemetry.Event) => void events.push(event))
-  try {
-    await new Delivery(root, { ...limits, core_lessons: 2 }).prepare("session", "first", "staging")
-  } finally {
-    spy.mockRestore()
+  const delivered = async (session: string) => {
+    const events: Telemetry.Event[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((event: Telemetry.Event) => void events.push(event))
+    try {
+      await new Delivery(root, { ...limits, core_lessons: 2 }).prepare(session, "first", "staging")
+    } finally {
+      spy.mockRestore()
+    }
+    return events.find((e): e is Extract<Telemetry.Event, { type: "rules_delivered" }> => e.type === "rules_delivered")
   }
-  const start = events.find((e): e is Extract<Telemetry.Event, { type: "rules_delivered" }> => e.type === "rules_delivered")
-  expect(start).toMatchObject({ tier: "start", rules: 2, team_rules: 1 })
+  const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+  try {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    expect(await delivered("on")).toMatchObject({ tier: "start", rules: 2, team_rules: 1 })
+    // The last pulled team rules are not delivered while workspaces are turned off; the person's own rules are.
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    expect(await delivered("off")).toMatchObject({ tier: "start", rules: 1, team_rules: 0 })
+  } finally {
+    if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+  }
 })

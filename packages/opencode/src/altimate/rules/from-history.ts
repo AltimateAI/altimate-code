@@ -21,6 +21,8 @@ export async function candidateTexts(root: string, name: string): Promise<Set<st
 
 export interface Staged {
   workspace: { name: string; owner: string }
+  /** The account and workspace these were listed for: they are queued only for them. */
+  scope: RulesStore.Scope
   /** What would be sent, in order. */
   items: ProposalItem[]
   /** Staged rules that failed the rule lint and stay local only. */
@@ -41,7 +43,7 @@ export async function stagedRules(input: {
 }): Promise<Staged | undefined> {
   if (!RulesSync.rulesEnabled(input.learn)) return undefined
   const state = await RulesStore.read(input.root)
-  if (!state.workspace) return undefined
+  if (!state.workspace || !state.scope) return undefined
   const [approved, candidate] = await Promise.all([
     Store.loadApproved(input.root, input.name),
     Store.loadCandidateLessons(input.root, input.name),
@@ -76,6 +78,7 @@ export async function stagedRules(input: {
   if (!items.length && !invalid.length) return undefined
   return {
     workspace: { name: state.workspace.name, owner: state.workspace.owner_name ?? "the workspace owner" },
+    scope: state.scope,
     items,
     invalid,
     localChanges: edited + removed,
@@ -91,15 +94,29 @@ export async function sendStaged(input: {
   staged: Staged
   /** `candidateTexts` before the run: a candidate that existed before is never discarded. */
   before: Set<string> | undefined
-}): Promise<{ sent: number; queued: number; refused: number; lost: number; message: string }> {
-  const ids = await RulesSync.enqueueMany(input.root, input.staged.items.map((item) => ({ item })))
-  // A push sends at most a batch: keep sending until these proposals have left the outbox, or a run sends nothing
-  // more (not ready, or kept back with an error). Bounded by the number of batches they need, plus one.
+}): Promise<{ sent: number; queued: number; refused: number; lost: number; held: number; message: string }> {
+  const { owner, name } = input.staged.workspace
+  // Only what the outbox has room for is queued; the rest stays in the local candidate (not sent for review).
+  const room = Math.max(0, RulesStore.MAX_OUTBOX - (await RulesStore.read(input.root)).outbox.length)
+  const items = input.staged.items.slice(0, room)
+  const held = input.staged.items.length - items.length
+  const heldNote = held ? `; ${held} not sent: the queue of proposals waiting to be sent is full (${RulesStore.MAX_OUTBOX}), so they stay in the local candidate` : ""
+  let ids: string[]
+  try {
+    ids = await RulesSync.enqueueMany(input.root, items.map((item) => ({ item })), input.staged.scope)
+  } catch (error) {
+    if (!(error instanceof RulesSync.ScopeChangedError)) throw error
+    const message = `Nothing sent: the account or workspace changed since these rules were listed. The local candidate was kept: \`learn show\`.`
+    return { sent: 0, queued: 0, refused: 0, lost: 0, held: input.staged.items.length, message }
+  }
+  // A push sends the oldest batch of the outbox, which can hold older proposals ahead of these: keep sending while these
+  // are still queued and each run moves the outbox along. Stops when a run is not ready, keeps something back with an
+  // error, or sends nothing; bounded by the batches a full outbox needs.
   let report = await RulesSync.runFresh(input.root, input.directory, input.learn, "import")
   let state = await RulesStore.read(input.root)
-  for (let round = 1; round <= Math.ceil(ids.length / RulesSync.MAX_PROPOSALS); round++) {
+  for (let round = 1; round <= Math.ceil(RulesStore.MAX_OUTBOX / RulesSync.MAX_PROPOSALS); round++) {
     const waiting = ids.some((id) => state.outbox.some((entry) => entry.id === id))
-    if (!waiting || report.context.status !== "ready" || report.push?.error) break
+    if (!waiting || report.context.status !== "ready" || report.push?.error || !report.push?.sent.length) break
     report = await RulesSync.runFresh(input.root, input.directory, input.learn, "import")
     state = await RulesStore.read(input.root)
   }
@@ -111,24 +128,24 @@ export async function sendStaged(input: {
   const lost = outcomes.length - queued - refused - sent
   // The workspace's review queue replaces a candidate this run created, once it holds every rule of it: only when the
   // candidate is nothing but the adds that were sent (no local edits or removals, nothing invalid, refused or queued).
-  const discard = !input.before && queued === 0 && refused === 0 && lost === 0 && input.staged.invalid.length === 0 &&
+  const discard = !input.before && queued === 0 && refused === 0 && lost === 0 && held === 0 && input.staged.invalid.length === 0 &&
     input.staged.localChanges === 0
   if (discard) await Store.reject(input.root, input.name)
-  const { owner, name } = input.staged.workspace
-  // Why some stayed queued, as the run said it: sync not ready (not signed in, link lost …), or kept back with an error.
+  // Why some stayed queued, as the run said it: sync not ready (not signed in, link lost …), kept back with an error, or
+  // not reached yet behind older proposals.
   const why = report.context.status !== "ready"
     ? report.context.reason
-    : report.push?.error ?? "the workspace could not be reached"
+    : report.push?.error ?? "behind older queued proposals"
   const message = `${sent} ${sent === 1 ? "rule" : "rules"} sent for ${owner}'s review in ${name}` +
     (queued ? `; ${queued} kept queued (${why}) and sent on a later sync` : "") +
     (refused ? `; ${refused} refused by the workspace` : "") +
-    (lost ? `; ${lost} not sent (${RulesStore.scopeDropNote(state) ?? "the account or workspace changed"})` : "") + "." +
+    (lost ? `; ${lost} not sent (${RulesStore.scopeDropNote(state) ?? "the account or workspace changed"})` : "") + heldNote + "." +
     (discard
       ? ""
       : input.staged.localChanges
         ? ` The local candidate was kept: it also changes ${input.staged.localChanges} local ${input.staged.localChanges === 1 ? "rule" : "rules"} (\`learn show\`, \`learn promote\`).`
         : " The local candidate was kept: `learn show`.")
-  return { sent, queued, refused, lost, message }
+  return { sent, queued, refused, lost, held, message }
 }
 
 export * as RulesFromHistory from "./from-history"

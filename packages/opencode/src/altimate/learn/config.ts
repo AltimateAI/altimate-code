@@ -14,6 +14,12 @@ export function booleanFlag(value: string | undefined): boolean | undefined {
   return undefined
 }
 
+/** Workspaces are on unless `ALTIMATE_DISABLE_WORKSPACE` is set to anything but empty, `0` or `false`. */
+export function workspacesOn(env: NodeJS.ProcessEnv = process.env): boolean {
+  const disabled = env["ALTIMATE_DISABLE_WORKSPACE"]?.trim().toLowerCase()
+  return disabled === undefined || disabled === "" || disabled === "0" || disabled === "false"
+}
+
 /** The global switch defaults on; env overrides config in both directions. */
 export function learnEnabled(cfg?: { enabled?: boolean }, env: NodeJS.ProcessEnv = process.env): boolean {
   return booleanFlag(env["ALTIMATE_LEARN"]) ?? cfg?.enabled ?? true

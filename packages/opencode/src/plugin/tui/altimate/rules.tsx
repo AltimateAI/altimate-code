@@ -538,12 +538,14 @@ async function showMenu(api: TuiPluginApi) {
         if (option.value === "sync") {
           api.ui.toast({ variant: "info", message: "Syncing rules…", duration: 3000 })
           const report = await post<{ ok: boolean; error?: string; pull?: { ok: boolean; rules: number; pending: number; error?: string; notices: unknown[] }; push?: { sent: unknown[]; queued?: number; error?: string }; context?: { status: string; reason?: string } }>(api, "/altimate/rules/sync").catch(() => undefined)
-          // A review notice from this pull is its own toast; do not cover it with the summary.
-          if (report?.pull?.notices.length) return
+          // A review notice from this pull is its own toast: the success summary would cover it, but a problem (proposals
+          // kept queued, a failed pull) is still said.
+          const reviewed = !!report?.pull?.notices.length
           if (report?.context && report.context.status !== "ready")
             api.ui.toast({ variant: "warning", message: `Rules sync skipped: ${printable(report.context.reason ?? report.context.status)}.`, duration: 8000 })
           else if (report?.pull?.ok && report.push?.error)
             api.ui.toast({ variant: "warning", message: `Synced ${report.pull.rules} team ${report.pull.rules === 1 ? "rule" : "rules"}, but ${report.push.queued ?? 0} ${report.push.queued === 1 ? "proposal stays" : "proposals stay"} queued: ${printable(report.push.error)}`, duration: 10000 })
+          else if (report?.pull?.ok && reviewed) return
           else if (report?.pull?.ok)
             api.ui.toast({ variant: "success", message: `Synced: ${report.pull.rules} team ${report.pull.rules === 1 ? "rule" : "rules"}, ${report.pull.pending} pending review${report.push?.sent.length ? `, ${report.push.sent.length} sent` : ""}.`, duration: 6000 })
           else api.ui.toast({ variant: "error", message: `Rules sync failed: ${printable(report?.pull?.error ?? report?.error ?? "the session server did not answer")}`, duration: 8000 })
@@ -577,7 +579,7 @@ const tui: TuiPlugin = async (api) => {
         namespace: "palette",
         slashName: "rules",
         run() {
-          showMenu(api).catch((err) => api.ui.toast({ variant: "error", message: String(err), duration: 8000 }))
+          showMenu(api).catch((err) => api.ui.toast({ variant: "error", message: printable(String(err)), duration: 8000 }))
         },
       },
     ],

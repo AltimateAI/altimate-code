@@ -17,8 +17,9 @@ import { lint } from "../learn/curator"
 import { readShownSnapshots } from "../learn/delivery"
 import { buildDigest, type DigestSource } from "../learn/digest"
 import * as Playbook from "../learn/playbook"
-import { analyzeRecurrence } from "../learn/recurrence"
-import { reflect, type Generate } from "../learn/reflect"
+import { approvedLessons, unmatchedCorrectionTopics } from "../learn/recurrence"
+import { reflect, type Generate, type GenerateUsage } from "../learn/reflect"
+import { createUsageTracker } from "../learn/usage"
 import { readSignals, type Signal } from "../learn/signals"
 import { RuleClassify } from "./classify"
 import { RuleProposal, excerpt, type Draft } from "./proposal"
@@ -30,8 +31,8 @@ export const RECURRENCE_SESSIONS = 2
 const MAX_WHY = 280
 
 export interface TriggerDeps {
-  /** The model for one drafting call, resolved for this session. */
-  generate: (source: DigestSource) => Promise<Generate>
+  /** The model for one drafting call, resolved for this session; `onUsage` receives its token and cost usage. */
+  generate: (source: DigestSource, onUsage?: (usage: GenerateUsage) => void) => Promise<Generate>
   source: (sessionID: string) => Promise<DigestSource>
 }
 
@@ -66,6 +67,8 @@ const STOP = new Set("the and for with that this from into when then than are wa
 const words = (text: string) => new Set((text.toLowerCase().match(/[a-z][a-z0-9_]{2,}/g) ?? []).filter((w) => !STOP.has(w)))
 /** Shared content words that make a shown team rule the subject of a correction. */
 export const EDIT_OVERLAP = 3
+/** Shared content words that make a correction evidence for a rule the person asked to remember. */
+const RELATED_OVERLAP = 2
 
 /** Path globs per proposal, and their length: the server's lint bounds (a glob longer than a rule is not a path the
  * person meant). Shared with the history path (`from-history.ts`). */
@@ -96,6 +99,7 @@ const teamBullets = (state: RulesStore.State): Playbook.Bullet[] =>
 async function draft(input: {
   deps: TriggerDeps
   sessionID: string
+  trigger: "shown_rule" | "recurrence"
   signals: readonly Signal[]
   state: RulesStore.State
   target?: string
@@ -105,14 +109,25 @@ async function draft(input: {
   note?: (outcome: string) => void
 }): Promise<{ text: string; change: Draft["change"]; replaces?: Draft["replaces"]; reason: string } | "covered" | undefined> {
   const source = await input.deps.source(input.sessionID)
-  const generate = await input.deps.generate(source)
+  // The model call runs in the background after a turn: its tokens and cost are reported, failed or not.
+  const tracker = createUsageTracker()
+  const startedAt = Date.now()
+  let ok = false
   const bullets = teamBullets(input.state)
-  const deltas = await reflect({
-    digest: buildDigest(source),
-    feedback: input.signals.map((signal) => signal.text).join("\n\n"),
-    kind: "user",
-    bullets: input.target ? bullets.filter((b) => b.id === input.target) : bullets,
-  }, generate)
+  const deltas = await (async () => {
+    try {
+      const result = await reflect({
+        digest: buildDigest(source),
+        feedback: input.signals.map((signal) => signal.text).join("\n\n"),
+        kind: "user",
+        bullets: input.target ? bullets.filter((b) => b.id === input.target) : bullets,
+      }, await input.deps.generate(source, tracker.add))
+      ok = true
+      return result
+    } finally {
+      RulesTelemetry.drafted({ sessionID: input.sessionID, trigger: input.trigger, ok, usage: tracker.usage, startedAt })
+    }
+  })()
   log.info("rule draft", { session: input.sessionID, target: input.target, deltas: deltas.map((d) => d.op) })
   const rules = new Map(input.state.rules.map((rule) => [RulesStore.lessonId(rule.rule_key), rule]))
   for (const delta of deltas) {
@@ -168,6 +183,15 @@ export async function afterTurn(input: {
       return RulesTelemetry.skipped(input.sessionID, undefined, "card_open")
     // Marked processed once the check completes; a failed check is retried after the next turn.
     checked = fresh.map((signal) => signal.id)
+    // The model call takes a while: if the client that shows cards went away meanwhile, the card would not be seen,
+    // so the corrections are left for a later check instead.
+    const stillShown = () => {
+      if (RuleProposal.rendererAttached(input.directory)) return true
+      checked = []
+      outcome = "the client that shows cards went away during the check; corrections kept for a later check"
+      RulesTelemetry.skipped(input.sessionID, undefined, "no_renderer")
+      return false
+    }
     const newest = fresh[fresh.length - 1]
     const correction = { excerpt: excerpt(newest.text), at: newest.correctedAt ?? newest.at }
 
@@ -185,10 +209,11 @@ export async function afterTurn(input: {
       .sort((a, b) => b.overlap - a.overlap)[0]
     log.info("rule edit candidate", { session: input.sessionID, hit: hit?.id, overlap: hit?.overlap, shown: shownIds.size })
     if (hit) {
-      const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, signals: fresh, state, target: hit.id, note })
+      const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, trigger: "shown_rule", signals: fresh, state, target: hit.id, note })
       // The shown rule already says it: no card, and no second drafting call for recurrence.
       if (drafted === "covered") return RulesTelemetry.skipped(input.sessionID, "shown_rule", "covered")
       if (drafted) {
+        if (!stillShown()) return
         const card = await RuleProposal.ask({
           sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "shown_rule",
           draft: {
@@ -209,22 +234,22 @@ export async function afterTurn(input: {
       return RulesTelemetry.skipped(input.sessionID, "shown_rule", "no_draft")
     }
 
-    // (a) The same topic corrected in 2 or more sessions, with no rule covering it.
-    const recurrence = await analyzeRecurrence(input.root)
+    // (a) The same topic corrected in 2 or more sessions, with no rule covering it. From the corrections themselves:
+    // a project with no approved rules yet has no delivery snapshots, and must still be able to get its first rule.
+    const all = await readSignals(input.root, Playbook.DEFAULT_NAME)
+    const topics = unmatchedCorrectionTopics(all, await approvedLessons(input.root))
     const freshIds = new Set(fresh.map((signal) => signal.id))
-    const topic = recurrence.unmatched_topics.find((t) =>
-      t.sessions >= RECURRENCE_SESSIONS && t.signal_ids.some((id) => freshIds.has(id)) && !RulesStore.dismissed(state, t.identifier))
+    const candidates = topics.filter((t) => t.sessions >= RECURRENCE_SESSIONS && t.signal_ids.some((id) => freshIds.has(id)))
+    const topic = candidates.find((t) => !RulesStore.dismissed(state, t.identifier))
     if (!topic) {
       if (!hit) outcome = "no team rule shown on this subject and no topic corrected in 2+ sessions"
-      const dismissed = recurrence.unmatched_topics.some((t) =>
-        t.sessions >= RECURRENCE_SESSIONS && t.signal_ids.some((id) => freshIds.has(id)) && RulesStore.dismissed(state, t.identifier))
-      return RulesTelemetry.skipped(input.sessionID, "recurrence", dismissed ? "topic_dismissed" : "no_topic")
+      return RulesTelemetry.skipped(input.sessionID, "recurrence", candidates.length ? "topic_dismissed" : "no_topic")
     }
-    const all = await readSignals(input.root, Playbook.DEFAULT_NAME)
     const backing = all.filter((signal) => topic.signal_ids.includes(signal.id))
-    const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, signals: backing, state, addOnly: true, note })
+    const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, trigger: "recurrence", signals: backing, state, addOnly: true, note })
     if (!drafted || drafted === "covered" || drafted.change !== "add")
       return RulesTelemetry.skipped(input.sessionID, "recurrence", drafted === "covered" ? "covered" : "no_draft")
+    if (!stillShown()) return
     const card = await RuleProposal.ask({
       sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "recurrence",
       draft: {
@@ -272,6 +297,8 @@ export async function explicit(input: {
   memory?: { id: string; tags: string[] }
   /** Saves the request as before cards if the card closes unanswered (`RuleProposal.ask`). */
   unanswered?: (text: string) => Promise<void>
+  /** What to keep on disk while the card is open (`RuleProposal.ask`). */
+  request?: import("./proposal").RequestRecord
 }): Promise<
   | { status: "shown"; card: Awaited<ReturnType<typeof RuleProposal.ask>>; choose: boolean }
   | { status: "invalid"; reason: string; kind: "rule" | "ambiguous" }
@@ -283,14 +310,17 @@ export async function explicit(input: {
   if (kind === "memory") return { status: "memory", cue: cue ?? "a fact or preference" }
   const reason = lint(text)
   if (reason) return { status: "invalid", reason, kind }
-  const signals = (await readSignals(input.root, Playbook.DEFAULT_NAME).catch(() => [] as Signal[]))
+  // The session's latest correction is evidence only when it is about the same thing: an unrelated quote would reach the
+  // owner (and widen `applies_to`) for a rule it has nothing to do with.
+  const said = words(text)
+  const last = (await readSignals(input.root, Playbook.DEFAULT_NAME).catch(() => [] as Signal[]))
     .filter((signal) => signal.kind === "user_correction" && signal.sessionID === input.sessionID)
-  const last = signals[signals.length - 1]
+    .findLast((signal) => [...words(signal.text)].filter((w) => said.has(w)).length >= RELATED_OVERLAP)
   // Always a new rule: shared words are not a reason to replace a team rule (dbt rules share "model", "test",
   // "staging"), and the card has no "add instead". Changing a team rule is the correction path's job, where the
   // drafter decides whether the shown rule is the subject.
   const card = await RuleProposal.ask({
-    sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, unanswered: input.unanswered,
+    sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, unanswered: input.unanswered, request: input.request,
     draft: {
       text,
       applies_to: appliesTo([text, ...(last ? [last.text] : [])]),

@@ -43,6 +43,8 @@ export async function effectiveLearn(loaded: LearnConfig, root: string, director
   const above = Config.learnKeysAboveProject(directory)
   const result: Record<string, unknown> = { ...loaded }
   for (const [key, value] of Object.entries(onDisk ?? {})) if (!above.has(key)) result[key] = value
+  // Only this function marks a policy: a key named so in any file (a committed project file above all) is not one.
+  delete result.capture_policy
   if (above.has("capture")) result.capture_policy = true
   return result as LearnConfig
 }
@@ -62,7 +64,7 @@ async function linked(root: string, directory: string): Promise<boolean> {
 function deps(ctx: InstanceContext, model?: string): RuleTrigger.TriggerDeps {
   return {
     source: async (sessionID) => (await import("../learn/session-reflect")).sourceFromSession(sessionID, ctx),
-    generate: async (source) => {
+    generate: async (source, onUsage) => {
       const [{ Provider }, { AppRuntime }, { InstanceRef }, { DEFAULT_TIMEOUT_MS, providerGenerate }, { learnModel }] = await Promise.all([
         import("@/provider/provider"),
         import("@/effect/app-runtime"),
@@ -72,7 +74,7 @@ function deps(ctx: InstanceContext, model?: string): RuleTrigger.TriggerDeps {
       ])
       const chosen = learnModel(model)
       return AppRuntime.runPromise(
-        providerGenerate(chosen ? Provider.parseModel(chosen) : source.model, DEFAULT_TIMEOUT_MS).pipe(Effect.provideService(InstanceRef, ctx)),
+        providerGenerate(chosen ? Provider.parseModel(chosen) : source.model, DEFAULT_TIMEOUT_MS, undefined, onUsage).pipe(Effect.provideService(InstanceRef, ctx)),
       )
     },
   }
@@ -95,6 +97,12 @@ export async function sessionStart(root: string, directory: string, loaded: Lear
   // would add up to `SESSION_WAIT_MS` to the first prompt of every session in a project without rules.
   const hasState = !!(await RulesStore.read(root).catch(() => undefined))?.scope
   await RulesSync.sessionStart(root, directory, learn, { startIfDue: hasState })
+}
+
+/** Whether `sessionID` is a subagent's (it has a parent). Unknown counts as not. */
+async function subagent(sessionID: string): Promise<boolean> {
+  const [{ Session }, { SessionID }] = await Promise.all([import("@/session"), import("@/session/schema")])
+  return Session.get(SessionID.make(sessionID)).then((session) => !!session.parentID, () => false)
 }
 
 export async function start(ctx: InstanceContext): Promise<void> {
@@ -154,12 +162,20 @@ export async function start(ctx: InstanceContext): Promise<void> {
       void work().catch((error) => log.warn(`rules ${what} failed`, { error: error instanceof Error ? error.message : String(error) }))
     await followLearning(await learnConfig(ctx)).catch((error) => log.warn("rules learning setup failed", { error: String(error) }))
     safely("refresh", refresh)()
+    // "Remember" requests whose card died with another process (a crash): saved as before cards, into this project.
+    safely("remember recovery", Instance.bind(async () => {
+      const { RulesRemember } = await import("./remember")
+      await RulesRemember.recoverRequests(root, ctx.directory)
+    }))()
     const timer = setInterval(safely("refresh", refresh), RulesSync.REFRESH_MS)
     timer.unref?.()
     const onIdle = Instance.bind(async (sessionID: string) => {
       if (disposed) return
       const learn = await learnConfig(ctx)
       if (!RulesSync.rulesEnabled(learn)) return
+      // A subagent's session is not one a client shows: a card raised there would never be seen, and its corrections
+      // would be marked handled. They are left unprocessed.
+      if (await subagent(sessionID)) return
       const { flushCapture } = await import("../learn/capture")
       await flushCapture()
       await RuleTrigger.afterTurn({ sessionID, root, directory: ctx.directory, learn, deps: deps(ctx, learn?.model) })

@@ -1,6 +1,6 @@
 import path from "path"
 import { Token } from "@/util/token"
-import { existsSync, readFileSync, realpathSync } from "node:fs"
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
 import os from "os"
 import fs from "fs/promises"
 import z from "zod"
@@ -152,27 +152,34 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 // altimate_change start — workspace rules: sessions that already had their session-start pull in this process
 const rulesSessionsStarted = new Set<string>()
 /** Rules state in this project, or a cached workspace binding for this directory: otherwise the project cannot have
- * workspace rules, and the prompt path skips them. Synchronous, local checks only (a small JSON read at most). */
+ * workspace rules, and the prompt path skips them. Synchronous, local checks only: the bindings cache is parsed once per
+ * change of the file (size and mtime), not on every prompt. */
+const canonicalDir = (dir: string) => {
+  try {
+    return realpathSync(path.resolve(dir))
+  } catch {
+    return path.resolve(dir)
+  }
+}
+let boundDirs: { stamp: string; dirs: ReadonlySet<string> } | undefined
+const boundDirectories = (): ReadonlySet<string> => {
+  const file = path.join(Global.Path.state, "altimate-workspace-bindings.json")
+  try {
+    const stat = statSync(file)
+    const stamp = `${stat.size}:${stat.mtimeMs}`
+    if (boundDirs?.stamp !== stamp) {
+      const cache = JSON.parse(readFileSync(file, "utf8")) as { bindings?: Record<string, unknown> }
+      boundDirs = { stamp, dirs: new Set(Object.keys(cache.bindings ?? {}).map(canonicalDir)) }
+    }
+    return boundDirs.dirs
+  } catch {
+    return new Set()
+  }
+}
 const mayHaveWorkspaceRules = (root: string, directory: string) => {
   if (existsSync(path.join(root, ".altimate-code", "learn", "workspace-rules", "rules.json"))) return true
-  try {
-    const cache = JSON.parse(readFileSync(path.join(Global.Path.state, "altimate-workspace-bindings.json"), "utf8")) as {
-      bindings?: Record<string, unknown>
-    }
-    const keys = Object.keys(cache.bindings ?? {})
-    if (!keys.length) return false
-    const canonical = (dir: string) => {
-      try {
-        return realpathSync(path.resolve(dir))
-      } catch {
-        return path.resolve(dir)
-      }
-    }
-    const here = canonical(directory)
-    return keys.some((key) => key === here || canonical(key) === here)
-  } catch {
-    return false
-  }
+  const dirs = boundDirectories()
+  return dirs.size > 0 && dirs.has(canonicalDir(directory))
 }
 // altimate_change end
 

@@ -5,6 +5,9 @@
 // when the person asked to remember) both come here first.
 
 import fs from "node:fs/promises"
+import { Log } from "@/util/log"
+
+const log = Log.create({ service: "rules.remember" })
 
 /** The person asked for something to be remembered (not the agent deciding to take a note). */
 const ASKED_TO_REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note (?:that|this)|save (?:this|that)|from now on)\b/i
@@ -60,33 +63,90 @@ export async function proposeTeamRule(
   const root = await fs.realpath(raw).catch(() => raw)
   // The project's learn file as it is now, like every other entry point: `learn disable` mid-session takes effect.
   const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
-  // A subagent's session is not the one a client shows: its card would never be seen.
-  const subagent = await import("@/session")
-    .then(async ({ Session }) => {
-      const { SessionID } = await import("@/session/schema")
-      return !!(await Session.get(SessionID.make(sessionID))).parentID
-    })
-    .catch(() => false)
+  // A subagent's session is not the one a client shows: its card would never be seen. Looked up only when a card
+  // would otherwise be raised.
+  const subagent = () =>
+    import("@/session")
+      .then(async ({ Session }) => {
+        const { SessionID } = await import("@/session/schema")
+        return !!(await Session.get(SessionID.make(sessionID))).parentID
+      })
+      .catch(() => false)
+  // What the tool meant to write, kept on disk while the card is open; saved as before cards if it closes unanswered.
+  const request = { session: sessionID, via, ...(memory ? { memory } : {}), ...(training ? { training } : {}) }
   // Bound to this instance, so it saves into this project whenever the card closes unanswered.
-  const unanswered = Instance.bind(async (text: string) => {
-    const now = new Date().toISOString()
-    if (via === "memory" && memory) {
-      const { MemoryStore } = await import("../../memory/store")
-      await MemoryStore.write({ id: memory.id, scope: "project", tags: memory.tags, created: now, updated: now, content: text }, { sessionID })
-      return
-    }
-    const [{ TrainingStore }, { RuleProposal }] = await Promise.all([import("../training"), import("./proposal")])
-    await TrainingStore.save({
-      kind: "rule",
-      name: training?.name ?? RuleProposal.slug(text),
-      scope: "project",
-      content: text,
-      source: training?.source ?? "remember (card closed unanswered)",
-      ...(training?.citations ? { citations: training.citations } : {}),
-      sessionID,
-    })
+  const unanswered = Instance.bind((text: string) => saveAsBefore({ ...request, text }))
+  return proposeFor({ root, directory: Instance.directory, learn, content, sessionID, said, via, memory, subagent, unanswered, request })
+}
+
+type Request = Pick<import("./store").RememberRequest, "text" | "session" | "via" | "memory" | "training">
+
+/** Save a "remember" as the tool would have without a card: the memory tool's block to project memory, or
+ * `training_save`'s rule to project training (within its per-kind limit). Runs in the asking project's instance. */
+export async function saveAsBefore(request: Request) {
+  const { text, session: sessionID, memory, training } = request
+  const now = new Date().toISOString()
+  if (request.via === "memory" && memory) {
+    const { MemoryStore } = await import("../../memory/store")
+    await MemoryStore.write({ id: memory.id, scope: "project", tags: memory.tags, created: now, updated: now, content: text }, { sessionID })
+    return
+  }
+  const [{ TrainingStore }, { RuleProposal }, { TRAINING_MAX_PATTERNS_PER_KIND }] = await Promise.all([
+    import("../training"),
+    import("./proposal"),
+    import("../training/types"),
+  ])
+  const name = training?.name ?? RuleProposal.slug(text)
+  // The same limit `training_save` applies: a new rule past it is not saved (an update of an existing one is).
+  if (!(await TrainingStore.get("project", "rule", name))) {
+    const count = await TrainingStore.count({ kind: "rule", scope: "project" })
+    if (count.rule >= TRAINING_MAX_PATTERNS_PER_KIND)
+      throw new Error(`project training already holds ${count.rule} rules (limit ${TRAINING_MAX_PATTERNS_PER_KIND})`)
+  }
+  await TrainingStore.save({
+    kind: "rule",
+    name,
+    scope: "project",
+    content: text,
+    source: training?.source ?? "remember (card closed unanswered)",
+    ...(training?.citations ? { citations: training.citations as import("../../memory/types").MemoryBlock["citations"] } : {}),
+    sessionID,
   })
-  return proposeFor({ root, directory: Instance.directory, learn, content, sessionID, said, via, memory, subagent, unanswered })
+}
+
+/** Whether process `pid` is running (a process this one may not signal still counts). */
+function alive(pid: number) {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM"
+  }
+}
+
+/**
+ * Save the "remember" requests of `directory` whose card died with its process (a crash, a kill): the card can no longer
+ * be answered or close on its own, so the request is saved as before cards. Each is claimed in one locked write first,
+ * so two processes starting together save it once. Runs in that project's instance; never throws.
+ */
+export async function recoverRequests(root: string, directory: string) {
+  const { RulesStore } = await import("./store")
+  const orphaned = (r: import("./store").RememberRequest) => r.directory === directory && r.pid !== process.pid && !alive(r.pid)
+  if (!(await RulesStore.read(root)).remember_requests.some(orphaned)) return
+  const claimed: import("./store").RememberRequest[] = []
+  await RulesStore.update(root, (s) => {
+    for (const r of s.remember_requests)
+      if (orphaned(r)) {
+        r.pid = process.pid
+        claimed.push({ ...r })
+      }
+  })
+  for (const r of claimed) {
+    await saveAsBefore(r).catch((error) => log.warn("recovered remember request not saved", { card: r.card, error }))
+    await RulesStore.update(root, (s) => {
+      s.remember_requests = s.remember_requests.filter((x) => x.card !== r.card)
+    })
+  }
 }
 
 /** `proposeTeamRule` for an explicit project (`root`, `directory`) and learn config. */
@@ -100,10 +160,12 @@ export async function proposeFor(input: {
   via?: "training" | "memory"
   /** From the memory tool: the block it meant to write, used if the person picks Memory on the card. */
   memory?: { id: string; tags: string[] }
-  /** The session is a subagent's: no client shows its cards. */
-  subagent?: boolean
+  /** Whether the session is a subagent's (no client shows its cards); asked only when a card would be raised. */
+  subagent?: boolean | (() => Promise<boolean>)
   /** Saves the request as before cards if its card closes unanswered. */
   unanswered?: (text: string) => Promise<void>
+  /** With `unanswered`: what to keep on disk while the card is open (`RuleProposal.ask`). */
+  request?: import("./proposal").RequestRecord
 }) {
   const { root, learn, content, sessionID, said } = input
   const via = input.via ?? "training"
@@ -123,8 +185,9 @@ export async function proposeFor(input: {
   // Nothing attached to this process shows cards (`altimate-code run`, ACP, a plugin): a card would be lost, so the
   // tool saves as it did before cards (memory, or project training).
   const { RuleProposal } = await import("./proposal")
-  if (input.subagent || !RuleProposal.rendererAttached(input.directory)) return void RulesTelemetry.routed(sessionID, via, "no_renderer")
-  const result = await RuleTrigger.explicit({ sessionID, root, directory: input.directory, learn, text: content, said, memory: input.memory, unanswered: input.unanswered })
+  if (!RuleProposal.rendererAttached(input.directory)) return void RulesTelemetry.routed(sessionID, via, "no_renderer")
+  if (typeof input.subagent === "function" ? await input.subagent() : input.subagent) return void RulesTelemetry.routed(sessionID, via, "no_renderer")
+  const result = await RuleTrigger.explicit({ sessionID, root, directory: input.directory, learn, text: content, said, memory: input.memory, unanswered: input.unanswered, request: input.request })
   RulesTelemetry.routed(
     sessionID,
     via,

@@ -388,8 +388,10 @@ const StatusCommand = effectCmd({
         ...base,
         // Read-only and advisory: runs after the lock is released; its failure must not hide the rest of the status.
         ...await analyzeRecurrence(root, { name }).then((recurrence) => ({ recurrence }), (error) => ({ recurrence_error: error instanceof Error ? error.message : String(error) })),
-        // altimate_change start — workspace rules (local state only)
-        rules: await import("../../altimate/rules/summary").then((m) => m.RulesSummary.summary(root, learn)),
+        // altimate_change start — workspace rules (local state only), with the learn config the service enforces
+        rules: await Promise.all([import("../../altimate/rules/summary"), import("../../altimate/rules/service")])
+          .then(async ([{ RulesSummary }, { RulesService }]) =>
+            RulesSummary.summary(root, await RulesService.effectiveLearn(learn, root, (await import("@/project/instance")).Instance.directory))),
         // altimate_change end
       }))
       if (args.json) return out(JSON.stringify(status, null, 2))

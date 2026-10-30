@@ -28,12 +28,76 @@ export type LessonRecurrence = {
   earlier_version: number
 }
 
+type Prepared = { name: string; id: string; textHash: string; anchors: string[]; tokens: Set<string> }
+const prepare = (lessons: readonly NamedLesson[]): Prepared[] => lessons.map(({ name, lesson }) => ({
+  name, id: lesson.id, textHash: lessonTextHash(lesson.text),
+  anchors: [...anchors(lesson.text)].filter((word) => !word.startsWith("_") && !word.endsWith("_")),
+  tokens: tokens(lesson.text),
+}))
+/** The lessons a correction is about: an anchor it names with another shared word, or most of the lesson's words. */
+const matchesOf = (text: string, prepared: readonly Prepared[]) => {
+  const words = identifiers(text)
+  const content = tokens(text)
+  return prepared.filter((lesson) => {
+    const overlap = [...lesson.tokens].filter((word) => content.has(word))
+    return lesson.anchors.some((anchor) => words.has(anchor) && overlap.some((word) => word !== anchor)) ||
+      (overlap.length >= 3 && overlap.length / lesson.tokens.size >= 0.6)
+  })
+}
+type Topics = Map<string, { sessions: Set<string>; signals: Set<string> }>
+/** Record an unmatched correction under each topic it names: snake_case identifiers and anchors. */
+const addTopics = (topics: Topics, signal: Signal) => {
+  const names = new Set([...identifiers(signal.text)].filter((word) => word.includes("_")))
+  for (const anchor of anchors(signal.text)) names.add(anchor)
+  for (const topic of names) {
+    if (!topics.has(topic)) topics.set(topic, { sessions: new Set(), signals: new Set() })
+    topics.get(topic)!.sessions.add(signal.sessionID)
+    topics.get(topic)!.signals.add(signal.id)
+  }
+}
+/** Topics corrected in 2 or more sessions, most sessions first. */
+const recurringTopics = (topics: Topics) => [...topics].filter(([, value]) => value.sessions.size >= 2)
+  .map(([identifier, value]) => ({ identifier, sessions: value.sessions.size, signal_ids: [...value.signals].sort() }))
+  .sort((a, b) => b.sessions - a.sessions || a.identifier.localeCompare(b.identifier))
+
+/**
+ * Topics corrected in 2 or more sessions that no approved lesson covers, from the corrections alone. Unlike
+ * `attribute`, a session needs no delivery snapshot: a project with no approved rules yet has none, and its repeated
+ * corrections must still be able to propose the first one.
+ */
+export function unmatchedCorrectionTopics(signals: readonly Signal[], lessons: readonly NamedLesson[]) {
+  const prepared = prepare(lessons)
+  const topics: Topics = new Map()
+  for (const signal of signals)
+    if (signal.kind === "user_correction" && !matchesOf(signal.text, prepared).length) addTopics(topics, signal)
+  return recurringTopics(topics)
+}
+
+/** Every store's approved lessons (stores whose names are invalid, or unreadable, are skipped). */
+export async function approvedLessons(root: string): Promise<NamedLesson[]> {
+  const dir = path.join(root, ".altimate-code", "learn")
+  await SafeFS.assertSafePath(root, dir)
+  const entries = await fs.readdir(dir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return []
+    throw error
+  })
+  const lessons: NamedLesson[] = []
+  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+    if (!entry.isDirectory()) continue
+    try { validateName(entry.name) } catch { continue }
+    const file = Store.paths(root, entry.name).approved
+    try {
+      await SafeFS.assertSafePath(root, file)
+      for (const lesson of parse(await fs.readFile(file, "utf8"))) lessons.push({ name: entry.name, lesson })
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") log.warn("learn recurrence approved store skipped", { name: entry.name, error })
+    }
+  }
+  return lessons
+}
+
 export function attribute(signals: readonly Signal[], snapshots: readonly ShownSnapshot[], lessons: readonly NamedLesson[]) {
-  const prepared = lessons.map(({ name, lesson }) => ({
-    name, id: lesson.id, textHash: lessonTextHash(lesson.text),
-    anchors: [...anchors(lesson.text)].filter((word) => !word.startsWith("_") && !word.endsWith("_")),
-    tokens: tokens(lesson.text),
-  }))
+  const prepared = prepare(lessons)
   const sessions = new Map(snapshots.map((snapshot) => [snapshot.session, snapshot.shown]))
   const rows = new Map<string, {
     row: LessonRecurrence
@@ -52,24 +116,12 @@ export function attribute(signals: readonly Signal[], snapshots: readonly ShownS
       counts.sessions_shown.add(snapshot.session)
     }
   }
-  const unmatched = new Map<string, { sessions: Set<string>; signals: Set<string> }>()
+  const unmatched: Topics = new Map()
   for (const signal of signals) {
     if (signal.kind !== "user_correction" || !sessions.has(signal.sessionID)) continue
-    const words = identifiers(signal.text)
-    const content = tokens(signal.text)
-    const matches = prepared.filter((lesson) => {
-      const overlap = [...lesson.tokens].filter((word) => content.has(word))
-      return lesson.anchors.some((anchor) => words.has(anchor) && overlap.some((word) => word !== anchor)) ||
-        (overlap.length >= 3 && overlap.length / lesson.tokens.size >= 0.6)
-    })
+    const matches = matchesOf(signal.text, prepared)
     if (!matches.length) {
-      const topics = new Set([...words].filter((word) => word.includes("_")))
-      for (const anchor of anchors(signal.text)) topics.add(anchor)
-      for (const topic of topics) {
-        if (!unmatched.has(topic)) unmatched.set(topic, { sessions: new Set(), signals: new Set() })
-        unmatched.get(topic)!.sessions.add(signal.sessionID)
-        unmatched.get(topic)!.signals.add(signal.id)
-      }
+      addTopics(unmatched, signal)
       continue
     }
     // Only lessons this session saw in their current text before the correction compete; a lesson never
@@ -104,9 +156,7 @@ export function attribute(signals: readonly Signal[], snapshots: readonly ShownS
       for (const field of Object.keys(counts) as (keyof typeof counts)[]) row[field] = counts[field].size
       return row
     }).sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id) || a.textHash.localeCompare(b.textHash)),
-    unmatched_topics: [...unmatched].filter(([, value]) => value.sessions.size >= 2)
-      .map(([identifier, value]) => ({ identifier, sessions: value.sessions.size, signal_ids: [...value.signals].sort() }))
-      .sort((a, b) => b.sessions - a.sessions || a.identifier.localeCompare(b.identifier)).slice(0, 5),
+    unmatched_topics: recurringTopics(unmatched).slice(0, 5),
   }
 }
 

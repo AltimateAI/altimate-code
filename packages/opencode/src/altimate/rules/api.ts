@@ -120,6 +120,8 @@ export class RulesApiError extends Error {
     message: string,
     readonly code?: string,
     readonly status?: number,
+    /** The server's error detail, for codes whose fields matter (`invalid_status` carries the rule's `status`). */
+    readonly detail?: Record<string, unknown>,
   ) {
     super(message)
     this.name = "RulesApiError"
@@ -154,7 +156,7 @@ export function classify(error: unknown): RulesApiError {
     return new RulesApiError("transient", messageOf(error.detail, message), code, error.status)
   }
   const named = error as { name?: string; detail?: Record<string, unknown> } | undefined
-  if (named?.name === "ConflictError") return new RulesApiError("conflict", messageOf(named.detail, message), codeOf(named.detail), 409)
+  if (named?.name === "ConflictError") return new RulesApiError("conflict", messageOf(named.detail, message), codeOf(named.detail), 409, named.detail)
   if (named?.name === "PreconditionFailedError") return new RulesApiError("conflict", messageOf(named.detail, message), codeOf(named.detail), 412)
   return new RulesApiError("transient", message)
 }

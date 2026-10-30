@@ -17,7 +17,7 @@ import { randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
 import { Log } from "@/util/log"
 import { Flock } from "@opencode-ai/core/util/flock"
-import { learnEnabled } from "../learn/config"
+import { learnEnabled, workspacesOn } from "../learn/config"
 import * as SafeFS from "../learn/safe-fs"
 import type { ActAs } from "../workspace/api-client"
 import { Bus } from "@/bus"
@@ -49,8 +49,7 @@ const principals = new Map<string, string>()
 
 /** Rules need learning on and workspaces on. */
 export function rulesEnabled(learn: LearnConfig, env: NodeJS.ProcessEnv = process.env): boolean {
-  const disabled = env["ALTIMATE_DISABLE_WORKSPACE"]?.trim().toLowerCase()
-  return learnEnabled(learn, env) && (disabled === undefined || disabled === "" || disabled === "0" || disabled === "false")
+  return learnEnabled(learn, env) && workspacesOn(env)
 }
 
 /** Resolve the gate and scope. Binding resolution may ask the server; never call this under the learn lock. */
@@ -122,6 +121,9 @@ export async function adopt(root: string, ctx: Ready): Promise<{ state: State; s
   return { state: after, same: !changed }
 }
 
+/** The state belongs to this run's account and workspace, or to none yet. */
+const ownedBy = (state: State, ctx: Ready) => !state.scope || RulesStore.sameScope(state.scope, ctx.scope)
+
 export async function pull(root: string, ctx: Ready): Promise<PullResult> {
   const { state: before, same } = await adopt(root, ctx)
   try {
@@ -131,7 +133,11 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       ...(same && before.cursor ? { reviewed_since: before.cursor } : {}),
     })
     const fresh: State["notices"] = []
+    let applied = true
     const state = await RulesStore.update(root, (state) => {
+      // Applied only to the state it was asked for: another process may have adopted another account or workspace, or
+      // pulled a newer revision, while this answer was on its way.
+      if (!ownedBy(state, ctx) || (state.revision !== undefined && response.revision < state.revision)) return void (applied = false)
       state.scope = ctx.scope
       state.workspace = { name: response.workspace_name, owner_name: response.owner_name ?? null, is_owner: response.is_owner }
       state.settings = response.settings
@@ -161,13 +167,15 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
         if (sent) Object.assign(sent, { status: reviewed.status, reason: notice.reason, reviewer: notice.reviewer, updated_at: notice.at })
       }
     })
+    if (!applied) log.info("rules pull answer superseded; not applied")
     return { ok: true, rules: state.rules.length, pending: state.pending_count, notices: fresh }
   } catch (error) {
+    // Like an answer, a failure only changes the state it was for.
     if (error instanceof RulesApiError && (error.kind === "workspace_not_found" || error.kind === "repo_not_bound" || error.kind === "forbidden")) {
       // The link is gone or access was taken away: stop delivering its rules. Queued proposals stay (same scope).
-      await RulesStore.reset(root, { keepOutbox: true })
+      await RulesStore.update(root, (state) => (ownedBy(state, ctx) ? RulesStore.cleared(state, { keepOutbox: true }) : undefined))
     } else {
-      await RulesStore.update(root, (state) => { state.last_error = errorText(error) })
+      await RulesStore.update(root, (state) => { if (ownedBy(state, ctx)) state.last_error = errorText(error) })
     }
     log.warn("rules pull failed", { error: errorText(error) })
     return { ok: false, error: errorText(error), rules: before.rules.length, pending: before.pending_count, notices: [] }
@@ -247,6 +255,11 @@ const retryableApproval = (error: unknown) => {
   return kind === "transient" || kind === "auth"
 }
 const MAX_APPROVAL_ATTEMPTS = 5
+/** The review was refused because the rule is already active (`invalid_status`, status `active`). */
+const alreadyActive = (error: unknown) => {
+  const failure = error instanceof RulesApiError ? error : RulesApi.classify(error)
+  return failure.code === "invalid_status" && failure.detail?.status === "active"
+}
 const MAX_PUSH_OUTCOMES = 200
 
 /** Per-item answers that are about now, not about the proposal: it stays queued and is sent again later. */
@@ -256,19 +269,23 @@ const RETRY_LATER = new Set(["too_many_pending"])
  * the request itself is refused. Until the outbox changes it is sent as one batch, not split again on every refresh. */
 const refusedWhole = new Map<string, string>()
 
-/** `RulesStore.update`, tried again when the learn lock is busy: what it records was already sent. */
+/** `RulesStore.update`, tried again while the learn lock is busy: what it records was already sent. Only a lock that was
+ * never acquired is retried: then `change` did not run. Any other failure may come after the state was written (the
+ * mirror), and running `change` again would apply it twice. */
 async function record(root: string, change: (state: State) => State | void): Promise<State> {
   for (let attempt = 1; ; attempt++) {
     try {
       return await RulesStore.update(root, change)
     } catch (error) {
-      if (attempt >= RECORD_ATTEMPTS) throw error
+      if (attempt >= RECORD_ATTEMPTS || !LEARN_LOCK_BUSY.test(errorText(error))) throw error
       log.warn("rules state busy; recording again", { attempt, error: errorText(error) })
       await new Promise((resolve) => setTimeout(resolve, 500 * attempt))
     }
   }
 }
 const RECORD_ATTEMPTS = 3
+/** `Flock`'s message when the learn lock (`withLearnLock`) could not be acquired in time. */
+const LEARN_LOCK_BUSY = /^Timed out waiting for lock: learn-state$/
 
 /**
  * Send the outbox. An item leaves it once the server answered for it, or refused it (`rejected`, reported
@@ -279,14 +296,20 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
   // cannot stop two of them from reading the same outbox and posting it twice. A run that finds another one sending
   // waits for it; the outcome it recorded per outbox id then answers this run's card.
   await SafeFS.mkdir(root, RulesStore.dir(root))
+  let entered = false
   try {
-    return await Flock.withLock("rules-push", () => pushLocked(root, ctx), {
+    return await Flock.withLock("rules-push", () => {
+      entered = true
+      return pushLocked(root, ctx)
+    }, {
       dir: RulesStore.dir(root),
       staleMs: 60_000,
       timeoutMs: PUSH_LOCK_WAIT_MS,
     })
   } catch (error) {
-    if (!/Timed out waiting for lock/.test(errorText(error))) throw error
+    // Only a push lock this run never got means another sender: anything thrown while sending (the learn lock too) is
+    // a failure of this run.
+    if (entered) throw error
     const queued = (await RulesStore.read(root)).outbox.length
     return { sent: [], queued, ...(queued ? { error: "another sync is still sending proposals" } : {}) }
   }
@@ -297,7 +320,7 @@ const PUSH_LOCK_WAIT_MS = 30_000
 async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
   const state = await RulesStore.read(root)
   // The state was taken over by another account or workspace since this run started: none of it is this run's to send.
-  if (state.scope && !RulesStore.sameScope(state.scope, ctx.scope)) return { sent: [], queued: 0 }
+  if (!ownedBy(state, ctx)) return { sent: [], queued: 0 }
   const batch = state.outbox.slice(0, MAX_PROPOSALS)
   const retried = await retryApprovals(root, ctx, state.pending_approvals)
   if (!batch.length) return { sent: [], queued: 0, ...(retried ? { approval_error: retried } : {}) }
@@ -343,11 +366,12 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
     if (entry.approve && result.status === "pending" && result.public_id && result.version)
       approvals.push({ entry, publicId: result.public_id, version: result.version })
   }
-  // Recorded before any "Approve now": what was sent leaves the outbox even if an approval or a later write fails.
+  // Recorded before any "Approve now": what was sent leaves the outbox, and an approval to make is kept as pending, so a
+  // crash or a failed write before the approval answers retries it on the next push instead of losing it.
   const now = new Date().toISOString()
   let foreign = false
   const after = await record(root, (s) => {
-    if (s.scope && !RulesStore.sameScope(s.scope, ctx.scope)) return void (foreign = true)
+    if (!ownedBy(s, ctx)) return void (foreign = true)
     s.outbox = s.outbox.filter((entry) => !done.has(entry.id))
     for (const entry of s.outbox) {
       const error = failed.get(entry.id)
@@ -356,20 +380,28 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
       entry.last_error = error
     }
     recordOutcomes(s, sent)
+    for (const approval of approvals)
+      if (!s.pending_approvals.some((p) => p.public_id === approval.publicId))
+        s.pending_approvals.push({ public_id: approval.publicId, version: approval.version, action: approval.entry.approve!, attempts: 0 })
     for (const row of sent) {
       if (!row.public_id || row.status === "exists") continue
       const existing = s.sent.find((x) => x.public_id === row.public_id)
       const change = batch.find((b) => b.id === row.id)?.item.change ?? "add"
       if (existing) Object.assign(existing, { status: row.status, updated_at: now })
-      else s.sent.push({ public_id: row.public_id, text: row.text, change, status: row.status, sent_at: now, updated_at: now })
-      if (row.status === "pending") s.pending_count += 1
+      else {
+        s.sent.push({ public_id: row.public_id, text: row.text, change, status: row.status, sent_at: now, updated_at: now })
+        // A proposal the server already had (a resend answered as a duplicate) is counted by the next pull, not again.
+        if (row.status === "pending") s.pending_count += 1
+      }
     }
   })
   if (foreign) {
     log.warn("rules state changed scope while proposals were sent; their answers were not recorded")
     return { sent: [], queued: after.outbox.length }
   }
-  const pendingApprovals: RulesStore.State["pending_approvals"] = []
+  /** Approvals answered here, for good or not: they leave `pending_approvals`; a passing failure stays with one attempt. */
+  const settled = new Set<string>()
+  const retry = new Set<string>()
   for (const approval of approvals) {
     const row = sent.find((s) => s.public_id === approval.publicId)
     try {
@@ -378,19 +410,20 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
         expected_version: approval.version,
       })
       if (row) Object.assign(row, { status: reviewed.status, approved: true })
+      settled.add(approval.publicId)
     } catch (error) {
       if (row) row.approve_error = errorText(error)
       if (retryableApproval(error)) {
         if (row) row.approve_retry = true
-        pendingApprovals.push({ public_id: approval.publicId, version: approval.version, action: approval.entry.approve!, attempts: 1 })
-      }
+        retry.add(approval.publicId)
+      } else settled.add(approval.publicId)
     }
   }
   if (approvals.length)
     await record(root, (s) => {
-      if (s.scope && !RulesStore.sameScope(s.scope, ctx.scope)) return
-      for (const approval of pendingApprovals)
-        if (!s.pending_approvals.some((p) => p.public_id === approval.public_id)) s.pending_approvals.push(approval)
+      if (!ownedBy(s, ctx)) return
+      s.pending_approvals = s.pending_approvals.flatMap((p) =>
+        settled.has(p.public_id) ? [] : retry.has(p.public_id) ? [{ ...p, attempts: Math.max(p.attempts, 1) }] : [p])
       const answered = sent.filter((row) => approvals.some((a) => a.publicId === row.public_id))
       recordOutcomes(s, answered)
       for (const row of answered) {
@@ -429,6 +462,11 @@ async function retryApprovals(root: string, ctx: Ready, pending: RulesStore.Stat
       })
       settled.set(approval.public_id, { status: reviewed.status })
     } catch (error) {
+      // An earlier attempt landed but its answer was lost: the rule is already active, which is what was asked.
+      if (alreadyActive(error)) {
+        settled.set(approval.public_id, { status: "active" })
+        continue
+      }
       last = `approving a proposal failed: ${errorText(error)}`
       if (retryableApproval(error) && approval.attempts + 1 < MAX_APPROVAL_ATTEMPTS) retry.set(approval.public_id, approval.attempts + 1)
       else settled.set(approval.public_id, { reason: `"Approve now" failed: ${errorText(error)}. Approve it in the workspace's Rules tab.` })
@@ -476,11 +514,25 @@ function fromRecorded(id: string, recorded: Recorded): SentRow {
   }
 }
 
-/** Queue proposals for the next push, in one write. Returns their outbox ids, in order. Refuses past `MAX_OUTBOX`. */
-export async function enqueueMany(root: string, items: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway" }[]): Promise<string[]> {
+/** The account or workspace changed since the proposal was shown: it is not queued for the new one. */
+export class ScopeChangedError extends Error {
+  constructor() {
+    super("the account or workspace changed since this was shown")
+    this.name = "ScopeChangedError"
+  }
+}
+
+/** Queue proposals for the next push, in one write. Returns their outbox ids, in order. Refuses past `MAX_OUTBOX`.
+ * `scope`: the scope they were shown for; checked in the same write, so they never join another scope's outbox. */
+export async function enqueueMany(
+  root: string,
+  items: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway" }[],
+  scope?: Scope,
+): Promise<string[]> {
   const ids = items.map(() => randomUUID())
   const at = new Date().toISOString()
   await RulesStore.update(root, (state) => {
+    if (scope && !RulesStore.sameScope(state.scope, scope)) throw new ScopeChangedError()
     if (state.outbox.length + items.length > RulesStore.MAX_OUTBOX)
       throw new Error(
         items.length > RulesStore.MAX_OUTBOX
@@ -494,8 +546,8 @@ export async function enqueueMany(root: string, items: readonly { item: Proposal
 }
 
 /** Queue one proposal; it is sent by the next push. Returns its outbox id. */
-export async function enqueue(root: string, item: ProposalItem, approve?: "approve" | "approve_anyway"): Promise<string> {
-  return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}) }]))[0]
+export async function enqueue(root: string, item: ProposalItem, approve?: "approve" | "approve_anyway", scope?: Scope): Promise<string> {
+  return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}) }], scope))[0]
 }
 
 /**
@@ -629,7 +681,8 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
   let stale = false
   const after = await RulesStore.update(root, (s) => {
     if (s.pending_usage) return
-    stale = pairs.some((pair) => s.usage_reported.includes(pair)) ||
+    const reportedNow = new Set(s.usage_reported)
+    stale = pairs.some((pair) => reportedNow.has(pair)) ||
       Object.keys(corrected).some((key) => (s.corrected_reported[key] ?? 0) !== (state.corrected_reported[key] ?? 0))
     if (!stale) s.pending_usage = batch
   })
@@ -686,19 +739,23 @@ async function runUntracked(root: string, directory: string, learn: LearnConfig)
   const key = await canonicalRoot(root)
   const ctx = await context(directory, learn)
   if (ctx.status !== "ready") {
-    if (ctx.status === "skipped" && ctx.unlinked) {
+    // Unlinked, or signed out: nothing vouches for the pulled rules any more, so they stop being delivered (the queue
+    // stays for when the link or the sign-in returns). Other skips (unconfirmed for now) keep them.
+    if (ctx.status === "skipped" && (ctx.unlinked || ctx.code === "not_signed_in")) {
       const state = await RulesStore.read(root)
       if (state.workspace) await RulesStore.reset(root, { keepOutbox: true })
     }
     failedAt.set(key, Date.now())
     return { context: ctx }
   }
-  await adopt(root, ctx)
+  const { state } = await adopt(root, ctx)
   const pushed = await push(root, ctx)
+  // Usage before the pull: it is counted against the rule versions sessions were shown, which a pull that edits or
+  // retires a rule would replace. Only for a workspace the last pull reached (`workspace` is cleared when it is gone).
+  const usage = state.workspace ? await reportUsage(root, ctx).catch((error) => ({ items: 0, error: errorText(error) })) : undefined
   const pulled = await pull(root, ctx)
   if (pulled.ok) failedAt.delete(key)
   else failedAt.set(key, Date.now())
-  const usage = pulled.ok ? await reportUsage(root, ctx).catch((error) => ({ items: 0, error: errorText(error) })) : undefined
   return { context: ctx, push: pushed, pull: pulled, ...(usage ? { usage } : {}) }
 }
 
