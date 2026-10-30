@@ -53,6 +53,7 @@ import { SkillCommand } from "./cli/cmd/skill"
 import { CheckCommand } from "./cli/cmd/check"
 // altimate_change start — tool: model-free data tool access
 import { ToolCommand } from "./cli/cmd/tool"
+import { IntegrationsCommand } from "./cli/cmd/integrations"
 // altimate_change end
 // altimate_change end
 // altimate_change start — learn: playbook learning loop command
@@ -261,6 +262,9 @@ let cli = yargs(args)
   // altimate_change end
   // altimate_change start — tool: model-free data tool access
   .command(ToolCommand)
+  // altimate_change end
+  // altimate_change start — integrations: one-click local integrations
+  .command(IntegrationsCommand)
   // altimate_change end
   // altimate_change start — learn: register playbook learning command
   .command(LearnCommand)
