@@ -62,13 +62,26 @@ afterAll(async () => {
   await fs.rm(root, { recursive: true, force: true })
 })
 
-const withTimeout = <T>(promise: Promise<T>, ms: number, label: string) =>
-  Promise.race([
-    promise,
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`${label} after ${ms}ms`)), ms)),
-  ])
+// Fails with `what()` evaluated at timeout, so the message carries the output captured so far.
+async function waitFor(check: () => boolean, ms: number, what: () => string) {
+  const deadline = Date.now() + ms
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error(`${what()} (after ${ms}ms)`)
+    await Bun.sleep(50)
+  }
+}
 
-describe("auth login cancel", () => {
+async function exitWithin<T>(exited: Promise<T>, ms: number, what: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${what} after ${ms}ms`)), ms)
+  })
+  return Promise.race([exited, timeout]).finally(() => clearTimeout(timer))
+}
+
+// Spawns the real CLI, so like cliIt tests it runs only in CI's bounded subprocess pass.
+// Windows has no POSIX signals or Ctrl+C-as-SIGINT through a PTY.
+describe.skipIf(!!process.env.OPENCODE_SKIP_SUBPROCESS || process.platform === "win32")("auth login cancel", () => {
   test("Ctrl+C in a terminal exits 130", async () => {
     const child = ptySpawn(process.execPath, argv, { name: "xterm-256color", cols: 120, rows: 40, cwd: root, env })
     let output = ""
@@ -77,15 +90,13 @@ describe("auth login cancel", () => {
     })
     const exited = new Promise<{ exitCode: number }>((resolve) => child.onExit(resolve))
     try {
-      await withTimeout(
-        (async () => {
-          while (!output.includes(WAITING)) await Bun.sleep(50)
-        })(),
+      await waitFor(
+        () => output.includes(WAITING),
         60_000,
-        `never printed "${WAITING}": ${output}`,
+        () => `never printed "${WAITING}": ${output}`,
       )
       child.write("\x03")
-      const { exitCode } = await withTimeout(exited, 10_000, "still running after Ctrl+C")
+      const { exitCode } = await exitWithin(exited, 10_000, "still running after Ctrl+C")
       expect(exitCode).toBe(130)
       expect(output).toContain("Sign-in canceled.")
     } finally {
@@ -101,27 +112,24 @@ describe("auth login cancel", () => {
       stdout: "pipe",
       stderr: "pipe",
     })
-    try {
+    let output = ""
+    const decoder = new TextDecoder()
+    const drained = (async () => {
       const reader = proc.stdout.getReader()
-      const decoder = new TextDecoder()
-      let output = ""
-      await withTimeout(
-        (async () => {
-          while (!output.includes(WAITING)) {
-            const { value, done } = await reader.read()
-            if (done) throw new Error(`exited before waiting: ${output}`)
-            output += decoder.decode(value)
-          }
-        })(),
+      for (let next = await reader.read(); !next.done; next = await reader.read()) output += decoder.decode(next.value)
+    })()
+    try {
+      await waitFor(
+        () => output.includes(WAITING),
         60_000,
-        `never printed "${WAITING}": ${output}`,
+        () => `never printed "${WAITING}": ${output}`,
       )
-      reader.releaseLock()
       proc.kill("SIGINT")
-      expect(await withTimeout(proc.exited, 10_000, "still running after SIGINT")).toBe(130)
+      expect(await exitWithin(proc.exited, 10_000, "still running after SIGINT")).toBe(130)
       expect(await new Response(proc.stderr).text()).toContain("Sign-in canceled.")
     } finally {
       proc.kill("SIGKILL")
+      await drained
     }
   }, 90_000)
 })
