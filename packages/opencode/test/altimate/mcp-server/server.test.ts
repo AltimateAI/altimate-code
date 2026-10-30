@@ -10,11 +10,13 @@ import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js"
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import { createServer, SERVER_INSTRUCTIONS } from "../../../src/altimate/mcp-server/server"
 import * as Registry from "../../../src/altimate/native/connections/registry"
+import * as CredentialStore from "../../../src/altimate/native/connections/credential-store"
 import { Dispatcher } from "../../../src/altimate/native"
 import type { Connector } from "@altimateai/drivers/types"
 import { closeScratch } from "../../../src/altimate/native/connections/scratch"
 import { EXPOSED } from "../../../src/altimate/tool-cli/allow-list"
 import * as CommitChecks from "../../../src/altimate/tools/answer-commit-checks"
+import { AnswerCommitConjunction } from "../../../src/altimate/tools/answer-commit-conjunction"
 
 // The original data toolset the size budgets below were set for; the allow-list adds more tools around it.
 const CORE_TOOLS = new Set(["answer_commit", "schema_inspect", "sql_check", "sql_execute", "sql_materialize", "warehouse_add", "warehouse_list"])
@@ -303,6 +305,26 @@ mcpTest("MCP cancellation reaches the active tool abort signal", async () => {
     expect(signal.aborted).toBe(true)
   } finally {
     dispatch.mockRestore()
+  }
+})
+
+mcpTest("file database locks are released after a tool call returns to idle, never mid-flight", async () => {
+  const { call } = await fixture()
+  const release = spyOn(Registry, "releaseFileConnections").mockResolvedValue(undefined)
+  try {
+    await call("warehouse_list", {})
+    expect(release).toHaveBeenCalledTimes(1)
+    release.mockClear()
+    const overlapping = await Promise.all([
+      call("sql_execute", { warehouse: "source", query: "SELECT * FROM items" }),
+      call("sql_execute", { warehouse: "source", query: "SELECT * FROM items" }),
+    ])
+    expect(overlapping.every((result) => !result.isError)).toBe(true)
+    // Two overlapping calls release at most once per idle moment, and always at least once.
+    expect(release.mock.calls.length).toBeGreaterThanOrEqual(1)
+    expect(release.mock.calls.length).toBeLessThanOrEqual(2)
+  } finally {
+    release.mockRestore()
   }
 })
 
@@ -627,7 +649,7 @@ mcpTest("the session record stays bounded across many accepted commits, and the 
   })
   const wide = Array.from({ length: 90 }, (_, i) => `v || '${i}' AS c${i}`).join(", ")
   let record: { parts: { state?: { output?: unknown } }[] }[] = []
-  const spy = spyOn(CommitChecks, "sessionNumbers").mockImplementation((messages) => {
+  const spy = spyOn(AnswerCommitConjunction, "conjunctionRejection").mockImplementation((_args, messages) => {
     record = messages as typeof record
     return undefined
   })
@@ -644,6 +666,37 @@ mcpTest("the session record stays bounded across many accepted commits, and the 
     // Rejections of the current turn are still counted after trimming.
     const args = commit([{ name: "item", value: "apple" }], ["item", "count"])
     for (let i = 0; i < 2; i++) expect((await call("answer_commit", args)).isError).toBe(true)
+    expect((await call("answer_commit", args)).isError).toBeFalsy()
+  } finally {
+    spy.mockRestore()
+  }
+}, 60_000)
+
+mcpTest("the session record stays bounded with no commits, keeping the user message and current rejections", async () => {
+  const { call } = await fixture(false, {}, undefined, (db) => {
+    db.run("CREATE TABLE big (v TEXT)")
+    for (let i = 0; i < 400; i++) db.run("INSERT INTO big VALUES (?)", ["z".repeat(190)])
+  })
+  const wide = Array.from({ length: 90 }, (_, i) => `v || '${i}' AS c${i}`).join(", ")
+  let record: { info: { role: string }; parts: { tool?: string; state?: { output?: unknown } }[] }[] = []
+  const spy = spyOn(AnswerCommitConjunction, "conjunctionRejection").mockImplementation((_args, messages) => {
+    record = messages as typeof record
+    return undefined
+  })
+  try {
+    // An accepted commit hands the checks the live record, then the turn under test starts with a rejection.
+    expect((await call("answer_commit", commit([{ name: "item", value: "apple" }], ["item"]))).isError).toBeFalsy()
+    const args = commit([{ name: "item", value: "apple" }], ["item", "count"])
+    expect((await call("answer_commit", args)).isError).toBe(true)
+    let produced = 0
+    for (let n = 0; n < 280; n++) produced += text(await call("sql_execute", { warehouse: "source", query: `SELECT ${wide} FROM big` })).length
+    expect(produced).toBeGreaterThan(CommitChecks.MAX_SCANNED_CHARACTERS)
+    expect((await call("answer_commit", args)).isError).toBe(true)
+    const retained = record.reduce((n, m) => n + m.parts.reduce((k, p) => k + String(p.state?.output ?? "").length, 0), 0)
+    expect(retained).toBeLessThanOrEqual(CommitChecks.MAX_SCANNED_CHARACTERS)
+    expect(record.some((m) => m.info.role === "user")).toBe(true)
+    expect(record.filter((m) => m.parts.some((p) => p.tool === "answer_commit"))).toHaveLength(2)
+    // Both rejections survived the trim, so the third attempt is accepted.
     expect((await call("answer_commit", args)).isError).toBeFalsy()
   } finally {
     spy.mockRestore()
@@ -1213,6 +1266,115 @@ mcpTest("warehouse_add refuses create:true in a read-only session and creates no
   expect(added.body).toContain("read-only")
   expect((await call("warehouse_list", {})).body).not.toContain("fresh")
   expect(await Bun.file(target).exists()).toBe(false)
+})
+// altimate_change end
+
+// altimate_change start — a read-only session cannot replace an existing connection
+mcpTest("warehouse_add refuses to replace an existing connection in a read-only session", async () => {
+  const { project, call } = await emptyProject()
+  const first = path.join(project, "store.sqlite")
+  expect((await call("warehouse_add", { name: "one", config: { type: "sqlite", path: first } })).result.isError).toBe(false)
+  const replaced = await call("warehouse_add", { name: "one", config: { type: "sqlite", path: path.join(project, "other.sqlite") } })
+  expect(replaced.body).toContain("already exists")
+  expect(replaced.body).toContain("--allow-write")
+  expect(Registry.getConfig("one")?.path).toBe(first)
+})
+// altimate_change end
+
+// altimate_change start — a read-only session must refuse a name bound anywhere `Registry.add` would touch, not
+// only in the registry the current session happens to serve
+mcpTest(
+  "warehouse_add in --connections mode refuses a name already bound in the global connections file",
+  async () => {
+    const { project, call } = await emptyProject()
+    // Bind "shadow" in the global file through an ordinary (non --connections) add.
+    expect(
+      (await call("warehouse_add", { name: "shadow", config: { type: "sqlite", path: path.join(project, "store.sqlite") } }))
+        .result.isError,
+    ).toBe(false)
+
+    // A second server whose active registry is an unrelated --connections file: "shadow" is invisible there.
+    const configFile = path.join(project, "only-other.json")
+    await Bun.write(configFile, JSON.stringify({}))
+    const server2 = await createServer({ connections: configFile })
+    const client2 = new Client({ name: "test2", version: "1" })
+    const [clientTransport2, serverTransport2] = InMemoryTransport.createLinkedPair()
+    await server2.connect(serverTransport2)
+    await client2.connect(clientTransport2)
+    try {
+      const result = await client2.callTool({
+        name: "warehouse_add",
+        arguments: { name: "shadow", config: { type: "sqlite", path: path.join(project, "other.sqlite") } },
+      })
+      const added = (result.content as { text?: string }[]).map((part) => part.text ?? "").join("\n")
+      expect(added).toContain("already exists")
+      expect(added).toContain("--allow-write")
+    } finally {
+      await client2.close()
+      await server2.close()
+    }
+  },
+)
+
+mcpTest("warehouse_add still adds a new name when the credential store cannot be read", async () => {
+  const { call } = await emptyProject()
+  const failing = async () => {
+    throw new Error("no libsecret")
+  }
+  CredentialStore.setSecretBackendForTests({ name: "broken", set: failing, get: failing, delete: failing })
+  try {
+    const added = await call("warehouse_add", { name: "fresh", config: { type: "postgres", host: "h", user: "u" } })
+    expect(added.body).not.toContain("already exists")
+  } finally {
+    CredentialStore.setSecretBackendForTests(undefined)
+  }
+})
+
+mcpTest("warehouse_add refuses a name with stored credentials even when no connections file names it", async () => {
+  const { call } = await emptyProject()
+  const store = new Map<string, string>()
+  const backend = {
+    name: "memory",
+    async set(account: string, value: string) {
+      store.set(account, value)
+    },
+    async get(account: string) {
+      return store.get(account) ?? null
+    },
+    async delete(account: string) {
+      return store.delete(account)
+    },
+  }
+  CredentialStore.setSecretBackendForTests(backend)
+  try {
+    await CredentialStore.storeCredential("ghost", "password", "s3cret")
+    const added = await call("warehouse_add", {
+      name: "ghost",
+      config: { type: "postgres", host: "h", user: "u", password: "new" },
+    })
+    expect(added.body).toContain("already exists")
+  } finally {
+    CredentialStore.setSecretBackendForTests(undefined)
+  }
+})
+
+mcpTest("warehouse_add refuses, rather than allows, when the existing-connection lookup throws", async () => {
+  const { project, call } = await emptyProject()
+  const original = Dispatcher.call
+  const dispatch = spyOn(Dispatcher, "call").mockImplementation(async (method, args, context) => {
+    if (method === "warehouse.list") throw new Error("boom")
+    return original(method, args, context)
+  })
+  try {
+    const added = await call("warehouse_add", {
+      name: "fresh2",
+      config: { type: "sqlite", path: path.join(project, "never-created.sqlite") },
+    })
+    expect(added.body).toContain("already exists")
+    expect(await Bun.file(path.join(project, "never-created.sqlite")).exists()).toBe(false)
+  } finally {
+    dispatch.mockRestore()
+  }
 })
 // altimate_change end
 

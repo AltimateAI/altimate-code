@@ -114,6 +114,127 @@ describe("daemon round trip", () => {
   })
 })
 
+describe("connection env in the socket name", () => {
+  test("changes the name only when ALTIMATE_CODE_CONN_* variables exist", async () => {
+    const dir = await temp()
+    const none = socketName(dir, "1.0.0", undefined, undefined, { PATH: "/bin" })
+    expect(none).toBe(socketName(dir, "1.0.0"))
+    const a = socketName(dir, "1.0.0", undefined, undefined, { ALTIMATE_CODE_CONN_A: '{"type":"duckdb"}' })
+    const b = socketName(dir, "1.0.0", undefined, undefined, { ALTIMATE_CODE_CONN_A: '{"type":"sqlite"}' })
+    expect(a).not.toBe(none)
+    expect(a).not.toBe(b)
+    expect(socketName(dir, "1.0.0", undefined, undefined, { ALTIMATE_CODE_CONN_B: "1", ALTIMATE_CODE_CONN_A: "2" })).toBe(
+      socketName(dir, "1.0.0", undefined, undefined, { ALTIMATE_CODE_CONN_A: "2", ALTIMATE_CODE_CONN_B: "1" }),
+    )
+    expect(socketPath(dir, "1.0.0", "/x", undefined, undefined, { ALTIMATE_CODE_CONN_A: "1" })).toBe(
+      `/x/${socketName(dir, "1.0.0", undefined, undefined, { ALTIMATE_CODE_CONN_A: "1" })}.sock`,
+    )
+  })
+
+  test("uses the registry's prefix", async () => {
+    const { CONN_ENV_PREFIX } = await import("../../../src/altimate/native/connections/registry")
+    const dir = await temp()
+    expect(socketName(dir, "1", undefined, undefined, { [`${CONN_ENV_PREFIX}X`]: "1" })).not.toBe(socketName(dir, "1"))
+  })
+})
+
+describe("connection refresh", () => {
+  test("runs before each run request and a failure is reported", async () => {
+    const dir = await temp()
+    const file = path.join(dir, "d.sock")
+    const runner = fakeRunner()
+    let refreshes = 0
+    let fail = false
+    const daemon = await startDaemon({
+      directory: dir,
+      version: "1",
+      runner,
+      file,
+      idleMs: 60_000,
+      refreshConnections: async () => {
+        refreshes++
+        if (fail) throw new Error("bad connections file")
+      },
+    })
+    cleanups.push(() => daemon.stop())
+    expect((await send(file, { id: "1", name: "t" }))?.status).toBe("ok")
+    expect(refreshes).toBe(1)
+    await send(file, { id: "2", op: "status" })
+    expect(refreshes).toBe(1)
+    fail = true
+    const reply = await send(file, { id: "3", name: "t" })
+    expect(reply).toMatchObject({ status: "error", output: "bad connections file" })
+  })
+})
+
+describe("connection refresh serialization", () => {
+  test("skips the connections check while another request is already in flight", async () => {
+    const dir = await temp()
+    const file = path.join(dir, "d.sock")
+    const gates: Array<() => void> = []
+    const runner = fakeRunner()
+    runner.run = () =>
+      new Promise((resolve) => gates.push(() => resolve({ status: "ok" as const, title: "t", output: "", metadata: {} })))
+    let refreshes = 0
+    const daemon = await startDaemon({
+      directory: dir,
+      version: "1",
+      runner,
+      file,
+      idleMs: 60_000,
+      refreshConnections: async () => void refreshes++,
+    })
+    cleanups.push(() => daemon.stop())
+    const first = send(file, { id: "1", name: "t" })
+    while (gates.length < 1) await new Promise((resolve) => setTimeout(resolve, 10))
+    expect(refreshes).toBe(1)
+    const second = send(file, { id: "2", name: "t" })
+    while (gates.length < 2) await new Promise((resolve) => setTimeout(resolve, 10))
+    // The second request arrived while the first was still in flight: its own reload is skipped, since a reload
+    // would close connectors the first request may still be using.
+    expect(refreshes).toBe(1)
+    gates[0]()
+    await first
+    gates[1]()
+    await second
+  })
+
+  test("a request that arrives during a reload waits for it before running", async () => {
+    const dir = await temp()
+    const file = path.join(dir, "d.sock")
+    const events: string[] = []
+    const runner = fakeRunner()
+    runner.run = async (name) => {
+      events.push(`run ${name}`)
+      return { status: "ok" as const, title: "t", output: "", metadata: {} }
+    }
+    let finishReload!: () => void
+    let reloads = 0
+    const daemon = await startDaemon({
+      directory: dir,
+      version: "1",
+      runner,
+      file,
+      idleMs: 60_000,
+      refreshConnections: () => {
+        if (++reloads > 1) return Promise.resolve()
+        events.push("reload start")
+        return new Promise<void>((resolve) => (finishReload = () => (events.push("reload end"), resolve())))
+      },
+    })
+    cleanups.push(() => daemon.stop())
+    const first = send(file, { id: "1", name: "a" })
+    while (!finishReload) await new Promise((resolve) => setTimeout(resolve, 10))
+    const second = send(file, { id: "2", name: "b" })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(events).toEqual(["reload start"])
+    finishReload()
+    await Promise.all([first, second])
+    expect(events.slice(0, 2)).toEqual(["reload start", "reload end"])
+    expect(events.slice(2).sort()).toEqual(["run a", "run b"])
+  })
+})
+
 describe("file lock release", () => {
   test("releases once after concurrent requests finish, never while one is in flight", async () => {
     const dir = await temp()

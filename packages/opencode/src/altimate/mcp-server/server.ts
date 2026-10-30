@@ -131,7 +131,10 @@ export async function createServer(options: ServeOptions = {}) {
     const text = [SERVER_INSTRUCTIONS, ...(question ? ["", `Question: ${question}`] : [])].join("\n")
     return { description: analyzePrompt.description, messages: [{ role: "user" as const, content: { type: "text" as const, text } }] }
   })
-  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  // Calls in flight; when the last one finishes, embedded file databases are released so another process (dbt, a
+  // second client) can open them while this server idles.
+  let inflight = 0
+  const callTool: Parameters<typeof server.setRequestHandler<typeof CallToolRequestSchema>>[1] = async (request, extra) => {
     try {
       if (workspace?.tools.some((tool) => tool.name === request.params.name)) {
         return await workspace.execute(request.params.name, request.params.arguments ?? {}, extra.signal)
@@ -149,6 +152,15 @@ export async function createServer(options: ServeOptions = {}) {
         content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }],
         isError: true,
       }
+    }
+  }
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+    inflight++
+    try {
+      return await callTool(request, extra)
+    } finally {
+      inflight--
+      if (inflight === 0) await Registry.releaseFileConnections().catch(() => {})
     }
   })
   let cleanup: Promise<void> | undefined

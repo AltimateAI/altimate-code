@@ -252,6 +252,36 @@ describe("claude skill mirror", () => {
     expect(existsSync(skillPath("staging-conventions"))).toBe(false)
   })
 
+  test("a skill whose SKILL.md cannot be read keeps every copy", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha") }, sk_2: { "SKILL.md": simple("beta") } })
+    await mirrorClaudeSkills(project)
+    const file = path.join(project, MANAGED, "sk_2", "SKILL.md")
+    rmSync(file)
+    mkdirSync(file) // reading a directory fails with something other than ENOENT
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+    expect(existsSync(skillPath("alpha"))).toBe(true)
+    expect(existsSync(skillPath("beta"))).toBe(true)
+  })
+
+  test("a manifest that breaks between the read and the ownership check keeps copies", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha") } })
+    await mirrorClaudeSkills(project)
+    const manifest = path.join(project, MANAGED, ".manifest.json")
+    const real = fsp.readFile.bind(fsp)
+    let reads = 0
+    const spy = spyOn(fsp, "readFile").mockImplementation((async (p: any, ...rest: any[]) => {
+      if (String(p) === manifest && ++reads >= 2) throw Object.assign(new Error("gone"), { code: "ENOENT" })
+      return (real as any)(p, ...rest)
+    }) as any)
+    try {
+      signIn(TENANT, "other-key")
+      expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(existsSync(skillPath("alpha"))).toBe(true)
+  })
+
   test("a snapshot missing while it is swapped keeps copies", async () => {
     writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
     await mirrorClaudeSkills(project)
@@ -463,6 +493,14 @@ describe("claude skill mirror", () => {
   test("withdraw removes marked copies whatever the snapshot says", async () => {
     writeSnapshot({ sk_1: { "SKILL.md": simple("a") } })
     await mirrorClaudeSkills(project)
+    expect((await mirrorClaudeSkills(project, { withdraw: true })).changed).toBe(true)
+    expect(existsSync(skillPath("a"))).toBe(false)
+  })
+
+  test("withdraw runs even with ALTIMATE_CLAUDE_SKILL_SYNC=0", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": simple("a") } })
+    await mirrorClaudeSkills(project)
+    process.env.ALTIMATE_CLAUDE_SKILL_SYNC = "0"
     expect((await mirrorClaudeSkills(project, { withdraw: true })).changed).toBe(true)
     expect(existsSync(skillPath("a"))).toBe(false)
   })

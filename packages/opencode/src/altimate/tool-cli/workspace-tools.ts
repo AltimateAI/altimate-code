@@ -4,14 +4,15 @@
 // An explicit flag always wins; without one the tools are on exactly when the project is linked.
 import fs from "node:fs/promises"
 import path from "node:path"
-import { resolveBindingOutcome } from "../workspace/state"
+import { readLocalBinding } from "../workspace/state"
 import * as WorkspaceClient from "../workspace/client"
 import * as SkillSync from "../workspace/skill-sync"
 
-/** Whether the project in `directory` is linked to a workspace. Unlinked, signed out or unreachable read as no. */
+/** Whether the project in `directory` is linked to a workspace, judged from the saved link alone: every CLI call asks,
+ * so it makes no network request. The workspace tools validate the link when one is called. Unlinked or signed out read as no. */
 export async function projectIsLinked(directory: string): Promise<boolean> {
   try {
-    return (await resolveBindingOutcome(directory)).status === "bound"
+    return (await readLocalBinding(directory)) !== null
   } catch {
     return false
   }

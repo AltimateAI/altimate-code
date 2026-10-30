@@ -14,7 +14,7 @@ altimate-code tool list          # id and description
 altimate-code tool list --json   # id, description and JSON input schema
 ```
 
-`tool` and `mcp serve` share one implementation, so compact schemas, `sql_execute` with `tables`, `query_from` chaining, spilled result files, read-only enforcement and `answer_commit` (with its `request` argument) behave the same in both. `tool` exposes the full tool list; pass `--workspace-tools` to add `workspace_context`, `workspace_skill` and `workspace_execute`.
+`tool` and `mcp serve` share one implementation, so compact schemas, `sql_execute` with `tables`, `query_from` chaining, spilled result files, read-only enforcement and `answer_commit` (with its `request` argument) behave the same in both. `tool` exposes the full tool list. In a project linked to a workspace it also exposes `workspace_context`, `workspace_skill` and `workspace_execute`; the link is read from the project's saved state, with no network request. Pass `--workspace-tools` to add them to an unlinked project, or `--no-workspace-tools` to leave them out of a linked one.
 
 ## Startup context
 
@@ -39,6 +39,8 @@ echo '{"query":"select 1"}' | altimate-code tool run sql_execute --args -
 | `--args-file <path>` | Read the arguments from a file. |
 | `--allow-write` | Allow writes. Without it, only reads run. |
 | `--no-daemon` | Run in this process instead of using the daemon. |
+| `--connections <file>` | Use only this connections JSON file instead of the project and global connection configs. Defaults to `$ALTIMATE_TOOL_CONNECTIONS`. |
+| `--workspace-tools` / `--no-workspace-tools` | Force the linked workspace tools on or off. Unset, they are on when the project is linked. |
 | `--json` | Print `{"status","title","output","metadata"}`. Otherwise only `output` is printed. |
 
 Arguments are validated against the tool's schema. An unknown tool, invalid arguments or a failing tool exits non-zero.
@@ -53,12 +55,16 @@ Runs are read-only by default. Reads such as `sql_execute` on a SELECT and `sche
 
 ## Daemon
 
-`tool run` starts a background process per project directory and CLI version on first use, and reuses it afterwards so warehouse connections and the schema cache stay warm. If it cannot be reached within about 3 seconds, the call runs in-process. `scratch` tables created by `sql_materialize` live as long as the daemon does. Every caller in that directory shares the daemon, so concurrent agents share its `scratch` tables and its `answer_commit` history; use `--no-daemon` to keep a caller separate.
+`tool run` starts a background process per project directory and CLI version on first use, and reuses it afterwards so warehouse connections and the schema cache stay warm. If it cannot be reached within about 3 seconds, the call runs in-process. `scratch` tables created by `sql_materialize` live as long as the daemon does, with one exception: with `--connections`, an edit to that file is reloaded by replacing the registry entirely, which also closes and empties `scratch`, so a `--connections` daemon's `scratch` tables only live between connection file edits. Every caller in that directory shares the daemon, so concurrent agents share its `scratch` tables and its `answer_commit` history; use `--no-daemon` to keep a caller separate.
+
+The daemon reloads its connections when the global or project `connections.json` (or the `--connections` file) changed since its last reload. The check runs on a call that has no other call in flight, so an edit made while calls overlap is picked up by the next call that runs alone; calls that arrive during a reload wait for it.
 
 ```bash
 altimate-code tool daemon status
 altimate-code tool daemon stop
 ```
+
+`status` and `stop` locate the running daemon the same way `run` does: by project directory, CLI version, the `--connections` file (if any), whether workspace tools are on, and the caller's `ALTIMATE_CODE_CONN_*` environment variables. Run them with the same flags and `ALTIMATE_CODE_CONN_*` variables as the call that started the daemon, or they will report no daemon running for this project even though one is.
 
 | Setting | Description |
 |---|---|

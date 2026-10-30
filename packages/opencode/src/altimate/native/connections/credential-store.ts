@@ -270,3 +270,16 @@ export async function saveConnection(
 export function isSensitiveField(field: string): boolean {
   return SENSITIVE_FIELDS.has(field)
 }
+
+/**
+ * Whether any sensitive field is currently stored for connection `name`. Unlike {@link getCredential}, a backend
+ * read failure is not reported as "absent": it propagates, so the caller decides what an unreadable store means.
+ */
+export async function hasStoredCredentials(name: string): Promise<boolean> {
+  const store = await getBackend()
+  if (!store) return false
+  for (const field of SENSITIVE_FIELDS) {
+    if ((await store.get(`${name}/${field}`)) !== null) return true
+  }
+  return false
+}

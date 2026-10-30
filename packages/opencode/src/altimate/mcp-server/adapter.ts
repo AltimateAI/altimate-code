@@ -390,7 +390,7 @@ export async function createAdapter(options: AdapterOptions = {}) {
   const shutdown = new AbortController()
   const active = new Set<Promise<Tool.ExecuteResult>>()
   // Feed the native commit checks: completed tool output and rejections, with a new turn after an accepted commit.
-  const record = (name: string, result: Tool.ExecuteResult, args: Record<string, unknown>, request?: unknown) => {
+  const push = (name: string, result: Tool.ExecuteResult, args: Record<string, unknown>, request?: unknown) => {
     if (name !== "answer_commit") {
       if (result.status !== "error") messages.push(toolMessage(name, { status: "completed", output: result.output }))
       return result
@@ -400,15 +400,32 @@ export async function createAdapter(options: AdapterOptions = {}) {
       return result
     }
     messages.push(userMessage())
-    // Earlier turns beyond what the commit checks can scan are dead weight; the new turn is never trimmed.
-    const size = (message: TurnMessage) =>
-      (message.parts as { state?: { output?: unknown }; text?: string }[]).reduce(
-        (total, part) => total + String(part.state?.output ?? part.text ?? "").length,
-        0,
-      )
-    let retained = messages.slice(0, -1).reduce((total, message) => total + size(message), 0)
-    while (retained > MAX_SCANNED_CHARACTERS && messages.length > 1) retained -= size(messages.shift()!)
     return { ...result, output: finalAnswerText(args, result.metadata.committed_text ?? result.output, request) }
+  }
+  // Tool output beyond what the commit checks can scan is dead weight, so after every call the oldest is dropped.
+  // The latest user message and the current turn's answer_commit rejections are what the checks count, so they stay.
+  const size = (message: TurnMessage) =>
+    (message.parts as { state?: { output?: unknown }; text?: string }[]).reduce(
+      (total, part) => total + String(part.state?.output ?? part.text ?? "").length,
+      0,
+    )
+  const trim = () => {
+    let turn = messages.findLastIndex((message) => (message.info as { role?: string }).role === "user")
+    let retained = messages.reduce((total, message) => total + size(message), 0)
+    for (let i = 0; retained > MAX_SCANNED_CHARACTERS && i < messages.length; ) {
+      const kept = i === turn || (i > turn && (messages[i].parts as { tool?: string }[]).some((part) => part.tool === "answer_commit"))
+      if (kept) {
+        i++
+        continue
+      }
+      retained -= size(messages.splice(i, 1)[0])
+      if (i < turn) turn--
+    }
+  }
+  const record = (...args: Parameters<typeof push>) => {
+    const result = push(...args)
+    trim()
+    return result
   }
   const advertised = new Map([...tools].filter(([name]) => options.allTools || DEFAULT_TOOLS.has(name)))
   /** sql_execute with `tables`: describe each table with schema_inspect, then run the queries, in one call. */
@@ -483,7 +500,10 @@ export async function createAdapter(options: AdapterOptions = {}) {
         const result = await pending
         return record(name, result, args, request)
       } catch (error) {
-        if (name === "answer_commit") messages.push(toolMessage(name, { status: "error", error: String(error) }))
+        if (name === "answer_commit") {
+          messages.push(toolMessage(name, { status: "error", error: String(error) }))
+          trim()
+        }
         throw error
       } finally {
         active.delete(pending)

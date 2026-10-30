@@ -40,22 +40,51 @@ export function resolveDirectory(directory: string): string {
   }
 }
 
+// The registry's CONN_ENV_PREFIX, repeated so a client call does not load the registry.
+const CONN_ENV_PREFIX = "ALTIMATE_CODE_CONN_"
+
+/** A short digest of the caller's `ALTIMATE_CODE_CONN_*` variables, empty when there are none. A daemon reads them
+ * once at spawn, so callers with different values must not share one. */
+export function connectionEnvKey(env: NodeJS.ProcessEnv = process.env): string {
+  const entries = Object.entries(env)
+    .filter(([key, value]) => key.startsWith(CONN_ENV_PREFIX) && value)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+  if (entries.length === 0) return ""
+  return createHash("sha256").update(JSON.stringify(entries)).digest("hex").slice(0, 8)
+}
+
 /**
- * Identifies one daemon: the project directory, the explicit connections file if any, and the CLI version, so an
- * upgrade never reuses an old process and a daemon never serves connections it was not started with.
+ * Identifies one daemon: the project directory, the explicit connections file if any, the caller's connection
+ * variables and the CLI version, so an upgrade never reuses an old process and a daemon never serves connections it
+ * was not started with.
  */
-export function socketName(directory: string, version: string, connections?: string, workspaceTools?: boolean): string {
+export function socketName(
+  directory: string,
+  version: string,
+  connections?: string,
+  workspaceTools?: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
   const parts = [resolveDirectory(directory), ...(connections ? [path.resolve(connections)] : [])]
   // Appended only when set, so existing daemons keep their names.
   if (workspaceTools) parts.push("workspace-tools")
+  const connEnv = connectionEnvKey(env)
+  if (connEnv) parts.push(`conn-env:${connEnv}`)
   const key = parts.join("\0")
   const hash = createHash("sha256").update(key).digest("hex").slice(0, 12)
   return `tool-${hash}-${version.replace(/[^A-Za-z0-9.-]/g, "_")}`
 }
 
 /** A named pipe on Windows, otherwise a socket file under the global state path (or the temp dir when that path is too long). */
-export function socketPath(directory: string, version: string, base?: string, connections?: string, workspaceTools?: boolean): string {
-  const name = socketName(directory, version, connections, workspaceTools)
+export function socketPath(
+  directory: string,
+  version: string,
+  base?: string,
+  connections?: string,
+  workspaceTools?: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const name = socketName(directory, version, connections, workspaceTools, env)
   if (process.platform === "win32") return `\\\\.\\pipe\\altimate-code-${name}`
   const preferred = path.join(base ?? path.join(Global.Path.state, "tool-daemon"), `${name}.sock`)
   if (base !== undefined || Buffer.byteLength(preferred) <= MAX_SOCKET_PATH) return preferred
@@ -138,6 +167,8 @@ export interface DaemonOptions {
   idleMs?: number
   /** Closes embedded file-database connections between requests so their file locks are released. */
   releaseFiles?: () => Promise<void>
+  /** Reloads connections edited since the last reload. Called before a `run` that has no other request in flight. */
+  refreshConnections?: () => Promise<void>
 }
 
 export interface Daemon {
@@ -154,6 +185,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const startedAt = Date.now()
   let requests = 0
   let inflight = 0
+  let reloading: Promise<void> | undefined
   let stopping: Promise<void> | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   const sockets = new Set<net.Socket>()
@@ -171,6 +203,20 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     requests++
     if (typeof request.name !== "string")
       return { id: request.id, status: "error", title: "Invalid request", output: "A tool name is required.", metadata: {} }
+    // A reload closes cached connectors, so it runs only when no other request is in flight, and requests that
+    // arrive meanwhile wait for it. A skipped check loses nothing: the edit stays pending until a request runs alone.
+    if (reloading) await reloading.catch(() => {})
+    if (inflight === 1 && options.refreshConnections) {
+      reloading = options.refreshConnections()
+      try {
+        await reloading
+      } catch (error) {
+        const output = error instanceof Error ? error.message : String(error)
+        return { id: request.id, status: "error", title: "Connections reload failed", output, metadata: {} }
+      } finally {
+        reloading = undefined
+      }
+    }
     const result = await options.runner.run(request.name, request.args ?? {}, { allowWrite: request.allowWrite === true })
     return { id: request.id, ...result }
   }

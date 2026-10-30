@@ -142,8 +142,6 @@ interface WorkspaceSkill {
   body: string
 }
 
-/** Each usable workspace skill; empty when there is no snapshot servable to the current
- * account, so the copies are removed. */
 /** True while some process has moved the live snapshot aside to swap a new one in. Judged by
  * ctime: the rename that retires the snapshot updates it but keeps the old mtime. */
 async function snapshotIsSwapping(directory: string): Promise<boolean> {
@@ -174,7 +172,16 @@ async function readSnapshot(directory: string): Promise<WorkspaceSkill[] | null>
     return null
   }
   const manifest = await ownManifest(directory)
-  if (!manifest) return []
+  if (!manifest) {
+    // Another account's snapshot removes the copies, but a manifest that vanished or broke since
+    // the read above is a swap in progress, not an answer.
+    try {
+      JSON.parse(await fs.readFile(path.join(snapshotRoot(directory), ".manifest.json"), "utf8"))
+    } catch {
+      return null
+    }
+    return []
+  }
   const root = snapshotRoot(directory)
   const skills: WorkspaceSkill[] = []
   for (const id of Object.keys(manifest.skills)) {
@@ -184,12 +191,20 @@ async function readSnapshot(directory: string): Promise<WorkspaceSkill[] | null>
     try {
       const st = await fs.lstat(source)
       if (st.isSymbolicLink() || !st.isDirectory()) continue
-    } catch {
-      continue
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue
+      return null
+    }
+    let bytes: Buffer
+    try {
+      bytes = await fs.readFile(path.join(source, "SKILL.md"))
+    } catch (err) {
+      // A skill without a SKILL.md is skipped; one that cannot be read is unknown, so nothing is pruned.
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue
+      return null
     }
     let text: string
     try {
-      const bytes = await fs.readFile(path.join(source, "SKILL.md"))
       // Fatal decode and universal newlines, as the Python script reads text.
       text = new TextDecoder("utf-8", { fatal: true }).decode(bytes).replace(/\r\n?/g, "\n")
     } catch {
@@ -393,7 +408,7 @@ async function reconcile(targetRoot: string, skills: WorkspaceSkill[] | null): P
  * not served to the signed-in account. `withdraw` removes every copy regardless of the snapshot
  * (unlink, feature off).
  *
- * Skipped when `ALTIMATE_CLAUDE_SKILL_SYNC=0`, and for a project with no `.claude` directory:
+ * Copying is skipped when `ALTIMATE_CLAUDE_SKILL_SYNC=0` (withdrawal still runs), and for a project with no `.claude` directory:
  * one that does not use Claude Code is left alone, and the plugin creates `.claude/skills` on
  * its first session. Never throws; a failure leaves the existing copies as they were. */
 export async function mirrorClaudeSkills(
@@ -401,7 +416,8 @@ export async function mirrorClaudeSkills(
   opts?: { withdraw?: boolean },
 ): Promise<{ changed: boolean }> {
   try {
-    if (process.env.ALTIMATE_CLAUDE_SKILL_SYNC === "0") return { changed: false }
+    // Withdrawal (unlink, feature off) is not copying, so the off switch does not stop it.
+    if (process.env.ALTIMATE_CLAUDE_SKILL_SYNC === "0" && opts?.withdraw !== true) return { changed: false }
     const project = path.resolve(directory)
     if (!(await lexists(path.join(project, ".claude")))) return { changed: false }
     // A symlinked `.claude` or `.claude/skills` could point outside the project; never write or remove through it.

@@ -106,7 +106,7 @@ const CLI_COMMAND_NAMES = new Set([
   "learn",
   // altimate_change end
   // registered conditionally below (workspace / local-install builds)
-  "link", "workspace", "workspace-serve",
+  "link", "workspace", "workspace-serve", "workspace-client",
 ])
 // altimate_change end
 let cli = yargs(args)
@@ -269,7 +269,7 @@ let cli = yargs(args)
 // altimate_change start — link and workspace: absent from --help when workspaces are turned off
 // via ALTIMATE_DISABLE_WORKSPACE=1. Off, hidden stubs take their place and say why.
 if (!Flag.ALTIMATE_DISABLE_WORKSPACE) cli = cli.command(LinkCommand).command(WorkspaceCommand).command(WorkspaceClientCommand)
-else cli = cli.command(pilotOffCommand("link")).command(pilotOffCommand("workspace [action]"))
+else cli = cli.command(pilotOffCommand("link")).command(pilotOffCommand("workspace [action]")).command(pilotOffCommand("workspace-client [action]"))
 // altimate_change end
 
 // altimate_change start — workspace-serve: register dev-only workspace serve command
