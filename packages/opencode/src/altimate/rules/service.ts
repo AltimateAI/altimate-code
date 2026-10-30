@@ -144,8 +144,17 @@ export async function start(ctx: InstanceContext): Promise<void> {
         await stop()
       }
     }
+    // "Remember" requests no card will settle: another process's that died, or this one's whose save failed.
+    const recover = Instance.bind(async () => {
+      if (disposed) return
+      // Cards past their day close first (their fallback saves them), then the leftovers are recovered.
+      const [{ RulesRemember }, { RuleProposal }] = await Promise.all([import("./remember"), import("./proposal")])
+      RuleProposal.list(ctx.directory)
+      await RulesRemember.recoverRequests(root, ctx.directory)
+    })
     const refresh = Instance.bind(async () => {
       if (disposed) return
+      await recover().catch((error) => log.warn("rules remember recovery failed", { error: error instanceof Error ? error.message : String(error) }))
       const learn = await learnConfig(ctx)
       if (!RulesSync.rulesEnabled(learn) || !(await linked(root, ctx.directory))) return void (await followLearning(learn))
       const report = await syncNow(root, ctx.directory, learn).catch((error) => {
@@ -160,11 +169,6 @@ export async function start(ctx: InstanceContext): Promise<void> {
       void work().catch((error) => log.warn(`rules ${what} failed`, { error: error instanceof Error ? error.message : String(error) }))
     await followLearning(await learnConfig(ctx)).catch((error) => log.warn("rules learning setup failed", { error: String(error) }))
     safely("refresh", refresh)()
-    // "Remember" requests whose card died with another process (a crash): saved as before cards, into this project.
-    safely("remember recovery", Instance.bind(async () => {
-      const { RulesRemember } = await import("./remember")
-      await RulesRemember.recoverRequests(root, ctx.directory)
-    }))()
     const timer = setInterval(safely("refresh", refresh), RulesSync.REFRESH_MS)
     timer.unref?.()
     const onIdle = Instance.bind(async (sessionID: string) => {

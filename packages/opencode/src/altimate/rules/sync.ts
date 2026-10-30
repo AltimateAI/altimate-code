@@ -31,8 +31,11 @@ export const REFRESH_MS = 5 * 60_000
 export const SESSION_WAIT_MS = 2_000
 export const MAX_PROPOSALS = 50
 const MAX_USAGE_DELTA = 50
-/** How long a reported (session, rule) pair is remembered after its session's snapshot was last written. */
-const USAGE_PAIR_MS = 30 * 24 * 60 * 60_000
+/** How recently a session's snapshot must have been written for its rules to be counted. */
+const USAGE_COUNT_MS = 30 * 24 * 60 * 60_000
+/** How long a reported (session, rule) pair is remembered after its session's snapshot was last written: longer than
+ * `USAGE_COUNT_MS`, so nothing countable is ever forgotten. */
+const USAGE_PAIR_MS = 3 * USAGE_COUNT_MS
 /** The server's per-batch limit on usage items (`MAX_USAGE_ITEMS`). */
 const MAX_USAGE_ITEMS = 500
 
@@ -529,7 +532,8 @@ export async function enqueueMany(
   root: string,
   all: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway" }[],
   scope?: Scope,
-  options: { upTo?: boolean } = {},
+  /** `forget`: the "remember" card these come from; its kept request ends in the same write that queues them. */
+  options: { upTo?: boolean; forget?: string } = {},
 ): Promise<string[]> {
   let items = all
   let ids = items.map(() => randomUUID())
@@ -549,13 +553,20 @@ export async function enqueueMany(
       )
     items.forEach(({ item, approve }, index) =>
       state.outbox.push({ id: ids[index], created_at: at, attempts: 0, item, ...(approve ? { approve } : {}) }))
+    if (options.forget) state.remember_requests = state.remember_requests.filter((r) => r.card !== options.forget)
   })
   return ids
 }
 
 /** Queue one proposal; it is sent by the next push. Returns its outbox id. */
-export async function enqueue(root: string, item: ProposalItem, approve?: "approve" | "approve_anyway", scope?: Scope): Promise<string> {
-  return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}) }], scope))[0]
+export async function enqueue(
+  root: string,
+  item: ProposalItem,
+  approve?: "approve" | "approve_anyway",
+  scope?: Scope,
+  forget?: string,
+): Promise<string> {
+  return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}) }], scope, forget ? { forget } : {}))[0]
 }
 
 /**
@@ -620,20 +631,24 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
     }
   }
   const [{ readShownSnapshots, lessonTextHash, snapshotFiles, snapshotFile }, { analyzeRecurrence }] = await Promise.all([import("../learn/delivery"), import("../learn/recurrence")])
-  // A reported pair is kept while its session's snapshot exists and was written within `USAGE_PAIR_MS`: a resumed
-  // session comes back into the newest snapshots, and its pairs must still read as reported. Snapshots are never
-  // deleted, so age bounds the list; a session resumed after that long may be counted once more.
+  // A session counts while its snapshot was written within `USAGE_COUNT_MS`; its reported pairs are remembered for
+  // `USAGE_PAIR_MS`, which is longer, so a pair is never forgotten while its session can still be counted, and a session
+  // resumed within that longer time is not counted again. One resumed after more than `USAGE_PAIR_MS` may be counted
+  // once more (accepted: an advisory counter). Snapshots are never deleted, so the window also bounds the list. Without
+  // the file times nothing is counted this run.
   const files = await snapshotFiles(root).catch(() => undefined)
   const sessionOf = (pair: string) => pair.slice(0, pair.lastIndexOf("|"))
   const now = Date.now()
-  const live = (pair: string) => {
-    const written = files!.get(snapshotFile(sessionOf(pair)))
-    return written !== undefined && now - written < USAGE_PAIR_MS
+  const within = (session: string, window: number) => {
+    const written = files?.get(snapshotFile(session))
+    return written !== undefined && now - written < window
   }
+  const countable = (session: string) => within(session, USAGE_COUNT_MS)
+  const remembered = (pair: string) => within(sessionOf(pair), USAGE_PAIR_MS)
   const unpruned = await RulesStore.read(root)
-  if (files && unpruned.usage_reported.some((pair) => !live(pair)))
+  if (files && unpruned.usage_reported.some((pair) => !remembered(pair)))
     await RulesStore.update(root, (s) => {
-      s.usage_reported = s.usage_reported.filter(live)
+      s.usage_reported = s.usage_reported.filter(remembered)
     })
   const state = await RulesStore.read(root)
   if (!state.rules.length) return { items: 0 }
@@ -646,6 +661,7 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
   // even when the session was reported after turn 1. A rule counts at most `MAX_USAGE_DELTA` sessions per report, and
   // a batch at most `MAX_USAGE_ITEMS` rules: the rest waits for the next report.
   for (const snapshot of snapshots) {
+    if (!countable(snapshot.session)) continue
     // Only against the version the session was shown: the lesson id (from `rule_key`) survives an approved edit, the
     // text does not. A session shown an earlier version is not counted against the current one.
     const shown = [...new Set(snapshot.shown
@@ -701,15 +717,18 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
   // (the next run recounts from what is left).
   let stale = false
   const after = await RulesStore.update(root, (s) => {
+    // A batch saved meanwhile is sent instead, only if it is this run's account and workspace's (checked below).
+    if (!ownedBy(s, ctx)) return void (stale = true)
     if (s.pending_usage) return
     const reportedNow = new Set(s.usage_reported)
     stale = pairs.some((pair) => reportedNow.has(pair)) ||
       Object.keys(corrected).some((key) => (s.corrected_reported[key] ?? 0) !== (state.corrected_reported[key] ?? 0))
-    if (!ownedBy(s, ctx)) stale = true
     if (!stale) s.pending_usage = batch
   })
   if (stale) return { items: 0 }
   const saved = after.pending_usage ?? batch
+  // Never sent with this run's credential when it was built for another scope.
+  if (saved.scope && !RulesStore.sameScope(saved.scope, ctx.scope)) return { items: 0 }
   try {
     await sendUsage(root, ctx, saved)
   } catch (error) {

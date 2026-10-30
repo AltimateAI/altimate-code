@@ -1039,14 +1039,14 @@ describe("the workspace API, by path", () => {
     expect(state.usage_reported).toEqual([])
   })
 
-  test("a reported pair is let go once its session's snapshot is older than a month", async () => {
+  test("a reported pair is let go once its session's snapshot is older than three months", async () => {
     const root = await tmp()
     answer = () => Response.json(syncBody([{ ...rule("aaaaaaaaaaaa", "Name staging models stg_<source>."), public_id: "p-a" }]))
     await RulesSync.pull(root, ready())
     const dir = path.join(root, ".altimate-code", "learn", ".sessions")
     await fs.mkdir(dir, { recursive: true })
     for (const session of ["old", "recent"]) await fs.writeFile(path.join(dir, `${Store.sha256(session)}.json`), "{}")
-    const longAgo = new Date(Date.now() - 40 * 24 * 60 * 60_000)
+    const longAgo = new Date(Date.now() - 100 * 24 * 60 * 60_000)
     await fs.utimes(path.join(dir, `${Store.sha256("old")}.json`), longAgo, longAgo)
     await RulesStore.update(root, (s) => { s.usage_reported = ["old|p-a", "recent|p-a"] })
     await RulesSync.reportUsage(root, ready())
@@ -1065,6 +1065,59 @@ describe("the workspace API, by path", () => {
     } finally {
       spy.mockRestore()
     }
+  })
+
+  test("a session older than the window is neither counted nor remembered, so it is not counted again on every sync", async () => {
+    const root = await tmp()
+    answer = () => Response.json(syncBody([{ ...rule("aaaaaaaaaaaa", "Name staging models stg_<source>."), public_id: "p-a" }]))
+    await RulesSync.pull(root, ready())
+    const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+    await fs.mkdir(dir, { recursive: true })
+    const lesson = { id: RulesStore.lessonId("R-aaaaaaaaaaaa"), text: "Name staging models stg_<source>.", tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0, created: "2026-10-27T00:00:00Z", updated: "2026-10-27T00:00:00Z" }
+    const file = path.join(dir, `${Store.sha256("ancient")}.json`)
+    await fs.writeFile(file, JSON.stringify({
+      version: 1, session: "ancient", firstMessage: "m", query: "q", touchedPaths: [], section: "", requests: [], requestParts: [], compactions: [], counted: [],
+      shown: [{ name: RulesStore.WORKSPACE_RULES_STORE, lesson, tier: "core", at: "2026-09-01T00:00:00Z", queryHash: "h" }],
+    }))
+    const longAgo = new Date(Date.now() - 40 * 24 * 60 * 60_000)
+    await fs.utimes(file, longAgo, longAgo)
+    await RulesStore.update(root, (s) => { s.usage_reported = ["ancient|p-a"] })
+    seen.length = 0
+    answer = () => Response.json({ duplicate: false, applied_items: 1, skipped_items: 0 })
+    for (let run = 0; run < 3; run++) await RulesSync.reportUsage(root, ready())
+    expect(seen.filter((r) => r.path === "/usage")).toEqual([])
+    // Remembered longer than it can be counted: resumed within that time, it is not counted again.
+    expect((await RulesStore.read(root)).usage_reported).toEqual(["ancient|p-a"])
+  })
+
+  test("a usage batch another scope saved while this run counted is not sent with this run's credential", async () => {
+    const root = await tmp()
+    answer = () => Response.json(syncBody([{ ...rule("aaaaaaaaaaaa", "Name staging models stg_<source>."), public_id: "p-a" }]))
+    await RulesSync.pull(root, ready())
+    const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+    await fs.mkdir(dir, { recursive: true })
+    const lesson = { id: RulesStore.lessonId("R-aaaaaaaaaaaa"), text: "Name staging models stg_<source>.", tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0, created: "2026-10-27T00:00:00Z", updated: "2026-10-27T00:00:00Z" }
+    await fs.writeFile(path.join(dir, `${Store.sha256("s-now")}.json`), JSON.stringify({
+      version: 1, session: "s-now", firstMessage: "m", query: "q", touchedPaths: [], section: "", requests: [], requestParts: [], compactions: [], counted: [],
+      shown: [{ name: RulesStore.WORKSPACE_RULES_STORE, lesson, tier: "core", at: "2026-10-28T00:00:00Z", queryHash: "h" }],
+    }))
+    const recurrence = await import("../../../src/altimate/learn/recurrence")
+    const real = recurrence.analyzeRecurrence
+    // While this run counts, another process saves a batch for someone else's scope.
+    const spy = spyOn(recurrence, "analyzeRecurrence").mockImplementation((async (...args: Parameters<typeof real>) => {
+      await RulesStore.update(root, (s) => {
+        s.pending_usage = { batch_id: "batch-foreign", scope: { ...scope(), account: "someone-else" }, items: [{ public_id: "p-a", applied: 1, helpful: 0, harmful: 0, corrected_again: 0 }], pairs: ["s-other|p-a"], corrected: {} }
+      })
+      return real(...args)
+    }) as never)
+    seen.length = 0
+    try {
+      expect(await RulesSync.reportUsage(root, ready())).toEqual({ items: 0 })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(seen.filter((r) => r.path === "/usage")).toEqual([])
+    expect((await RulesStore.read(root)).pending_usage?.batch_id).toBe("batch-foreign")
   })
 
   test("too many proposals at once say so", async () => {
@@ -1880,13 +1933,14 @@ describe("cards across the feature's edges", () => {
           s.remember_requests.push({ card: "c-dead", text: "Alias every joined table.", session: "x1", directory: Instance.directory, via: "training", training: { name: "alias-joins" }, pid: dead.pid, boot: "earlier", at: now })
           // A restarted server can get the crashed one's PID (PID 1 in a container): its boot id tells them apart.
           s.remember_requests.push({ card: "c-restart", text: "Quote reserved identifiers.", session: "x3", directory: Instance.directory, via: "training", training: { name: "quote-reserved" }, pid: process.pid, boot: "before-restart", at: now })
-          s.remember_requests.push({ card: "c-live", text: "Still open here.", session: "x2", directory: Instance.directory, via: "training", pid: process.pid, boot: RulesStore.PROCESS_BOOT, at: now })
+          // Another live process's (our parent), recently written: its own card settles it.
+          s.remember_requests.push({ card: "c-live", text: "Still open elsewhere.", session: "x2", directory: Instance.directory, via: "training", pid: process.ppid, boot: "another-live-process", at: now })
         })
         await RulesRemember.recoverRequests(root, Instance.directory)
         await RulesRemember.recoverRequests(root, Instance.directory)
         expect((await TrainingStore.get("project", "rule", "alias-joins"))?.content).toContain("Alias every joined table.")
         expect((await TrainingStore.get("project", "rule", "quote-reserved"))?.content).toContain("Quote reserved identifiers.")
-        // A card this process still shows is its own to save.
+        // A live process's fresh request is that process's to save.
         expect((await RulesStore.read(root)).remember_requests.map((r) => r.card)).toEqual(["c-live"])
       } })
     } finally {
@@ -1924,6 +1978,220 @@ describe("cards across the feature's edges", () => {
     } finally {
       await disposeAllInstances()
     }
+  })
+
+  test("a claim renews the request, and this process retries its own leftover request once its card is gone, never an open one", async () => {
+    await using dir = await tmpdir({ git: true })
+    const twoDaysAgo = new Date(Date.now() - 2 * RuleProposal.CARD_TTL_MS).toISOString()
+    try {
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        const root = await fs.realpath(Instance.worktree)
+        await RulesStore.update(root, (s) => {
+          // Another boot's, its PID alive (our parent), older than a card can live: orphaned, claimed by this process.
+          s.remember_requests.push({ card: "c-stale", text: "Alias every joined table.", session: "q1", directory: Instance.directory, via: "training", training: { name: "alias-stale" }, pid: process.ppid, boot: "elsewhere", at: twoDaysAgo })
+        })
+        const save = spyOn(TrainingStore, "save").mockRejectedValueOnce(new Error("EBUSY: resource busy"))
+        try {
+          await RulesRemember.recoverRequests(root, Instance.directory)
+        } finally {
+          save.mockRestore()
+        }
+        // Claimed: owned by this boot with a fresh time, so no other live process takes it while this one runs.
+        const [kept] = (await RulesStore.read(root)).remember_requests
+        expect(kept).toMatchObject({ card: "c-stale", boot: RulesStore.PROCESS_BOOT, pid: process.pid })
+        expect(Date.now() - Date.parse(kept.at)).toBeLessThan(60_000)
+        // Its card is not open here: the next refresh in this same process retries it.
+        await RulesRemember.recoverRequests(root, Instance.directory)
+        expect((await TrainingStore.get("project", "rule", "alias-stale"))?.content).toContain("Alias every joined table.")
+        expect((await RulesStore.read(root)).remember_requests).toEqual([])
+        // A card this process still shows is never recovered from under it.
+        RuleProposal.setRendererForTest(Instance.directory)
+        await RulesStore.update(root, (s) => Object.assign(s, linked()))
+        const card = (await RuleProposal.ask({ sessionID: "q2", root, directory: Instance.directory, learn: undefined, unanswered: async () => {}, request: { session: "q2", via: "training", training: { name: "still-open" } }, draft: { text: "Still open here.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } }))!
+        await RulesRemember.recoverRequests(root, Instance.directory)
+        expect(await TrainingStore.get("project", "rule", "still-open")).toBeUndefined()
+        expect((await RulesStore.read(root)).remember_requests.map((r) => r.card)).toEqual([card.id])
+        await RuleProposal.drop(Instance.directory)
+      } })
+    } finally {
+      RuleProposal.setRendererForTest(undefined)
+      await disposeAllInstances()
+    }
+  })
+
+  test("a requested card is shown only once its request is on disk; otherwise there is no card", async () => {
+    const root = await linkedRoot()
+    const update = RulesStore.update
+    const spy = spyOn(RulesStore, "update").mockImplementationOnce((async () => {
+      throw new Error("Timed out waiting for lock: learn-state")
+    }) as never)
+    try {
+      const card = await RuleProposal.ask({ sessionID: "p1", root, directory: root, learn: undefined, unanswered: async () => {}, request: { session: "p1", via: "training" }, draft: { text: "Quote reserved words.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } })
+      expect(card).toBeUndefined()
+      expect(RuleProposal.list(root, "p1")).toEqual([])
+    } finally {
+      spy.mockRestore()
+    }
+    void update
+    // And through the save tools: no card, so the tool saves as before.
+    const full = spyOn(RulesStore, "update").mockImplementationOnce((async () => {
+      throw new Error("Timed out waiting for lock: learn-state")
+    }) as never)
+    try {
+      expect(await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content: "Always use CTEs in staging models.", sessionID: "p2", said: "Remember as a rule: always use CTEs in staging models.", unanswered: async () => {}, request: { session: "p2", via: "training" } })).toBeUndefined()
+    } finally {
+      full.mockRestore()
+    }
+  })
+
+  test("dismissing or sending a requested card ends its request in the same write as the decision", async () => {
+    const root = await linkedRoot()
+    const draft = (text: string) => ({ text, applies_to: [], change: "add" as const, origin: "explicit" as const, evidence: { sessions: 1 }, topics: [] })
+    const dismissed = (await RuleProposal.ask({ sessionID: "w1", root, directory: root, learn: undefined, unanswered: async () => {}, request: { session: "w1", via: "training" }, draft: draft("Prefix seeds with seed_.") }))!
+    const sent = (await RuleProposal.ask({ sessionID: "w2", root, directory: root, learn: undefined, unanswered: async () => {}, request: { session: "w2", via: "training" }, draft: draft("Quote reserved words.") }))!
+    // Any write after the decision fails: the request must already be gone with the decision itself.
+    let seenAtSync: unknown
+    const run = spyOn(RulesSync, "runFresh").mockImplementation((async () => {
+      const state = await RulesStore.read(root)
+      seenAtSync = { requests: state.remember_requests.map((r) => r.card), outbox: state.outbox.map((e) => e.item.text) }
+      return undefined
+    }) as never)
+    try {
+      await RuleProposal.reply(sent.id, { action: "send" })
+    } finally {
+      run.mockRestore()
+    }
+    expect(seenAtSync).toEqual({ requests: [dismissed.id], outbox: ["Quote reserved words."] })
+    const update = RulesStore.update
+    let calls = 0
+    const after = spyOn(RulesStore, "update").mockImplementation((async (...args: Parameters<typeof update>) => {
+      if (calls++ > 0) throw new Error("disk gone")
+      return update(...args)
+    }) as never)
+    try {
+      await RuleProposal.reply(dismissed.id, { action: "dismiss" })
+    } finally {
+      after.mockRestore()
+    }
+    expect((await RulesStore.read(root)).remember_requests).toEqual([])
+  })
+
+  test("a card answered while its request cannot be removed is never saved again by recovery", async () => {
+    // Not linked: the card offers "Save for this project", an answer that succeeds without a rules-state write.
+    const root = await tmp()
+    const card = (await RuleProposal.ask({ sessionID: "a1", root, directory: root, learn: undefined, unanswered: async () => {}, request: { session: "a1", via: "training", training: { name: "answered-once" } }, draft: { text: "Alias joined tables.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } }))!
+    const saves: string[] = []
+    const save = spyOn(TrainingStore, "save").mockImplementation((async (input: { name: string }) => void saves.push(input.name)) as never)
+    const update = RulesStore.update
+    const stuck = spyOn(RulesStore, "update").mockImplementation((async () => {
+      throw new Error("Timed out waiting for lock: learn-state")
+    }) as never)
+    try {
+      expect(await RuleProposal.reply(card.id, { action: "save_local" })).toMatchObject({ ok: true })
+    } finally {
+      stuck.mockRestore()
+    }
+    void update
+    try {
+      expect((await RulesStore.read(root)).remember_requests.map((r) => r.card)).toEqual([card.id])
+      // The next refresh removes it instead of saving it a second time.
+      await RulesRemember.recoverRequests(root, root)
+      expect((await RulesStore.read(root)).remember_requests).toEqual([])
+      expect(saves).toEqual([RuleProposal.slug("Alias joined tables.")])
+    } finally {
+      save.mockRestore()
+    }
+  })
+
+  test("a send the workspace refuses keeps the card open and its request back on disk", async () => {
+    const root = await linkedRoot()
+    const card = (await RuleProposal.ask({ sessionID: "r1", root, directory: root, learn: undefined, unanswered: async () => {}, request: { session: "r1", via: "training" }, draft: { text: "Prefix seeds with seed_.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } }))!
+    const run = spyOn(RulesSync, "runFresh").mockResolvedValue(undefined as never)
+    const outcome = spyOn(RulesSync, "outcomeOf").mockReturnValue({ status: "sent", row: { id: "x", text: "", status: "invalid", error: "too vague" } } as never)
+    try {
+      expect(await RuleProposal.reply(card.id, { action: "send" })).toMatchObject({ ok: false, code: "refused" })
+    } finally {
+      run.mockRestore()
+      outcome.mockRestore()
+    }
+    expect(RuleProposal.list(root, "r1").map((c) => c.id)).toEqual([card.id])
+    expect((await RulesStore.read(root)).remember_requests.map((r) => r.card)).toEqual([card.id])
+    await RuleProposal.drop(root)
+  })
+
+  test("a send that fails after its proposal was queued does not keep its request again: the queue has it", async () => {
+    const root = await linkedRoot()
+    const saved: string[] = []
+    const card = (await RuleProposal.ask({ sessionID: "q9", root, directory: root, learn: undefined, unanswered: async (text) => void saved.push(text), request: { session: "q9", via: "training" }, draft: { text: "Name seeds seed_<entity>.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } }))!
+    const run = spyOn(RulesSync, "runFresh").mockResolvedValue(undefined as never)
+    const outcome = spyOn(RulesSync, "outcomeOf").mockImplementation(() => { throw new Error("state unreadable") })
+    try {
+      expect(await RuleProposal.reply(card.id, { action: "send" })).toMatchObject({ ok: false, code: "failed" })
+    } finally {
+      run.mockRestore()
+      outcome.mockRestore()
+    }
+    const state = await RulesStore.read(root)
+    expect(state.outbox.map((e) => e.item.text)).toEqual(["Name seeds seed_<entity>."])
+    expect(state.remember_requests).toEqual([])
+    await RuleProposal.drop(root)
+    expect(saved).toEqual([])
+  })
+
+  test("a send whose queue write landed but whose call failed is treated as queued, not kept again", async () => {
+    const root = await linkedRoot()
+    const saved: string[] = []
+    const card = (await RuleProposal.ask({ sessionID: "m9", root, directory: root, learn: undefined, unanswered: async (text) => void saved.push(text), request: { session: "m9", via: "training" }, draft: { text: "Name macros with a verb.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } }))!
+    const update = RulesStore.update
+    let failAfterWrite = true
+    // The state (outbox and request) is saved, then the mirror write fails.
+    const spy = spyOn(RulesStore, "update").mockImplementation((async (...args: Parameters<typeof update>) => {
+      const result = await update(...args)
+      if (failAfterWrite) {
+        failAfterWrite = false
+        throw new Error("EACCES: approved.json")
+      }
+      return result
+    }) as never)
+    try {
+      expect(await RuleProposal.reply(card.id, { action: "send" })).toMatchObject({ ok: false, code: "failed" })
+    } finally {
+      spy.mockRestore()
+    }
+    const state = await RulesStore.read(root)
+    expect(state.outbox.map((e) => e.item.text)).toEqual(["Name macros with a verb."])
+    expect(state.remember_requests).toEqual([])
+    // Queued: closing the card later saves no second, local copy.
+    await RuleProposal.drop(root)
+    expect(saved).toEqual([])
+  })
+
+  test("asked again by a remember whose request cannot be written, the card is not handed back", async () => {
+    const root = await linkedRoot()
+    const draft = { text: "Name timestamps <event>_at.", applies_to: [], change: "add" as const, origin: "session" as const, evidence: { sessions: 2 }, topics: [], choose: true }
+    const shown = (await RuleProposal.ask({ sessionID: "g1", root, directory: root, learn: undefined, draft }))!
+    const spy = spyOn(RulesStore, "update").mockImplementationOnce((async () => {
+      throw new Error("Timed out waiting for lock: learn-state")
+    }) as never)
+    try {
+      expect(await RuleProposal.ask({ sessionID: "g1", root, directory: root, learn: undefined, unanswered: async () => {}, request: { session: "g1", via: "memory", memory: { id: "conventions/time", tags: [] } }, draft: { ...draft, origin: "explicit", memory: { id: "conventions/time", tags: [] } } })).toBeUndefined()
+    } finally {
+      spy.mockRestore()
+    }
+    // Left exactly as it was: the memory block and its scope label are not taken over by a request that was not kept.
+    expect(RuleProposal.list(root, "g1")).toEqual([shown])
+    await RuleProposal.drop(root)
+  })
+
+  test("this process renews the record of a card it still shows, so no other process takes it as ownerless", async () => {
+    const root = await linkedRoot()
+    const card = (await RuleProposal.ask({ sessionID: "n1", root, directory: root, learn: undefined, unanswered: async () => {}, request: { session: "n1", via: "training" }, draft: { text: "Quote reserved words.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } }))!
+    await RulesStore.update(root, (s) => { s.remember_requests[0].at = new Date(Date.now() - 2 * RuleProposal.CARD_TTL_MS).toISOString() })
+    await RulesRemember.recoverRequests(root, root)
+    const [record] = (await RulesStore.read(root)).remember_requests
+    expect(record.card).toBe(card.id)
+    expect(Date.now() - Date.parse(record.at)).toBeLessThan(60_000)
+    await RuleProposal.drop(root)
   })
 
   test("a card whose fallback fails for a passing reason keeps its request; a refused save clears it", async () => {

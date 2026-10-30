@@ -145,39 +145,68 @@ function processAlive(pid: number) {
   }
 }
 
+/** Requests this process is saving right now (`recoverRequests` from the start and the refresh can overlap). */
+const recovering = new Set<string>()
+
 /**
- * Save the "remember" requests of `directory` whose card died with its process (a crash, a kill), or whose card closed
- * while its save failed: the request is saved as before cards. A request is this process's own while it carries this
- * process's boot id. Another boot's request is orphaned when its process is gone, its PID is now this process's (a
- * restart reused it), or it is older than a card can live (another process reused the PID). Each is claimed in one
- * locked write first, so two processes starting together save it once. It is removed once saved, or when its save can
- * never succeed; after any other failure it stays for the next start. Runs in that project's instance; never throws.
+ * Save the "remember" requests of `directory` that no card will settle any more: the request is saved as before cards.
+ * - This process's own (its boot id) whose card is no longer open or settling: its save failed earlier, retried now.
+ * - Another boot's whose process is gone, whose PID is now this process's (a restart reused it), or that has had no
+ *   owner for longer than a card can live (another process reused the PID). A claim renews `at`, so a claimed request
+ *   is not taken by another process while its claimant lives.
+ * Each is claimed in one locked write first, so it is saved once. It is removed once saved, or when its save can never
+ * succeed; after any other failure it stays, retried on the next refresh or start. Runs in that project's instance.
  */
 export async function recoverRequests(root: string, directory: string) {
-  const [{ RulesStore }, { CARD_TTL_MS, SaveRefusedError }] = await Promise.all([import("./store"), import("./proposal")])
+  const [{ RulesStore }, { CARD_TTL_MS, SaveRefusedError, isOpen, answeredIds, forgotten }] = await Promise.all([import("./store"), import("./proposal")])
   const now = Date.now()
-  const orphaned = (r: import("./store").RememberRequest) =>
-    r.directory === directory && r.boot !== RulesStore.PROCESS_BOOT &&
-    (r.pid === process.pid || !processAlive(r.pid) || !(now - Date.parse(r.at) < CARD_TTL_MS))
-  if (!(await RulesStore.read(root)).remember_requests.some(orphaned)) return
-  const claimed: import("./store").RememberRequest[] = []
+  const answered = answeredIds()
+  const ours = (r: import("./store").RememberRequest) => r.directory === directory && r.boot === RulesStore.PROCESS_BOOT
+  const orphaned = (r: import("./store").RememberRequest) => {
+    if (r.directory !== directory || recovering.has(r.card)) return false
+    if (r.boot === RulesStore.PROCESS_BOOT) return !isOpen(r.card)
+    return r.pid === process.pid || !processAlive(r.pid) || !(now - Date.parse(r.at) < CARD_TTL_MS)
+  }
+  // This process's cards still open: their records are renewed, so no other process takes one as ownerless while this
+  // one lives (a card can stay open past a day when nothing lists cards).
+  const stale = (r: import("./store").RememberRequest) => ours(r) && isOpen(r.card) && !answered.has(r.card) && !(now - Date.parse(r.at) < CARD_TTL_MS / 4)
+  const before = (await RulesStore.read(root)).remember_requests
+  if (!before.some((r) => orphaned(r) || stale(r) || (ours(r) && answered.has(r.card)))) return
+  let claimed: import("./store").RememberRequest[] = []
+  let settled: string[] = []
+  // Claimed ids are marked inside the locked write, so an overlapping recovery in this process cannot claim them too.
   await RulesStore.update(root, (s) => {
-    for (const r of s.remember_requests)
-      if (orphaned(r)) {
-        Object.assign(r, { pid: process.pid, boot: RulesStore.PROCESS_BOOT })
+    claimed = []
+    // Answered cards whose record could not be removed then: removed now, never saved. Ids with no record left are done.
+    settled = [...answered].filter((card) => !s.remember_requests.some((r) => r.card === card && !ours(r)))
+    s.remember_requests = s.remember_requests.filter((r) => !(ours(r) && answered.has(r.card)))
+    for (const r of s.remember_requests) {
+      if (stale(r)) r.at = new Date(now).toISOString()
+      else if (orphaned(r)) {
+        Object.assign(r, { pid: process.pid, boot: RulesStore.PROCESS_BOOT, at: new Date(now).toISOString() })
         claimed.push({ ...r })
+        recovering.add(r.card)
       }
+    }
+  }).catch((error) => {
+    for (const r of claimed) recovering.delete(r.card)
+    throw error
   })
-  for (const r of claimed) {
-    const done = await saveWithoutCard(r).then(() => true, (error) => {
-      log.warn("recovered remember request not saved", { card: r.card, error })
-      return error instanceof SaveRefusedError
-    })
-    // Kept: claimed by this boot, so the next start (another boot) tries it again.
-    if (!done) continue
-    await RulesStore.update(root, (s) => {
-      s.remember_requests = s.remember_requests.filter((x) => x.card !== r.card)
-    }).catch((error) => log.warn("recovered remember request not cleared", { card: r.card, error }))
+  for (const card of settled) forgotten(card)
+  try {
+    for (const r of claimed) {
+      const done = await saveWithoutCard(r).then(() => true, (error) => {
+        log.warn("recovered remember request not saved", { card: r.card, error })
+        return error instanceof SaveRefusedError
+      })
+      // Kept: claimed by this boot, retried on the next refresh (or the next start, if this process ends first).
+      if (!done) continue
+      await RulesStore.update(root, (s) => {
+        s.remember_requests = s.remember_requests.filter((x) => x.card !== r.card)
+      }).catch((error) => log.warn("recovered remember request not cleared", { card: r.card, error }))
+    }
+  } finally {
+    for (const r of claimed) recovering.delete(r.card)
   }
 }
 
@@ -226,6 +255,9 @@ export async function proposeFor(input: {
   if (input.request && state.remember_requests.length >= RulesStore.MAX_REMEMBER_REQUESTS)
     return void RulesTelemetry.routed(sessionID, via, "requests_full")
   const result = await RuleTrigger.explicit({ sessionID, root, directory: input.directory, learn, text: content, said, memory: input.memory, unanswered: input.unanswered, request: input.request })
+  // No card: its request could not be kept on disk (the limit was reached meanwhile, or the write failed). Saved as
+  // before cards instead, rather than a card a crash could lose.
+  if (result.status === "shown" && !result.card) return void RulesTelemetry.routed(sessionID, via, "requests_full")
   RulesTelemetry.routed(
     sessionID,
     via,

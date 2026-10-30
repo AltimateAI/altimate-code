@@ -505,6 +505,44 @@ test("rules added to a session are reported by tier, as counts only; a cached an
   expect(JSON.stringify(events)).not.toContain("shipping")
 })
 
+test("a resumed session keeps a team rule only while it is still in the mirror; an edit keeps its frozen wording", async () => {
+  await approve([lesson("L-0301", "Keep the project rules explicit.", { pinned: true })])
+  await approve([lesson("L-0302", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
+  const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+  try {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    const first = await new Delivery(root, { ...limits, core_lessons: 2 }).prepare("kept", "first", "staging")
+    expect(first.section).toContain("Name staging models stg_<source>.")
+    // An approved edit keeps the rule's id: the session keeps the wording it was shown.
+    await approve([lesson("L-0302", "Name staging models stg_<source>__<entity>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
+    expect(await new Delivery(root, { ...limits, core_lessons: 2 }).section("kept")).toBe(first.section)
+    // Signed out, unlinked or another workspace: the mirror no longer holds it, so the cached section is not served.
+    await approve([], Store.WORKSPACE_RULES_STORE)
+    const gone = new Delivery(root, { ...limits, core_lessons: 2 })
+    expect(await gone.section("kept")).not.toContain("Name staging models")
+    expect((await gone.prepare("kept", "first", "staging")).section).not.toContain("Name staging models")
+  } finally {
+    if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+  }
+})
+
+test("a mirror that cannot be read keeps a resumed session's cached team rules", async () => {
+  await approve([lesson("L-0401", "Keep the project rules explicit.", { pinned: true })])
+  await approve([lesson("L-0402", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
+  const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+  try {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    const first = await new Delivery(root, { ...limits, core_lessons: 2 }).prepare("unreadable", "first", "staging")
+    expect(first.section).toContain("Name staging models")
+    await fs.writeFile(Store.paths(root, Store.WORKSPACE_RULES_STORE).approved, "{ not json")
+    expect(await new Delivery(root, { ...limits, core_lessons: 2 }).section("unreadable")).toBe(first.section)
+  } finally {
+    if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+  }
+})
+
 test("a resumed session shown team rules drops them while workspaces are off", async () => {
   await approve([lesson("L-0201", "Keep the project rules explicit.", { pinned: true })])
   await approve([lesson("L-0202", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)

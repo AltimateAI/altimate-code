@@ -60,6 +60,10 @@ interface Pending {
   scope?: RulesStore.Scope
   /** The request is kept on disk (`RulesStore.RememberRequest`) until the card is answered or its fallback ran. */
   persisted?: boolean
+  /** What is kept on disk for a requested card: written again if a reply ends its record but the card stays open. */
+  request?: RequestRecord
+  /** This reply queued the proposal (its request ended in the same write). */
+  enqueued?: boolean
   /** Closed (expired, or its instance went away) while a reply was running: the reply settles it when it ends, then
    * calls `done`, which resolves the promise `close` returned (`drop` waits on it). */
   closed?: { message: string; why: "expired" | "closed"; here: string | undefined; done: () => void }
@@ -72,9 +76,11 @@ export const CARD_TTL_MS = 24 * 60 * 60_000
  * card is saved: by its fallback, or, for a card whose reply is running, once that reply ended (it saved the card, or
  * failed and the fallback saved it). */
 function close(id: string, entry: Pending, message: string, why: "expired" | "closed", here: string | undefined): Promise<void> {
+  settling.add(id)
   pending.delete(id)
-  if (entry.busy) return new Promise((done) => void (entry.closed = { message, why, here, done }))
-  return settle(id, entry, message, why, here)
+  if (entry.busy)
+    return new Promise((resolve) => void (entry.closed = { message, why, here, done: () => (settling.delete(id), resolve()) }))
+  return settle(id, entry, message, why, here).finally(() => settling.delete(id))
 }
 
 /** What a "remember" card keeps on disk so the request survives the process (`RulesRemember.recoverRequests`). */
@@ -89,32 +95,41 @@ export class SaveRefusedError extends Error {
   }
 }
 
-async function persistRequest(entry: Pending, request: RequestRecord) {
+async function persistRequest(entry: Pending, request: RequestRecord, directory = entry.directory): Promise<boolean> {
   const record: RulesStore.RememberRequest = {
     ...request,
     card: entry.card.id,
     text: entry.card.text,
-    directory: entry.directory,
+    directory,
     pid: process.pid,
     boot: RulesStore.PROCESS_BOOT,
     at: new Date().toISOString(),
   }
-  // Best effort: the card and its in-memory fallback work without it; only a crash would then lose the request. Never
-  // past the limit: a live record is not evicted (`proposeFor` saves without a card when it is full).
+  // A card for a request is shown only once its request is on disk (`ask`): never past the limit, so no live record is
+  // evicted. Not kept (full, or the write failed): the caller saves without a card.
   let kept = false
   await RulesStore.update(entry.root, (s) => {
     const others = s.remember_requests.filter((r) => r.card !== record.card)
     if (others.length >= RulesStore.MAX_REMEMBER_REQUESTS) return
     s.remember_requests = [...others, record]
     kept = true
-  }).then(
-    () => void (entry.persisted = kept),
-    (error) => log.warn("remember request not kept on disk", { card: record.card, error }),
-  )
+  }).catch((error) => log.warn("remember request not kept on disk", { card: record.card, error }))
+  if (kept) entry.persisted = true
+  return kept
+}
+
+/** Cards closed but still settling (their fallback, or the reply that was running, has not finished): with the open
+ * ones, the requests this process still owns (`isOpen`). */
+const settling = new Set<string>()
+
+/** Whether card `id` is open or still settling in this process: its request is not this process's to recover. */
+export function isOpen(id: string): boolean {
+  return pending.has(id) || settling.has(id) || answered.has(id)
 }
 
 /** The card was answered, or its request was saved: it no longer needs keeping. Retried, since a record left behind
- * would be saved again by recovery; removing it twice is harmless. */
+ * would be saved again by recovery; removing it twice is harmless. If every attempt fails, the id is remembered as
+ * answered: this process's recovery removes the record instead of saving it (`answeredIds`). */
 async function forgetRequest(id: string, entry: Pending) {
   if (!entry.persisted) return
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -129,7 +144,15 @@ async function forgetRequest(id: string, entry: Pending) {
       await new Promise((resolve) => setTimeout(resolve, 200 * attempt))
     }
   }
+  answered.add(id)
 }
+
+/** Cards answered (or saved) whose kept request could not be removed yet: recovery removes them, never saves them. */
+const answered = new Set<string>()
+
+/** The answered cards whose kept request is still to remove, and a way to mark one removed. */
+export const answeredIds = () => new Set(answered)
+export const forgotten = (id: string) => void answered.delete(id)
 
 /** A closed card nobody answered: save a requested one as before cards, record it, tell its clients. */
 async function settle(id: string, entry: Pending, message: string, why: "expired" | "closed", here: string | undefined): Promise<void> {
@@ -285,6 +308,20 @@ export async function ask(input: {
     if (existing.root === input.root && existing.card.text.toLowerCase() === input.draft.text.toLowerCase()) {
       // Asked again: the card moves to the session that asked (clients show cards per session), and a client that
       // missed it gets it back.
+      // Asked again by a "remember": its request must be on disk before the tool stands down for this card. If it cannot
+      // be written, or the card closed during the write, no card is returned, the tool saves as before cards, and the
+      // card is left as it was. Nothing below changes the card until then.
+      if (input.unanswered && input.request) {
+        const kept = await persistRequest(existing, input.request, input.directory)
+        if (kept && !pending.has(existing.card.id)) {
+          await RulesStore.update(existing.root, (s) => {
+            s.remember_requests = s.remember_requests.filter((r) => r.card !== existing.card.id)
+          }).catch((error) => log.warn("remember request not cleared", { id: existing.card.id, error }))
+          return undefined
+        }
+        if (!kept) return undefined
+        existing.request = input.request
+      }
       // The latest request's memory block and fallback win, whichever session asked.
       if (input.draft.memory) {
         existing.memory = input.draft.memory
@@ -299,7 +336,6 @@ export async function ask(input: {
         existing.learn = input.learn
         await publish(RuleEvents.Event.Updated, existing.card)
       } else await publish(RuleEvents.Event.Asked, existing.card)
-      if (input.unanswered && input.request) await persistRequest(existing, input.request)
       RulesTelemetry.shown(existing.card, existing.trigger, true)
       return existing.card
     }
@@ -307,9 +343,12 @@ export async function ask(input: {
   const entry: Pending = {
     card, root: input.root, directory: input.directory, learn: input.learn, at: Date.now(), trigger, edits: 0,
     sourceSession: input.sessionID, memory: input.draft.memory, unanswered: input.unanswered, scope: state.scope,
+    ...(input.unanswered && input.request ? { request: input.request } : {}),
   }
+  // A requested card is shown only once its request is on disk: otherwise there is no card, and the tool saves as
+  // before cards (a card the tool had stood down for, lost with a crash, would lose the request).
+  if (input.unanswered && input.request && !(await persistRequest(entry, input.request))) return undefined
   pending.set(card.id, entry)
-  if (input.unanswered && input.request) await persistRequest(entry, input.request)
   RulesTelemetry.shown(card, trigger, false)
   await publish(RuleEvents.Event.Asked, card)
   return card
@@ -419,6 +458,7 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
   }
 
   entry.busy = true
+  entry.enqueued = false
   let message: string
   try {
     const done = await act(entry, input.action)
@@ -431,22 +471,48 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
       entry.busy = false
       track("not_open")
       if (entry.closed) return (await settleIfClosed(id, entry))!
-      pending.delete(id)
       const message = "The account or workspace changed since this proposal was shown: it was not sent."
-      await settle(id, entry, message, "closed", entry.directory)
+      await close(id, entry, message, "closed", entry.directory)
       return { ok: false, code: "not_open", error: message }
     }
     const code = error instanceof RefusedError ? "refused" : "failed"
     if (code === "failed") log.warn("rule proposal reply failed", { action: input.action, error })
     track(code)
+    // The card stays open. A send whose proposal is no longer queued (refused, or the enqueue never happened) has no
+    // request on disk any more: it is kept again, still busy, so nothing closes the card mid-write. If that cannot be
+    // written, the card closes so its fallback saves the request now. A proposal still queued keeps it ended.
+    // An enqueue whose write landed but whose call still threw (the mirror write after it failed) ended the request on
+    // disk: the record's absence is what says so, not whether the call returned.
+    if (entry.persisted && !entry.enqueued && entry.request && !(await RulesStore.read(entry.root).then(
+      (state) => state.remember_requests.some((r) => r.card === id),
+      () => true,
+    ))) {
+      entry.persisted = false
+      entry.enqueued = true
+    }
+    const unqueued = error instanceof RefusedError || !entry.enqueued
+    // Still queued: the request went to the workspace with the proposal, so the card no longer stands for a "remember".
+    // Closed unanswered later, it saves nothing locally (that would be a second copy).
+    if (!unqueued) {
+      entry.unanswered = undefined
+      entry.request = undefined
+    }
+    if (entry.request && entry.unanswered && !entry.persisted && unqueued && !(await persistRequest(entry, entry.request))) {
+      entry.busy = false
+      if (entry.closed) return (await settleIfClosed(id, entry))!
+      await close(id, entry, "This proposal was closed: it could not be kept.", "closed", entry.directory)
+      return { ok: false, code: "not_open", error: `Not done: ${error instanceof Error ? error.message : String(error)}. The request was saved as before cards.` }
+    }
     entry.busy = false
     // Closed while this ran: nothing was saved, so the requested card falls back to saving as before cards.
     return (await settleIfClosed(id, entry)) ?? { ok: false, code, error: `Not done: ${error instanceof Error ? error.message : String(error)}`, card: entry.card }
   } finally {
     entry.busy = false
   }
+  // Answered: still this process's until its kept request is gone, so recovery never saves it meanwhile.
+  settling.add(id)
   pending.delete(id)
-  await forgetRequest(id, entry)
+  await forgetRequest(id, entry).finally(() => settling.delete(id))
   // Closed while this ran: the answer saved it, which is what the close was waiting for.
   entry.closed?.done()
   await publish(RuleEvents.Event.Replied, { id, sessionID: card.sessionID, action: input.action, message })
@@ -463,7 +529,10 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
     const until = new Date(Date.now() + RulesStore.DISMISS_MS).toISOString()
     await RulesStore.update(entry.root, (state) => {
       for (const topic of card.topics) state.dismissed.push({ topic, until })
+      // The decision and the end of the request in one write: a crash cannot leave a dismissed request to recover.
+      state.remember_requests = state.remember_requests.filter((r) => r.card !== card.id)
     })
+    entry.persisted = false
     message = card.topics.length ? "Not a rule: it won't be proposed again for 30 days." : "Dismissed: nothing was saved."
   } else if (action === "save_memory") {
     const { MemoryStore } = await import("../../memory/store")
@@ -498,7 +567,10 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
       corrections: card.evidence.correction && quotes
         ? [{ excerpt: card.evidence.correction.excerpt, corrected_at: card.evidence.correction.at, session_ref: hashRef(entry.sourceSession) }]
         : [],
-    }, approve, entry.scope)
+    }, approve, entry.scope, entry.persisted ? card.id : undefined)
+    // Queued, and the request ended in the same write: a crash from here cannot turn it into a local save.
+    entry.persisted = false
+    entry.enqueued = true
     const report = await RulesSync.runFresh(entry.root, entry.directory, entry.learn, "card").catch(() => undefined)
     const sent = RulesSync.outcomeOf(await RulesStore.read(entry.root), report, outboxId)
     const owner = card.workspace?.owner_name ?? "the workspace owner"

@@ -60,6 +60,8 @@ export async function stagedRules(input: {
   const invalid: Staged["invalid"] = []
   for (const lesson of candidate) {
     if (known.has(lesson.text) || approvedIds.has(lesson.id)) continue
+    // The same wording twice in the candidate is proposed once.
+    known.add(lesson.text)
     const reason = lint(lesson.text)
     if (reason) {
       invalid.push({ text: lesson.text, reason })

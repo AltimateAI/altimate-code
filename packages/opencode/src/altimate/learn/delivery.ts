@@ -105,7 +105,9 @@ export async function snapshotFiles(root: string): Promise<Map<string, number>> 
 export const snapshotFile = (session: string) => Store.sha256(session) + ".json"
 
 async function readSnapshotFile(root: string, file: string): Promise<ShownSnapshot> {
-  const state = State.parse(JSON.parse((await read(root, file)) ?? ""))
+  const raw = await read(root, file)
+  if (raw === undefined) throw Object.assign(new Error(`no snapshot: ${file}`), { code: "ENOENT" })
+  const state = State.parse(JSON.parse(raw))
   if (path.basename(file) !== Store.sha256(state.session) + ".json") throw new Error("Learn session state belongs to another session")
   return { session: state.session, shown: state.shown.map(({ name, lesson, tier, at }) => ({
     name, id: lesson.id, textHash: lessonTextHash(lesson.text), tier, at,
@@ -117,8 +119,8 @@ export async function readShownSnapshot(root: string, session: string): Promise<
   const dir = path.join(root, ".altimate-code", "learn", ".sessions")
   await SafeFS.assertSafePath(root, dir)
   const file = path.join(dir, snapshotFile(session))
-  if ((await read(root, file)) === undefined) return undefined
   return readSnapshotFile(root, file).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
     if (error instanceof SafeFS.UnsafeLearnPathError) throw error
     log.warn("learn session snapshot skipped", { file, error })
     return undefined
@@ -215,10 +217,13 @@ export class Delivery {
     // Older versions froze unchecked content. Rebuild unsafe snapshots on the next prepare;
     // valid snapshots retain their byte-identical prefix across resume and approved edits.
     const grandfathered = new Map<string, Pick<Lesson, "id" | "text">[]>()
+    // Read once per check, an unreadable mirror (null) included.
+    let mirrored: Promise<Set<string> | null> | undefined
     for (const { name, lesson } of state.shown) {
-      // altimate_change start — workspace rules: a session that was shown team rules is rebuilt without them while
-      // workspaces are off, so a resumed session does not keep delivering them from its cached section and notes
-      if (name === Store.WORKSPACE_RULES_STORE && !workspacesOn()) {
+      // altimate_change start — workspace rules: a session's cached section and notes keep a team rule only while sync
+      // still vouches for it: workspaces on, and the rule still in the mirror (an edit keeps its id, so its frozen
+      // wording stays). Otherwise (workspaces off, signed out, unlinked, another workspace, retired) it is rebuilt.
+      if (name === Store.WORKSPACE_RULES_STORE && (!workspacesOn() || (await (mirrored ??= this.mirroredIds()))?.has(lesson.id) === false)) {
         log.info("learn session snapshot rebuilt without team rules", { session })
         return undefined
       }
@@ -233,6 +238,20 @@ export class Delivery {
     await this.validateStatePaths(state)
     return state
   }
+
+  // altimate_change start — workspace rules: the ids the team-rules mirror holds now; a missing mirror holds none, and
+  // one that cannot be read is unknown (null): the snapshot is kept rather than rebuilt on a passing read error
+  private async mirroredIds(): Promise<Set<string> | null> {
+    const raw = await read(this.root, Store.paths(this.root, Store.WORKSPACE_RULES_STORE).approved).catch(() => null)
+    if (raw === null) return null
+    if (raw === undefined) return new Set()
+    try {
+      return new Set(parse(raw).map((lesson) => lesson.id))
+    } catch {
+      return null
+    }
+  }
+  // altimate_change end
 
   private async approved(): Promise<Approved[]> {
     const result: Approved[] = []
