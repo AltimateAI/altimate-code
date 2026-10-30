@@ -1,6 +1,5 @@
 import { describe, test, expect, beforeAll } from "bun:test"
 import {
-  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -13,6 +12,7 @@ import {
 import { tmpdir } from "os"
 import { dirname, join } from "path"
 import { $ } from "bun"
+import { standInPython } from "./stand-in-python"
 
 const pkg = join(import.meta.dir, "..")
 const dist = join(pkg, "dist")
@@ -65,9 +65,8 @@ describe("build integrity", () => {
   })
 
   // The published package (see opencode/script/publish.ts copyAssets) is run by
-  // Node from wherever npm installed it. A stand-in `python` records what it is
-  // asked to run and answers the CLI's prerequisite checks, so this follows the
-  // real startup as far as spawning the bridge, without Python or dbt installed.
+  // Node from wherever npm installed it. With the stand-in `python`, this follows
+  // the real startup as far as spawning the bridge, without Python or dbt installed.
   async function startPublished(root: string, dbtIntegration: string) {
     const installed = join(root, "install", "dbt-tools")
     mkdirSync(join(installed, "bin"), { recursive: true })
@@ -77,21 +76,7 @@ describe("build integrity", () => {
     cpSync(join(dist, "node_python_bridge.py"), join(installed, "dist/node_python_bridge.py"))
     writeFileSync(join(installed, "package.json"), JSON.stringify({ type: "module" }))
 
-    const argvLog = join(root, "argv.log")
-    const python = join(root, "python")
-    writeFileSync(
-      python,
-      [
-        "#!/bin/sh",
-        `printf '%s\\n' "$*" >> '${argvLog}'`,
-        'case "$1" in',
-        '  --version) echo "Python 3.11.9"; exit 0 ;;',
-        '  -c) echo "1.10.0"; exit 0 ;;',
-        "esac",
-        "exit 3",
-      ].join("\n") + "\n",
-    )
-    chmodSync(python, 0o755)
+    const { python, runs } = standInPython(root)
     const project = join(root, "project")
     mkdirSync(project)
     writeFileSync(join(project, "dbt_project.yml"), "name: p\nversion: '1.0'\nprofile: p\n")
@@ -103,7 +88,7 @@ describe("build integrity", () => {
       JSON.stringify({ projectRoot: project, pythonPath: python, dbtIntegration, queryLimit: 500 }),
     )
 
-    await $`node ${join(installed, "bin/altimate-dbt")} info`
+    const cli = await $`node ${join(installed, "bin/altimate-dbt")} info`
       .cwd(root)
       .env({ ...process.env, HOME: home })
       .quiet()
@@ -111,17 +96,23 @@ describe("build integrity", () => {
 
     // Node loads the bundle by its real path; on macOS `tmpdir()` is under the `/var` symlink.
     const script = join(realpathSync(installed), "dist", "node_python_bridge.py")
-    return { script, runs: readFileSync(argvLog, "utf8").split("\n") }
+    return { script, runs: runs(), exitCode: cli.exitCode, output: cli.stdout.toString() }
   }
+
+  // The stand-in `python` is a `#!/bin/sh` script.
+  const posixOnly = test.skipIf(process.platform === "win32")
 
   // A dbt Cloud variant other than fusion-stable, here an unknown one, runs on a dbt Core
   // command engine, which starts the bridge. Without that engine's dependencies it throws first.
-  test.skipIf(process.platform === "win32")(
+  posixOnly(
     "the published package starts dbt Cloud mode's dbt Core command engine",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "dbt-tools-cloud-"))
       try {
-        const { script, runs } = await startPublished(root, "cloud")
+        const { script, runs, exitCode, output } = await startPublished(root, "cloud")
+        // `info` answers from the project once the engine's bridge has failed. A failure
+        // before the spawn exits 1, and the comparison shows the CLI's message.
+        expect({ exitCode, output }).toMatchObject({ exitCode: 0 })
         expect(runs).toContain(script)
       } finally {
         rmSync(root, { recursive: true, force: true })
@@ -129,12 +120,17 @@ describe("build integrity", () => {
     },
   )
 
-  test.skipIf(process.platform === "win32")(
+  posixOnly(
     "the published package starts the bridge script next to its own bundle, from any directory",
     async () => {
       const root = mkdtempSync(join(tmpdir(), "dbt-tools-published-"))
       try {
-        const { script, runs } = await startPublished(root, "corecommand")
+        const { script, runs, exitCode, output } = await startPublished(root, "corecommand")
+        // The CLI fails on the stand-in's exit, so after the spawn.
+        expect({ exitCode, output }).toMatchObject({
+          exitCode: 1,
+          output: expect.stringContaining("Python process closed with exit code 3"),
+        })
         expect(runs).toContain(script)
         expect(existsSync(script)).toBe(true)
       } finally {

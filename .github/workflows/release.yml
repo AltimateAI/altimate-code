@@ -291,6 +291,16 @@ jobs:
             echo "::error::dbt-tools bundle lacks fileURLToPath(import.meta.url), which the bridge path is built from"
             exit 1
           fi
+          # ...joined with the bare script name, not a literal path ending in it
+          if ! grep -qF '"node_python_bridge.py"' packages/dbt-tools/dist/index.js; then
+            echo "::error::dbt-tools bundle lacks the \"node_python_bridge.py\" name the bridge path is joined from"
+            exit 1
+          fi
+          # No path from this checkout baked into the bundle
+          if [ -z "$GITHUB_WORKSPACE" ] || grep -qF "$GITHUB_WORKSPACE" packages/dbt-tools/dist/index.js; then
+            echo "::error::dbt-tools bundle contains the build checkout path, or GITHUB_WORKSPACE is unset"
+            exit 1
+          fi
           echo "dbt-tools smoke test passed"
 
       - name: Free disk space for artifact download + npm publish
