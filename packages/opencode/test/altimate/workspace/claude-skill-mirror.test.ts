@@ -342,6 +342,156 @@ describe("claude skill mirror", () => {
     for (const dir of users) expect(existsSync(dir)).toBe(true)
   })
 
+  test("a listed skill directory that is gone keeps copies; a skill without SKILL.md is skipped", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL }, sk_2: { "SKILL.md": simple("b") } })
+    await mirrorClaudeSkills(project)
+    rmSync(path.join(project, MANAGED, "sk_2"), { recursive: true })
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+    expect(existsSync(skillPath("b"))).toBe(true)
+    mkdirSync(path.join(project, MANAGED, "sk_2"))
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: true })
+    expect(existsSync(skillPath("b"))).toBe(false)
+    expect(existsSync(skillPath("staging-conventions"))).toBe(true)
+  })
+
+  test("a symlinked SKILL.md or snapshot path is not read", async () => {
+    const outside = path.join(project, "outside")
+    mkdirSync(outside)
+    writeFileSync(path.join(outside, "SKILL.md"), simple("outside"))
+    writeSnapshot({ sk_1: { "other.md": "x" } })
+    symlinkSync(path.join(outside, "SKILL.md"), path.join(project, MANAGED, "sk_1", "SKILL.md"))
+    await mirrorClaudeSkills(project)
+    expect(existsSync(skillPath("outside"))).toBe(false)
+
+    rmSync(path.join(project, ".altimate-code"), { recursive: true })
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
+    const skill = path.join(project, ".altimate-code", "skill")
+    renameSync(skill, path.join(project, "elsewhere"))
+    symlinkSync(path.join(project, "elsewhere"), skill)
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+    expect(existsSync(skillPath("staging-conventions"))).toBe(false)
+  })
+
+  test("unreadable credentials keep copies; signing out removes them", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
+    await mirrorClaudeSkills(project)
+    writeFileSync(CREDENTIALS, "{not json")
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+    expect(existsSync(skillPath("staging-conventions"))).toBe(true)
+    rmSync(CREDENTIALS)
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: true })
+    expect(existsSync(skillPath("staging-conventions"))).toBe(false)
+  })
+
+  test("one skill's failed swap does not stop the others", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha", "one") }, sk_2: { "SKILL.md": simple("beta", "one") } })
+    await mirrorClaudeSkills(project)
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha", "two") }, sk_2: { "SKILL.md": simple("beta", "two") } })
+    const rename = fsp.rename.bind(fsp)
+    const spy = spyOn(fsp, "rename").mockImplementation(async (from, to) => {
+      if (!String(from).endsWith(".old") && String(to) === path.join(project, ".claude", "skills", "alpha")) throw new Error("swap failed")
+      return rename(from, to)
+    })
+    try {
+      expect(await mirrorClaudeSkills(project)).toEqual({ changed: true })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(read(skillPath("alpha"))).toContain('description: "one"')
+    expect(read(skillPath("beta"))).toContain('description: "two"')
+  })
+
+  test("a symlinked manifest is not read", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
+    await mirrorClaudeSkills(project)
+    const manifest = path.join(project, MANAGED, ".manifest.json")
+    renameSync(manifest, path.join(project, "manifest.json"))
+    symlinkSync(path.join(project, "manifest.json"), manifest)
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+    expect(existsSync(skillPath("staging-conventions"))).toBe(true)
+  })
+
+  test("a failed move of the old copy does not stop the others", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha", "one") }, sk_2: { "SKILL.md": simple("beta", "one") } })
+    await mirrorClaudeSkills(project)
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha", "two") }, sk_2: { "SKILL.md": simple("beta", "two") } })
+    const rename = fsp.rename.bind(fsp)
+    const spy = spyOn(fsp, "rename").mockImplementation(async (from, to) => {
+      if (String(from) === path.join(project, ".claude", "skills", "alpha")) throw new Error("busy")
+      return rename(from, to)
+    })
+    try {
+      expect(await mirrorClaudeSkills(project)).toEqual({ changed: true })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(read(skillPath("alpha"))).toContain('description: "one"')
+    expect(read(skillPath("beta"))).toContain('description: "two"')
+  })
+
+  test("a manifest replaced during the sync stops the removal pass", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha"), "notes.md": "x" }, sk_2: { "SKILL.md": simple("beta") } })
+    await mirrorClaudeSkills(project)
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha", "two"), "notes.md": "x" } })
+    const manifest = path.join(project, MANAGED, ".manifest.json")
+    const copyFile = fsp.copyFile.bind(fsp)
+    const spy = spyOn(fsp, "copyFile").mockImplementation(async (from, to, mode) => {
+      // A newer snapshot lands while alpha is being copied.
+      writeFileSync(manifest, read(manifest).replace('"datamateId":1', '"datamateId":2'))
+      return copyFile(from, to, mode)
+    })
+    try {
+      await mirrorClaudeSkills(project)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(existsSync(skillPath("beta"))).toBe(true)
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: true })
+    expect(existsSync(skillPath("beta"))).toBe(false)
+  })
+
+  test("parity with the plugin on edge inputs", async () => {
+    // A U+FEFF after the colon is not whitespace to Python: the name is invalid on both sides.
+    writeSnapshot({ sk_1: { "SKILL.md": "---\nname:\ufeffalpha\ndescription: d\n---\n" } })
+    await mirrorClaudeSkills(project)
+    expect(existsSync(skillPath("alpha"))).toBe(false)
+    // `skills` as an array is not a manifest the plugin serves either.
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
+    const manifest = path.join(project, MANAGED, ".manifest.json")
+    writeFileSync(manifest, JSON.stringify({ ...JSON.parse(read(manifest)), skills: ["sk_1"] }))
+    await mirrorClaudeSkills(project)
+    expect(existsSync(skillPath("staging-conventions"))).toBe(false)
+  })
+
+  test("tombs of broken locks are removed", async () => {
+    const tomb = path.join(project, ".claude", "skills", ".altimate-workspace-sync.lock.stale-1-2")
+    mkdirSync(tomb, { recursive: true })
+    const old = new Date(Date.now() - 3_600_000)
+    utimesSync(tomb, old, old)
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
+    await mirrorClaudeSkills(project)
+    expect(existsSync(tomb)).toBe(false)
+  })
+
+  test("a stale lock that cannot be removed gives up in time", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
+    const lock = path.join(project, ".claude", "skills", ".altimate-workspace-sync.lock")
+    mkdirSync(lock, { recursive: true })
+    const old = new Date(Date.now() - 3_600_000)
+    utimesSync(lock, old, old)
+    const spy = spyOn(fsp, "rename").mockImplementation(async () => {
+      throw Object.assign(new Error("read-only"), { code: "EACCES" })
+    })
+    const start = Date.now()
+    try {
+      expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(Date.now() - start).toBeLessThan(15_000)
+    expect(existsSync(lock)).toBe(true)
+  }, 20_000)
+
   test("waits for a sync holding the lock; a stale lock is taken over", async () => {
     writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
     const lock = path.join(project, ".claude", "skills", ".altimate-workspace-sync.lock")

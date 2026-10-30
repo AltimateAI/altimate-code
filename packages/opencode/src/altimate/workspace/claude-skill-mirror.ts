@@ -13,9 +13,11 @@
 // blocks in a skill body. So a copy keeps only `name` and `description`, leaves no `!` beside a
 // backtick or fence, and skips the paths Claude Code reads as skills, hooks or other components.
 
+import { constants } from "node:fs"
 import fs from "fs/promises"
 import path from "path"
 import { Log } from "@/altimate/util/log"
+import { AltimateApi } from "@/altimate/api/client"
 import { ownManifest, snapshotRoot } from "./skill-sync"
 
 const log = Log.create({ service: "altimate-workspace-claude-skill-mirror" })
@@ -32,8 +34,9 @@ const MARKER_TEXT =
 const STAGING_INFIX = ".altimate-staging-"
 const STAGING_PATTERN = /^\.[a-z0-9][a-z0-9-]{0,63}\.altimate-staging-[A-Za-z0-9_]{6,8}(\.old)?$/
 /** One sync at a time per project, shared with the plugin's Python script: an atomic `mkdir`,
- * the one lock both runtimes have. A lock older than LOCK_STALE_MS belongs to a sync that died;
- * one that is not free within LOCK_WAIT_MS leaves the copies as they are. */
+ * the one lock both runtimes have. The holder renews it; one not renewed for LOCK_STALE_MS
+ * belongs to a sync that died and is taken over; one that is not free within LOCK_WAIT_MS
+ * leaves the copies as they are. */
 const LOCK_DIR = ".altimate-workspace-sync.lock"
 const LOCK_STALE_MS = 120_000
 const LOCK_WAIT_MS = 10_000
@@ -65,6 +68,8 @@ const BLOCKED_FILES = new Set([
 /** What Python's `str.strip()` removes. JS `trim()` differs (it strips U+FEFF, and not U+001C-U+001F). */
 const PY_WHITESPACE = "\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000"
 const PY_STRIP = new RegExp(`^[${PY_WHITESPACE}]+|[${PY_WHITESPACE}]+$`, "g")
+/** `key: value`, with the whitespace after the colon as Python's `\s` (JS `\s` also takes U+FEFF). */
+const FIELD_LINE = new RegExp(`^([A-Za-z_][\\p{L}\\p{N}_-]*):[${PY_WHITESPACE}]*([^\\n]*)$`, "u")
 
 function pyStrip(s: string): string {
   return s.replace(PY_STRIP, "")
@@ -95,7 +100,7 @@ export function parseFrontmatter(text: string): { fields: Record<string, string>
   const fields: Record<string, string> = {}
   let i = 1
   while (i < end) {
-    const match = /^([A-Za-z_][\p{L}\p{N}_-]*):[\s]*([^\n]*)$/u.exec(lines[i])
+    const match = FIELD_LINE.exec(lines[i])
     i++
     if (!match) continue
     const key = match[1]
@@ -155,17 +160,49 @@ async function snapshotIsSwapping(directory: string): Promise<boolean> {
   return false
 }
 
-/** The usable skills, `[]` when there is no snapshot or it may not be served to the signed-in
- * account (so copies are removed), or null when the snapshot exists but cannot be read, or is
- * missing while a swap is in progress (so nothing changes). */
-async function readSnapshot(directory: string): Promise<WorkspaceSkill[] | null> {
-  let raw: string
-  try {
-    raw = await fs.readFile(path.join(snapshotRoot(directory), ".manifest.json"), "utf8")
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") return null
-    return (await snapshotIsSwapping(directory)) ? null : []
+interface Snapshot {
+  skills: WorkspaceSkill[]
+  /** The manifest as read, or null without one: removal runs only while it is unchanged. */
+  manifest: string | null
+}
+
+/** The manifest's text, null when there is none, or undefined when it cannot be read or its
+ * path runs through a symlink. */
+async function manifestText(directory: string): Promise<string | null | undefined> {
+  const root = snapshotRoot(directory)
+  const parts = path.relative(directory, root).split(path.sep)
+  for (let i = 1; i <= parts.length; i++) {
+    const st = await fs.lstat(path.join(directory, ...parts.slice(0, i))).catch(() => null)
+    if (st?.isSymbolicLink()) return undefined
   }
+  try {
+    // lstat too: Windows has no O_NOFOLLOW.
+    if ((await fs.lstat(path.join(root, ".manifest.json"))).isSymbolicLink()) return undefined
+    return await readNoFollow(path.join(root, ".manifest.json"), "utf8")
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT" ? null : undefined
+  }
+}
+
+/** Read a file, never through a symlink (O_NOFOLLOW does not exist on Windows). */
+async function readNoFollow(file: string): Promise<Buffer>
+async function readNoFollow(file: string, encoding: "utf8"): Promise<string>
+async function readNoFollow(file: string, encoding?: "utf8"): Promise<Buffer | string> {
+  const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+  try {
+    return encoding ? await handle.readFile(encoding) : await handle.readFile()
+  } finally {
+    await handle.close()
+  }
+}
+
+/** The usable skills, none when there is no snapshot or it may not be served to the signed-in
+ * account (so copies are removed), or null when the snapshot or the credentials cannot be read,
+ * a listed skill directory is missing, or a swap is in progress (so nothing changes). */
+async function readSnapshot(directory: string): Promise<Snapshot | null> {
+  const raw = await manifestText(directory)
+  if (raw === undefined) return null
+  if (raw === null) return (await snapshotIsSwapping(directory)) ? null : { skills: [], manifest: null }
   try {
     JSON.parse(raw)
   } catch {
@@ -180,7 +217,15 @@ async function readSnapshot(directory: string): Promise<WorkspaceSkill[] | null>
     } catch {
       return null
     }
-    return []
+    // Signed out removes them too; credentials that exist but cannot be read are not an answer.
+    if (await AltimateApi.isConfigured()) {
+      try {
+        await AltimateApi.getCredentials()
+      } catch {
+        return null
+      }
+    }
+    return { skills: [], manifest: raw }
   }
   const root = snapshotRoot(directory)
   const skills: WorkspaceSkill[] = []
@@ -191,16 +236,20 @@ async function readSnapshot(directory: string): Promise<WorkspaceSkill[] | null>
     try {
       const st = await fs.lstat(source)
       if (st.isSymbolicLink() || !st.isDirectory()) continue
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue
+    } catch {
+      // A listed directory that is gone means the snapshot changed under us.
       return null
     }
     let bytes: Buffer
     try {
-      bytes = await fs.readFile(path.join(source, "SKILL.md"))
+      // lstat too: Windows has no O_NOFOLLOW.
+      if ((await fs.lstat(path.join(source, "SKILL.md"))).isSymbolicLink()) continue
+      bytes = await readNoFollow(path.join(source, "SKILL.md"))
     } catch (err) {
-      // A skill without a SKILL.md is skipped; one that cannot be read is unknown, so nothing is pruned.
-      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue
+      // A skill without a SKILL.md, or with a symlinked one, is skipped; one that cannot be read
+      // is unknown, so nothing is pruned.
+      const code = (err as NodeJS.ErrnoException)?.code
+      if (code === "ENOENT" || code === "ELOOP") continue
       return null
     }
     let text: string
@@ -216,7 +265,7 @@ async function readSnapshot(directory: string): Promise<WorkspaceSkill[] | null>
     const description = parsed.fields.description ?? ""
     if (NAME_PATTERN.test(name) && description) skills.push({ source, name, description, body: parsed.body })
   }
-  return skills
+  return { skills, manifest: raw }
 }
 
 /** A marked, non-symlinked directory whose marker names it. Markers without a name (written by
@@ -274,22 +323,25 @@ async function buildCopy(skill: WorkspaceSkill, staging: string): Promise<void> 
   await fs.writeFile(path.join(staging, MARKER), `${MARKER_TEXT}skill: ${skill.name}\n`, "utf8")
 }
 
-async function listing(root: string, dir = root, found = new Map<string, Buffer>()): Promise<Map<string, Buffer>> {
+async function fileSizes(root: string, dir = root, found = new Map<string, number>()): Promise<Map<string, number>> {
   for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
     const p = path.join(dir, entry.name)
-    if (entry.isDirectory()) await listing(root, p, found)
-    else found.set(path.relative(root, p), await fs.readFile(p))
+    if (entry.isDirectory()) await fileSizes(root, p, found)
+    else found.set(path.relative(root, p), (await fs.stat(p)).size)
   }
   return found
 }
 
+/** Same files with the same bytes. Sizes first; contents one file pair at a time, so a large
+ * bundle is never held in memory whole. */
 async function sameTree(a: string, b: string): Promise<boolean> {
   try {
-    const [left, right] = await Promise.all([listing(a), listing(b)])
+    const [left, right] = await Promise.all([fileSizes(a), fileSizes(b)])
     if (left.size !== right.size) return false
-    for (const [rel, bytes] of left) {
-      const other = right.get(rel)
-      if (!other || !bytes.equals(other)) return false
+    for (const [rel, size] of left) if (right.get(rel) !== size) return false
+    for (const rel of left.keys()) {
+      const [x, y] = await Promise.all([fs.readFile(path.join(a, rel)), fs.readFile(path.join(b, rel))])
+      if (!x.equals(y)) return false
     }
     return true
   } catch {
@@ -304,30 +356,79 @@ async function isDir(p: string): Promise<boolean> {
     .catch(() => false)
 }
 
-async function acquireLock(targetRoot: string): Promise<boolean> {
+interface Lock {
+  path: string
+  token: string
+}
+
+/** The lock once this process holds it, or null when it is not free within LOCK_WAIT_MS.
+ * Ownership is an empty `<token>` directory inside the lock, which git does not show and which
+ * no other holder can have. */
+async function acquireLock(targetRoot: string): Promise<Lock | null> {
   const lock = path.join(targetRoot, LOCK_DIR)
+  const token = `${process.pid}-${process.hrtime.bigint()}`
   const deadline = Date.now() + LOCK_WAIT_MS
   for (;;) {
     try {
       await fs.mkdir(lock)
-      return true
+      await fs.mkdir(path.join(lock, token))
+      return { path: lock, token }
     } catch (err) {
-      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return false
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return null
     }
-    const st = await fs.lstat(lock).catch(() => null)
-    if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) {
-      await fs.rmdir(lock).catch(() => {})
-      continue
-    }
-    if (Date.now() > deadline) return false
+    await breakStaleLock(lock)
+    if (Date.now() > deadline) return null
     await new Promise((resolve) => setTimeout(resolve, 50))
   }
+}
+
+/** Remove a lock whose holder stopped renewing it. The rename lets one taker win. A lock renewed
+ * meanwhile goes back only while the path is free; otherwise its holder finds its token gone
+ * and stops. */
+async function breakStaleLock(lock: string): Promise<void> {
+  const tomb = `${lock}.stale-${process.pid}-${process.hrtime.bigint()}`
+  try {
+    if (Date.now() - (await fs.lstat(lock)).mtimeMs <= LOCK_STALE_MS) return
+    await fs.rename(lock, tomb)
+    if (Date.now() - (await fs.lstat(tomb)).mtimeMs <= LOCK_STALE_MS && !(await lexists(lock))) {
+      await fs.rename(tomb, lock)
+      return
+    }
+  } catch {
+    return
+  }
+  await fs.rm(tomb, { recursive: true, force: true }).catch(() => {})
+}
+
+async function holdsLock(lock: Lock): Promise<boolean> {
+  const own = await fs.lstat(path.join(lock.path, lock.token)).catch(() => null)
+  const dir = await fs.lstat(lock.path).catch(() => null)
+  return !!own?.isDirectory() && !dir?.isSymbolicLink()
+}
+
+/** Keep a held lock fresh, so a long sync is not taken for a dead one. False once it is lost. */
+async function renewLock(lock: Lock): Promise<boolean> {
+  if (!(await holdsLock(lock))) return false
+  await fs.utimes(lock.path, new Date(), new Date()).catch(() => {})
+  return true
+}
+
+/** Remove the lock only while it is still this process's. */
+async function releaseLock(lock: Lock): Promise<void> {
+  if (await holdsLock(lock)) await fs.rm(lock.path, { recursive: true, force: true }).catch(() => {})
 }
 
 /** Staging left by a sync that was killed. Only our staging names match, and under the lock no
  * other sync runs; the age is a margin for a sync that has not taken the lock yet. */
 async function removeAbandonedStaging(targetRoot: string): Promise<void> {
   for (const entry of await fs.readdir(targetRoot).catch(() => [] as string[])) {
+    if (entry.startsWith(`${LOCK_DIR}.stale-`)) {
+      // A lock taken over from a dead sync whose removal was interrupted.
+      const st = await fs.lstat(path.join(targetRoot, entry)).catch(() => null)
+      if (st && !st.isSymbolicLink() && Date.now() - st.mtimeMs > LOCK_STALE_MS)
+        await fs.rm(path.join(targetRoot, entry), { recursive: true, force: true }).catch(() => {})
+      continue
+    }
     if (!STAGING_PATTERN.test(entry)) continue
     const dir = path.join(targetRoot, entry)
     const st = await fs.lstat(dir).catch(() => null)
@@ -341,20 +442,29 @@ async function sync(directory: string, withdraw: boolean): Promise<boolean> {
   const targetRoot = path.join(directory, SKILLS_DIR)
   if (!(await isDir(targetRoot))) {
     // Nothing to remove; create the directory only when there is something to copy.
-    if (withdraw || !(await readSnapshot(directory))?.length) return false
+    if (withdraw || !(await readSnapshot(directory))?.skills.length) return false
     await fs.mkdir(targetRoot, { recursive: true })
   }
-  if (!(await acquireLock(targetRoot))) return false
+  const lock = await acquireLock(targetRoot)
+  if (!lock) return false
   try {
     await removeAbandonedStaging(targetRoot)
-    return await reconcile(targetRoot, withdraw ? [] : await readSnapshot(directory))
+    if (withdraw) return await reconcile(directory, targetRoot, { skills: [], manifest: null }, lock, false)
+    const snapshot = await readSnapshot(directory)
+    return snapshot ? await reconcile(directory, targetRoot, snapshot, lock, true) : false
   } finally {
-    await fs.rmdir(path.join(targetRoot, LOCK_DIR)).catch(() => {})
+    await releaseLock(lock)
   }
 }
 
-async function reconcile(targetRoot: string, skills: WorkspaceSkill[] | null): Promise<boolean> {
-  if (!skills) return false
+async function reconcile(
+  directory: string,
+  targetRoot: string,
+  snapshot: Snapshot,
+  lock: Lock,
+  checkManifest: boolean,
+): Promise<boolean> {
+  const skills = snapshot.skills
   let changed = false
   const wanted = new Set<string>()
   for (const skill of skills) {
@@ -364,6 +474,8 @@ async function reconcile(targetRoot: string, skills: WorkspaceSkill[] | null): P
     // A skill the user wrote under this name stays as it is; the workspace one is skipped.
     if ((await lexists(target)) && !(await isOurs(target))) continue
     wanted.add(name)
+    // Taken over as dead: the new holder finishes the job.
+    if (!(await renewLock(lock))) return changed
     const staging = await fs.mkdtemp(path.join(targetRoot, `.${name}${STAGING_INFIX}`))
     const aside = `${staging}.old`
     try {
@@ -375,13 +487,17 @@ async function reconcile(targetRoot: string, skills: WorkspaceSkill[] | null): P
       }
       const exists = await isDir(target)
       if (exists && (await sameTree(staging, target))) continue
+      // Building can outlast the lock; a holder taken over meanwhile swaps nothing more.
+      if (!(await renewLock(lock))) return changed
       // Move the old copy aside rather than deleting it, so a failed swap leaves it in place.
-      if (exists) await fs.rename(target, aside)
       try {
+        if (exists) await fs.rename(target, aside)
         await fs.rename(staging, target)
       } catch (err) {
-        if (exists) await fs.rename(aside, target).catch(() => {})
-        throw err
+        if (exists && !(await lexists(target))) await fs.rename(aside, target).catch(() => {})
+        // One skill's failed swap leaves its copy and does not stop the others.
+        log.warn("could not update workspace skill", { name, err: String(err) })
+        continue
       }
       // Only after a successful swap: if restoring failed above, the aside copy is the only one left.
       await fs.rm(aside, { recursive: true, force: true }).catch(() => {})
@@ -390,6 +506,8 @@ async function reconcile(targetRoot: string, skills: WorkspaceSkill[] | null): P
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
     }
   }
+  // Removal only for the snapshot read above: one swapped in meanwhile is the next sync's.
+  if (!(await renewLock(lock)) || (checkManifest && (await manifestText(directory)) !== snapshot.manifest)) return changed
   if (await isDir(targetRoot)) {
     for (const entry of await fs.readdir(targetRoot)) {
       const entryPath = path.join(targetRoot, entry)
