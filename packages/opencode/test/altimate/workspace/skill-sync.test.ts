@@ -2503,6 +2503,45 @@ describe("workspace skill sync", () => {
   })
 })
 
+describe("workspace skill sync mirrors into .claude/skills", () => {
+  const SKILL = (name: string) => `---\nname: ${name}\ndescription: a skill\n---\nbody\n`
+  const copy = (name: string) => path.join(project, ".claude", "skills", name, "SKILL.md")
+
+  test("syncSkills and purgeManagedSnapshot keep the Claude Code copies in step", async () => {
+    mkdirSync(path.join(project, ".claude"), { recursive: true })
+    serve({ "pub-1": { "SKILL.md": SKILL("mirrored") } })
+    await syncSkills(project)
+    expect(existsSync(copy("mirrored"))).toBe(true)
+    expect(existsSync(path.join(project, ".claude", "skills", "mirrored", ".altimate-workspace-skill"))).toBe(true)
+
+    // An empty workspace removes the snapshot, and the copies with it.
+    serve({})
+    await syncSkills(project)
+    expect(existsSync(copy("mirrored"))).toBe(false)
+
+    serve({ "pub-1": { "SKILL.md": SKILL("mirrored") } })
+    await syncSkills(project)
+    expect(existsSync(copy("mirrored"))).toBe(true)
+    await purgeManagedSnapshot(project, "test")
+    expect(existsSync(copy("mirrored"))).toBe(false)
+  })
+
+  test("a project without .claude gets no copies from a sync", async () => {
+    serve({ "pub-1": { "SKILL.md": SKILL("mirrored") } })
+    await syncSkills(project)
+    expect(existsSync(path.join(project, ".claude"))).toBe(false)
+  })
+
+  test("a failing mirror does not change the sync result", async () => {
+    // `.claude` is a file, so the copy cannot be written; the sync must still report normally.
+    writeFileSync(path.join(project, ".claude"), "not a directory")
+    serve({ "pub-1": { "SKILL.md": SKILL("mirrored") } })
+    const result = await syncSkills(project)
+    expect(result.changed).toBe(true)
+    expect(result.error).toBeUndefined()
+  })
+})
+
 describe("describeSyncProblems", () => {
   const skip = (skill: string) => ({ skill, reason: `${skill} failed` })
 

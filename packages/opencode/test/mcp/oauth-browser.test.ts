@@ -1,8 +1,12 @@
-import { expect, mock, beforeEach } from "bun:test"
+import { afterAll, expect, mock, beforeEach } from "bun:test"
 import { EventEmitter } from "events"
 import { Deferred, Effect, Exit, Fiber, Layer, Option } from "effect"
 import { awaitWithTimeout, testEffect } from "../lib/effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
+import { snapshotMcpClientModules } from "../lib/mcp-sdk-restore"
+
+const restoreMcpClientModules = await snapshotMcpClientModules()
+afterAll(restoreMcpClientModules)
 
 // Track open() calls and control failure behavior
 let openShouldFail = false

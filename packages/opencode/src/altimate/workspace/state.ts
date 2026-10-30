@@ -822,12 +822,18 @@ export async function resolveBindingOutcome(directory: string): Promise<BindingO
  * see. */
 /** `directory` is the canonical path whose binding changed, so a listener can scope its
  * reaction to that project rather than to every project the process serves. */
-const bindingChangeListeners = new Set<(directory: string) => void>()
+function bindingChangeListeners(): Set<(directory: string) => void> {
+  // Subscribers can arrive through a cyclic import before this module finishes
+  // evaluating. A hoisted accessor avoids a top-level Set's temporal dead zone.
+  const key = Symbol.for("altimate.workspace.binding-change-listeners")
+  const shared = globalThis as unknown as Record<symbol, Set<(directory: string) => void> | undefined>
+  return (shared[key] ??= new Set())
+}
 
 export function onBindingChanged(listener: (directory: string) => void): () => void {
-  bindingChangeListeners.add(listener)
+  bindingChangeListeners().add(listener)
   return () => {
-    bindingChangeListeners.delete(listener)
+    bindingChangeListeners().delete(listener)
   }
 }
 
@@ -839,7 +845,7 @@ function notifyBindingChanged(directory: string): void {
   // Snapshot first: a listener may subscribe or unsubscribe while being
   // notified, and iterating the live Set would then walk a collection that
   // changed underneath us.
-  const listeners = Array.from(bindingChangeListeners)
+  const listeners = Array.from(bindingChangeListeners())
   for (const listener of listeners) {
     try {
       listener(canonical)

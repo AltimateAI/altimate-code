@@ -126,6 +126,23 @@ describe("answer_commit conjunction check", () => {
     expect((await tool.execute(unresolved, context([user(compound)]))).output).toBe(renderAnswer(unresolved))
     expect((await tool.execute(payload, context())).output).toBe(renderAnswer(payload))
   })
+  test("counts non-blank asked labels, so a rows commit is checked too; blank labels fall back to fields", async () => {
+    const tool = await initTool(AnswerCommitTool)
+    const rows = { basis, rows: { columns: ["repository"], values: [["repo-a"]] } }
+    const underAsked = await tool.execute({ ...rows, asked: ["repository"] }, context([user(compound)]))
+    expect(underAsked.status).toBe("error")
+    expect(underAsked.output).toContain('1 asked item (["repository"])')
+    expect((await tool.execute({ ...payload, asked: [" "] }, context([user(compound)]))).status).toBe("error")
+    const both = { ...complete, asked: ["repository", "most copied file"] }
+    const accepted = await tool.execute(both, context([user(compound)]))
+    expect(accepted.metadata.asked).toEqual(both.asked)
+    expect(accepted.output).toBe(renderAnswer({ ...both, asked: undefined }))
+  })
+  test("an unresolved commit with asked labels is accepted", async () => {
+    const tool = await initTool(AnswerCommitTool)
+    const unresolved = { basis, unresolved: { reason: "No matching records." }, asked: ["repository"] }
+    expect((await tool.execute(unresolved, context([user(compound)]))).output).toBe(renderAnswer(unresolved))
+  })
 })
 
 describe("near the time budget a commit is never rejected", () => {

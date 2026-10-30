@@ -193,6 +193,16 @@ const EMPTY = (reason: Precedence["disabledReason"], workspaceName = "", workspa
 /** Per-session precedence, refreshed once per turn by the tool resolver and read
  * (never recomputed) by tool bodies mid-turn. */
 const bySession = new Map<string, Precedence>()
+
+/** A standalone native-tool server deliberately uses local drivers, without attaching an engine. */
+export function bindLocalSession(sessionID: string): void {
+  remember(sessionID, EMPTY("escape-hatch"))
+}
+
+export function releaseLocalSession(sessionID: string): void {
+  bySession.delete(sessionID)
+  incarnations.delete(sessionID)
+}
 /** One token per session incarnation: set when a session is first remembered or
  * recreated after eviction, dropped with it. A delivery records against the
  * incarnation it was published for, so ordinary refreshes (which replace the

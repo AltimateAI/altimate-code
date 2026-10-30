@@ -1,6 +1,10 @@
-import { expect, mock, beforeEach } from "bun:test"
+import { afterAll, expect, mock, beforeEach } from "bun:test"
 import { Effect, Fiber, Layer } from "effect"
 import { testEffect } from "../lib/effect"
+import { snapshotMcpClientModules } from "../lib/mcp-sdk-restore"
+
+const restoreMcpClientModules = await snapshotMcpClientModules()
+afterAll(restoreMcpClientModules)
 
 // Mock UnauthorizedError to match the SDK's class
 class MockUnauthorizedError extends Error {

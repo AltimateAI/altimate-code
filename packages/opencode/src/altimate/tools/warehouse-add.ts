@@ -1,6 +1,12 @@
 import z from "zod"
+import fs from "node:fs"
+import path from "node:path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+// altimate_change start — a read-only session must refuse a name bound anywhere, not only in the active registry
+import * as Registry from "../native/connections/registry"
+import { hasStoredCredentials } from "../native/connections/credential-store"
+// altimate_change end
 // altimate_change start — post-connect feature suggestions
 import { PostConnectSuggestions } from "./post-connect-suggestions"
 import { Telemetry } from "../../telemetry"
@@ -49,12 +55,57 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
       }
     }
 
+    // altimate_change start — a read-only MCP session must not create a database file through `create`
+    if (ctx.extra?.forceReadOnly === true && args.config.create === true) {
+      return {
+        title: `Add '${args.name}': FAILED`,
+        metadata: { success: false, name: args.name, type: String(args.config.type) },
+        output: `This session is read-only, so "create": true is not allowed. Point "path" at an existing database file.`,
+      }
+    }
+    // altimate_change end
+    // altimate_change start — a read-only session may add a connection but not replace one. "Replace" means bound
+    // anywhere `Registry.add` would touch or read from: the active registry (what the running session serves —
+    // under `--connections` that excludes the global/project files, but `add` still writes the global file and the
+    // OS credential store regardless), the global connections file, the project connections file, or stored
+    // credentials (keyed by name only, so shared across every project that uses that name). A failed lookup must
+    // refuse rather than silently allow a replace or credential reuse.
+    if (ctx.extra?.forceReadOnly === true) {
+      let bound: boolean
+      try {
+        bound = await nameIsBoundAnywhere(args.name)
+      } catch {
+        bound = true
+      }
+      if (bound) {
+        return {
+          title: `Add '${args.name}': FAILED`,
+          metadata: { success: false, name: args.name, type: String(args.config.type) },
+          output: `A connection named '${args.name}' already exists (or could not be checked), and this session is read-only, so it cannot be replaced. Use another name, or replace it with --allow-write.`,
+        }
+      }
+    }
+    // altimate_change end
+    // altimate_change start — a store this process cannot write (file or directory) is opened read-only; opening it
+    // read-write failed every query with "attempt to write a readonly database". A property of the file, so it is
+    // correct to persist; writable stores are unchanged.
+    const config = unwritableFileStore(args.config) ? { ...args.config, readonly: true } : args.config
+    // altimate_change end
     try {
       const result = await Dispatcher.call("warehouse.add", {
         name: args.name,
-        config: args.config,
+        config,
       })
 
+      // altimate_change start — MCP clients have only the toolkit: no warehouse_test or suggested follow-up tools
+      if (result.success && ctx.extra?.mcpClient === true) {
+        let output = `Added warehouse '${result.name}' (type: ${result.type}). Call warehouse_list to see its tables.`
+        output += driverReadinessNote(result.type)
+        if (result.warnings?.length)
+          output += `\n\nWarning — not every credential was saved:\n${result.warnings.map((w) => `- ${w}`).join("\n")}`
+        return { title: `Add '${args.name}': OK`, metadata: { success: true, name: result.name, type: result.type }, output }
+      }
+      // altimate_change end
       if (result.success) {
         // altimate_change start — append post-connect feature suggestions (async, non-blocking)
         let output = `Successfully added warehouse '${result.name}' (type: ${result.type}).\n\nUse warehouse_test to verify connectivity.`
@@ -157,6 +208,44 @@ IMPORTANT: For private key file paths, always use "private_key_path" (not "priva
     }
   },
 })
+
+// altimate_change start — every place `Registry.add` could already have this name bound
+/**
+ * Whether `name` is already bound in the active registry, in the global or project connections
+ * file, or in a readable OS credential store. `Registry.add` always writes the global file and the
+ * credential store (see registry.ts), even when the active session serves a different registry
+ * (`--connections`), so a read-only replace check against the active registry alone misses a
+ * collision there — and the credential store is shared by name across every project.
+ */
+async function nameIsBoundAnywhere(name: string): Promise<boolean> {
+  const existing = await Dispatcher.call("warehouse.list", {})
+  if (existing.warehouses.some((warehouse) => warehouse.name === name)) return true
+  for (const file of [Registry.globalConfigPath(), Registry.localConfigPath()]) {
+    if (!fs.existsSync(file)) continue
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf-8"))
+    if (parsed && typeof parsed === "object" && Object.hasOwn(parsed, name)) return true
+  }
+  // An unreadable credential store cannot be overwritten either (its writes fail and the field stays in the config),
+  // so it does not block a new name; the file and registry checks above still fail closed.
+  return hasStoredCredentials(name).catch(() => false)
+}
+// altimate_change end
+
+// altimate_change start — read-only detection for existing SQLite/DuckDB store files
+function unwritableFileStore(config: Record<string, unknown>): boolean {
+  const type = String(config.type).toLowerCase()
+  const store = config.path
+  if ((type !== "sqlite" && type !== "duckdb") || typeof store !== "string" || !path.isAbsolute(store)) return false
+  if (config.readonly !== undefined || !fs.existsSync(store)) return false
+  try {
+    fs.accessSync(store, fs.constants.W_OK)
+    fs.accessSync(path.dirname(store), fs.constants.W_OK)
+    return false
+  } catch {
+    return true
+  }
+}
+// altimate_change end
 
 // altimate_change start — driver readiness note for newly added warehouses
 /**

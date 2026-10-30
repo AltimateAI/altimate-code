@@ -1,5 +1,8 @@
 import yargs from "yargs"
 import { hideBin } from "yargs/helpers"
+// altimate_change start - stdin tool arguments
+import { foldStdinArgs } from "./altimate/tool-cli/argv"
+// altimate_change end
 import { RunCommand } from "./cli/cmd/run"
 import { GenerateCommand } from "./cli/cmd/generate"
 import { ConsoleCommand } from "./cli/cmd/account"
@@ -49,6 +52,9 @@ import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change start — check: deterministic SQL check command
 import { CheckCommand } from "./cli/cmd/check"
 // altimate_change end
+// altimate_change start — tool: model-free data tool access
+import { ToolCommand } from "./cli/cmd/tool"
+// altimate_change end
 // altimate_change start — learn: playbook learning loop command
 import { LearnCommand } from "./cli/cmd/learn"
 // altimate_change end
@@ -56,6 +62,7 @@ import { LearnCommand } from "./cli/cmd/learn"
 import { LinkCommand } from "./cli/cmd/link"
 // altimate_change start — headless workspace commands (status, refresh, sync, unlink)
 import { WorkspaceCommand } from "./cli/cmd/workspace"
+import { WorkspaceClientCommand } from "./cli/cmd/workspace-client"
 // altimate_change end
 import { pilotOffCommand } from "./cli/cmd/workspace-pilot"
 // altimate_change end
@@ -73,7 +80,9 @@ import { Log as AltimateLog } from "@/altimate/util/log"
 // altimate_change end
 // altimate_change end
 
-const args = hideBin(process.argv)
+// altimate_change start - fold `tool run --args -` before yargs sees the lone dash
+const args = foldStdinArgs(hideBin(process.argv))
+// altimate_change end
 
 function show(out: string) {
   const text = out.trimStart()
@@ -92,12 +101,12 @@ function show(out: string) {
 const CLI_COMMAND_NAMES = new Set([
   "acp", "mcp", "attach", "run", "generate", "debug", "console", "providers", "auth", "agent",
   "upgrade", "uninstall", "serve", "web", "models", "stats", "export", "import", "github", "gitlab",
-  "review", "pr", "session", "plugin", "plug", "db", "trace", "recap", "skill", "check", "completion",
+  "review", "pr", "session", "plugin", "plug", "db", "trace", "recap", "skill", "check", "completion", "tool",
   // altimate_change start — attribute learning commands to their CLI entry point
   "learn",
   // altimate_change end
   // registered conditionally below (workspace / local-install builds)
-  "link", "workspace", "workspace-serve",
+  "link", "workspace", "workspace-serve", "workspace-client",
 ])
 // altimate_change end
 let cli = yargs(args)
@@ -141,13 +150,19 @@ let cli = yargs(args)
   .middleware(async (opts) => {
     if (opts.printLogs) process.env.OPENCODE_PRINT_LOGS = "1"
     if (opts.logLevel) process.env.OPENCODE_LOG_LEVEL = opts.logLevel
+    // altimate_change start — the altimate log shim read its level when it was imported, before this ran
+    if (opts.logLevel) AltimateLog.setLevel(opts.logLevel as AltimateLog.Level)
+    // altimate_change end
+    // altimate_change start - workspace precedence escape hatch. Process-wide, not
+    // per session: an env var inherited by child processes, and under `serve` (and
+    // `mcp serve`) it covers every session that process hosts.
+    if (opts.integrations) process.env.ALTIMATE_INTEGRATIONS = String(opts.integrations)
+    // altimate_change end
     if (opts.pure) {
       process.env.OPENCODE_PURE = "1"
     }
-    // altimate_change start - workspace precedence escape hatch. Process-wide, not
-    // per session: an env var inherited by child processes, and under `serve` it
-    // covers every session that process hosts.
-    if (opts.integrations) process.env.ALTIMATE_INTEGRATIONS = String(opts.integrations)
+    // altimate_change start — MCP stdio needs no banner, telemetry startup or agent initialization
+    if (opts._[0] === "mcp" && opts._[1] === "serve") return
     // altimate_change end
 
     Heap.start()
@@ -244,14 +259,17 @@ let cli = yargs(args)
   // altimate_change start — check: register deterministic SQL check command
   .command(CheckCommand)
   // altimate_change end
+  // altimate_change start — tool: model-free data tool access
+  .command(ToolCommand)
+  // altimate_change end
   // altimate_change start — learn: register playbook learning command
   .command(LearnCommand)
   // altimate_change end
 
 // altimate_change start — link and workspace: absent from --help when workspaces are turned off
 // via ALTIMATE_DISABLE_WORKSPACE=1. Off, hidden stubs take their place and say why.
-if (!Flag.ALTIMATE_DISABLE_WORKSPACE) cli = cli.command(LinkCommand).command(WorkspaceCommand)
-else cli = cli.command(pilotOffCommand("link")).command(pilotOffCommand("workspace [action]"))
+if (!Flag.ALTIMATE_DISABLE_WORKSPACE) cli = cli.command(LinkCommand).command(WorkspaceCommand).command(WorkspaceClientCommand)
+else cli = cli.command(pilotOffCommand("link")).command(pilotOffCommand("workspace [action]")).command(pilotOffCommand("workspace-client [action]"))
 // altimate_change end
 
 // altimate_change start — workspace-serve: register dev-only workspace serve command
