@@ -15,6 +15,8 @@ import {
   GraphParser,
   SourceParser,
   TestParser,
+  UnitTestParser,
+  SemanticModelParser,
   ExposureParser,
   FunctionParser,
   DocParser,
@@ -141,6 +143,8 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
       defer,
       changed,
       cloudVariantDetector,
+      // Every variant but fusion-stable runs on a dbt Core command engine, which needs these.
+      { pythonDBTCommandExecutionStrategy: python, dbtConfiguration: config, dbtIntegrationClient: client },
     )
 
   const command = (
@@ -170,19 +174,7 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
     defer: DeferConfig,
     changed: () => void,
   ): DBTProjectIntegration =>
-    new DBTFusionCommandProjectIntegration(
-      infra,
-      factory,
-      cli,
-      runtime,
-      provider,
-      term,
-      root,
-      diag,
-      defer,
-      changed,
-      cloudVariantDetector,
-    )
+    new DBTFusionCommandProjectIntegration(infra, factory, cli, runtime, provider, term, root, diag, defer, changed)
 
   const adapter = new DBTProjectIntegrationAdapter(
     config,
@@ -200,11 +192,13 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
     new GraphParser(term),
     new SourceParser(term),
     new TestParser(term),
+    new UnitTestParser(term),
     new ExposureParser(term),
     new FunctionParser(term),
     new DocParser(term),
     term,
     new ModelDepthParser(term, client, config),
+    new SemanticModelParser(term),
   )
 
   await adapter.initialize()

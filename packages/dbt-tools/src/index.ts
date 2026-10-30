@@ -37,12 +37,6 @@ function flag(args: string[], name: string): string | undefined {
 
 function diagnose(err: Error): { error: string; fix?: string } {
   const msg = err.message || String(err)
-  if (msg.includes("private field") || msg.includes("#stdin") || msg.includes("#stdout")) {
-    return {
-      error: "Internal error: Bun runtime incompatibility with python-bridge. Please report this issue.",
-      fix: "Try updating: bun install, or file a bug at https://github.com/AltimateAI/altimate-code/issues",
-    }
-  }
   if (msg.includes("IPC channel") || msg.includes("ERR_IPC_CHANNEL_CLOSED")) {
     return {
       error: "Failed to start Python bridge. The dbt Python process exited unexpectedly.",
@@ -109,7 +103,7 @@ function bail(err: unknown): never {
   process.exit(1)
 }
 
-// Catch unhandled rejections (bluebird throws outside normal promise chains)
+// An error that escapes main() still ends as a JSON error on stdout
 process.on("unhandledRejection", bail)
 process.on("uncaughtException", bail)
 
@@ -142,7 +136,7 @@ async function main() {
   const { configure } = await import("./dbt-cli")
   configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot })
 
-  // Lazy import to avoid loading python-bridge until needed
+  // Lazy import: the adapter loads dbt-integration, which commands above don't need
   let adapter
   try {
     const { create } = await import("./adapter")
