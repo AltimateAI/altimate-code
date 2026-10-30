@@ -20,7 +20,7 @@ import * as Playbook from "../learn/playbook"
 import { appendSignal, isHostSession, readSignals } from "../learn/signals"
 import { printable } from "./printable"
 import { RuleProposal } from "./proposal"
-import { ASKED_TO_REMEMBER, alive } from "./remember"
+import { alive } from "./remember"
 import { RulesStore } from "./store"
 import { RulesSync } from "./sync"
 import { RuleTrigger } from "./trigger"
@@ -57,23 +57,21 @@ export interface Start {
 
 /** How long a session start waits for a pull before answering from the last one. */
 export const START_WAIT_MS = 3_000
-/** A project with no pulled rules yet waits longer: without them, nothing else here runs. Within the hook's 15s. */
+/** A project with no pulled rules yet waits longer: without them, nothing else here runs. */
 export const FIRST_PULL_WAIT_MS = 8_000
+/** The whole session start, pull included, ends within this: the plugin's hook timeout is 15s and the CLI takes about a
+ * second to start. Recording the rules as shown and marking notices seen are best effort within what is left. */
+export const START_DEADLINE_MS = 11_000
 /** A review notice older than this is not reported at a host session start: the first one after an upgrade would
  * otherwise report every review ever kept. */
 export const NOTICE_MAX_AGE_MS = 14 * 24 * 60 * 60_000
-/** A check that has run this long is taken to have died (its process killed with the host's). */
-export const CHECK_STALE_MS = 10 * 60_000
+/** A check round that has run this long is taken to have died (its pid may be reused). One drafting call times out at
+ * 2 minutes; the claim's time is renewed every round. */
+export const CHECK_STALE_MS = 4 * 60_000
+/** A leftover session whose check failed is not retried before this: a failing model is not called every turn. */
+export const RETRY_FAILED_MS = 30 * 60_000
 /** Checks one Stop runs for its session at most: the first, then one per round of Stops that arrived meanwhile. */
 const MAX_CHECK_ROUNDS = 3
-
-/** The rules were pulled with the credential signed in now. Two people can share a tenant: the credential's digest tells
- * them apart, where the API URL and tenant would not. No network. */
-async function verified(state: RulesStore.State): Promise<boolean> {
-  if (!state.pulled_with) return false
-  const { accountDigest } = await import("../workspace/state")
-  return (await accountDigest().catch(() => null)) === state.pulled_with
-}
 
 /** Learning is on, workspaces are on, the project is linked to a workspace, and the person signed in now is the one the
  * rules were pulled for (a sync that would clear them after a sign-out or an account change may not have run yet). */
@@ -81,7 +79,7 @@ async function on(root: string, learn: LearnConfig, state?: RulesStore.State) {
   if (!RulesSync.rulesEnabled(learn)) return false
   const current = state ?? (await RulesStore.read(root))
   if (!current.workspace || !RuleTrigger.learningEnabled(learn, current)) return false
-  return verified(current)
+  return RulesStore.verified(current)
 }
 
 /**
@@ -89,39 +87,62 @@ async function on(root: string, learn: LearnConfig, state?: RulesStore.State) {
  * recorded as shown to it and the notices reported are not reported again. Pulls (never pushes: the hook's process may
  * exit mid-way) when one is due or the rules are not verified for this credential, waiting at most `waitMs`.
  */
-export async function start(input: { root: string; directory: string; learn: LearnConfig; session?: string; waitMs?: number }): Promise<Start> {
+export async function start(input: {
+  root: string
+  directory: string
+  learn: LearnConfig
+  session?: string
+  waitMs?: number
+  /** Overrides `START_DEADLINE_MS` (tests). */
+  deadlineMs?: number
+}): Promise<Start> {
   const none: Start = { rules: [], proposals: 0, notices: [] }
+  const deadline = Date.now() + (input.deadlineMs ?? START_DEADLINE_MS)
+  const left = () => Math.max(0, deadline - Date.now())
+  /** `work`, or `fallback` once the deadline passes (the work goes on; the hook's process may exit under it). */
+  const within = <T>(work: Promise<T>, fallback: T) =>
+    Promise.race([work, new Promise<T>((resolve) => setTimeout(() => resolve(fallback), left()).unref?.())])
   const { RulesService } = await import("./service")
   if (!RulesSync.rulesEnabled(input.learn) || !(await RulesService.linked(input.root, input.directory))) return none
   const before = await RulesStore.read(input.root)
-  if (!(await verified(before)) || (await RulesSync.due(input.root)))
-    await RulesSync.pullWithin(input.root, input.directory, input.learn, input.waitMs ?? (before.scope ? START_WAIT_MS : FIRST_PULL_WAIT_MS))
+  if (!RulesSync.pullFailedRecently(before) && (!(await RulesStore.verified(before)) || (await RulesSync.due(input.root))))
+    await RulesSync.pullWithin(input.root, input.directory, input.learn, Math.min(left(), input.waitMs ?? (before.scope ? START_WAIT_MS : FIRST_PULL_WAIT_MS)))
   const state = await RulesStore.read(input.root)
   if (!(await on(input.root, input.learn, state))) return none
-  const all = state.rules.map(RulesStore.toLesson)
-  // Recorded as shown when the learn lock allows (a busy TUI may hold it): the rules are given either way.
+  // The same selection either way: pinned first, within the start budget.
+  const { renderSection, resolveLimits } = await import("../learn/select")
+  const all = state.rules.map(RulesStore.toLesson).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned))
+  const selected = renderSection(all, resolveLimits(input.learn as Parameters<typeof resolveLimits>[0]).budget_tokens).lessons
+  // Recorded as shown when the learn lock allows within the deadline (a busy TUI may hold it): given either way.
   const lessons = input.session
-    ? await import("../learn/delivery")
-        .then(({ Delivery }) =>
-          new Delivery(input.root, input.learn as ConstructorParameters<typeof Delivery>[1], input.directory).recordStart(input.session!, RulesStore.WORKSPACE_RULES_STORE))
-        .catch((error) => {
-          log.warn("host session rules not recorded as shown", { error: errorText(error) })
-          return all
-        })
-    : all
+    ? await within(
+        import("../learn/delivery")
+          .then(({ Delivery }) =>
+            new Delivery(input.root, input.learn as ConstructorParameters<typeof Delivery>[1], input.directory).recordStart(input.session!, RulesStore.WORKSPACE_RULES_STORE))
+          .catch((error) => {
+            log.warn("host session rules not recorded as shown", { error: errorText(error) })
+            return selected
+          }),
+        selected,
+      )
+    : selected
   const seen = new Set(state.host_notices_seen)
   const now = Date.now()
   const notices = state.notices.filter((notice) => !seen.has(noticeKey(notice)) && !(now - Date.parse(notice.at) > NOTICE_MAX_AGE_MS))
   const failed = state.last_check?.outcome.startsWith("failed") && !seen.has(checkKey(state.last_check)) ? state.last_check : undefined
+  // Marked seen only if the write lands in time: otherwise they are said again next time, never lost.
   if (input.session && (notices.length || failed))
-    await RulesStore.update(input.root, (s) => {
-      const keys = [...notices.map(noticeKey), ...(failed ? [checkKey(failed)] : [])]
-      s.host_notices_seen = [...s.host_notices_seen, ...keys.filter((key) => !s.host_notices_seen.includes(key))]
-    })
+    await within(
+      RulesStore.update(input.root, (s) => {
+        const keys = [...notices.map(noticeKey), ...(failed ? [checkKey(failed)] : [])]
+        s.host_notices_seen = [...s.host_notices_seen, ...keys.filter((key) => !s.host_notices_seen.includes(key))]
+      }).catch((error) => log.warn("host notices not marked seen", { error: errorText(error) })),
+      undefined,
+    )
   return {
     workspace: state.workspace,
     rules: lessons.map((lesson) => ({ text: lesson.text, applies_to: lesson.trigger?.paths ?? [] })),
-    proposals: (await RuleProposal.stored(input.root)).length,
+    proposals: (await RuleProposal.storedFor(input.root)).length,
     notices,
     ...(failed ? { check_failed: failed.outcome.replace(/^failed:\s*/, "") } : {}),
   }
@@ -140,7 +161,8 @@ export function context(start: Start, command = "/altimate-code:rules"): string 
       lines.push(`- ${printable(rule.text)}${rule.applies_to.length ? ` (applies to ${rule.applies_to.map(printable).join(", ")})` : ""}`)
   }
   if (start.proposals)
-    lines.push(`${start.proposals} proposed team ${start.proposals === 1 ? "rule is" : "rules are"} waiting for the person's answer: they can review ${start.proposals === 1 ? "it" : "them"} with ${command}.`)
+    lines.push(`${start.proposals} proposed team ${start.proposals === 1 ? "rule is" : "rules are"} waiting for the person's answer: they can review ${start.proposals === 1 ? "it" : "them"} with ${command}.` +
+      (start.proposals >= RulesStore.MAX_STORED_PROPOSALS ? " New proposals from corrections wait until some are answered." : ""))
   if (start.notices.length) {
     lines.push(`Reviews of the person's proposed rules in ${ws} since their last session:`)
     for (const notice of start.notices) {
@@ -153,8 +175,10 @@ export function context(start: Start, command = "/altimate-code:rules"): string 
   return lines.join("\n")
 }
 
-/** "Remember this as a team rule: X", "from now on, X": the request and what to remember (its first line). */
-const REMEMBER = /\b(?:remember|keep in mind|from now on)\b(?:\s+(?:this|that))?(?:\s+as\s+an?\s+(?:team\s+)?rule)?\s*[:,-]?\s*(.+)$/i
+/** "Remember this as a team rule: X", "save as a rule - X", "don't forget, team rule: X": a request that names a team rule,
+ * and what it is. Only explicit wording: "remember to run the tests" or "do you remember …?" is the conversation, not a
+ * rule. The cue words are the ones `RulesRemember` treats as asking to remember. */
+const REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note|save|from now on)\b,?(?:\s+(?:this|that|it))?\s+(?:as\s+)?(?:an?\s+)?(?:team\s+)?rule\b\s*[:,-]\s*(.+)$/i
 /** Shorter than this after the cue is not a rule ("remember?", "remember this"). */
 const MIN_REMEMBERED = 8
 
@@ -170,16 +194,17 @@ export async function recordCorrection(input: {
   session: string
   text: string
   explicit?: boolean
-}): Promise<"proposed" | "recorded" | "duplicate" | "not_correction" | "off"> {
+}): Promise<"proposed" | "not_stored" | "recorded" | "duplicate" | "not_correction" | "off"> {
   if (!(await on(input.root, input.learn))) return "off"
-  if (input.explicit !== false && ASKED_TO_REMEMBER.test(input.text)) {
-    const remembered = REMEMBER.exec(input.text.split("\n")[0])?.[1]?.trim()
+  if (input.explicit !== false) {
+    // The rule may follow on the next line ("Remember this as a team rule:\nAlways …").
+    const remembered = REMEMBER.exec(input.text.replace(/\s*\n\s*/g, " "))?.[1]?.trim()
     if (remembered && remembered.length >= MIN_REMEMBERED) {
       const result = await RuleTrigger.explicit({
         sessionID: input.session, root: input.root, directory: input.directory, learn: input.learn, text: remembered, said: input.text,
         persist: true, request: { session: input.session, via: "training" },
       })
-      if (result.status === "shown" && result.card) return "proposed"
+      if (result.status === "shown") return result.card ? "proposed" : "not_stored"
     }
   }
   const reason = correctionReason(input.text)
@@ -250,17 +275,8 @@ export async function check(input: { root: string; directory: string; learn: Lea
   const last = transcript?.prompts.at(-1)
   if (last) await recordCorrection({ ...input, text: last, explicit: false }).catch((error) => log.warn("last prompt not recorded", { error: errorText(error) }))
   if (!(await claimCheck(input.root, input.session, true))) return "another check of this session is running; it checks again before it ends"
-  let outcome: string
-  try {
-    outcome = await checkSession(input, input.session, transcript)
-    for (let round = 1; round < MAX_CHECK_ROUNDS && (await releaseCheck(input.root, input.session)); round++)
-      await checkSession(input, input.session, input.transcript ? await sourceFromTranscript(input.transcript).catch(() => transcript) : transcript)
-  } finally {
-    // Past the last round, or after a failure: released for good; work marked meanwhile is left for the next check.
-    await RulesStore.update(input.root, (s) => {
-      if (s.host_checks[input.session]?.pid === process.pid) delete s.host_checks[input.session]
-    }).catch((error) => log.warn("host check claim not released", { error: errorText(error) }))
-  }
+  const reread = async () => (input.transcript ? await sourceFromTranscript(input.transcript).catch(() => transcript) : transcript)
+  const outcome = await runRounds(input, input.session, transcript, reread)
   if (outcome === "no new corrections") await checkLeftover(input)
   const state = await RulesStore.read(input.root)
   if (state.outbox.length || (await RulesSync.due(input.root)))
@@ -269,20 +285,64 @@ export async function check(input: { root: string; directory: string; learn: Lea
   return outcome
 }
 
-/** One other host session with corrections no check has seen: the oldest, checked under its own claim. */
+/**
+ * Check `session` under the claim this process holds, again while work arrives for it (`pending`), at most
+ * `MAX_CHECK_ROUNDS` times; then release the claim. Work still pending at the limit is kept in `host_pending`, so the next
+ * check with nothing new takes it first. Returns the last round's outcome.
+ */
+async function runRounds(
+  input: Parameters<typeof check>[0],
+  session: string,
+  transcript: DigestSource | undefined,
+  reread: () => Promise<DigestSource | undefined>,
+): Promise<string> {
+  let outcome = "no new corrections"
+  try {
+    outcome = await checkSession(input, session, transcript)
+    for (let round = 1; await releaseCheck(input.root, session); round++) {
+      if (round >= MAX_CHECK_ROUNDS) {
+        await RulesStore.update(input.root, (s) => {
+          if (!s.host_pending.includes(session)) s.host_pending.push(session)
+        })
+        break
+      }
+      outcome = await checkSession(input, session, await reread())
+    }
+  } finally {
+    await RulesStore.update(input.root, (s) => {
+      if (s.host_checks[session]?.pid === process.pid) delete s.host_checks[session]
+    }).catch((error) => log.warn("host check claim not released", { error: errorText(error) }))
+  }
+  return outcome
+}
+
+/**
+ * One other host session with corrections no check has seen: first a session whose check stopped with work left
+ * (`host_pending`), then the oldest unchecked correction's session. Skipped: sessions another check holds, sessions with
+ * a proposal still waiting for an answer (their check would not draft), and sessions whose check failed within
+ * `RETRY_FAILED_MS`.
+ */
 async function checkLeftover(input: Parameters<typeof check>[0]) {
   const state = await RulesStore.read(input.root)
   const processed = new Set(state.processed_signals)
-  const leftover = (await readSignals(input.root, Playbook.DEFAULT_NAME)).find((signal) =>
-    signal.kind === "user_correction" && isHostSession(signal.sessionID) && signal.sessionID !== input.session && !processed.has(signal.id))
-  if (!leftover || !(await claimCheck(input.root, leftover.sessionID, false))) return
-  try {
-    await checkSession(input, leftover.sessionID, undefined)
-  } finally {
-    await RulesStore.update(input.root, (s) => {
-      if (s.host_checks[leftover.sessionID]?.pid === process.pid) delete s.host_checks[leftover.sessionID]
-    }).catch((error) => log.warn("host check claim not released", { error: errorText(error) }))
+  const waiting = new Set((await RuleProposal.stored(input.root)).map((card) => card.sessionID))
+  const now = Date.now()
+  const eligible = (session: string) => {
+    if (session === input.session || waiting.has(session)) return false
+    const claim = state.host_checks[session]
+    if (claim && alive(claim.pid) && now - Date.parse(claim.at) < CHECK_STALE_MS) return false
+    const retry = state.host_retry[session]
+    return !retry || Date.parse(retry) <= now
   }
+  const unchecked = (await readSignals(input.root, Playbook.DEFAULT_NAME))
+    .filter((signal) => signal.kind === "user_correction" && isHostSession(signal.sessionID) && !processed.has(signal.id))
+    .map((signal) => signal.sessionID)
+  const leftover = [...state.host_pending, ...unchecked].find(eligible)
+  if (!leftover || !(await claimCheck(input.root, leftover, false))) return
+  await RulesStore.update(input.root, (s) => {
+    s.host_pending = s.host_pending.filter((session) => session !== leftover)
+  })
+  await runRounds(input, leftover, undefined, async () => undefined)
 }
 
 async function checkSession(input: Parameters<typeof check>[0], session: string, transcript: DigestSource | undefined): Promise<string> {
@@ -296,7 +356,14 @@ async function checkSession(input: Parameters<typeof check>[0], session: string,
     },
     generate: (source, onUsage) => generate(input.learn?.model, source, onUsage),
   }
-  return RuleTrigger.afterTurn({ sessionID: session, root: input.root, directory: input.directory, learn: input.learn, deps, persist: true })
+  const outcome = await RuleTrigger.afterTurn({ sessionID: session, root: input.root, directory: input.directory, learn: input.learn, deps, persist: true })
+  // A failed check is retried as a leftover only after `RETRY_FAILED_MS`; its own session's next turn retries it anyway.
+  await RulesStore.update(input.root, (s) => {
+    for (const [key, at] of Object.entries(s.host_retry)) if (Date.parse(at) <= Date.now()) delete s.host_retry[key]
+    if (outcome.startsWith("failed")) s.host_retry[session] = new Date(Date.now() + RETRY_FAILED_MS).toISOString()
+    else delete s.host_retry[session]
+  }).catch((error) => log.warn("host check retry not recorded", { error: errorText(error) }))
+  return outcome
 }
 
 /** A transcript path from the host is read only when it is a regular file (a FIFO would block the check). */

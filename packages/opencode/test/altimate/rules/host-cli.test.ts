@@ -137,6 +137,7 @@ describe("learn proposals", () => {
   test("lists stored proposals and answers them; a wrong or missing answer fails", async () => {
     await using dir = await tmpdir({ git: true })
     const root = await linkedProject(dir.path, { rules: [teamRule] })
+    const env = await home(dir.path)
     const card = {
       id: "card-1", sessionID: "claude:x", text: "Quote reserved words.", applies_to: [], change: "add", origin: "session",
       evidence: { sessions: 2 }, chars: 21, workspace: { name: "Team", owner_name: "Olive", is_owner: false },
@@ -145,26 +146,41 @@ describe("learn proposals", () => {
     await RulesStore.update(root, (s) => {
       s.proposals = [RulesStore.StoredProposal.parse({ card, directory: root, scope: s.scope, trigger: "recurrence", source_session: "claude:x", at: new Date().toISOString() })]
     })
-    const listed = JSON.parse((await cli(dir.path, ["learn", "proposals", "--json"])).stdout)
+    const listed = JSON.parse((await cli(dir.path, ["learn", "proposals", "--json"], { env })).stdout)
     expect(listed.proposals.map((c: { id: string }) => c.id)).toEqual(["card-1"])
     expect(listed.team_rules).toHaveLength(1)
-    expect((await cli(dir.path, ["learn", "proposals"])).stdout).toContain("card-1  add: Quote reserved words.")
+    expect((await cli(dir.path, ["learn", "proposals"], { env })).stdout).toContain("card-1  add: Quote reserved words.")
 
-    const none = await cli(dir.path, ["learn", "proposals", "reply", "card-1"])
+    const none = await cli(dir.path, ["learn", "proposals", "reply", "card-1"], { env })
     expect(none.code).not.toBe(0)
     expect(none.stderr).toContain("Pass exactly one of")
-    expect((await cli(dir.path, ["learn", "proposals", "reply", "card-1", "--send", "--dismiss"])).code).not.toBe(0)
-    const unavailable = await cli(dir.path, ["learn", "proposals", "reply", "card-1", "--approve", "--json"])
+    expect((await cli(dir.path, ["learn", "proposals", "reply", "card-1", "--send", "--dismiss"], { env })).code).not.toBe(0)
+    const unavailable = await cli(dir.path, ["learn", "proposals", "reply", "card-1", "--approve", "--json"], { env })
     expect(unavailable.code).toBe(1)
     expect(JSON.parse(unavailable.stdout)).toMatchObject({ ok: false, code: "not_available" })
 
-    const edited = await cli(dir.path, ["learn", "proposals", "reply", "card-1", "--edit", "Quote every reserved word."])
+    const edited = await cli(dir.path, ["learn", "proposals", "reply", "card-1", "--edit", "Quote every reserved word."], { env })
     expect(edited).toMatchObject({ code: 0, stdout: "Wording updated.\n" })
-    const dismissed = await cli(dir.path, ["learn", "proposals", "reply", "card-1", "--dismiss"])
+    const dismissed = await cli(dir.path, ["learn", "proposals", "reply", "card-1", "--dismiss"], { env })
     expect(dismissed.code).toBe(0)
     expect(dismissed.stdout).toContain("won't be proposed again")
-    const gone = await cli(dir.path, ["learn", "proposals", "reply", "card-1", "--dismiss"])
+    const gone = await cli(dir.path, ["learn", "proposals", "reply", "card-1", "--dismiss"], { env })
     expect(gone).toMatchObject({ code: 1, stdout: "This proposal is no longer open.\n" })
     expect((await RulesStore.read(root)).proposals).toEqual([])
   }, 180_000)
+
+  test("signed out, no team rules, review history or workspace proposals are listed", async () => {
+    await using dir = await tmpdir({ git: true })
+    const root = await linkedProject(dir.path, { rules: [teamRule] })
+    await RulesStore.update(root, (s) => {
+      s.proposals = [RulesStore.StoredProposal.parse({
+        card: { id: "card-2", sessionID: "claude:x", text: "Quote reserved words.", applies_to: [], change: "add", origin: "session", evidence: { sessions: 2 }, chars: 21, actions: ["send", "edit", "dismiss"], topics: [] },
+        directory: root, scope: s.scope, trigger: "recurrence", source_session: "claude:x", at: new Date().toISOString(),
+      })]
+    })
+    const listed = JSON.parse((await cli(dir.path, ["learn", "proposals", "--json"], { env: await home(dir.path, false) })).stdout)
+    expect(listed).toEqual({ workspace: null, proposals: [], team_rules: [], mine: [] })
+    const reply = await cli(dir.path, ["learn", "proposals", "reply", "card-2", "--dismiss", "--json"], { env: await home(dir.path, false) })
+    expect(JSON.parse(reply.stdout)).toMatchObject({ ok: false, code: "not_available" })
+  }, 120_000)
 })

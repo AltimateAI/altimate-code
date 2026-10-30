@@ -18,6 +18,8 @@ import { Telemetry } from "../../../src/altimate/telemetry"
 import { TrainingStore } from "../../../src/altimate/training"
 import { Instance } from "../../../src/project/instance"
 import { disposeAllInstances, tmpdir } from "../../fixture/fixture"
+import { withLearnLock } from "../../../src/altimate/learn/lock"
+import { RulesService } from "../../../src/altimate/rules/service"
 
 /** The digest of the credential signed in, in these tests. */
 const ME = "digest-of-me"
@@ -312,27 +314,24 @@ describe("stored proposals", () => {
     }
   })
 
-  test("a stored remember answered after the account changed is not sent, and is saved as before", async () => {
-    await using dir = await tmpdir({ git: true })
-    try {
-      await Instance.provide({ directory: dir.path, fn: async () => {
-        const root = await fs.realpath(Instance.worktree)
-        await RulesStore.update(root, (s) => Object.assign(s, linked()))
-        const card = (await RuleProposal.ask({
-          sessionID: "claude:r", root, directory: Instance.directory, learn, persist: true,
-          request: { session: "claude:r", via: "training", training: { name: "cte-staging" } },
-          draft: draft("Always use CTEs in staging models.", { origin: "explicit", topics: [] }),
-        }))!
-        await RulesStore.update(root, (s) => { s.scope = { ...s.scope!, account: "someone-else" } })
-        expect(await RuleProposal.replyStored({ root, directory: Instance.directory, learn, id: card.id }, { action: "send" })).toMatchObject({ ok: false, code: "not_open" })
-        const state = await RulesStore.read(root)
-        expect(state.outbox).toEqual([])
-        expect(state.proposals).toEqual([])
-        expect((await TrainingStore.get("project", "rule", "cte-staging"))?.content).toContain("Always use CTEs in staging models.")
-      } })
-    } finally {
-      await disposeAllInstances()
-    }
+  test("a stored proposal of another account or workspace is not shown or answered, and is kept for when it returns", async () => {
+    const root = await linkedRoot()
+    const card = (await RuleProposal.ask({
+      sessionID: "claude:r", root, directory: root, learn, persist: true, request: { session: "claude:r", via: "training" },
+      draft: draft("Always use CTEs in staging models.", { origin: "explicit", topics: [] }),
+    }))!
+    await RulesStore.update(root, (s) => { s.scope = { ...s.scope!, account: "someone-else" } })
+    expect(await RuleProposal.storedFor(root)).toEqual([])
+    expect(await RuleProposal.replyStored({ root, directory: root, learn, id: card.id }, { action: "send" })).toMatchObject({ ok: false, code: "not_available" })
+    // Signed in as someone else (the scope matches, the credential does not): hidden as well.
+    await RulesStore.update(root, (s) => { s.scope = { ...s.scope!, account: "a" } })
+    digest.mockResolvedValue("digest-of-someone-else")
+    expect(await RuleProposal.storedFor(root)).toEqual([])
+    digest.mockResolvedValue(ME)
+    expect((await RuleProposal.storedFor(root)).map((c) => c.id)).toEqual([card.id])
+    const state = await RulesStore.read(root)
+    expect(state.outbox).toEqual([])
+    expect(state.proposals).toHaveLength(1)
   })
 
   test("a remember with no client showing cards waits as a stored proposal; a subagent's, or one past the limit, is saved as before", async () => {
@@ -685,6 +684,181 @@ describe("host session", () => {
     const root = await linkedRoot()
     expect(await RulesHost.check({ root, directory: root, learn: { enabled: false }, session: "claude:o" })).toContain("off")
     expect((await RulesStore.read(root)).last_check).toBeUndefined()
+  })
+})
+
+describe("host session, review round 2", () => {
+  const addDeps = (text: string): RuleTrigger.TriggerDeps => ({
+    source: async () => ({ prompts: ["fix it"], calls: [] }),
+    generate: async () => async () => ({ deltas: [{ op: "ADD", text, reason: "corrected in two sessions" }] }),
+  })
+  const correct = async (root: string, session: string, text: string) =>
+    appendSignal(root, { kind: "user_correction", sessionID: session, text, reason: "correction" })
+
+  test.each([
+    "Remember to run the tests before you commit",
+    "do you remember what the orders schema was?",
+    "From now on, answer in French",
+    "remember that I prefer CTEs",
+  ])("not a team-rule request: %s", async (text) => {
+    const root = await linkedRoot()
+    expect(await RulesHost.recordCorrection({ root, directory: root, learn, session: "claude:fp", text })).not.toBe("proposed")
+    expect((await RulesStore.read(root)).proposals).toEqual([])
+  })
+
+  test.each([
+    ["Remember this as a team rule:\nAlways use CTEs in staging models.", "Always use CTEs in staging models."],
+    ["don't forget, team rule: never select star in marts", "never select star in marts"],
+    ["save as a rule - prefix seeds with seed_", "prefix seeds with seed_"],
+  ])("a team-rule request becomes a proposal: %s", async (text, rule) => {
+    const root = await linkedRoot()
+    expect(await RulesHost.recordCorrection({ root, directory: root, learn, session: "claude:tr", text })).toBe("proposed")
+    expect((await RulesStore.read(root)).proposals.map((p) => p.card.text)).toEqual([rule])
+  })
+
+  test("a request the person made is kept past the limit; a proposal from corrections waits and keeps its corrections", async () => {
+    const root = await linkedRoot()
+    for (let i = 0; i < RulesStore.MAX_STORED_PROPOSALS; i++)
+      await RuleProposal.ask({ sessionID: "s", root, directory: root, learn, draft: draft(`Rule number ${i} for staging.`), persist: true })
+    expect(await RulesHost.recordCorrection({ root, directory: root, learn, session: "claude:full", text: "Remember this as a team rule: quote reserved words" })).toBe("proposed")
+    expect((await RulesStore.read(root)).proposals).toHaveLength(RulesStore.MAX_STORED_PROPOSALS + 1)
+    await correct(root, "claude:q1", "no, the column is shipped_at")
+    await correct(root, "claude:q2", "no, use shipped_at for the ship time")
+    expect(await RuleTrigger.afterTurn({ sessionID: "claude:q2", root, directory: root, learn, deps: addDeps("Name ship timestamps shipped_at."), persist: true }))
+      .toContain("too many proposals are waiting")
+    expect((await RulesStore.read(root)).processed_signals).toEqual([])
+    const start = await RulesHost.start({ root, directory: root, learn })
+    expect(RulesHost.context(start)).toContain("New proposals from corrections wait until some are answered")
+  })
+
+  test("a draft whose account or workspace changed while it was drafted is not stored, and its corrections are kept", async () => {
+    const root = await linkedRoot()
+    await correct(root, "claude:d1", "no, the column is shipped_at")
+    await correct(root, "claude:d2", "no, use shipped_at for the ship time")
+    const deps: RuleTrigger.TriggerDeps = {
+      source: async () => ({ prompts: ["fix it"], calls: [] }),
+      generate: async () => async () => {
+        await RulesStore.update(root, (s) => { s.scope = { ...s.scope!, datamateId: 99 } })
+        return { deltas: [{ op: "ADD", text: "Name ship timestamps shipped_at.", reason: "r" }] }
+      },
+    }
+    expect(await RuleTrigger.afterTurn({ sessionID: "claude:d2", root, directory: root, learn, deps, persist: true })).toContain("changed while it was drafted")
+    const state = await RulesStore.read(root)
+    expect(state.proposals).toEqual([])
+    expect(state.processed_signals).toEqual([])
+  })
+
+  test("leftover checks skip sessions waiting on a proposal, held by a check, or failing; a session left at the round limit goes first", async () => {
+    const root = await linkedRoot()
+    for (const session of ["claude:waiting", "claude:held", "claude:failing", "claude:ok", "claude:limit"])
+      await correct(root, session, `no, ${session} uses shipped_at`)
+    await RuleProposal.ask({ sessionID: "claude:waiting", root, directory: root, learn, draft: draft("Quote reserved words."), persist: true })
+    await RulesStore.update(root, (s) => {
+      s.host_checks["claude:held"] = { pid: process.ppid, at: new Date().toISOString() }
+      s.host_retry["claude:failing"] = new Date(Date.now() + 60_000).toISOString()
+      s.host_pending = ["claude:limit"]
+    })
+    const checked: string[] = []
+    const spy = spyOn(RuleTrigger, "afterTurn").mockImplementation(async (input) => {
+      checked.push(input.sessionID)
+      return input.sessionID === "claude:now" ? "no new corrections" : "checked"
+    })
+    try {
+      await RulesHost.check({ root, directory: root, learn, session: "claude:now" })
+      await RulesHost.check({ root, directory: root, learn, session: "claude:now" })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(checked).toEqual(["claude:now", "claude:limit", "claude:now", "claude:ok"])
+  })
+
+  test("a failed leftover check is not retried before its back-off", async () => {
+    const root = await linkedRoot()
+    await correct(root, "claude:bad", "no, the column is shipped_at")
+    const checked: string[] = []
+    const spy = spyOn(RuleTrigger, "afterTurn").mockImplementation(async (input) => {
+      checked.push(input.sessionID)
+      return input.sessionID === "claude:bad" ? "failed: model unavailable" : "no new corrections"
+    })
+    try {
+      await RulesHost.check({ root, directory: root, learn, session: "claude:a" })
+      await RulesHost.check({ root, directory: root, learn, session: "claude:a" })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(checked).toEqual(["claude:a", "claude:bad", "claude:a"])
+    expect(Date.parse((await RulesStore.read(root)).host_retry["claude:bad"])).toBeGreaterThan(Date.now())
+  })
+
+  test("the last round's outcome is reported, and work still pending at the round limit is kept", async () => {
+    const root = await linkedRoot()
+    let rounds = 0
+    const spy = spyOn(RuleTrigger, "afterTurn").mockImplementation(async () => {
+      rounds++
+      // Every round, another Stop arrives from another process.
+      await RulesStore.update(root, (s) => { s.host_checks["claude:busy"].pending = 1 })
+      return rounds === 1 ? "no new corrections" : `stored an add proposal (round ${rounds})`
+    })
+    try {
+      expect(await RulesHost.check({ root, directory: root, learn, session: "claude:busy" })).toBe("stored an add proposal (round 3)")
+    } finally {
+      spy.mockRestore()
+    }
+    const state = await RulesStore.read(root)
+    expect(state.host_pending).toEqual(["claude:busy"])
+    expect(state.host_checks).toEqual({})
+  })
+
+  test("a session start under a held learn lock ends within its deadline with the rules, unrecorded", async () => {
+    const root = await linkedRoot({ rules: [rule("Name staging models stg_<source>.")] })
+    let release!: () => void
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const holder = withLearnLock(root, () => held, { timeoutMs: 1_000 })
+    await Bun.sleep(50)
+    const startedAt = Date.now()
+    try {
+      const start = await RulesHost.start({ root, directory: root, learn, session: "claude:lock", deadlineMs: 1_500 })
+      expect(start.rules.map((r) => r.text)).toEqual(["Name staging models stg_<source>."])
+      expect(Date.now() - startedAt).toBeLessThan(3_000)
+    } finally {
+      release()
+      await holder
+    }
+  })
+
+  test("a pull that failed recently is not waited on again", async () => {
+    const root = await linkedRoot({ pulled_at: "2020-01-01T00:00:00Z", pull_failed_at: new Date().toISOString() })
+    const { RulesSync } = await import("../../../src/altimate/rules/sync")
+    const pull = spyOn(RulesSync, "pullWithin").mockResolvedValue()
+    try {
+      await RulesHost.start({ root, directory: root, learn })
+      expect(pull).not.toHaveBeenCalled()
+    } finally {
+      pull.mockRestore()
+    }
+  })
+
+  test("a session started in a subdirectory finds the link made for the folder above it", async () => {
+    const root = await tmp()
+    const sub = path.join(root, "models", "staging")
+    const binding = spyOn(WorkspaceState, "readLocalBinding").mockImplementation(async (dir: string) =>
+      (path.resolve(dir) === path.resolve(root) ? ({ datamateId: 1 } as never) : null))
+    try {
+      expect(await RulesService.linked(root, sub)).toBe(true)
+      expect(await RulesService.linked(root, path.join(os.tmpdir(), "elsewhere"))).toBe(false)
+    } finally {
+      binding.mockRestore()
+    }
+  })
+
+  test("a resumed session's edited rule is recorded with its new wording", async () => {
+    const root = await linkedRoot({ rules: [rule("Name staging models stg_<source>.")] })
+    await RulesHost.start({ root, directory: root, learn, session: "claude:ed" })
+    await RulesStore.update(root, (s) => { s.rules = [rule("Name staging models stg_<source>__<entity>.", { version: 2 })] })
+    expect((await RulesHost.start({ root, directory: root, learn, session: "claude:ed" })).rules.map((r) => r.text)).toEqual(["Name staging models stg_<source>__<entity>."])
+    const { lessonTextHash } = await import("../../../src/altimate/learn/delivery")
+    const [snapshot] = (await readShownSnapshots(root)).snapshots
+    expect(snapshot.shown.map((e) => e.textHash)).toEqual([lessonTextHash("Name staging models stg_<source>__<entity>.")])
   })
 })
 

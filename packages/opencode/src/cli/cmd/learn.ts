@@ -538,7 +538,7 @@ const CheckCommand = effectCmd({
       const project = await rulesProject()
       const outcome = await RulesHost.check({ ...project, session: args.session as string, transcript: args.transcript as string | undefined })
       const { RuleProposal } = await import("../../altimate/rules/proposal")
-      const waiting = (await RuleProposal.stored(project.root)).length
+      const waiting = (await RuleProposal.storedFor(project.root)).length
       if (args.json) return out(JSON.stringify({ outcome, proposals: waiting }, null, 2))
       out(`Check: ${printable(outcome)}.`)
       if (waiting) out(`${waiting} proposed ${waiting === 1 ? "rule is" : "rules are"} waiting: \`altimate-code learn proposals\`.`)
@@ -603,9 +603,14 @@ const ProposalsCommand = effectCmd({
         import("../../altimate/rules/proposal"), import("../../altimate/rules/summary"), import("../../altimate/rules/store"),
       ])
       const { root } = await rulesProject()
-      const [proposals, active, mine, state] = await Promise.all([
-        RuleProposal.stored(root), RulesSummary.rows(root, "active"), RulesSummary.rows(root, "mine"), RulesStore.read(root),
+      const [proposals, rows, state] = await Promise.all([
+        RuleProposal.storedFor(root), Promise.all([RulesSummary.rows(root, "active"), RulesSummary.rows(root, "mine")]), RulesStore.read(root),
       ])
+      // Team rules and review history only for the account they were pulled for: signed out or signed in as someone
+      // else, they stay on disk unshown.
+      const verified = await RulesStore.verified(state)
+      const [active, mine] = verified ? rows : [[], []]
+      if (!verified) state.workspace = undefined
       if (args.json) return out(JSON.stringify(printableDeep({ workspace: state.workspace ?? null, proposals, team_rules: active, mine }), null, 2))
       if (!proposals.length) out("No proposed rules are waiting.")
       for (const card of proposals) {
@@ -1090,11 +1095,12 @@ const SignalAddCommand = effectCmd({
       if (!text.trim()) throw new Error("Signal text is empty.")
       // altimate_change start — workspace rules: --detect
       if (args.detect) {
-        const { RulesHost } = await import("../../altimate/rules/host")
+        const [{ RulesHost }, { RulesStore }] = await Promise.all([import("../../altimate/rules/host"), import("../../altimate/rules/store")])
         const project = await rulesProject()
         const result = await RulesHost.recordCorrection({ ...project, session: args.session as string, text })
         return out({
           proposed: "Proposed as a team rule: it waits in `altimate-code learn proposals`.",
+          not_stored: `Not proposed: ${RulesStore.MAX_REQUESTED_PROPOSALS} proposals are already waiting; answer some with \`altimate-code learn proposals\`.`,
           recorded: `Recorded a correction for session ${args.session}.`,
           duplicate: "Already recorded; nothing added.",
           not_correction: "Not a correction; nothing recorded.",

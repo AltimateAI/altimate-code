@@ -10,7 +10,7 @@ import { Log } from "@/util/log"
 const log = Log.create({ service: "rules.remember" })
 
 /** The person asked for something to be remembered (not the agent deciding to take a note). */
-export const ASKED_TO_REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note (?:that|this)|save (?:this|that)|from now on)\b/i
+const ASKED_TO_REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note (?:that|this)|save (?:this|that)|from now on)\b/i
 const contentWords = (text: string) => new Set(text.toLowerCase().match(/[a-z0-9_]{3,}/g) ?? [])
 const NEGATION = /\b(?:never|not|no|don'?t|do not|avoid|without)\b/i
 

@@ -782,12 +782,24 @@ export async function pullOnly(root: string, directory: string, learn: LearnConf
     const report = ctx.status === "ready" ? { context: ctx, pull: await pull(root, ctx) } : await unready(root, key, ctx)
     if (report.pull?.ok) failedAt.delete(key)
     else if (report.pull) failedAt.set(key, Date.now())
+    // Each host hook is a new process, so `failedAt` does not outlive it: a failure is kept on disk too, and the next
+    // session start does not wait on another pull for `REFRESH_MS`. A project that turned out unlinked is not marked.
+    const failed = report.pull ? !report.pull.ok : !(report.context.status === "skipped" && report.context.unlinked)
+    await RulesStore.update(root, (s) => {
+      if (failed) s.pull_failed_at = new Date().toISOString()
+      else delete s.pull_failed_at
+    }).catch((error) => log.warn("rules pull outcome not recorded", { error: errorText(error) }))
     RulesTelemetry.synced(trigger, report, startedAt)
     return report
   } catch (error) {
     RulesTelemetry.syncThrew(trigger, startedAt)
     throw error
   }
+}
+
+/** A pull without a sync run failed within `REFRESH_MS` (`pullOnly`): not worth waiting on again yet. */
+export function pullFailedRecently(state: State, now = Date.now()): boolean {
+  return !!state.pull_failed_at && now - Date.parse(state.pull_failed_at) < REFRESH_MS
 }
 
 /** `pullOnly`, waited for at most `waitMs`; never throws. */

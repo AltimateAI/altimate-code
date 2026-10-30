@@ -250,6 +250,10 @@ export async function ask(input: {
   request?: RequestRecord
   /** Nothing attached shows cards: keep the proposal on disk for `learn proposals` instead (`StoredProposal`). */
   persist?: boolean
+  /** With `persist`: the account and workspace the draft was made for. It is stored only if they are still current. */
+  scope?: RulesStore.Scope
+  /** With `persist`: why nothing was stored, when it was not for a dismissed topic (the caller keeps its corrections). */
+  onNotStored?: (reason: "full" | "scope_changed") => void
 }) {
   expire(input.directory)
   const trigger = input.trigger ?? (input.draft.origin === "explicit" ? "remember" : "recurrence")
@@ -307,13 +311,16 @@ const identity = (scope: RulesStore.Scope | undefined, card: Pick<ProposalCard, 
     [...card.applies_to].sort(), card.text.trim().toLowerCase(),
   ])
 
-/** `ask` with no client to show the card: keep it on disk, once per proposal (`identity`). Undefined when the list is
- * full. */
+/** `ask` with no client to show the card: keep it on disk, once per proposal (`identity`). Undefined when it was not
+ * stored (`onNotStored` says why). */
 async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Promise<ProposalCard | undefined> {
   let card: ProposalCard | undefined
   let repeat = false
+  let refused: "full" | "scope_changed" | undefined
   await RulesStore.update(input.root, (s) => {
     s.proposals = s.proposals.filter((p) => storedLive(p))
+    // Drafted for another account or workspace than the one pulled now: not labelled as this one's.
+    if (input.scope && !RulesStore.sameScope(input.scope, s.scope)) return void (refused = "scope_changed")
     const wanted = identity(s.scope, input.draft)
     const existing = s.proposals.find((p) => identity(p.scope, p.card) === wanted)
     if (existing) {
@@ -332,7 +339,9 @@ async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Pr
       card = existing.card
       return
     }
-    if (s.proposals.length >= RulesStore.MAX_STORED_PROPOSALS) return
+    // A request the person made is kept past the limit (it is never dropped); one raised from corrections waits.
+    const limit = input.request ? RulesStore.MAX_REQUESTED_PROPOSALS : RulesStore.MAX_STORED_PROPOSALS
+    if (s.proposals.length >= limit) return void (refused = "full")
     card = build(randomUUID(), input.sessionID, input.draft, s)
     s.proposals.push({
       card, directory: input.directory, ...(s.scope ? { scope: s.scope } : {}), trigger, source_session: input.sessionID,
@@ -341,16 +350,32 @@ async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Pr
     })
   })
   if (card) RulesTelemetry.shown(card, trigger, repeat, true)
-  else if (trigger !== "remember") RulesTelemetry.skipped(input.sessionID, trigger, "stored_full")
+  else if (trigger !== "remember" && refused === "full") RulesTelemetry.skipped(input.sessionID, trigger, "stored_full")
+  if (refused) input.onNotStored?.(refused)
   return card
 }
 
-/** A reply runs a sync at most: a claim older than this belongs to a reply that died. */
-export const CLAIM_STALE_MS = 10 * 60_000
+/** A reply runs one sync at most: a claim older than this belongs to a reply that died (its pid may be reused). */
+export const CLAIM_STALE_MS = 3 * 60_000
 
-/** Proposals kept on disk, waiting for `learn proposals reply`. */
+/** Proposals kept on disk, waiting for `learn proposals reply`, whoever is signed in. */
 export async function stored(root: string): Promise<ProposalCard[]> {
   return (await RulesStore.read(root)).proposals.filter((p) => storedLive(p)).map((p) => p.card)
+}
+
+/** Whether the person signed in now may see and answer `proposal`: one raised for no workspace (an unlinked project),
+ * or for the workspace and account the rules were last pulled for, with the credential they were pulled with. */
+async function mayAnswer(state: RulesStore.State, proposal: RulesStore.StoredProposal): Promise<boolean> {
+  if (!proposal.scope) return true
+  return RulesStore.sameScope(proposal.scope, state.scope) && (await RulesStore.verified(state))
+}
+
+/** The stored proposals the person signed in now may see (`mayAnswer`). Others stay on disk for when they sign back in. */
+export async function storedFor(root: string): Promise<ProposalCard[]> {
+  const state = await RulesStore.read(root)
+  const visible: ProposalCard[] = []
+  for (const proposal of state.proposals) if (storedLive(proposal) && (await mayAnswer(state, proposal))) visible.push(proposal.card)
+  return visible
 }
 
 /**
@@ -380,6 +405,10 @@ async function answerStored(
   answer: Parameters<typeof replyStored>[1],
 ): Promise<ReplyResult> {
   const { root, id } = input
+  const before = await RulesStore.read(root)
+  const found = before.proposals.find((p) => p.card.id === id && storedLive(p))
+  if (found && !(await mayAnswer(before, found)))
+    return { ok: false, code: "not_available", error: "This proposal belongs to another Altimate account or workspace: sign in to it (and sync) to answer it." }
   let record: RulesStore.StoredProposal | undefined
   let held = false
   let conflict: string | undefined

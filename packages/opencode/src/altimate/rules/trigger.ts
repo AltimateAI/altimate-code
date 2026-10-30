@@ -200,6 +200,18 @@ export async function afterTurn(input: {
       RulesTelemetry.skipped(input.sessionID, undefined, "no_renderer")
       return false
     }
+    // A stored proposal that could not be stored (too many waiting, or the account or workspace changed while it was
+    // drafted) leaves its corrections unchecked, so they are proposed once that clears.
+    let notStored: "full" | "scope_changed" | undefined
+    const keepIfNotStored = { scope: state.scope, onNotStored: (reason: "full" | "scope_changed") => void (notStored = reason) }
+    const unstored = () => {
+      if (!notStored) return false
+      checked = []
+      outcome = notStored === "full"
+        ? "not stored: too many proposals are waiting; corrections kept for a later check"
+        : "not stored: the account or workspace changed while it was drafted; corrections kept for a later check"
+      return true
+    }
     const newest = fresh[fresh.length - 1]
     const correction = { excerpt: excerpt(newest.text), at: newest.correctedAt ?? newest.at }
 
@@ -224,6 +236,7 @@ export async function afterTurn(input: {
         if (!stillShown()) return
         const card = await RuleProposal.ask({
           sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "shown_rule", persist: input.persist,
+          ...(input.persist ? keepIfNotStored : {}),
           draft: {
             text: drafted.text,
             // An edit or retire keeps the rule's scope; a new rule beside it takes the correction's.
@@ -235,6 +248,7 @@ export async function afterTurn(input: {
             origin: "session", evidence: { sessions: 1, correction }, topics: [hit.id],
           },
         })
+        if (unstored()) return
         outcome = card
           ? `${input.persist ? "stored" : "showed"} a ${drafted.change} ${input.persist ? "proposal" : "card"} for a shown team rule`
           : input.persist ? "the proposal for this team rule was not stored (dismissed, or too many waiting)" : "the proposal for this team rule was dismissed"
@@ -262,6 +276,7 @@ export async function afterTurn(input: {
     if (!stillShown()) return
     const card = await RuleProposal.ask({
       sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "recurrence", persist: input.persist,
+      ...(input.persist ? keepIfNotStored : {}),
       draft: {
         text: drafted.text,
         applies_to: appliesTo(backing.map((signal) => signal.text)),
@@ -271,6 +286,7 @@ export async function afterTurn(input: {
         topics: [topic.identifier],
       },
     })
+    if (unstored()) return
     outcome = card
       ? `${input.persist ? "stored an add proposal" : "showed an add card"} for topic ${topic.identifier}`
       : input.persist ? `topic ${topic.identifier} was not stored (dismissed, or too many waiting)` : `topic ${topic.identifier} was dismissed`

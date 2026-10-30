@@ -138,8 +138,11 @@ export const StoredProposal = z.object({
   claim: z.object({ pid: z.number().int(), at: z.string(), answering: z.string().optional() }).optional(),
 })
 export type StoredProposal = z.infer<typeof StoredProposal>
-/** Kept at most. A session proposal past it is not raised; a "remember" is saved as before cards instead. */
+/** Kept at most. A session proposal past it is not raised (its corrections stay unchecked); a "remember" the person asked
+ * for is kept anyway, up to `MAX_REQUESTED_PROPOSALS`, so a request is never dropped. */
 export const MAX_STORED_PROPOSALS = 20
+/** Hard bound on stored proposals, requested ones included, so the state file stays small. */
+export const MAX_REQUESTED_PROPOSALS = 100
 
 export const State = z.object({
   version: z.literal(1),
@@ -199,6 +202,12 @@ export const State = z.object({
   proposals: z.array(StoredProposal).default([]),
   /** Review notices already reported at a host session start (`public_id|status`). */
   host_notices_seen: z.array(z.string()).default([]),
+  /** Host sessions whose check stopped with work left (the round limit): the next check with nothing new takes them first. */
+  host_pending: z.array(z.string()).default([]),
+  /** Per host session, when its failed check may be retried as a leftover (a failing model is not retried every turn). */
+  host_retry: z.record(z.string(), z.string()).default({}),
+  /** When the last pull without a sync run failed: a host session start does not wait on another one for `REFRESH_MS`. */
+  pull_failed_at: z.string().optional(),
   /** The after-turn check running for a host session, per session: one at a time across processes. */
   host_checks: z.record(z.string(), z.object({
     pid: z.number().int(),
@@ -394,6 +403,8 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
     proposals: state.proposals,
     host_notices_seen: state.host_notices_seen,
     host_checks: state.host_checks,
+    host_pending: state.host_pending,
+    host_retry: state.host_retry,
   }
 }
 
@@ -405,6 +416,15 @@ export function scopeDropNote(state: State, now = Date.now()): string | undefine
   const drop = state.scope_drop
   if (!drop || !scopeDropShown(drop, now)) return undefined
   return `${drop.count} queued ${drop.count === 1 ? "proposal was" : "proposals were"} for another account or workspace and ${drop.count === 1 ? "was" : "were"} not sent`
+}
+
+/** The rules state was pulled with the credential signed in now (`pulled_with`). Two people can share a tenant: the
+ * credential's digest tells them apart, where the API URL and tenant would not. No network. Every path that shows
+ * workspace content outside a running session (a host session start, `learn proposals`, a reply) checks it. */
+export async function verified(state: State): Promise<boolean> {
+  if (!state.pulled_with) return false
+  const { accountDigest } = await import("../workspace/state")
+  return (await accountDigest().catch(() => null)) === state.pulled_with
 }
 
 /** Queued proposals at most; a new one is refused (the card stays open) rather than an older one dropped. */

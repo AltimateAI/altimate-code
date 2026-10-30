@@ -389,12 +389,26 @@ export class Delivery {
         shown: [], requests: [], requestParts: [], compactions: [], counted: [],
       }
       const before = state.shown.length
+      // A rule edited since the session was shown it: the shown entry takes the current wording, so usage and "corrected
+      // again" count the version the session now has.
+      let edited = false
+      for (const entry of state.shown) {
+        if (entry.name !== name) continue
+        const now = approved.find((candidate) => candidate.lesson.id === entry.lesson.id)?.lesson
+        if (now && now.text !== entry.lesson.text) {
+          entry.lesson = now
+          entry.at = new Date().toISOString()
+          edited = true
+        }
+      }
       this.add(state, approved, rendered.lessons, "core", "")
-      if (!existing || state.shown.length > before) {
+      if (!existing || edited || state.shown.length > before) {
         await this.save(state)
         this.delivered(state, before, "start")
         await this.log(state)
       }
+      // Every rule within the budget is given, recorded or not (past `session_max_lessons` it is given without
+      // attribution): delivery never waits on bookkeeping.
       return rendered.lessons.map((lesson) => approved.find((entry) => identity(entry.name, entry.lesson.id) === lesson.id)!.lesson)
     }, LOCK_OPTIONS)
   }

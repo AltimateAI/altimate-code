@@ -54,11 +54,16 @@ async function learnConfig(ctx: InstanceContext): Promise<LearnConfig> {
   return effectiveLearn(Config.peek(ctx)?.learn as LearnConfig, ctx.worktree !== "/" ? ctx.worktree : ctx.directory, ctx.directory)
 }
 
-/** Whether a pull can find anything: pulled state, or a local workspace binding. No network. */
+/** Whether a pull can find anything: pulled state, or a local workspace binding for `directory` or a directory above it
+ * up to `root` (a session started in a subdirectory of the linked folder). No network. */
 export async function linked(root: string, directory: string): Promise<boolean> {
   if ((await RulesStore.read(root).catch(() => undefined))?.scope) return true
   const { readLocalBinding } = await import("../workspace/state")
-  return !!(await readLocalBinding(directory).catch(() => null))
+  const path = await import("node:path")
+  for (let dir = path.resolve(directory); ; dir = path.dirname(dir)) {
+    if (await readLocalBinding(dir).catch(() => null)) return true
+    if (dir === path.resolve(root) || path.dirname(dir) === dir || !dir.startsWith(path.resolve(root))) return false
+  }
 }
 
 function deps(ctx: InstanceContext, model?: string): RuleTrigger.TriggerDeps {
