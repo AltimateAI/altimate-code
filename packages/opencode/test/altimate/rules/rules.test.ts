@@ -1140,6 +1140,13 @@ describe("learning decision", () => {
     expect(learningDecision(undefined, state(), { ALTIMATE_LEARN_CAPTURE: "yes" })).toEqual({ on: true, source: "workspace" })
     expect(learningDecision({ enabled: false }, state(), { ALTIMATE_LEARN: "1" })).toEqual({ on: true, source: "workspace" })
   })
+
+  test("with workspaces off, a saved workspace's Learn from sessions decides nothing", () => {
+    const saved = state({ settings: { learning_enabled: true } } as Partial<RulesStore.State>)
+    expect(learningDecision(undefined, saved, {})).toEqual({ on: true, source: "workspace" })
+    expect(learningDecision(undefined, saved, { ALTIMATE_DISABLE_WORKSPACE: "1" })).toEqual({ on: false, source: "default" })
+    expect(learningDecision({ capture: true }, saved, { ALTIMATE_DISABLE_WORKSPACE: "1" })).toEqual({ on: true, source: "you" })
+  })
 })
 
 describe("rule or memory, edge wording", () => {

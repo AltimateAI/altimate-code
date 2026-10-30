@@ -12,7 +12,7 @@
 // an ADD becomes an add card, an EDIT or REMOVE of a team rule becomes an edit or retire card, and a
 // HELPFUL on a team rule (the rule already says it) makes no card.
 import { Log } from "@/util/log"
-import { booleanFlag, learnEnabled } from "../learn/config"
+import { booleanFlag, learnEnabled, workspacesOn } from "../learn/config"
 import { lint } from "../learn/curator"
 import { readShownSnapshot } from "../learn/delivery"
 import { buildDigest, type DigestSource } from "../learn/digest"
@@ -54,7 +54,7 @@ export function learningDecision(learn: LearnConfig, state: RulesStore.State, en
   if (learn?.capture_policy && learn.capture !== undefined) return { on: learn.capture, source: "organization" }
   if (state.personal_learning !== undefined) return { on: state.personal_learning, source: "you" }
   if (learn?.capture !== undefined) return { on: learn.capture, source: "you" }
-  if (state.workspace) return { on: state.settings?.learning_enabled === true, source: "workspace" }
+  if (state.workspace && workspacesOn(env)) return { on: state.settings?.learning_enabled === true, source: "workspace" }
   return { on: false, source: "default" }
 }
 
