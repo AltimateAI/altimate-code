@@ -27,7 +27,7 @@ export interface Source {
   kind: SourceKind
   label: string
 }
-export type ProviderState = "connected" | "expired" | "detected" | "available" | "not_found"
+export type ProviderState = "connected" | "expired" | "rejected" | "detected" | "available" | "not_found"
 export type SyncState = "synced" | "local" | "pending" | "blocked"
 
 export interface Detection {
@@ -56,7 +56,7 @@ export interface StatusResult {
   providers: ProviderStatus[]
 }
 
-interface StoredProvider {
+export interface StoredProvider {
   detection?: Detection
   registered?: boolean
   account?: string | null
@@ -67,12 +67,25 @@ interface StoredProvider {
   expiresAt?: string | null
   /** Workspace connection id when the connection was saved to the workspace. */
   connectionId?: number | null
+  /** Credential form: non-secret values typed in but not yet connected. Secrets live in the secret store. */
+  drafts?: Record<string, string>
+  /** Credential form: the non-secret values of the connected credentials. */
+  values?: Record<string, string>
+  /** Credential form: names of the secret fields kept under `credentialKey`. */
+  secretFields?: string[]
+  variant?: string
+  validatedAt?: string
+  /** The last validation was refused by the provider. */
+  rejected?: boolean
+  /** Where a workspace sync said the credential came from; reused so a later sync updates the same connection. */
+  syncSource?: { kind: "cli" | "env" | "mcp"; label: string }
 }
 export interface Store {
   blocked: Partial<Record<ProviderId, boolean>>
   providers: Partial<Record<ProviderId, StoredProvider>>
 }
 
+const REJECTED_NOTE = "Token rejected, update it"
 export const demoMode = () => process.env.ALTIMATE_INTEGRATIONS_DEMO === "1"
 export const mockMode = () => process.env.ALTIMATE_INTEGRATIONS_MOCK === "1" || demoMode()
 /** Backend login when real mode applies: signed in to Altimate and no mock switch set. */
@@ -91,8 +104,8 @@ export const mockTtlSeconds = () => {
   const n = Number(process.env.ALTIMATE_INTEGRATIONS_MOCK_TTL_SECONDS)
   return Number.isFinite(n) && n > 0 ? n : 3600
 }
-const dataDir = () => process.env.ALTIMATE_INTEGRATIONS_DIR || Global.Path.data
-const homeDir = () => process.env.ALTIMATE_INTEGRATIONS_HOME || os.homedir()
+export const dataDir = () => process.env.ALTIMATE_INTEGRATIONS_DIR || Global.Path.data
+export const homeDir = () => process.env.ALTIMATE_INTEGRATIONS_HOME || os.homedir()
 const statePath = () => path.join(dataDir(), "integrations.json")
 const remotePath = () => path.join(dataDir(), "integrations-remote-mock.json")
 const secretsPath = () => path.join(dataDir(), "integrations-secrets.json")
@@ -103,14 +116,14 @@ export function isProvider(value: string): value is ProviderId {
   return (PROVIDER_IDS as string[]).includes(value)
 }
 
-function readJson<T>(file: string, fallback: T): T {
+export function readJson<T>(file: string, fallback: T): T {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8")) as T
   } catch {
     return fallback
   }
 }
-function writeJson(file: string, value: unknown, mode?: number) {
+export function writeJson(file: string, value: unknown, mode?: number) {
   fs.mkdirSync(path.dirname(file), { recursive: true })
   fs.writeFileSync(file, JSON.stringify(value, null, 2), { mode })
   if (mode) fs.chmodSync(file, mode)
@@ -130,7 +143,16 @@ export function maskSecret(secret: string): string {
   return secret.length <= 8 ? "••••" : `${secret.slice(0, secret.indexOf("_") > 0 ? secret.indexOf("_") + 1 : 3)}••••${secret.slice(-4)}`
 }
 
-export function storeSecret(id: ProviderId, secret: string) {
+/** Secret-store account for a credential field; the draft and the connected copy are kept apart. */
+export const secretKey = (kind: "draft" | "cred", id: ProviderId, field: string) => `${kind}:${id}:${field}`
+/** The fields a provider is known to hold as secrets, before the workspace catalog is read. */
+export const BUILTIN_SECRET_FIELDS: Record<ProviderId, string[]> = {
+  github: ["github_token"],
+  jira: ["jiraApiToken", "jiraPatToken"],
+  linear: ["linearApiKey"],
+}
+
+export function storeSecret(id: string, secret: string) {
   if (useKeychain()) {
     const r = spawnSync("security", ["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", id, "-w", secret], {
       stdio: "ignore",
@@ -141,7 +163,7 @@ export function storeSecret(id: ProviderId, secret: string) {
   all[id] = secret
   writeJson(secretsPath(), all, 0o600)
 }
-export function readSecret(id: ProviderId): string | undefined {
+export function readSecret(id: string): string | undefined {
   if (useKeychain()) {
     const r = spawnSync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id, "-w"], {
       encoding: "utf8",
@@ -151,7 +173,7 @@ export function readSecret(id: ProviderId): string | undefined {
   }
   return readJson<Record<string, string>>(secretsPath(), {})[id]
 }
-export function deleteSecret(id: ProviderId) {
+export function deleteSecret(id: string) {
   if (useKeychain()) spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], { stdio: "ignore" })
   const all = readJson<Record<string, string>>(secretsPath(), {})
   if (id in all) {
@@ -159,10 +181,27 @@ export function deleteSecret(id: ProviderId) {
     writeJson(secretsPath(), all, 0o600)
   }
 }
+/** Removes every draft and connected secret kept for a provider's credential form. */
+export function purgeCredentialSecrets(id: ProviderId, rec?: StoredProvider) {
+  for (const field of new Set([...BUILTIN_SECRET_FIELDS[id], ...(rec?.secretFields ?? [])])) {
+    deleteSecret(secretKey("draft", id, field))
+    deleteSecret(secretKey("cred", id, field))
+  }
+}
+
+/** Claude MCP server maps that apply here: user level, this project, and the project `.mcp.json`. */
+export function mcpServerMaps(home: string, cwd: string): Record<string, McpServer>[] {
+  const claude = readJson<any>(path.join(home, ".claude.json"), {})
+  const maps: Record<string, McpServer>[] = [claude.mcpServers ?? {}, claude.projects?.[cwd]?.mcpServers ?? {}]
+  maps.push(readJson<any>(path.join(cwd, ".mcp.json"), {}).mcpServers ?? {})
+  return maps
+}
+export const providerMatchesMcp = (id: ProviderId, name: string, server: McpServer) =>
+  MCP_MATCHERS[id].test([name, server.command, server.url, ...(server.args ?? [])].filter(Boolean).join(" "))
 
 // ---------------------------------------------------------------- detection
 
-interface McpServer {
+export interface McpServer {
   command?: string
   args?: string[]
   url?: string
@@ -294,7 +333,7 @@ export function recordDetections(found: Detection[]): Store {
     const d = found.find((f) => f.id === id)
     const prev = store.providers[id] ?? {}
     if (d) store.providers[id] = { ...prev, detection: d, updatedAt: new Date().toISOString() }
-    else if (!prev.registered) delete store.providers[id]
+    else if (!prev.registered && !prev.drafts) delete store.providers[id]
     else store.providers[id] = { ...prev, detection: undefined }
   }
   saveStore(store)
@@ -321,14 +360,15 @@ export function buildStatus(store: Store, overlay: Detection[] = [], now = Date.
     if (rec?.registered) {
       const source = rec.source ?? det?.source ?? null
       const expired = isExpired(rec.expiresAt, now)
+      const rejected = !expired && Boolean(rec.rejected)
       return {
         ...base,
-        state: expired ? "expired" : "connected",
+        state: expired ? "expired" : rejected ? "rejected" : "connected",
         source,
         account: rec.account ?? det?.account ?? null,
         syncable: true,
         sync: blocked ? "blocked" : rec.synced ? "synced" : "local",
-        note: blocked ? "kept local by policy" : expired ? "access expired, reconnect to continue" : null,
+        note: rejected ? REJECTED_NOTE : blocked ? "kept local by policy" : expired ? "access expired, reconnect to continue" : null,
       }
     }
     if (!det) return { ...base, state: "not_found", source: null, account: null, syncable: true, sync: blocked ? "blocked" : "local", note: null }
@@ -355,8 +395,10 @@ export function status(): StatusResult {
 export function mergeRemote(local: StatusResult, remote: backend.RemoteProvider[], now = Date.now()): StatusResult {
   const providers = local.providers.map((p): ProviderStatus => {
     const r = remote.find((x) => x.integration_id === p.id)
-    if (!r || r.connection_id == null) return p
+    if (!r || r.connection_id == null || p.state === "rejected") return p
     const remoteExpired = r.expired || isExpired(r.expires_at, now)
+    // An expired copy is reported as expired; only a live one the provider refused counts as rejected.
+    const remoteRejected = !remoteExpired && r.is_valid === false
     const rs = typeof r.source === "string" ? { kind: "cli" as const, label: r.source } : r.source?.label ? { kind: (r.source.kind as SourceKind) ?? "cli", label: r.source.label } : null
     if (p.state === "connected" || p.state === "expired") {
       // A fresh local token or connection wins; the workspace copy is only reported in the note.
@@ -371,21 +413,21 @@ export function mergeRemote(local: StatusResult, remote: backend.RemoteProvider[
           : "local token expired, the workspace connection is still active"
       return orderStatus({
         ...p,
-        state: expired ? "expired" : "connected",
+        state: expired ? "expired" : localFresh && remoteRejected ? "rejected" : "connected",
         expiresAt: localFresh ? p.expiresAt : expired ? (p.expiresAt ?? r.expires_at) : r.expires_at,
         sync: p.sync === "blocked" ? p.sync : "synced",
-        note,
+        note: localFresh && remoteRejected ? REJECTED_NOTE : note,
       })
     }
     return orderStatus({
       ...p,
-      state: remoteExpired ? "expired" : "connected",
+      state: remoteExpired ? "expired" : remoteRejected ? "rejected" : "connected",
       source: rs ?? { kind: "browser", label: "Altimate workspace" },
       account: r.account ?? p.account,
       syncable: true,
       sync: "synced",
       expiresAt: r.expires_at,
-      note: remoteExpired ? "access expired, reconnect to continue" : null,
+      note: remoteExpired ? "access expired, reconnect to continue" : remoteRejected ? REJECTED_NOTE : null,
     })
   })
   return { ...local, providers }
@@ -516,6 +558,15 @@ function jiraDomain(det: Detection | undefined): string | undefined {
 
 /** The connection config to upload for a provider, read from where it was detected. Never printed. */
 export function collectConfig(id: ProviderId, det: Detection | undefined, rec: StoredProvider | undefined): { config: Record<string, unknown> } | { reason: string } {
+  if (rec?.registered && rec.variant) {
+    const config: Record<string, unknown> = { ...rec.values, auth_type: "token" }
+    for (const field of rec.secretFields ?? []) {
+      const value = readSecret(secretKey("cred", id, field))
+      if (!value) return { reason: "no local credential to upload" }
+      config[field] = value
+    }
+    return { config }
+  }
   if (rec?.registered && rec.source?.kind === "browser") {
     const secret = readSecret(id)
     if (!secret) return { reason: "no local credential to upload" }
@@ -554,8 +605,8 @@ async function syncReal(
 ): Promise<SyncOutcome> {
   const collected = collectConfig(id, det, rec)
   if ("reason" in collected) return { id, result: "skipped", reason: collected.reason, steps: [] }
-  const kind = det?.source.kind === "env" || det?.source.kind === "mcp" ? det.source.kind : "cli"
-  const label = det?.source.label ?? rec?.source?.label ?? "altimate"
+  const kind = rec?.syncSource?.kind ?? (det?.source.kind === "env" || det?.source.kind === "mcp" ? det.source.kind : "cli")
+  const label = rec?.syncSource?.label ?? det?.source.label ?? rec?.source?.label ?? "altimate"
   const steps: SyncStep[] = []
   const step = (l: string) => {
     steps.push({ label: l, ok: true })
@@ -590,6 +641,7 @@ export function disconnect(id: ProviderId): boolean {
   if (rec) store.providers[id] = { detection: rec.detection, updatedAt: new Date().toISOString() }
   saveStore(store)
   deleteSecret(id)
+  purgeCredentialSecrets(id, rec)
   const remote = readJson<Record<string, unknown>>(remotePath(), {})
   const hadRemote = id in remote
   if (hadRemote) {
@@ -965,8 +1017,8 @@ export async function getToken(id: ProviderId, deps: ConnectDeps & { onListening
 }
 
 export function openBrowser(url: string) {
-  const bin = process.platform === "darwin" ? "open" : "xdg-open"
+  const [bin, ...pre] = process.platform === "darwin" ? ["open"] : process.platform === "win32" ? ["cmd", "/c", "start", ""] : ["xdg-open"]
   try {
-    spawnSync(bin, [url], { stdio: "ignore", timeout: 5000 })
+    spawnSync(bin, [...pre, url], { stdio: "ignore", timeout: 5000 })
   } catch {}
 }

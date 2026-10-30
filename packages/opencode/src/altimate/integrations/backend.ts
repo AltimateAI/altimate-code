@@ -140,3 +140,5 @@ export const deleteConnection = (cfg: BackendConfig, id: number) =>
   call<unknown>(cfg, "DELETE", `/connections/${id}`)
 export const connectionStatus = (cfg: BackendConfig) =>
   call<{ providers: RemoteProvider[] }>(cfg, "GET", "/integrations/connections/status")
+/** The workspace integrations catalog: what each provider's web form asks for. */
+export const integrationsCatalog = (cfg: BackendConfig) => call<unknown>(cfg, "GET", "/datamate_integrations/")
