@@ -143,6 +143,8 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
       defer,
       changed,
       cloudVariantDetector,
+      // Every variant but fusion-stable runs on a dbt Core command engine, which needs these.
+      { pythonDBTCommandExecutionStrategy: python, dbtConfiguration: config, dbtIntegrationClient: client },
     )
 
   const command = (
@@ -172,18 +174,7 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
     defer: DeferConfig,
     changed: () => void,
   ): DBTProjectIntegration =>
-    new DBTFusionCommandProjectIntegration(
-      infra,
-      factory,
-      cli,
-      runtime,
-      provider,
-      term,
-      root,
-      diag,
-      defer,
-      changed,
-    )
+    new DBTFusionCommandProjectIntegration(infra, factory, cli, runtime, provider, term, root, diag, defer, changed)
 
   const adapter = new DBTProjectIntegrationAdapter(
     config,
