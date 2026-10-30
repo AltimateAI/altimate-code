@@ -21,11 +21,26 @@ import { ownManifest, snapshotRoot } from "./skill-sync"
 const log = Log.create({ service: "altimate-workspace-claude-skill-mirror" })
 
 const SKILLS_DIR = path.join(".claude", "skills")
-/** Present in every directory this module wrote. Only marked directories are replaced or
- * removed, so a skill the user wrote with the same name is never touched. */
+/** Present in every directory this module wrote, naming the skill. Only marked directories are
+ * replaced or removed, so a skill the user wrote with the same name is never touched; a marked
+ * directory under another name (a user's renamed copy) is not ours either. */
 const MARKER = ".altimate-workspace-skill"
 const MARKER_TEXT =
   "Copied from the linked Altimate workspace by the altimate-code plugin. Edits here are replaced.\n"
+/** Staging directories: `.<name>.altimate-staging-XXXXXX` (and `.old` for the copy a swap moves
+ * aside). The infix keeps a user's own hidden directories from ever matching. */
+const STAGING_INFIX = ".altimate-staging-"
+const STAGING_PATTERN = /^\.[a-z0-9][a-z0-9-]{0,63}\.altimate-staging-[A-Za-z0-9_]{6,8}(\.old)?$/
+/** One sync at a time per project, shared with the plugin's Python script: an atomic `mkdir`,
+ * the one lock both runtimes have. A lock older than LOCK_STALE_MS belongs to a sync that died;
+ * one that is not free within LOCK_WAIT_MS leaves the copies as they are. */
+const LOCK_DIR = ".altimate-workspace-sync.lock"
+const LOCK_STALE_MS = 120_000
+const LOCK_WAIT_MS = 10_000
+/** Staging older than this is abandoned; a retired snapshot younger than this is a swap in progress. */
+const SWAP_MS = 600_000
+/** Where the snapshot is moved aside while a new one is swapped in. */
+const SNAPSHOT_STAGING = path.join(".altimate-code", "skill-staging")
 /** Keeps copies out of version control. */
 const GITIGNORE_TEXT = "*\n"
 /** Claude Code skill names: lowercase letters, digits and hyphens. */
@@ -38,6 +53,8 @@ const BANG_AFTER_FENCE = /(`{3,}|~{3,})!+/g
 const BLOCKED_DIRS = new Set(["hooks", "skills", "agents", "commands", "output-styles", "monitors", "bin"])
 const BLOCKED_FILES = new Set([
   "skill.md",
+  "claude.md",
+  "claude.local.md",
   ".mcp.json",
   ".lsp.json",
   "settings.json",
@@ -127,7 +144,35 @@ interface WorkspaceSkill {
 
 /** Each usable workspace skill; empty when there is no snapshot servable to the current
  * account, so the copies are removed. */
-async function readSnapshot(directory: string): Promise<WorkspaceSkill[]> {
+/** True while some process has moved the live snapshot aside to swap a new one in. Judged by
+ * ctime: the rename that retires the snapshot updates it but keeps the old mtime. */
+async function snapshotIsSwapping(directory: string): Promise<boolean> {
+  const staging = path.join(directory, SNAPSHOT_STAGING)
+  const entries = await fs.readdir(staging).catch(() => [] as string[])
+  for (const entry of entries) {
+    if (!entry.startsWith("retired-")) continue
+    const st = await fs.lstat(path.join(staging, entry)).catch(() => null)
+    if (st && Date.now() - st.ctimeMs < SWAP_MS) return true
+  }
+  return false
+}
+
+/** The usable skills, `[]` when there is no snapshot or it may not be served to the signed-in
+ * account (so copies are removed), or null when the snapshot exists but cannot be read, or is
+ * missing while a swap is in progress (so nothing changes). */
+async function readSnapshot(directory: string): Promise<WorkspaceSkill[] | null> {
+  let raw: string
+  try {
+    raw = await fs.readFile(path.join(snapshotRoot(directory), ".manifest.json"), "utf8")
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") return null
+    return (await snapshotIsSwapping(directory)) ? null : []
+  }
+  try {
+    JSON.parse(raw)
+  } catch {
+    return null
+  }
   const manifest = await ownManifest(directory)
   if (!manifest) return []
   const root = snapshotRoot(directory)
@@ -159,10 +204,16 @@ async function readSnapshot(directory: string): Promise<WorkspaceSkill[]> {
   return skills
 }
 
+/** A marked, non-symlinked directory whose marker names it. Markers without a name (written by
+ * earlier versions) still count; a copy the user renamed does not. */
 async function isOurs(dir: string): Promise<boolean> {
   try {
     if ((await fs.lstat(dir)).isSymbolicLink()) return false
-    return (await fs.stat(path.join(dir, MARKER))).isFile()
+    const names = (await fs.readFile(path.join(dir, MARKER), "utf8"))
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith("skill: "))
+      .map((line) => line.slice("skill: ".length))
+    return names.length === 0 || names[0] === path.basename(dir)
   } catch {
     return false
   }
@@ -198,13 +249,14 @@ async function copyTree(source: string, staging: string): Promise<void> {
 }
 
 async function buildCopy(skill: WorkspaceSkill, staging: string): Promise<void> {
+  // First, so a copy interrupted part-way is still kept out of git.
+  await fs.writeFile(path.join(staging, ".gitignore"), GITIGNORE_TEXT, "utf8")
   await copyTree(skill.source, staging)
   const rendered = renderSkill(skill.name, skill.description, skill.body)
   if (hasCommandMarker(rendered.slice(rendered.indexOf("\n---\n") + 5)))
     throw new Error(`workspace skill ${skill.name} still has a command marker`)
   await fs.writeFile(path.join(staging, "SKILL.md"), rendered, "utf8")
-  await fs.writeFile(path.join(staging, ".gitignore"), GITIGNORE_TEXT, "utf8")
-  await fs.writeFile(path.join(staging, MARKER), MARKER_TEXT, "utf8")
+  await fs.writeFile(path.join(staging, MARKER), `${MARKER_TEXT}skill: ${skill.name}\n`, "utf8")
 }
 
 async function listing(root: string, dir = root, found = new Map<string, Buffer>()): Promise<Map<string, Buffer>> {
@@ -237,9 +289,57 @@ async function isDir(p: string): Promise<boolean> {
     .catch(() => false)
 }
 
+async function acquireLock(targetRoot: string): Promise<boolean> {
+  const lock = path.join(targetRoot, LOCK_DIR)
+  const deadline = Date.now() + LOCK_WAIT_MS
+  for (;;) {
+    try {
+      await fs.mkdir(lock)
+      return true
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") return false
+    }
+    const st = await fs.lstat(lock).catch(() => null)
+    if (st && Date.now() - st.mtimeMs > LOCK_STALE_MS) {
+      await fs.rmdir(lock).catch(() => {})
+      continue
+    }
+    if (Date.now() > deadline) return false
+    await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+}
+
+/** Staging left by a sync that was killed. Only our staging names match, and under the lock no
+ * other sync runs; the age is a margin for a sync that has not taken the lock yet. */
+async function removeAbandonedStaging(targetRoot: string): Promise<void> {
+  for (const entry of await fs.readdir(targetRoot).catch(() => [] as string[])) {
+    if (!STAGING_PATTERN.test(entry)) continue
+    const dir = path.join(targetRoot, entry)
+    const st = await fs.lstat(dir).catch(() => null)
+    if (!st || st.isSymbolicLink() || !st.isDirectory() || Date.now() - st.mtimeMs < SWAP_MS) continue
+    const ignore = await fs.readFile(path.join(dir, ".gitignore"), "utf8").catch(() => "")
+    if (ignore === GITIGNORE_TEXT) await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
 async function sync(directory: string, withdraw: boolean): Promise<boolean> {
-  const skills = withdraw ? [] : await readSnapshot(directory)
   const targetRoot = path.join(directory, SKILLS_DIR)
+  if (!(await isDir(targetRoot))) {
+    // Nothing to remove; create the directory only when there is something to copy.
+    if (withdraw || !(await readSnapshot(directory))?.length) return false
+    await fs.mkdir(targetRoot, { recursive: true })
+  }
+  if (!(await acquireLock(targetRoot))) return false
+  try {
+    await removeAbandonedStaging(targetRoot)
+    return await reconcile(targetRoot, withdraw ? [] : await readSnapshot(directory))
+  } finally {
+    await fs.rmdir(path.join(targetRoot, LOCK_DIR)).catch(() => {})
+  }
+}
+
+async function reconcile(targetRoot: string, skills: WorkspaceSkill[] | null): Promise<boolean> {
+  if (!skills) return false
   let changed = false
   const wanted = new Set<string>()
   for (const skill of skills) {
@@ -249,8 +349,7 @@ async function sync(directory: string, withdraw: boolean): Promise<boolean> {
     // A skill the user wrote under this name stays as it is; the workspace one is skipped.
     if ((await lexists(target)) && !(await isOurs(target))) continue
     wanted.add(name)
-    await fs.mkdir(targetRoot, { recursive: true })
-    const staging = await fs.mkdtemp(path.join(targetRoot, `.${name}.`))
+    const staging = await fs.mkdtemp(path.join(targetRoot, `.${name}${STAGING_INFIX}`))
     const aside = `${staging}.old`
     try {
       try {
@@ -279,7 +378,7 @@ async function sync(directory: string, withdraw: boolean): Promise<boolean> {
   if (await isDir(targetRoot)) {
     for (const entry of await fs.readdir(targetRoot)) {
       const entryPath = path.join(targetRoot, entry)
-      // Staging directories start with "." and never match; another session may be using one.
+      // Staging and lock directories start with "." and never match.
       if (NAME_PATTERN.test(entry) && !wanted.has(entry) && (await isOurs(entryPath))) {
         await fs.rm(entryPath, { recursive: true, force: true }).catch(() => {})
         changed = true

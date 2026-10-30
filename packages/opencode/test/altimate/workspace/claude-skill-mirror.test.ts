@@ -4,7 +4,20 @@
 // script, so the cases follow that script's own tests.
 import { afterAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import fsp from "fs/promises"
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs"
+import {
+  chmodSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs"
 import path from "node:path"
 import os from "node:os"
 
@@ -228,16 +241,99 @@ describe("claude skill mirror", () => {
     expect(existsSync(skillPath("staging-conventions"))).toBe(false)
   })
 
-  test("an unreadable manifest removes copies", async () => {
+  test("an unreadable manifest keeps copies; a missing one removes them", async () => {
     writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
     await mirrorClaudeSkills(project)
     writeFileSync(path.join(project, MANAGED, ".manifest.json"), "{not json")
-    expect((await mirrorClaudeSkills(project)).changed).toBe(true)
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+    expect(existsSync(skillPath("staging-conventions"))).toBe(true)
+    rmSync(path.join(project, MANAGED, ".manifest.json"))
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: true })
     expect(existsSync(skillPath("staging-conventions"))).toBe(false)
   })
 
+  test("a snapshot missing while it is swapped keeps copies", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
+    await mirrorClaudeSkills(project)
+    const root = path.join(project, MANAGED)
+    const old = new Date(Date.now() - 3_600_000)
+    utimesSync(root, old, old) // the rename keeps a snapshot's old mtime
+    const retired = path.join(project, ".altimate-code", "skill-staging", "retired-1-x")
+    mkdirSync(path.dirname(retired), { recursive: true })
+    renameSync(root, retired)
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+    expect(existsSync(skillPath("staging-conventions"))).toBe(true)
+  })
+
+  test("the marker names the skill; a renamed copy is the user's", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
+    await mirrorClaudeSkills(project)
+    expect(read(skillPath("staging-conventions", MARKER))).toEndWith("skill: staging-conventions\n")
+    const mine = path.join(project, ".claude", "skills", "staging-conventions-mine")
+    cpSync(path.dirname(skillPath("staging-conventions")), mine, { recursive: true })
+    writeSnapshot({})
+    await mirrorClaudeSkills(project)
+    expect(existsSync(mine)).toBe(true)
+    expect(existsSync(skillPath("staging-conventions"))).toBe(false)
+  })
+
+  test("copies marked without a name are still ours", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
+    await mirrorClaudeSkills(project)
+    writeFileSync(skillPath("staging-conventions", MARKER), "Copied from the linked Altimate workspace by the altimate-code plugin. Edits here are replaced.\n")
+    writeSnapshot({})
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: true })
+    expect(existsSync(skillPath("staging-conventions"))).toBe(false)
+  })
+
+  test("nested CLAUDE.md files are not copied", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL, "CLAUDE.md": "x", "ref/claude.local.md": "x", "ref/notes.md": "x" } })
+    await mirrorClaudeSkills(project)
+    expect(existsSync(skillPath("staging-conventions", "CLAUDE.md"))).toBe(false)
+    expect(existsSync(skillPath("staging-conventions", "ref/claude.local.md"))).toBe(false)
+    expect(existsSync(skillPath("staging-conventions", "ref/notes.md"))).toBe(true)
+  })
+
+  test("abandoned staging is removed; other hidden directories stay", async () => {
+    const skills = path.join(project, ".claude", "skills")
+    const abandoned = path.join(skills, ".alpha.altimate-staging-Ab12Cd")
+    const fresh = path.join(skills, ".beta.altimate-staging-ef56gh.old")
+    const users = [".notes.my-files", ".drafts.archived", ".notes.20240101"].map((n) => path.join(skills, n))
+    const old = new Date(Date.now() - 3_600_000)
+    for (const dir of [abandoned, fresh, ...users]) {
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(path.join(dir, ".gitignore"), "*\n")
+    }
+    for (const dir of [abandoned, ...users]) utimesSync(dir, old, old)
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
+    await mirrorClaudeSkills(project)
+    expect(existsSync(abandoned)).toBe(false)
+    expect(existsSync(fresh)).toBe(true)
+    for (const dir of users) expect(existsSync(dir)).toBe(true)
+  })
+
+  test("waits for a sync holding the lock; a stale lock is taken over", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": RISKY_SKILL } })
+    const lock = path.join(project, ".claude", "skills", ".altimate-workspace-sync.lock")
+    mkdirSync(lock, { recursive: true })
+    let settled = false
+    const run = mirrorClaudeSkills(project).finally(() => (settled = true))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(settled).toBe(false)
+    expect(existsSync(skillPath("staging-conventions"))).toBe(false)
+    rmSync(lock, { recursive: true })
+    expect(await run).toEqual({ changed: true })
+    expect(existsSync(lock)).toBe(false)
+
+    writeSnapshot({})
+    mkdirSync(lock)
+    const old = new Date(Date.now() - 3_600_000)
+    utimesSync(lock, old, old)
+    expect(await mirrorClaudeSkills(project)).toEqual({ changed: true })
+  })
+
   test("another session's staging directory is left alone", async () => {
-    const staging = path.join(project, ".claude", "skills", ".a.x1y2")
+    const staging = path.join(project, ".claude", "skills", ".a.altimate-staging-x1y2z3")
     mkdirSync(staging, { recursive: true })
     writeFileSync(path.join(staging, MARKER), "")
     writeSnapshot({ sk_1: { "SKILL.md": simple("a") } })
