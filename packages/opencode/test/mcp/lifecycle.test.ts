@@ -2,12 +2,16 @@ import path from "node:path"
 import { mkdtempSync, readFileSync } from "node:fs"
 import os, { tmpdir } from "node:os"
 import { pathToFileURL } from "node:url"
-import { expect, mock, beforeEach, afterEach, spyOn } from "bun:test"
+import { afterAll, expect, mock, beforeEach, afterEach, spyOn } from "bun:test"
 import { ListRootsRequestSchema, ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js"
 import { Cause, Effect, Exit, Fiber } from "effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 import { testEffect } from "../lib/effect"
 import { TestInstance } from "../fixture/fixture"
+import { snapshotMcpClientModules } from "../lib/mcp-sdk-restore"
+
+const restoreMcpClientModules = await snapshotMcpClientModules()
+afterAll(restoreMcpClientModules)
 
 // --- Mock infrastructure ---
 

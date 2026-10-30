@@ -1,4 +1,8 @@
-import { describe, test, expect, beforeEach, mock, afterEach } from "bun:test"
+import { afterAll, describe, test, expect, beforeEach, mock, afterEach } from "bun:test"
+import { snapshotMcpClientModules } from "../lib/mcp-sdk-restore"
+
+const restoreMcpClientModules = await snapshotMcpClientModules()
+afterAll(restoreMcpClientModules)
 
 // ---------------------------------------------------------------------------
 // Mocks — set up before importing the MCP module
