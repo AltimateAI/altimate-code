@@ -265,7 +265,12 @@ export namespace MemoryStore {
     })
   }
 
-  export async function write(block: MemoryBlock, options?: { mirror?: boolean; cleanup?: boolean }): Promise<{ duplicates: MemoryBlock[] }> {
+  export async function write(
+    block: MemoryBlock,
+    // altimate_change — the writing session, for the workspace write-back's row; `mirror: false`
+    // skips the workspace write-back and `cleanup: false` the duplicate cleanup
+    opts: { sessionID?: string; mirror?: boolean; cleanup?: boolean } = {},
+  ): Promise<{ duplicates: MemoryBlock[] }> {
     if (block.content.length > MEMORY_MAX_BLOCK_SIZE) {
       throw new Error(
         `Memory block "${block.id}" content exceeds maximum size of ${MEMORY_MAX_BLOCK_SIZE} characters (got ${block.content.length})`,
@@ -308,7 +313,8 @@ export namespace MemoryStore {
     Telemetry.track({
       type: "memory_operation",
       timestamp: Date.now(),
-      session_id: Telemetry.getContext().sessionId,
+      // altimate_change — the writing session when the caller passed it, else the context's
+      session_id: opts.sessionID ?? Telemetry.getContext().sessionId,
       operation: "write",
       scope: block.scope,
       block_id: block.id,
@@ -327,7 +333,7 @@ export namespace MemoryStore {
     // local-existence check would then look for this block in the wrong tree
     // and skip it as deleted.
     const owningDirectory = safeDirectory()
-    if (options?.mirror !== false) void mirrorBlock(block, owningDirectory).catch((e) => {
+    if (opts.mirror !== false) void mirrorBlock(block, owningDirectory, opts.sessionID).catch((e) => {
       mirrorLog.warn("failed to mirror memory block to workspace", {
         id: block.id,
         scope: block.scope,
@@ -337,7 +343,7 @@ export namespace MemoryStore {
     // altimate_change end
 
     // Auto-clean expired blocks AFTER successful write to avoid data loss
-    if (needsCleanup && options?.cleanup !== false) {
+    if (needsCleanup && opts.cleanup !== false) {
       const expiredBlocks = allBlocks.filter((b) => isExpired(b))
       for (const expired of expiredBlocks) {
         await remove(block.scope, expired.id)

@@ -4,6 +4,13 @@ import { rm } from "node:fs/promises"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
 import { currentCredentials } from "./credentials-context"
+import {
+  findGlobalConfigPaths,
+  findProjectConfigPaths,
+  listMcpInConfig,
+  readMcpEntryFromDisk,
+  removeMcpFromConfig,
+} from "../../mcp/config"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 
 const DEFAULT_MCP_URL = "https://mcpserver.getaltimate.com/sse"
@@ -158,9 +165,51 @@ export namespace AltimateApi {
     )
   }
 
-  /** Remove the stored gateway credential file (sign out). No-op if absent. */
+  /** Delete ~/.altimate/altimate.json, including any non-credential fields such as `mcpServerUrl`. No-op if absent. */
   export async function clearCredentials(): Promise<void> {
     await rm(credentialsPath(), { force: true })
+  }
+
+  /** Directories whose project config a session in `directory` loads, mirroring `ConfigPaths`: `directory`
+   *  up to the git root (every ancestor outside git, where the worktree is "/"), plus `~/.altimate-code`. */
+  async function projectConfigDirs(directory: string): Promise<string[]> {
+    const dirs = [Global.Path.home]
+    for (let dir = directory; ; dir = path.dirname(dir)) {
+      dirs.push(dir)
+      if (path.dirname(dir) === dir || (await Filesystem.exists(path.join(dir, ".git")))) return [...new Set(dirs)]
+    }
+  }
+
+  /** Sign out of the gateway: remove MCP entries that carry the saved key, then delete the credential file.
+   *  Standalone `datamate add` writes the key into MCP headers (`buildMcpConfig`); matching the exact key
+   *  leaves user-authored entries alone. Searches the global config and every project config a session in
+   *  `projectDir` loads. Fails without deleting the file when the key can't be read: the file holds the
+   *  only copy, and without it leftover MCP entries can never be matched. */
+  export async function signOut(projectDir: string): Promise<Array<{ name: string; path: string }>> {
+    if (!(await isConfigured())) return []
+    let key: string
+    try {
+      key = (await getCredentials()).altimateApiKey
+    } catch (err) {
+      throw new Error(
+        `could not read the saved key from ${credentialsPath()} (${err instanceof Error ? err.message : err}); ` +
+          "fix the file and sign out again so MCP servers that carry the key are removed too",
+      )
+    }
+    const configPaths = [
+      ...(await Promise.all((await projectConfigDirs(projectDir)).map(findProjectConfigPaths))).flat(),
+      ...(await findGlobalConfigPaths(Global.Path.config)),
+    ]
+    const removed: Array<{ name: string; path: string }> = []
+    for (const configPath of configPaths) {
+      for (const name of await listMcpInConfig(configPath)) {
+        const entry = await readMcpEntryFromDisk(name, configPath)
+        if (entry?.type !== "remote" || entry.headers?.Authorization !== `Bearer ${key}`) continue
+        if (await removeMcpFromConfig(name, configPath)) removed.push({ name, path: configPath })
+      }
+    }
+    await clearCredentials()
+    return removed
   }
 
   const VALID_TENANT_REGEX = /^[a-z_][a-z0-9_-]*$/

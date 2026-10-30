@@ -550,6 +550,7 @@ export async function publishFromPicker(
         skill_name: skillName,
         action: report.action,
         file_count: report.files,
+        workspace_id: report.datamateId,
         source: "tui",
       })
     } catch {}

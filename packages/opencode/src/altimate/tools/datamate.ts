@@ -79,14 +79,14 @@ export const DatamateManagerTool = Tool.define("datamate_manager", {
       .optional()
       .describe("Server name to remove (for 'remove'). Use 'list-config' or 'status' to find names."),
   }),
-  async execute(args): Promise<{ title: string; metadata: Record<string, unknown>; output: string }> {
+  async execute(args, ctx): Promise<{ title: string; metadata: Record<string, unknown>; output: string }> {
     // altimate_change start — a linked project gets its integrations from the
     // workspace's own engine only. The tool is kept out of the model's catalog
     // there (datamate-manager-gate.ts); this covers callers that run it
     // directly. Every operation is refused before anything is looked up or
     // written, so the refusal does not depend on the API being reachable.
     const workspace = await disablingWorkspace()
-    if (workspace) return refusal(args.operation, workspace)
+    if (workspace) return refusal(args.operation, workspace, ctx.sessionID)
     // altimate_change end
     if (args.operation !== "status" && args.operation !== "list-config") {
       const configured = await AltimateApi.isConfigured()
@@ -106,9 +106,9 @@ export const DatamateManagerTool = Tool.define("datamate_manager", {
       case "list-integrations":
         return handleListIntegrations()
       case "add":
-        return handleAdd(args)
+        return handleAdd(args, "add", ctx.sessionID)
       case "create":
-        return handleCreate(args)
+        return handleCreate(args, ctx.sessionID)
       case "edit":
         return handleEdit(args)
       case "delete":
@@ -116,7 +116,7 @@ export const DatamateManagerTool = Tool.define("datamate_manager", {
       case "status":
         return handleStatus()
       case "remove":
-        return handleRemove(args)
+        return handleRemove(args, ctx.sessionID)
       case "list-config":
         return handleListConfig()
     }
@@ -250,6 +250,8 @@ function mergeRefreshedEntry(
 async function handleAdd(
   args: { datamate_id?: string; name?: string; scope?: "project" | "global" },
   operation = "add",
+  /** The calling session, for the refusal's telemetry row. */
+  sessionID?: string,
 ) {
   if (!args.datamate_id) {
     return {
@@ -315,7 +317,7 @@ async function handleAdd(
     // it, as a boundary starts the engine's, or it could replace the engine's.
     using lock = await holdDirectoryLock()
     const off = await disablingWorkspace()
-    if (off) return refusal(operation, off)
+    if (off) return refusal(operation, off, sessionID)
     // altimate_change end
 
     if (transport !== null) {
@@ -452,7 +454,7 @@ async function handleAdd(
           else await removeMcpFromConfig(serverName, configPath)
           again.release()
           if (prior && prior.enabled !== false) await MCP.add(serverName, prior).catch(() => {})
-          return refusal(operation, linked)
+          return refusal(operation, linked, sessionID)
         }
       }
       // altimate_change end
@@ -492,14 +494,17 @@ async function handleAdd(
   }
 }
 
-async function handleCreate(args: {
-  name?: string
-  description?: string
-  integration_ids?: string[]
-  memory_enabled?: boolean
-  privacy?: string
-  scope?: "project" | "global"
-}) {
+async function handleCreate(
+  args: {
+    name?: string
+    description?: string
+    integration_ids?: string[]
+    memory_enabled?: boolean
+    privacy?: string
+    scope?: "project" | "global"
+  },
+  sessionID?: string,
+) {
   if (!args.name) {
     return {
       title: "Datamate create: FAILED",
@@ -514,7 +519,7 @@ async function handleCreate(args: {
     // altimate_change start — checked again before the datamate is created: a
     // boundary may have linked the project since the check in `execute`.
     const off = await disablingWorkspace()
-    if (off) return refusal("create", off)
+    if (off) return refusal("create", off, sessionID)
     // The account the datamate is created in, kept for deleting it again: ids
     // are per tenant, and the credentials can change while the request runs.
     const creds = await AltimateApi.getCredentials()
@@ -535,6 +540,7 @@ async function handleCreate(args: {
     const added = await handleAdd(
       { datamate_id: created.id, name: `datamate-${slugify(args.name)}`, scope: args.scope },
       "create",
+      sessionID,
     )
     if (!("managedBy" in added.metadata)) return added
     const rolledBack = await AltimateApi.deleteDatamate(created.id, creds).then(
@@ -691,7 +697,7 @@ async function handleStatus() {
   }
 }
 
-async function handleRemove(args: { server_name?: string; scope?: "project" | "global" }) {
+async function handleRemove(args: { server_name?: string; scope?: "project" | "global" }, sessionID?: string) {
   if (!args.server_name) {
     return {
       title: "Datamate remove: FAILED",
@@ -706,7 +712,7 @@ async function handleRemove(args: { server_name?: string; scope?: "project" | "g
     // check at the top of `execute` must not have its engine's key removed.
     using _lock = await holdDirectoryLock()
     const off = await disablingWorkspace()
-    if (off) return refusal("remove", off)
+    if (off) return refusal("remove", off, sessionID)
     // altimate_change end
     // Fully remove from runtime state (disconnect + purge from MCP list)
     // altimate_change start — MCP.remove (was disconnect): delete the status entry + publish

@@ -108,6 +108,6 @@ describe("error_fingerprint wiring", () => {
   test("prompt.ts emits through these helpers", async () => {
     const src = await Bun.file(new URL("../../src/session/prompt.ts", import.meta.url)).text()
     expect(src).toContain("...ErrorDetail.describeToolError(errorMsg)")
-    expect(src).toContain("Telemetry.track(ErrorDetail.buildErrorFingerprintEvent(sessionID, err))")
+    expect(src).toContain("Telemetry.track({ ...ErrorDetail.buildErrorFingerprintEvent(sessionID, err), ...turnWorkspace })")
   })
 })
