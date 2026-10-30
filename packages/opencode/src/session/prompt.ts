@@ -2241,6 +2241,8 @@ export namespace SessionPrompt {
         lastToolName = part.tool
         // altimate_change end
         if (toolChain.length < 50) toolChain.push(part.tool)
+        // altimate_change — a requested abort closing a running tool is not a tool failure
+        if (ErrorDetail.isRequestedToolInterruption(part.state, abort.aborted)) continue
         const isError = part.state?.status === "error"
         if (isError) {
           toolErrorCount++
