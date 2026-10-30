@@ -505,6 +505,27 @@ test("rules added to a session are reported by tier, as counts only; a cached an
   expect(JSON.stringify(events)).not.toContain("shipping")
 })
 
+test("a resumed session shown team rules drops them while workspaces are off", async () => {
+  await approve([lesson("L-0201", "Keep the project rules explicit.", { pinned: true })])
+  await approve([lesson("L-0202", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
+  const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+  try {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    const on = await new Delivery(root, { ...limits, core_lessons: 2 }).prepare("resumed", "first", "staging")
+    expect(on.section).toContain("Name staging models")
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    const off = new Delivery(root, { ...limits, core_lessons: 2 })
+    // The cached section is not served; the next request rebuilds it without the team rule.
+    expect(await off.section("resumed")).not.toContain("Name staging models")
+    const again = await off.prepare("resumed", "first", "staging")
+    expect(again.section).not.toContain("Name staging models")
+    expect(again.section).toContain("Keep the project rules explicit")
+  } finally {
+    if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+  }
+})
+
 test("rules from the workspace-rules store are counted as team rules, and are not delivered with workspaces off", async () => {
   await approve([lesson("L-0101", "Keep the project rules explicit.", { pinned: true })])
   await approve([lesson("L-0102", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)

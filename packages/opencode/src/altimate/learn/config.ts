@@ -1,4 +1,5 @@
 // altimate_change - new file
+import { killSwitchSet } from "@opencode-ai/core/flag/flag"
 
 interface LearnConfig {
   enabled?: boolean
@@ -14,10 +15,9 @@ export function booleanFlag(value: string | undefined): boolean | undefined {
   return undefined
 }
 
-/** Workspaces are on unless `ALTIMATE_DISABLE_WORKSPACE` is set to anything but empty, `0` or `false`. */
+/** Workspaces are on unless the `ALTIMATE_DISABLE_WORKSPACE` kill switch is set (`Flag`'s parse, with `env` explicit). */
 export function workspacesOn(env: NodeJS.ProcessEnv = process.env): boolean {
-  const disabled = env["ALTIMATE_DISABLE_WORKSPACE"]?.trim().toLowerCase()
-  return disabled === undefined || disabled === "" || disabled === "0" || disabled === "false"
+  return !killSwitchSet(env["ALTIMATE_DISABLE_WORKSPACE"])
 }
 
 /** The global switch defaults on; env overrides config in both directions. */

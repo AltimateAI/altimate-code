@@ -1009,6 +1009,64 @@ describe("the workspace API, by path", () => {
     expect((await RulesStore.read(root)).outbox).toEqual([])
   })
 
+  test("one review row or field this version cannot read, or a rule that fails the lint, does not fail the pull", async () => {
+    const root = await tmp()
+    const good = { public_id: "p-ok", rule_key: "R-1", text: "Use cents.", change: "add", status: "active", reviewed_at: "2026-10-28T00:00:00Z", updated_at: "2026-10-28T00:00:00Z" }
+    answer = () => Response.json(syncBody([
+      rule("aaaaaaaaaaaa", "Name staging models stg_<source>."),
+      rule("bbbbbbbbbbbb", "Line one\nline two."),
+    ], { repo_identity: null, my_reviewed: [{ ...good, updated_at: null, public_id: "p-bad" }, good] }))
+    const pulled = await RulesSync.pull(root, ready())
+    expect(pulled).toMatchObject({ ok: true, rules: 1 })
+    expect(pulled.notices.map((n) => n.public_id)).toEqual(["p-ok"])
+    const state = await RulesStore.read(root)
+    expect(state.revision).toBeUndefined()
+    expect(state.last_error).toContain("did not pass the rule lint")
+  })
+
+  test("usage built for another account or workspace is neither sent nor marked reported", async () => {
+    const root = await tmp()
+    answer = () => Response.json(syncBody([rule("aaaaaaaaaaaa", "Name staging models stg_<source>.")]))
+    await RulesSync.pull(root, ready())
+    await RulesStore.update(root, (s) => {
+      s.pending_usage = { batch_id: "batch-other", scope: { ...scope(), account: "someone-else" }, items: [{ public_id: "p-aaaaaaaaaaaa", applied: 1, helpful: 0, harmful: 0, corrected_again: 0 }], pairs: ["s1|p-aaaaaaaaaaaa"], corrected: {} }
+    })
+    seen.length = 0
+    expect(await RulesSync.reportUsage(root, ready())).toEqual({ items: 0 })
+    expect(seen.filter((r) => r.path === "/usage")).toEqual([])
+    const state = await RulesStore.read(root)
+    expect(state.pending_usage?.batch_id).toBe("batch-other")
+    expect(state.usage_reported).toEqual([])
+  })
+
+  test("a reported pair is let go once its session's snapshot is older than a month", async () => {
+    const root = await tmp()
+    answer = () => Response.json(syncBody([{ ...rule("aaaaaaaaaaaa", "Name staging models stg_<source>."), public_id: "p-a" }]))
+    await RulesSync.pull(root, ready())
+    const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+    await fs.mkdir(dir, { recursive: true })
+    for (const session of ["old", "recent"]) await fs.writeFile(path.join(dir, `${Store.sha256(session)}.json`), "{}")
+    const longAgo = new Date(Date.now() - 40 * 24 * 60 * 60_000)
+    await fs.utimes(path.join(dir, `${Store.sha256("old")}.json`), longAgo, longAgo)
+    await RulesStore.update(root, (s) => { s.usage_reported = ["old|p-a", "recent|p-a"] })
+    await RulesSync.reportUsage(root, ready())
+    expect((await RulesStore.read(root)).usage_reported).toEqual(["recent|p-a"])
+  })
+
+  test("a push lock that cannot be taken for another reason fails the push; only a busy one reads as another sender", async () => {
+    const root = await tmp()
+    await RulesSync.enqueue(root, item("Lock trouble."))
+    const { Flock } = await import("@opencode-ai/core/util/flock")
+    const spy = spyOn(Flock, "withLock").mockRejectedValueOnce(new Error("EACCES: permission denied, mkdir rules-push.lock"))
+    try {
+      await expect(RulesSync.push(root, ready())).rejects.toThrow("EACCES")
+      spy.mockRejectedValueOnce(new Error("Timed out waiting for lock: rules-push"))
+      expect(await RulesSync.push(root, ready())).toMatchObject({ queued: 1, error: "another sync is still sending proposals" })
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   test("too many proposals at once say so", async () => {
     const root = await tmp()
     const many = Array.from({ length: RulesStore.MAX_OUTBOX + 1 }, (_, i) => ({ item: item(`Rule ${i}.`) }))
@@ -1782,6 +1840,7 @@ describe("cards across the feature's edges", () => {
     const root = await linkedRoot()
     await appendSignal(root, { kind: "user_correction", sessionID: "e1", text: "no, the column is ordered_at", reason: "correction" })
     const unrelated = await RuleTrigger.explicit({ sessionID: "e1", root, directory: root, learn: undefined, text: "Never use FLOAT for money columns.", said: "Remember as a rule: never use FLOAT for money columns." })
+    expect(unrelated.status).toBe("shown")
     expect(unrelated.status === "shown" && unrelated.card?.evidence.correction).toBeFalsy()
     await appendSignal(root, { kind: "user_correction", sessionID: "e1", text: "money columns must not be FLOAT, use integer cents", reason: "correction" })
     await RuleProposal.drop(root)
@@ -1809,26 +1868,145 @@ describe("cards across the feature's edges", () => {
     expect((await RulesStore.read(root)).remember_requests).toEqual([])
   })
 
-  test("a requested card whose process died is saved as before by the next process, once", async () => {
+  test("a requested card whose process died is saved as before by the next process, once; a PID reused by a restart does not hide it", async () => {
     await using dir = await tmpdir({ git: true })
     const dead = Bun.spawn(["true"])
     await dead.exited
+    const now = new Date().toISOString()
     try {
       await Instance.provide({ directory: dir.path, fn: async () => {
         const root = await fs.realpath(Instance.worktree)
         await RulesStore.update(root, (s) => {
-          s.remember_requests.push({ card: "c-dead", text: "Alias every joined table.", session: "x1", directory: Instance.directory, via: "training", training: { name: "alias-joins" }, pid: dead.pid, at: new Date().toISOString() })
-          s.remember_requests.push({ card: "c-live", text: "Still open here.", session: "x2", directory: Instance.directory, via: "training", pid: process.pid, at: new Date().toISOString() })
+          s.remember_requests.push({ card: "c-dead", text: "Alias every joined table.", session: "x1", directory: Instance.directory, via: "training", training: { name: "alias-joins" }, pid: dead.pid, boot: "earlier", at: now })
+          // A restarted server can get the crashed one's PID (PID 1 in a container): its boot id tells them apart.
+          s.remember_requests.push({ card: "c-restart", text: "Quote reserved identifiers.", session: "x3", directory: Instance.directory, via: "training", training: { name: "quote-reserved" }, pid: process.pid, boot: "before-restart", at: now })
+          s.remember_requests.push({ card: "c-live", text: "Still open here.", session: "x2", directory: Instance.directory, via: "training", pid: process.pid, boot: RulesStore.PROCESS_BOOT, at: now })
         })
         await RulesRemember.recoverRequests(root, Instance.directory)
         await RulesRemember.recoverRequests(root, Instance.directory)
         expect((await TrainingStore.get("project", "rule", "alias-joins"))?.content).toContain("Alias every joined table.")
+        expect((await TrainingStore.get("project", "rule", "quote-reserved"))?.content).toContain("Quote reserved identifiers.")
         // A card this process still shows is its own to save.
         expect((await RulesStore.read(root)).remember_requests.map((r) => r.card)).toEqual(["c-live"])
       } })
     } finally {
       await disposeAllInstances()
     }
+  })
+
+  test("a request whose save fails for a passing reason is kept for the next start; one that can never be saved is dropped", async () => {
+    await using dir = await tmpdir({ git: true })
+    const now = new Date().toISOString()
+    try {
+      await Instance.provide({ directory: dir.path, fn: async () => {
+        const root = await fs.realpath(Instance.worktree)
+        await RulesStore.update(root, (s) => {
+          s.remember_requests.push({ card: "c-busy", text: "Alias every joined table.", session: "y1", directory: Instance.directory, via: "training", training: { name: "alias-busy" }, pid: process.pid, boot: "earlier", at: now })
+        })
+        const save = spyOn(TrainingStore, "save").mockRejectedValue(new Error("EBUSY: resource busy"))
+        try {
+          await RulesRemember.recoverRequests(root, Instance.directory)
+        } finally {
+          save.mockRestore()
+        }
+        // Kept, claimed by this boot: the next start (another boot) tries again.
+        expect((await RulesStore.read(root)).remember_requests).toEqual([expect.objectContaining({ card: "c-busy", boot: RulesStore.PROCESS_BOOT })])
+        await RulesStore.update(root, (s) => { s.remember_requests[0].boot = "next-start" })
+        const count = spyOn(TrainingStore, "count").mockResolvedValue({ rule: 50 } as never)
+        try {
+          await RulesRemember.recoverRequests(root, Instance.directory)
+        } finally {
+          count.mockRestore()
+        }
+        // The per-kind limit can never be met as asked: dropped (logged).
+        expect((await RulesStore.read(root)).remember_requests).toEqual([])
+      } })
+    } finally {
+      await disposeAllInstances()
+    }
+  })
+
+  test("a card whose fallback fails for a passing reason keeps its request; a refused save clears it", async () => {
+    const root = await linkedRoot()
+    const draft = (text: string) => ({ text, applies_to: [], change: "add" as const, origin: "explicit" as const, evidence: { sessions: 1 }, topics: [] })
+    await RuleProposal.ask({ sessionID: "f1", root, directory: root, learn: undefined, request: { session: "f1", via: "training" }, unanswered: async () => { throw new Error("ENOSPC: no space left") }, draft: draft("Quote reserved words.") })
+    await RuleProposal.ask({ sessionID: "f2", root, directory: root, learn: undefined, request: { session: "f2", via: "training" }, unanswered: async () => { throw new RuleProposal.SaveRefusedError("project training already holds 50 rules") }, draft: draft("Alias joined tables.") })
+    await RuleProposal.drop(root)
+    expect((await RulesStore.read(root)).remember_requests.map((r) => r.text)).toEqual(["Quote reserved words."])
+  })
+
+  test("with 50 requested cards open, a new request is saved without a card instead of evicting one", async () => {
+    const root = await linkedRoot()
+    await RulesStore.update(root, (s) => {
+      for (let i = 0; i < RulesStore.MAX_REMEMBER_REQUESTS; i++)
+        s.remember_requests.push({ card: `c-${i}`, text: `Rule ${i}.`, session: "z", directory: root, via: "training", pid: process.pid, boot: RulesStore.PROCESS_BOOT, at: new Date().toISOString() })
+    })
+    const result = await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content: "Always use CTEs in staging models.", sessionID: "z1", said: "Remember as a rule: always use CTEs in staging models.", unanswered: async () => {}, request: { session: "z1", via: "training" } })
+    expect(result).toBeUndefined()
+    expect(RuleProposal.list(root, "z1")).toEqual([])
+    expect((await RulesStore.read(root)).remember_requests).toHaveLength(RulesStore.MAX_REMEMBER_REQUESTS)
+  })
+
+  test("a card answered after its day is closed, not answered; a requested one is saved as before", async () => {
+    const root = await linkedRoot()
+    const saved: string[] = []
+    const card = (await RuleProposal.ask({ sessionID: "d1", root, directory: root, learn: undefined, unanswered: async (text) => void saved.push(text), draft: { text: "Prefix seeds with seed_.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } }))!
+    const clock = spyOn(Date, "now").mockReturnValue(Date.now() + RuleProposal.CARD_TTL_MS + 1_000)
+    try {
+      expect(await RuleProposal.reply(card.id, { action: "send" })).toMatchObject({ ok: false, code: "not_open", error: "This proposal expired." })
+    } finally {
+      clock.mockRestore()
+    }
+    expect((await RulesStore.read(root)).outbox).toEqual([])
+    expect(saved).toEqual(["Prefix seeds with seed_."])
+  })
+
+  test("a card sent while rules sync is unavailable says so, instead of promising it is sent when the workspace is reachable", async () => {
+    const root = await linkedRoot()
+    const card = (await RuleProposal.ask({ sessionID: "o1", root, directory: root, learn: { enabled: false }, draft: { text: "Prefix seeds with seed_.", applies_to: [], change: "add", origin: "explicit", evidence: { sessions: 1 }, topics: [] } }))!
+    const result = await RuleProposal.reply(card.id, { action: "send" })
+    expect(result).toMatchObject({ ok: true })
+    expect(result.ok && result.message).toContain("rules sync is not available")
+  })
+
+  test("training_save content that reads as a memory is saved to memory, not redirected to a tool the agent may not have", async () => {
+    const root = await linkedRoot()
+    const memories: { text: string }[] = []
+    const result = await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content: "I prefer CTEs over subqueries.", sessionID: "m5", said: "Remember: I prefer CTEs over subqueries.", saveMemory: async (text) => { memories.push({ text }); return "global" } })
+    expect(result).toMatchObject({ title: "Saved to memory", metadata: { action: "memory", scope: "global" } })
+    expect(memories).toEqual([{ text: "I prefer CTEs over subqueries." }])
+  })
+
+  test("the after-turn check proposes an edit of a team rule the session was shown, a retire, or nothing when the rule already says it", async () => {
+    const root = await linkedRoot()
+    const text = "Name order timestamp columns ordered_at in staging models."
+    await RulesStore.update(root, (s) => { s.rules = [rule(text)] })
+    const id = RulesStore.lessonId(rule(text).rule_key)
+    const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+    await fs.mkdir(dir, { recursive: true })
+    const shown = (session: string) => fs.writeFile(path.join(dir, `${Store.sha256(session)}.json`), JSON.stringify({
+      version: 1, session, firstMessage: "m", query: "q", touchedPaths: [], section: "", requests: [], requestParts: [], compactions: [], counted: [],
+      shown: [{ name: RulesStore.WORKSPACE_RULES_STORE, lesson: { id, text, tags: [], scope: "project", helpful: 0, harmful: 0, applied: 0, created: "2026-10-27T00:00:00Z", updated: "2026-10-27T00:00:00Z" }, tier: "core", at: "2026-01-01T00:00:00Z", queryHash: "h" }],
+    }))
+    const check = async (session: string, delta: unknown) => {
+      await shown(session)
+      await appendSignal(root, { kind: "user_correction", sessionID: session, text: "no, the order timestamp columns in staging models are named order_ts", reason: "correction" })
+      await RuleTrigger.afterTurn({ sessionID: session, root, directory: root, learn: { enabled: true, capture: true }, deps: deps({ deltas: [delta] }) })
+      const cards = RuleProposal.list(root, session)
+      await RuleProposal.drop(root)
+      return cards
+    }
+    expect(await check("e-edit", { op: "EDIT", id, text: "Name order timestamp columns order_ts in staging models.", reason: "renamed" }))
+      .toEqual([expect.objectContaining({ change: "edit", replaces: expect.objectContaining({ text }) })])
+    expect(await check("e-retire", { op: "REMOVE", id, reason: "no longer true" })).toEqual([expect.objectContaining({ change: "retire" })])
+    const events: Telemetry.Event[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((event: Telemetry.Event) => void events.push(event))
+    try {
+      expect(await check("e-covered", { op: "HELPFUL", id, reason: "the rule says it" })).toEqual([])
+    } finally {
+      spy.mockRestore()
+    }
+    expect(events).toContainEqual(expect.objectContaining({ type: "rule_proposal_skipped", trigger: "shown_rule", reason: "covered" }))
   })
 
   test("with project config disabled, the live re-read ignores the project file", async () => {

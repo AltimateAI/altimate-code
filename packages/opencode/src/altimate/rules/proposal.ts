@@ -80,6 +80,15 @@ function close(id: string, entry: Pending, message: string, why: "expired" | "cl
 /** What a "remember" card keeps on disk so the request survives the process (`RulesRemember.recoverRequests`). */
 export type RequestRecord = Pick<RulesStore.RememberRequest, "session" | "via" | "memory" | "training">
 
+/** A save that can never succeed as asked (the project's memory or training is full, the text is too long): retrying
+ * it is pointless, so its request is not kept for recovery. Any other failure is kept and retried. */
+export class SaveRefusedError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "SaveRefusedError"
+  }
+}
+
 async function persistRequest(entry: Pending, request: RequestRecord) {
   const record: RulesStore.RememberRequest = {
     ...request,
@@ -87,24 +96,39 @@ async function persistRequest(entry: Pending, request: RequestRecord) {
     text: entry.card.text,
     directory: entry.directory,
     pid: process.pid,
+    boot: RulesStore.PROCESS_BOOT,
     at: new Date().toISOString(),
   }
-  // Best effort: the card and its in-memory fallback work without it; only a crash would then lose the request.
+  // Best effort: the card and its in-memory fallback work without it; only a crash would then lose the request. Never
+  // past the limit: a live record is not evicted (`proposeFor` saves without a card when it is full).
+  let kept = false
   await RulesStore.update(entry.root, (s) => {
-    s.remember_requests = [...s.remember_requests.filter((r) => r.card !== record.card), record]
+    const others = s.remember_requests.filter((r) => r.card !== record.card)
+    if (others.length >= RulesStore.MAX_REMEMBER_REQUESTS) return
+    s.remember_requests = [...others, record]
+    kept = true
   }).then(
-    () => void (entry.persisted = true),
+    () => void (entry.persisted = kept),
     (error) => log.warn("remember request not kept on disk", { card: record.card, error }),
   )
 }
 
-/** The card was answered, or its fallback ran: its request no longer needs keeping. */
+/** The card was answered, or its request was saved: it no longer needs keeping. Retried, since a record left behind
+ * would be saved again by recovery; removing it twice is harmless. */
 async function forgetRequest(id: string, entry: Pending) {
   if (!entry.persisted) return
-  entry.persisted = false
-  await RulesStore.update(entry.root, (s) => {
-    s.remember_requests = s.remember_requests.filter((r) => r.card !== id)
-  }).catch((error) => log.warn("remember request not cleared", { id, error }))
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await RulesStore.update(entry.root, (s) => {
+        s.remember_requests = s.remember_requests.filter((r) => r.card !== id)
+      })
+      entry.persisted = false
+      return
+    } catch (error) {
+      log.warn("remember request not cleared", { id, attempt, error })
+      await new Promise((resolve) => setTimeout(resolve, 200 * attempt))
+    }
+  }
 }
 
 /** A closed card nobody answered: save a requested one as before cards, record it, tell its clients. */
@@ -113,16 +137,18 @@ async function settle(id: string, entry: Pending, message: string, why: "expired
   // clients then learn it is gone from their next list or reply (`not_open`).
   if (here === entry.directory)
     void publish(RuleEvents.Event.Replied, { id, sessionID: entry.card.sessionID, action: "expired", message })
-  // A "remember" the person asked for is saved as it was before cards. That save can still fail (the project's memory
-  // or training is full): recorded as a failed close, not as saved.
+  // A "remember" the person asked for is saved as it was before cards. That save can still fail: recorded as a failed
+  // close. Its kept request is cleared only once saved, or when the save can never succeed (`SaveRefusedError`);
+  // after any other failure it stays, and the next process opening the project saves it (`recoverRequests`).
+  let refused = false
   const saved = entry.unanswered
     ? await entry.unanswered(entry.card.text).then(() => true, (error) => {
+        refused = error instanceof SaveRefusedError
         log.warn("unanswered card not saved", { id, error })
         return false
       })
     : undefined
-  // Saved, or failed for good (the project's memory or training is full): either way nothing is left to recover.
-  await forgetRequest(id, entry)
+  if (saved !== false || refused) await forgetRequest(id, entry)
   RulesTelemetry.answered({
     card: entry.card,
     trigger: entry.trigger,
@@ -332,6 +358,11 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
   const entry = pending.get(id)
   if (!entry || (directory !== undefined && entry.directory !== directory))
     return { ok: false, code: "not_open", error: "This proposal is no longer open." }
+  // Past its day: closed now (a requested one is saved as before cards), not answered.
+  if (!entry.busy && Date.now() - entry.at > CARD_TTL_MS) {
+    await close(id, entry, "This proposal expired.", "expired", entry.directory)
+    return { ok: false, code: "not_open", error: "This proposal expired." }
+  }
   const track = (status: "ok" | ReplyFailure, outcome?: AnswerOutcome) => {
     if (status !== "not_open")
       RulesTelemetry.answered({ card: entry.card, trigger: entry.trigger, action: input.action, status, outcome, edits: entry.edits, shownAt: entry.at })
@@ -472,7 +503,11 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
     const sent = RulesSync.outcomeOf(await RulesStore.read(entry.root), report, outboxId)
     const owner = card.workspace?.owner_name ?? "the workspace owner"
     const ws = card.workspace?.name ?? "the workspace"
-    if (sent.status === "queued") {
+    if (sent.status === "queued" && report && report.context.status !== "ready") {
+      // Not sent, and not until rules sync is available again (learning or workspaces off, signed out, not linked).
+      message = `Kept queued: rules sync is not available (${report.context.reason}); it is sent on a later sync once it is.`
+      outcome = "queued"
+    } else if (sent.status === "queued") {
       message = sent.error
         ? `Not sent yet (${sent.error}): kept queued and sent again on the next sync.`
         : `Queued: it will be sent to ${owner}'s review queue when the workspace is reachable.`

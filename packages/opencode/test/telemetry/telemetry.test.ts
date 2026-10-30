@@ -250,6 +250,7 @@ const ALL_EVENT_TYPES: Telemetry.Event["type"][] = [
   "plan_no_tool_generation",
   "rule_proposal_shown",
   "rule_proposal_answered",
+  "rule_drafted",
   "rule_proposal_skipped",
   "rule_remember_routed",
   "rules_sync",
@@ -260,7 +261,7 @@ const ALL_EVENT_TYPES: Telemetry.Event["type"][] = [
 
 describe("telemetry.event-types", () => {
   test("all event types are valid", () => {
-    expect(ALL_EVENT_TYPES.length).toBe(53)
+    expect(ALL_EVENT_TYPES.length).toBe(54)
   })
 })
 

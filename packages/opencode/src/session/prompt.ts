@@ -1,6 +1,6 @@
 import path from "path"
 import { Token } from "@/util/token"
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import os from "os"
 import fs from "fs/promises"
 import z from "zod"
@@ -121,8 +121,9 @@ import { trackWorkspaceToolCall } from "../altimate/workspace/tool-call-telemetr
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
-// altimate_change start — the session's bound workspace rides on every telemetry row
-import { readLocalBinding } from "@/altimate/workspace/state"
+// altimate_change start — the session's bound workspace rides on every telemetry row; workspace rules canonicalize bound
+// directories like the bindings cache does
+import { canonicalDirectory, readLocalBinding } from "@/altimate/workspace/state"
 
 /** The session's workspace use, as session_end fields. Read only: the row is tracked first, then the
  * turn ends its telemetry entries (`Telemetry.endSession`), so the row itself still carries the
@@ -154,22 +155,16 @@ const rulesSessionsStarted = new Set<string>()
 /** Rules state in this project, or a cached workspace binding for this directory: otherwise the project cannot have
  * workspace rules, and the prompt path skips them. Synchronous, local checks only: the bindings cache is parsed once per
  * change of the file (size and mtime), not on every prompt. */
-const canonicalDir = (dir: string) => {
-  try {
-    return realpathSync(path.resolve(dir))
-  } catch {
-    return path.resolve(dir)
-  }
-}
 let boundDirs: { stamp: string; dirs: ReadonlySet<string> } | undefined
 const boundDirectories = (): ReadonlySet<string> => {
   const file = path.join(Global.Path.state, "altimate-workspace-bindings.json")
   try {
     const stat = statSync(file)
-    const stamp = `${stat.size}:${stat.mtimeMs}`
+    // A same-sized atomic replacement within one mtime tick still changes the inode or ctime.
+    const stamp = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
     if (boundDirs?.stamp !== stamp) {
       const cache = JSON.parse(readFileSync(file, "utf8")) as { bindings?: Record<string, unknown> }
-      boundDirs = { stamp, dirs: new Set(Object.keys(cache.bindings ?? {}).map(canonicalDir)) }
+      boundDirs = { stamp, dirs: new Set(Object.keys(cache.bindings ?? {}).map(canonicalDirectory)) }
     }
     return boundDirs.dirs
   } catch {
@@ -179,7 +174,7 @@ const boundDirectories = (): ReadonlySet<string> => {
 const mayHaveWorkspaceRules = (root: string, directory: string) => {
   if (existsSync(path.join(root, ".altimate-code", "learn", "workspace-rules", "rules.json"))) return true
   const dirs = boundDirectories()
-  return dirs.size > 0 && dirs.has(canonicalDir(directory))
+  return dirs.size > 0 && dirs.has(canonicalDirectory(directory))
 }
 // altimate_change end
 

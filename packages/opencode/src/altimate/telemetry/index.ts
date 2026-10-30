@@ -843,7 +843,7 @@ export namespace Telemetry {
         session_id: string
         via: "training" | "memory"
         /** `no_renderer`: no client that shows cards is attached, so the tool saved as before cards. */
-        outcome: "card" | "choose_card" | "memory" | "invalid" | "learning_off" | "not_linked" | "no_renderer"
+        outcome: "card" | "choose_card" | "memory" | "invalid" | "learning_off" | "not_linked" | "no_renderer" | "requests_full"
       }
     | {
         /** One rules sync (push queued proposals, pull rules and reviews, report usage). */

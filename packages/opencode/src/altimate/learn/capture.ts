@@ -247,6 +247,13 @@ export class Capture {
 
 // Keep every active capture drainable when more than one instance is open.
 const active = new Set<Capture>()
+/** Instance directories whose capture runs, whoever started it. */
+const running = new Set<string>()
+
+/** Whether capture runs for the instance at `directory`. */
+export function captureRunning(directory: string): boolean {
+  return running.has(directory)
+}
 
 // altimate_change start — workspace rules: a per-project gate the rules service sets from the full learning decision
 // (the person's /rules choice can turn learning off while config still has learn.capture on). No gate: record.
@@ -324,6 +331,7 @@ export async function startCapture(
       },
     })
     active.add(capture)
+    running.add(ctx.directory)
     const subscriptions: Array<() => void> = []
     // altimate_change start — one stop path for disposal and for workspace rules
     // One stop, shared: a second caller (the instance disposer overlapping a settings change) waits for the
@@ -335,6 +343,7 @@ export async function startCapture(
         await capture.flush()
         await flushWrites()
         active.delete(capture)
+        running.delete(ctx.directory)
         unregister()
       })())
     const unregister = registerDisposer(async (directory) => {

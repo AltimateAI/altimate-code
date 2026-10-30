@@ -65,43 +65,64 @@ export async function proposeTeamRule(
   const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
   // A subagent's session is not the one a client shows: its card would never be seen. Looked up only when a card
   // would otherwise be raised.
-  const subagent = () =>
-    import("@/session")
-      .then(async ({ Session }) => {
-        const { SessionID } = await import("@/session/schema")
-        return !!(await Session.get(SessionID.make(sessionID))).parentID
-      })
-      .catch(() => false)
+  const subagent = () => subagentSession(sessionID)
   // What the tool meant to write, kept on disk while the card is open; saved as before cards if it closes unanswered.
   const request = { session: sessionID, via, ...(memory ? { memory } : {}), ...(training ? { training } : {}) }
   // Bound to this instance, so it saves into this project whenever the card closes unanswered.
-  const unanswered = Instance.bind((text: string) => saveAsBefore({ ...request, text }))
-  return proposeFor({ root, directory: Instance.directory, learn, content, sessionID, said, via, memory, subagent, unanswered, request })
+  const unanswered = Instance.bind((text: string) => saveWithoutCard({ ...request, text }))
+  // A `training_save` that reads as a memory is saved to memory here: the calling agent may not have the memory tool.
+  const saveMemory = Instance.bind(async (text: string) => {
+    const [{ MemoryStore }, { RuleClassify }, { RuleProposal }] = await Promise.all([
+      import("../../memory/store"),
+      import("./classify"),
+      import("./proposal"),
+    ])
+    const scope = RuleClassify.memoryScope(text)
+    const now = new Date().toISOString()
+    await MemoryStore.write({ id: `notes/${RuleProposal.slug(text)}`, scope, tags: ["remembered"], created: now, updated: now, content: text }, { sessionID })
+    return scope
+  })
+  return proposeFor({ root, directory: Instance.directory, learn, content, sessionID, said, via, memory, subagent, unanswered, request, saveMemory })
+}
+
+/** Whether `sessionID` is a subagent's (it has a parent): no client shows its cards. Unknown counts as not. */
+export async function subagentSession(sessionID: string): Promise<boolean> {
+  const [{ Session }, { SessionID }] = await Promise.all([import("@/session"), import("@/session/schema")])
+  return Session.get(SessionID.make(sessionID)).then((session) => !!session.parentID, () => false)
 }
 
 type Request = Pick<import("./store").RememberRequest, "text" | "session" | "via" | "memory" | "training">
 
 /** Save a "remember" as the tool would have without a card: the memory tool's block to project memory, or
- * `training_save`'s rule to project training (within its per-kind limit). Runs in the asking project's instance. */
-export async function saveAsBefore(request: Request) {
+ * `training_save`'s rule to project training. A save that can never succeed (a limit the tool enforces) throws
+ * `SaveRefusedError`; anything else is worth retrying. Runs in the asking project's instance. */
+export async function saveWithoutCard(request: Request) {
   const { text, session: sessionID, memory, training } = request
   const now = new Date().toISOString()
+  const { SaveRefusedError, slug } = await import("./proposal")
   if (request.via === "memory" && memory) {
-    const { MemoryStore } = await import("../../memory/store")
+    const [{ MemoryStore, isExpired }, { MEMORY_MAX_BLOCK_SIZE, MEMORY_MAX_BLOCKS_PER_SCOPE }] = await Promise.all([
+      import("../../memory/store"),
+      import("../../memory/types"),
+    ])
+    // The memory tool's own limits, checked first so that only they read as refused.
+    if (text.length > MEMORY_MAX_BLOCK_SIZE) throw new SaveRefusedError(`longer than a memory block allows (${MEMORY_MAX_BLOCK_SIZE})`)
+    const blocks = await MemoryStore.list("project", { includeExpired: true })
+    if (!blocks.some((b) => b.id === memory.id) && blocks.filter((b) => !isExpired(b)).length >= MEMORY_MAX_BLOCKS_PER_SCOPE)
+      throw new SaveRefusedError(`project memory already holds ${MEMORY_MAX_BLOCKS_PER_SCOPE} blocks`)
     await MemoryStore.write({ id: memory.id, scope: "project", tags: memory.tags, created: now, updated: now, content: text }, { sessionID })
     return
   }
-  const [{ TrainingStore }, { RuleProposal }, { TRAINING_MAX_PATTERNS_PER_KIND }] = await Promise.all([
+  const [{ TrainingStore }, { TRAINING_MAX_PATTERNS_PER_KIND }] = await Promise.all([
     import("../training"),
-    import("./proposal"),
     import("../training/types"),
   ])
-  const name = training?.name ?? RuleProposal.slug(text)
+  const name = training?.name ?? slug(text)
   // The same limit `training_save` applies: a new rule past it is not saved (an update of an existing one is).
   if (!(await TrainingStore.get("project", "rule", name))) {
     const count = await TrainingStore.count({ kind: "rule", scope: "project" })
     if (count.rule >= TRAINING_MAX_PATTERNS_PER_KIND)
-      throw new Error(`project training already holds ${count.rule} rules (limit ${TRAINING_MAX_PATTERNS_PER_KIND})`)
+      throw new SaveRefusedError(`project training already holds ${count.rule} rules (limit ${TRAINING_MAX_PATTERNS_PER_KIND})`)
   }
   await TrainingStore.save({
     kind: "rule",
@@ -115,7 +136,7 @@ export async function saveAsBefore(request: Request) {
 }
 
 /** Whether process `pid` is running (a process this one may not signal still counts). */
-function alive(pid: number) {
+function processAlive(pid: number) {
   try {
     process.kill(pid, 0)
     return true
@@ -125,27 +146,38 @@ function alive(pid: number) {
 }
 
 /**
- * Save the "remember" requests of `directory` whose card died with its process (a crash, a kill): the card can no longer
- * be answered or close on its own, so the request is saved as before cards. Each is claimed in one locked write first,
- * so two processes starting together save it once. Runs in that project's instance; never throws.
+ * Save the "remember" requests of `directory` whose card died with its process (a crash, a kill), or whose card closed
+ * while its save failed: the request is saved as before cards. A request is this process's own while it carries this
+ * process's boot id. Another boot's request is orphaned when its process is gone, its PID is now this process's (a
+ * restart reused it), or it is older than a card can live (another process reused the PID). Each is claimed in one
+ * locked write first, so two processes starting together save it once. It is removed once saved, or when its save can
+ * never succeed; after any other failure it stays for the next start. Runs in that project's instance; never throws.
  */
 export async function recoverRequests(root: string, directory: string) {
-  const { RulesStore } = await import("./store")
-  const orphaned = (r: import("./store").RememberRequest) => r.directory === directory && r.pid !== process.pid && !alive(r.pid)
+  const [{ RulesStore }, { CARD_TTL_MS, SaveRefusedError }] = await Promise.all([import("./store"), import("./proposal")])
+  const now = Date.now()
+  const orphaned = (r: import("./store").RememberRequest) =>
+    r.directory === directory && r.boot !== RulesStore.PROCESS_BOOT &&
+    (r.pid === process.pid || !processAlive(r.pid) || !(now - Date.parse(r.at) < CARD_TTL_MS))
   if (!(await RulesStore.read(root)).remember_requests.some(orphaned)) return
   const claimed: import("./store").RememberRequest[] = []
   await RulesStore.update(root, (s) => {
     for (const r of s.remember_requests)
       if (orphaned(r)) {
-        r.pid = process.pid
+        Object.assign(r, { pid: process.pid, boot: RulesStore.PROCESS_BOOT })
         claimed.push({ ...r })
       }
   })
   for (const r of claimed) {
-    await saveAsBefore(r).catch((error) => log.warn("recovered remember request not saved", { card: r.card, error }))
+    const done = await saveWithoutCard(r).then(() => true, (error) => {
+      log.warn("recovered remember request not saved", { card: r.card, error })
+      return error instanceof SaveRefusedError
+    })
+    // Kept: claimed by this boot, so the next start (another boot) tries it again.
+    if (!done) continue
     await RulesStore.update(root, (s) => {
       s.remember_requests = s.remember_requests.filter((x) => x.card !== r.card)
-    })
+    }).catch((error) => log.warn("recovered remember request not cleared", { card: r.card, error }))
   }
 }
 
@@ -166,6 +198,9 @@ export async function proposeFor(input: {
   unanswered?: (text: string) => Promise<void>
   /** With `unanswered`: what to keep on disk while the card is open (`RuleProposal.ask`). */
   request?: import("./proposal").RequestRecord
+  /** Saves `training_save` content that reads as a memory to memory, returning its scope. Without it the agent is told
+   * to use the memory tool. */
+  saveMemory?: (text: string) => Promise<"global" | "project">
 }) {
   const { root, learn, content, sessionID, said } = input
   const via = input.via ?? "training"
@@ -187,6 +222,9 @@ export async function proposeFor(input: {
   const { RuleProposal } = await import("./proposal")
   if (!RuleProposal.rendererAttached(input.directory)) return void RulesTelemetry.routed(sessionID, via, "no_renderer")
   if (typeof input.subagent === "function" ? await input.subagent() : input.subagent) return void RulesTelemetry.routed(sessionID, via, "no_renderer")
+  // Too many requested cards open to keep another on disk: saved without a card now, rather than a card a crash could lose.
+  if (input.request && state.remember_requests.length >= RulesStore.MAX_REMEMBER_REQUESTS)
+    return void RulesTelemetry.routed(sessionID, via, "requests_full")
   const result = await RuleTrigger.explicit({ sessionID, root, directory: input.directory, learn, text: content, said, memory: input.memory, unanswered: input.unanswered, request: input.request })
   RulesTelemetry.routed(
     sessionID,
@@ -198,6 +236,14 @@ export async function proposeFor(input: {
   // requested rule that is not one line is sent back to be restated: saved as project memory, it would reach
   // teammates through the workspace's memory without review.
   if (via === "memory" && (result.status === "memory" || (result.status === "invalid" && result.kind !== "rule"))) return undefined
+  if (result.status === "memory" && input.saveMemory) {
+    const scope = await input.saveMemory(content)
+    return {
+      title: "Saved to memory",
+      metadata: { ...metadata, action: "memory", scope },
+      output: `This reads as ${result.cue}, not a team rule, so it was saved to ${scope === "global" ? "your memory (all your projects)" : "this project's memory"} instead. Tell the person it was saved to memory; do not save it again.`,
+    }
+  }
   if (result.status === "memory")
     return {
       title: "Not a team rule",

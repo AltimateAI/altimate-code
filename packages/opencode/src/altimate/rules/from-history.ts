@@ -96,19 +96,20 @@ export async function sendStaged(input: {
   before: Set<string> | undefined
 }): Promise<{ sent: number; queued: number; refused: number; lost: number; held: number; message: string }> {
   const { owner, name } = input.staged.workspace
-  // Only what the outbox has room for is queued; the rest stays in the local candidate (not sent for review).
-  const room = Math.max(0, RulesStore.MAX_OUTBOX - (await RulesStore.read(input.root)).outbox.length)
-  const items = input.staged.items.slice(0, room)
-  const held = input.staged.items.length - items.length
-  const heldNote = held ? `; ${held} not sent: the queue of proposals waiting to be sent is full (${RulesStore.MAX_OUTBOX}), so they stay in the local candidate` : ""
+  // Only what the outbox has room for is queued, decided in the same write; the rest stays in the local candidate.
   let ids: string[]
   try {
-    ids = await RulesSync.enqueueMany(input.root, items.map((item) => ({ item })), input.staged.scope)
+    ids = await RulesSync.enqueueMany(input.root, input.staged.items.map((item) => ({ item })), input.staged.scope, { upTo: true })
   } catch (error) {
     if (!(error instanceof RulesSync.ScopeChangedError)) throw error
     const message = `Nothing sent: the account or workspace changed since these rules were listed. The local candidate was kept: \`learn show\`.`
     return { sent: 0, queued: 0, refused: 0, lost: 0, held: input.staged.items.length, message }
   }
+  const held = input.staged.items.length - ids.length
+  // Not offered again by a later run (they are in the candidate it starts from): said, with the way to keep them.
+  const heldNote = held
+    ? `; ${held} not sent: the queue of proposals waiting to be sent is full (${RulesStore.MAX_OUTBOX}). They stay in the local candidate and are not offered for review again: keep them with \`learn promote\``
+    : ""
   // A push sends the oldest batch of the outbox, which can hold older proposals ahead of these: keep sending while these
   // are still queued and each run moves the outbox along. Stops when a run is not ready, keeps something back with an
   // error, or sends nothing; bounded by the batches a full outbox needs.

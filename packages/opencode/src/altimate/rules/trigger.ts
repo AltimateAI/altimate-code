@@ -14,7 +14,7 @@
 import { Log } from "@/util/log"
 import { booleanFlag, learnEnabled } from "../learn/config"
 import { lint } from "../learn/curator"
-import { readShownSnapshots } from "../learn/delivery"
+import { readShownSnapshot } from "../learn/delivery"
 import { buildDigest, type DigestSource } from "../learn/digest"
 import * as Playbook from "../learn/playbook"
 import { approvedLessons, unmatchedCorrectionTopics } from "../learn/recurrence"
@@ -169,7 +169,9 @@ export async function afterTurn(input: {
     const state = await RulesStore.read(input.root)
     if (!learningEnabled(input.learn, state)) return
     const processed = new Set(state.processed_signals)
-    const fresh = (await readSignals(input.root, Playbook.DEFAULT_NAME)).filter((signal) =>
+    // Read once per check: the recurrence path below uses the same signals.
+    const all = await readSignals(input.root, Playbook.DEFAULT_NAME)
+    const fresh = all.filter((signal) =>
       signal.kind === "user_correction" && signal.sessionID === input.sessionID && !processed.has(signal.id))
     if (!fresh.length) return
     // Nothing attached would show a card (`altimate-code run`, ACP, a plugin): the corrections are left unprocessed,
@@ -185,11 +187,11 @@ export async function afterTurn(input: {
     checked = fresh.map((signal) => signal.id)
     // The model call takes a while: if the client that shows cards went away meanwhile, the card would not be seen,
     // so the corrections are left for a later check instead.
-    const stillShown = () => {
+    const stillShown = (trigger: "shown_rule" | "recurrence") => {
       if (RuleProposal.rendererAttached(input.directory)) return true
       checked = []
       outcome = "the client that shows cards went away during the check; corrections kept for a later check"
-      RulesTelemetry.skipped(input.sessionID, undefined, "no_renderer")
+      RulesTelemetry.skipped(input.sessionID, trigger, "no_renderer")
       return false
     }
     const newest = fresh[fresh.length - 1]
@@ -197,7 +199,7 @@ export async function afterTurn(input: {
 
     // (c) A team rule shown in this session before the correction, on the same subject: propose changing it.
     // A loose word-overlap filter picks the candidate; the drafter decides (HELPFUL = the rule already says it).
-    const snapshot = (await readShownSnapshots(input.root)).snapshots.find((s) => s.session === input.sessionID)
+    const snapshot = await readShownSnapshot(input.root, input.sessionID)
     const correctedAt = Date.parse(newest.correctedAt ?? newest.at)
     const shownIds = new Set((snapshot?.shown ?? [])
       .filter((entry) => entry.name === RulesStore.WORKSPACE_RULES_STORE && !(Date.parse(entry.at) >= correctedAt))
@@ -213,7 +215,7 @@ export async function afterTurn(input: {
       // The shown rule already says it: no card, and no second drafting call for recurrence.
       if (drafted === "covered") return RulesTelemetry.skipped(input.sessionID, "shown_rule", "covered")
       if (drafted) {
-        if (!stillShown()) return
+        if (!stillShown("shown_rule")) return
         const card = await RuleProposal.ask({
           sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "shown_rule",
           draft: {
@@ -236,7 +238,6 @@ export async function afterTurn(input: {
 
     // (a) The same topic corrected in 2 or more sessions, with no rule covering it. From the corrections themselves:
     // a project with no approved rules yet has no delivery snapshots, and must still be able to get its first rule.
-    const all = await readSignals(input.root, Playbook.DEFAULT_NAME)
     const topics = unmatchedCorrectionTopics(all, await approvedLessons(input.root))
     const freshIds = new Set(fresh.map((signal) => signal.id))
     const candidates = topics.filter((t) => t.sessions >= RECURRENCE_SESSIONS && t.signal_ids.some((id) => freshIds.has(id)))
@@ -249,7 +250,7 @@ export async function afterTurn(input: {
     const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, trigger: "recurrence", signals: backing, state, addOnly: true, note })
     if (!drafted || drafted === "covered" || drafted.change !== "add")
       return RulesTelemetry.skipped(input.sessionID, "recurrence", drafted === "covered" ? "covered" : "no_draft")
-    if (!stillShown()) return
+    if (!stillShown("recurrence")) return
     const card = await RuleProposal.ask({
       sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "recurrence",
       draft: {

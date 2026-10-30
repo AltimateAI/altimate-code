@@ -8,6 +8,7 @@
 // call as `transient` (the server may already have applied it, so the client keeps what it sent and retries).
 // Pulled rules are parsed one by one: an invalid rule is skipped, not a reason to freeze every rule.
 import z from "zod"
+import { lint, normalizeText } from "../learn/curator"
 import { altimateRequest, ForbiddenError, NotFoundError, WorkspaceApiError, type ActAs } from "../workspace/api-client"
 
 export const Settings = z.object({
@@ -46,18 +47,24 @@ export type Reviewed = z.infer<typeof Reviewed>
 export const SyncResponse = z.object({
   unchanged: z.boolean(),
   revision: z.number().int(),
-  repo_identity: z.string(),
+  // Not used by the client: never a reason to fail a pull.
+  repo_identity: z.string().nullable().optional(),
   workspace_name: z.string(),
   owner_name: z.string().nullable().optional(),
   is_owner: z.boolean(),
   settings: Settings,
   pending_count: z.number().int(),
-  // Each rule is validated on its own in `sync` below.
+  // Each rule and each review is validated on its own in `sync` below: one this version cannot read is skipped, not a
+  // failed pull.
   rules: z.array(z.unknown()),
-  my_reviewed: z.array(Reviewed),
+  my_reviewed: z.array(z.unknown()),
   cursor: z.string(),
 })
-export type SyncResponse = Omit<z.infer<typeof SyncResponse>, "rules"> & { rules: RuleOut[]; skipped: number }
+export type SyncResponse = Omit<z.infer<typeof SyncResponse>, "rules" | "my_reviewed"> & {
+  rules: RuleOut[]
+  my_reviewed: Reviewed[]
+  skipped: number
+}
 
 export const ORIGINS = ["session", "explicit", "bootstrap", "import_reviews"] as const
 export type Origin = (typeof ORIGINS)[number]
@@ -157,7 +164,7 @@ export function classify(error: unknown): RulesApiError {
   }
   const named = error as { name?: string; detail?: Record<string, unknown> } | undefined
   if (named?.name === "ConflictError") return new RulesApiError("conflict", messageOf(named.detail, message), codeOf(named.detail), 409, named.detail)
-  if (named?.name === "PreconditionFailedError") return new RulesApiError("conflict", messageOf(named.detail, message), codeOf(named.detail), 412)
+  if (named?.name === "PreconditionFailedError") return new RulesApiError("conflict", messageOf(named.detail, message), codeOf(named.detail), 412, named.detail)
   return new RulesApiError("transient", message)
 }
 
@@ -172,11 +179,20 @@ async function call<T>(schema: z.ZodType<T>, actAs: ActAs, method: string, datam
 
 export async function sync(actAs: ActAs, datamateId: number, body: { repo_remote: string; known_revision?: number; reviewed_since?: string }): Promise<SyncResponse> {
   const raw = await call(SyncResponse, actAs, "POST", datamateId, "/sync", body)
+  // A rule goes into every teammate's prompt: like a proposal or a local promote, it must pass the rule lint (one line,
+  // no commands, links or secrets; the length limit is the server's) and be normalized text. One that fails is skipped
+  // and counted, and the pull keeps no revision, so it is fetched again once fixed.
   const rules = raw.rules.flatMap((rule) => {
     const parsed = RuleOut.safeParse(rule)
+    if (!parsed.success) return []
+    const text = parsed.data.text
+    return lint(text, { grandfathered: true }) || normalizeText(text).trim() !== text ? [] : [parsed.data]
+  })
+  const reviewed = raw.my_reviewed.flatMap((row) => {
+    const parsed = Reviewed.safeParse(row)
     return parsed.success ? [parsed.data] : []
   })
-  return { ...raw, rules, skipped: raw.rules.length - rules.length }
+  return { ...raw, rules, my_reviewed: reviewed, skipped: raw.rules.length - rules.length }
 }
 
 export async function propose(actAs: ActAs, datamateId: number, body: { repo_remote: string; items: ProposalItem[] }) {

@@ -31,6 +31,8 @@ export const REFRESH_MS = 5 * 60_000
 export const SESSION_WAIT_MS = 2_000
 export const MAX_PROPOSALS = 50
 const MAX_USAGE_DELTA = 50
+/** How long a reported (session, rule) pair is remembered after its session's snapshot was last written. */
+const USAGE_PAIR_MS = 30 * 24 * 60 * 60_000
 /** The server's per-batch limit on usage items (`MAX_USAGE_ITEMS`). */
 const MAX_USAGE_ITEMS = 500
 
@@ -148,7 +150,7 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.pending_count = response.pending_count
       state.pulled_at = new Date().toISOString()
       state.last_error = response.skipped
-        ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code; update it to get them`
+        ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code, or did not pass the rule lint (one line, no commands, links or secrets), and ${response.skipped === 1 ? "is" : "are"} not delivered`
         : undefined
       if (!response.unchanged) state.rules = response.rules
       for (const reviewed of response.my_reviewed) {
@@ -296,26 +298,24 @@ export async function push(root: string, ctx: Ready): Promise<PushResult> {
   // cannot stop two of them from reading the same outbox and posting it twice. A run that finds another one sending
   // waits for it; the outcome it recorded per outbox id then answers this run's card.
   await SafeFS.mkdir(root, RulesStore.dir(root))
-  let entered = false
   try {
-    return await Flock.withLock("rules-push", () => {
-      entered = true
-      return pushLocked(root, ctx)
-    }, {
+    return await Flock.withLock("rules-push", () => pushLocked(root, ctx), {
       dir: RulesStore.dir(root),
       staleMs: 60_000,
       timeoutMs: PUSH_LOCK_WAIT_MS,
     })
   } catch (error) {
-    // Only a push lock this run never got means another sender: anything thrown while sending (the learn lock too) is
-    // a failure of this run.
-    if (entered) throw error
+    // Only a push lock still held by another sender after the wait: any other failure (taking the lock, sending, the
+    // learn lock) is a failure of this run.
+    if (!PUSH_LOCK_BUSY.test(errorText(error))) throw error
     const queued = (await RulesStore.read(root)).outbox.length
     return { sent: [], queued, ...(queued ? { error: "another sync is still sending proposals" } : {}) }
   }
 }
 
 const PUSH_LOCK_WAIT_MS = 30_000
+/** `Flock`'s message when the push lock was still held by another sender after `PUSH_LOCK_WAIT_MS`. */
+const PUSH_LOCK_BUSY = /^Timed out waiting for lock: rules-push$/
 
 async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
   const state = await RulesStore.read(root)
@@ -522,17 +522,25 @@ export class ScopeChangedError extends Error {
   }
 }
 
-/** Queue proposals for the next push, in one write. Returns their outbox ids, in order. Refuses past `MAX_OUTBOX`.
- * `scope`: the scope they were shown for; checked in the same write, so they never join another scope's outbox. */
+/** Queue proposals for the next push, in one write. Returns their outbox ids, in order. Refuses past `MAX_OUTBOX`, or
+ * with `upTo`, queues only the first ones that fit (the ids returned say which). `scope`: the scope they were shown
+ * for; checked in the same write, so they never join another scope's outbox. */
 export async function enqueueMany(
   root: string,
-  items: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway" }[],
+  all: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway" }[],
   scope?: Scope,
+  options: { upTo?: boolean } = {},
 ): Promise<string[]> {
-  const ids = items.map(() => randomUUID())
+  let items = all
+  let ids = items.map(() => randomUUID())
   const at = new Date().toISOString()
   await RulesStore.update(root, (state) => {
     if (scope && !RulesStore.sameScope(state.scope, scope)) throw new ScopeChangedError()
+    if (options.upTo) {
+      const room = Math.max(0, RulesStore.MAX_OUTBOX - state.outbox.length)
+      items = all.slice(0, room)
+      ids = ids.slice(0, room)
+    }
     if (state.outbox.length + items.length > RulesStore.MAX_OUTBOX)
       throw new Error(
         items.length > RulesStore.MAX_OUTBOX
@@ -583,6 +591,8 @@ async function sendUsage(root: string, ctx: Ready, batch: PendingUsage): Promise
  * `pending_usage`. The one place that decides what "reported" means. */
 async function markReported(root: string, batch: PendingUsage) {
   await RulesStore.update(root, (s) => {
+    // Another account or workspace took the state over meanwhile: its own reports are not marked by this batch.
+    if (batch.scope && !RulesStore.sameScope(s.scope, batch.scope)) return
     const known = new Set(s.usage_reported)
     s.usage_reported.push(...batch.pairs.filter((pair) => !known.has(pair)))
     s.corrected_reported = { ...s.corrected_reported, ...batch.corrected }
@@ -597,6 +607,10 @@ async function markReported(root: string, batch: PendingUsage) {
  */
 export async function reportUsage(root: string, ctx: Ready): Promise<{ items: number; error?: string }> {
   const before = await RulesStore.read(root)
+  // Only this run's account and workspace: a state another process adopted, or a batch built for another scope, is not
+  // this run's to send (with its credential) or to mark reported.
+  if (!ownedBy(before, ctx)) return { items: 0 }
+  if (before.pending_usage?.scope && !RulesStore.sameScope(before.pending_usage.scope, ctx.scope)) return { items: 0 }
   if (before.pending_usage) {
     try {
       await sendUsage(root, ctx, before.pending_usage)
@@ -605,20 +619,26 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
       await dropUsage(root, before.pending_usage, error)
     }
   }
+  const [{ readShownSnapshots, lessonTextHash, snapshotFiles, snapshotFile }, { analyzeRecurrence }] = await Promise.all([import("../learn/delivery"), import("../learn/recurrence")])
+  // A reported pair is kept while its session's snapshot exists and was written within `USAGE_PAIR_MS`: a resumed
+  // session comes back into the newest snapshots, and its pairs must still read as reported. Snapshots are never
+  // deleted, so age bounds the list; a session resumed after that long may be counted once more.
+  const files = await snapshotFiles(root).catch(() => undefined)
+  const sessionOf = (pair: string) => pair.slice(0, pair.lastIndexOf("|"))
+  const now = Date.now()
+  const live = (pair: string) => {
+    const written = files!.get(snapshotFile(sessionOf(pair)))
+    return written !== undefined && now - written < USAGE_PAIR_MS
+  }
+  const unpruned = await RulesStore.read(root)
+  if (files && unpruned.usage_reported.some((pair) => !live(pair)))
+    await RulesStore.update(root, (s) => {
+      s.usage_reported = s.usage_reported.filter(live)
+    })
   const state = await RulesStore.read(root)
   if (!state.rules.length) return { items: 0 }
   const byLesson = new Map(state.rules.map((rule) => [RulesStore.lessonId(rule.rule_key), rule]))
-  const [{ readShownSnapshots, lessonTextHash, snapshotFiles, snapshotFile }, { analyzeRecurrence }] = await Promise.all([import("../learn/delivery"), import("../learn/recurrence")])
   const { snapshots } = await readShownSnapshots(root)
-  // A reported pair is kept while its session has a snapshot (any of them, not only the newest read here): a resumed
-  // session comes back into the newest, and its pairs must still read as reported. A pair whose session is gone can
-  // never be counted again, so it is let go: the list stays as small as the sessions on disk.
-  const files = await snapshotFiles(root).catch(() => undefined)
-  const sessionOf = (pair: string) => pair.slice(0, pair.lastIndexOf("|"))
-  if (files && state.usage_reported.some((pair) => !files.has(snapshotFile(sessionOf(pair)))))
-    await RulesStore.update(root, (s) => {
-      s.usage_reported = s.usage_reported.filter((pair) => files.has(snapshotFile(sessionOf(pair))))
-    })
   const reported = new Set(state.usage_reported)
   const counts = new Map<string, { applied: number; corrected_again: number }>()
   const pairs: string[] = []
@@ -670,6 +690,7 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
   }
   const batch: PendingUsage = {
     batch_id: randomUUID(),
+    scope: ctx.scope,
     items: [...counts].map(([public_id, c]) => ({ public_id, applied: c.applied, helpful: 0, harmful: 0, corrected_again: c.corrected_again })),
     pairs,
     corrected,
@@ -684,6 +705,7 @@ export async function reportUsage(root: string, ctx: Ready): Promise<{ items: nu
     const reportedNow = new Set(s.usage_reported)
     stale = pairs.some((pair) => reportedNow.has(pair)) ||
       Object.keys(corrected).some((key) => (s.corrected_reported[key] ?? 0) !== (state.corrected_reported[key] ?? 0))
+    if (!ownedBy(s, ctx)) stale = true
     if (!stale) s.pending_usage = batch
   })
   if (stale) return { items: 0 }

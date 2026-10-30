@@ -12,6 +12,7 @@
 //
 // Writes take the learn lock (delivery reads the same directory) and are atomic.
 import { constants } from "node:fs"
+import { randomUUID } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
 import z from "zod"
@@ -105,13 +106,20 @@ export const RememberRequest = z.object({
   memory: z.object({ id: z.string(), tags: z.array(z.string()) }).optional(),
   /** `training_save`'s entry (`via: "training"`). */
   training: z.object({ name: z.string(), source: z.string().optional(), citations: z.array(z.unknown()).optional() }).optional(),
-  /** The process that shows the card: while it lives, its own fallback saves the request. */
+  /** The process that shows the card, and that process's boot id (`PROCESS_BOOT`): a PID can be reused, a boot id is
+   * not. While that process lives, its own fallback saves the request. */
   pid: z.number().int(),
+  boot: z.string().default(""),
   at: z.string(),
 })
 export type RememberRequest = z.infer<typeof RememberRequest>
-/** Requests kept at most; the oldest beyond it are dropped (each is also bounded by its card's day). */
-const MAX_REMEMBER_REQUESTS = 50
+/** Requests kept at most. A new card past it is not raised (the tool saves without a card): a live record is never
+ * evicted. */
+export const MAX_REMEMBER_REQUESTS = 50
+
+/** This process's id for `RememberRequest.boot`: one per process, whichever import path loads this module. */
+const BOOT = Symbol.for("altimate.rules.process.boot")
+export const PROCESS_BOOT = ((globalThis as Record<symbol, unknown>)[BOOT] ??= randomUUID()) as string
 
 export const State = z.object({
   version: z.literal(1),
@@ -166,6 +174,8 @@ export const State = z.object({
   /** A usage report sent but not yet acknowledged: resent with the same `batch_id` so the server counts it once. */
   pending_usage: z.object({
     batch_id: z.string(),
+    /** The account and workspace it was built for: only a run for the same scope sends or acknowledges it. */
+    scope: Scope.optional(),
     items: z.array(z.object({ public_id: z.string(), applied: z.number().int(), helpful: z.number().int(), harmful: z.number().int(), corrected_again: z.number().int() })),
     pairs: z.array(z.string()),
     corrected: z.record(z.string(), z.number().int()),
@@ -259,7 +269,6 @@ export async function update(root: string, change: (state: State) => State | voi
     next.notices = next.notices.slice(-MAX_NOTICES)
     next.sent = capSent(next.sent)
     next.processed_signals = next.processed_signals.slice(-MAX_TRACKED)
-    next.remember_requests = next.remember_requests.slice(-MAX_REMEMBER_REQUESTS)
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
     if (next.scope_drop && !scopeDropShown(next.scope_drop, now)) delete next.scope_drop

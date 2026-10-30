@@ -89,19 +89,41 @@ export type ShownSnapshot = {
   shown: { name: string; id: string; textHash: string; tier: Shown["tier"]; at: string }[]
 }
 
-/** The snapshot file names (`<sha256(session)>.json`) present now, all of them: a session whose file is gone can never be
- * read again. */
-export async function snapshotFiles(root: string): Promise<Set<string>> {
+/** The snapshot files present now (`<sha256(session)>.json`), all of them, with when each was last written (ms). */
+export async function snapshotFiles(root: string): Promise<Map<string, number>> {
   const dir = path.join(root, ".altimate-code", "learn", ".sessions")
   await SafeFS.assertSafePath(root, dir)
-  return new Set(await fs.readdir(dir).catch((error: NodeJS.ErrnoException) => {
+  const names = await fs.readdir(dir).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return []
     throw error
-  }))
+  })
+  return new Map(await Promise.all(names.map(async (name) =>
+    [name, await fs.lstat(path.join(dir, name)).then((stat) => stat.mtimeMs, () => 0)] as const)))
 }
 
 /** The snapshot file name of `session`. */
 export const snapshotFile = (session: string) => Store.sha256(session) + ".json"
+
+async function readSnapshotFile(root: string, file: string): Promise<ShownSnapshot> {
+  const state = State.parse(JSON.parse((await read(root, file)) ?? ""))
+  if (path.basename(file) !== Store.sha256(state.session) + ".json") throw new Error("Learn session state belongs to another session")
+  return { session: state.session, shown: state.shown.map(({ name, lesson, tier, at }) => ({
+    name, id: lesson.id, textHash: lessonTextHash(lesson.text), tier, at,
+  })) }
+}
+
+/** One session's snapshot, or undefined when it has none (or it cannot be read). */
+export async function readShownSnapshot(root: string, session: string): Promise<ShownSnapshot | undefined> {
+  const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+  await SafeFS.assertSafePath(root, dir)
+  const file = path.join(dir, snapshotFile(session))
+  if ((await read(root, file)) === undefined) return undefined
+  return readSnapshotFile(root, file).catch((error) => {
+    if (error instanceof SafeFS.UnsafeLearnPathError) throw error
+    log.warn("learn session snapshot skipped", { file, error })
+    return undefined
+  })
+}
 
 export async function readShownSnapshots(root: string, options: { limit?: number } = {}) {
   const dir = path.join(root, ".altimate-code", "learn", ".sessions")
@@ -120,11 +142,7 @@ export async function readShownSnapshots(root: string, options: { limit?: number
   coverage.truncated = files.length > limit
   for (const { file } of files.sort((a, b) => b.mtime - a.mtime || a.file.localeCompare(b.file)).slice(0, limit)) {
     try {
-      const state = State.parse(JSON.parse((await read(root, file)) ?? ""))
-      if (path.basename(file) !== Store.sha256(state.session) + ".json") throw new Error("Learn session state belongs to another session")
-      snapshots.push({ session: state.session, shown: state.shown.map(({ name, lesson, tier, at }) => ({
-        name, id: lesson.id, textHash: lessonTextHash(lesson.text), tier, at,
-      })) })
+      snapshots.push(await readSnapshotFile(root, file))
     } catch (error) {
       if (error instanceof SafeFS.UnsafeLearnPathError) throw error
       coverage.sessions_skipped_malformed++
@@ -198,6 +216,13 @@ export class Delivery {
     // valid snapshots retain their byte-identical prefix across resume and approved edits.
     const grandfathered = new Map<string, Pick<Lesson, "id" | "text">[]>()
     for (const { name, lesson } of state.shown) {
+      // altimate_change start — workspace rules: a session that was shown team rules is rebuilt without them while
+      // workspaces are off, so a resumed session does not keep delivering them from its cached section and notes
+      if (name === Store.WORKSPACE_RULES_STORE && !workspacesOn()) {
+        log.info("learn session snapshot rebuilt without team rules", { session })
+        return undefined
+      }
+      // altimate_change end
       if (lesson.text.length > MAX_TEXT && !grandfathered.has(name))
         grandfathered.set(name, await Store.grandfathered(this.root, name, { migrate: false }).catch(() => []))
       const safe = sanitize(name, lesson, grandfathered.get(name))

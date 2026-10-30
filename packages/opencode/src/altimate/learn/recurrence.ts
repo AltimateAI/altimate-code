@@ -73,27 +73,36 @@ export function unmatchedCorrectionTopics(signals: readonly Signal[], lessons: r
   return recurringTopics(topics)
 }
 
-/** Every store's approved lessons (stores whose names are invalid, or unreadable, are skipped). */
-export async function approvedLessons(root: string): Promise<NamedLesson[]> {
+/** The learn store names in `root`, sorted: directories with a valid name (only `name`, when given). */
+async function storeNames(root: string, name?: string): Promise<string[]> {
   const dir = path.join(root, ".altimate-code", "learn")
   await SafeFS.assertSafePath(root, dir)
   const entries = await fs.readdir(dir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return []
     throw error
   })
-  const lessons: NamedLesson[] = []
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.isDirectory()) continue
-    try { validateName(entry.name) } catch { continue }
-    const file = Store.paths(root, entry.name).approved
-    try {
-      await SafeFS.assertSafePath(root, file)
-      for (const lesson of parse(await fs.readFile(file, "utf8"))) lessons.push({ name: entry.name, lesson })
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") log.warn("learn recurrence approved store skipped", { name: entry.name, error })
-    }
+  return entries.sort((a, b) => a.name.localeCompare(b.name)).flatMap((entry) => {
+    if (!entry.isDirectory() || (name !== undefined && entry.name !== name)) return []
+    try { validateName(entry.name) } catch { return [] }
+    return [entry.name]
+  })
+}
+
+/** One store's approved lessons; an unreadable store is skipped. */
+async function storeLessons(root: string, name: string): Promise<NamedLesson[]> {
+  const file = Store.paths(root, name).approved
+  try {
+    await SafeFS.assertSafePath(root, file)
+    return parse(await fs.readFile(file, "utf8")).map((lesson) => ({ name, lesson }))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") log.warn("learn recurrence approved store skipped", { name, error })
+    return []
   }
-  return lessons
+}
+
+/** Every store's approved lessons (stores whose names are invalid, or unreadable, are skipped). */
+export async function approvedLessons(root: string): Promise<NamedLesson[]> {
+  return (await Promise.all((await storeNames(root)).map((name) => storeLessons(root, name)))).flat()
 }
 
 export function attribute(signals: readonly Signal[], snapshots: readonly ShownSnapshot[], lessons: readonly NamedLesson[]) {
@@ -166,27 +175,12 @@ export async function analyzeRecurrence(root: string, options: { limit?: number;
   const { coverage } = read
   const snapshots = options.name === undefined ? read.snapshots
     : read.snapshots.map((snapshot) => ({ ...snapshot, shown: snapshot.shown.filter((entry) => entry.name === options.name) }))
-  const dir = path.join(root, ".altimate-code", "learn")
-  await SafeFS.assertSafePath(root, dir)
-  const entries = await fs.readdir(dir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return []
-    throw error
-  })
   const lessons: NamedLesson[] = []
   const signals: Signal[] = []
   const sessions = new Set(snapshots.map((snapshot) => snapshot.session))
-  for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-    if (!entry.isDirectory()) continue
-    try { validateName(entry.name) } catch { continue }
-    if (options.name !== undefined && entry.name !== options.name) continue
-    if (sessions.size) signals.push(...(await readSignalsSnapshot(root, entry.name)).filter((signal) => sessions.has(signal.sessionID)))
-    const file = Store.paths(root, entry.name).approved
-    try {
-      await SafeFS.assertSafePath(root, file)
-      for (const lesson of parse(await fs.readFile(file, "utf8"))) lessons.push({ name: entry.name, lesson })
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") log.warn("learn recurrence approved store skipped", { name: entry.name, error })
-    }
+  for (const name of await storeNames(root, options.name)) {
+    if (sessions.size) signals.push(...(await readSignalsSnapshot(root, name)).filter((signal) => sessions.has(signal.sessionID)))
+    lessons.push(...(await storeLessons(root, name)))
   }
   return { ...attribute(signals, snapshots, lessons), coverage }
 }
