@@ -2242,6 +2242,8 @@ export namespace SessionPrompt {
         // altimate_change end
         if (toolChain.length < 50) toolChain.push(part.tool)
         const isError = part.state?.status === "error"
+        // A tool the user's own abort interrupted did not fail; it is neither an error nor a recovery.
+        if (isError && !SessionProcessor.shouldTrackToolError(part, abort.aborted)) continue
         if (isError) {
           toolErrorCount++
           // Flush previous unrecovered error before recording new one

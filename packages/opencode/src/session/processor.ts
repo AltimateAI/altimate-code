@@ -153,6 +153,14 @@ export namespace SessionProcessor {
   export function shouldTrackStreamingError(error: unknown, sessionAborted: boolean): boolean {
     return !(sessionAborted && MessageV2.AbortedError.isInstance(error))
   }
+
+  // The same rule for tool parts: an unfinished tool closed by interruptedToolPart
+  // after the session's abort signal fired is the requested cancellation, not a
+  // tool failure. Interruptions the session did not request are still reported.
+  /** @internal Exported for focused telemetry tests. */
+  export function shouldTrackToolError(part: MessageV2.ToolPart, sessionAborted: boolean): boolean {
+    return !(sessionAborted && part.state.status === "error" && part.state.metadata?.interrupted === true)
+  }
   // altimate_change end
 
   // A provider may repeat one malformed raw tool-call id for concurrent calls.
