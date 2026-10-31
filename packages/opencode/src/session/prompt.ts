@@ -2241,6 +2241,9 @@ export namespace SessionPrompt {
         lastToolName = part.tool
         // altimate_change end
         if (toolChain.length < 50) toolChain.push(part.tool)
+        // altimate_change start — a tool the session's own abort interrupted is neither a failure nor a recovery
+        if (part.state?.status === "error" && ErrorDetail.isRequestedToolAbort(part.state.error, abort.aborted)) continue
+        // altimate_change end
         const isError = part.state?.status === "error"
         if (isError) {
           toolErrorCount++
