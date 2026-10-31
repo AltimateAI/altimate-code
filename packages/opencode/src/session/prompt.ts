@@ -2244,13 +2244,15 @@ export namespace SessionPrompt {
         const isError = part.state?.status === "error"
         if (isError) {
           toolErrorCount++
+          const errorMsg =
+            part.state.status === "error" && typeof part.state.error === "string" ? part.state.error : "unknown"
+          // altimate_change — permission-rule denials/user rejections are reported by permission_denied, not as tool errors
+          if (!ErrorDetail.shouldFingerprintToolError(errorMsg)) continue
           // Flush previous unrecovered error before recording new one
           if (pendingError) {
             if (errorRecords.length < 200) errorRecords.push({ ...pendingError, recovered: false, recoveryTool: "" })
           }
           lastToolWasError = true
-          const errorMsg =
-            part.state.status === "error" && typeof part.state.error === "string" ? part.state.error : "unknown"
           pendingError = {
             toolName: part.tool,
             toolCategory,
