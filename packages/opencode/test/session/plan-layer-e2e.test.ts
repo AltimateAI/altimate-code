@@ -623,7 +623,7 @@ describe("trust boundary (behavioral)", () => {
       model,
     })
 
-    // Sink 1 — the system array (loop() spreads hoistedReminders into it).
+    // Sink 1 — the hoisted text (loop() passes hoistedReminders with the trailing environment message).
     const system = SessionPrompt.isAnthropicLikeModel(model) ? [] : result.trustedReminderParts.map((p) => p.text)
     expect(system.join("\n")).not.toContain("ATTACKER")
     expect(system.join("\n")).toContain("Plan Mode - System Reminder")

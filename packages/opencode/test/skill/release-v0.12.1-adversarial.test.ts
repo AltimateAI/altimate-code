@@ -208,12 +208,13 @@ describe("v0.12.1 adversarial: identity copy across pin × stale × unbound", ()
 
   test("every bound combination names the id and states the right subject", () => {
     const cases: Array<[BindingOutcome, RegExp, RegExp]> = [
-      [{ status: "bound", binding: binding(false) }, /^This project is linked to Altimate Workspace id 237;/m, /last known|pinned/],
-      [{ status: "bound", binding: binding(false), stale: true }, /^This project was last known to be linked to Altimate Workspace id 237;/m, /pinned/],
-      [{ status: "bound", binding: binding(true) }, /^This session is pinned by the IDE extension to Altimate Workspace id 237;/m, /last known|This project is linked/],
+      // Stale and fresh render the same subject: the copy sits in the cached prefix.
+      [{ status: "bound", binding: binding(false) }, /^This project is linked to Altimate Workspace id 237;/m, /pinned/],
+      [{ status: "bound", binding: binding(false), stale: true }, /^This project is linked to Altimate Workspace id 237;/m, /pinned/],
+      [{ status: "bound", binding: binding(true) }, /^This session is pinned by the IDE extension to Altimate Workspace id 237;/m, /This project is linked/],
       [
         { status: "bound", binding: binding(true), stale: true },
-        /^This session was last known to be pinned by the IDE extension to Altimate Workspace id 237;/m,
+        /^This session is pinned by the IDE extension to Altimate Workspace id 237;/m,
         /This project is linked/,
       ],
     ]
@@ -232,14 +233,11 @@ describe("v0.12.1 adversarial: identity copy across pin × stale × unbound", ()
     expect(render({ status: "bound", binding: binding(false) })).not.toContain(caveat)
   })
 
-  test("a stale miss and a fresh miss differ in both the statement and the instruction", () => {
+  test("a stale miss and a fresh miss render identically, hedged as of the last check", () => {
     const fresh = render({ status: "unbound" })
-    const stale = render({ status: "unbound", stale: true })
-    expect(fresh).toContain("No Altimate Workspace is linked to this project.")
-    expect(fresh).toContain("say plainly that none is linked yet")
-    expect(stale).toContain("as of the last check, up to five minutes ago")
-    expect(stale).toContain("say that none was linked as of the last check")
-    expect(stale).not.toContain("say plainly that none is linked yet")
+    expect(render({ status: "unbound", stale: true })).toBe(fresh)
+    expect(fresh).toContain("No Altimate Workspace is linked to this project as of the last check.")
+    expect(fresh).toContain("say that none was linked as of the last check")
   })
 
   test("a `pinned` flag on a non-boolean value is not a pin", () => {
