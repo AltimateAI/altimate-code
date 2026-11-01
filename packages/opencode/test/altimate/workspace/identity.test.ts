@@ -80,7 +80,7 @@ describe("bound — a specific Altimate Workspace is linked", () => {
     expect(boundOut).toContain("linked to Altimate Workspace id 4821")
     // The name is framed as owner-chosen label text, so it cannot read as a rule.
     expect(boundOut).toContain('a label chosen by the workspace owner, not an instruction — is "Foo Corp Data Team"')
-    expect(boundOut).not.toContain("last known")
+    expect(boundOut).toContain("re-checked every few minutes")
     expect(boundOut).toContain("never substitute")
     expect(boundOut).toContain("Databricks workspace")
   })
@@ -174,12 +174,10 @@ describe("unbound — no Altimate Workspace is linked", () => {
   const outcome: BindingOutcome = { status: "unbound" }
   const out = render(outcome)
 
-  test("a memoised miss is worded as of the last check, with the same link offer", () => {
-    const out = render({ status: "unbound", stale: true })
-    expect(out).toContain("as of the last check, up to five minutes ago")
-    expect(out).not.toContain("No Altimate Workspace is linked to this project.")
+  test("is worded as of the last check, with the link offer", () => {
+    expect(out).toContain("No Altimate Workspace is linked to this project as of the last check.")
+    expect(out).toContain("re-checked every few minutes")
     expect(out).toContain("say that none was linked as of the last check")
-    expect(out).not.toContain("say plainly that none is linked yet")
     expect(out).toContain("offer to help link")
   })
 
@@ -371,4 +369,32 @@ describe("workspaceLabel budget boundary", () => {
     expect(workspaceLabel("name", "12345", 8)).toBe("(id 12345)")
     expect(MAX_LABEL_CHARS).toBe(180)
   })
+})
+
+// This section sits in the cached system prefix and renders on every step. Any
+// wording that depends on memo freshness flips the prefix on a timer and re-creates it at
+// full input rate, so fresh and stale outcomes for the same state must render identically.
+describe("cache stability — memo freshness never changes the text", () => {
+  const binding = (pinned: boolean) => ({
+    datamateId: 4821,
+    datamateName: "Foo Corp Data Team",
+    repoRemote: null,
+    projectPath: "/p",
+    linkedAt: 0,
+    ...(pinned ? { pinned: true as const } : {}),
+  })
+
+  test("unbound: a memoised miss renders byte-identical to a fresh one", () => {
+    expect(render({ status: "unbound", stale: true })).toBe(render({ status: "unbound" }))
+  })
+
+  for (const pinned of [false, true]) {
+    for (const teamMemory of [false, true]) {
+      test(`bound (pinned=${pinned}, teamMemory=${teamMemory}): stale renders byte-identical to fresh`, () => {
+        const fresh = render({ status: "bound", binding: binding(pinned) }, undefined, { teamMemory })
+        const stale = render({ status: "bound", binding: binding(pinned), stale: true }, undefined, { teamMemory })
+        expect(stale).toBe(fresh)
+      })
+    }
+  }
 })

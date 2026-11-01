@@ -2019,7 +2019,8 @@ export namespace SessionPrompt {
         // altimate_change start — persisted plain-text section has a stable position
         ...(teamRules ? [teamRules] : []),
         // altimate_change end
-        ...hoistedReminders,
+        // altimate_change start — hoisted reminders go in `environment` below, not here
+        // altimate_change end
       ]
       // altimate_change start — run-mode-only completion instruction. This text
       // used to sit in builder.txt, but builder is a PRIMARY agent, so it also
@@ -2130,8 +2131,11 @@ export namespace SessionPrompt {
         abort,
         sessionID,
         system,
-        // altimate_change start — upstream_fix: append ambient context after the cached instructions
-        environment: await SystemPrompt.environment(model),
+        // altimate_change start — upstream_fix: append ambient context after the cached instructions.
+        // Hoisted reminders (task pin, plan switch) appear on some steps only, so they ride in the
+        // same trailing message, after the cache breakpoint; inside `system` they changed the
+        // cached prefix and re-created it at full input rate.
+        environment: [...(await SystemPrompt.environment(model)), ...hoistedReminders],
         // altimate_change end
         messages: [
           // altimate_change start - use the history converted before the fresh-user check

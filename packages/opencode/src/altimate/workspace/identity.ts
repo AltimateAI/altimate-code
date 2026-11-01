@@ -36,7 +36,7 @@ import { memoryEnabledCached } from "./memory-sync"
  * fixed-shape identity statement, not an open-ended list of served integrations, so a
  * much smaller ceiling is enough. The label is budgeted separately (`MAX_LABEL_CHARS`
  * in `workspace-name.ts`) so the cap here is defense in depth and never cuts the
- * instruction itself: the longest fixed shape (pinned, stale, with the team-memory line)
+ * instruction itself: the longest fixed shape (pinned, with the team-memory line)
  * is ~1,550 characters before the label, and a label at its budget still leaves room. A
  * test renders every shape with a budget-sized label and checks the name survives. */
 export const MAX_SECTION_CHARS = 2_000
@@ -123,6 +123,10 @@ function teamMemoryLine(tools: MemoryTools = { read: true, write: true }): strin
   return undefined
 }
 
+function lastCheckNote(verifyNoun: "link" | "pin"): string {
+  return `The ${verifyNoun} is re-checked every few minutes, so a change made elsewhere may not show yet.`
+}
+
 function renderBody(outcome: BindingOutcome, opts: RenderOptions = {}): string {
   if (outcome.status === "bound") {
     const id = String(outcome.binding.datamateId)
@@ -135,18 +139,16 @@ function renderBody(outcome: BindingOutcome, opts: RenderOptions = {}): string {
     // so, since the project's own link may name a different workspace.
     const pinned = outcome.binding.pinned === true
     const subject = pinned ? "This session is pinned by the IDE extension to" : "This project is linked to"
-    const subjectPast = pinned
-      ? "This session was last known to be pinned by the IDE extension to"
-      : "This project was last known to be linked to"
     const verifyNoun = pinned ? "pin" : "link"
     const memoryLine = opts.teamMemory ? teamMemoryLine(opts.memoryTools) : undefined
+    // One sentence for fresh and stale alike. This section sits in the
+    // cached system prefix and renders on every step; wording keyed on memo freshness
+    // flipped on a timer and re-created the whole prefix at full input rate. The
+    // hedge below is true in both states.
     return [
       HEADING,
       "",
-      (outcome.stale
-        ? `${subjectPast} Altimate Workspace id ${id}; ${named}. ` +
-          `The ${verifyNoun} could not be re-verified just now, so it may since have changed.`
-        : `${subject} Altimate Workspace id ${id}; ${named}.`) +
+      `${subject} Altimate Workspace id ${id}; ${named}. ${lastCheckNote(verifyNoun)}` +
         (pinned
           ? " Skills and memory follow this workspace, and so does warehouse tool routing unless " +
             "integrations are set to local, even where the project's own link names a different one."
@@ -167,17 +169,13 @@ function renderBody(outcome: BindingOutcome, opts: RenderOptions = {}): string {
     // come up normally. The active instruction is scoped to TRIGGER (a real identity
     // question), not "any mention of the word" — the earlier draft's "whenever
     // 'workspace' comes up" phrasing was exactly the over-triggering this fixes.
+    // Same wording for a fresh and a memoised miss, for the cache reason above.
     return [
       HEADING,
       "",
-      outcome.stale
-        ? "No Altimate Workspace was linked to this project as of the last check, up to five " +
-          "minutes ago; a link made elsewhere since then would not show yet."
-        : "No Altimate Workspace is linked to this project.",
-      outcome.stale
-        ? `When ${TRIGGER}, say that none was linked as of the last check, that a link made ` +
-          "since then may not show yet, and offer to help link one."
-        : `When ${TRIGGER}, say plainly that none is linked yet and offer to help link one.`,
+      `No Altimate Workspace is linked to this project as of the last check. ${lastCheckNote("link")}`,
+      `When ${TRIGGER}, say that none was linked as of the last check, that a link made ` +
+        "elsewhere may take a few minutes to show, and offer to help link one.",
       LINK_HINT,
       "Outside such a question, other services' own \"workspace\" concepts (e.g. a " +
         "Databricks workspace) are unrelated — discuss them normally, with no linking " +
@@ -239,7 +237,7 @@ function renderBody(outcome: BindingOutcome, opts: RenderOptions = {}): string {
 export const OUTCOME_MEMO_MS = 30_000
 /** How long prompt assembly waits for a resolve before rendering what it has.
  * Past this the resolve keeps running and fills the memo for the next step; this
- * step renders the last known outcome (marked stale if it named a workspace) or
+ * step renders the last known outcome as it was, or
  * "unknown". The `git remote` probe inside the resolver is synchronous and can
  * hold the loop for up to three seconds on a hung git; that is the resolver's
  * cost on every caller and is not changed here. */
@@ -368,8 +366,8 @@ function governingPin(directory: string): boolean {
 function renderOptions(outcome: BindingOutcome, directory: string, memoryTools?: MemoryTools): RenderOptions {
   if (outcome.status === "unknown") return { pinned: governingPin(directory) }
   if (outcome.status !== "bound") return {}
-  // A stale outcome is "last known … may since have changed": promising that a
-  // save syncs to that workspace would contradict the line above it.
+  // A stale outcome is a link the server could not confirm: promising that a save
+  // syncs to that workspace would not be true of it.
   if (outcome.stale) return {}
   return { teamMemory: memoryEnabledCached(outcome.binding) === "enabled", memoryTools }
 }
@@ -379,7 +377,7 @@ function keyFor(scope: AccountScope, directory: string): string {
 }
 
 /** What to render when the resolve has not settled inside the deadline: the last
- * known outcome for this key, marked stale if it named a workspace; failing that,
+ * known outcome for this key, as it was; failing that,
  * the binding the local cache holds for the SAME account — read under the
  * current credentials and used only if they still match the key, so a switch
  * during the wait cannot surface the other account's cache; else unknown.
@@ -396,7 +394,11 @@ async function lastKnown(key: string, directory: string): Promise<BindingOutcome
   const scope = await accountScope().catch(() => null)
   if (!scope || keyFor(scope, directory) !== key) return { status: "unknown" }
   const previous = memo.get(key)?.outcome
-  if (previous?.status === "bound") return { ...previous, stale: true }
+  // A re-check still in flight is not a failed one: render the previous outcome as it was.
+  // Marking it stale here dropped the workspace contents and memory line from the cached
+  // system prefix whenever a resolve outlasted the deadline, re-creating the prefix at full
+  // input rate. Only the resolver itself marks a binding stale.
+  if (previous?.status === "bound") return previous
   // Under a pin the project's own cached link is not the answer — the pin outranks it
   // in the resolver, and an invalid pin fails closed — so a cold memo renders unknown
   // rather than the workspace the pin exists to override.
@@ -431,8 +433,8 @@ async function lastKnown(key: string, directory: string): Promise<BindingOutcome
  * as a separate block under its own cap: `render` drops the identity section entirely when it
  * overflows, and a long skill list must not take the link statement down with it. */
 async function withContents(outcome: BindingOutcome, directory: string, identity: string): Promise<string> {
-  // A stale outcome is a link that could not be confirmed and may have changed; the identity text
-  // says "last known". Listing that workspace's contents would present it as current, so skip them.
+  // A stale outcome is a link the server could not confirm and that may have changed. Listing
+  // that workspace's contents would present it as current, so skip them.
   if (!identity || outcome.status !== "bound" || outcome.stale) return identity
   const contents = await Contents.section(directory, outcome.binding.datamateId).catch(() => "")
   return contents ? `${identity}\n\n${contents}` : identity
