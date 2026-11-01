@@ -1,5 +1,5 @@
 import { Telemetry } from "./index"
-import stripAnsi from "strip-ansi"
+import { Ansi } from "./ansi"
 
 const MAX_MESSAGE = 200
 const PLACEHOLDER = "<x>"
@@ -414,12 +414,14 @@ export const ERROR_VOCABULARY: ReadonlySet<string> = new Set([
  * rest of the line become one `<x>` too, because a credential value may itself consist
  * of vocabulary words. This deliberately loses diagnostic text after ambiguous words
  * such as key or session: privacy takes priority over template detail. The output holds
- * only vocabulary words, `<x>` and spaces.
+ * only vocabulary words, `<x>` and spaces. Raw first lines over 8192 UTF-16 code units
+ * become `<x>` in full; partially normalized prefixes could cut ANSI or credential keys.
  */
 export function templateErrorMessage(raw: string): string {
-  // Split first so an OSC sequence spanning a newline cannot erase the line boundary.
+  const line = Ansi.normalize(raw, "template")
+  if (line === undefined) return PLACEHOLDER
   // Use the tokenizer's letter boundaries; spaced keys require an assignment separator.
-  const first = stripAnsi(raw.split(/[\r\n\u2028\u2029]/, 1)[0])
+  const first = line
     .replace(/(?<![A-Za-z])connection[_-]string(?![A-Za-z])/gi, "connectionstring")
     .replace(/(?<![A-Za-z])connection[ \t]+string["'`]?[ \t]*(?=[:=])/gi, "connectionstring")
   const out: string[] = []

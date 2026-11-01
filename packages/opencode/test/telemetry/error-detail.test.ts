@@ -206,6 +206,33 @@ describe("templateErrorMessage", () => {
     expect(templateErrorMessage("error ".repeat(200)).length).toBeLessThanOrEqual(200)
   })
 
+  test.each([8191, 8192, 8193])("bounds the raw first line at %i characters", (length) => {
+    const raw = "connection refused" + " ".repeat(length - 18)
+    expect(templateErrorMessage(raw)).toBe(length > 8192 ? "<x>" : "connection refused")
+  })
+
+  test.each([
+    ["diagnostic words", "error ".repeat(2000)],
+    ["closed CSI across the limit", "connection \x1b[" + "0;".repeat(5000) + "mpassword=wrong user"],
+    ["closed OSC across the limit", "connection \x1b]0;" + "x".repeat(8192) + "\x07password=wrong user"],
+    ["unfinished CSI", "connection \x1b[" + "0;".repeat(5000)],
+    ["unfinished OSC", "connection \x1b]0;" + "wrong user ".repeat(1000)],
+    ["credential word across the limit", " ".repeat(8190) + "privateKey=wrong user"],
+    ["spaced key across the limit", "connection " + " ".repeat(8180) + "connection string=wrong user"],
+    ["styled key across the limit", " ".repeat(8190) + "pass\x1b[31mword=wrong user"],
+  ])("fails closed for an oversized first line: %s", (_, raw) => {
+    expect(templateErrorMessage(raw)).toBe("<x>")
+  })
+
+  test.each(["\n", "\r", "\r\n", "\u2028", "\u2029"])(
+    "keeps a complete line at the input limit before %j",
+    (newline) => {
+      const first = "connection refused" + " ".repeat(8192 - 18)
+      expect(templateErrorMessage(first + newline + "password=wrong user")).toBe("connection refused")
+      expect(templateErrorMessage("connection refused" + newline + "\x1b[31m".repeat(10000))).toBe("connection refused")
+    },
+  )
+
   test.each(["\n", "\r", "\r\n", "\u2028", "\u2029"])("does not inspect later lines after %j", (newline) => {
     expect(templateErrorMessage(`connection refused${newline}password is wrong user`)).toBe("connection refused")
     expect(templateErrorMessage(`password is wrong user${newline}connection refused`)).toBe("<x>")
