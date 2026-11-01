@@ -3468,3 +3468,85 @@ noLLMServer.instance(
     }),
   30_000,
 )
+
+// altimate_change start - the step cap ends in a toolless text answer sent after a user turn,
+// and only model requests count toward the cap (a compaction iteration does not).
+for (const mode of ["plain", "compacted"] as const) {
+  noLLMServer.instance(
+    `the step cap asks for a final text answer as a user turn with tools off (${mode})`,
+    () =>
+      Effect.gen(function* () {
+        const { prompt, chat, sessions } = yield* boot()
+        const requests: Record<string, unknown>[] = []
+        // plain: tool, tool, final. compacted: tool (overflow), summary, tool, final.
+        const expected = mode === "compacted" ? 4 : 3
+        const language = createOpenAICompatible({
+          name: "test",
+          baseURL: "https://unused.invalid/v1",
+          fetch: Object.assign(
+            async (_url: string | URL | Request, init?: RequestInit) => {
+              if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+              const request = JSON.parse(init.body)
+              requests.push(request)
+              if (requests.length > expected) throw new Error("the step cap was not enforced")
+              const limited = JSON.stringify(request.messages).includes("CRITICAL - MAXIMUM STEPS REACHED")
+              const summary = mode === "compacted" && requests.length === 2
+              const response = limited
+                ? reply().text("Maximum steps reached. Done so far: two probes.").stop().item()
+                : summary
+                  ? reply().text("Summary: two probes were run.").stop().item()
+                  : reply()
+                      .tool("glob", { pattern: `probe-${requests.length}-*` })
+                      .usage({ input: mode === "compacted" && requests.length === 1 ? 80_000 : 1, output: 1 })
+                      .item()
+              if (response.type !== "sse") throw new Error("expected SSE response")
+              return new Response(
+                [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                  "data: [DONE]\n\n",
+                { headers: { "Content-Type": "text/event-stream" } },
+              )
+            },
+            { preconnect: () => undefined },
+          ),
+        }).chatModel("test-model")
+        const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+        try {
+          const result = yield* prompt.prompt({
+            sessionID: chat.id,
+            agent: "builder",
+            model: promptRef,
+            parts: [{ type: "text", text: "Probe the project, one glob at a time." }],
+          })
+          expect(requests).toHaveLength(expected)
+          const last = requests.at(-1)!
+          // Before the fix the cap message was a trailing assistant turn with every tool still offered.
+          expect(requestMessages(last).at(-1)!.role).toBe("user")
+          expect(requestText(requestMessages(last).at(-1)!.content)).toContain("CRITICAL - MAXIMUM STEPS REACHED")
+          expect(last.tools ?? []).toHaveLength(0)
+          for (const earlier of requests.slice(0, -1)) {
+            expect(JSON.stringify(earlier.messages)).not.toContain("CRITICAL - MAXIMUM STEPS REACHED")
+          }
+          if (mode === "compacted") {
+            const messages = yield* sessions.messages({ sessionID: chat.id })
+            expect(messages.some((message) => message.info.role === "assistant" && message.info.summary)).toBe(true)
+          }
+          expect(result.info).not.toHaveProperty("error")
+          expect(result.parts).toContainEqual(
+            expect.objectContaining({ type: "text", text: "Maximum steps reached. Done so far: two probes." }),
+          )
+        } finally {
+          languageSpy.mockRestore()
+        }
+      }),
+    {
+      config: {
+        ...cfg,
+        snapshot: false,
+        learn: { enabled: false },
+        agent: { builder: { steps: 3, permission: { glob: "allow" } } },
+      },
+    },
+    30_000,
+  )
+}
+// altimate_change end

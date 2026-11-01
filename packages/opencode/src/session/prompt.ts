@@ -720,6 +720,11 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     let step = 0
+    // altimate_change start — the agent's `steps` cap counts model requests only. `step` also
+    // counts iterations that run a compaction or a subtask and `continue`, which ended capped
+    // agents several requests early.
+    let modelSteps = 0
+    // altimate_change end
     // altimate_change start — which tool catalogs of this loop run the workspace
     // engine's turn boundary: the first, and the first after a new user request
     // joins the loop. `step` counts loop iterations, and an iteration can
@@ -1516,7 +1521,10 @@ export namespace SessionPrompt {
       // normal processing
       const agent = await Agent.get(lastUser.agent)
       const maxSteps = agent.steps ?? Infinity
-      const isLastStep = step >= maxSteps
+      // altimate_change start — see `modelSteps`
+      modelSteps++
+      const isLastStep = modelSteps >= maxSteps
+      // altimate_change end
       // altimate_change start — only a completed compaction may change this prefix.
       // Recover the marker from persisted history too, including a process restart
       // between summary completion and the next model call.
@@ -2040,6 +2048,10 @@ export namespace SessionPrompt {
       // altimate_change start - every successful commit makes the next generation an echo, including after compaction
       const echoCommittedAnswer =
         format.type === "text" && agent.name === "analyst" && committedAnswer !== undefined
+      // altimate_change start — at the step cap a text answer is produced with tools off. A
+      // json_schema request keeps its tools: its answer is the StructuredOutput tool call.
+      const textFinalStep = isLastStep && !echoCommittedAnswer && format.type !== "json_schema"
+      // altimate_change end
       const deferredText: MessageV2.TextPart[] = []
       // altimate_change end
 
@@ -2151,20 +2163,27 @@ export namespace SessionPrompt {
             : isLastStep
               ? [
                   {
-                    role: "assistant" as const,
+                    // altimate_change start — the step-cap instruction is a user turn, like the echo
+                    // above. Sent as a trailing assistant message with every tool still offered, the
+                    // gateway rejected it and the run ended with no answer.
+                    role: "user" as const,
+                    // altimate_change end
                     content: MAX_STEPS,
                   },
                 ]
               : []),
           // altimate_change end
         ],
-        // altimate_change start - the final echo cannot spend another step on tools
-        tools: echoCommittedAnswer ? {} : tools,
+        // altimate_change start - the final echo, and the step-cap answer, cannot spend another step on tools.
+        // Text finalization uses the same toolless shape as compaction and title generation: no
+        // tools and toolChoice "none", so llm.ts flattens historical tool calls for the gateway.
+        tools: echoCommittedAnswer || textFinalStep ? {} : tools,
         deferText: echoCommittedAnswer ? deferredText : undefined,
         // altimate_change end
         model,
         // altimate_change start - a user output schema still takes precedence over text finalization
-        toolChoice: echoCommittedAnswer ? "none" : format.type === "json_schema" ? "required" : undefined,
+        toolChoice:
+          echoCommittedAnswer || textFinalStep ? "none" : format.type === "json_schema" ? "required" : undefined,
         // altimate_change end
       })
 
