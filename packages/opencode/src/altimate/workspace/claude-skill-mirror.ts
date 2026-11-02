@@ -251,12 +251,16 @@ async function readSnapshot(directory: string): Promise<Snapshot | null> {
       // A skill without a regular SKILL.md (missing, a link, a directory) is skipped; lstat also
       // covers Windows, which has no O_NOFOLLOW.
       if (!(await fs.lstat(path.join(source, "SKILL.md"))).isFile()) continue
-      bytes = await readNoFollow(path.join(source, "SKILL.md"))
     } catch (err) {
-      // A skill without a SKILL.md, or with a symlinked one, is skipped; one that cannot be read
-      // is unknown, so nothing is pruned.
-      const code = (err as NodeJS.ErrnoException)?.code
-      if (code === "ENOENT" || code === "ELOOP") continue
+      // One that cannot be checked is unknown, so nothing is pruned.
+      if ((err as NodeJS.ErrnoException)?.code === "ENOENT") continue
+      return null
+    }
+    try {
+      bytes = await readNoFollow(path.join(source, "SKILL.md"))
+    } catch {
+      // Gone or replaced by a link since the lstat: the snapshot changed under us, so nothing is
+      // pruned, as the plugin's copy does.
       return null
     }
     let text: string
