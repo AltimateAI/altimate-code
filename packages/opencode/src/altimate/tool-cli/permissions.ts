@@ -11,14 +11,11 @@ export const READ_PERMISSIONS: ReadonlySet<string> = new Set([
   "answer_commit",
 ])
 
-const BLOCKED_STATEMENT = /^\s*(drop\s+(database|schema)\b|truncate\b)/i
-
-// Same statements the agent's `safetyDenials` rules refuse (agent/agent.ts). With the warehouse's
-// dialect the SQL classifier finds them past leading comments and in later statements; without
-// one, quoting differs by dialect (dollar quotes, backticks), so only the leading statement is
-// checked rather than risk an unoverridable denial of a valid read.
+// Same statements the agent's `safetyDenials` rules refuse (agent/agent.ts), found by the SQL
+// classifier past comments and in later statements. Callers pass the warehouse so its dialect's
+// quoting and comments apply; without one the classifier's generic lexing is used.
 export function isBlockedStatement(pattern: string, dialect?: string): boolean {
-  return dialect ? classifyAndCheck(pattern, dialect).blocked : BLOCKED_STATEMENT.test(pattern)
+  return classifyAndCheck(pattern, dialect).blocked
 }
 
 function dialectOf(metadata: unknown): string | undefined {

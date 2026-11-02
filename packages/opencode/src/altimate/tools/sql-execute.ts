@@ -264,7 +264,7 @@ export const SqlExecuteTool = Tool.define(
                 permission: "sql_execute_write",
                 patterns: [sql.slice(0, 200)],
                 always: ["*"],
-                metadata: { queryType, ...(parseError && { parseError }) },
+                metadata: { queryType, warehouse: args.warehouse, ...(parseError && { parseError }) },
               })
             }
             // altimate_change end

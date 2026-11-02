@@ -428,6 +428,8 @@ describe("release ordering", () => {
     finishRun()
     await pending
     await daemon.closed
+    // The client socket is gone already; let the daemon-side handler of the late run finish.
+    await new Promise((resolve) => setImmediate(resolve))
     expect(releases).toBe(0)
   })
 

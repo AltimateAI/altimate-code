@@ -172,8 +172,13 @@ describe("ask handler", () => {
     expect(isBlockedStatement("SELECT 1; TRUNCATE t", "postgres")).toBe(true)
     // Dollar-quoted text is a string in Postgres, not a second statement.
     expect(isBlockedStatement("SELECT $q$; TRUNCATE staging$q$", "postgres")).toBe(false)
-    // Without a dialect quoting is unknown, so only the leading statement counts.
-    expect(isBlockedStatement("SELECT $q$; TRUNCATE staging$q$")).toBe(false)
+    // Each dialect's comments apply: nested block comments (Postgres), # comments (MySQL).
+    expect(isBlockedStatement("/* outer /* inner */ DROP SCHEMA s */ SELECT 1", "postgres")).toBe(false)
+    expect(isBlockedStatement("# note\nDROP DATABASE db", "mysql")).toBe(true)
+    // Comments between keywords, executable comments and CR line ends are seen in any dialect.
+    for (const sql of ["/* note */ DROP SCHEMA s", "DROP/**/SCHEMA s", "/*!50000 DROP */ SCHEMA s", "-- note\rDROP SCHEMA s"])
+      expect(isBlockedStatement(sql)).toBe(true)
+    expect(isBlockedStatement("/* DROP SCHEMA s */ SELECT 1")).toBe(false)
     Registry.setConfigs({ pg: { type: "postgres" } as any })
     try {
       const askWith = (patterns: string[]) =>
@@ -251,6 +256,23 @@ describe("data_diff write-carrying inputs", () => {
       }
     })
   }
+
+  test("each side's hard-block check uses its own warehouse dialect", async () => {
+    Registry.setConfigs({ my: { type: "mysql" } as any, pg: { type: "postgres" } as any })
+    try {
+      // Dollar-quoted text is a string in Postgres; read as MySQL it would look like a DROP SCHEMA.
+      const result = await runner.run("data_diff", {
+        source: "orders",
+        target: "SELECT $$; DROP SCHEMA s;$$ AS id",
+        key_columns: ["id"],
+        source_warehouse: "my",
+        target_warehouse: "pg",
+      })
+      expect(JSON.stringify(result)).not.toContain("blocked for safety")
+    } finally {
+      Registry.reset()
+    }
+  })
 })
 
 describe("results directory", () => {

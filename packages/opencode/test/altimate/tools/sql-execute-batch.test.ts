@@ -132,8 +132,9 @@ describe("sql_execute batch references", () => {
     const result = await tool.execute(
       {
         warehouse: "main",
+        limit: 5000,
         queries: [
-          { label: "src", query: "SELECT v FROM t", limit: 5000 },
+          { label: "src", query: "SELECT v FROM t" },
           { label: "use", query: "SELECT 1 WHERE x IN ({{src.v}})" },
         ],
       },

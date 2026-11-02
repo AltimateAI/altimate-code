@@ -111,12 +111,14 @@ test("an unreadable config path does not stop startup", async () => {
   expect(await outputLimits()).toEqual({ maxLines: 8, maxBytes: MAX_BYTES })
 })
 
-test("managed preferences resolve {file:...} next to their plist", async () => {
+test("managed preferences with a relative {file:...} keep their limits", async () => {
+  // The plist arrives as JSON; a relative file reference elsewhere in it must resolve next to the
+  // plist, or substitution fails and every limit from that source is dropped.
   const prefs = path.join(root, "Managed Preferences", "user")
   await mkdir(prefs, { recursive: true })
-  await writeFile(path.join(prefs, "lines.txt"), "7")
+  await writeFile(path.join(prefs, "key.txt"), "secret")
   const spy = spyOn(ConfigManaged, "readManagedPreferences").mockResolvedValue({
-    text: '{"tool_output":{"max_lines":{file:lines.txt}}}',
+    text: JSON.stringify({ tool_output: { max_lines: 7 }, provider: { p: { options: { apiKey: "{file:key.txt}" } } } }),
     source: `mobileconfig:${path.join(prefs, "com.example.plist")}`,
   } as never)
   try {

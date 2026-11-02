@@ -309,10 +309,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           try {
             chmodSync(file, 0o600)
           } catch (error) {
-            // Leave nothing bound behind: no socket file and no listening server.
-            server.close()
-            removeSocket(file)
-            return reject(error)
+            // Leave nothing bound behind: no connection, no listening server, then no socket file.
+            for (const socket of sockets) socket.destroy()
+            server.close(() => {
+              removeSocket(file)
+              reject(error)
+            })
+            return
           }
         }
         resolve()
