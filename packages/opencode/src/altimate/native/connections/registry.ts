@@ -328,6 +328,27 @@ export function load(): void {
   loadInto(projectState())
 }
 
+/**
+ * Load only an explicit connections file (`mcp serve --connections`), resolving stores relative to that file. Like
+ * setConfigs(), the file becomes the one registry every project uses and is never re-read from project sources.
+ */
+export async function loadFile(file: string): Promise<void> {
+  await closeAll()
+  const absolute = path.resolve(file)
+  const parsed: unknown = JSON.parse(await fs.promises.readFile(absolute, "utf8"))
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("Connections file must contain an object keyed by connection name")
+  }
+  for (const [name, value] of Object.entries(parsed)) {
+    if (!value || typeof value !== "object" || typeof value.type !== "string") {
+      throw new Error(`Invalid connection: ${name}`)
+    }
+  }
+  setConfigs(resolveStorePaths(parsed as Record<string, ConnectionConfig>, path.dirname(absolute)))
+  if (state().configs.has(SCRATCH_NAME)) Log.Default.warn(SCRATCH_NAME_CONFLICT)
+  censusSent = false
+}
+
 /** Ensure the current project's configs are loaded; returns its state. */
 function ensureLoaded(): State {
   const s = state()
@@ -380,8 +401,9 @@ const DRIVER_MAP: Record<string, string> = {
  * different service with different credentials and endpoints, where Postgres
  * wire-compatibility is an implementation detail rather than an identity.
  */
-export function canonicalType(type: string | undefined | null): string | null {
-  if (!type) return null
+export function canonicalType(type: unknown): string | null {
+  // A hand-edited connection may carry a non-string type; it maps to no driver rather than throwing.
+  if (typeof type !== "string" || !type) return null
   const driverPath = DRIVER_MAP[type.toLowerCase()]
   if (!driverPath) return null
   return driverPath.slice(driverPath.lastIndexOf("/") + 1)

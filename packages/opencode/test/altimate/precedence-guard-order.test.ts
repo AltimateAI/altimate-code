@@ -201,13 +201,14 @@ describe("sql_explain — input validation outranks the redirect", () => {
 })
 
 describe("schema_inspect — input validation outranks the redirect", () => {
-  test("an empty table reports invalid input rather than redirecting", async () => {
+  // altimate_change start — omitted/blank tables discover inventory through the same routing guard
+  test("an empty table listing still respects warehouse precedence", async () => {
     const tool = await initTool(SchemaInspectTool)
     const result: any = await tool.execute({ table: "   ", warehouse: "shadowed_snow" }, ctx)
-    expect(result.metadata.error_class).toBe("input_validation")
-    expect(result.metadata.redirected).toBeUndefined()
+    expect(result.metadata.redirected).toBe(true)
   })
 
+  // altimate_change end
   test("an empty warehouse string is invalid input, not the default target", async () => {
     const tool = await initTool(SchemaInspectTool)
     const result: any = await tool.execute({ table: "orders", warehouse: "   " }, ctx)

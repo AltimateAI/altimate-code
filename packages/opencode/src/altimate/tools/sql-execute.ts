@@ -2,7 +2,7 @@ import z from "zod"
 import { Effect } from "effect"
 import { EffectBridge } from "../../effect/bridge"
 import { Truncate } from "../../tool/truncate"
-import { legacyToInit, type LegacyToolDef } from "../tool-zod-compat"
+import { legacyToInit, type LegacyContext, type LegacyResult, type LegacyToolDef } from "../tool-zod-compat"
 import { formatSqlResult, SQL_MAX_PREVIEW_BYTES } from "./sql-result-format"
 import { lintSqlResult } from "./sql-result-lint"
 import { Tool } from "../../tool/tool"
@@ -35,12 +35,30 @@ import * as Precedence from "../workspace/precedence"
 import { normalizeError } from "./response-normalization"
 // altimate_change end
 import { readSql } from "./sql-check"
+import { MaterializeError, storeRows } from "./sql-materialize"
+import { firstTime } from "./session-hints"
 
 const MAX_SQL_ROWS = 10_000
 const LIMIT_ERROR = "limit must be a finite positive integer"
 const MAX_GENERATED_SQL_BYTES = 1024 * 1024
 // Below the default tool-output cap, so a redirect never spills the SQL into a truncated file.
 const MAX_REDIRECT_SQL_BYTES = 40 * 1024
+// A batch shares one output budget; each query gets an equal share of what is left, so small results donate the rest.
+const MAX_BATCH_QUERIES = 8
+const BATCH_MAX_PREVIEW_BYTES = 24 * 1024
+
+/** Per-query overrides a batch applies to one item. */
+interface ItemBudget {
+  maxBytes: number
+  maxLines: number
+  // A later batch step references this one: fetch at least this many rows and hand back the raw result.
+  minRows?: number
+  capture?: (result: SqlExecuteResult) => void
+}
+
+// Batch steps reference earlier steps: {{label.column}} (literal value list) or {{label}} (scratch table).
+const STEP_REF = /\{\{([A-Za-z_]\w*)(?:\.([A-Za-z_]\w*))?\}\}/g
+const MAX_BOUND_ROWS = 1000
 
 function generatedRead(sql: string, warehouse: string, stage: "source" | "result"): string {
   try {
@@ -52,7 +70,20 @@ function generatedRead(sql: string, warehouse: string, stage: "source" | "result
 
 const parameters = z
   .object({
-  query: z.string().nullish().describe("SQL query to execute; omit when using query_from"),
+  query: z.string().nullish().describe("SQL query to execute; omit when using query_from or queries"),
+  queries: z
+    .array(
+      z.object({
+        label: z.string().nullish().describe("Short name for this result (default q1, q2, ...)"),
+        query: z.string().describe("Read-only SQL (or MongoDB JSON command)"),
+        warehouse: z.string().nullish().describe("Warehouse for this query (default: warehouse)"),
+      }),
+    )
+    .max(MAX_BATCH_QUERIES, `queries accepts at most ${MAX_BATCH_QUERIES} items`)
+    .nullish()
+    .describe(
+      `Up to ${MAX_BATCH_QUERIES} read-only queries run in order in one call, each returning its own labeled result; one failing query does not stop the others. A later query can use an earlier one's rows: {{label.column}} becomes its values as comma-separated literals, e.g. IN ({{ids.id}}) (at most ${MAX_BOUND_ROWS} rows) and {{label}} a scratch table (warehouse scratch).`,
+    ),
   query_from: z
     .object({
       warehouse: z.string().describe("Warehouse containing the SQL generator or saved SQL"),
@@ -95,14 +126,19 @@ export const SqlExecuteTool = Tool.define(
     return () =>
       Effect.gen(function* () {
         const bridge = yield* EffectBridge.make()
-        return yield* legacyToInit({
+        const def = {
           description:
             "Execute SQL against a connected data warehouse. Returns all selected columns as a formatted table. full_text_columns prioritizes named cells within the ordinary output budget and always saves returned rows to result_path; read with char_offset/max_chars recovers clipped text. [] or null, or omitting the field, turns the mode off. A non-empty list caps preview rows at 20: omit limit to use the default; larger limits clamp to 20 with a result note. Missing column names produce a bounded note listing available columns while still returning rows. " +
-            "Provide exactly one of query or query_from. query_from runs a read-only generator SELECT and executes its single SQL string result (up to 1 MiB) as a read-only SELECT on warehouse, without previewing or retyping the generated SQL. " +
+            "Provide exactly one of query, query_from or queries. query_from runs a read-only generator SELECT and executes its single SQL string result (up to 1 MiB) as a read-only SELECT on warehouse, without previewing or retyping the generated SQL. " +
+            `queries runs up to ${MAX_BATCH_QUERIES} read-only queries in order in one call and returns one labeled result per query; a later query can reference an earlier one with IN ({{label.column}}) (its values) or {{label}} (scratch table). ` +
             "For DuckDB table sets, generate query_table([...], true) with escaped table-name string literals. For thousands of tables, UNION ALL BY NAME batches of at most 128 names to stay within the default expression depth.",
           parameters,
-          formatValidationError: (error) => error.issues?.map((issue) => issue.message).join("; ") || LIMIT_ERROR,
-          async execute(args, ctx) {
+          formatValidationError: (error: z.ZodError) => error.issues?.map((issue) => issue.message).join("; ") || LIMIT_ERROR,
+          async execute(args: z.infer<typeof parameters>, ctx: LegacyContext, budget?: ItemBudget): Promise<LegacyResult> {
+            if (!budget && args.queries?.length) {
+              const limits = await bridge.promise(truncate.limits())
+              return executeBatch(args, ctx, limits, (item, itemBudget) => def.execute(item, ctx, itemBudget))
+            }
             const fullText = Boolean(args.full_text_columns?.length)
             const limit = fullText ? Math.min(args.limit ?? 20, 20) : Math.min(args.limit ?? 100, MAX_SQL_ROWS)
             const limitNote =
@@ -140,7 +176,7 @@ export const SqlExecuteTool = Tool.define(
                   ...(Registry.canonicalType(Registry.getConfig(source.warehouse)?.type) === "postgres"
                     ? { read_only: true }
                     : {}),
-                }, { signal: ctx.abort, sessionID: ctx.sessionID })
+                }, { signal: ctx.abort, sessionID: ctx.sessionID, ...(ctx.extra?.forceReadOnly === true ? { forceReadOnly: true } : {}) })
                 const error = normalizeError(result.error)
                 if (error !== undefined) {
                   throw new Error(`query_from source failed: ${error.trim() || "SQL execution failed."}`)
@@ -199,6 +235,9 @@ export const SqlExecuteTool = Tool.define(
               throw new Error(
                 "DROP DATABASE, DROP SCHEMA, TRUNCATE, and executable SQL comments are blocked for safety. This cannot be overridden.",
               )
+            }
+            if (budget && queryType !== "read") {
+              throw new Error("Batched queries must be read-only; run a write as its own sql_execute call.")
             }
             const parseError = "parseError" in classification ? classification.parseError : undefined
             if (!mongo && queryType === "read") {
@@ -278,10 +317,18 @@ export const SqlExecuteTool = Tool.define(
               const result = await Dispatcher.call("sql.execute", {
                 sql: query,
                 warehouse: args.warehouse,
-                limit,
+                limit: Math.max(limit, budget?.minRows ?? 0),
                 query_timeout_ms: args.query_timeout_ms,
                 ...(readOnly ? { read_only: true } : {}),
-              }, { signal: ctx.abort, sessionID: ctx.sessionID })
+              }, {
+                signal: ctx.abort,
+                sessionID: ctx.sessionID,
+                // forceReadOnly protects source connections; the session's own scratch tables take the
+                // same table writes here that need no write permission above.
+                ...(ctx.extra?.forceReadOnly === true && !(queryType === "write" && isScratch(args.warehouse) && isScratchSafeWrite(sql))
+                  ? { forceReadOnly: true }
+                  : {}),
+              })
 
               // altimate_change start — a failure must not be rendered as "(0 rows)".
               // sql.execute never throws: it catches every connection and query error
@@ -309,6 +356,7 @@ export const SqlExecuteTool = Tool.define(
                 })
               }
               // altimate_change end
+              budget?.capture?.(result)
 
               // altimate_change start — emit SQL structure fingerprint telemetry on the
               // success path, BEFORE formatting the result. A query that reached this point
@@ -337,7 +385,10 @@ export const SqlExecuteTool = Tool.define(
               }
               // altimate_change end
 
-              const limits = await bridge.promise(truncate.limits())
+              const configured = await bridge.promise(truncate.limits())
+              const limits = budget
+                ? { maxBytes: Math.min(configured.maxBytes, budget.maxBytes), maxLines: Math.min(configured.maxLines, budget.maxLines) }
+                : configured
               const maxBytes = Math.min(limits.maxBytes, SQL_MAX_PREVIEW_BYTES)
               // Reserve the routing explanation before the formatter budgets optional notes.
               const routingNotice = fullText ? Precedence.annotate(precedence, { output: "" }).output : ""
@@ -360,7 +411,8 @@ export const SqlExecuteTool = Tool.define(
               const suggestion = ctx.agent === "analyst" ? null : PostConnectSuggestions.getProgressiveSuggestion("sql_execute")
               const lint = await lintSqlResult(sql, args.warehouse, ctx.sessionID)
               const formatted = await formatSqlResult(result, {
-                limit,
+                mcpClient: ctx.extra?.mcpClient === true,
+                limit: Math.max(limit, budget?.minRows ?? 0),
                 fullTextColumns: args.full_text_columns,
                 // The statement text lets the formatter add the empty/near-empty
                 // result hint when a string-literal filter is present.
@@ -373,7 +425,16 @@ export const SqlExecuteTool = Tool.define(
                 ].filter(Boolean),
                 maxBytes: routingClipped ? 0 : maxBytes - routingBytes,
                 maxLines: limits.maxLines - routingLines,
-                write: (text) => bridge.promise(truncate.write(text)),
+                // The MCP adapter names its spill files itself (sequential, private directory).
+                write: (text) =>
+                  typeof ctx.extra?.writeSpill === "function"
+                    ? ctx.extra.writeSpill(text, "csv")
+                    : bridge.promise(truncate.write(text)),
+                store:
+                  ctx.extra?.mcpClient === true
+                    ? () => storeSpill(result, { signal: ctx.abort, sessionID: ctx.sessionID })
+                    : undefined,
+                firstHint: ctx.extra?.mcpClient === true ? (key) => firstTime(ctx.sessionID, key) : undefined,
               })
               // altimate_change start — progressive disclosure suggestions
               if (suggestion && formatted.output.includes(suggestion)) {
@@ -412,10 +473,202 @@ export const SqlExecuteTool = Tool.define(
               })
             }
           },
-        } satisfies LegacyToolDef<typeof parameters>)
+        } satisfies LegacyToolDef<typeof parameters>
+        return yield* legacyToInit(def)
       })
   }),
 )
+
+/** Next spill table number per session; names are sequential, so outputs stay reproducible. */
+const spillCounters = new Map<string, number>()
+const MAX_SPILL_SESSIONS = 1_000
+const SPILL_NAME_ATTEMPTS = 5
+
+/**
+ * Stores a spilled result's returned rows as scratch table result_N, so the client queries them
+ * instead of reading the file. Undefined when storing fails; the file remains the fallback.
+ */
+async function storeSpill(result: SqlExecuteResult, context: { signal: AbortSignal; sessionID: string }) {
+  for (let attempt = 0; attempt < SPILL_NAME_ATTEMPTS; attempt++) {
+    const next = (spillCounters.get(context.sessionID) ?? 0) + 1
+    spillCounters.delete(context.sessionID)
+    spillCounters.set(context.sessionID, next)
+    if (spillCounters.size > MAX_SPILL_SESSIONS) spillCounters.delete(spillCounters.keys().next().value!)
+    const table = `result_${next}`
+    try {
+      await storeRows(table, result, context)
+      return table
+    } catch (error) {
+      context.signal.throwIfAborted()
+      // A table the client created under this name: try the next number.
+      if (!(error instanceof MaterializeError && error.message.includes("already exists"))) return undefined
+    }
+  }
+  return undefined
+}
+
+type BatchItem = { label?: string | null; query: string; warehouse?: string | null }
+
+/**
+ * Runs independent read queries one after another (one connection per warehouse) and renders each
+ * result under its label. A failing query becomes its own error block; the others still run.
+ * Every block, error or not, is clipped to its share of one shared byte/line budget.
+ */
+async function executeBatch(
+  args: z.infer<typeof parameters>,
+  ctx: LegacyContext,
+  configured: { maxBytes: number; maxLines: number },
+  run: (item: z.infer<typeof parameters>, budget: ItemBudget) => Promise<LegacyResult>,
+): Promise<LegacyResult> {
+  const items = args.queries as BatchItem[]
+  if (args.query?.trim() || args.query_from?.warehouse?.trim() || args.query_from?.sql?.trim()) {
+    throw new Error("Provide either queries or query/query_from, not both.")
+  }
+  let bytesLeft = Math.min(configured.maxBytes, BATCH_MAX_PREVIEW_BYTES)
+  let linesLeft = configured.maxLines
+  const blocks: string[] = []
+  const summary: { label: string; rowCount: number; error?: string; result_path?: string }[] = []
+  const labels = items.map((item, index) => (item.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60) || `q${index + 1}`)
+  // Steps a later step references, as a value list ({{label.column}}) or a scratch table ({{label}}).
+  const listRefs = new Set<string>()
+  const tableRefs = new Set<string>()
+  for (const item of items.slice(1))
+    for (const [, ref, column] of item.query.matchAll(STEP_REF)) (column ? listRefs : tableRefs).add(ref)
+  const captured = new Map<string, SqlExecuteResult>()
+  const stored = new Map<string, string>()
+  for (const [index, item] of items.entries()) {
+    ctx.abort.throwIfAborted()
+    const share = Math.floor(bytesLeft / (items.length - index))
+    const lineShare = Math.max(1, Math.floor(linesLeft / (items.length - index)))
+    const label = labels[index]
+    const header = `[${label}]\n`
+    const separator = blocks.length ? "\n\n" : ""
+    const reserved = Buffer.byteLength(separator + header, "utf8") + Buffer.byteLength(BATCH_CLIPPED, "utf8")
+    const referenced = listRefs.has(label) || tableRefs.has(label)
+    const budget: ItemBudget = {
+      maxBytes: Math.max(0, share - reserved),
+      maxLines: Math.max(1, lineShare - 2),
+      ...(referenced ? { minRows: MAX_BOUND_ROWS, capture: (raw: SqlExecuteResult) => captured.set(label, raw) } : {}),
+    }
+    const warehouse = item.warehouse?.trim() || args.warehouse
+    let result: LegacyResult
+    try {
+      const query = resolveStepRefs(item.query, labels.slice(0, index), captured, stored, warehouse)
+      result = await run(
+        {
+          query,
+          warehouse,
+          limit: args.limit,
+          full_text_columns: args.full_text_columns,
+          query_timeout_ms: args.query_timeout_ms,
+        },
+        budget,
+      )
+    } catch (error) {
+      if (ctx.abort.aborted) throw error
+      const message = error instanceof Error ? error.message : String(error)
+      result = { title: "SQL: ERROR", metadata: { error: message }, output: `Failed to execute SQL: ${message}` }
+    }
+    const failedStep = typeof result.metadata?.error === "string" && result.metadata?.success !== true
+    if (failedStep) captured.delete(label)
+    // A step referenced as {{label}} is stored in scratch (result_N), like a spilled result.
+    const raw = captured.get(label)
+    if (raw && tableRefs.has(label) && !raw.truncated) {
+      const table = await storeSpill(raw, { signal: ctx.abort, sessionID: ctx.sessionID })
+      if (table) stored.set(label, table)
+    }
+    const body = clipToBudget(result.output, budget.maxBytes, budget.maxLines)
+    const block = separator + header + body
+    blocks.push(block)
+    bytesLeft -= Buffer.byteLength(block, "utf8")
+    linesLeft -= block.split("\n").length - (separator ? 1 : 0)
+    const metadata = (result.metadata ?? {}) as Record<string, unknown>
+    summary.push({
+      label,
+      rowCount: Number(metadata.rowCount ?? 0),
+      ...(typeof metadata.error === "string" && metadata.success !== true ? { error: metadata.error } : {}),
+      ...(typeof metadata.result_path === "string" ? { result_path: metadata.result_path } : {}),
+    })
+  }
+  const failed = summary.filter((item) => item.error !== undefined)
+  return {
+    title: `SQL: ${items.length} queries${failed.length ? `, ${failed.length} failed` : ""}`,
+    metadata: {
+      rowCount: summary.reduce((total, item) => total + item.rowCount, 0),
+      queries: summary,
+      result_paths: summary.flatMap((item) => (item.result_path ? [item.result_path] : [])),
+      // This tool owns clipping; every block is already bounded.
+      truncated: false,
+      ...(failed.length === items.length ? { error: failed.map((item) => `${item.label}: ${item.error}`).join("\n") } : {}),
+    },
+    output: blocks.join(""),
+  }
+}
+
+/**
+ * Replaces {{label.column}} with that earlier step's distinct column values as comma-separated literals (no brackets,
+ * so `IN ({{x.id}})`, a DuckDB list `[{{x.id}}]` and a MongoDB `[{{x.id}}]` all work; NULL when empty) and {{label}}
+ * with the scratch table holding its rows. Throws, failing only this step, when the
+ * reference names no earlier successful step, a missing column, a step with more than MAX_BOUND_ROWS rows, or a
+ * table reference outside scratch.
+ */
+function resolveStepRefs(
+  query: string,
+  earlier: string[],
+  captured: Map<string, SqlExecuteResult>,
+  stored: Map<string, string>,
+  warehouse: string | undefined,
+): string {
+  return query.replace(STEP_REF, (match, ref: string, column: string | undefined) => {
+    if (!earlier.includes(ref)) throw new Error(`${match} names no earlier step in this call.`)
+    const source = captured.get(ref)
+    if (!source) throw new Error(`${match}: step "${ref}" failed, so this step did not run.`)
+    if (source.truncated)
+      throw new Error(`${match}: step "${ref}" has more than ${MAX_BOUND_ROWS} rows; filter or aggregate it first.`)
+    if (!column) {
+      if (!isScratch(warehouse))
+        throw new Error(`${match} is a scratch table: run this step on warehouse "scratch", or use {{${ref}.column}}.`)
+      const table = stored.get(ref)
+      if (!table) throw new Error(`${match}: storing step "${ref}" in scratch failed.`)
+      return table
+    }
+    const index = source.columns.findIndex((name) => name.toLowerCase() === column.toLowerCase())
+    // Some drivers return no column names for an empty result; an empty step is an empty list either way.
+    if (index < 0 && !source.rows.length && !source.columns.length) return isMongoWarehouse(warehouse) ? "null" : "NULL"
+    if (index < 0) throw new Error(`${match}: step "${ref}" has no column ${column} (columns: ${source.columns.join(", ")}).`)
+    const values = [...new Set(source.rows.map((row) => row[index]).filter((value) => value !== null && value !== undefined))]
+    if (isMongoWarehouse(warehouse)) return values.map((value) => JSON.stringify(value)).join(", ") || "null"
+    const mysql = ["mysql", "mariadb"].includes(Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? "")
+    return values.length ? values.map((value) => sqlLiteral(value, mysql)).join(", ") : "NULL"
+  })
+}
+
+function sqlLiteral(value: unknown, mysql: boolean): string {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value)
+  if (typeof value === "bigint") return value.toString()
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE"
+  const text = typeof value === "string" ? value : value instanceof Date ? value.toISOString() : JSON.stringify(value)
+  const escaped = text.replaceAll("'", "''")
+  return `'${mysql ? escaped.replaceAll("\\", "\\\\") : escaped}'`
+}
+
+const BATCH_CLIPPED = "…[output clipped]"
+
+/** Clip text to a byte and line budget on code-point boundaries, marking any clip. */
+function clipToBudget(text: string, maxBytes: number, maxLines: number): string {
+  if (Buffer.byteLength(text, "utf8") <= maxBytes && text.split("\n").length <= maxLines) return text
+  let bytes = 0
+  let lines = 1
+  let end = 0
+  for (const char of text) {
+    const size = Buffer.byteLength(char, "utf8")
+    if (bytes + size > maxBytes || (char === "\n" && lines >= maxLines)) break
+    bytes += size
+    if (char === "\n") lines++
+    end += char.length
+  }
+  return text.slice(0, end) + BATCH_CLIPPED
+}
 
 // altimate_change start — pre-execution SQL validation via cached schema
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000 // 24 hours

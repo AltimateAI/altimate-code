@@ -87,6 +87,20 @@ jobs:
               - '.github/workflows/ci.yml'
             # altimate_change end
             drivers:
+              # altimate_change start — run real MCP drivers for MCP/tool-only changes
+              - 'packages/opencode/src/altimate/mcp-server/**'
+              - 'packages/opencode/test/altimate/mcp-server/**'
+              - 'packages/opencode/src/altimate/tools/schema-inspect.ts'
+              - 'packages/opencode/src/altimate/tools/schema-values.ts'
+              # The tools the MCP server exposes; server.test.ts is their only real-driver run.
+              - 'packages/opencode/src/altimate/tools/warehouse-list.ts'
+              - 'packages/opencode/src/altimate/tools/warehouse-add.ts'
+              - 'packages/opencode/src/altimate/tools/sql-execute.ts'
+              - 'packages/opencode/src/altimate/tools/sql-check.ts'
+              - 'packages/opencode/src/altimate/tools/sql-materialize.ts'
+              - 'packages/opencode/src/altimate/tools/answer-commit*.ts'
+              - 'packages/opencode/src/tool/truncate.ts'
+              # altimate_change end
               - 'packages/drivers/src/**'
               - 'packages/opencode/src/altimate/native/connections/**'
               - 'packages/opencode/test/altimate/drivers-e2e.test.ts'
@@ -511,6 +525,14 @@ jobs:
         working-directory: packages/opencode
         env:
           ALTIMATE_DUCKDB_E2E: "1"
+
+      # Same reason as above: the in-process MCP server tests use real SQLite/DuckDB drivers, which the
+      # whole-package run replaces with module mocks, so they run in their own process.
+      - name: Run MCP server tests (real drivers, no mocks)
+        run: bun test --timeout 90000 test/altimate/mcp-server/server.test.ts
+        working-directory: packages/opencode
+        env:
+          ALTIMATE_MCP_E2E: "1"
 
       - name: Run Docker driver E2E (MySQL, SQL Server, Redshift)
         run: bun test test/altimate/drivers-docker-e2e.test.ts
