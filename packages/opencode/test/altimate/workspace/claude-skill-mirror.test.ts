@@ -266,6 +266,24 @@ describe("claude skill mirror", () => {
     expect(existsSync(skillPath("beta"))).toBe(true)
   })
 
+  test("a SKILL.md that disappears between its check and its read keeps every copy", async () => {
+    writeSnapshot({ sk_1: { "SKILL.md": simple("alpha") }, sk_2: { "SKILL.md": simple("beta") } })
+    await mirrorClaudeSkills(project)
+    const file = path.join(project, MANAGED, "sk_2", "SKILL.md")
+    const real = fsp.open.bind(fsp)
+    const spy = spyOn(fsp, "open").mockImplementation((async (p: any, ...rest: any[]) => {
+      if (String(p) === file) throw Object.assign(new Error("gone"), { code: "ENOENT" })
+      return (real as any)(p, ...rest)
+    }) as any)
+    try {
+      expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(existsSync(skillPath("alpha"))).toBe(true)
+    expect(existsSync(skillPath("beta"))).toBe(true)
+  })
+
   test("a lock lost while copying publishes nothing", async () => {
     writeSnapshot({ sk_1: { "SKILL.md": simple("alpha"), "notes.md": "x" } })
     const lock = path.join(project, ".claude", "skills", ".altimate-workspace-sync.lock")
