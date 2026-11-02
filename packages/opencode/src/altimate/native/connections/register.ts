@@ -59,6 +59,8 @@ let dbtAdapterInflight: Promise<any | null> | undefined
 export const dbtAdapterInternals: {
   /** Replaces the dbt config read, so a test can hold an attempt open. */
   readConfig?: () => Promise<unknown>
+  /** Replaces dbt-tools' adapter creation, so a test can see which integration modes were tried. */
+  create?: (config: any) => Promise<any>
   /** Adapter creation attempts since the last reset — what single-flight bounds. */
   attempts: number
   /** Cache writes since the last reset: only the attempt that owns the slot writes. */
@@ -111,7 +113,16 @@ async function ensureDbtAdapter(): Promise<any | null> {
       }
 
       // Create the adapter
-      const { create } = await import("../../../../../dbt-tools/src/adapter")
+      const create = dbtAdapterInternals.create ?? (await import("../../../../../dbt-tools/src/adapter")).create
+      // A project found without a dbt.json tries dbt-integration's Python-bridge mode ("core")
+      // first: a lineage lookup there takes milliseconds, against one dbt process per compiled
+      // model in "corecommand". When the bridge does not bring the project up (no dbt in that
+      // Python, or a bridge that cannot start), the configured mode is created as before.
+      if (dbtConfig.autoDiscovered && dbtConfig.dbtIntegration !== "core") {
+        const core = await create({ ...dbtConfig, dbtIntegration: "core" }).catch(() => null)
+        if (core?.isInitialized?.() === true) return publish(core)
+        await core?.dispose?.().catch(() => {})
+      }
       return publish(await create(dbtConfig))
     } catch {
       // dbt-tools not available or config invalid — fall back to native
@@ -270,6 +281,11 @@ async function tryExecuteViaDbt(
     // dbt execution failed — fall back to native driver silently
     return null
   }
+}
+
+/** The project's dbt adapter, created on first use; null when there is no usable dbt project. */
+export function getDbtAdapter(): Promise<any | null> {
+  return ensureDbtAdapter()
 }
 
 /** Reset dbt adapter (for testing). */

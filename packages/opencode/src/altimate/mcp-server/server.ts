@@ -146,8 +146,13 @@ export async function createServer(options: ServeOptions = {}) {
       const clarified = request.params.name === "answer_commit" ? await clarifyReading(request.params.arguments, result, extra.signal) : undefined
       if (clarified) return { content: [{ type: "text" as const, text: clarified }], isError: true }
       const isError = resultFailed(result)
+      // A tool that builds a structured result (dbt_lineage) hands it over beside its text.
+      const structured = result.metadata?.structuredContent
       return {
         content: [{ type: "text" as const, text: result.output }, ...resultLinks(result.metadata)],
+        ...(structured && typeof structured === "object" && !isError
+          ? { structuredContent: structured as Record<string, unknown> }
+          : {}),
         isError,
       }
     } catch (error) {

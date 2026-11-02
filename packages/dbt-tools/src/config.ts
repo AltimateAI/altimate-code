@@ -9,6 +9,8 @@ type Config = {
   pythonPath: string
   dbtIntegration: string
   queryLimit: number
+  /** Set when there was no dbt.json and the project was found from the working directory. */
+  autoDiscovered?: boolean
 }
 
 function configDir() {
@@ -104,6 +106,7 @@ async function read(): Promise<Config | null> {
     pythonPath: discoverPython(projectRoot),
     dbtIntegration: "corecommand",
     queryLimit: 500,
+    autoDiscovered: true,
   }
 }
 
