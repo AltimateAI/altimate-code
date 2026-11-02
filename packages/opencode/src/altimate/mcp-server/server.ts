@@ -192,6 +192,8 @@ export async function serveStdio(options: ServeOptions = {}): Promise<void> {
   console.log = console.error.bind(console)
   console.info = console.error.bind(console)
   console.debug = console.error.bind(console)
+  // Without --allow-write, sql_execute never runs through dbt here.
+  if (!options.allowWrite) (await import("../native/connections/register")).declareNoDbtUserSql()
   const server = await createServer(options)
   server.onerror = (error) => console.error(error)
   const closed = Promise.withResolvers<void>()

@@ -61,6 +61,8 @@ export const dbtAdapterInternals: {
   readConfig?: () => Promise<unknown>
   /** Replaces dbt-tools' adapter creation, so a test can see which integration modes were tried. */
   create?: (config: any) => Promise<any>
+  /** Set by `declareNoDbtUserSql()`: no call in this process runs user SQL through dbt. */
+  noUserSql?: boolean
   /** Adapter creation attempts since the last reset — what single-flight bounds. */
   attempts: number
   /** Cache writes since the last reset: only the attempt that owns the slot writes. */
@@ -118,7 +120,9 @@ async function ensureDbtAdapter(): Promise<any | null> {
       // first: a lineage lookup there takes milliseconds, against one dbt process per compiled
       // model in "corecommand". When the bridge does not bring the project up (no dbt in that
       // Python, or a bridge that cannot start), the configured mode is created as before.
-      if (dbtConfig.autoDiscovered && dbtConfig.dbtIntegration !== "core") {
+      // Only in a process that runs no user SQL through dbt: a `create table` run through the
+      // bridge reports success and is not persisted.
+      if (dbtAdapterInternals.noUserSql && dbtConfig.autoDiscovered && dbtConfig.dbtIntegration !== "core") {
         const core = await create({ ...dbtConfig, dbtIntegration: "core" }).catch(() => null)
         if (core?.isInitialized?.() === true) return publish(core)
         await core?.dispose?.().catch(() => {})
@@ -286,6 +290,24 @@ async function tryExecuteViaDbt(
 /** The project's dbt adapter, created on first use; null when there is no usable dbt project. */
 export function getDbtAdapter(): Promise<any | null> {
   return ensureDbtAdapter()
+}
+
+/** Declares that no call in this process runs user SQL through dbt (a read-only MCP server). */
+export function declareNoDbtUserSql(): void {
+  dbtAdapterInternals.noUserSql = true
+}
+
+/** The dbt project's root as the adapter finds it: a dbt.json, or a walk up from the working directory. */
+export async function getDbtProjectRoot(): Promise<string | undefined> {
+  try {
+    const config = dbtAdapterInternals.readConfig
+      ? await dbtAdapterInternals.readConfig()
+      : await (await import("../../../../../dbt-tools/src/config")).read()
+    const root = (config as { projectRoot?: unknown } | null)?.projectRoot
+    return typeof root === "string" ? root : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** Reset dbt adapter (for testing). */

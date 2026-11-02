@@ -41,7 +41,9 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
     manifest_path: z
       .string()
       .optional()
-      .describe("manifest.json for the manifest-only fallback (default: target/manifest.json)"),
+      .describe(
+        "manifest.json for the manifest-only fallback, read only when the dbt integration isn't available (default: the dbt project's target/manifest.json)",
+      ),
     dialect: z.string().optional().describe("SQL dialect override for the manifest-only fallback"),
   }),
   async execute(args, ctx) {
@@ -59,13 +61,19 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
         output: formatModelLineage(result),
       }
     }
+    const notUsed = viaAdapter.reason ? `dbt integration not used: ${viaAdapter.reason}` : undefined
+    const manifestPath = args.manifest_path ?? (await defaultManifestPath())
+    ctx.abort.throwIfAborted()
     try {
       const result = await Dispatcher.call("dbt.lineage", {
-        manifest_path: args.manifest_path ?? path.join("target", "manifest.json"),
+        manifest_path: manifestPath,
         model: args.model,
         dialect: args.dialect,
       })
-      if (viaAdapter.reason) result.confidence_factors.push(`dbt integration not used: ${viaAdapter.reason}`)
+      if (notUsed) result.confidence_factors.push(notUsed)
+      if (args.column) {
+        result.confidence_factors.push(`tracing ${args.column} needs the dbt integration; this is the whole model's lineage`)
+      }
       return {
         title: `dbt Lineage: ${result.model_name} [${result.confidence}]`,
         metadata: {
@@ -79,7 +87,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
       return {
         title: "dbt Lineage: ERROR",
         metadata: { model_name: args.model, confidence: "unknown", error: msg },
-        output: `Failed: ${msg}`,
+        output: `Failed: ${msg}${notUsed ? `\n(${notUsed})` : ""}`,
       }
     }
   },
@@ -102,8 +110,16 @@ async function fromAdapter(
     if (typeof adapter.getModelLineage !== "function") return { reason: "dbt-integration has no getModelLineage" }
     return { result: (await adapter.getModelLineage({ model, ...(column ? { column } : {}) }, signal)) as ModelLineage }
   } catch (e) {
+    // A cancelled call stops here rather than starting the manifest fallback.
+    if (signal.aborted) throw e
     return { reason: e instanceof Error ? e.message : String(e) }
   }
+}
+
+/** target/manifest.json in the project the dbt adapter finds, which may be above the working directory. */
+async function defaultManifestPath(): Promise<string> {
+  const { getDbtProjectRoot } = await import("../native/connections/register")
+  return path.join((await getDbtProjectRoot()) ?? "", "target", "manifest.json")
 }
 
 const MAX_TEXT_EDGES = 200
@@ -115,7 +131,8 @@ export function formatModelLineage(result: ModelLineage): string {
   const kind = (n: ModelLineage["nodes"][number]) => (n.type === "model" ? (n.materialization ?? "model") : n.type)
   const signedDepth = (id: string) => {
     const n = byId.get(id)
-    return n ? (n.direction === "upstream" ? -n.depth : n.depth) : 0
+    if (!n) return 0
+    return n.direction === "upstream" ? -n.depth : n.depth
   }
   const lines: string[] = []
   const focus = byId.get(result.focus.uniqueId)
@@ -126,7 +143,7 @@ export function formatModelLineage(result: ModelLineage): string {
     const nodes = result.nodes.filter((n) => n.direction === direction)
     lines.push("", `${direction === "upstream" ? "Upstream" : "Downstream"} (${nodes.length}):`)
     if (nodes.length === 0) lines.push("  none")
-    for (const n of nodes) lines.push(`  ${"  ".repeat(n.depth - 1)}${n.name} · ${kind(n)} · depth ${n.depth}`)
+    for (const n of nodes) lines.push(`  ${"  ".repeat(Math.max(0, n.depth - 1))}${n.name} · ${kind(n)} · depth ${n.depth}`)
   }
   const edges = [...result.columnLineage].sort((a, b) => signedDepth(a.target[0]) - signedDepth(b.target[0]))
   lines.push(

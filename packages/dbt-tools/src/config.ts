@@ -9,7 +9,7 @@ type Config = {
   pythonPath: string
   dbtIntegration: string
   queryLimit: number
-  /** Set when there was no dbt.json and the project was found from the working directory. */
+  /** Set when no readable dbt.json was found (missing or malformed) and the project was found from the working directory. */
   autoDiscovered?: boolean
 }
 

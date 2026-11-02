@@ -121,6 +121,7 @@ afterEach(() => {
   resetDbtAdapter()
   delete dbtAdapterInternals.readConfig
   delete dbtAdapterInternals.create
+  delete dbtAdapterInternals.noUserSql
 })
 
 describe("dbt_lineage with the project's dbt adapter", () => {
@@ -147,6 +148,7 @@ describe("dbt_lineage with the project's dbt adapter", () => {
     // Upstream hops first, then the focus, then downstream.
     const order = ["stg_payments.amount ←", "customers.customer_lifetime_value ←", "customer_segments."]
     const at = order.map((line) => result.output.indexOf(line))
+    expect(at.every((i) => i >= 0)).toBe(true)
     expect(at).toEqual([...at].sort((a, b) => a - b))
   })
 
@@ -225,6 +227,99 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     }
   })
 
+  test("reads the manifest of the project the adapter found, not the working directory's", async () => {
+    useConfig(false)
+    dbtAdapterInternals.create = async () => fakeAdapter(true)
+    const call = manifestOnly()
+    try {
+      await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
+      expect(call.mock.calls[0]?.[1]).toMatchObject({ manifest_path: path.join(project, "target", "manifest.json") })
+    } finally {
+      call.mockRestore()
+    }
+  })
+
+  test("falls back with the reason when a dbt.json's project root isn't a path", async () => {
+    dbtAdapterInternals.readConfig = async () => ({ projectRoot: 123 })
+    const call = manifestOnly()
+    try {
+      const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
+      expect(call.mock.calls[0]?.[1]).toMatchObject({ manifest_path: path.join("target", "manifest.json") })
+      expect(result.output).toContain("dbt integration not used: no dbt project here")
+    } finally {
+      call.mockRestore()
+    }
+  })
+
+  test("says a column trace fell back to the whole model", async () => {
+    dbtAdapterInternals.readConfig = async () => null
+    const call = manifestOnly()
+    try {
+      const result = await (await initTool(DbtLineageTool)).execute({ model: "customers", column: "id" }, ctx)
+      expect(result.output).toContain("tracing id needs the dbt integration; this is the whole model's lineage")
+    } finally {
+      call.mockRestore()
+    }
+  })
+
+  test("keeps the adapter's reason when the manifest fallback fails too", async () => {
+    dbtAdapterInternals.readConfig = async () => null
+    const call = spyOn(Dispatcher, "call").mockImplementation((async () => {
+      throw new Error("Manifest file not found")
+    }) as any)
+    try {
+      const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
+      expect(result.output).toContain("Failed: Manifest file not found")
+      expect(result.output).toContain("dbt integration not used: no dbt project here")
+    } finally {
+      call.mockRestore()
+    }
+  })
+
+  test("stops on a cancelled call, without the manifest fallback", async () => {
+    useConfig(false)
+    const controller = new AbortController()
+    dbtAdapterInternals.create = async () =>
+      fakeAdapter(true, async () => {
+        controller.abort()
+        throw new DOMException("This operation was aborted", "AbortError")
+      })
+    const call = manifestOnly()
+    try {
+      const tool = await initTool(DbtLineageTool)
+      await expect(tool.execute({ model: "customers" }, { ...ctx, abort: controller.signal })).rejects.toThrow(
+        "aborted",
+      )
+      expect(call).not.toHaveBeenCalled()
+    } finally {
+      call.mockRestore()
+    }
+  })
+
+  test("stops on a call cancelled while the fallback looks for the manifest", async () => {
+    const controller = new AbortController()
+    let reads = 0
+    dbtAdapterInternals.readConfig = async () => {
+      // The adapter reads the config first; the fallback's manifest lookup reads it second.
+      reads += 1
+      if (reads === 2) controller.abort()
+      return { projectRoot: project, pythonPath: "python3", dbtIntegration: "corecommand", queryLimit: 500 }
+    }
+    dbtAdapterInternals.create = async () =>
+      fakeAdapter(true, async () => {
+        throw new Error("lookup failed")
+      })
+    const call = manifestOnly()
+    try {
+      const tool = await initTool(DbtLineageTool)
+      await expect(tool.execute({ model: "customers" }, { ...ctx, abort: controller.signal })).rejects.toThrow()
+      expect(reads).toBe(2)
+      expect(call).not.toHaveBeenCalled()
+    } finally {
+      call.mockRestore()
+    }
+  })
+
   test("falls back with the reason when the lookup fails", async () => {
     useConfig(false)
     dbtAdapterInternals.create = async () =>
@@ -251,6 +346,7 @@ describe("the dbt adapter's integration mode", () => {
   }
   beforeEach(() => {
     tried.length = 0
+    dbtAdapterInternals.noUserSql = true
   })
 
   test("a project found without a dbt.json uses the Python bridge when it brings the project up", async () => {
@@ -272,6 +368,14 @@ describe("the dbt adapter's integration mode", () => {
     dbtAdapterInternals.create = creating({ core: "throws", corecommand: true })
     expect(await getDbtAdapter()).toMatchObject({ mode: "corecommand" })
     expect(tried).toEqual(["core", "corecommand"])
+  })
+
+  test("a process that can run user SQL through dbt keeps the configured mode", async () => {
+    delete dbtAdapterInternals.noUserSql
+    useConfig(true)
+    dbtAdapterInternals.create = creating({ core: true, corecommand: true })
+    expect(await getDbtAdapter()).toMatchObject({ mode: "corecommand" })
+    expect(tried).toEqual(["corecommand"])
   })
 
   test("a dbt.json's mode is used as configured", async () => {
