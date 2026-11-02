@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test, beforeEach } from "bun:test"
+import { afterAll, afterEach, describe, expect, test, beforeEach } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -84,56 +84,51 @@ describe("block policy and sync", () => {
   })
 })
 
-describe("loopback callback", () => {
-  test("validates state and returns the credential", async () => {
-    const pending = core.runConnect({
-      id: "github",
-      account: "octo",
-      onListening: async (url) => {
-        const u = new URL(url)
-        const page = await (await fetch(url)).text()
-        expect(page).toContain("Altimate Code wants to connect GitHub")
-        expect((await fetch(`${u.origin}/connect/github?state=bad`)).status).toBe(403)
-        const bad = await fetch(`${u.origin}/callback`, { method: "POST", body: JSON.stringify({ state: "nope", choice: "allow" }) })
-        expect(bad.status).toBe(403)
-        const ok = await fetch(`${u.origin}/callback`, {
-          method: "POST",
-          body: JSON.stringify({ state: u.searchParams.get("state"), choice: "allow", sync: true }),
-        })
-        expect(await ok.text()).toContain("return to your terminal")
-      },
-    })
-    const r = await pending
-    expect(r.status).toBe("connected")
-    expect(r.sync).toBe("synced")
-    expect(r.credential).toStartWith("ghu_demo_")
-    expect(core.maskSecret(r.credential!)).toMatch(/^ghu_••••.{4}$/)
-  })
+const connected = (id: core.ProviderId, expiresAt: string | null, extra: Partial<core.StoredProvider> = {}, secret: string | null = "tok_" + id) => {
+  if (secret) core.storeSecret(id, secret)
+  const store = core.loadStore()
+  store.providers[id] = { registered: true, account: "octo", source: { kind: "cli", label: "test" }, synced: false, expiresAt, updatedAt: new Date().toISOString(), ...extra }
+  core.saveStore(store)
+}
 
-  test("cancel and local-only", async () => {
-    const cancel = await core.runConnect({
-      id: "linear",
-      onListening: async (url) => {
-        const u = new URL(url)
-        await fetch(`${u.origin}/callback`, { method: "POST", body: JSON.stringify({ state: u.searchParams.get("state"), choice: "cancel" }) })
-      },
-    })
-    expect(cancel.status).toBe("cancelled")
-    const local = await core.runConnect({
-      id: "jira",
-      localOnly: true,
-      onListening: async (url) => {
-        const u = new URL(url)
-        expect(await (await fetch(url)).text()).toContain("disabled")
-        await fetch(`${u.origin}/callback`, { method: "POST", body: JSON.stringify({ state: u.searchParams.get("state"), choice: "allow", sync: true }) })
-      },
-    })
-    expect([local.status, local.sync]).toEqual(["connected", "local"])
-  })
-})
+const HOST = os.hostname()
 
-const connected = (id: core.ProviderId, expiresAt: string | null, extra: Partial<core.ConnectResult> = {}) =>
-  core.registerConnection({ provider: id, status: "connected", sync: "local", account: "octo", url: "", credential: "tok_" + id, expiresAt, ...extra })
+/** A stand-in for the existing connections endpoints (own list, create, update, delete). */
+function connectionsStub() {
+  const state = {
+    rows: [] as any[],
+    next: 21,
+    valid: true,
+    fail: null as null | { status: number; body: unknown },
+  }
+  const seed = (row: Record<string, unknown>) => {
+    const full = { id: state.next++, user_id: 1, is_valid: true, is_owner: true, config: {}, last_validated_at: null, created_at: "2030-01-01T00:00:00Z", ...row }
+    state.rows.push(full)
+    return full
+  }
+  const handle = (req: Request, url: URL, body: any): Response | undefined => {
+    if (!url.pathname.startsWith("/connections")) return
+    if (state.fail && req.method !== "GET") return Response.json(state.fail.body, { status: state.fail.status })
+    const id = Number(url.pathname.split("/")[2])
+    if (req.method === "GET" && url.pathname === "/connections/")
+      return Response.json({ connections: state.rows.filter((r) => !r.deleted && (url.searchParams.get("include_shared") === "true" || r.is_owner)) })
+    if (req.method === "POST" && url.pathname === "/connections/") {
+      if (!body?.name?.trim()) return Response.json({ detail: [{ loc: ["body", "name"], msg: "Name can't be blank", type: "blank_field" }] }, { status: 422 })
+      return Response.json(seed({ name: body.name, integration_id: body.integration_id, config: body.config, is_valid: state.valid, last_validated_at: state.valid ? "2030-06-01T00:00:00Z" : null }), { status: 201 })
+    }
+    const row = state.rows.find((r) => r.id === id && r.is_owner && !r.deleted)
+    if (!row) return Response.json({ detail: "Connection not found" }, { status: 404 })
+    if (req.method === "PATCH" && url.pathname === `/connections/${id}`) {
+      Object.assign(row, { config: body.config, is_valid: state.valid, updated_at: "2030-07-01T00:00:00Z" })
+      return Response.json(row)
+    }
+    if (req.method === "DELETE" && url.pathname === `/connections/${id}`) {
+      row.deleted = true
+      return Response.json({ ok: true })
+    }
+  }
+  return { state, seed, handle }
+}
 
 describe("expiry", () => {
   test("isExpired uses a 60 second skew", () => {
@@ -154,333 +149,189 @@ describe("expiry", () => {
     expect(core.expireProvider("linear")).toBe(false)
   })
 
-  test("mock credential honours the TTL setting", async () => {
-    process.env.ALTIMATE_INTEGRATIONS_MOCK_TTL_SECONDS = "120"
-    try {
-      const before = Date.now()
-      const r = await core.runConnect({
-        id: "github",
-        onListening: async (url) => {
-          const u = new URL(url)
-          await fetch(`${u.origin}/callback`, { method: "POST", body: JSON.stringify({ state: u.searchParams.get("state"), choice: "allow" }) })
-        },
-      })
-      const ttl = Date.parse(r.expiresAt!) - before
-      expect(ttl).toBeGreaterThan(110_000)
-      expect(ttl).toBeLessThan(130_000)
-    } finally {
-      delete process.env.ALTIMATE_INTEGRATIONS_MOCK_TTL_SECONDS
-    }
-  })
-
-  test("mock consent page variants", async () => {
-    const r = core.consentPage("jira", "s", { account: null, syncDisabled: false, reauth: true })
-    expect(r).toContain("Your Jira access expired. Reconnect to continue.")
-    expect(core.errorPage("Invalid or expired state. Start again from your terminal.")).toContain("Invalid or expired state")
-    await core.runConnect({
-      id: "github",
-      reauth: true,
-      timeoutMs: 1500,
-      onListening: async (url) => {
-        expect(await (await fetch(url)).text()).toContain("access expired")
-        const u = new URL(url)
-        const bad = await fetch(`${u.origin}/connect/github?state=bad`)
-        expect(bad.status).toBe(403)
-        expect(await bad.text()).toContain("Invalid or expired state")
-      },
-    })
-  })
 })
 
 describe("token", () => {
-  test("not connected and saved-only messages", async () => {
-    expect((await core.getToken("github")).status).toBe("not_connected")
-    connected("github", null, { credential: undefined, saved: true, connectionId: 7 })
+  const fixHint = (m: string, id: string) => {
+    expect(m).toContain(`altimate integrations update ${id}`)
+    expect(m).toContain(`connect ${id} --local-only`)
+  }
+
+  test("not connected, and no stored credential, say how to fix it", async () => {
+    const none = await core.getToken("github")
+    expect(none.status).toBe("not_connected")
+    connected("github", null, { synced: true, connectionId: 7 }, null)
     const r = await core.getToken("github")
     expect(r.status).toBe("unavailable")
+    fixHint((r as { message: string }).message, "github")
   })
 
   test("returns the stored token while fresh", async () => {
     connected("linear", new Date(Date.now() + 3_600_000).toISOString())
-    let called = 0
-    const r = await core.getToken("linear", { connect: async () => (called++, { result: {} as any, sync: "local" }) })
-    expect(r).toMatchObject({ status: "ok", token: "tok_linear", reauthed: false })
-    expect(called).toBe(0)
+    expect(await core.getToken("linear")).toMatchObject({ status: "ok", token: "tok_linear" })
   })
 
-  test("expired access re-runs connect with reauth", async () => {
-    connected("jira", new Date(Date.now() - 1000).toISOString())
-    const seen: core.ConnectOptions[] = []
-    const r = await core.getToken("jira", {
-      connect: async (o) => {
-        seen.push(o)
-        const result: core.ConnectResult = { provider: "jira", status: "connected", sync: "local", account: "a", url: "", credential: "fresh", expiresAt: new Date(Date.now() + 3_600_000).toISOString() }
-        core.registerConnection(result)
-        return { result, sync: "local" }
-      },
-    })
-    expect(seen.map((o) => [o.id, o.reauth, o.localOnly])).toEqual([["jira", true, true]])
-    expect(r).toMatchObject({ status: "ok", token: "fresh", reauthed: true })
-    expect(core.status().providers[1].state).toBe("connected")
-  })
-
-  test("failed renewal is reported", async () => {
-    connected("jira", new Date(Date.now() - 1000).toISOString())
-    const r = await core.getToken("jira", { connect: async () => ({ result: { provider: "jira", status: "cancelled", sync: "local", account: null, url: "" }, sync: "local" }) })
+  test("a rejected credential is reported with the fix", async () => {
+    connected("jira", null, { rejected: true })
+    const r = await core.getToken("jira")
     expect(r.status).toBe("failed")
+    fixHint((r as { message: string }).message, "jira")
+  })
+
+  test("an expired token, or one inside the 60 second margin, is reported", async () => {
+    connected("jira", new Date(Date.now() - 1000).toISOString())
+    expect((await core.getToken("jira")).status).toBe("failed")
+    connected("github", new Date(Date.now() + 30_000).toISOString())
+    const r = await core.getToken("github")
+    expect(r.status).toBe("failed")
+    fixHint((r as { message: string }).message, "github")
   })
 })
 
-describe("real mode client", () => {
-  const calls: { method: string; path: string; auth: string | null; tenant: string | null; body: any }[] = []
+describe("workspace connections", () => {
+  const calls: { method: string; path: string; query: string; auth: string | null; tenant: string | null; body: any }[] = []
+  const api = connectionsStub()
   let server: ReturnType<typeof Bun.serve>
-  let exchangeResponse: Record<string, unknown>
-  const saveEnv = { ...process.env }
+  const saved = { ...process.env }
 
   beforeEach(() => {
     calls.length = 0
-    exchangeResponse = { provider: "github", account: "octo", site_url: null, expires_at: null, saved: true, connection_id: 11, access_token: null }
-  })
-
-  const start = () => {
+    api.state.rows.length = 0
+    api.state.next = 21
+    api.state.valid = true
+    api.state.fail = null
     server = Bun.serve({
       port: 0,
       async fetch(req) {
         const url = new URL(req.url)
-        const body = req.method === "POST" ? await req.json().catch(() => null) : null
-        calls.push({ method: req.method, path: url.pathname, auth: req.headers.get("authorization"), tenant: req.headers.get("x-tenant"), body })
-        if (url.pathname.endsWith("/start")) return Response.json({ authorize_url: "https://provider.example/authorize?x=1", state_expires_in: 600 })
-        if (url.pathname === "/integrations/oauth/exchange")
-          return body?.code === "used" ? Response.json({ detail: { code: "handoff_code_invalid" } }, { status: 410 }) : Response.json(exchangeResponse)
-        if (url.pathname === "/integrations/connections/sync")
-          return Response.json({ connection_id: 5, created: true, is_valid: true, message: null })
-        if (url.pathname === "/integrations/connections/status")
-          return Response.json({ providers: [{ integration_id: "jira", connection_id: 9, name: "Jira", account: "me", auth_type: "oauth", source: null, expires_at: "2020-01-01T00:00:00Z", expired: true, is_valid: false }] })
-        return new Response("no", { status: 404 })
+        const body = req.method === "POST" || req.method === "PATCH" ? await req.json().catch(() => null) : null
+        calls.push({ method: req.method, path: url.pathname, query: url.search, auth: req.headers.get("authorization"), tenant: req.headers.get("x-tenant"), body })
+        return api.handle(req, url, body) ?? new Response("no", { status: 404 })
       },
     })
     delete process.env.ALTIMATE_INTEGRATIONS_MOCK
     process.env.ALTIMATE_API_URL = `http://127.0.0.1:${server.port}`
     process.env.ALTIMATE_TOKEN = "bearer-1"
     process.env.ALTIMATE_TENANT = "acme"
-    process.env.ALTIMATE_FRONTEND_URL = "http://app.example"
-  }
-  const stop = () => {
+    process.env.ALTIMATE_INTEGRATIONS_HOME = fs.mkdtempSync(path.join(tmp, "empty-"))
+    process.env.GITHUB_TOKEN = "gh_env_token"
+    core.recordDetections([{ id: "github", source: { kind: "env", label: "GITHUB_TOKEN" }, account: null, syncable: true, note: null }])
+  })
+  afterEach(() => {
     server.stop(true)
     process.env.ALTIMATE_INTEGRATIONS_MOCK = "1"
-    for (const k of ["ALTIMATE_API_URL", "ALTIMATE_TOKEN", "ALTIMATE_TENANT", "ALTIMATE_FRONTEND_URL"]) delete process.env[k]
-    expect(process.env.ALTIMATE_INTEGRATIONS_DIR).toBe(saveEnv.ALTIMATE_INTEGRATIONS_DIR ?? tmp)
-  }
-  const callback = async (url: string, query: (state: string) => string) => {
-    const u = new URL(url)
-    const redirect = new URL(u.searchParams.get("redirect") ?? u.origin)
-    return fetch(`${redirect.origin}/callback?${query(u.searchParams.get("state")!)}`)
-  }
+    for (const k of ["ALTIMATE_API_URL", "ALTIMATE_TOKEN", "ALTIMATE_TENANT", "ALTIMATE_INTEGRATIONS_HOME"]) delete process.env[k]
+    if (saved.GITHUB_TOKEN === undefined) delete process.env.GITHUB_TOKEN
+    else process.env.GITHUB_TOKEN = saved.GITHUB_TOKEN
+  })
+  const writes = () => calls.filter((c) => c.method !== "GET")
 
-  test("saved connect: consent url, exchange, no secret kept", async () => {
-    start()
-    try {
-      let consent = ""
-      let page: Promise<string> = Promise.resolve("")
-      const { result, sync } = await core.connectProvider({
-        id: "github",
-        onListening: (url) => {
-          consent = url
-          page = callback(url, (s) => `code=abc&state=${s}`).then((r) => r.text())
-        },
-      })
-      expect(await page).toContain("GitHub connected")
-      const q = new URL(consent)
-      expect(q.origin + q.pathname).toBe("http://app.example/cli/integrations/connect")
-      expect([q.searchParams.get("provider"), q.searchParams.get("save"), q.searchParams.get("connection_id")]).toEqual(["github", "1", null])
-      expect(result.status).toBe("connected")
-      expect(sync).toBe("synced")
-      expect(core.readSecret("github")).toBeUndefined()
-      const p = core.status().providers[0]
-      expect([p.state, p.sync]).toEqual(["connected", "synced"])
-      expect(calls).toHaveLength(1)
-      expect(calls[0]).toMatchObject({ path: "/integrations/oauth/exchange", auth: "Bearer bearer-1", tenant: "acme", body: { code: "abc" } })
-    } finally {
-      stop()
-    }
+  test("sync creates the managed connection, then updates it in place", async () => {
+    const first = await core.syncProvider("github")
+    expect(first.result).toBe("synced")
+    expect(writes()).toHaveLength(1)
+    expect(writes()[0]).toMatchObject({ method: "POST", path: "/connections/", auth: "Bearer bearer-1", tenant: "acme" })
+    expect(writes()[0].body).toEqual({ name: `GitHub (from ${HOST})`, integration_id: "github", config: { github_token: "gh_env_token" } })
+    expect(calls[0]).toMatchObject({ method: "GET", path: "/connections/", query: "?include_shared=false" })
+    expect(core.loadStore().providers.github).toMatchObject({ registered: true, synced: true, connectionId: 21 })
+
+    process.env.GITHUB_TOKEN = "gh_env_token_2"
+    const second = await core.syncProvider("github")
+    expect(second.result).toBe("synced")
+    expect(second.steps).toEqual([{ label: "Updated connection", ok: true }])
+    expect(writes()[1]).toMatchObject({ method: "PATCH", path: "/connections/21", auth: "Bearer bearer-1", tenant: "acme" })
+    expect(writes()[1].body).toEqual({ config: { github_token: "gh_env_token_2" } })
+    expect(api.state.rows).toHaveLength(1)
   })
 
-  test("local-only keeps the token and expiry locally", async () => {
-    start()
-    try {
-      exchangeResponse = { ...exchangeResponse, saved: false, connection_id: null, access_token: "gho_real", expires_at: "2031-01-01T00:00:00Z" }
-      const { result } = await core.connectProvider({
-        id: "github",
-        localOnly: true,
-        onListening: async (url) => {
-          expect(new URL(url).searchParams.get("save")).toBe("0")
-          await callback(url, (s) => `code=abc&state=${s}`)
-        },
-      })
-      expect(result.status).toBe("connected")
-      expect(core.readSecret("github")).toBe("gho_real")
-      const p = core.status().providers[0]
-      expect([p.sync, p.expiresAt]).toEqual(["local", "2031-01-01T00:00:00Z"])
-      expect((await core.getToken("github")).status).toBe("ok")
-    } finally {
-      stop()
-    }
+  test("a saved but invalid connection is reported rejected and kept", async () => {
+    api.state.valid = false
+    const o = await core.syncProvider("github")
+    expect(o.result).toBe("failed")
+    expect(o.reason).toContain("marked it invalid")
+    expect(api.state.rows).toHaveLength(1)
+    expect(core.status().providers[0].state).toBe("rejected")
+    api.state.valid = true
+    expect((await core.syncProvider("github")).result).toBe("synced")
+    expect(writes().map((c) => c.method)).toEqual(["POST", "PATCH"])
+    expect(core.status().providers[0].state).toBe("connected")
   })
 
-  test("--no-frontend starts at the backend and reauth sends the connection id", async () => {
-    start()
-    try {
-      core.registerConnection({ provider: "github", status: "connected", sync: "synced", account: "o", url: "", saved: true, connectionId: 11 })
-      let url = ""
-      await core.connectProvider({
-        id: "github",
-        noFrontend: true,
-        reauth: true,
-        timeoutMs: 800,
-        onListening: (u) => (url = u),
-      })
-      expect(url).toBe("https://provider.example/authorize?x=1")
-      expect(calls[0].path).toBe("/integrations/oauth/github/start")
-      expect(calls[0].body).toMatchObject({ save_to_workspace: true, connection_id: 11 })
-      expect(calls[0].body.redirect_uri).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/callback$/)
-      let consent = ""
-      await core.connectProvider({ id: "github", reauth: true, timeoutMs: 500, onListening: (u) => (consent = u) })
-      expect(new URL(consent).searchParams.get("connection_id")).toBe("11")
-    } finally {
-      stop()
-    }
+  test("backend errors keep the message (code) format", async () => {
+    api.state.fail = { status: 422, body: { detail: [{ loc: ["body", "config", "jiraEmail"], msg: "Email is not a valid email address", type: "value_error.format" }] } }
+    const o = await core.syncProvider("github")
+    expect([o.result, o.reason]).toEqual(["failed", "Email is not a valid email address (value_error.format)"])
+    api.state.fail = { status: 400, body: { detail: "Fill in the required connection fields: Api Key" } }
+    expect((await core.syncProvider("github")).reason).toBe("Fill in the required connection fields: Api Key")
+    api.state.fail = { status: 409, body: { detail: "Reload this connection before saving: the stored github_token has changed" } }
+    expect((await core.syncProvider("github")).reason).toContain("Reload this connection")
+    expect(core.status().providers[0].state).not.toBe("connected")
   })
 
-  test("cancel and error callbacks", async () => {
-    start()
-    try {
-      let page = ""
-      let pending: Promise<unknown> = Promise.resolve()
-      const cancelled = await core.connectProvider({
-        id: "linear",
-        onListening: (url) => {
-          pending = callback(url, (s) => `error=access_denied&state=${s}`).then(async (r) => (page = await r.text()))
-        },
-      })
-      await pending
-      expect(cancelled.result.status).toBe("cancelled")
-      expect(page).toContain("Cancelled")
-      const failed = await core.connectProvider({
-        id: "linear",
-        onListening: (url) => {
-          pending = callback(url, (s) => `error=provider_error&state=${s}`).then(async (r) => (page = await r.text()))
-        },
-      })
-      await pending
-      expect(failed.result.status).toBe("error")
-      expect(page).toContain("Could not connect")
-      const badState = await core.connectProvider({
-        id: "linear",
-        timeoutMs: 600,
-        onListening: async (url) => {
-          const r = await callback(url, () => "code=abc&state=wrong")
-          expect(r.status).toBe(403)
-          expect(await r.text()).toContain("Invalid or expired state")
-        },
-      })
-      expect(badState.result.status).toBe("timeout")
-      const used = await core.connectProvider({
-        id: "linear",
-        onListening: (url) => {
-          pending = callback(url, (s) => `code=used&state=${s}`).then(async (r) => (page = await r.text()))
-        },
-      })
-      await pending
-      expect(used.result.status).toBe("error")
-      expect(page).toContain("already used")
-      expect(core.status().providers[2].state).toBe("not_found")
-    } finally {
-      stop()
-    }
+  test("status prefers the managed connection, else the latest validated own one, and skips shared ones", async () => {
+    api.seed({ name: "Old", integration_id: "jira", last_validated_at: "2030-01-01T00:00:00Z" })
+    api.seed({ name: "Hand made", integration_id: "jira", last_validated_at: "2030-05-01T00:00:00Z" })
+    api.seed({ name: "Teammate", integration_id: "linear", is_owner: false })
+    api.seed({ name: `GitHub (from ${HOST})`, integration_id: "github", is_valid: false })
+    api.seed({ name: "GitHub (from elsewhere)", integration_id: "github", last_validated_at: "2031-01-01T00:00:00Z" })
+    const derived = core.deriveRemote(await backend.listOwnConnections((await backend.backendConfig())!))
+    expect(derived.map((d) => [d.integration_id, d.name, d.managed])).toEqual([
+      ["github", `GitHub (from ${HOST})`, true],
+      ["jira", "Hand made", false],
+    ])
+    const s = await core.statusRemote()
+    expect(Object.keys(s.providers[0])).toEqual(["id", "name", "state", "source", "account", "syncable", "sync", "updatedAt", "expiresAt", "note"])
+    expect(s.providers.map((p) => [p.id, p.state, p.sync, p.source?.label ?? null])).toEqual([
+      ["github", "rejected", "synced", "Altimate workspace"],
+      ["jira", "connected", "synced", "Altimate workspace"],
+      ["linear", "not_found", "local", null],
+    ])
   })
 
-  test("sync posts the config and status merges the workspace view", async () => {
-    start()
-    const gh = process.env.GITHUB_TOKEN
-    try {
-      process.env.GITHUB_TOKEN = "gh_env_token"
-      process.env.ALTIMATE_INTEGRATIONS_HOME = fs.mkdtempSync(path.join(tmp, "empty-"))
-      core.recordDetections([{ id: "github", source: { kind: "env", label: "GITHUB_TOKEN" }, account: null, syncable: true, note: null }])
-      const o = await core.syncProvider("github")
-      expect(o.result).toBe("synced")
-      const sent = calls.find((c) => c.path === "/integrations/connections/sync")!
-      expect(sent.body).toMatchObject({ integration_id: "github", config: { github_token: "gh_env_token" }, source: { kind: "env", label: "GITHUB_TOKEN" } })
-      expect(sent.body.source.machine).toBeString()
-      const merged = await core.statusRemote()
-      expect(merged.providers[0]).toMatchObject({ id: "github", state: "connected", sync: "synced" })
-      expect(merged.providers[1]).toMatchObject({ id: "jira", state: "expired", expiresAt: "2020-01-01T00:00:00Z" })
-    } finally {
-      if (gh === undefined) delete process.env.GITHUB_TOKEN
-      else process.env.GITHUB_TOKEN = gh
-      delete process.env.ALTIMATE_INTEGRATIONS_HOME
-      stop()
-    }
-  })
-  test("token falls back to the authorize url when there is no frontend address", async () => {
-    start()
-    delete process.env.ALTIMATE_FRONTEND_URL
-    process.env.ALTIMATE_API_URL = "http://localhost:" + server.port
-    try {
-      const cfg = (await backend.backendConfig())!
-      expect(cfg.frontendUrl).toBeNull()
-      let url = ""
-      const r = await core.runRealConnect(cfg, { id: "linear", localOnly: true, reauth: true, timeoutMs: 300, onListening: (u) => (url = u) })
-      expect(r.status).toBe("timeout")
-      expect(url).toBe("https://provider.example/authorize?x=1")
-      expect(calls[0].path).toBe("/integrations/oauth/linear/start")
-    } finally {
-      stop()
-    }
-  })
-
-  test("status keeps a fresh local connection and reports the expired workspace copy in the note", () => {
+  test("a fresh local connection wins over the remote one", () => {
     const now = Date.parse("2030-01-01T00:00:00Z")
-    const remote = [{ integration_id: "linear", connection_id: 3, name: "Linear", account: "me", auth_type: "oauth" as const, source: null, expires_at: "2029-12-31T00:00:00Z", expired: true, is_valid: false }]
-    const local = (expiresAt: string) => {
-      core.registerConnection({ provider: "linear", status: "connected", sync: "local", account: "me", url: "", credential: "tok", expiresAt })
-      return core.buildStatus(core.loadStore(), [], now)
-    }
-    const fresh = core.mergeRemote(local("2030-01-01T01:00:00Z"), remote, now).providers.find((p) => p.id === "linear")!
-    expect(fresh.state).toBe("connected")
-    expect(fresh.expiresAt).toBe("2030-01-01T01:00:00Z")
-    expect(fresh.note).toBe("workspace copy expired, reconnect to update it")
-    const stale = core.mergeRemote(local("2029-12-31T00:00:00Z"), remote, now).providers.find((p) => p.id === "linear")!
-    expect(stale.state).toBe("expired")
-    const live = [{ ...remote[0], expired: false, expires_at: "2030-01-01T02:00:00Z" }]
-    const rescued = core.mergeRemote(local("2029-12-31T00:00:00Z"), live, now).providers.find((p) => p.id === "linear")!
-    expect(rescued.state).toBe("connected")
-    expect(rescued.note).toBe("local token expired, the workspace connection is still active")
+    const remote: core.RemoteProvider[] = [{ integration_id: "linear", connection_id: 3, name: "Linear", account: null, managed: true, source: null, expires_at: null, expired: false, is_valid: false }]
+    connected("linear", "2030-01-01T01:00:00Z", { account: "me" })
+    const merged = core.mergeRemote(core.buildStatus(core.loadStore(), [], now), remote, now).providers.find((p) => p.id === "linear")!
+    expect([merged.state, merged.sync, merged.note]).toEqual(["rejected", "synced", "Token rejected, update it"])
+    const hand = core.mergeRemote(core.buildStatus(core.loadStore(), [], now), [{ ...remote[0], managed: false, is_valid: true }], now).providers.find((p) => p.id === "linear")!
+    expect([hand.state, hand.sync]).toEqual(["connected", "local"])
   })
 
-  test("backend failures carry the message and code", async () => {
-    const failing = Bun.serve({
-      port: 0,
-      fetch: () => Response.json({ detail: { code: "connection_test_failed", message: "Linear rejected the API key" } }, { status: 422 }),
-    })
-    try {
-      const cfg = { apiUrl: `http://127.0.0.1:${failing.port}`, tenant: "t", token: "x", frontendUrl: null }
-      const e = await backend.syncConnection(cfg, { integration_id: "linear", config: {}, source: { kind: "env", label: "l", machine: "m" } }).catch((x) => x)
-      expect(e).toBeInstanceOf(backend.BackendError)
-      expect(e.status).toBe(422)
-      expect(e.code).toBe("connection_test_failed")
-      expect(e.message).toBe("Linear rejected the API key (connection_test_failed)")
-    } finally {
-      failing.stop(true)
-    }
+  test("disconnect deletes only the managed connections", async () => {
+    api.seed({ name: `Linear (from ${HOST})`, integration_id: "linear" })
+    api.seed({ name: `Linear (from ${HOST})`, integration_id: "linear" })
+    api.seed({ name: "Linear", integration_id: "linear" })
+    api.seed({ name: `GitHub (from ${HOST})`, integration_id: "github" })
+    api.seed({ name: "Linear (from another-host)", integration_id: "linear" })
+    expect(await core.disconnectRemote("linear")).toBe(2)
+    expect(calls.filter((c) => c.method === "DELETE").map((c) => c.path)).toEqual(["/connections/21", "/connections/22"])
+    expect(api.state.rows.filter((r) => !r.deleted).map((r) => r.name)).toEqual(["Linear", `GitHub (from ${HOST})`, "Linear (from another-host)"])
+  })
+
+  test("only the existing connections endpoints are called", async () => {
+    await core.syncProvider("github")
+    await core.statusRemote()
+    await core.disconnectRemote("github")
+    expect(calls.length).toBeGreaterThan(3)
+    expect(calls.filter((c) => c.path.startsWith("/integrations/"))).toEqual([])
+    expect(calls.every((c) => c.auth === "Bearer bearer-1" && c.tenant === "acme")).toBe(true)
+    expect(calls.every((c) => c.path === "/connections/" || /^\/connections\/\d+$/.test(c.path))).toBe(true)
+  })
+
+  test("without a signed-in backend nothing is removed", async () => {
+    expect(await core.disconnectRemote("linear", null)).toEqual(0)
   })
 })
 
 describe("failure descriptions", () => {
-  test("409, 410, 503 and 400 use the code and a fallback text", () => {
-    expect(backend.describeFailure(409, { detail: { code: "integration_token_expired", provider: "jira" } })).toBe("The saved access expired, reconnect to continue (integration_token_expired)")
-    expect(backend.describeFailure(410, { detail: { code: "handoff_code_invalid" } })).toBe("This sign-in link was already used or expired (handoff_code_invalid)")
-    expect(backend.describeFailure(503, { detail: { code: "provider_not_configured", message: "Jira is not configured" } })).toBe("Jira is not configured (provider_not_configured)")
-    expect(backend.describeFailure(400, { detail: { code: "invalid_redirect_uri" } })).toBe("The request was rejected (invalid_redirect_uri)")
+  test("validation lists, string details and codes", () => {
+    expect(backend.describeFailure(422, { detail: [{ loc: ["body", "name"], msg: "Name can't be blank", type: "blank_field" }, { loc: ["body", "config"], msg: "Settings can't be empty", type: "empty_field" }] })).toBe(
+      "Name can't be blank; Settings can't be empty (blank_field)",
+    )
+    expect(backend.describeFailure(400, { detail: "Fill in the required connection fields: Domain" })).toBe("Fill in the required connection fields: Domain")
+    expect(backend.describeFailure(409, { detail: { code: "stored_secret_changed" } })).toBe("The saved credential changed, reload and try again (stored_secret_changed)")
+    expect(backend.describeFailure(404, { detail: { code: "gone", message: "Connection not found" } })).toBe("Connection not found (gone)")
     expect(backend.describeFailure(500, null)).toBe("status 500")
   })
 })
@@ -491,80 +342,23 @@ describe("jira domain and cli flags", () => {
       expect(core.normaliseJiraDomain(v)).toBe("acme")
   })
 
-  test("a token inside the 60 second margin is treated as expired", async () => {
-    core.registerConnection({ provider: "github", status: "connected", sync: "local", account: "a", url: "", credential: "old", expiresAt: new Date(Date.now() + 30_000).toISOString() })
-    let ran = false
-    const r = await core.getToken("github", {
-      connect: async () => {
-        ran = true
-        return { result: { provider: "github", status: "cancelled", sync: "local", account: null, url: "" }, sync: "local" }
-      },
-    })
-    expect(ran).toBe(true)
-    expect(r.status).toBe("failed")
-  })
-
-  test("--no-frontend and --no-open are accepted by the CLI", () => {
+  test("the browser sign-in flags are gone and token explains a missing connection", () => {
     const cli = path.join(import.meta.dir, "../../src/index.ts")
-    const run = Bun.spawnSync(["bun", "run", cli, "integrations", "token", "github", "--no-frontend", "--no-open"], {
-      env: { ...process.env, ALTIMATE_INTEGRATIONS_DIR: tmp, ALTIMATE_INTEGRATIONS_MOCK: "1" },
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    const text = run.stderr.toString() + run.stdout.toString()
-    expect(text).not.toContain("Unknown argument")
-    expect(text).toContain("not connected")
-  }, 30_000)
-})
-
-describe("disconnect in real mode", () => {
-  test("removes the workspace connections this tool made and keeps hand-made ones", async () => {
-    const remaining = [
-      { integration_id: "linear", connection_id: 7, auth_type: "oauth", source: null },
-      { integration_id: "linear", connection_id: 6, auth_type: "token", source: { kind: "env" } },
-      { integration_id: "linear", connection_id: 3, auth_type: "token", source: null },
-    ]
-    const deleted: number[] = []
-    const server = Bun.serve({
-      port: 0,
-      fetch(req) {
-        const url = new URL(req.url)
-        if (req.method === "DELETE" && url.pathname.startsWith("/connections/")) {
-          const id = Number(url.pathname.split("/").pop())
-          deleted.push(id)
-          remaining.splice(remaining.findIndex((c) => c.connection_id === id), 1)
-          return Response.json({ ok: true })
-        }
-        if (url.pathname === "/integrations/connections/status") {
-          const top = remaining[0]
-          return Response.json({
-            providers: [{ name: "Linear", account: null, expires_at: null, expired: false, is_valid: true, ...(top ?? { integration_id: "linear", connection_id: null, auth_type: null, source: null }) }],
-          })
-        }
-        return new Response("no", { status: 404 })
-      },
-    })
-    try {
-      const cfg = { apiUrl: `http://127.0.0.1:${server.port}`, tenant: "t", token: "x", frontendUrl: null }
-      const removed = await core.disconnectRemote("linear", cfg)
-      expect(removed).toEqual(2)
-      expect(deleted).toEqual([7, 6])
-    } finally {
-      server.stop(true)
-    }
-  })
-
-  test("does nothing without a signed-in backend", async () => {
-    expect(await core.disconnectRemote("linear", null)).toEqual(0)
-  })
+    const run = (...args: string[]) =>
+      Bun.spawnSync(["bun", "run", cli, "integrations", ...args], { env: { ...process.env, ALTIMATE_INTEGRATIONS_DIR: tmp, ALTIMATE_INTEGRATIONS_MOCK: "1" }, stdout: "pipe", stderr: "pipe" })
+    const all = (r: ReturnType<typeof run>) => r.stderr.toString() + r.stdout.toString()
+    expect(all(run("token", "github"))).toContain("not connected")
+    const help = all(run("connect", "--help"))
+    for (const flag of ["--oauth", "--reauth", "--no-frontend", "--port"]) expect(help).not.toContain(flag)
+    expect(help).toContain("--local-only")
+  }, 60_000)
 })
 
 describe("credentials flow", () => {
-  const calls: { method: string; path: string; auth: string | null; body: any }[] = []
+  const calls: { method: string; path: string; query: string; auth: string | null; body: any }[] = []
   let server: ReturnType<typeof Bun.serve>
-  let remoteStatus: any[] = []
+  const api = connectionsStub()
   let catalog: unknown = []
-  let syncValid = true
   const saved = { ...process.env }
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "integ-home-"))
   const bin = fs.mkdtempSync(path.join(os.tmpdir(), "integ-bin-"))
@@ -587,13 +381,15 @@ describe("credentials flow", () => {
   }
   const clip = (text: string | undefined) => ({ clipboard: () => text })
   const token = async (id: core.ProviderId, field: string, value = GOOD) => creds.setSecretDraft(id, field, { kind: "clipboard" }, clip(value))
-  const synced = () => calls.filter((c) => c.path === "/integrations/connections/sync")
+  const synced = () => calls.filter((c) => c.method !== "GET" && c.path.startsWith("/connections"))
 
   beforeEach(() => {
     calls.length = 0
-    remoteStatus = []
+    api.state.rows.length = 0
+    api.state.next = 21
+    api.state.valid = true
+    api.state.fail = null
     catalog = []
-    syncValid = true
     fs.rmSync(home, { recursive: true, force: true })
     fs.mkdirSync(home)
     fake("gh", null)
@@ -610,8 +406,8 @@ describe("credentials flow", () => {
       async fetch(req) {
         const url = new URL(req.url)
         const auth = req.headers.get("authorization")
-        const body = req.method === "POST" ? await req.json().catch(() => null) : null
-        calls.push({ method: req.method, path: url.pathname, auth, body })
+        const body = req.method === "POST" || req.method === "PATCH" ? await req.json().catch(() => null) : null
+        calls.push({ method: req.method, path: url.pathname, query: url.search, auth, body })
         const deny = () => Response.json({ message: "Bad credentials" }, { status: 401 })
         if (url.pathname === "/user")
           return auth === `Bearer ${GOOD}` ? Response.json({ login: "octo" }, { headers: { "github-authentication-token-expiration": "2031-01-02 03:04:05 UTC" } }) : deny()
@@ -619,8 +415,8 @@ describe("credentials flow", () => {
         if (url.pathname === "/rest/api/2/myself") return auth === `Bearer ${GOOD}` ? Response.json({ displayName: "Server Me" }) : deny()
         if (url.pathname === "/graphql") return auth === GOOD ? Response.json({ data: { viewer: { email: "lin@acme.com", name: "Lin" } } }) : Response.json({ errors: [{ extensions: { code: "AUTHENTICATION_ERROR" } }] }, { status: 401 })
         if (url.pathname === "/datamate_integrations/") return Response.json(catalog)
-        if (url.pathname === "/integrations/connections/sync") return Response.json({ connection_id: 21, created: true, is_valid: syncValid, message: syncValid ? null : "workspace test failed" })
-        if (url.pathname === "/integrations/connections/status") return Response.json({ providers: remoteStatus })
+        const mine = api.handle(req, url, body)
+        if (mine) return mine
         return new Response("no", { status: 404 })
       },
     })
@@ -833,7 +629,7 @@ describe("credentials flow", () => {
       expect(core.status().providers[0].state).toBe("not_found")
     })
 
-    test("sync sends the catalog field names to the sync endpoint and keeps no secret locally", async () => {
+    test("sync creates the managed connection with the catalog field names and keeps no secret locally", async () => {
       real()
       await creds.setDraft("jira", "jiraDomain", "acme")
       await creds.setDraft("jira", "jiraEmail", "me@acme.com")
@@ -842,19 +638,45 @@ describe("credentials flow", () => {
       expect([r.status, r.sync, r.account]).toEqual(["connected", "synced", "me@acme.com"])
       const sent = synced()
       expect(sent).toHaveLength(1)
-      expect(sent[0].body.integration_id).toBe("jira")
-      expect(sent[0].body.config).toEqual({ auth_type: "token", jiraDomain: "acme", jiraEmail: "me@acme.com", jiraApiToken: GOOD })
-      expect(sent[0].body.source).toEqual({ kind: "cli", label: "Claude Code", machine: os.hostname() })
+      expect(sent[0]).toMatchObject({ method: "POST", path: "/connections/" })
+      expect(sent[0].body).toEqual({ name: `Jira (from ${os.hostname()})`, integration_id: "jira", config: { jiraDomain: "acme", jiraEmail: "me@acme.com", jiraApiToken: GOOD } })
       expect(core.readSecret("jira")).toBeUndefined()
       expect(core.loadStore().providers.jira).toMatchObject({ registered: true, synced: true, connectionId: 21 })
     })
 
-    test("a credential the workspace refuses is rejected and not stored", async () => {
+    test("jira server sends the variant type with its catalog fields", async () => {
       real()
-      syncValid = false
+      await creds.setDraft("jira", "jiraBaseUrl", base())
+      await token("jira", "jiraPatToken")
+      const r = await creds.connectCredentials({ id: "jira", variant: "server" })
+      expect([r.status, r.sync]).toEqual(["connected", "synced"])
+      expect(synced()[0].body.config).toEqual({ jiraBaseUrl: base(), jiraPatToken: GOOD, type: "server" })
+    })
+
+    test("a connection the workspace marks invalid is rejected, kept, and fixed by update", async () => {
+      real()
+      api.state.valid = false
       await token("linear", "linearApiKey")
       const r = await creds.connectCredentials({ id: "linear" })
-      expect([r.status, r.message]).toEqual(["rejected", "workspace test failed"])
+      expect([r.status, r.sync]).toEqual(["rejected", "synced"])
+      expect(r.message).toContain("marked it invalid")
+      expect(api.state.rows).toHaveLength(1)
+      expect(core.status().providers[2].state).toBe("rejected")
+      api.state.valid = true
+      await token("linear", "linearApiKey")
+      const fixed = await creds.connectCredentials({ id: "linear", update: true })
+      expect(fixed.status).toBe("connected")
+      expect(synced().map((c) => c.method)).toEqual(["POST", "PATCH"])
+      expect(api.state.rows).toHaveLength(1)
+      expect(core.status().providers[2].state).toBe("connected")
+    })
+
+    test("a backend refusal is reported as message (code)", async () => {
+      real()
+      api.state.fail = { status: 422, body: { detail: [{ loc: ["body", "config", "jiraEmail"], msg: "Email is not a valid email address", type: "value_error.format" }] } }
+      await token("linear", "linearApiKey")
+      const r = await creds.connectCredentials({ id: "linear" })
+      expect([r.status, r.message]).toEqual(["failed", "Email is not a valid email address (value_error.format)"])
       expect(core.loadStore().providers.linear?.registered).toBeUndefined()
     })
 
@@ -879,7 +701,7 @@ describe("credentials flow", () => {
       expect([r.status, r.sync, synced().length]).toEqual(["connected", "local", 0])
     })
 
-    test("update of a synced connection syncs again from the same source", async () => {
+    test("update of a synced connection updates the same connection in place", async () => {
       real()
       await token("github", "github_token")
       await creds.connectCredentials({ id: "github" })
@@ -887,7 +709,9 @@ describe("credentials flow", () => {
       const r = await creds.connectCredentials({ id: "github", update: true })
       expect([r.status, r.sync]).toEqual(["connected", "synced"])
       const [first, second] = synced()
-      expect(second.body.source).toEqual(first.body.source)
+      expect([first.method, first.path, second.method, second.path]).toEqual(["POST", "/connections/", "PATCH", "/connections/21"])
+      expect(second.body).toEqual({ config: { github_token: GOOD } })
+      expect(api.state.rows).toHaveLength(1)
     })
 
     test("a manual sync of a locally connected credential uploads it", async () => {
@@ -896,7 +720,7 @@ describe("credentials flow", () => {
       real()
       const o = await core.syncProvider("github")
       expect(o.result).toBe("synced")
-      expect(synced()[0].body.config).toEqual({ github_token: GOOD, auth_type: "token" })
+      expect(synced()[0].body.config).toEqual({ github_token: GOOD })
     })
 
     test("disconnect removes the credential secrets", async () => {
@@ -921,23 +745,22 @@ describe("credentials flow", () => {
       expect(core.status().providers[0].state).toBe("connected")
     })
 
-    test("a workspace connection the provider refuses is rejected; expired wins", async () => {
+    test("a workspace connection marked invalid is rejected", async () => {
       real()
-      remoteStatus = [
-        { integration_id: "github", connection_id: 1, name: "GitHub", account: "octo", auth_type: "token", source: null, expires_at: null, expired: false, is_valid: false },
-        { integration_id: "linear", connection_id: 2, name: "Linear", account: "lin", auth_type: "token", source: null, expires_at: "2020-01-01T00:00:00Z", expired: true, is_valid: false },
-        { integration_id: "jira", connection_id: 3, name: "Jira", account: "me", auth_type: "token", source: null, expires_at: null, expired: false, is_valid: true },
-      ]
+      api.seed({ name: `GitHub (from ${os.hostname()})`, integration_id: "github", is_valid: false })
+      api.seed({ name: "Hand made", integration_id: "jira", last_validated_at: "2030-01-01T00:00:00Z" })
+      api.seed({ name: "Teammate", integration_id: "linear", is_owner: false })
       const s = await core.statusRemote()
       expect(s.providers.map((p) => [p.id, p.state, p.note])).toEqual([
         ["github", "rejected", "Token rejected, update it"],
         ["jira", "connected", null],
-        ["linear", "expired", "access expired, reconnect to continue"],
+        ["linear", "not_found", null],
       ])
+      expect(calls.find((c) => c.path === "/connections/")?.query).toBe("?include_shared=false")
     })
   })
 
-  test("the CLI shows the credential commands and keeps the browser flow behind --oauth", () => {
+  test("the CLI shows the credential commands and no browser flow", () => {
     const cli = path.join(import.meta.dir, "../../src/index.ts")
     const run = (...args: string[]) =>
       Bun.spawnSync([process.execPath, "run", cli, "integrations", ...args], { env: { ...process.env, PATH: saved.PATH, ALTIMATE_INTEGRATIONS_DIR: tmp, ALTIMATE_INTEGRATIONS_MOCK: "1", ALTIMATE_INTEGRATIONS_HOME: home }, stdout: "pipe", stderr: "pipe" })
@@ -945,7 +768,8 @@ describe("credentials flow", () => {
     expect(JSON.parse(fields.stdout.toString()).variant).toBe("key")
     const help = run("connect", "--help")
     const text = help.stderr.toString() + help.stdout.toString()
-    for (const flag of ["--oauth", "--reauth", "--frontend", "--local-only"]) expect(text).toContain(flag)
+    expect(text).toContain("--local-only")
+    for (const flag of ["--oauth", "--reauth", "--frontend"]) expect(text).not.toContain(flag)
     const bad = run("set", "linear", "linearApiKey", "x", "--json")
     expect(JSON.parse(bad.stdout.toString())).toMatchObject({ status: "failed" })
     expect(bad.stdout.toString()).toContain("is a secret")

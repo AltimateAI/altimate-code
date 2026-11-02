@@ -1,9 +1,9 @@
 // altimate_change - new file
 //
 // `integrations`: one-click local integrations for GitHub, Jira and Linear. Detects existing
-// credentials, collects the workspace's own credentials (fields, drafts, clipboard, validation),
-// keeps them local or shares them with the workspace, and still offers the loopback browser
-// consent flow behind `connect --oauth`. The workspace side is mocked unless signed in.
+// credentials, collects the workspace's own credentials (fields, drafts, clipboard, validation) and
+// keeps them local or saves them as the caller's own workspace connection. The workspace side is
+// mocked unless signed in.
 import type { Argv } from "yargs"
 import os from "node:os"
 import { cmd } from "./cmd"
@@ -166,52 +166,6 @@ const DisconnectCommand = cmd({
   },
 })
 
-function announce(args: { json: boolean; open: boolean }, name: string, reauth: boolean) {
-  return (url: string) => {
-    if (args.json) console.error(JSON.stringify({ event: "browser", url }))
-    else {
-      out(`\n${S.TEXT_HIGHLIGHT_BOLD}◆ ${reauth ? "Reconnect" : "Connect"} ${name}${S.TEXT_NORMAL}\n`)
-      out(`  Approve access in your browser:\n  ${S.TEXT_INFO}${url}${S.TEXT_NORMAL}\n`)
-      out(`  ${S.TEXT_DIM}Waiting for approval (up to 5 minutes)...${S.TEXT_NORMAL}`)
-    }
-    if (args.open) core.openBrowser(url)
-  }
-}
-
-async function runOAuthConnect(args: any) {
-  try {
-    const id = parseProviders(args.provider, false)[0]
-    const name = core.PROVIDER_NAMES[id]
-    const { result, sync } = await core.connectProvider({
-      id,
-      port: args.port,
-      localOnly: args["local-only"],
-      reauth: args.reauth,
-      noFrontend: !args.frontend,
-      onListening: announce(args, name, args.reauth),
-      onStep: args.json ? undefined : (label, done) => done && out(`  ${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${label}`),
-      pace: args.json ? 0 : 250,
-    })
-    if (args.json) {
-      json({ provider: id, status: result.status, sync, account: result.account, url: result.url, expiresAt: result.expiresAt ?? null, ...(result.message ? { message: result.message } : {}) })
-      if (result.status === "error") process.exitCode = 1
-      return
-    }
-    out()
-    if (result.status === "connected") {
-      out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} connected${result.account ? ` as ${S.TEXT_NORMAL_BOLD}${result.account}${S.TEXT_NORMAL}` : ""}`)
-      out(`  ${S.TEXT_DIM}${result.credential ? `credential ${core.maskSecret(result.credential)} stored locally` : "no credential kept on this machine"}${S.TEXT_NORMAL}`)
-      out(`  ${S.TEXT_DIM}${sync === "synced" ? `synced to ${core.workspaceInfo().name} from ${os.hostname()}` : "kept local, not synced"}${S.TEXT_NORMAL}\n`)
-    } else if (result.status === "cancelled") out(`${S.TEXT_WARNING}⊘${S.TEXT_NORMAL} Cancelled, nothing was connected.\n`)
-    else if (result.status === "error") {
-      out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${result.message ?? "Could not connect."}\n`)
-      process.exitCode = 1
-    } else out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} Timed out waiting for approval.\n`)
-  } catch (e) {
-    fail(e)
-  }
-}
-
 const variantOption = { describe: "credential variant (Jira: cloud or server)", type: "string" } as const
 
 async function runCredentials(args: any, update: boolean) {
@@ -244,16 +198,9 @@ const credentialOptions = (yargs: Argv) =>
 
 const ConnectCommand = cmd({
   command: "connect <provider>",
-  describe: "connect a provider with its own credentials (add --oauth for the browser sign-in)",
-  builder: (yargs: Argv) =>
-    credentialOptions(yargs)
-      .option("local-only", { describe: "keep the credential on this machine", type: "boolean", default: false })
-      .option("oauth", { describe: "use the one-click browser sign-in instead of credentials", type: "boolean", default: false })
-      .option("open", { describe: "open the browser (--no-open prints the URL only)", type: "boolean", default: true })
-      .option("reauth", { describe: "renew expired access for an existing connection (with --oauth)", type: "boolean", default: false })
-      .option("frontend", { describe: "use the Altimate web app consent page (--no-frontend opens the provider authorize URL directly)", type: "boolean", default: true })
-      .option("port", { describe: "loopback port for the consent page (with --oauth)", type: "number" }),
-  handler: async (args) => (args.oauth ? runOAuthConnect(args) : runCredentials(args, false)),
+  describe: "connect a provider with its own credentials",
+  builder: (yargs: Argv) => credentialOptions(yargs).option("local-only", { describe: "keep the credential on this machine", type: "boolean", default: false }),
+  handler: async (args) => runCredentials(args, false),
 })
 
 const UpdateCommand = cmd({
@@ -352,31 +299,19 @@ const OpenTokenPageCommand = cmd({
 
 const TokenCommand = cmd({
   command: "token <provider>",
-  describe: "print a fresh token for local tools (renews expired access in the browser)",
-  builder: (yargs: Argv) =>
-    yargs
-      .positional("provider", { type: "string", choices: core.PROVIDER_IDS, demandOption: true })
-      .option("json", jsonOption)
-      .option("open", { describe: "open the browser when access must be renewed", type: "boolean", default: true })
-      .option("frontend", { describe: "use the Altimate web app consent page (--no-frontend opens the provider authorize URL directly)", type: "boolean", default: true }),
+  describe: "print the stored local credential for local tools",
+  builder: (yargs: Argv) => yargs.positional("provider", { type: "string", choices: core.PROVIDER_IDS, demandOption: true }).option("json", jsonOption),
   handler: async (args) => {
     try {
       const id = parseProviders(args.provider, false)[0]
-      // Progress goes to stderr so stdout carries only the token.
-      const r = await core.getToken(id, {
-        noFrontend: !args.frontend,
-        onListening: (url) => {
-          console.error(`Access expired, approve in your browser: ${url}`)
-          if (args.open) core.openBrowser(url)
-        },
-      })
+      const r = await core.getToken(id)
       if (r.status !== "ok") {
         if (args.json) json({ provider: id, status: r.status, message: r.message })
         else console.error(r.message)
         process.exitCode = 1
         return
       }
-      if (args.json) return json({ provider: id, status: "ok", token: r.token, expiresAt: r.expiresAt, reauthed: r.reauthed })
+      if (args.json) return json({ provider: id, status: "ok", token: r.token, expiresAt: r.expiresAt })
       console.log(r.token)
     } catch (e) {
       fail(e)
@@ -401,7 +336,7 @@ const ExpireCommand = cmd({
 
 export const IntegrationsCommand = cmd({
   command: "integrations",
-  describe: "connect GitHub, Jira and Linear with one click and sync them to your workspace",
+  describe: "connect GitHub, Jira and Linear and sync them to your workspace",
   builder: (yargs: Argv) =>
     yargs
       .command(StatusCommand)

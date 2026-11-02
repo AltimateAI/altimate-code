@@ -5,7 +5,6 @@
 // against the provider and the connect/update steps that keep a credential local or share it with
 // the workspace. A secret is never returned, printed or logged: callers only ever see a masked tail.
 import fs from "node:fs"
-import os from "node:os"
 import path from "node:path"
 import { spawnSync } from "node:child_process"
 import * as core from "./core"
@@ -506,7 +505,6 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   const cfg = wantSync && !blocked ? await core.realConfig() : null
   const handDone = Object.values(r.origin).includes("draft") || Object.values(r.origin).includes("stored")
   const detectedSource = r.detected[0]
-  const source: Source = opts.update && rec?.syncSource ? rec.syncSource : handDone || !detectedSource ? MANUAL_SOURCE : detectedSource
   const secretFields = r.def.fields.filter((f) => f.secret).map((f) => f.name)
   const plain = Object.fromEntries(r.def.fields.filter((f) => !f.secret).map((f) => [f.name, r.values[f.name]]).filter(([, v]) => v))
   const stamp = new Date().toISOString()
@@ -521,28 +519,25 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   if (!cfg) {
     for (const f of secretFields) if (r.values[f]) core.storeSecret(core.secretKey("cred", id, f), r.values[f])
     if (secretFields[0] && r.values[secretFields[0]]) core.storeSecret(id, r.values[secretFields[0]])
-    finish(false, { connectionId: null, syncSource: undefined })
+    finish(false, { connectionId: null })
     const notSignedIn = wantSync && !blocked
     return { ...base, provider: id, status: "connected", sync: "local", account: check.account, expiresAt: check.expiresAt, message: notSignedIn ? NOT_SIGNED_IN : blocked && wantSync ? "Sync is blocked for this provider, kept local." : null }
   }
 
   opts.onStep?.("Saving to your workspace…")
-  const config: Record<string, unknown> = { auth_type: "token" }
+  const config: Record<string, unknown> = {}
   for (const f of r.def.fields) if (r.values[f.name]) config[f.name] = r.values[f.name]
   try {
-    const res = await backend.syncConnection(cfg, { integration_id: core.INTEGRATION_IDS[id], config, source: { kind: source.kind as "cli" | "env" | "mcp", label: source.label, machine: os.hostname() } })
-    if (!res.is_valid) {
-      if (rec?.registered) {
-        const store = core.loadStore()
-        store.providers[id] = { ...store.providers[id], rejected: true, validatedAt: stamp }
-        core.saveStore(store)
-      }
-      return local({ status: "rejected", sync: "local", message: res.message ?? `${name} rejected the credentials in the workspace` })
-    }
+    const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config))
     // The connection lives in the workspace; no secret is kept on this machine.
     for (const f of secretFields) core.deleteSecret(core.secretKey("cred", id, f))
     core.deleteSecret(id)
-    finish(true, { connectionId: res.connection_id, syncSource: { kind: source.kind as "cli" | "env" | "mcp", label: source.label } })
+    if (!res.isValid) {
+      // Saved but not valid: keep it, marked rejected, so an update can fix it.
+      finish(true, { connectionId: res.connectionId, rejected: true })
+      return { ...base, provider: id, status: "rejected", sync: "synced", account: check.account, expiresAt: check.expiresAt, message: res.message ?? `${name} rejected the credentials in the workspace` }
+    }
+    finish(true, { connectionId: res.connectionId })
     return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: check.expiresAt, message: null }
   } catch (e) {
     return local({ status: "failed", sync: "local", message: e instanceof Error ? e.message : String(e) })
