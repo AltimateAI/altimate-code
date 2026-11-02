@@ -36,6 +36,8 @@ export const TuiEvent = {
       // same stream: the session it was raised for lets that run print only its
       // own offer, not another session's in the same directory.
       sessionID: Schema.optional(Schema.String),
+      // The offer's telemetry fields (JSON), for the surface that prints it to report `shown` with.
+      arguments: Schema.optional(Schema.String),
       // altimate_change end
     },
   }),

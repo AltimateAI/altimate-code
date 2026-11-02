@@ -61,7 +61,11 @@ describe("diff", () => {
   })
 
   test("identical sets have no changes", () => {
-    expect(SyncState.diff({ a: skill("Alpha") }, { a: skill("Alpha") })).toEqual({ added: [], removed: [], updated: [] })
+    expect(SyncState.diff({ a: skill("Alpha") }, { a: skill("Alpha") })).toEqual({
+      added: [],
+      removed: [],
+      updated: [],
+    })
   })
 
   test("an id named like an inherited property is still an item", () => {
@@ -75,7 +79,13 @@ describe("record", () => {
     await SyncState.record(project, 7, "skills", { items: { a: skill("Alpha"), b: skill("Beta") } })
 
     const state = await SyncState.read(project, 7)
-    expect(state?.entities.skills).toMatchObject({ kind: "skills", status: "ok", count: 2, lastChangedAt: null, changes: null })
+    expect(state?.entities.skills).toMatchObject({
+      kind: "skills",
+      status: "ok",
+      count: 2,
+      lastChangedAt: null,
+      changes: null,
+    })
     expect(state?.entities.skills?.lastCheckedAt).toBeNumber()
     expect(state?.entities.skills?.lastSucceededAt).toBe(state!.entities.skills!.lastCheckedAt)
     expect(published).toEqual([])
@@ -196,7 +206,13 @@ describe("record", () => {
 
   test("a late result from a previous binding is dropped", async () => {
     await SyncState.record(project, 8, "memory", { items: { m1: skill("New workspace block") } })
-    await SyncState.record(project, 7, "memory", { error: "could not load workspace memory" }, { isCurrent: () => false })
+    await SyncState.record(
+      project,
+      7,
+      "memory",
+      { error: "could not load workspace memory" },
+      { isCurrent: () => false },
+    )
 
     const state = await SyncState.read(project, 8)
     expect(state?.entities.memory).toMatchObject({ status: "ok", count: 1 })
@@ -296,5 +312,39 @@ describe("forget", () => {
     await SyncState.record(project, 7, "memory", { items: { m1: skill("One") } })
     await SyncState.forget(project, "memory", { isCurrent: () => false })
     expect((await SyncState.read(project, 7))?.entities.memory?.count).toBe(1)
+  })
+})
+
+describe("workspace_sync_failed telemetry", () => {
+  test("a kind flipping to error reports once, with a reason class; a repeat does not", async () => {
+    const { Telemetry } = await import("../../../src/altimate/telemetry")
+    const events: any[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((e) => {
+      events.push(e)
+    })
+    try {
+      await SyncState.record(project, 9, "memory", { error: "401 unauthorized" })
+      expect(events).toEqual([
+        expect.objectContaining({ type: "workspace_sync_failed", workspace_id: 9, kind: "memory", reason: "auth" }),
+      ])
+      await SyncState.record(project, 9, "memory", { error: "still unauthorized" }) // already in error: no new row
+      expect(events).toHaveLength(1)
+      await SyncState.record(project, 9, "memory", { items: { a: skill("Alpha") } }) // back to ok
+      await SyncState.record(project, 9, "memory", { error: "Cannot reach https://api: ECONNREFUSED" })
+      expect(events).toHaveLength(2)
+      expect(events[1]).toEqual(expect.objectContaining({ kind: "memory", reason: "network" }))
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test("syncFailureReason classifies the messages the sync produces", () => {
+    expect(SyncState.syncFailureReason("Request failed with status 403")).toBe("auth")
+    expect(SyncState.syncFailureReason("Please sign in again")).toBe("auth")
+    expect(SyncState.syncFailureReason("Workspace not found (404)")).toBe("not_found")
+    expect(SyncState.syncFailureReason("Request to x timed out after 15s")).toBe("network")
+    expect(SyncState.syncFailureReason("TypeError: fetch failed")).toBe("network")
+    expect(SyncState.syncFailureReason("The server returned no usable id")).toBe("other")
+    expect(SyncState.syncFailureReason(undefined)).toBe("other")
   })
 })

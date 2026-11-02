@@ -215,6 +215,25 @@ describe("activation events", () => {
     expect((events.find((e) => e.type === "first_job_completed") as any).job).toBe("sample_duck_db")
   })
 
+  test("the first job's row names the workspace the hook input carries", async () => {
+    const events = captureEvents()
+    const hooks = await plugin()
+    await startOnboarding(hooks, "skip")
+
+    // The trigger site sets `workspaceId` from the turn that ran the tool; the hook never asks the
+    // session for its current turn (a replacement's, when a cancelled turn's tool returns late).
+    await runTool(
+      hooks,
+      { tool: "sample_setup", sessionID: SESSION, callID: "c3w", args: {}, workspaceId: 7 },
+      { title: "", output: "", metadata: { success: true } },
+    )
+    await settle()
+
+    const completed = events.find((e) => e.type === "first_job_completed") as any
+    expect(completed.workspace_id).toBe(7)
+    expect("workspace_id" in (events.find((e) => e.type === "activation_job_selected") as any)).toBe(false)
+  })
+
   test("a failed sample setup counts as selected but not completed", async () => {
     const events = captureEvents()
     const hooks = await plugin()

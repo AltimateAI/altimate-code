@@ -72,6 +72,12 @@ describe("analyst default reasoning effort", () => {
     expect(analystEffortOptions({ agent: { name: "analyst", options: { effort: "max" } }, model: opus })).toEqual({})
   })
 
+  test("a per-model provider option keeps its setting", () => {
+    const tuned = { ...opus, options: { thinking: { type: "enabled", budgetTokens: 8000 } } }
+    expect(analystEffortOptions({ agent: analyst, model: tuned })).toEqual({})
+    expect(analystEffortOptions({ agent: analyst, model: { ...opus, options: { reasoningEffort: "low" } } })).toEqual({})
+  })
+
   test("the environment selects another effort or disables the default", () => {
     process.env[ANALYST_EFFORT_ENV] = "XHIGH"
     expect(analystEffortOptions({ agent: analyst, model: opus })).toMatchObject({ effort: "xhigh" })

@@ -20,25 +20,20 @@ afterEach(() => {
 })
 
 describe("workspace tools default", () => {
-  test("on when the project is linked", async () => {
-    mocks.push(spyOn(State, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding }))
+  test("on when the project has a saved link, without asking the service", async () => {
+    const outcome = spyOn(State, "resolveBindingOutcome").mockRejectedValue(new Error("must not be called"))
+    mocks.push(outcome, spyOn(State, "readLocalBinding").mockResolvedValue(binding))
     expect(await projectIsLinked("/project")).toBe(true)
     expect(await resolveWorkspaceTools(undefined, "/project")).toBe(true)
+    expect(outcome).not.toHaveBeenCalled()
   })
 
-  test("a link served from the cache while the service is unreachable still counts", async () => {
-    mocks.push(spyOn(State, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding, stale: true }))
-    expect(await projectIsLinked("/project")).toBe(true)
-  })
-
-  test("off, without an error, when unlinked, unknown or failing", async () => {
-    const outcome = spyOn(State, "resolveBindingOutcome")
-    mocks.push(outcome)
-    outcome.mockResolvedValue({ status: "unbound" })
+  test("off, without an error, when unlinked or the link cannot be read", async () => {
+    const local = spyOn(State, "readLocalBinding")
+    mocks.push(local)
+    local.mockResolvedValue(null)
     expect(await resolveWorkspaceTools(undefined, "/project")).toBe(false)
-    outcome.mockResolvedValue({ status: "unknown" })
-    expect(await resolveWorkspaceTools(undefined, "/project")).toBe(false)
-    outcome.mockRejectedValue(new Error("offline"))
+    local.mockRejectedValue(new Error("unreadable"))
     expect(await resolveWorkspaceTools(undefined, "/project")).toBe(false)
   })
 

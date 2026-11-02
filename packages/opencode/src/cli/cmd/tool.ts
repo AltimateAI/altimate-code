@@ -4,7 +4,8 @@
 // that keeps warehouse connections and the schema cache warm between calls. The tool modules are
 // loaded lazily so the rest of the CLI does not pay for them at startup.
 import type { Argv } from "yargs"
-import { readFileSync } from "node:fs"
+import { readFileSync, statSync } from "node:fs"
+import path from "node:path"
 import { randomUUID } from "node:crypto"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { cmd } from "./cmd"
@@ -64,6 +65,36 @@ async function inProcess(
 ): Promise<ToolResult> {
   process.chdir(directory)
   return withRunner(directory, connections, workspaceTools, (runner) => runner.run(name, toolArgs, { allowWrite }))
+}
+
+/** Reloads the connections when a source file was created, edited or removed since the last reload. */
+async function connectionsRefresher(
+  directory: string,
+  connections: string | undefined,
+): Promise<() => Promise<void>> {
+  const Registry = await import("../../altimate/native/connections/registry")
+  const files = connections
+    ? [connections]
+    : [Registry.globalConfigPath(), path.join(directory, ".altimate-code", "connections.json")]
+  const stamp = () =>
+    files
+      .map((file) => {
+        try {
+          const st = statSync(file)
+          return `${st.mtimeMs}:${st.size}`
+        } catch {
+          return "missing"
+        }
+      })
+      .join("|")
+  let last = stamp()
+  return async () => {
+    const now = stamp()
+    if (now === last) return
+    if (connections) await Registry.loadFile(connections)
+    else await Registry.reload()
+    last = now
+  }
 }
 
 const connectionsOption = {
@@ -221,7 +252,9 @@ const ToolDaemonCommand = cmd({
     const daemon = await import("../../altimate/tool-cli/daemon")
     const directory = daemon.resolveDirectory(args.dir ?? process.cwd())
     const workspaceTools = await resolveWorkspaceTools(args["workspace-tools"], directory)
-    const file = daemon.socketPath(directory, InstallationVersion, undefined, args.connections, workspaceTools)
+    // Resolved before the chdir below, so the socket key and the load agree on one file.
+    const connections = args.connections ? path.resolve(args.connections) : undefined
+    const file = daemon.socketPath(directory, InstallationVersion, undefined, connections, workspaceTools)
     if (args.action === "status" || args.action === "stop") {
       const reply = await daemon.send(file, { id: randomUUID(), op: args.action })
       if (!reply) {
@@ -235,9 +268,10 @@ const ToolDaemonCommand = cmd({
     const { createRunner } = await import("../../altimate/tool-cli/runner")
     process.chdir(directory)
     await bootstrap(directory, async () => {
-      if (args.connections) await (await import("../../altimate/native/connections/registry")).loadFile(args.connections)
+      if (connections) await (await import("../../altimate/native/connections/registry")).loadFile(connections)
       const runner = await createRunner({ workspaceTools })
       try {
+        const refreshConnections = await connectionsRefresher(directory, connections)
         const { releaseFileConnections } = await import("../../altimate/native/connections/registry")
         const running = await daemon.startDaemon({
           directory,
@@ -245,6 +279,7 @@ const ToolDaemonCommand = cmd({
           runner,
           file,
           releaseFiles: releaseFileConnections,
+          refreshConnections,
         })
         await running.closed
       } catch (error) {

@@ -34,6 +34,8 @@ export namespace TrainingStore {
     content: string
     source?: string
     citations?: MemoryBlock["citations"]
+    /** The writing session, for the workspace write-back's row. */
+    sessionID?: string
   }): Promise<{ entry: TrainingEntry; duplicates: MemoryBlock[] }> {
     const id = trainingId(input.kind, input.name)
     const existing = await MemoryStore.read(input.scope, id)
@@ -48,15 +50,18 @@ export namespace TrainingStore {
 
     const enriched = embedTrainingMeta(input.content, meta)
 
-    const { duplicates } = await MemoryStore.write({
-      id,
-      scope: input.scope,
-      tags: trainingTags(input.kind),
-      created: existing?.created ?? now,
-      updated: now,
-      citations: input.citations,
-      content: enriched,
-    })
+    const { duplicates } = await MemoryStore.write(
+      {
+        id,
+        scope: input.scope,
+        tags: trainingTags(input.kind),
+        created: existing?.created ?? now,
+        updated: now,
+        citations: input.citations,
+        content: enriched,
+      },
+      { sessionID: input.sessionID },
+    )
 
     return {
       entry: {

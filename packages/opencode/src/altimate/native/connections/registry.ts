@@ -333,7 +333,8 @@ export function load(): void {
  * setConfigs(), the file becomes the one registry every project uses and is never re-read from project sources.
  */
 export async function loadFile(file: string): Promise<void> {
-  await closeAll()
+  // Read and validate before closing anything: a bad edit to the file (truncated, malformed, or missing a "type")
+  // must leave every cached connector and the scratch warehouse untouched, not tear them down and then throw.
   const absolute = path.resolve(file)
   const parsed: unknown = JSON.parse(await fs.promises.readFile(absolute, "utf8"))
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -344,6 +345,7 @@ export async function loadFile(file: string): Promise<void> {
       throw new Error(`Invalid connection: ${name}`)
     }
   }
+  await closeAll()
   setConfigs(resolveStorePaths(parsed as Record<string, ConnectionConfig>, path.dirname(absolute)))
   if (state().configs.has(SCRATCH_NAME)) Log.Default.warn(SCRATCH_NAME_CONFLICT)
   censusSent = false
@@ -1041,8 +1043,11 @@ export async function releaseFileConnections(): Promise<void> {
   const s = state()
   const tasks: Array<() => Promise<void>> = []
   for (const name of [...s.connectors.keys()]) {
-    const type = canonicalType(s.configs.get(name)?.type)
-    if (type === "duckdb" || type === "sqlite") tasks.push(detachCached(s, name))
+    const config = s.configs.get(name)
+    const type = canonicalType(config?.type)
+    // An in-memory database holds no file lock, and closing it would discard its contents.
+    const file = typeof config?.path === "string" && config.path !== "" && config.path !== ":memory:"
+    if ((type === "duckdb" || type === "sqlite") && file) tasks.push(detachCached(s, name))
   }
   await Promise.all(tasks.map((task) => task()))
 }

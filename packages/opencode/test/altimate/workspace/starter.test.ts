@@ -1,6 +1,7 @@
 // altimate_change - new file
-import { describe, expect, test } from "bun:test"
-import { renderStarter, wrapStarter } from "../../../src/altimate/workspace/starter"
+import { describe, expect, spyOn, test } from "bun:test"
+import { renderStarter, trackStarterShown, wrapStarter } from "../../../src/altimate/workspace/starter"
+import { Telemetry } from "../../../src/altimate/telemetry"
 import type { WorkspaceContents } from "../../../src/altimate/workspace/contents"
 
 const full: WorkspaceContents = {
@@ -46,7 +47,12 @@ describe("renderStarter", () => {
   })
 
   test("says what an empty or unsynced workspace means, and suggests only what it can back", () => {
-    const empty = renderStarter("Acme", { skills: [], integrations: [], memoryEnabled: false, knowledge: { kind: "off" } })
+    const empty = renderStarter("Acme", {
+      skills: [],
+      integrations: [],
+      memoryEnabled: false,
+      knowledge: { kind: "off" },
+    })
     expect(empty.lines).toEqual([
       "Skills: none yet. Add them in the workspace and they sync here.",
       "Knowledge: off for this workspace.",
@@ -108,5 +114,33 @@ describe("wrapStarter", () => {
 
   test("short text is unchanged", () => {
     expect(wrapStarter("a\n\nb c", 80)).toBe("a\n\nb c")
+  })
+})
+
+describe("starter_shown telemetry", () => {
+  test("reports what the workspace provides as counts, and leaves unknowns out", () => {
+    const events: any[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((e) => {
+      events.push(e)
+    })
+    try {
+      trackStarterShown(5, full)
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: "starter_shown",
+          workspace_id: 5,
+          skills: Array.isArray(full.skills) ? full.skills.length : undefined,
+          integrations: Array.isArray(full.integrations) ? full.integrations.length : undefined,
+          knowledge: full.knowledge?.kind ?? "unknown",
+          memory_enabled: full.memoryEnabled === true,
+        }),
+      ])
+      events.length = 0
+      trackStarterShown(6, { skills: "unknown", integrations: null, memoryEnabled: null, knowledge: null })
+      expect(events[0]).toEqual(expect.objectContaining({ workspace_id: 6, knowledge: "unknown" }))
+      for (const key of ["skills", "integrations", "memory_enabled"]) expect(key in events[0]).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
   })
 })

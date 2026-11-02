@@ -116,6 +116,7 @@ export const TrainingImportTool = Tool.define("training_import", {
             scope: args.scope,
             content: section.content.slice(0, 1800), // Enforce max content length
             source: args.file_path,
+            sessionID: ctx.sessionID,
           })
           imported++
           results.push(`  + ${section.name}`)

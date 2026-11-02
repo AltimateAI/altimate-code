@@ -1,5 +1,5 @@
-import os from "node:os"
 import path from "node:path"
+import { Global } from "@/global"
 import { createAdapter, descriptions, resultFailed } from "../mcp-server/adapter"
 
 export interface ToolResult {
@@ -30,9 +30,9 @@ function failure(title: string, output: string): ToolResult {
   return { status: "error", title, output, metadata: {} }
 }
 
-/** Spilled results outlive the one-shot process that wrote them, so the CLI keeps them in a per-user directory. */
-function resultsDirectory(): string {
-  return path.join(os.tmpdir(), `altimate-code-tool-results-${os.userInfo().uid}`)
+/** Spilled results outlive the one-shot process that wrote them, so the CLI keeps them in the per-user state directory. */
+export function resultsDirectory(): string {
+  return path.join(Global.Path.state, "tool-results")
 }
 
 type WorkspaceAdapter = Awaited<ReturnType<(typeof import("../mcp-server/workspace"))["createWorkspaceAdapter"]>>

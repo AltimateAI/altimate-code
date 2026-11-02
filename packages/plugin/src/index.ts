@@ -271,14 +271,18 @@ export interface Hooks {
     input: { cwd: string; sessionID?: string; callID?: string },
     output: { env: Record<string, string> },
   ) => Promise<void>
+  // altimate_change start — `workspaceId`: the workspace of the turn the tool ran in, set by the
+  // trigger site, so a plugin's own rows name it without consulting the session's current turn
+  // (which may be a replacement by the time a cancelled turn's tool returns)
   "tool.execute.after"?: (
-    input: { tool: string; sessionID: string; callID: string; args: any },
+    input: { tool: string; sessionID: string; callID: string; args: any; workspaceId?: number },
     output: {
       title: string
       output: string
       metadata: any
     },
   ) => Promise<void>
+  // altimate_change end
   "experimental.chat.messages.transform"?: (
     input: {},
     output: {

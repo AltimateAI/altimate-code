@@ -728,7 +728,7 @@ async function readManifest(directory: string): Promise<Manifest | null> {
     if (typeof m.datamateId !== "number") return null
     if (typeof m.tenant !== "string" || typeof m.apiUrl !== "string") return null
     if (typeof m.account !== "string" || !m.account) return null
-    if (!m.skills || typeof m.skills !== "object") return null
+    if (!m.skills || typeof m.skills !== "object" || Array.isArray(m.skills)) return null
     return m as Manifest
   } catch {
     return null

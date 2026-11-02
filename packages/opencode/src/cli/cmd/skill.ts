@@ -533,6 +533,7 @@ const SkillPublishCommand = cmd({
             action: report.action,
             file_count: report.files,
             source: "cli",
+            workspace_id: report.datamateId,
           })
         } catch {}
       } catch (err) {

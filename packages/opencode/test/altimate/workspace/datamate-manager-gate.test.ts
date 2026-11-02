@@ -38,8 +38,10 @@ import {
   DATAMATE_MANAGER_TOOL_ID,
   engineNotice,
   hiddenToolIds,
+  refusal,
   turnNotice,
 } from "../../../src/altimate/workspace/datamate-manager-gate"
+import { Telemetry } from "../../../src/altimate/telemetry"
 
 const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
 const ORIGINAL_SPEC = process.env.ALTIMATE_ENGINE_INSTALL_SPEC
@@ -814,4 +816,29 @@ describe("older datamate-<name> entries in a linked project", () => {
       expect(h.lines.filter((line) => line.startsWith("Older datamate entries"))).toHaveLength(0)
     })
   }
+})
+
+describe("telemetry — the refusal", () => {
+  test("a refused datamate_manager call is reported as a redirect naming the operation and workspace", () => {
+    const rows: Array<Record<string, unknown>> = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((e) => {
+      rows.push(e as Record<string, unknown>)
+    })
+    try {
+      const out = refusal("status", { id: "42", name: "analytics" }, "ses_r")
+      expect(out.metadata).toEqual({ operation: "status", managedBy: "42" })
+      expect(rows).toEqual([
+        expect.objectContaining({
+          type: "workspace_engine_redirect",
+          tool: "datamate",
+          operation: "status",
+          outcome: "refused",
+          workspace_id: 42,
+          session_id: "ses_r",
+        }),
+      ])
+    } finally {
+      spy.mockRestore()
+    }
+  })
 })

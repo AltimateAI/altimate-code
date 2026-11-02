@@ -7,6 +7,7 @@
 // the detail here from disk and PATH rather than from the overlay's memory.
 // Offer, never install on the flow's own account — `installEngine` only ever
 // runs from an explicit "Install now".
+import { trackInstallPrompt } from "./engine-telemetry"
 import { execFile, type ChildProcess } from "node:child_process"
 import launch from "cross-spawn"
 import { Process } from "@/util/process"
@@ -272,15 +273,61 @@ export async function installEngine(): Promise<InstallResult> {
   return { ok: false, error: detail || `npm exited with code ${run.code ?? "unknown"}` }
 }
 
+/** What the bus carries with the offer command: the offer's telemetry fields, so the surface that
+ * prints the offer in another process (an attached run) reports `shown` with them. No node probe
+ * rides along: it would sit on the dispatch path, ahead of the turn boundary. */
+export type OfferDetail = Pick<EngineOffer, "reason" | "workspaceId" | "declared" | "found">
+
+export function encodeOfferDetail(offer: EngineOffer): string {
+  const detail: OfferDetail = {
+    reason: offer.reason,
+    workspaceId: offer.workspaceId,
+    declared: offer.declared,
+    found: offer.found,
+  }
+  return JSON.stringify(detail)
+}
+
+/** The detail back from the bus, or undefined for anything that is not one. */
+export function decodeOfferDetail(raw: unknown): OfferDetail | undefined {
+  if (typeof raw !== "string") return undefined
+  try {
+    const v = JSON.parse(raw) as Partial<Record<keyof OfferDetail, unknown>>
+    const reason = v.reason === "engine-missing" || v.reason === "engine-too-old" ? v.reason : undefined
+    const workspaceId = typeof v.workspaceId === "string" ? v.workspaceId : undefined
+    const declared = typeof v.declared === "number" ? v.declared : v.declared === undefined ? undefined : NaN
+    const found = typeof v.found === "string" ? v.found : v.found === undefined ? undefined : ""
+    if (!reason || workspaceId === undefined || Number.isNaN(declared) || found === "") {
+      return undefined
+    }
+    return { reason, workspaceId, declared, found }
+  } catch {
+    return undefined
+  }
+}
+
+/** An attached run printed the offer it read off the bus: that process is the surface that showed
+ * it, so it reports `shown` (surface `bus`) from the fields the event carried. False when the
+ * event carried none that decode, and nothing is reported. */
+export function trackPrintedOffer(raw: unknown, sessionID: string): boolean {
+  const detail = decodeOfferDetail(raw)
+  if (!detail) return false
+  trackInstallPrompt("shown", detail, { surface: "bus" }, sessionID)
+  return true
+}
+
 /** Ask the TUI to raise the offer. False when the bus is unavailable. The
  * session is carried so an attached headless run, which reads the same event
- * stream, prints the offer raised for its own session only. */
-async function publishOffer(sessionID: string): Promise<boolean> {
-  if (syncInternals.publishOffer) return syncInternals.publishOffer(sessionID)
+ * stream, prints the offer raised for its own session only; the offer's fields
+ * ride along so that run reports `shown` from them (the TUI dialog re-derives
+ * the offer and reports its own). */
+async function publishOffer(offer: EngineOffer, sessionID: string): Promise<boolean> {
+  const detail = encodeOfferDetail(offer)
+  if (syncInternals.publishOffer) return syncInternals.publishOffer(sessionID, detail)
   try {
     await AppRuntime.runPromise(
       EventV2Bridge.Service.use((events) =>
-        events.publish(TuiEvent.CommandExecute, { command: OFFER_COMMAND, sessionID }),
+        events.publish(TuiEvent.CommandExecute, { command: OFFER_COMMAND, sessionID, arguments: detail }),
       ),
     )
     return true
@@ -320,11 +367,20 @@ export function toolsNeed(declared: number | undefined): string {
 /** Offer via the dialog surface when there is one; otherwise print (headless)
  * or toast (bus unavailable). Exactly one of these happens. */
 export async function offerOrNotify(offer: EngineOffer, toast: Toast, sessionID: string): Promise<void> {
+  // Telemetry: the offer was shown, on which surface, and whether Node was there to install with.
+  const shown = (surface: "headless" | "dialog" | "bus" | "toast") =>
+    void nodeMajor()
+      .catch(() => null)
+      .then((major) => trackInstallPrompt("shown", offer, { surface, nodeMajor: major }, sessionID))
   if (isHeadless()) {
     printLine(describeOfferLine(offer))
+    shown("headless")
     return
   }
+  // A dialog, whether taken here or over the bus, reports `shown` itself when it renders: the TUI
+  // may hold the offer back (its 7-day latch), so dispatch is not display. The toast reports here
+  // only when it was shown.
   if (offerInstall(offer)) return
-  if (await publishOffer(sessionID)) return
-  await notify(toast)
+  if (await publishOffer(offer, sessionID)) return
+  if (await notify(toast)) shown("toast")
 }

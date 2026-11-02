@@ -1,7 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test"
 import { initTool } from "../tool-fixture"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
-import { registerAll } from "../../../src/altimate/native/connections/register"
+import { registerDefaultNativeHandlers } from "../../lib/native-handlers"
 import { SchemaInspectTool } from "../../../src/altimate/tools/schema-inspect"
 
 // The handler answers an unknown table with an empty column list and success; in one evaluation
@@ -29,7 +29,7 @@ beforeEach(() => {
 })
 
 afterAll(() => {
-  registerAll()
+  registerDefaultNativeHandlers()
 })
 
 describe("schema_inspect unknown tables", () => {

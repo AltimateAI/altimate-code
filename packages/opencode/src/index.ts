@@ -51,10 +51,10 @@ import { SkillCommand } from "./cli/cmd/skill"
 // altimate_change end
 // altimate_change start — check: deterministic SQL check command
 import { CheckCommand } from "./cli/cmd/check"
+// altimate_change end
 // altimate_change start — tool: model-free data tool access
 import { ToolCommand } from "./cli/cmd/tool"
 import { IntegrationsCommand } from "./cli/cmd/integrations"
-// altimate_change end
 // altimate_change end
 // altimate_change start — learn: playbook learning loop command
 import { LearnCommand } from "./cli/cmd/learn"
@@ -107,7 +107,7 @@ const CLI_COMMAND_NAMES = new Set([
   "learn",
   // altimate_change end
   // registered conditionally below (workspace / local-install builds)
-  "link", "workspace", "workspace-serve",
+  "link", "workspace", "workspace-serve", "workspace-client",
 ])
 // altimate_change end
 let cli = yargs(args)
@@ -273,7 +273,7 @@ let cli = yargs(args)
 // altimate_change start — link and workspace: absent from --help when workspaces are turned off
 // via ALTIMATE_DISABLE_WORKSPACE=1. Off, hidden stubs take their place and say why.
 if (!Flag.ALTIMATE_DISABLE_WORKSPACE) cli = cli.command(LinkCommand).command(WorkspaceCommand).command(WorkspaceClientCommand)
-else cli = cli.command(pilotOffCommand("link")).command(pilotOffCommand("workspace [action]"))
+else cli = cli.command(pilotOffCommand("link")).command(pilotOffCommand("workspace [action]")).command(pilotOffCommand("workspace-client [action]"))
 // altimate_change end
 
 // altimate_change start — workspace-serve: register dev-only workspace serve command
@@ -308,13 +308,15 @@ try {
     await cli.parse()
   }
 } catch (e) {
+  // altimate_change start — set the default before FormatError so a CliError's own exitCode (e.g. 130) wins
+  process.exitCode = 1
   const formatted = FormatError(e)
+  // altimate_change end
   if (formatted) UI.error(formatted)
   if (formatted === undefined) {
     UI.error("Unexpected error" + EOL)
     process.stderr.write(errorMessage(e) + EOL)
   }
-  process.exitCode = 1
 } finally {
   // altimate_change start - telemetry flush
   // Flush any buffered telemetry events before exiting.

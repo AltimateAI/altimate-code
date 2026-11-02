@@ -114,10 +114,26 @@ import { Config } from "../config/config"
 import { Tracer } from "../altimate/observability/tracing"
 // altimate_change start — stamp an authoritative tool source + humanized MCP title
 import { stampRegistryToolSource, describeMcpTool } from "../altimate/tool-source"
+import { trackWorkspaceToolCall } from "../altimate/workspace/tool-call-telemetry" // altimate_change — workspace integration rows
 // altimate_change end
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
+// altimate_change start — the session's bound workspace rides on every telemetry row
+import { readLocalBinding } from "@/altimate/workspace/state"
+
+/** The session's workspace use, as session_end fields. Read only: the row is tracked first, then the
+ * turn ends its telemetry entries (`Telemetry.endSession`), so the row itself still carries the
+ * workspace. */
+function workspaceUseFields(sessionID: string, turn: number) {
+  const use = Telemetry.workspaceUseOf(sessionID, turn)
+  return {
+    workspace_skills_used: use.skills,
+    workspace_memory_blocks: use.memory,
+    workspace_integration_calls: use.integrations,
+  }
+}
+// altimate_change end
 import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
 // altimate_change start — keyless public Zen predicate (flat module)
@@ -763,7 +779,19 @@ export namespace SessionPrompt {
       throw e
     }
     // altimate_change end
-    Telemetry.setContext({ sessionId: sessionID, projectId: Instance.project?.id ?? "" })
+    // altimate_change start — the workspace this project is linked to (local binding cache, no
+    // network), named by the rows of this turn that carry workspace_id.
+    const boundWorkspace = await readLocalBinding(Instance.directory).catch(() => null)
+    const telemetryTurn = Telemetry.setContext({
+      sessionId: sessionID,
+      projectId: Instance.project?.id ?? "",
+    })
+    // The turn's own workspace, named on the rows this loop emits at its end: a cancelled turn
+    // unwinding after its replacement started must not take the replacement's entry.
+    // Always keyed, undefined for an unbound turn: a row that carries the key is never stamped from
+    // the session's entry, and the envelope drops an undefined value.
+    const turnWorkspace = { workspace_id: boundWorkspace?.datamateId }
+    // altimate_change end
     // altimate_change start — the learn kill switch disables new delivery, while retaining trusted note cleanup.
     // An unused project pays only an existence check; do not load stores, migrate,
     // create state, or even schedule async learning work on that default-off path.
@@ -827,13 +855,18 @@ export namespace SessionPrompt {
       emergencySessionEndFired = true
       Telemetry.track({
         type: "session_end",
+        ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
         timestamp: Date.now(),
         session_id: sessionID,
         total_cost: sessionTotalCost,
         total_tokens: sessionTotalTokens,
         tool_call_count: toolCallCount,
         duration_ms: Date.now() - sessionStartTime,
+        // altimate_change start — what of the bound workspace this session used
+        ...workspaceUseFields(sessionID, telemetryTurn),
+        // altimate_change end
       })
+      Telemetry.endSession(sessionID, telemetryTurn) // altimate_change — after the row, this turn only
     }
     process.once("beforeExit", emergencySessionEnd)
     process.once("exit", emergencySessionEnd)
@@ -1271,6 +1304,10 @@ export namespace SessionPrompt {
           sessionID: sessionID,
           abort,
           callID: part.callID,
+          // altimate_change start — the turn's workspace and token, for the task's own rows
+          workspaceId: boundWorkspace?.datamateId,
+          turn: telemetryTurn,
+          // altimate_change end
           extra: { bypassAgentCheck: true },
           // altimate_change start — pass effective permission rules to search result filtering
           permissions: PermissionNext.merge(taskAgent.permission, session.permission ?? []),
@@ -1320,6 +1357,7 @@ export namespace SessionPrompt {
             sessionID,
             callID: part.id,
             args: taskArgs,
+            workspaceId: boundWorkspace?.datamateId, // altimate_change — the turn's workspace, for plugin rows
           },
           result,
         )
@@ -1559,6 +1597,7 @@ export namespace SessionPrompt {
             // Cap reached — track and inject a synthetic hint so the LLM informs the user
             Telemetry.track({
               type: "plan_revision",
+              ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
               timestamp: Date.now(),
               session_id: sessionID,
               revision_number: planRevisionCount,
@@ -1643,6 +1682,7 @@ export namespace SessionPrompt {
             const action = isRejection ? "reject" : isApproval ? "approve" : "refine"
             Telemetry.track({
               type: "plan_revision",
+              ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
               timestamp: Date.now(),
               session_id: sessionID,
               revision_number: planRevisionCount,
@@ -1723,6 +1763,8 @@ export namespace SessionPrompt {
               messages: msgs,
               // altimate_change start — file rules append only to this tool result
               lessons,
+              workspaceId: boundWorkspace?.datamateId,
+              turn: telemetryTurn,
               // altimate_change end
             }),
           { step, agent: agent.name },
@@ -1785,6 +1827,7 @@ export namespace SessionPrompt {
         // "build" sessions). See the helper at the top of this namespace.
         Telemetry.track({
           type: "session_start",
+          ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
           timestamp: Date.now(),
           session_id: sessionID,
           model_id: model.id,
@@ -1836,6 +1879,7 @@ export namespace SessionPrompt {
               ) ?? "unknown"
             Telemetry.track({
               type: "task_classified",
+              ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
               timestamp: Date.now(),
               session_id: sessionID,
               intent: intent as any,
@@ -1869,7 +1913,7 @@ export namespace SessionPrompt {
           OnboardingTelemetry.isOnboardingSession(sessionID) &&
           OnboardingTelemetry.claimFirstPrompt(sessionID)
         ) {
-          void OnboardingTelemetry.emit({ type: "first_prompt_sent" }, sessionID)
+          void OnboardingTelemetry.emit({ type: "first_prompt_sent", ...turnWorkspace }, sessionID)
         }
         // altimate_change end
         // altimate_change end — session start telemetry
@@ -1911,6 +1955,9 @@ export namespace SessionPrompt {
             agent: agent.name,
             disableTraining: Flag.ALTIMATE_DISABLE_TRAINING,
             sessionID,
+            // altimate_change — the turn's workspace and token, for the injection row and its count
+            turn: telemetryTurn,
+            workspaceId: boundWorkspace?.datamateId,
           })
       // altimate_change end
       // altimate_change start — workspace identity.
@@ -2366,6 +2413,7 @@ export namespace SessionPrompt {
             // (verdict enums, counters, model names) passes through.
             Telemetry.track({
               type: "validator_check",
+              ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
               timestamp: Date.now(),
               session_id: sessionID,
               validator_name: validator.name,
@@ -2432,6 +2480,7 @@ export namespace SessionPrompt {
             })
             Telemetry.track({
               type: "validator_retries_exhausted",
+              ...turnWorkspace, // altimate_change — this turn's workspace, named explicitly
               timestamp: Date.now(),
               session_id: sessionID,
               step,
@@ -2531,6 +2580,7 @@ export namespace SessionPrompt {
     // altimate_change start — emit quality signal, tool chain, and error fingerprint events
     Telemetry.track({
       type: "task_outcome_signal",
+      ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
       timestamp: Date.now(),
       session_id: sessionID,
       signal: Telemetry.deriveQualitySignal(outcome),
@@ -2538,11 +2588,14 @@ export namespace SessionPrompt {
       step_count: step,
       duration_ms: Date.now() - sessionStartTime,
       last_tool_category: lastToolCategory || "none",
+      // altimate_change — whether workspace skills, memory or integrations were in play
+      workspace_context_used: Object.values(Telemetry.workspaceUseOf(sessionID, telemetryTurn)).some((n) => n > 0),
     })
     // Tool chain effectiveness — aggregated tool sequence + outcome
     if (toolChain.length > 0) {
       Telemetry.track({
         type: "tool_chain_outcome",
+        ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
         timestamp: Date.now(),
         session_id: sessionID,
         chain: JSON.stringify(toolChain),
@@ -2560,7 +2613,7 @@ export namespace SessionPrompt {
     }
     // Error fingerprints — one event per unique error (capped at 20)
     for (const err of errorRecords.slice(0, 20)) {
-      Telemetry.track(ErrorDetail.buildErrorFingerprintEvent(sessionID, err))
+      Telemetry.track({ ...ErrorDetail.buildErrorFingerprintEvent(sessionID, err), ...turnWorkspace }) // altimate_change — this turn's workspace, not the session's current entry
     }
     // altimate_change end — emit quality signal, tool chain, and error fingerprint events
     // altimate_change start — populate agent_outcome diagnostic fields
@@ -2584,6 +2637,7 @@ export namespace SessionPrompt {
     // altimate_change end
     Telemetry.track({
       type: "agent_outcome",
+      ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
       timestamp: Date.now(),
       session_id: sessionID,
       // altimate_change start — route through normalizeAgentName (shared with
@@ -2609,13 +2663,18 @@ export namespace SessionPrompt {
       process.off("exit", emergencySessionEnd)
       Telemetry.track({
         type: "session_end",
+        ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
         timestamp: Date.now(),
         session_id: sessionID,
         total_cost: sessionTotalCost,
         total_tokens: sessionTotalTokens,
         tool_call_count: toolCallCount,
         duration_ms: Date.now() - sessionStartTime,
+        // altimate_change start — what of the bound workspace this session used
+        ...workspaceUseFields(sessionID, telemetryTurn),
+        // altimate_change end
       })
+      Telemetry.endSession(sessionID, telemetryTurn) // altimate_change — after the row, this turn only
     }
     await Telemetry.shutdown()
     // altimate_change end
@@ -2717,6 +2776,10 @@ export namespace SessionPrompt {
     messages: MessageV2.WithParts[]
     // altimate_change start — optional for callers outside the main prompt loop
     lessons?: LessonDelivery
+    /** The workspace the calling turn resolved, for the rows its MCP calls emit, and the turn itself,
+     * so a call landing after the turn was replaced does not count toward the replacement. */
+    workspaceId?: number
+    turn?: number
     // altimate_change end
   }) {
     using _ = log.time("resolveTools")
@@ -2730,6 +2793,10 @@ export namespace SessionPrompt {
         abort: options.abortSignal!,
         messageID: input.processor.message.id,
         callID: options.toolCallId,
+        // altimate_change start — the turn's workspace and token, for the rows the tool emits
+        workspaceId: input.workspaceId,
+        turn: input.turn,
+        // altimate_change end
         // altimate_change start — batch inner calls reuse the prompt's lesson delivery state
         extra: { model: input.model, bypassAgentCheck: input.bypassAgentCheck, lessons: input.lessons },
         // altimate_change end
@@ -2845,6 +2912,7 @@ export namespace SessionPrompt {
                 sessionID: ctx.sessionID,
                 callID: ctx.callID,
                 args,
+                workspaceId: input.workspaceId, // altimate_change — the turn's workspace, for plugin rows
               },
               // altimate_change start — plugins observe the source-stamped output
               stamped,
@@ -2911,7 +2979,36 @@ export namespace SessionPrompt {
           )
           // altimate_change end
 
-          const result = await execute(args, opts)
+          // altimate_change start — a workspace integration call is tracked here, where MCP tools run
+          const startedAt = Date.now()
+          let result
+          try {
+            result = await execute(args, opts)
+          } catch (err) {
+            trackWorkspaceToolCall({
+              key,
+              clientName,
+              sessionID: ctx.sessionID,
+              messageID: ctx.messageID,
+              workspaceId: input.workspaceId,
+              turn: input.turn,
+              startedAt,
+              outcome: "error",
+              error: err,
+            })
+            throw err
+          }
+          trackWorkspaceToolCall({
+            key,
+            clientName,
+            sessionID: ctx.sessionID,
+            messageID: ctx.messageID,
+            workspaceId: input.workspaceId,
+            turn: input.turn,
+            startedAt,
+            outcome: (result as { isError?: boolean }).isError === true ? "error" : "success",
+          })
+          // altimate_change end
 
           await Plugin.trigger(
             "tool.execute.after",
@@ -2920,6 +3017,7 @@ export namespace SessionPrompt {
               sessionID: ctx.sessionID,
               callID: opts.toolCallId,
               args,
+              workspaceId: input.workspaceId, // altimate_change — the turn's workspace, for plugin rows
             },
             result,
           )
@@ -3237,6 +3335,8 @@ export namespace SessionPrompt {
                 const model = await Provider.getModel(info.model.providerID, info.model.modelID)
                 const readCtx: Tool.Context = {
                   sessionID: input.sessionID,
+                  // altimate_change — the project's binding, so the attachment read's tool rows name the workspace
+                  workspaceId: (await readLocalBinding(Instance.directory).catch(() => null))?.datamateId,
                   abort: new AbortController().signal,
                   agent: input.agent!,
                   messageID: info.id,

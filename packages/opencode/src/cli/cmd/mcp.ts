@@ -135,7 +135,7 @@ export const McpServeCommand = cmd({
     .option("connections", { type: "string", describe: "Connections JSON file" })
     .option("allow-write", { type: "boolean", default: false, describe: "Allow SQL write permissions" })
     .option("workspace-tools", { type: "boolean", default: false, describe: "Expose linked workspace context, skills and read tools" })
-    .option("all-tools", { type: "boolean", default: false, describe: "Also expose schema_inspect and sql_check" }),
+    .option("all-tools", { type: "boolean", default: false, describe: "Expose every tool on the allow-list, not just the default set" }),
   async handler(args) {
     const { serveStdio } = await import("../../altimate/mcp-server/server")
     await serveStdio({ connections: args.connections, allowWrite: args.allowWrite, allTools: args.allTools, workspaceTools: args.workspaceTools })

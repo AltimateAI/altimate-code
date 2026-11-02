@@ -98,6 +98,7 @@ export const TrainingSaveTool = Tool.define("training_save", {
         content: args.content,
         source: args.source,
         citations: args.citations,
+        sessionID: ctx.sessionID,
       })
 
       // Build response with context

@@ -22,8 +22,14 @@ import {
   type EngineOffer,
   type Toast,
 } from "../../../src/altimate/workspace/engine-overlay"
-import { OFFER_RECHECK_MS, OFFER_SKIP_TTL_MS } from "../../../src/altimate/workspace/engine-offer"
+import {
+  OFFER_RECHECK_MS,
+  OFFER_SKIP_TTL_MS,
+  decodeOfferDetail,
+  trackPrintedOffer,
+} from "../../../src/altimate/workspace/engine-offer"
 import type { CachedBinding } from "../../../src/altimate/workspace/state"
+import { Telemetry } from "../../../src/altimate/telemetry"
 
 const DIR = "/tmp/analytics"
 const ORIGINAL_FLAG = process.env.ALTIMATE_DISABLE_WORKSPACE
@@ -37,7 +43,14 @@ const binding: CachedBinding = {
   linkedAt: 0,
 } as CachedBinding
 
-type Harness = { offers: EngineOffer[]; toasts: Toast[]; printed: string[]; published: number; publishedFor: string[] }
+type Harness = {
+  offers: EngineOffer[]
+  toasts: Toast[]
+  printed: string[]
+  published: number
+  publishedFor: string[]
+  publishedDetail: string[]
+}
 
 /** No engine on PATH (or an old one) plus captured surfaces. */
 function install(opts: {
@@ -49,7 +62,7 @@ function install(opts: {
   surface?: boolean
   bound?: boolean
 }): Harness {
-  const h: Harness = { offers: [], toasts: [], printed: [], published: 0, publishedFor: [] }
+  const h: Harness = { offers: [], toasts: [], printed: [], published: 0, publishedFor: [], publishedDetail: [] }
   delete process.env.ALTIMATE_DISABLE_WORKSPACE
   syncInternals.serve = () => false
   syncInternals.headless = () => opts.headless === true
@@ -67,10 +80,11 @@ function install(opts: {
   syncInternals.printLine = (line) => {
     h.printed.push(line)
   }
-  syncInternals.publishOffer = async (sessionID) => {
+  syncInternals.publishOffer = async (sessionID, detail) => {
     if (opts.bus === false) return false
     h.published += 1
     h.publishedFor.push(sessionID)
+    h.publishedDetail.push(detail)
     return true
   }
   if (opts.surface) {
@@ -159,6 +173,43 @@ describe("offer routing — engine missing", () => {
     expect(h.published).toBe(1)
     expect(h.toasts).toEqual([])
     expect(h.printed).toEqual([])
+  })
+  test("the published offer carries its fields, and the surface that prints them reports shown", async () => {
+    const h = install({})
+    await beforeTurn("s1")
+    expect(decodeOfferDetail(h.publishedDetail[0])).toEqual({
+      reason: "engine-missing",
+      workspaceId: "42",
+      declared: 2,
+      found: undefined,
+    })
+    const rows: Record<string, unknown>[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((e) => {
+      rows.push(e as Record<string, unknown>)
+    })
+    try {
+      // An attached run prints the offer from this event in its own process and reports from it.
+      expect(trackPrintedOffer(h.publishedDetail[0], "s1")).toBe(true)
+      expect(trackPrintedOffer(undefined, "s1")).toBe(false)
+      expect(trackPrintedOffer("not json", "s1")).toBe(false)
+      expect(trackPrintedOffer(JSON.stringify({ reason: "other", workspaceId: "42" }), "s1")).toBe(false)
+      expect(trackPrintedOffer(JSON.stringify({ reason: "engine-missing", declared: "2" }), "s1")).toBe(false)
+    } finally {
+      spy.mockRestore()
+    }
+    expect(rows).toEqual([
+      expect.objectContaining({
+        type: "workspace_engine_install_prompt",
+        action: "shown",
+        surface: "bus",
+        session_id: "s1",
+        workspace_id: 42,
+        reason: "engine-missing",
+        declared: 2,
+      }),
+    ])
+    // No node fields: the probe stays off the dispatch path, so the event carries none.
+    expect("node_detected" in rows[0]!).toBe(false)
   })
   test("falls back to the toast only when the bus is unavailable", async () => {
     const h = install({ bus: false })
@@ -458,5 +509,59 @@ describe("install success is verified, not assumed", () => {
   test("a non-zero exit reports npm's last lines", async () => {
     syncInternals.runInstall = async () => ({ code: 1, timedOut: false, stderr: "boom\nEACCES denied" })
     expect(await installEngine()).toEqual({ ok: false, error: "boom EACCES denied" })
+  })
+})
+
+describe("telemetry — the install prompt", () => {
+  const rows: Array<Record<string, unknown>> = []
+  let spy: ReturnType<typeof spyOn>
+  beforeEach(() => {
+    rows.length = 0
+    spy = spyOn(Telemetry, "track").mockImplementation((e) => {
+      rows.push(e as Record<string, unknown>)
+    })
+  })
+  afterEach(() => spy.mockRestore())
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0))
+  const prompts = () => rows.filter((r) => r.type === "workspace_engine_install_prompt")
+
+  test("headless: shown once per session, naming the surface and the node that could install", async () => {
+    install({ headless: true })
+    syncInternals.nodeMajor = async () => 22
+    await beforeTurn("s1")
+    await beforeTurn("s1")
+    await settle()
+    expect(prompts()).toEqual([
+      expect.objectContaining({
+        session_id: "s1",
+        action: "shown",
+        reason: "engine-missing",
+        workspace_id: 42,
+        declared: 2,
+        surface: "headless",
+        node_detected: true,
+        node_major: 22,
+      }),
+    ])
+    // The missing engine is the attach outcome behind the prompt, reported once as well.
+    expect(rows.filter((r) => r.type === "workspace_engine_attach")).toEqual([
+      expect.objectContaining({ outcome: "engine_missing", declared: 2 }),
+    ])
+  })
+
+  test("a dialog reports shown itself when it renders, so dispatch over the bus reports nothing here", async () => {
+    install({})
+    await beforeTurn("s1")
+    await settle()
+    expect(prompts()).toHaveLength(0)
+  })
+
+  test("the toast reports shown once shown, and no node on PATH is said rather than guessed", async () => {
+    install({ bus: false })
+    await beforeTurn("s1")
+    await settle()
+    expect(prompts()).toHaveLength(1)
+    expect(prompts()[0]).toEqual(expect.objectContaining({ surface: "toast", node_detected: false }))
+    expect("node_major" in prompts()[0]).toBe(false)
   })
 })

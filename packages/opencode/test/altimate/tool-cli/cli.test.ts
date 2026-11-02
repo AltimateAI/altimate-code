@@ -81,6 +81,31 @@ describe("tool CLI", () => {
     }
   }, 90000)
 
+  test("the daemon picks up connection edits on the next call", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "tool-cli-reload-"))
+    await mkdir(path.join(dir, ".altimate-code"))
+    const config = path.join(dir, ".altimate-code", "connections.json")
+    await writeFile(config, JSON.stringify({ first_wh: { type: "duckdb", path: path.join(dir, "a.duckdb"), create: true } }))
+    const env = { ...process.env, ALTIMATE_TELEMETRY_DISABLED: "1", ALTIMATE_TOOL_DAEMON_IDLE_MS: "30000" }
+    const run = (...args: string[]) =>
+      Bun.spawn([process.execPath, "--conditions=browser", entry, "tool", ...args], { cwd: dir, env, stdout: "pipe", stderr: "pipe" })
+    const list = async () => {
+      const proc = run("run", "warehouse_list", "--json")
+      return JSON.parse(await new Response(proc.stdout).text()).output as string
+    }
+    try {
+      expect(await list()).toContain("first_wh")
+      // Wait until the daemon is the one answering.
+      for (let i = 0; i < 100 && (await run("daemon", "status").exited) !== 0; i++) await Bun.sleep(100)
+      await writeFile(config, JSON.stringify({ second_wh: { type: "duckdb", path: path.join(dir, "b.duckdb"), create: true } }))
+      const output = await list()
+      expect(output).toContain("second_wh")
+      expect(output).not.toContain("first_wh")
+    } finally {
+      await run("daemon", "stop").exited
+    }
+  }, 120000)
+
   test("--connections uses only the given file", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "tool-cli-conns-"))
     await mkdir(path.join(dir, ".altimate-code"))

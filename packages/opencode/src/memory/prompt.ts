@@ -206,6 +206,8 @@ export namespace MemoryPrompt {
     let injectedCount = 0
     const injectedTraining: MemoryBlock[] = []
     const scopesSeen = new Set<string>()
+    // altimate_change — blocks injected from the bound workspace's cloud memory
+    let workspaceBlocks = 0
 
     // Group training blocks by kind for structured display
     const byKind = new Map<TrainingKind, typeof trainingBlocks>()
@@ -244,6 +246,13 @@ export namespace MemoryPrompt {
         injectedCount++
         injectedTraining.push(item.block)
         scopesSeen.add(item.block.scope)
+        // altimate_change start — a project-scope block from the bound workspace's cloud memory counts as
+        // workspace scope; a global cloud block is the account's and applies everywhere
+        if (isRemote(item.block) && item.block.scope === "project") {
+          scopesSeen.add("workspace")
+          workspaceBlocks++
+        }
+        // altimate_change end
       }
     }
 
@@ -263,6 +272,12 @@ export namespace MemoryPrompt {
           used += needed
           injectedCount++
           scopesSeen.add(item.block.scope)
+          // altimate_change start — as above, for memory blocks
+          if (isRemote(item.block) && item.block.scope === "project") {
+            scopesSeen.add("workspace")
+            workspaceBlocks++
+          }
+          // altimate_change end
         }
       }
     }
@@ -288,12 +303,21 @@ export namespace MemoryPrompt {
       Telemetry.track({
         type: "memory_injection",
         timestamp: Date.now(),
-        session_id: Telemetry.getContext().sessionId,
+        // altimate_change — the injecting session, not the process context (another turn's in serve)
+        session_id: ctx?.sessionID ?? Telemetry.getContext().sessionId,
+        workspace_id: ctx?.workspaceId, // altimate_change — the turn's workspace, named explicitly
         block_count: injectedCount,
         total_chars: used,
         budget,
         scopes_used: [...scopesSeen],
+        // altimate_change start — workspace memory use, for memory_injection and the session's summary rows
+        ...(workspaceBlocks > 0 && { workspace_blocks: workspaceBlocks }),
       })
+      // The turn injects on every step: the count is the most blocks any step injected, not a sum.
+      if (workspaceBlocks > 0 && ctx?.sessionID) {
+        Telemetry.noteWorkspaceUse(ctx.sessionID, "memory", workspaceBlocks, "max", ctx.turn)
+      }
+      // altimate_change end
     }
 
     return injectedCount > 0 ? result : ""

@@ -1,7 +1,7 @@
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { NodePath } from "@effect/platform-node"
 import { Effect, Layer } from "effect"
-import { mkdir, mkdtemp, chmod, readdir, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, chmod, lstat, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
@@ -11,9 +11,10 @@ import { Truncate } from "@/tool/truncate"
 import { outputLimits } from "./output-settings"
 import { renderAnswer } from "../tools/answer-commit"
 import { AnswerCommitConjunction } from "../tools/answer-commit-conjunction"
+import { MAX_SCANNED_CHARACTERS } from "../tools/answer-commit-checks"
 import * as Precedence from "../workspace/precedence"
 // altimate_change start — one tool set shared by `mcp serve` and `tool`
-import { EXPOSED, WRITE_TOOLS } from "../tool-cli/allow-list"
+import { EXPOSED, MCP_OPEN_WRITE_TOOLS, WRITE_TOOLS } from "../tool-cli/allow-list"
 import { askFor, denied } from "../tool-cli/permissions"
 // altimate_change end
 import { closeScratch } from "../native/connections/scratch"
@@ -325,6 +326,7 @@ const RESULT_RETENTION_MS = 24 * 60 * 60 * 1000
 
 async function persistentDirectory(directory: string) {
   await mkdir(directory, { recursive: true, mode: 0o700 })
+  if ((await lstat(directory)).isSymbolicLink()) throw new Error(`Refusing to use the results directory ${directory}: it is a symlink.`)
   await chmod(directory, 0o700)
   const cutoff = Date.now() - RESULT_RETENTION_MS
   for (const name of await readdir(directory).catch(() => [])) {
@@ -388,7 +390,7 @@ export async function createAdapter(options: AdapterOptions = {}) {
   const shutdown = new AbortController()
   const active = new Set<Promise<Tool.ExecuteResult>>()
   // Feed the native commit checks: completed tool output and rejections, with a new turn after an accepted commit.
-  const record = (name: string, result: Tool.ExecuteResult, args: Record<string, unknown>, request?: unknown) => {
+  const push = (name: string, result: Tool.ExecuteResult, args: Record<string, unknown>, request?: unknown) => {
     if (name !== "answer_commit") {
       if (result.status !== "error") messages.push(toolMessage(name, { status: "completed", output: result.output }))
       return result
@@ -399,6 +401,31 @@ export async function createAdapter(options: AdapterOptions = {}) {
     }
     messages.push(userMessage())
     return { ...result, output: finalAnswerText(args, result.metadata.committed_text ?? result.output, request) }
+  }
+  // Tool output beyond what the commit checks can scan is dead weight, so after every call the oldest is dropped.
+  // The latest user message and the current turn's answer_commit rejections are what the checks count, so they stay.
+  const size = (message: TurnMessage) =>
+    (message.parts as { state?: { output?: unknown }; text?: string }[]).reduce(
+      (total, part) => total + String(part.state?.output ?? part.text ?? "").length,
+      0,
+    )
+  const trim = () => {
+    let turn = messages.findLastIndex((message) => (message.info as { role?: string }).role === "user")
+    let retained = messages.reduce((total, message) => total + size(message), 0)
+    for (let i = 0; retained > MAX_SCANNED_CHARACTERS && i < messages.length; ) {
+      const kept = i === turn || (i > turn && (messages[i].parts as { tool?: string }[]).some((part) => part.tool === "answer_commit"))
+      if (kept) {
+        i++
+        continue
+      }
+      retained -= size(messages.splice(i, 1)[0])
+      if (i < turn) turn--
+    }
+  }
+  const record = (...args: Parameters<typeof push>) => {
+    const result = push(...args)
+    trim()
+    return result
   }
   const advertised = new Map([...tools].filter(([name]) => options.allTools || DEFAULT_TOOLS.has(name)))
   /** sql_execute with `tables`: describe each table with schema_inspect, then run the queries, in one call. */
@@ -438,7 +465,7 @@ export async function createAdapter(options: AdapterOptions = {}) {
       signal.throwIfAborted()
       const tool = advertised.get(name)
       if (!tool) throw new Error(`Unknown tool: ${name}`)
-      if (options.cli && WRITE_TOOLS.has(name) && !allowWrite) throw denied(name, retry)
+      if (WRITE_TOOLS.has(name) && (options.cli || !MCP_OPEN_WRITE_TOOLS.has(name)) && !allowWrite) throw denied(name, retry)
       const ctx: Tool.Context = {
         sessionID,
         messageID: `mcp-${randomUUID()}` as MessageID,
@@ -473,7 +500,10 @@ export async function createAdapter(options: AdapterOptions = {}) {
         const result = await pending
         return record(name, result, args, request)
       } catch (error) {
-        if (name === "answer_commit") messages.push(toolMessage(name, { status: "error", error: String(error) }))
+        if (name === "answer_commit") {
+          messages.push(toolMessage(name, { status: "error", error: String(error) }))
+          trim()
+        }
         throw error
       } finally {
         active.delete(pending)

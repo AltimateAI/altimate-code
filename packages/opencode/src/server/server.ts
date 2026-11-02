@@ -1348,6 +1348,7 @@ export namespace Server {
                 action: report.action,
                 file_count: report.files,
                 source: "serve",
+                workspace_id: report.datamateId,
               })
             } catch {}
             return c.json({ ok: true as const, report, message: describePublish(report) })

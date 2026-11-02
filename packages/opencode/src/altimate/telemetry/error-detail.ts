@@ -411,7 +411,7 @@ export function buildErrorFingerprintEvent(
     recovered: boolean
     recoveryTool: string
   },
-): Telemetry.Event {
+): Extract<Telemetry.Event, { type: "error_fingerprint" }> {
   return {
     type: "error_fingerprint",
     timestamp: Date.now(),

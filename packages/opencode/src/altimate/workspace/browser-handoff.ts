@@ -556,7 +556,8 @@ export async function runHandoffWithOpener(
         // Import buildCliContext lazily so this module doesn't pull altimate.ts
         // into every consumer's import graph at load time.
         const { buildCliContext } = await import("../plugin/altimate")
-        const cliContext = await buildCliContext().catch((err) => {
+        // The linked project's config decides the opt-out, not the directory the command started in.
+        const cliContext = await buildCliContext(undefined, input.identifier.projectPath).catch((err) => {
           log.warn("buildCliContext failed; proceeding without", { err: String(err) })
           return ""
         })

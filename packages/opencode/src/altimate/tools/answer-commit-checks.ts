@@ -14,7 +14,7 @@ export const MAX_READING_REJECTIONS = 1
 /** Integers up to this magnitude are commonly counted from listed rows; they are not checked. */
 const SMALL_INTEGER_LIMIT = 10
 /** Bound the scan over prior tool output so a huge session cannot stall the commit. */
-const MAX_SCANNED_CHARACTERS = 4_000_000
+export const MAX_SCANNED_CHARACTERS = 4_000_000
 /** Significant digits that strip binary float noise (0.1 + 0.2) without losing real precision. */
 const FLOAT_NOISE_PRECISION = 15
 

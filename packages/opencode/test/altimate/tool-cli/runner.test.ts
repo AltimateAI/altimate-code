@@ -3,10 +3,12 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import { bootstrap } from "../../../src/cli/bootstrap"
-import { createRunner, type Runner } from "../../../src/altimate/tool-cli/runner"
+import { createRunner, resultsDirectory, type Runner } from "../../../src/altimate/tool-cli/runner"
 import { EXPOSED } from "../../../src/altimate/tool-cli/allow-list"
 import { askFor, isBlockedStatement } from "../../../src/altimate/tool-cli/permissions"
 import { Effect, Exit } from "effect"
+import { Global } from "../../../src/global"
+import { registerDefaultNativeHandlers } from "../../lib/native-handlers"
 
 let dir: string
 let runner: Runner
@@ -15,6 +17,7 @@ let finished: Promise<void>
 let ready: Promise<void>
 
 beforeAll(async () => {
+  registerDefaultNativeHandlers()
   dir = await mkdtemp(path.join(tmpdir(), "tool-cli-runner-"))
   finished = new Promise((resolve) => (done = resolve))
   ready = new Promise((resolve, reject) => {
@@ -186,5 +189,11 @@ describe("shared adapter behaviour", () => {
     } finally {
       await withWorkspace.close()
     }
+  })
+})
+
+describe("results directory", () => {
+  test("lives under the state directory", () => {
+    expect(resultsDirectory()).toBe(path.join(Global.Path.state, "tool-results"))
   })
 })

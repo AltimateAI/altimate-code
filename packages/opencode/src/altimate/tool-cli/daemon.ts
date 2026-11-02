@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { spawn } from "node:child_process"
-import { mkdirSync, realpathSync, rmSync } from "node:fs"
+import { lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
@@ -40,22 +40,51 @@ export function resolveDirectory(directory: string): string {
   }
 }
 
+// The registry's CONN_ENV_PREFIX, repeated so a client call does not load the registry.
+const CONN_ENV_PREFIX = "ALTIMATE_CODE_CONN_"
+
+/** A short digest of the caller's `ALTIMATE_CODE_CONN_*` variables, empty when there are none. A daemon reads them
+ * once at spawn, so callers with different values must not share one. */
+export function connectionEnvKey(env: NodeJS.ProcessEnv = process.env): string {
+  const entries = Object.entries(env)
+    .filter(([key, value]) => key.startsWith(CONN_ENV_PREFIX) && value)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+  if (entries.length === 0) return ""
+  return createHash("sha256").update(JSON.stringify(entries)).digest("hex").slice(0, 8)
+}
+
 /**
- * Identifies one daemon: the project directory, the explicit connections file if any, and the CLI version, so an
- * upgrade never reuses an old process and a daemon never serves connections it was not started with.
+ * Identifies one daemon: the project directory, the explicit connections file if any, the caller's connection
+ * variables and the CLI version, so an upgrade never reuses an old process and a daemon never serves connections it
+ * was not started with.
  */
-export function socketName(directory: string, version: string, connections?: string, workspaceTools?: boolean): string {
+export function socketName(
+  directory: string,
+  version: string,
+  connections?: string,
+  workspaceTools?: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
   const parts = [resolveDirectory(directory), ...(connections ? [path.resolve(connections)] : [])]
   // Appended only when set, so existing daemons keep their names.
   if (workspaceTools) parts.push("workspace-tools")
+  const connEnv = connectionEnvKey(env)
+  if (connEnv) parts.push(`conn-env:${connEnv}`)
   const key = parts.join("\0")
   const hash = createHash("sha256").update(key).digest("hex").slice(0, 12)
   return `tool-${hash}-${version.replace(/[^A-Za-z0-9.-]/g, "_")}`
 }
 
 /** A named pipe on Windows, otherwise a socket file under the global state path (or the temp dir when that path is too long). */
-export function socketPath(directory: string, version: string, base?: string, connections?: string, workspaceTools?: boolean): string {
-  const name = socketName(directory, version, connections, workspaceTools)
+export function socketPath(
+  directory: string,
+  version: string,
+  base?: string,
+  connections?: string,
+  workspaceTools?: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const name = socketName(directory, version, connections, workspaceTools, env)
   if (process.platform === "win32") return `\\\\.\\pipe\\altimate-code-${name}`
   const preferred = path.join(base ?? path.join(Global.Path.state, "tool-daemon"), `${name}.sock`)
   if (base !== undefined || Buffer.byteLength(preferred) <= MAX_SOCKET_PATH) return preferred
@@ -123,13 +152,10 @@ function exchange(socket: net.Socket, request: Request): Promise<Response> {
   })
 }
 
-/** Sends one request. Resolves undefined when no daemon is listening; a stale socket file is removed. */
-export async function send(file: string, request: Request, cleanStale = true): Promise<Response | undefined> {
+/** Sends one request. Resolves undefined when no daemon is listening. Only a starting daemon removes stale sockets. */
+export async function send(file: string, request: Request): Promise<Response | undefined> {
   const socket = await connect(file)
-  if (!socket) {
-    if (cleanStale) removeSocket(file)
-    return undefined
-  }
+  if (!socket) return undefined
   return exchange(socket, request)
 }
 
@@ -141,6 +167,8 @@ export interface DaemonOptions {
   idleMs?: number
   /** Closes embedded file-database connections between requests so their file locks are released. */
   releaseFiles?: () => Promise<void>
+  /** Reloads connections edited since the last reload. Called before a `run` that has no other request in flight. */
+  refreshConnections?: () => Promise<void>
 }
 
 export interface Daemon {
@@ -157,6 +185,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const startedAt = Date.now()
   let requests = 0
   let inflight = 0
+  let reloading: Promise<void> | undefined
   let stopping: Promise<void> | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   const sockets = new Set<net.Socket>()
@@ -174,9 +203,21 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     requests++
     if (typeof request.name !== "string")
       return { id: request.id, status: "error", title: "Invalid request", output: "A tool name is required.", metadata: {} }
+    // A reload closes cached connectors, so it runs only when no other request is in flight, and requests that
+    // arrive meanwhile wait for it. A skipped check loses nothing: the edit stays pending until a request runs alone.
+    if (reloading) await reloading.catch(() => {})
+    if (inflight === 1 && options.refreshConnections) {
+      reloading = options.refreshConnections()
+      try {
+        await reloading
+      } catch (error) {
+        const output = error instanceof Error ? error.message : String(error)
+        return { id: request.id, status: "error", title: "Connections reload failed", output, metadata: {} }
+      } finally {
+        reloading = undefined
+      }
+    }
     const result = await options.runner.run(request.name, request.args ?? {}, { allowWrite: request.allowWrite === true })
-    // Release DuckDB/SQLite file locks between calls so `dbt build` and other clients can open the file.
-    if (inflight <= 1) await options.releaseFiles?.().catch(() => {})
     return { id: request.id, ...result }
   }
 
@@ -204,13 +245,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           output: error instanceof Error ? error.message : String(error),
           metadata: {},
         }))
-        .then((response) => {
+        .then(async (response) => {
+          inflight--
+          // Release DuckDB/SQLite file locks once idle, before replying, so a client running `dbt build` next finds the file free.
+          if (inflight === 0) await options.releaseFiles?.().catch(() => {})
           if (!socket.destroyed) socket.write(JSON.stringify(response) + "\n")
         })
-        .finally(() => {
-          inflight--
-          arm()
-        })
+        .finally(arm)
     })
   })
 
@@ -238,7 +279,33 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       })
     })
 
-  if (process.platform !== "win32") mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+  const alreadyRunning = () => new Error(`A tool daemon is already running for ${directory}.`)
+  // Serializes bind and stale-socket recovery so two starting daemons never unlink each other's fresh socket.
+  const lock = `${file}.lock`
+  const acquire = () => {
+    if (process.platform === "win32") return
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+    const dir = lstatSync(path.dirname(file))
+    if (dir.isSymbolicLink() || (process.getuid && dir.uid !== process.getuid()))
+      throw new Error(`Refusing to use the tool daemon directory ${path.dirname(file)}: it is a symlink or owned by another user.`)
+    for (let attempt = 0; ; attempt++) {
+      try {
+        mkdirSync(lock, { mode: 0o700 })
+        return
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error
+        let age = 0
+        try {
+          age = Date.now() - statSync(lock).mtimeMs
+        } catch {
+          continue
+        }
+        if (age < SPAWN_WAIT_MS || attempt > 0) throw alreadyRunning()
+        rmSync(lock, { recursive: true, force: true })
+      }
+    }
+  }
+  acquire()
   try {
     await listen()
   } catch (error) {
@@ -246,10 +313,12 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     const live = await connect(file)
     if (live) {
       live.destroy()
-      throw new Error(`A tool daemon is already running for ${directory}.`)
+      throw alreadyRunning()
     }
     removeSocket(file)
     await listen()
+  } finally {
+    if (process.platform !== "win32") rmSync(lock, { recursive: true, force: true })
   }
   arm()
   return { file, closed, stop }
@@ -293,7 +362,7 @@ export async function runViaDaemon(
   const deadline = Date.now() + (options.waitMs ?? SPAWN_WAIT_MS)
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, POLL_MS))
-    const reply = await send(file, request, false)
+    const reply = await send(file, request)
     if (reply) return reply
   }
   return undefined

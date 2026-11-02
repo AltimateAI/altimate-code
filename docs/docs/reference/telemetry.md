@@ -37,7 +37,7 @@ We collect the following categories of events:
 | `error_recovered` | Successful recovery from a transient error (error type, strategy, attempt count) |
 | `mcp_server_census` | MCP server capabilities after connect (tool and resource counts, but no tool names) |
 | `context_overflow_recovered` | Context overflow is handled (strategy) |
-| `skill_used` | A skill is loaded (skill name, source — `builtin`, `global`, or `project`, and trigger — `user`, `auto`, or `suggestion` — no skill content) |
+| `skill_used` | A skill is loaded (skill name, source — `builtin`, `global`, `project`, or `workspace`, and trigger — `user`, `auto`, or `suggestion` — no skill content) |
 | `plan_revision` | A plan revision occurs in Plan mode (revision_number, action: `refine`, `approve`, `reject`, or `cap_reached`) |
 | `feature_suggestion` | A post-connection feature suggestion is shown (suggestion_type, suggestions_shown, warehouse_type — no user input) |
 | `sql_execute_failure` | A SQL execution fails (warehouse type, query type, error message, PII-masked SQL — no raw values) |
@@ -76,6 +76,37 @@ We collect the following categories of events:
 | `review_post_outcome` | Whether a review was published to GitHub — `not_requested`, `not_attempted`, `target_unresolved`, `full`, `partial`, or `summary_failed`, plus duration. Emitted on the **CLI path only** — the `dbt_pr_review` tool completes reviews but never publishes, so a `review_run` with `invocation: tool` has no post event and that is not a failure. Within the CLI path there is exactly one per **completed** review: a review that failed emits `review_run: failed` and no post event, so absence there means the review failed rather than that an event was lost. `not_attempted` is publication requested but never reached (a bad `--output` path, a stdout write error). No repository, PR, or comment content. |
 
 Each event includes a timestamp, session ID, a per-launch correlation ID (`launch_id` — a random value regenerated every process start, not persisted and not derived from your machine or identity; it exists only to group events from the same run), CLI version, and a machine ID (a random UUID stored in `~/.altimate/machine-id`, generated once and not derived from your hardware or identity). When the machine is signed in to Altimate, each event also carries `user_id` and `tenant`, described under [User Identification](#new-user-identification).
+
+### Workspace events
+
+These events describe projects linked to an Altimate workspace. A workspace is identified only by its numeric id (`workspace_id`, or `to_workspace_id` and `from_workspace_id` on a switch). No workspace name, project path, repository remote, skill content, memory content or prompt text is sent.
+
+| Event | Description |
+|-------|-------------|
+| `workspace_linked` | A project was linked to a workspace and the server confirmed it. `how` is `bind_existing`, `create_and_bind`, `rebind_remote` or `rebind_path`. |
+| `workspace_created` | A workspace was created from the CLI or the TUI. `how` is `create_and_bind`, or `create_unbound` when the link follows as a separate step. |
+| `workspace_link_failed` | A link step failed. `how` names the step, and `reason` is a class: `auth`, `not_found`, `network`, `conflict` or `other`. No error text. |
+| `workspace_unlinked` | A project was unlinked, with the workspace id when the CLI knew it. |
+| `workspace_switched` | A linked project was moved to another workspace. `how` is `rebind_remote` or `rebind_path`. |
+| `workspace_auth_expired` | A workspace call was answered 401: the sign-in has expired. Carries `endpoint` and `status`. |
+| `workspace_api_error` | A workspace call failed. `status_class` is `4xx`, `5xx`, `network`, `timeout`, or `response` (a success status with an empty or unreadable body), plus the HTTP `status` when there was one. A 403 is reported here, not as expired auth. A status the caller handles as an answer is not a failure and is not reported, such as a 404 from the link lookups ("not linked") or from an unlink ("already unlinked"). `GET /users/me` is not a workspace call and is not reported. |
+| `starter_shown` | The "what this workspace provides" starter was served after a link: to the TUI, to the IDE extension's chat, or printed by `altimate-code link`. It counts the starter being served, so a client that closes before rendering it is still counted. Contains the counts of skills and integrations when known, `knowledge` (`off`, `all`, `selected` or `unknown`) and `memory_enabled`. |
+| `starter_action_picked` | The user chose an option from the TUI starter: `action` is `prompt`, `open` or `done`, with `prompt_index` (its position) for a suggested prompt. Never the prompt's text. |
+| `workspace_memory_contributed` | A memory block was written back to the workspace's shared memory, including the existing blocks seeded when a project is linked. `block_count` is per write. No memory content. |
+| `workspace_sync_failed` | Syncing the workspace's skills or memory to this project changed to failing. `kind` is `skills` or `memory`, and `reason` is a class. Sent once per change, not on every retry. |
+| `workspace_engine_attach` | A session's connection to the workspace integration engine settled on an outcome (`attached`, `engine_missing`, `engine_too_old`, `connect_failed`, `disabled` or `unbound`), with the engine version and counts of integrations. Sent when the outcome changes, not every turn. |
+| `workspace_engine_install_prompt` | The offer to install or update the engine: `action` is `shown`, `accepted`, `installed`, `install_failed`, `copied` or `declined`, with the `reason` and whether Node.js was found and its major version. |
+| `workspace_engine_precedence` | Whether the workspace's integrations take precedence over the project's own connections, with counts of shadowed connection types and connections. Sent when the state changes. |
+| `workspace_engine_redirect` | A `datamate_manager` call was refused because the project is linked to a workspace. Contains the tool and operation names. |
+| `workspace_engine_error` | The engine failed at a stage (`attach`, `install` or `precedence`). `message` is masked (paths, credentials and quoted strings are replaced) and capped at 200 characters. |
+
+Other rows gain workspace fields in a linked project:
+
+- Every event carries `client: "altimate-code"`, which names the product that sent it. `source` still says how the CLI was launched.
+- Rows of a turn in a linked project carry that project's `workspace_id`: `session_start`, `session_end`, `first_prompt_sent`, `first_job_completed`, `skill_used`, `skill_published`, `memory_injection`, `agent_outcome`, `task_classified`, `task_outcome_signal`, `tool_chain_outcome`, `core_failure`, `error_fingerprint`, `plan_revision`, `sql_quality` and `tool_call`.
+- `session_end` counts the workspace skills, memory blocks and integration calls the session used. `memory_injection` counts the workspace's blocks. `task_outcome_signal` says whether workspace context was used.
+- A call to a workspace integration through the engine is reported as a `tool_call` with `tool_type: "mcp"` and `via_workspace: true`. As for other tools, there are no arguments or outputs, and an error message is masked and capped at 500 characters.
+- An `endpoint` value is a route label with every id and path segment replaced by `:id`, for example `POST /datamate-project-bindings/bind`. It never contains an id, a file path or a query string.
 
 ### Notes on the review events
 

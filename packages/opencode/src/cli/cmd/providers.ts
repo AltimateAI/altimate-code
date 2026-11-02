@@ -19,6 +19,7 @@ import type { Hooks } from "@opencode-ai/plugin"
 import { Process } from "@/util/process"
 import { errorMessage } from "@/util/error"
 import { FreeTier } from "@/altimate/free/client"
+import { AltimateApi } from "@/altimate/api/client"
 import { text } from "node:stream/consumers"
 import { Effect, Option } from "effect"
 
@@ -39,6 +40,18 @@ const cliTry = <Value>(message: string, fn: () => PromiseLike<Value>) =>
     try: fn,
     catch: (error) => new CliError({ message: message + errorMessage(error) }),
   })
+
+// altimate_change start — resolve a pending wait on Ctrl+C (SIGINT) instead of letting it run to timeout
+const SIGNIN_CANCELED = Symbol("signin-canceled")
+const untilSigint = <Value>(promise: Promise<Value>) => {
+  let onSigint = () => {}
+  const canceled = new Promise<typeof SIGNIN_CANCELED>((resolve) => {
+    onSigint = () => resolve(SIGNIN_CANCELED)
+    process.once("SIGINT", onSigint)
+  })
+  return Promise.race([promise, canceled]).finally(() => process.off("SIGINT", onSigint))
+}
+// altimate_change end
 
 const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
   plugin: { auth: PluginAuth },
@@ -107,11 +120,14 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
       if (authorize.instructions) {
         yield* Prompt.log.info(authorize.instructions)
       }
-      const spinner = Prompt.spinner()
-      yield* spinner.start("Waiting for authorization...")
-      const result = yield* cliTry("Failed to authorize: ", () => authorize.callback())
+      // altimate_change start — no clack spinner here: its raw-mode stdin turns Ctrl+C into
+      // process.exit(0), so a canceled sign-in looked successful to `&&` chains and scripts.
+      yield* Prompt.log.info("Waiting for authorization... (Ctrl+C to cancel)")
+      const result = yield* cliTry("Failed to authorize: ", () => untilSigint(authorize.callback()))
+      if (result === SIGNIN_CANCELED) return yield* fail("Sign-in canceled.", 130)
+      // altimate_change end
       if (result.type === "failed") {
-        yield* spinner.stop("Failed to authorize", 1)
+        yield* Prompt.log.error("Failed to authorize")
       }
       if (result.type === "success") {
         const saveProvider = result.provider ?? provider
@@ -132,7 +148,7 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
             ...(result.metadata ? { metadata: result.metadata } : {}),
           })
         }
-        yield* spinner.stop("Login successful")
+        yield* Prompt.log.success("Login successful")
       }
     }
 
@@ -605,6 +621,14 @@ export const ProvidersLogoutCommand = effectCmd({
         label: (database[key]?.name || key) + UI.Style.TEXT_DIM + " (" + value.type + ")",
         value: key,
       }))
+    // Credentials saved only to ~/.altimate/altimate.json (TUI paste dialog) have no auth-store entry.
+    const hasAltimateBackendFile = yield* Effect.promise(() => AltimateApi.isConfigured())
+    if (hasAltimateBackendFile && !options.some((option) => option.value === "altimate-backend")) {
+      options.push({
+        label: (database["altimate-backend"]?.name || "altimate-backend") + UI.Style.TEXT_DIM + " (api)",
+        value: "altimate-backend",
+      })
+    }
     if (hasAltimateBaseCredential || hasLegacyAltimateBaseCredential || hasAltimateBaseState) {
       options.push({
         label: "Altimate Base" + UI.Style.TEXT_DIM + " (managed)",
@@ -637,6 +661,17 @@ export const ProvidersLogoutCommand = effectCmd({
       yield* Effect.orDie(authSvc.remove(FreeTier.PROVIDER_ID))
       yield* Prompt.outro("Logout successful")
       return
+    }
+    if (provider === "altimate-backend") {
+      // Browser sign-in persists the gateway key to ~/.altimate/altimate.json, which the provider
+      // loader and every workspace call read first, so sign-out must remove it too.
+      // On failure the saved key and the auth-store entry are both kept, so fixing the cause and
+      // re-running logout can still match and remove every copy of the key.
+      const removed = yield* cliTry("Failed to sign out of Altimate; fix the cause below and run logout again: ", () =>
+        AltimateApi.signOut(process.cwd()),
+      )
+      for (const entry of removed) yield* Prompt.log.info(`Removed MCP server "${entry.name}" from ${entry.path}`)
+      if (removed.length > 0) yield* Prompt.log.info("Add the datamate again after signing in to restore it.")
     }
     // altimate_change end
     yield* Effect.orDie(authSvc.remove(provider))
