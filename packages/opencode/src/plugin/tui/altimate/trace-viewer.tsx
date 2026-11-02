@@ -12,7 +12,7 @@ import type { TuiPlugin, TuiPluginApi } from "@opencode-ai/plugin/tui"
 import type { BuiltinTuiPlugin } from "@opencode-ai/tui/builtins"
 import { createMemo, createResource, onMount } from "solid-js"
 import fsAsync from "fs/promises"
-import open from "open"
+import { openUrl } from "@opencode-ai/core/open"
 import { Trace } from "@/altimate/observability/tracing"
 import { renderTraceViewer } from "@/altimate/observability/viewer"
 import { Log } from "@/util/log"
@@ -256,7 +256,7 @@ const tui: TuiPlugin = async (api) => {
         return
       }
       const url = getTraceViewerUrl(sessionID, tracesDir)
-      await open(url)
+      await openUrl(url)
       api.ui.toast({ variant: "info", message: `Trace viewer: ${url}`, duration: 6000 })
     } catch (err) {
       Log.Default.error(`Failed to open trace viewer: ${err}`)

@@ -57,6 +57,14 @@ export function setBrowserOpenerForTests(fn: (url: string) => void): () => void 
 }
 
 function launchBrowser(url: string): void {
+  // The server/IdP supplies this URL. Refuse non-web protocol handlers; the notice still carries it for manual copy.
+  try {
+    const protocol = new URL(url).protocol
+    if (protocol !== "http:" && protocol !== "https:") return
+  } catch {
+    return
+  }
+
   const [command, args] =
     process.platform === "win32"
       ? // No shell, so `&` in the SAML query needs no escaping (unlike `cmd /c start`).

@@ -19,7 +19,7 @@
 // See docs `workspace-browser-handoff-plan-v3.md` for the design context.
 import { createServer, type Server } from "http"
 import { randomBytes } from "crypto"
-import open from "open"
+import { openUrl } from "@opencode-ai/core/open"
 
 import { AltimateApi } from "@/altimate/api/client"
 import { Log } from "@/altimate/util/log"
@@ -424,7 +424,7 @@ export interface OpenBrowserHandoffInput {
  * error is expressed as ``{ok: false, reason}`` so the caller can toast the
  * appropriate message. */
 export async function openWorkspaceBrowserHandoff(input: OpenBrowserHandoffInput): Promise<HandoffResult> {
-  return runHandoffWithOpener(input, (url) => open(url).then(() => undefined))
+  return runHandoffWithOpener(input, (url) => openUrl(url).then(() => undefined))
 }
 
 /** Same as ``openWorkspaceBrowserHandoff`` but takes the browser-open callback

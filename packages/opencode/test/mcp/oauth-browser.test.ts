@@ -1,6 +1,6 @@
-import { expect, mock, beforeEach } from "bun:test"
+import { expect, mock, beforeEach, spyOn } from "bun:test"
 import { EventEmitter } from "events"
-import { Deferred, Effect, Exit, Fiber, Layer, Option } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option } from "effect"
 import { awaitWithTimeout, testEffect } from "../lib/effect"
 import type { MCP as MCPNS } from "../../src/mcp/index"
 
@@ -8,6 +8,7 @@ import type { MCP as MCPNS } from "../../src/mcp/index"
 let openShouldFail = false
 let openCalledWith: string | undefined
 let openDeferred: Deferred.Deferred<string> | undefined
+let authorizationUrl = "https://auth.example.com/authorize?client_id=test"
 // altimate_change start — token exchanges the transport performed
 let tokenExchanges = 0
 // altimate_change end
@@ -64,7 +65,7 @@ void mock.module("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
     async start() {
       // Simulate OAuth redirect by calling the authProvider's redirectToAuthorization
       if (this.authProvider?.redirectToAuthorization) {
-        await this.authProvider.redirectToAuthorization(new URL("https://auth.example.com/authorize?client_id=test"))
+        await this.authProvider.redirectToAuthorization(new URL(authorizationUrl))
       }
       throw new MockUnauthorizedError()
     }
@@ -116,6 +117,7 @@ beforeEach(() => {
   openShouldFail = false
   openCalledWith = undefined
   openDeferred = undefined
+  authorizationUrl = "https://auth.example.com/authorize?client_id=test"
   transportCalls.length = 0
   // altimate_change start — see tokenExchanges
   tokenExchanges = 0
@@ -184,6 +186,31 @@ const authenticateScoped = (name: string) =>
       Effect.forkScoped,
     )
   })
+
+for (const url of ["file:///tmp/authorize", "ms-msdt:/id PCWDiagnostic"]) {
+  mcpTest.instance(
+    `refuses server-supplied authorization URL ${url} before opening a browser`,
+    () =>
+      Effect.gen(function* () {
+        yield* withCallbackStop
+        const callbackServer = spyOn(McpOAuthCallback, "ensureRunning").mockResolvedValue(undefined)
+        yield* Effect.addFinalizer(() => Effect.sync(() => callbackServer.mockRestore()))
+        authorizationUrl = url
+        const mcp = yield* service
+        const result = yield* Effect.exit(
+          mcp.authenticate("test-unsafe-oauth-server").pipe(Effect.timeout("2 seconds")),
+        )
+
+        expect(Exit.isFailure(result)).toBe(true)
+        if (Exit.isFailure(result)) {
+          expect(Cause.pretty(result.cause)).toContain(`returned a ${new URL(url).protocol} authorization URL`)
+        }
+        expect(openCalledWith).toBeUndefined()
+        expect(tokenExchanges).toBe(0)
+      }),
+    { config: config("test-unsafe-oauth-server") },
+  )
+}
 
 mcpTest.instance(
   "BrowserOpenFailed event is published when open() throws",

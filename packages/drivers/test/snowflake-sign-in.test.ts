@@ -4,14 +4,22 @@
  * sign-in that never came back is an actionable error, not the SDK's raw timeout.
  * Non-interactive logins get an upper bound instead of the SDK's 300 s retry floor.
  */
-import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
+import * as childProcess from "child_process"
+import { EventEmitter } from "node:events"
 import { connect, SSO_WAIT_MS } from "../src/snowflake"
-import { onBrowserSignIn, redactSignInUrl, setBrowserOpenerForTests, type BrowserSignInNotice } from "../src/sign-in"
+import {
+  onBrowserSignIn,
+  openInBrowser,
+  redactSignInUrl,
+  setBrowserOpenerForTests,
+  type BrowserSignInNotice,
+} from "../src/sign-in"
 
 const SIGN_IN_URL = "https://idp.example.com/sso/saml?SAMLRequest=abc&RelayState=xyz"
 
 /** snowflake-sdk stand-in: `browser` decides what the SSO sign-in does; `connect` what a plain login does. */
-function fakeSdk(opts: { browser?: "complete" | "timeout" | "no-prompt"; connect?: "ok" | "never" }) {
+function fakeSdk(opts: { browser?: "complete" | "timeout" | "no-prompt"; connect?: "ok" | "never"; url?: string }) {
   const created: Array<{ options: any; destroyed: boolean }> = []
   const sdk = {
     configure() {},
@@ -20,7 +28,7 @@ function fakeSdk(opts: { browser?: "complete" | "timeout" | "no-prompt"; connect
       created.push(entry)
       return {
         async connectAsync(cb: (err: Error | null) => void) {
-          if (opts.browser !== "no-prompt") options.openExternalBrowserCallback?.(SIGN_IN_URL)
+          if (opts.browser !== "no-prompt") options.openExternalBrowserCallback?.(opts.url ?? SIGN_IN_URL)
           setTimeout(() => {
             if (opts.browser === "timeout") {
               cb(new Error("Error while getting SAML token: Browser action timed out after 120000 ms."))
@@ -63,6 +71,46 @@ afterEach(() => {
 })
 
 describe("Snowflake browser sign-in", () => {
+  test.each(["file:///etc/hosts", "javascript:alert(1)", "ms-msdt:/id PCWDiagnostic", "not a url", "", "https://"])(
+    "refuses to launch %j but still announces it for manual copy",
+    async (url) => {
+      restoreOpener()
+      const spawn = spyOn(childProcess, "spawn").mockImplementation(() => {
+        throw new Error("Unexpected browser launch")
+      })
+      try {
+        const { sdk } = fakeSdk({ browser: "complete", url })
+        const c = await connect(sso, sdk)
+        await c.connect()
+
+        expect(spawn).not.toHaveBeenCalled()
+        expect(notices).toEqual([
+          { warehouse: "snowflake", account: "acme-xy123", phase: "waiting", url, timeoutMs: SSO_WAIT_MS },
+          { warehouse: "snowflake", account: "acme-xy123", phase: "completed" },
+        ])
+      } finally {
+        spawn.mockRestore()
+      }
+    },
+  )
+
+  test.each(["http://idp.example.com/sso", SIGN_IN_URL, "HTTPS://idp.example.com/sso"])(
+    "launches the browser for %s",
+    (url) => {
+      restoreOpener()
+      const child = Object.assign(new EventEmitter(), { unref() {} }) as childProcess.ChildProcess
+      const spawn = spyOn(childProcess, "spawn").mockReturnValue(child)
+      try {
+        openInBrowser(url)
+
+        expect(spawn).toHaveBeenCalledTimes(1)
+        expect(spawn.mock.calls[0][1]).toContain(url)
+      } finally {
+        spawn.mockRestore()
+      }
+    },
+  )
+
   test("the sign-in page is announced with its time limit, opened, and its completion reported", async () => {
     const { sdk, created } = fakeSdk({ browser: "complete" })
     const c = await connect(sso, sdk)

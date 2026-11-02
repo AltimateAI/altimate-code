@@ -4,7 +4,9 @@ import { cmd } from "./cmd"
 import { withNetworkOptions, resolveNetworkOptions } from "../network"
 import { AppRuntime } from "../../effect/app-runtime"
 import { Flag } from "../../flag/flag"
-import open from "open"
+// altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+import { openUrl } from "@opencode-ai/core/open"
+// altimate_change end
 import { networkInterfaces } from "os"
 // altimate_change start — auto-register Altimate Base before the server (and its provider state) starts
 import { FreeTier } from "../../altimate/free/client"
@@ -81,11 +83,15 @@ export const WebCommand = cmd({
       }
 
       // Open localhost in browser
-      open(localhostUrl.toString()).catch(() => {})
+      // altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+      openUrl(localhostUrl.toString()).catch(() => {})
+      // altimate_change end
     } else {
       const displayUrl = server.url.toString()
       UI.println(UI.Style.TEXT_INFO_BOLD + "  Web interface:    ", UI.Style.TEXT_NORMAL, displayUrl)
-      open(displayUrl).catch(() => {})
+      // altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+      openUrl(displayUrl).catch(() => {})
+      // altimate_change end
     }
 
     await new Promise(() => {})

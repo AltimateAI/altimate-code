@@ -1,5 +1,7 @@
 import { RGBA, TextAttributes } from "@opentui/core"
-import open from "open"
+// altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+import { openUrl } from "@opencode-ai/core/open"
+// altimate_change end
 import { createSignal } from "solid-js"
 import { selectedForeground, useTheme } from "../context/theme"
 import { useDialog, type DialogContext } from "../ui/dialog"
@@ -21,7 +23,9 @@ export type DialogRetryActionProps = {
 }
 
 function runAction(props: DialogRetryActionProps, dialog: ReturnType<typeof useDialog>) {
-  if (props.link) open(props.link).catch(() => {})
+  // altimate_change start — upstream_fix: backport 29f07e0c69 restrict browser URLs to http(s)
+  if (props.link) openUrl(props.link).catch(() => {})
+  // altimate_change end
   props.onClose?.()
   dialog.clear()
 }
