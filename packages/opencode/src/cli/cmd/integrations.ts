@@ -2,10 +2,11 @@
 //
 // `integrations`: one-click local integrations for GitHub, Jira and Linear. Detects existing
 // credentials, collects the workspace's own credentials (fields, drafts, clipboard, validation) and
-// keeps them local or saves them as the caller's own workspace connection. The workspace side is
-// mocked unless signed in.
+// keeps them local or saves them as the caller's own workspace connection. Signed in, it talks to the
+// real workspace; without a login the credentials stay on this machine (or a stand-in workspace in mock and demo modes).
 import type { Argv } from "yargs"
 import os from "node:os"
+import open from "open"
 import { cmd } from "./cmd"
 import { UI } from "../ui"
 import * as core from "../../altimate/integrations/core"
@@ -34,7 +35,7 @@ const SYNC_LABEL: Record<ProviderStatus["sync"], string> = {
 
 function printStatus(result: StatusResult, title: string) {
   out()
-  out(`${S.TEXT_HIGHLIGHT_BOLD}◆ ${title}${S.TEXT_NORMAL}  ${S.TEXT_DIM}${result.workspace.linked ? `workspace ${result.workspace.name}` : "workspace not linked"} (${result.workspace.tenant})${S.TEXT_NORMAL}`)
+  out(`${S.TEXT_HIGHLIGHT_BOLD}◆ ${title}${S.TEXT_NORMAL}  ${S.TEXT_DIM}${result.workspace.linked ? `workspace ${result.workspace.name}` : "workspace not linked"}${result.workspace.tenant ? ` (${result.workspace.tenant})` : ""}${S.TEXT_NORMAL}`)
   out()
   for (const p of result.providers) {
     const v = STATE_VIEW[p.state]
@@ -63,9 +64,13 @@ const StatusCommand = cmd({
   describe: "show the GitHub, Jira and Linear integrations",
   builder: (yargs: Argv) => yargs.option("json", jsonOption),
   handler: async (args) => {
-    const result = await core.statusRemote()
-    if (args.json) return json(result)
-    printStatus(result, "Integrations")
+    try {
+      const result = await core.statusRemote()
+      if (args.json) return json(result)
+      printStatus(result, "Integrations")
+    } catch (e) {
+      fail(e, args.json)
+    }
   },
 })
 
@@ -74,10 +79,14 @@ const DetectCommand = cmd({
   describe: "scan this machine for existing credentials (read-only, secrets are never printed)",
   builder: (yargs: Argv) => yargs.option("json", jsonOption),
   handler: async (args) => {
-    core.recordDetections(core.scan())
-    const result = await core.statusRemote()
-    if (args.json) return json(result)
-    printStatus(result, "Detected integrations")
+    try {
+      await core.recordDetections(core.scan())
+      const result = await core.statusRemote()
+      if (args.json) return json(result)
+      printStatus(result, "Detected integrations")
+    } catch (e) {
+      fail(e, args.json)
+    }
   },
 })
 
@@ -89,7 +98,7 @@ function renderSync(o: core.SyncOutcome) {
   out(`  ${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} synced to workspace (private)`)
 }
 
-async function runSync(ids: ProviderId[], asJson: boolean) {
+async function runSync(ids: ProviderId[], asJson: boolean, skipSynced = false) {
   const outcomes: core.SyncOutcome[] = []
   for (const id of ids) {
     if (!asJson && !core.isBlocked(id)) out(`\n${S.TEXT_NORMAL_BOLD}${core.PROVIDER_NAMES[id]}${S.TEXT_NORMAL}`)
@@ -97,11 +106,12 @@ async function runSync(ids: ProviderId[], asJson: boolean) {
       id,
       asJson ? undefined : (label, done) => done && out(`  ${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${label}`),
       asJson ? 0 : 250,
+      skipSynced,
     )
     outcomes.push(o)
     if (!asJson) renderSync(o)
   }
-  if (asJson) json({ workspace: await core.liveWorkspaceInfo(), results: outcomes.map(({ steps, ...rest }) => ({ ...rest, steps: steps.map((s) => s.label) })) })
+  if (asJson) json({ workspace: await core.liveWorkspaceInfo(), results: outcomes })
   else out()
   return outcomes
 }
@@ -116,9 +126,10 @@ const SyncCommand = cmd({
       .option("json", jsonOption),
   handler: async (args) => {
     try {
-      await runSync(args.provider || args.all ? parseProviders(args.provider, args.all) : core.PROVIDER_IDS, args.json)
+      const outcomes = await runSync(args.provider || args.all ? parseProviders(args.provider, args.all) : core.PROVIDER_IDS, args.json, !args.provider)
+      if (outcomes.some((o) => o.result === "failed")) process.exitCode = 1
     } catch (e) {
-      fail(e)
+      fail(e, args.json)
     }
   },
 })
@@ -135,13 +146,20 @@ function policyCommand(name: "block" | "unblock") {
         .option("json", jsonOption),
     handler: async (args) => {
       try {
-        const ids = parseProviders(args.provider, args.all)
-        core.setBlocked(ids, blocking)
-        if (args.json) return json({ policy: name === "block" ? "blocked" : "allowed", providers: ids })
+        const wanted = parseProviders(args.provider, args.all)
+        // A connection saved in the workspace has no copy here to keep, so it cannot be blocked. One only the workspace holds counts too. If the workspace cannot be read the block is still set (it only stops later uploads) and a warning says so.
+        const { blocked: ids, refused: held, unchecked } = blocking ? await core.blockProviders(wanted) : { blocked: wanted, refused: [] as ProviderId[], unchecked: [] as ProviderId[] }
+        if (!blocking) await core.setBlocked(ids, false)
+        if (held.length) process.exitCode = 1
+        const warning = unchecked.length ? `Could not check the workspace for ${unchecked.map((id) => core.PROVIDER_NAMES[id]).join(", ")}; blocked here anyway. If a copy is already saved there it stays until you disconnect it.` : null
+        const refusal = (id: ProviderId) => `${core.PROVIDER_NAMES[id]} is saved in your workspace only. To keep it on this machine run: altimate integrations connect ${id} --local-only`
+        if (args.json) return json({ policy: name === "block" ? "blocked" : "allowed", providers: ids, ...(held.length ? { refused: held, message: held.map(refusal).join(" ") } : {}), ...(warning ? { warning } : {}) })
         for (const id of ids)
           out(`${blocking ? S.TEXT_WARNING + "⊘" : S.TEXT_SUCCESS + "✓"}${S.TEXT_NORMAL} ${core.PROVIDER_NAMES[id]} ${blocking ? "will stay on this machine" : "can sync to the workspace"}`)
+        for (const id of held) UI.error(refusal(id))
+        if (warning) out(`${S.TEXT_WARNING}${warning}${S.TEXT_NORMAL}`)
       } catch (e) {
-        fail(e)
+        fail(e, args.json)
       }
     },
   })
@@ -155,13 +173,13 @@ const DisconnectCommand = cmd({
   handler: async (args) => {
     try {
       const id = parseProviders(args.provider, false)[0]
-      const removedLocal = core.disconnect(id)
-      const removedRemote = await core.disconnectRemote(id)
+      const { removedLocal, removedRemote, detached, detachMessage } = await core.disconnect(id)
       const removed = removedLocal || removedRemote > 0
-      if (args.json) return json({ provider: id, status: "disconnected", removed, removedFromWorkspace: removedRemote })
+      if (args.json) return json({ provider: id, status: "disconnected", removed, removedFromWorkspace: removedRemote, detached, ...(detachMessage ? { message: `Could not detach it from the linked workspace: ${detachMessage}` } : {}) })
       out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${core.PROVIDER_NAMES[id]} disconnected${removed ? "" : S.TEXT_DIM + " (nothing was stored)" + S.TEXT_NORMAL}`)
+      if (!detached) out(`  ${S.TEXT_WARNING}Could not detach it from the linked workspace: ${detachMessage}. Check the workspace's integrations.${S.TEXT_NORMAL}`)
     } catch (e) {
-      fail(e)
+      fail(e, args.json)
     }
   },
 })
@@ -186,7 +204,7 @@ async function runCredentials(args: any, update: boolean) {
       out(`  ${S.TEXT_DIM}${r.sync === "synced" ? `synced to your workspace from ${os.hostname()}` : "kept local, not synced"}${r.expiresAt ? ` · expires ${r.expiresAt}` : ""}${r.message ? ` · ${r.message}` : ""}${S.TEXT_NORMAL}`)
     } else out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: ${r.message ?? r.status}`)
   } catch (e) {
-    fail(e)
+    fail(e, args.json)
   }
 }
 
@@ -279,6 +297,22 @@ const SetSecretCommand = cmd({
   },
 })
 
+const DiscardCommand = cmd({
+  command: "discard <provider>",
+  describe: "forget the fields and secrets typed in for a provider and not yet connected, such as after a cancelled connect or update",
+  builder: (yargs: Argv) => yargs.positional("provider", { type: "string", choices: core.PROVIDER_IDS, demandOption: true }).option("json", jsonOption),
+  handler: async (args) => {
+    try {
+      const id = parseProviders(args.provider, false)[0]
+      const r = await creds.discardDrafts(id)
+      if (args.json) return json({ ...r, status: "discarded" })
+      out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${core.PROVIDER_NAMES[id]} entries cleared`)
+    } catch (e) {
+      fail(e, args.json)
+    }
+  },
+})
+
 const OpenTokenPageCommand = cmd({
   command: "open-token-page <provider>",
   describe: "open the page where the provider's token is created",
@@ -288,7 +322,7 @@ const OpenTokenPageCommand = cmd({
       const id = parseProviders(args.provider, false)[0]
       const { variant, tokenUrl } = await creds.describeFields(id, args.variant)
       if (!tokenUrl) throw new Error(`${core.PROVIDER_NAMES[id]} (${variant}) has no token page. Create the token in your Jira profile.`)
-      if (args.open) core.openBrowser(tokenUrl)
+      if (args.open) await open(tokenUrl).catch(() => undefined)
       if (args.json) return json({ provider: id, variant, tokenUrl })
       out(tokenUrl)
     } catch (e) {
@@ -314,22 +348,7 @@ const TokenCommand = cmd({
       if (args.json) return json({ provider: id, status: "ok", token: r.token, expiresAt: r.expiresAt })
       console.log(r.token)
     } catch (e) {
-      fail(e)
-    }
-  },
-})
-
-const ExpireCommand = cmd({
-  command: "expire <provider>",
-  describe: false,
-  builder: (yargs: Argv) => yargs.positional("provider", { type: "string", choices: core.PROVIDER_IDS, demandOption: true }),
-  handler: async (args) => {
-    try {
-      const id = parseProviders(args.provider, false)[0]
-      if (!core.expireProvider(id)) throw new Error(`${core.PROVIDER_NAMES[id]} is not connected.`)
-      out(`${core.PROVIDER_NAMES[id]} access marked expired.`)
-    } catch (e) {
-      fail(e)
+      fail(e, args.json)
     }
   },
 })
@@ -346,12 +365,12 @@ export const IntegrationsCommand = cmd({
       .command(FieldsCommand)
       .command(SetCommand)
       .command(SetSecretCommand)
+      .command(DiscardCommand)
       .command(OpenTokenPageCommand)
       .command(SyncCommand)
       .command(policyCommand("block"))
       .command(policyCommand("unblock"))
       .command(TokenCommand)
-      .command(ExpireCommand)
       .command(DisconnectCommand)
       .demandCommand(),
   async handler() {},

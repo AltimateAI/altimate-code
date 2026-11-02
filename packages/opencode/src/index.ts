@@ -54,6 +54,8 @@ import { CheckCommand } from "./cli/cmd/check"
 // altimate_change end
 // altimate_change start — tool: model-free data tool access
 import { ToolCommand } from "./cli/cmd/tool"
+// altimate_change end
+// altimate_change start — integrations: one-click local integrations command
 import { IntegrationsCommand } from "./cli/cmd/integrations"
 // altimate_change end
 // altimate_change start — learn: playbook learning loop command

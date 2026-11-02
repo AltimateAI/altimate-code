@@ -6,10 +6,13 @@
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { AsyncLocalStorage } from "node:async_hooks"
 import { spawnSync } from "node:child_process"
+import { Flock } from "@opencode-ai/core/util/flock"
 import { Global } from "../../global"
 import * as backend from "./backend"
-import { resolveBinding } from "../workspace/state"
+import * as creds from "./credentials"
+import { resolveBinding, resolveBindingOutcome } from "../workspace/state"
 
 export type ProviderId = "github" | "jira" | "linear"
 export const PROVIDER_IDS: ProviderId[] = ["github", "jira", "linear"]
@@ -43,6 +46,8 @@ export interface ProviderStatus {
   updatedAt: string | null
   expiresAt: string | null
   note: string | null
+  /** False for a connection made by hand in the web app: shown, but this tool does not manage it. */
+  managed?: boolean
 }
 
 export interface StatusResult {
@@ -71,6 +76,8 @@ export interface StoredProvider {
   validatedAt?: string
   /** The last validation was refused by the provider. */
   rejected?: boolean
+  /** Kept on this machine while the provider could not be reached to check it. */
+  unverified?: boolean
 }
 export interface Store {
   blocked: Partial<Record<ProviderId, boolean>>
@@ -111,10 +118,42 @@ export function readJson<T>(file: string, fallback: T): T {
     return fallback
   }
 }
-export function writeJson(file: string, value: unknown, mode?: number) {
+/** Writes through a temp file in the same directory and renames it over the target, so a reader or a crash never sees half a file. The mode is set when the file is created; the temp file never outlives a failed write. */
+export function writeJson(file: string, value: unknown, mode = 0o666) {
   fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, JSON.stringify(value, null, 2), { mode })
-  if (mode) fs.chmodSync(file, mode)
+  const tmp = `${file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`
+  const fd = fs.openSync(tmp, "wx", mode)
+  try {
+    try {
+      fs.writeFileSync(fd, JSON.stringify(value, null, 2))
+    } finally {
+      fs.closeSync(fd)
+    }
+    fs.renameSync(tmp, file)
+  } catch (e) {
+    fs.rmSync(tmp, { force: true })
+    throw e
+  }
+}
+
+const lockScope = new AsyncLocalStorage<true>()
+/** A lock whose holder stopped refreshing it is taken over after this long; kept well under the shortest time a caller waits on the CLI, so a killed run does not block the next one. */
+const LOCK_STALE_MS = 12_000
+/** How long a call waits for the lock before it gives up; the plugin allows more than this plus the network budget of the call. */
+export const LOCK_WAIT_MS = 30_000
+/** Runs `fn` with other CLI processes kept out. The lock is held for everything `fn` does, including workspace network calls, not only local file reads and writes. Re-entrant within the running task. */
+export async function withLock<T>(fn: () => T | Promise<T>): Promise<T> {
+  if (lockScope.getStore()) return fn()
+  return Flock.withLock("altimate-integrations", () => lockScope.run(true, async () => fn()), { dir: path.join(dataDir(), "locks"), staleMs: LOCK_STALE_MS, timeoutMs: LOCK_WAIT_MS })
+}
+/** Loads the state, lets `fn` change it, and saves it, all under the lock. */
+export function updateStore<T>(fn: (store: Store) => T): Promise<T> {
+  return withLock(() => {
+    const store = loadStore()
+    const result = fn(store)
+    saveStore(store)
+    return result
+  })
 }
 
 export function loadStore(): Store {
@@ -127,10 +166,6 @@ export function saveStore(store: Store) {
 
 // ---------------------------------------------------------------- secrets
 
-export function maskSecret(secret: string): string {
-  return secret.length <= 8 ? "••••" : `${secret.slice(0, secret.indexOf("_") > 0 ? secret.indexOf("_") + 1 : 3)}••••${secret.slice(-4)}`
-}
-
 /** Secret-store account for a credential field; the draft and the connected copy are kept apart. */
 export const secretKey = (kind: "draft" | "cred", id: ProviderId, field: string) => `${kind}:${id}:${field}`
 /** The fields a provider is known to hold as secrets, before the workspace catalog is read. */
@@ -140,16 +175,22 @@ export const BUILTIN_SECRET_FIELDS: Record<ProviderId, string[]> = {
   linear: ["linearApiKey"],
 }
 
-export function storeSecret(id: string, secret: string) {
-  if (useKeychain()) {
-    const r = spawnSync("security", ["add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", id, "-w", secret], {
-      stdio: "ignore",
+export async function storeSecret(id: string, secret: string) {
+  // The secret goes to `security -i` on stdin so it never shows in the process list. A line break
+  // cannot be quoted for that parser, so such a value takes the file path below.
+  if (useKeychain() && !/[\r\n]/.test(secret)) {
+    const quote = (v: string) => `"${v.replace(/[\\"]/g, "\\$&")}"`
+    const r = spawnSync("security", ["-i"], {
+      input: `add-generic-password -U -s ${quote(KEYCHAIN_SERVICE)} -a ${quote(id)} -w ${quote(secret)}\n`,
+      stdio: ["pipe", "ignore", "ignore"],
     })
     if (r.status === 0) return
   }
-  const all = readJson<Record<string, string>>(secretsPath(), {})
-  all[id] = secret
-  writeJson(secretsPath(), all, 0o600)
+  await withLock(() => {
+    const all = readJson<Record<string, string>>(secretsPath(), {})
+    all[id] = secret
+    writeJson(secretsPath(), all, 0o600)
+  })
 }
 export function readSecret(id: string): string | undefined {
   if (useKeychain()) {
@@ -161,19 +202,22 @@ export function readSecret(id: string): string | undefined {
   }
   return readJson<Record<string, string>>(secretsPath(), {})[id]
 }
-export function deleteSecret(id: string) {
+export async function deleteSecret(id: string) {
   if (useKeychain()) spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], { stdio: "ignore" })
-  const all = readJson<Record<string, string>>(secretsPath(), {})
-  if (id in all) {
-    delete all[id]
-    writeJson(secretsPath(), all, 0o600)
-  }
+  await withLock(() => {
+    const all = readJson<Record<string, string>>(secretsPath(), {})
+    if (id in all) {
+      delete all[id]
+      writeJson(secretsPath(), all, 0o600)
+    }
+  })
 }
-/** Removes every draft and connected secret kept for a provider's credential form. */
-export function purgeCredentialSecrets(id: ProviderId, rec?: StoredProvider) {
-  for (const field of new Set([...BUILTIN_SECRET_FIELDS[id], ...(rec?.secretFields ?? [])])) {
-    deleteSecret(secretKey("draft", id, field))
-    deleteSecret(secretKey("cred", id, field))
+/** Removes every draft and connected secret kept for a provider's credential form, of every variant it can have; fields in `keep` keep their connected secret. */
+export async function purgeCredentialSecrets(id: ProviderId, rec?: StoredProvider, includeDrafts = true, keep: Set<string> = new Set()) {
+  const catalog = await creds.catalogSecretFields(id)
+  for (const field of new Set([...BUILTIN_SECRET_FIELDS[id], ...catalog, ...(rec?.secretFields ?? [])])) {
+    if (includeDrafts) await deleteSecret(secretKey("draft", id, field))
+    if (!keep.has(field)) await deleteSecret(secretKey("cred", id, field))
   }
 }
 
@@ -292,8 +336,8 @@ function detectLinear(): Detection | undefined {
 
 export function demoDetections(): Detection[] {
   return [
-    { id: "github", source: { kind: "cli", label: "gh CLI" }, account: "harish-altimate", syncable: true, note: null },
-    { id: "jira", source: { kind: "cli", label: "jira-cli" }, account: "harish@altimate.ai", syncable: true, note: "site https://altimate.atlassian.net" },
+    { id: "github", source: { kind: "cli", label: "gh CLI" }, account: "demo-user", syncable: true, note: null },
+    { id: "jira", source: { kind: "cli", label: "jira-cli" }, account: "demo-user@example.com", syncable: true, note: "site https://demo.atlassian.net" },
     {
       id: "linear",
       source: { kind: "mcp-remote", label: "Claude MCP (linear)" },
@@ -315,17 +359,17 @@ export function scan(cwd = process.cwd()): Detection[] {
   return PROVIDER_IDS.flatMap((id) => (best.has(id) ? [best.get(id)!] : []))
 }
 
-export function recordDetections(found: Detection[]): Store {
-  const store = loadStore()
-  for (const id of PROVIDER_IDS) {
-    const d = found.find((f) => f.id === id)
-    const prev = store.providers[id] ?? {}
-    if (d) store.providers[id] = { ...prev, detection: d, updatedAt: new Date().toISOString() }
-    else if (!prev.registered && !prev.drafts) delete store.providers[id]
-    else store.providers[id] = { ...prev, detection: undefined }
-  }
-  saveStore(store)
-  return store
+export function recordDetections(found: Detection[]): Promise<Store> {
+  return updateStore((store) => {
+    for (const id of PROVIDER_IDS) {
+      const d = found.find((f) => f.id === id)
+      const prev = store.providers[id] ?? {}
+      if (d) store.providers[id] = { ...prev, detection: d, updatedAt: new Date().toISOString() }
+      else if (!prev.registered && !prev.drafts) delete store.providers[id]
+      else store.providers[id] = { ...prev, detection: undefined }
+    }
+    return store
+  })
 }
 
 // ---------------------------------------------------------------- status
@@ -337,10 +381,13 @@ export interface WorkspaceInfo {
   linked: boolean
   /** The linked workspace id; null when not linked or offline. */
   id: number | null
+  /** Whether an Altimate login exists; without one everything stays on this machine. */
+  signedIn: boolean
 }
 
 export function workspaceInfo(): WorkspaceInfo {
-  return { name: "Altimate Demo", tenant: "altimate", linked: true, id: null }
+  if (mockMode()) return { name: "Altimate Demo", tenant: "altimate", linked: true, id: null, signedIn: true }
+  return { name: "not signed in", tenant: "", linked: false, id: null, signedIn: false }
 }
 
 /** The workspace being talked to: the real tenant and, when this directory is linked, the linked workspace's name. */
@@ -348,11 +395,11 @@ export async function liveWorkspaceInfo(): Promise<WorkspaceInfo> {
   const cfg = await realConfig()
   if (!cfg) return workspaceInfo()
   const binding = await resolveBinding(process.cwd()).catch(() => null)
-  return { name: binding?.datamateName || cfg.tenant, tenant: cfg.tenant, linked: Boolean(binding), id: binding?.datamateId ?? null }
+  return { name: binding?.datamateName || cfg.tenant, tenant: cfg.tenant, linked: Boolean(binding), id: binding?.datamateId ?? null, signedIn: true }
 }
 
 function orderStatus(p: ProviderStatus): ProviderStatus {
-  return { id: p.id, name: p.name, state: p.state, source: p.source, account: p.account, syncable: p.syncable, sync: p.sync, updatedAt: p.updatedAt, expiresAt: p.expiresAt, note: p.note }
+  return { id: p.id, name: p.name, state: p.state, source: p.source, account: p.account, syncable: p.syncable, sync: p.sync, updatedAt: p.updatedAt, expiresAt: p.expiresAt, note: p.note, ...(p.managed === false ? { managed: false } : {}) }
 }
 
 export function buildStatus(store: Store, overlay: Detection[] = [], now = Date.now()): StatusResult {
@@ -373,7 +420,7 @@ export function buildStatus(store: Store, overlay: Detection[] = [], now = Date.
         account: rec.account ?? det?.account ?? null,
         syncable: true,
         sync: blocked ? "blocked" : rec.synced ? "synced" : "local",
-        note: rejected ? REJECTED_NOTE : blocked ? "kept local by policy" : expired ? "access expired, reconnect to continue" : null,
+        note: rejected ? REJECTED_NOTE : rec.unverified ? "not verified yet, the provider could not be reached" : blocked ? "kept local by policy" : expired ? "access expired, reconnect to continue" : null,
       }
     }
     if (!det) return { ...base, state: "not_found", source: null, account: null, syncable: true, sync: blocked ? "blocked" : "local", note: null }
@@ -402,8 +449,10 @@ export interface RemoteProvider {
   connection_id: number | null
   name: string
   account: string | null
-  /** True for the connection this tool made (named after this machine). */
+  /** True when the connection shown is the one this tool made (named after this machine). */
   managed: boolean
+  /** The connection this tool made for the provider, shown or not; null when there is none. */
+  managedId?: number | null
   source: { kind?: string; label?: string } | null
   expires_at: string | null
   expired: boolean
@@ -412,6 +461,12 @@ export interface RemoteProvider {
 
 /** The name this tool gives its connection for a provider on this machine. */
 export const managedName = (id: ProviderId, host = os.hostname()) => `${PROVIDER_NAMES[id]} (from ${host})`
+
+/** The expiry the workspace keeps in the connection's config, when it has one. */
+const connectionExpiry = (c: backend.Connection): string | null => {
+  const v = c.config?.expires_at
+  return typeof v === "string" && Number.isFinite(Date.parse(v)) ? v : null
+}
 
 const validatedAt = (c: backend.Connection) => Date.parse(c.last_validated_at ?? "") || 0
 
@@ -422,34 +477,73 @@ export function findManaged(connections: backend.Connection[], id: ProviderId, h
 }
 
 /**
- * The remote state of each provider from the caller's own connections: the managed one when there is
- * one, else the most recently validated one.
+ * The remote state of each provider from the caller's own connections. What is shown comes from the
+ * most recently validated one (the managed one on a tie); `managedId` is the connection this tool
+ * made, which update, disconnect and the removed-connection check follow.
  */
 export function deriveRemote(connections: backend.Connection[], host = os.hostname()): RemoteProvider[] {
   const out: RemoteProvider[] = []
   for (const id of PROVIDER_IDS) {
     const own = connections.filter((c) => c.integration_id === INTEGRATION_IDS[id])
     const managed = findManaged(connections, id, host)
-    const pick = managed ?? own.sort((a, b) => validatedAt(b) - validatedAt(a) || b.id - a.id)[0]
+    const pick = own.sort((a, b) => validatedAt(b) - validatedAt(a) || Number(b.id === managed?.id) - Number(a.id === managed?.id) || b.id - a.id)[0]
     if (!pick) continue
-    out.push({ integration_id: id, connection_id: pick.id, name: pick.name, account: null, managed: Boolean(managed), source: null, expires_at: null, expired: false, is_valid: pick.is_valid })
+    out.push({
+      integration_id: id,
+      connection_id: pick.id,
+      name: pick.name,
+      account: null,
+      managed: pick.id === managed?.id,
+      managedId: managed?.id ?? null,
+      source: null,
+      expires_at: connectionExpiry(pick),
+      expired: false,
+      is_valid: pick.is_valid,
+    })
   }
   return out
 }
 
 /** Local status merged with the workspace view of this user's connections (real mode only). */
 export function mergeRemote(local: StatusResult, remote: RemoteProvider[], now = Date.now()): StatusResult {
-  const providers = local.providers.map((p): ProviderStatus => {
-    const r = remote.find((x) => x.integration_id === p.id)
-    if (!r || r.connection_id == null || p.state === "rejected") return p
+  const providers = local.providers.map((orig): ProviderStatus => {
+    const r = remote.find((x) => x.integration_id === orig.id)
+    const managedId = r ? (r.managedId !== undefined ? r.managedId : r.managed ? r.connection_id : null) : null
+    // Saved to the workspace and no longer there: the credential is kept nowhere, so it cannot read as connected on its own.
+    const gone = orig.sync === "synced" && orig.state !== "detected" && managedId == null
+    const removed: Partial<ProviderStatus> = { state: "not_found", source: null, account: null, sync: "local", expiresAt: null, note: "The workspace connection was removed. Add the credentials again." }
+    if (gone && r?.connection_id == null) return orderStatus({ ...orig, ...removed } as ProviderStatus)
+    // Another connection of the caller's is still there: it is what the workspace shows for the provider.
+    let p: ProviderStatus = gone ? ({ ...orig, ...removed, note: null } as ProviderStatus) : orig
+    if (!r || r.connection_id == null) return p
+    // A local rejected flag on a record kept in the workspace is stale once the workspace says otherwise: the workspace connection is what decides.
+    if (p.state === "rejected") {
+      if (orig.sync !== "synced") return p
+      p = { ...p, state: "connected", note: null }
+    }
     const remoteExpired = r.expired || isExpired(r.expires_at, now)
     // An expired copy is reported as expired; only a live one the workspace marked invalid counts as rejected.
     const remoteRejected = !remoteExpired && r.is_valid === false
     const rs = r.source?.label ? { kind: (r.source.kind as SourceKind) ?? "cli", label: r.source.label } : null
     if (p.state === "connected" || p.state === "expired") {
-      // A fresh local token or connection wins; the workspace copy is only reported in the note.
+      // Only the connection this tool made holds this credential; a hand-made one says nothing about it.
+      if (managedId == null) return p
+      // A synced credential is held by the workspace, so once the workspace reports an expiry it replaces the older local value; with none reported, the local one stands.
+      if (orig.sync === "synced") {
+        const known = r.expires_at != null || r.expired
+        const expired = known ? remoteExpired : p.state === "expired"
+        const rejectedNow = !expired && remoteRejected
+        return orderStatus({
+          ...p,
+          state: expired ? "expired" : rejectedNow ? "rejected" : "connected",
+          expiresAt: r.expires_at ?? p.expiresAt,
+          note: expired ? "access expired, reconnect to continue" : rejectedNow ? REJECTED_NOTE : p.state === "connected" ? p.note : null,
+        })
+      }
+      // A credential kept on this machine has its own expiry; the workspace only adds to it.
       const localFresh = p.state === "connected"
-      const expired = !localFresh && remoteExpired
+      const remoteKnown = r.expires_at != null
+      const expired = !localFresh && (remoteExpired || !remoteKnown)
       const note = localFresh
         ? remoteExpired
           ? "workspace copy expired, reconnect to update it"
@@ -457,12 +551,13 @@ export function mergeRemote(local: StatusResult, remote: RemoteProvider[], now =
         : expired
           ? "access expired, reconnect to continue"
           : "local token expired, the workspace connection is still active"
+      const rejected = !expired && remoteRejected
       return orderStatus({
         ...p,
-        state: expired ? "expired" : localFresh && remoteRejected ? "rejected" : "connected",
+        state: expired ? "expired" : rejected ? "rejected" : "connected",
         expiresAt: localFresh ? p.expiresAt : expired ? (p.expiresAt ?? r.expires_at) : r.expires_at,
-        sync: p.sync === "blocked" || !r.managed ? p.sync : "synced",
-        note: localFresh && remoteRejected ? REJECTED_NOTE : note,
+        sync: p.sync === "blocked" ? p.sync : "synced",
+        note: rejected ? REJECTED_NOTE : note,
       })
     }
     return orderStatus({
@@ -474,6 +569,7 @@ export function mergeRemote(local: StatusResult, remote: RemoteProvider[], now =
       sync: "synced",
       expiresAt: r.expires_at,
       note: remoteExpired ? "access expired, reconnect to continue" : remoteRejected ? REJECTED_NOTE : null,
+      ...(managedId != null ? {} : { managed: false }),
     })
   })
   return { ...local, providers }
@@ -487,22 +583,58 @@ export async function statusRemote(): Promise<StatusResult> {
     const remote = deriveRemote(await backend.listOwnConnections(cfg))
     return { ...mergeRemote(local, remote), workspace: await liveWorkspaceInfo() }
   } catch {
-    return local
+    return { ...local, workspace: await liveWorkspaceInfo() }
   }
 }
 
 // ---------------------------------------------------------------- policy
 
-export function setBlocked(ids: ProviderId[], blocked: boolean): Store {
-  const store = loadStore()
-  for (const id of ids) {
-    if (blocked) store.blocked[id] = true
-    else delete store.blocked[id]
-  }
-  saveStore(store)
-  return store
+export function setBlocked(ids: ProviderId[], blocked: boolean): Promise<Store> {
+  return updateStore((store) => {
+    for (const id of ids) {
+      if (blocked) store.blocked[id] = true
+      else delete store.blocked[id]
+    }
+    return store
+  })
+}
+/**
+ * Blocks providers in one locked step with the uploads. One whose managed workspace copy exists
+ * (recorded, or found by looking) is refused, since there is no local copy to keep. When the
+ * workspace cannot be read the block is still set, as it only stops later uploads, and `unchecked` says so.
+ */
+export async function blockProviders(ids: ProviderId[]): Promise<{ blocked: ProviderId[]; refused: ProviderId[]; unchecked: ProviderId[] }> {
+  return withLock(async () => {
+    const refused: ProviderId[] = []
+    const unchecked: ProviderId[] = []
+    for (const id of ids) {
+      if (isSynced(id)) {
+        refused.push(id)
+        continue
+      }
+      try {
+        if (await managedInWorkspace(id)) refused.push(id)
+      } catch {
+        unchecked.push(id)
+      }
+    }
+    const blocked = ids.filter((id) => !refused.includes(id))
+    await setBlocked(blocked, true)
+    return { blocked, refused, unchecked }
+  })
 }
 export const isBlocked = (id: ProviderId) => Boolean(loadStore().blocked[id])
+/** The credential was saved to the workspace by this tool: its secret is not kept on this machine, only the non-secret fields and status. */
+export const isSynced = (id: ProviderId) => {
+  const rec = loadStore().providers[id]
+  return Boolean(rec?.registered && rec.synced)
+}
+
+/** This tool's workspace connection for the provider exists in the workspace. Throws when the workspace cannot be read, so a caller never mistakes a failed lookup for an absent connection. */
+export async function managedInWorkspace(id: ProviderId): Promise<boolean> {
+  const cfg = await realConfig()
+  return cfg ? Boolean(findManaged(await backend.listOwnConnections(cfg), id)) : false
+}
 
 // ---------------------------------------------------------------- mock workspace sync
 
@@ -534,29 +666,55 @@ export function buildConnectionRequest(id: ProviderId, account: string | null, h
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-export async function syncProvider(id: ProviderId, onStep?: (label: string, done: boolean) => void, pace = 0): Promise<SyncOutcome> {
+const ALREADY_IN_WORKSPACE = "already in the workspace"
+const INVALID_IN_WORKSPACE = "the workspace connection is marked invalid; run update"
+
+/** `skipSynced` leaves a connection this tool already saved to the workspace as it is (it is only attached to the linked workspace), for runs that cover every provider. */
+export async function syncProvider(id: ProviderId, onStep?: (label: string, done: boolean) => void, pace = 0, skipSynced = false): Promise<SyncOutcome> {
   const store = loadStore()
   const rec = store.providers[id]
   // A sync before any detect still finds what is on this machine.
   const det = rec?.detection ?? (rec?.registered ? undefined : scan().find((d) => d.id === id))
-  if (!rec?.registered && !det) return { id, result: "skipped", reason: "nothing detected or connected", steps: [] }
-  if (store.blocked[id]) {
-    // Blocked means the credential is still registered for local use; it just never leaves the machine.
-    if (!rec?.registered && det?.syncable) {
-      store.providers[id] = { ...rec, detection: det, registered: true, account: det.account, source: det.source, synced: false, updatedAt: new Date().toISOString() }
-      saveStore(store)
+  if (!rec?.registered && !det) {
+    const nothing: SyncOutcome = { id, result: "skipped", reason: "nothing detected or connected", steps: [] }
+    // A run over every provider still attaches a workspace connection this tool made, when nothing for the provider is on this machine.
+    if (!skipSynced || store.blocked[id]) return nothing
+    const signedIn = await realConfig()
+    if (!signedIn) return nothing
+    try {
+      if (!(await managedInWorkspace(id))) return nothing
+    } catch (e) {
+      return { id, result: "failed", reason: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}`, steps: [] }
     }
+    return syncReal(id, signedIn, undefined, rec, null, onStep, true)
+  }
+  if (store.blocked[id]) {
+    // Blocked means the credential never leaves the machine; nothing is registered here without one.
     return { id, result: "kept_local", reason: "blocked by policy", steps: [] }
   }
   if (!rec?.registered && det && !det.syncable) return { id, result: "skipped", reason: det.note ?? "not syncable", steps: [] }
   const account = rec?.account ?? det?.account ?? null
   const cfg = await realConfig()
-  if (cfg) return syncReal(id, cfg, det, rec, account, onStep)
+  const alreadySynced = skipSynced && Boolean(rec?.registered && rec.synced)
+  if (cfg) {
+    let attachOnly = alreadySynced
+    // A run over every provider leaves a workspace connection this tool made as it is, even when this machine has no record of it.
+    if (skipSynced && !attachOnly && !rec?.registered) {
+      try {
+        attachOnly = await managedInWorkspace(id)
+      } catch (e) {
+        return { id, result: "failed", reason: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}`, steps: [] }
+      }
+    }
+    return syncReal(id, cfg, det, rec, account, onStep, attachOnly)
+  }
+  if (!mockMode()) return { id, result: "skipped", reason: NOT_SIGNED_IN, steps: [] }
+  if (alreadySynced) return { id, result: "skipped", reason: "already in the workspace", steps: [] }
   const request = buildConnectionRequest(id, account)
   const steps: SyncStep[] = []
   for (const label of [
     "Validating credential",
-    "POST /connections/test",
+    "Testing credential",
     `Upsert connection "${request.body.name}"`,
     "Enable on workspace",
   ]) {
@@ -565,20 +723,15 @@ export async function syncProvider(id: ProviderId, onStep?: (label: string, done
     steps.push({ label, ok: true })
     onStep?.(label, true)
   }
-  const remote = readJson<Record<string, unknown>>(remotePath(), {})
-  remote[id] = { ...request, enabled: true, workspace: workspaceInfo().name, recordedAt: new Date().toISOString() }
-  writeJson(remotePath(), remote)
-  const next = loadStore()
-  const cur = next.providers[id] ?? {}
-  next.providers[id] = {
-    ...cur,
-    registered: true,
-    account,
-    source: cur.source ?? det?.source,
-    synced: true,
-    updatedAt: new Date().toISOString(),
-  }
-  saveStore(next)
+  await withLock(() => {
+    const remote = readJson<Record<string, unknown>>(remotePath(), {})
+    remote[id] = { ...request, enabled: true, workspace: workspaceInfo().name, recordedAt: new Date().toISOString() }
+    writeJson(remotePath(), remote)
+  })
+  await updateStore((next) => {
+    const cur = next.providers[id] ?? {}
+    next.providers[id] = { ...cur, registered: true, account, source: cur.source ?? det?.source, synced: true, updatedAt: new Date().toISOString() }
+  })
   return { id, result: "synced", steps, request }
 }
 
@@ -591,24 +744,15 @@ export function normaliseJiraDomain(value: string): string {
     .replace(/\.atlassian\.net$/i, "")
 }
 
-function jiraDomain(det: Detection | undefined): string | undefined {
-  if (process.env.JIRA_DOMAIN) return normaliseJiraDomain(process.env.JIRA_DOMAIN)
-  const site = det?.note?.match(/^site (\S+)/)?.[1]
-  if (!site) return undefined
-  try {
-    return new URL(site).host.replace(/\.atlassian\.net$/, "")
-  } catch {
-    return site
-  }
-}
-
 /** Adds the variant key the backend needs to pick the Jira Server field set. Catalog fields only otherwise. */
 export function withVariant(id: ProviderId, variant: string | undefined, config: Record<string, unknown>): Record<string, unknown> {
-  return id === "jira" && variant === "server" ? { ...config, type: "server" } : config
+  return id === "jira" && isJiraServer(variant) ? { ...config, type: "server" } : config
 }
+/** The workspace catalog may name the Server / Data Center variant differently; any id naming "server" is it. */
+export const isJiraServer = (variant: string | undefined) => /server/i.test(variant ?? "")
 
-/** The connection config to upload for a provider, read from where it was detected. Never printed. */
-export function collectConfig(id: ProviderId, det: Detection | undefined, rec: StoredProvider | undefined): { config: Record<string, unknown> } | { reason: string } {
+/** The connection config to upload for a provider: the saved credential when it was connected here, else what connect would read from this machine. Never printed. */
+export async function collectConfig(id: ProviderId, rec: StoredProvider | undefined): Promise<{ config: Record<string, unknown> } | { reason: string }> {
   if (rec?.registered && rec.variant) {
     const config: Record<string, unknown> = { ...rec.values }
     for (const field of rec.secretFields ?? []) {
@@ -618,24 +762,7 @@ export function collectConfig(id: ProviderId, det: Detection | undefined, rec: S
     }
     return { config: withVariant(id, rec.variant, config) }
   }
-  if (!det) return { reason: "nothing detected" }
-  if (id === "github") {
-    let token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN
-    if (det.source.kind === "cli") {
-      const r = spawnSync("gh", ["auth", "token"], { encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] })
-      if (r.status === 0 && r.stdout.trim()) token = r.stdout.trim()
-    }
-    return token ? { config: { github_token: token } } : { reason: "could not read the GitHub token" }
-  }
-  if (id === "linear") {
-    const key = process.env.LINEAR_API_KEY
-    return key ? { config: { linearApiKey: key } } : { reason: "set LINEAR_API_KEY to sync Linear" }
-  }
-  const token = process.env.JIRA_API_TOKEN
-  const email = process.env.JIRA_USER || det.account
-  const domain = jiraDomain(det)
-  if (!token || !email || !domain) return { reason: "set JIRA_API_TOKEN (and JIRA_USER) to sync Jira" }
-  return { config: { jiraApiToken: token, jiraEmail: email, jiraDomain: domain } }
+  return creds.detectedConfig(id)
 }
 
 export interface UpsertResult {
@@ -650,7 +777,13 @@ export interface UpsertResult {
 export const NOT_LINKED_LABEL = "Not linked to a workspace: run altimate link"
 export const ATTACH_FAILED_PREFIX = "Saved the connection but could not attach it to the workspace: "
 
+export const NOT_SIGNED_IN = "Not signed in to Altimate, kept local."
+
 const INVALID_MESSAGE = "The workspace saved the connection but marked it invalid. Check the fields and run update."
+const REFUSED_MESSAGE = "The workspace refused the connection as invalid. Check the fields and try again."
+export const REMOVE_FAILED_WARNING = (error: string) => ` It could not be removed from the workspace, remove it there: ${error}`
+/** What to tell the user when the workspace marked a connection invalid: a new one was removed again, an updated one is left marked. */
+export const rejectionMessage = (res: Pick<UpsertResult, "created">) => (res.created ? REFUSED_MESSAGE : INVALID_MESSAGE)
 
 /**
  * Saves the credential as this tool's own connection: updated in place when it exists (matched on
@@ -662,16 +795,16 @@ export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, 
     ? await backend.updateConnection(cfg, existing.id, { config })
     : await backend.createConnection(cfg, { name: managedName(id), integration_id: INTEGRATION_IDS[id], config })
   const isValid = saved.is_valid !== false
-  const result: UpsertResult = { connectionId: saved.id, created: !existing, isValid, message: isValid ? null : INVALID_MESSAGE }
+  const result: UpsertResult = { connectionId: saved.id, created: !existing, isValid, message: isValid ? null : rejectionMessage({ created: !existing }) }
   if (!isValid) return result
   return { ...result, workspace: await attachToBoundWorkspace(cfg, id, saved.id) }
 }
 
 /** Attaches the connection to the workspace this directory is linked to, reporting instead of throwing. */
 export async function attachToBoundWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number): Promise<NonNullable<UpsertResult["workspace"]>> {
-  const binding = await resolveBinding(process.cwd()).catch(() => null)
-  if (!binding) return { notLinked: true }
   try {
+    const binding = await resolveBinding(process.cwd())
+    if (!binding) return { notLinked: true }
     await attachToWorkspace(cfg, id, connectionId, String(binding.datamateId))
     return { attached: binding.datamateName }
   } catch (e) {
@@ -706,17 +839,49 @@ export function attachToIntegrations(
 
 async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number, datamateId: string): Promise<void> {
   const integrationId = INTEGRATION_IDS[id]
-  const datamate = await backend.getDatamate(cfg, datamateId)
-  if (datamate.is_owner === false)
-    throw new Error(`only the owner of workspace "${datamate.name}" can attach connections to it; your connection is saved to your account. Link a workspace you own, or sign in as its owner`)
+  const first = await backend.getDatamate(cfg, datamateId)
+  if (first.is_owner === false)
+    throw new Error(`only the owner of workspace "${first.name}" can attach connections to it; your connection is saved to your account. Link a workspace you own, or sign in as its owner`)
   let keys: string[] = []
-  if (!datamate.integrations.some((e) => String(e.id) === integrationId)) {
+  if (!first.integrations.some((e) => String(e.id) === integrationId)) {
     const catalog = await backend.integrationsCatalog(cfg)
     const list: any[] = Array.isArray(catalog) ? catalog : ((catalog as any)?.integrations ?? [])
     const found = list.find((c) => String(c?.id) === integrationId)
     keys = (found?.tools ?? []).map((t: any) => t?.key).filter((k: unknown): k is string => typeof k === "string")
   }
+  // The backend replaces the whole list, so it is read again right before writing and only this entry changes.
+  const datamate = await backend.getDatamate(cfg, datamateId)
   await backend.updateDatamateIntegrations(cfg, datamateId, attachToIntegrations(datamate.integrations, integrationId, connectionId, keys))
+}
+
+/** The integrations list without references to the connection; other entries pass through untouched. */
+export function detachFromIntegrations(entries: backend.DatamateIntegrationEntry[], connectionId: number | string): backend.DatamateIntegrationEntry[] {
+  const conn = String(connectionId)
+  return entries.map((e) => {
+    const next = { ...e }
+    if (e.connection_id != null && String(e.connection_id) === conn) next.connection_id = null
+    if (Array.isArray(e.connection_ids)) next.connection_ids = e.connection_ids.filter((c) => String(c) !== conn)
+    return next
+  })
+}
+
+/** Removes the connection from the linked workspace's integrations before it is deleted. Returns why it could not, or null; the delete goes on either way. */
+async function detachFromBoundWorkspace(cfg: backend.BackendConfig, connectionId: number): Promise<string | null> {
+  try {
+    const outcome = await resolveBindingOutcome(process.cwd())
+    if (outcome.status === "unbound") return null
+    if (outcome.status === "unknown") return "could not tell whether this directory is linked to a workspace, so the connection was not detached from one"
+    const binding = outcome.binding
+    const datamateId = String(binding.datamateId)
+    const datamate = await backend.getDatamate(cfg, datamateId)
+    if (datamate.is_owner === false) return `only the owner of workspace "${datamate.name}" can detach connections from it`
+    const refs = (e: backend.DatamateIntegrationEntry) => String(e.connection_id) === String(connectionId) || (e.connection_ids ?? []).map(String).includes(String(connectionId))
+    if (!datamate.integrations.some(refs)) return null
+    await backend.updateDatamateIntegrations(cfg, datamateId, detachFromIntegrations(datamate.integrations, connectionId))
+    return null
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e)
+  }
 }
 
 async function syncReal(
@@ -726,8 +891,9 @@ async function syncReal(
   rec: StoredProvider | undefined,
   account: string | null,
   onStep?: (label: string, done: boolean) => void,
+  attachOnly = false,
 ): Promise<SyncOutcome> {
-  const collected = collectConfig(id, det, rec)
+  const collected = attachOnly ? { reason: ALREADY_IN_WORKSPACE } : await collectConfig(id, rec)
   const steps: SyncStep[] = []
   const step = (l: string) => {
     steps.push({ label: l, ok: true })
@@ -743,58 +909,109 @@ async function syncReal(
     return { id, result: "synced", steps }
   }
   if ("reason" in collected) {
-    // Nothing local to upload, but a connection saved earlier may still need attaching to the workspace.
-    if (!(rec?.registered && rec.synced && rec.connectionId && !rec.rejected)) return { id, result: "skipped", reason: collected.reason, steps: [] }
+    // Nothing local to upload, but a connection already in the workspace may still need attaching to it: the one this machine saved, or one it has no record of.
+    const known = rec?.registered ? (rec.synced && rec.connectionId ? rec.connectionId : undefined) : collected.reason === ALREADY_IN_WORKSPACE ? null : undefined
+    if (known === undefined) return { id, result: "skipped", reason: collected.reason, steps: [] }
     try {
-      const present = (await backend.listOwnConnections(cfg)).some((c) => c.id === rec.connectionId && c.integration_id === INTEGRATION_IDS[id])
-      if (!present) return { id, result: "skipped", reason: collected.reason, steps: [] }
+      const own = await backend.listOwnConnections(cfg)
+      // The workspace decides whether the connection is usable, not the flag kept here from an earlier check.
+      const found = known == null ? findManaged(own, id) : own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id])
+      if (!found) return { id, result: "skipped", reason: collected.reason, steps: [] }
+      if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
       step("Connection already in the workspace")
-      return reportWorkspace(await attachToBoundWorkspace(cfg, id, rec.connectionId))
+      return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id))
     } catch (e) {
       return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
     }
   }
   try {
-    const res = await upsertManaged(cfg, id, collected.config)
-    step(res.created ? "Created connection" : "Updated connection")
-    const next = loadStore()
-    if (!res.isValid) {
-      next.providers[id] = { ...next.providers[id], registered: true, account, source: next.providers[id]?.source ?? det?.source, synced: true, rejected: true, connectionId: res.connectionId, updatedAt: new Date().toISOString() }
-      saveStore(next)
-      return { id, result: "failed", reason: res.message ?? "connection test failed", steps }
-    }
-    next.providers[id] = {
-      ...next.providers[id],
-      registered: true,
-      account,
-      source: next.providers[id]?.source ?? det?.source,
-      synced: true,
-      rejected: false,
-      connectionId: res.connectionId,
-      updatedAt: new Date().toISOString(),
-    }
-    saveStore(next)
-    return reportWorkspace(res.workspace ?? { notLinked: true })
+    // The blocked check, the record check and the upload share one lock with Keep local and Disconnect. The config was prepared before the lock, so the record is compared again here.
+    return await withLock(async (): Promise<SyncOutcome> => {
+      const now = loadStore()
+      if (now.blocked[id]) return { id, result: "kept_local", reason: "blocked by policy", steps: [] }
+      const cur = now.providers[id]
+      if (Boolean(cur?.registered) !== Boolean(rec?.registered) || Boolean(cur?.synced) !== Boolean(rec?.synced) || cur?.variant !== rec?.variant || (cur?.connectionId ?? null) !== (rec?.connectionId ?? null) || cur?.validatedAt !== rec?.validatedAt)
+        return { id, result: "skipped", reason: "the connection changed while syncing, run sync again", steps: [] }
+      const res = await upsertManaged(cfg, id, collected.config)
+      if (!res.isValid) {
+        // A workspace that refuses a new connection keeps nothing of it; the local copy stays.
+        let warning = ""
+        if (res.created) {
+          try {
+            await backend.deleteConnection(cfg, res.connectionId)
+          } catch (e) {
+            warning = REMOVE_FAILED_WARNING(e instanceof Error ? e.message : String(e))
+          }
+        }
+        return { id, result: "failed", reason: rejectionMessage(res) + warning, steps }
+      }
+      step(res.created ? "Created connection" : "Updated connection")
+      await updateStore((next) => {
+        next.providers[id] = {
+          ...next.providers[id],
+          registered: true,
+          account,
+          source: next.providers[id]?.source ?? det?.source,
+          synced: true,
+          rejected: false,
+          unverified: false,
+          connectionId: res.connectionId,
+          updatedAt: new Date().toISOString(),
+        }
+      })
+      // The connection is in the workspace and accepted: no secret stays on this machine, the same as when it is connected there directly.
+      await purgeCredentialSecrets(id, rec, false)
+      await deleteSecret(id)
+      return reportWorkspace(res.workspace ?? { notLinked: true })
+    })
   } catch (e) {
     return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
   }
 }
 
-export function disconnect(id: ProviderId): boolean {
-  const store = loadStore()
-  const had = Boolean(store.providers[id]?.registered)
-  const rec = store.providers[id]
-  if (rec) store.providers[id] = { detection: rec.detection, updatedAt: new Date().toISOString() }
-  saveStore(store)
-  deleteSecret(id)
-  purgeCredentialSecrets(id, rec)
-  const remote = readJson<Record<string, unknown>>(remotePath(), {})
-  const hadRemote = id in remote
-  if (hadRemote) {
+export interface DisconnectResult {
+  removedLocal: boolean
+  removedRemote: number
+  /** False when a connection could not be taken out of the linked workspace's list before it was deleted. */
+  detached: boolean
+  detachMessage?: string
+}
+
+/** Removes the workspace copies first and the local credential only once that worked, so a failure can be retried. */
+export function disconnect(id: ProviderId): Promise<DisconnectResult> {
+  // One locked step, so an upload cannot land between the workspace delete and the local purge.
+  return withLock(async () => {
+    if (isSynced(id) && !(await realConfig()) && !mockMode())
+      throw new Error(`${PROVIDER_NAMES[id]} is saved in your workspace. Sign in to Altimate to remove it, then disconnect again.`)
+    const { removed, detachError } = await removeManaged(id, await realConfig())
+    const removedLocal = await disconnectLocal(id)
+    await creds.discardDraftSecrets(id)
+    return { removedLocal, removedRemote: removed, detached: detachError == null, ...(detachError ? { detachMessage: detachError } : {}) }
+  })
+}
+
+function disconnectLocal(id: ProviderId): Promise<boolean> {
+  return withLock(async () => {
+    const store = loadStore()
+    const had = Boolean(store.providers[id]?.registered)
+    const rec = store.providers[id]
+    if (rec) store.providers[id] = { detection: rec.detection, updatedAt: new Date().toISOString() }
+    saveStore(store)
+    await deleteSecret(id)
+    await purgeCredentialSecrets(id, rec)
+    return (await removeMockRemote(id)) || had
+  })
+}
+
+/** Removes the recorded stand-in for the workspace copy that mock and demo modes keep in a local file. */
+export function removeMockRemote(id: ProviderId): Promise<boolean> {
+  return withLock(() => {
+    const remote = readJson<Record<string, unknown>>(remotePath(), {})
+    if (!(id in remote)) return false
     delete remote[id]
     writeJson(remotePath(), remote)
-  }
-  return had || hadRemote
+    return true
+  })
 }
 
 /**
@@ -803,22 +1020,20 @@ export function disconnect(id: ProviderId): boolean {
  * are left alone. Returns how many went.
  */
 export async function disconnectRemote(id: ProviderId, cfg?: backend.BackendConfig | null): Promise<number> {
-  const config = cfg === undefined ? await realConfig() : cfg
-  if (!config) return 0
-  const name = managedName(id)
-  const managed = (await backend.listOwnConnections(config)).filter((c) => c.integration_id === INTEGRATION_IDS[id] && c.name === name)
-  for (const c of managed) await backend.deleteConnection(config, c.id)
-  return managed.length
+  return (await removeManaged(id, cfg === undefined ? await realConfig() : cfg)).removed
 }
 
-/** Dev aid: marks a connected provider's access as expired so the expired state can be shown. */
-export function expireProvider(id: ProviderId): boolean {
-  const store = loadStore()
-  const rec = store.providers[id]
-  if (!rec?.registered) return false
-  rec.expiresAt = new Date(Date.now() - 1000).toISOString()
-  saveStore(store)
-  return true
+/** Like disconnectRemote, and also says why a connection could not be detached from the linked workspace. The workspace list is replaced whole, so a failed detach leaves a dangling reference. */
+export async function removeManaged(id: ProviderId, config: backend.BackendConfig | null): Promise<{ removed: number; detachError: string | null }> {
+  if (!config) return { removed: 0, detachError: null }
+  const name = managedName(id)
+  const managed = (await backend.listOwnConnections(config)).filter((c) => c.integration_id === INTEGRATION_IDS[id] && c.name === name)
+  let detachError: string | null = null
+  for (const c of managed) {
+    detachError = (await detachFromBoundWorkspace(config, c.id)) ?? detachError
+    await backend.deleteConnection(config, c.id)
+  }
+  return { removed: managed.length, detachError }
 }
 
 export type TokenOutcome =
@@ -828,19 +1043,14 @@ export type TokenOutcome =
 /** The stored local credential for local tools; it says how to fix it when there is none or it was refused. */
 export async function getToken(id: ProviderId): Promise<TokenOutcome> {
   const name = PROVIDER_NAMES[id]
-  const fix = `Run: altimate integrations update ${id} (or connect ${id} --local-only)`
   const rec = loadStore().providers[id]
+  const fix = rec?.synced
+    ? `It is saved in your workspace only. Run: altimate integrations update ${id}, or connect ${id} --local-only to move it to this machine`
+    : `Run: altimate integrations update ${id} (or connect ${id} --local-only)`
   if (!rec?.registered) return { status: "not_connected", message: `${name} is not connected. Run: altimate integrations connect ${id} --local-only` }
   const secret = readSecret(id)
   if (!secret) return { status: "unavailable", message: `No ${name} credential is stored on this machine. ${fix}` }
   if (rec.rejected) return { status: "failed", message: `${name} rejected the stored credential. ${fix}` }
   if (isExpired(rec.expiresAt)) return { status: "failed", message: `The stored ${name} credential has expired. ${fix}` }
   return { status: "ok", token: secret, expiresAt: rec.expiresAt ?? null }
-}
-
-export function openBrowser(url: string) {
-  const [bin, ...pre] = process.platform === "darwin" ? ["open"] : process.platform === "win32" ? ["cmd", "/c", "start", ""] : ["xdg-open"]
-  try {
-    spawnSync(bin, [...pre, url], { stdio: "ignore", timeout: 5000 })
-  } catch {}
 }

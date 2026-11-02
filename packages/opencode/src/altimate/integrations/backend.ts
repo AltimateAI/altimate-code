@@ -2,7 +2,7 @@
 //
 // Client for the workspace connections API of the Altimate backend: list, create, update and delete
 // the caller's own connections, plus the integrations catalog. Credentials come from the existing
-// Altimate login, with environment overrides for local development.
+// Altimate login; the integrations-only environment variables point this client at another backend.
 import { AltimateApi } from "../api/client"
 
 export interface BackendConfig {
@@ -37,6 +37,8 @@ export interface Connection {
 
 /** The login used for backend calls, or null when there is none. */
 export async function backendConfig(): Promise<BackendConfig | null> {
+  const env = { url: process.env.ALTIMATE_INTEGRATIONS_API_URL, tenant: process.env.ALTIMATE_INTEGRATIONS_TENANT, token: process.env.ALTIMATE_INTEGRATIONS_TOKEN }
+  if (env.url && env.tenant && env.token) return { apiUrl: env.url.replace(/\/+$/, ""), tenant: env.tenant, token: env.token }
   const creds = await AltimateApi.getCredentials().catch(() => null)
   const apiUrl = (creds?.altimateUrl || "").replace(/\/+$/, "")
   const token = creds?.altimateApiKey || ""

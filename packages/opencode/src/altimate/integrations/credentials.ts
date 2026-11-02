@@ -6,6 +6,7 @@
 // the workspace. A secret is never returned, printed or logged: callers only ever see a masked tail.
 import fs from "node:fs"
 import path from "node:path"
+import { createHash } from "node:crypto"
 import { spawnSync } from "node:child_process"
 import * as core from "./core"
 import * as backend from "./backend"
@@ -50,7 +51,9 @@ export const BUILTIN_CATALOG: Record<ProviderId, VariantDef[]> = {
 
 // ---------------------------------------------------------------- catalog
 
-const catalogPath = () => path.join(core.dataDir(), "integrations-catalog.json")
+/** The saved catalog is per workspace login, so one tenant's fields are never shown for another. */
+const catalogPath = (cfg: backend.BackendConfig) =>
+  path.join(core.dataDir(), `integrations-catalog-${createHash("sha256").update(`${cfg.apiUrl}\n${cfg.tenant}`).digest("hex").slice(0, 12)}.json`)
 // Bookkeeping the backend keeps beside the credential; never asked of the user.
 const IGNORED_FIELDS = new Set(["auth_type", "privacy", "expires_at", "type", "account", "source"])
 
@@ -108,19 +111,20 @@ export function parseCatalog(data: unknown): Catalog {
   return out
 }
 
-/** The catalog to use: the workspace's when signed in, else the last one saved, else the built-in table. */
-export async function loadCatalog(id: ProviderId): Promise<VariantDef[]> {
+/** The catalog to use: the workspace's when signed in (the last one saved for that login if it cannot be reached), else the built-in table. */
+export async function loadCatalog(id: ProviderId, offline = false): Promise<VariantDef[]> {
   const cfg = await core.realConfig()
-  if (cfg) {
+  if (!cfg) return BUILTIN_CATALOG[id]
+  // Keeping a credential local does not need a fresh catalog, so only the saved one is used then.
+  if (!offline)
     try {
       const fresh = parseCatalog(await backend.integrationsCatalog(cfg))
       if (Object.keys(fresh).length) {
-        core.writeJson(catalogPath(), { ...core.readJson<Catalog>(catalogPath(), {}), ...fresh })
+        await core.withLock(() => core.writeJson(catalogPath(cfg), { ...core.readJson<Catalog>(catalogPath(cfg), {}), ...fresh }))
         if (fresh[id]) return fresh[id]!
       }
     } catch {}
-  }
-  return core.readJson<Catalog>(catalogPath(), {})[id] ?? BUILTIN_CATALOG[id]
+  return core.readJson<Catalog>(catalogPath(cfg), {})[id] ?? BUILTIN_CATALOG[id]
 }
 
 // ---------------------------------------------------------------- reading values on this machine
@@ -206,7 +210,7 @@ const tokenUrls: Record<string, string | null> = {
   "jira:server": null,
   linear: "https://linear.app/settings/account/security",
 }
-export const tokenUrl = (id: ProviderId, variant: string): string | null => (id === "jira" ? tokenUrls[`jira:${variant}`] ?? null : tokenUrls[id])
+export const tokenUrl = (id: ProviderId, variant: string): string | null => (id === "jira" ? tokenUrls[core.isJiraServer(variant) ? "jira:server" : "jira:cloud"] : tokenUrls[id])
 
 export interface Resolved {
   id: ProviderId
@@ -218,27 +222,28 @@ export interface Resolved {
   detected: Source[]
 }
 
-/** The value of every field of the chosen variant: drafts first, then the connected copy, then this machine. */
-export async function resolve(id: ProviderId, variantId?: string): Promise<Resolved> {
-  const variants = await loadCatalog(id)
-  const rec = core.loadStore().providers[id]
+/** The value of every field of the chosen variant: drafts first, then the connected copy, then this machine. `detectedOnly` reads this machine alone. */
+export async function resolve(id: ProviderId, variantId?: string, offline = false, detectedOnly = false): Promise<Resolved> {
+  const variants = await loadCatalog(id, offline)
+  const rec = detectedOnly ? undefined : core.loadStore().providers[id]
   let want = variantId
   if (!want && id === "jira") {
     const site = rec?.drafts?.jiraBaseUrl || rec?.drafts?.jiraDomain || rec?.values?.jiraBaseUrl || rec?.values?.jiraDomain || detectField(id, "jiraBaseUrl")?.value || process.env.JIRA_DOMAIN
     want = jiraVariantFor(site)
   }
-  const def = (want && variants.find((v) => v.id === want || v.id.toLowerCase().includes(want) || v.label.toLowerCase().includes(want))) || variants[0]
+  const key = want?.toLowerCase()
+  const def = (key && variants.find((v) => v.id.toLowerCase().includes(key) || v.label.toLowerCase().includes(key))) || variants[0]
   const values: Record<string, string> = {}
   const origin: Resolved["origin"] = {}
   const detected: Source[] = []
   for (const f of def.fields) {
-    const draft = f.secret ? core.readSecret(core.secretKey("draft", id, f.name)) : rec?.drafts?.[f.name]
+    const draft = detectedOnly ? undefined : f.secret ? core.readSecret(core.secretKey("draft", id, f.name)) : rec?.drafts?.[f.name]
     if (draft) {
       values[f.name] = draft
       origin[f.name] = "draft"
       continue
     }
-    const stored = f.secret ? core.readSecret(core.secretKey("cred", id, f.name)) : rec?.values?.[f.name]
+    const stored = detectedOnly ? undefined : f.secret ? core.readSecret(core.secretKey("cred", id, f.name)) : rec?.values?.[f.name]
     if (stored) {
       values[f.name] = stored
       origin[f.name] = "stored"
@@ -252,6 +257,16 @@ export async function resolve(id: ProviderId, variantId?: string): Promise<Resol
     }
   }
   return { id, variant: def.id, variants, def, values, origin, detected }
+}
+
+/** The config to upload for a provider found on this machine, read the same way connect reads it. Typed-in drafts and stored copies are never part of it. */
+export async function detectedConfig(id: ProviderId): Promise<{ config: Record<string, unknown> } | { reason: string }> {
+  const r = await resolve(id, undefined, false, true)
+  const missing = r.def.fields.filter((f) => f.required && !r.values[f.name])
+  if (missing.length) return { reason: `Missing: ${missing.map((f) => f.label).join(", ")}` }
+  const config: Record<string, unknown> = {}
+  for (const f of r.def.fields) if (r.values[f.name]) config[f.name] = r.values[f.name]
+  return { config: core.withVariant(id, r.variant, config) }
 }
 
 export const maskTail = (secret: string) => (secret.length <= 8 ? "••••" : `••••${secret.slice(-4)}`)
@@ -309,15 +324,37 @@ async function findField(id: ProviderId, name: string): Promise<FieldDef> {
 export async function setDraft(id: ProviderId, name: string, value: string) {
   const f = await findField(id, name)
   if (f.secret) throw new Error(`"${name}" is a secret. Use: altimate integrations set-secret ${id} ${name} --from-clipboard`)
-  const store = core.loadStore()
-  const rec = store.providers[id] ?? {}
-  const trimmed = value.trim()
-  const drafts = { ...rec.drafts }
-  if (trimmed) drafts[name] = trimmed
-  else delete drafts[name]
-  store.providers[id] = { ...rec, drafts: Object.keys(drafts).length ? drafts : undefined }
-  core.saveStore(store)
+  await core.updateStore((store) => {
+    const rec = store.providers[id] ?? {}
+    const trimmed = value.trim()
+    const drafts = { ...rec.drafts }
+    if (trimmed) drafts[name] = trimmed
+    else delete drafts[name]
+    store.providers[id] = { ...rec, drafts: Object.keys(drafts).length ? drafts : undefined }
+  })
   return { provider: id, field: name }
+}
+
+/** The names of every secret field the provider can ask for, across its catalog variants. */
+export async function catalogSecretFields(id: ProviderId): Promise<Set<string>> {
+  const names = new Set<string>()
+  for (const v of [...(await loadCatalog(id, true)), ...BUILTIN_CATALOG[id]]) for (const f of v.fields) if (f.secret) names.add(f.name)
+  return names
+}
+/** Deletes the pasted secret drafts of every field the provider can ask for: those of each catalog variant and of the connected credential. */
+export async function discardDraftSecrets(id: ProviderId) {
+  const names = new Set([...core.BUILTIN_SECRET_FIELDS[id], ...(core.loadStore().providers[id]?.secretFields ?? []), ...(await catalogSecretFields(id))])
+  for (const name of names) await core.deleteSecret(core.secretKey("draft", id, name))
+}
+
+/** Forgets everything typed or pasted into the form and not yet connected: its fields and secrets. A connected credential and its status are kept, so this also serves a cancelled update. */
+export async function discardDrafts(id: ProviderId) {
+  await discardDraftSecrets(id)
+  await core.updateStore((store) => {
+    const rec = store.providers[id]
+    if (rec?.drafts) store.providers[id] = { ...rec, drafts: undefined }
+  })
+  return { provider: id }
 }
 
 export type SecretSource = { kind: "clipboard" } | { kind: "env"; name: string } | { kind: "stdin" }
@@ -350,6 +387,8 @@ async function readStdin() {
   return Buffer.concat(chunks).toString("utf8")
 }
 
+const MIN_TOKEN_LENGTH = 8
+
 /** Reads a secret from the chosen source and keeps it as a draft in the secret store. Returns the masked tail only. */
 export async function setSecretDraft(id: ProviderId, name: string, source: SecretSource, deps: SecretDeps = {}) {
   const f = await findField(id, name)
@@ -359,8 +398,9 @@ export async function setSecretDraft(id: ProviderId, name: string, source: Secre
   const value = (raw ?? "").trim()
   const where = source.kind === "clipboard" ? "Clipboard" : source.kind === "env" ? `Environment variable ${source.name}` : "Standard input"
   if (!value) throw new Error(source.kind === "clipboard" ? "Clipboard doesn't contain a token" : `${where} is empty`)
-  if (/\s/.test(value)) throw new Error(source.kind === "clipboard" ? "Clipboard doesn't contain a token" : `${where} doesn't contain a token`)
-  core.storeSecret(core.secretKey("draft", id, name), value)
+  if (/\s/.test(value) || (source.kind === "clipboard" && (value.length < MIN_TOKEN_LENGTH || value.includes("://"))))
+    throw new Error(source.kind === "clipboard" ? "Clipboard doesn't contain a token" : `${where} doesn't contain a token`)
+  await core.storeSecret(core.secretKey("draft", id, name), value)
   return { provider: id, field: name, masked: maskTail(value) }
 }
 
@@ -370,6 +410,8 @@ export interface Validation {
   ok: boolean
   /** The provider refused the credential (401/403). False when it could not be reached. */
   rejected: boolean
+  /** The provider could not be reached or failed; false when it answered and the input is what is wrong. */
+  unavailable: boolean
   account: string | null
   expiresAt: string | null
   message: string | null
@@ -402,9 +444,10 @@ async function request(url: string, init: RequestInit) {
   }
 }
 
-const ok = (account: string | null, expiresAt: string | null = null): Validation => ({ ok: true, rejected: false, account, expiresAt, message: null })
-const refused = (message: string): Validation => ({ ok: false, rejected: true, account: null, expiresAt: null, message })
-const unreachable = (message: string): Validation => ({ ok: false, rejected: false, account: null, expiresAt: null, message })
+const ok = (account: string | null, expiresAt: string | null = null): Validation => ({ ok: true, rejected: false, unavailable: false, account, expiresAt, message: null })
+const refused = (message: string): Validation => ({ ok: false, rejected: true, unavailable: false, account: null, expiresAt: null, message })
+const unreachable = (message: string): Validation => ({ ok: false, rejected: false, unavailable: true, account: null, expiresAt: null, message })
+const badInput = (message: string): Validation => ({ ok: false, rejected: false, unavailable: false, account: null, expiresAt: null, message })
 
 /** Checks the credential straight against the provider; nothing goes to Altimate. */
 export async function validate(id: ProviderId, variant: string, v: Record<string, string>): Promise<Validation> {
@@ -414,27 +457,30 @@ export async function validate(id: ProviderId, variant: string, v: Record<string
       const { res, data } = await request(`${githubApi()}/user`, { headers: { Authorization: `Bearer ${v.github_token}`, Accept: "application/vnd.github+json", "User-Agent": "altimate-code" } })
       if (res.status === 401 || res.status === 403) return refused(`GitHub rejected the token (${res.status})${data?.message ? `: ${data.message}` : ""}`)
       if (!res.ok) return unreachable(`GitHub answered ${res.status}`)
-      return ok(data?.login ?? null, parseGithubExpiry(res.headers.get("github-authentication-token-expiration")))
+      if (typeof data?.login !== "string" || !data.login) return badInput("GitHub answered without an account, check the token")
+      return ok(data.login, parseGithubExpiry(res.headers.get("github-authentication-token-expiration")))
     }
     if (id === "jira") {
       let url: string
       let auth: string
-      if (variant === "server") {
+      if (core.isJiraServer(variant)) {
         const base = (v.jiraBaseUrl ?? "").replace(/\/+$/, "")
         const local = /^http:\/\/(127\.0\.0\.1|localhost)(:|\/|$)/i.test(base)
-        if (!/^https:\/\//i.test(base) && !local) return unreachable("The Jira base URL must start with https://")
+        if (!/^https:\/\//i.test(base) && !local) return badInput("The Jira base URL must start with https://")
         url = `${base}/rest/api/2/myself`
         auth = `Bearer ${v.jiraPatToken}`
       } else {
         const site = core.normaliseJiraDomain(v.jiraDomain ?? "")
-        if (!/^[a-z0-9-]+$/i.test(site)) return unreachable(`"${v.jiraDomain}" is not a Jira site name, use the part before .atlassian.net`)
+        if (!/^[a-z0-9-]+$/i.test(site)) return badInput(`"${v.jiraDomain}" is not a Jira site name, use the part before .atlassian.net`)
         url = `${jiraCloudBase(site)}/rest/api/3/myself`
         auth = `Basic ${Buffer.from(`${v.jiraEmail}:${v.jiraApiToken}`).toString("base64")}`
       }
       const { res, data } = await request(url, { headers: { Authorization: auth, Accept: "application/json" } })
       if (res.status === 401 || res.status === 403) return refused(`Jira rejected the credentials (${res.status})`)
       if (!res.ok) return unreachable(`Jira answered ${res.status}`)
-      return ok(data?.emailAddress || data?.displayName || data?.name || null)
+      const who = data?.emailAddress || data?.displayName || data?.name
+      if (typeof who !== "string" || !who) return badInput("Jira answered without an account, check the site")
+      return ok(who)
     }
     const { res, data } = await request(linearApi(), {
       method: "POST",
@@ -473,7 +519,6 @@ export interface CredentialOptions {
 }
 
 const MANUAL_SOURCE: Source = { kind: "cli", label: "Claude Code" }
-const NOT_SIGNED_IN = "Not signed in to Altimate, kept local."
 
 export async function connectCredentials(opts: CredentialOptions): Promise<CredentialResult> {
   const { id } = opts
@@ -481,64 +526,148 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   const base = { provider: id, account: null, expiresAt: null }
   const rec = core.loadStore().providers[id]
   const local = (r: Omit<CredentialResult, "provider" | "account" | "expiresAt"> & Partial<CredentialResult>): CredentialResult => ({ ...base, ...r })
-  if (opts.update && !rec?.registered)
+  // A connection that exists only in the workspace can be updated or moved local too.
+  let remoteManaged = false
+  if (!rec?.registered && opts.update) {
+    try {
+      remoteManaged = await core.managedInWorkspace(id)
+    } catch (e) {
+      return local({ status: "failed", sync: "local", message: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}` })
+    }
+  }
+  if (opts.update && !rec?.registered && !remoteManaged)
     return local({ status: "failed", sync: "local", message: `${name} is not connected yet. Use connect first.`, code: "not_connected" })
 
-  const r = await resolve(id, opts.variant ?? (opts.update ? rec?.variant : undefined))
+  const blocked = core.isBlocked(id)
+  const r = await resolve(id, opts.variant ?? (opts.update ? rec?.variant : undefined), Boolean(opts.localOnly) || blocked)
   const missing = r.def.fields.filter((f) => f.required && !r.values[f.name])
   if (missing.length)
     return local({ status: "missing_fields", sync: "local", message: `Missing: ${missing.map((f) => f.label).join(", ")}`, code: "missing_fields", missing: missing.map((f) => f.name) })
 
   opts.onStep?.("Testing connection…")
   const check = await validate(id, r.variant, r.values)
-  const blocked = core.isBlocked(id)
-  if (!check.ok) {
-    if (check.rejected && rec?.registered) {
-      const store = core.loadStore()
-      store.providers[id] = { ...store.providers[id], rejected: true, validatedAt: new Date().toISOString() }
-      core.saveStore(store)
+  const secretFields = r.def.fields.filter((f) => f.secret).map((f) => f.name)
+  // Keep local still works when the provider cannot be reached: the credential is kept, flagged as not verified yet.
+  const unverified = !check.ok && !check.rejected && check.unavailable && Boolean(opts.localOnly)
+  if (!check.ok && !unverified) {
+    if (check.rejected) {
+      // The provider refused what was typed: it is not kept, and the connection that was working is left as it was.
+      for (const f of secretFields) if (r.origin[f] === "draft") await core.deleteSecret(core.secretKey("draft", id, f))
+      // Only a re-test of exactly the stored values (every field, not just the secrets) shows that credential has stopped working.
+      if (rec?.registered && secretFields.length && r.variant === rec.variant && r.def.fields.every((f) => !r.values[f.name] || r.origin[f.name] === "stored")) {
+        await core.updateStore((store) => {
+          store.providers[id] = { ...store.providers[id], rejected: true, validatedAt: new Date().toISOString() }
+        })
+      }
     }
     return local({ status: check.rejected ? "rejected" : "failed", sync: rec?.synced ? "synced" : "local", message: check.message ?? "Could not validate the credentials" })
   }
 
-  const wantSync = opts.update ? Boolean(rec?.synced) : !opts.localOnly
+  const wantSync = opts.localOnly ? false : opts.update ? Boolean(rec?.synced) || remoteManaged : true
   const cfg = wantSync && !blocked ? await core.realConfig() : null
   const handDone = Object.values(r.origin).includes("draft") || Object.values(r.origin).includes("stored")
   const detectedSource = r.detected[0]
-  const secretFields = r.def.fields.filter((f) => f.secret).map((f) => f.name)
   const plain = Object.fromEntries(r.def.fields.filter((f) => !f.secret).map((f) => [f.name, r.values[f.name]]).filter(([, v]) => v))
   const stamp = new Date().toISOString()
-  const common = { registered: true, account: check.account, variant: r.variant, values: plain, secretFields, validatedAt: stamp, rejected: false, expiresAt: check.expiresAt, drafts: undefined }
-  const finish = (synced: boolean, extra: Partial<StoredProvider> = {}) => {
-    const store = core.loadStore()
-    store.providers[id] = { ...store.providers[id], ...common, source: handDone || !detectedSource ? MANUAL_SOURCE : detectedSource, synced, updatedAt: stamp, ...extra }
-    core.saveStore(store)
-    for (const f of secretFields) core.deleteSecret(core.secretKey("draft", id, f))
+  const common = {
+    registered: true,
+    account: check.ok ? check.account : (rec?.account ?? null),
+    variant: r.variant,
+    values: plain,
+    secretFields,
+    validatedAt: check.ok ? stamp : undefined,
+    unverified: !check.ok,
+    rejected: false,
+    expiresAt: check.expiresAt,
+    drafts: undefined,
+  }
+  const finish = async (synced: boolean, extra: Partial<StoredProvider> = {}) => {
+    await core.updateStore((store) => {
+      store.providers[id] = { ...store.providers[id], ...common, source: handDone || !detectedSource ? MANUAL_SOURCE : detectedSource, synced, updatedAt: stamp, ...extra }
+    })
+    await discardDraftSecrets(id)
   }
 
   if (!cfg) {
-    for (const f of secretFields) if (r.values[f]) core.storeSecret(core.secretKey("cred", id, f), r.values[f])
-    if (secretFields[0] && r.values[secretFields[0]]) core.storeSecret(id, r.values[secretFields[0]])
-    finish(false, { connectionId: null })
-    const notSignedIn = wantSync && !blocked
-    return { ...base, provider: id, status: "connected", sync: "local", account: check.account, expiresAt: check.expiresAt, message: notSignedIn ? NOT_SIGNED_IN : blocked && wantSync ? "Sync is blocked for this provider, kept local." : null }
+    // Keeping a connection local moves it: the whole decision and move happen in one locked step with the uploads, so no workspace copy can appear after it was looked for.
+    return await core.withLock(async (): Promise<CredentialResult> => {
+      let detachNote: string | null = null
+      const wasBlocked = core.isBlocked(id)
+      const signedIn = await core.realConfig()
+      let hadCopy = Boolean(core.loadStore().providers[id]?.synced) || remoteManaged
+      if (opts.localOnly && signedIn && !hadCopy) {
+        try {
+          hadCopy = await core.managedInWorkspace(id)
+        } catch (e) {
+          return local({ status: "failed", sync: "local", message: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}` })
+        }
+      }
+      if (hadCopy && !signedIn && !core.mockMode())
+        return local({ status: "failed", sync: "synced", message: `${name} is saved in your workspace. Sign in to Altimate first.` })
+      if (opts.localOnly && !wasBlocked) await core.setBlocked([id], true)
+      if (signedIn && hadCopy) {
+        try {
+          detachNote = (await core.removeManaged(id, signedIn)).detachError
+        } catch (e) {
+          if (opts.localOnly && !wasBlocked) await core.setBlocked([id], false)
+          return local({ status: "failed", sync: "synced", message: e instanceof Error ? e.message : String(e) })
+        }
+      }
+      // Switching variant must not leave the other variant's stored secret behind.
+      // The new secrets are stored first, so a failed write never leaves neither credential; only the old fields not just written are purged after.
+      const written = new Set<string>()
+      for (const f of secretFields) if (r.values[f]) {
+        await core.storeSecret(core.secretKey("cred", id, f), r.values[f])
+        written.add(f)
+      }
+      if (secretFields[0] && r.values[secretFields[0]]) await core.storeSecret(id, r.values[secretFields[0]])
+      await core.purgeCredentialSecrets(id, rec, false, written)
+      if (hadCopy && !signedIn) await core.removeMockRemote(id)
+      await finish(false, { connectionId: null })
+      const notSignedIn = wantSync && !blocked
+      const notes = [
+        unverified ? `${check.message} (kept on this machine, not verified yet)` : null,
+        notSignedIn ? core.NOT_SIGNED_IN : blocked && wantSync ? "Sync is blocked for this provider, kept local." : null,
+        detachNote ? `Could not detach it from the linked workspace: ${detachNote}` : null,
+      ].filter(Boolean)
+      return { ...base, provider: id, status: "connected", sync: "local", account: check.account, expiresAt: check.expiresAt, message: notes.length ? notes.join(" ") : null }
+    })
   }
 
   opts.onStep?.("Saving to your workspace…")
   const config: Record<string, unknown> = {}
   for (const f of r.def.fields) if (r.values[f.name]) config[f.name] = r.values[f.name]
   try {
-    const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config))
-    // The connection lives in the workspace; no secret is kept on this machine.
-    for (const f of secretFields) core.deleteSecret(core.secretKey("cred", id, f))
-    core.deleteSecret(id)
-    if (!res.isValid) {
-      // Saved but not valid: keep it, marked rejected, so an update can fix it.
-      finish(true, { connectionId: res.connectionId, rejected: true })
-      return { ...base, provider: id, status: "rejected", sync: "synced", account: check.account, expiresAt: check.expiresAt, message: res.message ?? `${name} rejected the credentials in the workspace` }
-    }
-    finish(true, { connectionId: res.connectionId })
-    return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: check.expiresAt, message: workspaceNote(res.workspace) }
+    // The blocked check and the upload share one lock with Keep local, so a move to this machine cannot interleave with an upload.
+    return await core.withLock(async (): Promise<CredentialResult> => {
+      if (core.isBlocked(id)) return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: "Sync is blocked for this provider, kept local." })
+      const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config))
+      if (!res.isValid) {
+        const rejected = (sync: "synced" | "local"): CredentialResult => ({ ...base, provider: id, status: "rejected", sync, account: check.account, expiresAt: check.expiresAt, message: core.rejectionMessage(res) })
+        // An existing connection was updated in place and cannot be reverted, so it stays marked rejected for update to fix; the local copy of a local credential is untouched.
+        if (!res.created && !(rec?.registered && !rec.synced)) {
+          await finish(true, { connectionId: res.connectionId, rejected: true })
+          return rejected("synced")
+        }
+        // A new connection the workspace refuses is removed again and nothing is stored.
+        let warning = ""
+        if (res.created) {
+          try {
+            await backend.deleteConnection(cfg, res.connectionId)
+          } catch (e) {
+            warning = core.REMOVE_FAILED_WARNING(e instanceof Error ? e.message : String(e))
+          }
+        }
+        await discardDraftSecrets(id)
+        const refusal = rejected(rec?.synced ? "synced" : "local")
+        return warning ? { ...refusal, message: (refusal.message ?? "") + warning } : refusal
+      }
+      // The connection lives in the workspace and was accepted; no secret is kept on this machine.
+      await core.purgeCredentialSecrets(id, rec, false)
+      await core.deleteSecret(id)
+      await finish(true, { connectionId: res.connectionId })
+      return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: check.expiresAt, message: workspaceNote(res.workspace) }
+    })
   } catch (e) {
     return local({ status: "failed", sync: "local", message: e instanceof Error ? e.message : String(e) })
   }
