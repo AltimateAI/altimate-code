@@ -75,7 +75,7 @@ export namespace AltimateApi {
   }
 
   export async function isConfigured(): Promise<boolean> {
-    if (currentCredentials()) return true
+    if (currentCredentials() || envCredentials()) return true
     return Filesystem.exists(credentialsPath())
   }
 
@@ -93,9 +93,20 @@ export namespace AltimateApi {
     return obj
   }
 
+  /** A complete login given through the environment, for pointing the CLI at a local backend. */
+  function envCredentials(): AltimateCredentials | null {
+    const altimateUrl = process.env.ALTIMATE_API_URL
+    const altimateInstanceName = process.env.ALTIMATE_TENANT
+    const altimateApiKey = process.env.ALTIMATE_TOKEN
+    if (!altimateUrl || !altimateInstanceName || !altimateApiKey) return null
+    return { altimateUrl: altimateUrl.replace(/\/+$/, ""), altimateInstanceName, altimateApiKey }
+  }
+
   export async function getCredentials(): Promise<AltimateCredentials> {
     const scoped = currentCredentials()
     if (scoped) return scoped
+    const fromEnv = envCredentials()
+    if (fromEnv) return fromEnv
     const p = credentialsPath()
     if (!(await Filesystem.exists(p))) {
       throw new Error(`Altimate credentials not found at ${p}`)

@@ -538,8 +538,15 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       return { ...base, provider: id, status: "rejected", sync: "synced", account: check.account, expiresAt: check.expiresAt, message: res.message ?? `${name} rejected the credentials in the workspace` }
     }
     finish(true, { connectionId: res.connectionId })
-    return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: check.expiresAt, message: null }
+    return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: check.expiresAt, message: workspaceNote(res.workspace) }
   } catch (e) {
     return local({ status: "failed", sync: "local", message: e instanceof Error ? e.message : String(e) })
   }
+}
+
+function workspaceNote(w: core.UpsertResult["workspace"]): string | null {
+  if (!w) return null
+  if ("error" in w) return core.ATTACH_FAILED_PREFIX + w.error
+  if ("notLinked" in w) return core.NOT_LINKED_LABEL
+  return `Attached to workspace ${w.attached}`
 }

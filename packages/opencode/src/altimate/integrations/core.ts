@@ -9,6 +9,7 @@ import path from "node:path"
 import { spawnSync } from "node:child_process"
 import { Global } from "../../global"
 import * as backend from "./backend"
+import { resolveBinding } from "../workspace/state"
 
 export type ProviderId = "github" | "jira" | "linear"
 export const PROVIDER_IDS: ProviderId[] = ["github", "jira", "linear"]
@@ -333,6 +334,14 @@ export function workspaceInfo() {
   return { name: "Altimate Demo", tenant: "altimate" }
 }
 
+/** The workspace being talked to: the real tenant and, when this directory is linked, the linked workspace's name. */
+export async function liveWorkspaceInfo(): Promise<{ name: string; tenant: string }> {
+  const cfg = await realConfig()
+  if (!cfg) return workspaceInfo()
+  const binding = await resolveBinding(process.cwd()).catch(() => null)
+  return { name: binding?.datamateName || cfg.tenant, tenant: cfg.tenant }
+}
+
 function orderStatus(p: ProviderStatus): ProviderStatus {
   return { id: p.id, name: p.name, state: p.state, source: p.source, account: p.account, syncable: p.syncable, sync: p.sync, updatedAt: p.updatedAt, expiresAt: p.expiresAt, note: p.note }
 }
@@ -467,7 +476,7 @@ export async function statusRemote(): Promise<StatusResult> {
   if (!cfg) return local
   try {
     const remote = deriveRemote(await backend.listOwnConnections(cfg))
-    return { ...mergeRemote(local, remote), workspace: { name: cfg.tenant, tenant: cfg.tenant } }
+    return { ...mergeRemote(local, remote), workspace: await liveWorkspaceInfo() }
   } catch {
     return local
   }
@@ -625,7 +634,12 @@ export interface UpsertResult {
   created: boolean
   isValid: boolean
   message: string | null
+  /** What happened to the workspace attach; absent when the connection was saved invalid. */
+  workspace?: { attached: string } | { notLinked: true } | { error: string }
 }
+
+export const NOT_LINKED_LABEL = "Not linked to a workspace: run altimate link"
+export const ATTACH_FAILED_PREFIX = "Saved the connection but could not attach it to the workspace: "
 
 const INVALID_MESSAGE = "The workspace saved the connection but marked it invalid. Check the fields and run update."
 
@@ -638,7 +652,62 @@ export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, 
   const saved = existing
     ? await backend.updateConnection(cfg, existing.id, { config })
     : await backend.createConnection(cfg, { name: managedName(id), integration_id: INTEGRATION_IDS[id], config })
-  return { connectionId: saved.id, created: !existing, isValid: saved.is_valid !== false, message: saved.is_valid === false ? INVALID_MESSAGE : null }
+  const isValid = saved.is_valid !== false
+  const result: UpsertResult = { connectionId: saved.id, created: !existing, isValid, message: isValid ? null : INVALID_MESSAGE }
+  if (!isValid) return result
+  return { ...result, workspace: await attachToBoundWorkspace(cfg, id, saved.id) }
+}
+
+/** Attaches the connection to the workspace this directory is linked to, reporting instead of throwing. */
+export async function attachToBoundWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number): Promise<NonNullable<UpsertResult["workspace"]>> {
+  const binding = await resolveBinding(process.cwd()).catch(() => null)
+  if (!binding) return { notLinked: true }
+  try {
+    await attachToWorkspace(cfg, id, connectionId, String(binding.datamateId))
+    return { attached: binding.datamateName }
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) }
+  }
+}
+
+const READ_ONLY_TOOL = /(^|_)(get|list|search)_/
+
+/**
+ * The workspace's integrations list with the connection attached to the provider's entry. An
+ * existing entry keeps its tools; a new one enables only the read-only tools. Other entries pass
+ * through untouched.
+ */
+export function attachToIntegrations(
+  entries: backend.DatamateIntegrationEntry[],
+  providerIntegrationId: string,
+  connectionId: number | string,
+  catalogToolKeys: string[],
+): backend.DatamateIntegrationEntry[] {
+  const conn = String(connectionId)
+  if (!entries.some((e) => String(e.id) === providerIntegrationId)) {
+    return [...entries, { id: providerIntegrationId, tools: catalogToolKeys.filter((k) => READ_ONLY_TOOL.test(k)).map((key) => ({ key })), connection_id: conn }]
+  }
+  return entries.map((e) => {
+    if (String(e.id) !== providerIntegrationId) return e
+    const next = { ...e, connection_id: conn }
+    if (Array.isArray(e.connection_ids) && !e.connection_ids.map(String).includes(conn)) next.connection_ids = [...e.connection_ids, conn]
+    return next
+  })
+}
+
+async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number, datamateId: string): Promise<void> {
+  const integrationId = INTEGRATION_IDS[id]
+  const datamate = await backend.getDatamate(cfg, datamateId)
+  if (datamate.is_owner === false)
+    throw new Error(`only the owner of workspace "${datamate.name}" can attach connections to it; your connection is saved to your account. Link a workspace you own, or sign in as its owner`)
+  let keys: string[] = []
+  if (!datamate.integrations.some((e) => String(e.id) === integrationId)) {
+    const catalog = await backend.integrationsCatalog(cfg)
+    const list: any[] = Array.isArray(catalog) ? catalog : ((catalog as any)?.integrations ?? [])
+    const found = list.find((c) => String(c?.id) === integrationId)
+    keys = (found?.tools ?? []).map((t: any) => t?.key).filter((k: unknown): k is string => typeof k === "string")
+  }
+  await backend.updateDatamateIntegrations(cfg, datamateId, attachToIntegrations(datamate.integrations, integrationId, connectionId, keys))
 }
 
 async function syncReal(
@@ -650,11 +719,31 @@ async function syncReal(
   onStep?: (label: string, done: boolean) => void,
 ): Promise<SyncOutcome> {
   const collected = collectConfig(id, det, rec)
-  if ("reason" in collected) return { id, result: "skipped", reason: collected.reason, steps: [] }
   const steps: SyncStep[] = []
   const step = (l: string) => {
     steps.push({ label: l, ok: true })
     onStep?.(l, true)
+  }
+  const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>): SyncOutcome => {
+    if ("error" in w) return { id, result: "failed", reason: ATTACH_FAILED_PREFIX + w.error, steps }
+    if ("attached" in w) step(`Attached to workspace "${w.attached}"`)
+    else {
+      steps.push({ label: NOT_LINKED_LABEL, ok: false })
+      onStep?.(NOT_LINKED_LABEL, false)
+    }
+    return { id, result: "synced", steps }
+  }
+  if ("reason" in collected) {
+    // Nothing local to upload, but a connection saved earlier may still need attaching to the workspace.
+    if (!(rec?.registered && rec.synced && rec.connectionId && !rec.rejected)) return { id, result: "skipped", reason: collected.reason, steps: [] }
+    try {
+      const present = (await backend.listOwnConnections(cfg)).some((c) => c.id === rec.connectionId && c.integration_id === INTEGRATION_IDS[id])
+      if (!present) return { id, result: "skipped", reason: collected.reason, steps: [] }
+      step("Connection already in the workspace")
+      return reportWorkspace(await attachToBoundWorkspace(cfg, id, rec.connectionId))
+    } catch (e) {
+      return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
+    }
   }
   try {
     const res = await upsertManaged(cfg, id, collected.config)
@@ -676,7 +765,7 @@ async function syncReal(
       updatedAt: new Date().toISOString(),
     }
     saveStore(next)
-    return { id, result: "synced", steps }
+    return reportWorkspace(res.workspace ?? { notLinked: true })
   } catch (e) {
     return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
   }

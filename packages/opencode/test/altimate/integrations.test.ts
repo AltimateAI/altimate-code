@@ -238,7 +238,7 @@ describe("workspace connections", () => {
     process.env.GITHUB_TOKEN = "gh_env_token_2"
     const second = await core.syncProvider("github")
     expect(second.result).toBe("synced")
-    expect(second.steps).toEqual([{ label: "Updated connection", ok: true }])
+    expect(second.steps).toEqual([{ label: "Updated connection", ok: true }, { label: "Not linked to a workspace: run altimate link", ok: false }])
     expect(writes()[1]).toMatchObject({ method: "PATCH", path: "/connections/21", auth: "Bearer bearer-1", tenant: "acme" })
     expect(writes()[1].body).toEqual({ config: { github_token: "gh_env_token_2" } })
     expect(api.state.rows).toHaveLength(1)
@@ -309,6 +309,33 @@ describe("workspace connections", () => {
     expect(api.state.rows.filter((r) => !r.deleted).map((r) => r.name)).toEqual(["Linear", `GitHub (from ${HOST})`, "Linear (from another-host)"])
   })
 
+  test("upsertManaged reports when the project is not linked to a workspace", async () => {
+    const cfg = (await backend.backendConfig())!
+    const res = await core.upsertManaged(cfg, "github", { github_token: "t" })
+    expect(res.workspace).toEqual({ notLinked: true })
+    expect(calls.filter((c) => c.path.startsWith("/datamates/"))).toEqual([])
+  })
+
+  test("an already saved connection with no local secret is verified and reported as not linked", async () => {
+    const row = api.seed({ name: `GitHub (from ${HOST})`, integration_id: "github" })
+    const store = core.loadStore()
+    store.providers.github = { registered: true, synced: true, connectionId: row.id, variant: "default", secretFields: ["github_token"], values: {} } as any
+    core.saveStore(store)
+    delete process.env.GITHUB_TOKEN
+    const out = await core.syncProvider("github")
+    expect(out.result).toBe("synced")
+    expect(out.steps).toEqual([{ label: "Connection already in the workspace", ok: true }, { label: "Not linked to a workspace: run altimate link", ok: false }])
+    expect(writes()).toEqual([])
+  })
+
+  test("a saved connection that is gone from the workspace is still skipped", async () => {
+    const store = core.loadStore()
+    store.providers.github = { registered: true, synced: true, connectionId: 999, variant: "default", secretFields: ["github_token"], values: {} } as any
+    core.saveStore(store)
+    delete process.env.GITHUB_TOKEN
+    expect((await core.syncProvider("github")).result).toBe("skipped")
+  })
+
   test("only the existing connections endpoints are called", async () => {
     await core.syncProvider("github")
     await core.statusRemote()
@@ -316,7 +343,7 @@ describe("workspace connections", () => {
     expect(calls.length).toBeGreaterThan(3)
     expect(calls.filter((c) => c.path.startsWith("/integrations/"))).toEqual([])
     expect(calls.every((c) => c.auth === "Bearer bearer-1" && c.tenant === "acme")).toBe(true)
-    expect(calls.every((c) => c.path === "/connections/" || /^\/connections\/\d+$/.test(c.path))).toBe(true)
+    expect(calls.filter((c) => !c.path.startsWith("/datamate-project-bindings/")).every((c) => c.path === "/connections/" || /^\/connections\/\d+$/.test(c.path))).toBe(true)
   })
 
   test("without a signed-in backend nothing is removed", async () => {
@@ -805,5 +832,20 @@ describe("catalog fields a person fills in", () => {
     expect(catalog.linear?.[0]?.fields.map((f) => f.name)).toEqual(["linearApiKey"])
     expect(catalog.jira?.map((v) => v.id)).toEqual(["cloud", "server"])
     expect(catalog.jira?.[0]?.fields.find((f) => f.name === "jiraDomain")?.label).toEqual("Domain")
+  })
+})
+
+describe("attachToIntegrations", () => {
+  const keys = ["get_file", "list_issues", "search_code", "delete_file", "create_repository"]
+  test("adds a missing entry with read-only tools only", () => {
+    const out = core.attachToIntegrations([{ id: "jira", tools: [{ key: "x" }], connection_id: null }], "github", 7, keys)
+    expect(out[0]).toEqual({ id: "jira", tools: [{ key: "x" }], connection_id: null })
+    expect(out[1]).toEqual({ id: "github", tools: [{ key: "get_file" }, { key: "list_issues" }, { key: "search_code" }], connection_id: "7" })
+  })
+  test("sets the connection on an existing entry and extends a connection list", () => {
+    const other = { id: "linear", tools: [], connection_id: "1", connection_ids: null, extra: true }
+    const out = core.attachToIntegrations([{ id: "jira", tools: [{ key: "t" }], connection_id: null, connection_ids: ["3"] }, other], "jira", 9, keys)
+    expect(out[0]).toEqual({ id: "jira", tools: [{ key: "t" }], connection_id: "9", connection_ids: ["3", "9"] })
+    expect(out[1]).toBe(other)
   })
 })

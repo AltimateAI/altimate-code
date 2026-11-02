@@ -38,9 +38,9 @@ export interface Connection {
 /** The login used for backend calls, or null when there is none. */
 export async function backendConfig(): Promise<BackendConfig | null> {
   const creds = await AltimateApi.getCredentials().catch(() => null)
-  const apiUrl = (process.env.ALTIMATE_API_URL || creds?.altimateUrl || "").replace(/\/+$/, "")
-  const token = process.env.ALTIMATE_TOKEN || creds?.altimateApiKey || ""
-  const tenant = process.env.ALTIMATE_TENANT || creds?.altimateInstanceName || ""
+  const apiUrl = (creds?.altimateUrl || "").replace(/\/+$/, "")
+  const token = creds?.altimateApiKey || ""
+  const tenant = creds?.altimateInstanceName || ""
   if (!apiUrl || !token || !tenant) return null
   return { apiUrl, tenant, token }
 }
@@ -123,3 +123,29 @@ export const updateConnection = (cfg: BackendConfig, id: number, body: { config:
 export const deleteConnection = (cfg: BackendConfig, id: number) => call<unknown>(cfg, "DELETE", `/connections/${id}`)
 /** The workspace integrations catalog: what each provider's web form asks for. */
 export const integrationsCatalog = (cfg: BackendConfig) => call<unknown>(cfg, "GET", "/datamate_integrations/")
+
+/** One integration entry of a workspace, as the datamates API stores it. */
+export interface DatamateIntegrationEntry {
+  id: string
+  tools: Array<{ key: string }>
+  connection_id?: string | number | null
+  connection_ids?: string[] | null
+  [extra: string]: unknown
+}
+export interface DatamateRecord {
+  id: string
+  name: string
+  integrations: DatamateIntegrationEntry[]
+  /** False when the caller is not the workspace's owner: only the owner can change its integrations. */
+  is_owner?: boolean
+}
+
+/** A workspace with its integrations list. */
+export async function getDatamate(cfg: BackendConfig, id: string): Promise<DatamateRecord> {
+  const res = await call<any>(cfg, "GET", `/datamates/${encodeURIComponent(id)}/summary`)
+  const d = res?.datamate ?? res
+  return { ...d, id: String(d?.id ?? id), name: d?.name ?? "", integrations: Array.isArray(d?.integrations) ? d.integrations : [] }
+}
+/** Replaces the workspace's whole integrations list. */
+export const updateDatamateIntegrations = (cfg: BackendConfig, id: string, integrations: DatamateIntegrationEntry[]) =>
+  call<unknown>(cfg, "PATCH", `/datamates/${encodeURIComponent(id)}`, { integrations })

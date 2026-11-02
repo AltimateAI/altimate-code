@@ -101,7 +101,7 @@ async function runSync(ids: ProviderId[], asJson: boolean) {
     outcomes.push(o)
     if (!asJson) renderSync(o)
   }
-  if (asJson) json({ workspace: core.workspaceInfo(), results: outcomes.map(({ steps, ...rest }) => ({ ...rest, steps: steps.map((s) => s.label) })) })
+  if (asJson) json({ workspace: await core.liveWorkspaceInfo(), results: outcomes.map(({ steps, ...rest }) => ({ ...rest, steps: steps.map((s) => s.label) })) })
   else out()
   return outcomes
 }
