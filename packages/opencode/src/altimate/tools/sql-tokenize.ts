@@ -17,6 +17,10 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
   // and PostgreSQL backticks can be operators. Unknown dialects keep both visible.
   const backtickIdentifiers = /^(mysql|mariadb|sqlite|bigquery|clickhouse|spark|databricks|hive)$/i.test(dialect ?? "")
   const bracketIdentifiers = /^(sqlserver|tsql|mssql|sqlite)$/i.test(dialect ?? "")
+  // A dialect these rules do not model (none, "generic", "unknown", oracle, trino...) may still
+  // escape a quote with a backslash or start a comment with #, so both make the SQL uncertain.
+  const unmodeled =
+    !/^(mysql|mariadb|bigquery|clickhouse|sqlite|postgres|postgresql|duckdb|sqlserver|tsql|mssql|spark|databricks|hive|redshift|snowflake)$/i.test(dialect ?? "")
   let complete = true
   let i = 0
   let code = 0
@@ -76,9 +80,9 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
             ((quote === "'" && /^(mysql|mariadb|clickhouse|snowflake|databricks|spark|hive)$/i.test(dialect ?? "")) ||
               (quote === '"' && /^(mysql|mariadb|databricks|spark|hive)$/i.test(dialect ?? "")))
           ) complete = false
-          // Unknown dialect: after an odd run of backslashes a quote is escaped in BigQuery or
+          // Unmodeled dialect: after an odd run of backslashes a quote is escaped in BigQuery or
           // MySQL but closes the literal elsewhere, so where it ends cannot be known.
-          if (!dialect && !escaped && quote !== "[" && sql[i] === end) {
+          if (unmodeled && !escaped && quote !== "[" && sql[i] === end) {
             let run = 0
             for (let j = i - 1; j > start && sql[j] === "\\"; j--) run++
             if (run % 2 === 1) complete = false
@@ -110,8 +114,8 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
       }
     }
     if (!kind) {
-      // Unknown dialect: # starts a comment in MySQL and BigQuery, so what follows cannot be read.
-      if (!dialect && sql[start] === "#") complete = false
+      // Unmodeled dialect: # starts a comment in MySQL and BigQuery, so what follows cannot be read.
+      if (unmodeled && sql[start] === "#") complete = false
       i++
       continue
     }

@@ -666,9 +666,9 @@ function resolveStepRefs(
  * manifest's adapter type. Read without starting dbt or loading the handlers. The registry
  * warehouse's name is returned when no dbt project can take the call. */
 async function defaultTarget(): Promise<{ dialects: (string | undefined)[]; warehouse?: string }> {
+  const fallback = Registry.list().warehouses[0] // before any await, as the call resolves it now
   const { dbtProjectAdapterType } = await import("../native/connections/dbt-adapter-type")
   const dbt = await dbtProjectAdapterType()
-  const fallback = Registry.list().warehouses[0]
   const dialects = [
     ...new Set([undefined, ...[fallback?.type, dbt.type].map((type) => (type ? (Registry.canonicalType(type) ?? undefined) : undefined))]),
   ]

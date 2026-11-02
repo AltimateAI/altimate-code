@@ -392,6 +392,19 @@ describe("literal and comment lexing where the dialect decides", () => {
     const commented = `SELECT 'x\\'' = "x'"; /* a ; b */ DROP SCHEMA ds CASCADE; -- '`
     for (const dialect of [undefined, "databricks", "spark", "bigquery"]) expect(classifyAndCheck(commented, dialect).blocked).toBe(true)
     expect(classifyAndCheck("SELECT TRUNCATE(amount, 2), 'a\\'b' FROM t", "mysql").blocked).toBe(false)
+    // Nothing is stripped first: in BigQuery the DROP below runs, though a naive reading sees a comment.
+    for (const dialect of ["bigquery", "databricks", undefined]) {
+      expect(classifyAndCheck("SELECT 'a\\' /* ' ; DROP SCHEMA s; -- */", dialect).blocked).toBe(true)
+      expect(classifyAndCheck("SELECT 'a\\' /* ' ; DROP /* x */ SCHEMA s; -- */", dialect).blocked).toBe(true)
+    }
+    // Linear on repeated unterminated comments.
+    const started = performance.now()
+    classifyAndCheck("DROP /* ".repeat(32_768), "bigquery")
+    expect(performance.now() - started).toBeLessThan(2_000)
+    expect(classifyAndCheck("SELECT 'x\\'' ; DROP -- c\n SCHEMA s").blocked).toBe(true)
+    // A dialect the lexer does not model gets the same guards as none.
+    for (const dialect of ["generic", "unknown", "oracle"])
+      expect(classifyAndCheck("SELECT 'x\\'' ; DROP SCHEMA s; -- '", dialect).blocked).toBe(true)
     // Complete SQL keeps its literals: hard-deny text inside a string is not a statement.
     expect(classifyAndCheck("SELECT '; DROP SCHEMA x' AS v", "postgres")).toEqual({ queryType: "read", blocked: false })
   })
