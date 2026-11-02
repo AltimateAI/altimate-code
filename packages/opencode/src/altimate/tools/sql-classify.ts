@@ -211,8 +211,15 @@ function mentionsHardDeny(sql: string): boolean {
     if (word === "DROP") drop = true
     else if (drop && (word === "DATABASE" || word === "SCHEMA")) return true
     else if (word === "TRUNCATE") {
+      // The TRUNCATE() function: "(" next, past whitespace and closed block comments.
       let k = j
-      while (k < sql.length && /\s/.test(sql[k])) k++
+      for (;;) {
+        while (k < sql.length && /\s/.test(sql[k])) k++
+        if (!sql.startsWith("/*", k)) break
+        const end = sql.indexOf("*/", k + 2)
+        if (end < 0) break
+        k = end + 2
+      }
       if (sql[k] !== "(") return true
     }
     i = j

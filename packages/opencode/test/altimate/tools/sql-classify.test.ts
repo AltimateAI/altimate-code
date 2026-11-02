@@ -403,8 +403,16 @@ describe("literal and comment lexing where the dialect decides", () => {
     expect(performance.now() - started).toBeLessThan(2_000)
     expect(classifyAndCheck("SELECT 'x\\'' ; DROP -- c\n SCHEMA s").blocked).toBe(true)
     // A dialect the lexer does not model gets the same guards as none.
-    for (const dialect of ["generic", "unknown", "oracle"])
+    for (const dialect of ["generic", "unknown"])
       expect(classifyAndCheck("SELECT 'x\\'' ; DROP SCHEMA s; -- '", dialect).blocked).toBe(true)
+    // Oracle, Trino and Fabric neither escape quotes with a backslash nor comment with #.
+    for (const dialect of ["oracle", "trino", "fabric"]) {
+      expect(classifyAndCheck("SELECT * FROM t WHERE c LIKE '%\\_%' ESCAPE '\\'", dialect)).toEqual({ queryType: "read", blocked: false })
+      expect(classifyAndCheck("SELECT 'C:\\reports\\' AS p FROM t", dialect)).toEqual({ queryType: "read", blocked: false })
+    }
+    expect(classifyAndCheck("SELECT order# FROM orders", "oracle").queryType).toBe("read")
+    // A comment between TRUNCATE and ( keeps it the function.
+    expect(classifyAndCheck("SELECT TRUNCATE /* c */ (amount, 2), 'a\\'b' AS v FROM t", "mysql").blocked).toBe(false)
     // Complete SQL keeps its literals: hard-deny text inside a string is not a statement.
     expect(classifyAndCheck("SELECT '; DROP SCHEMA x' AS v", "postgres")).toEqual({ queryType: "read", blocked: false })
   })

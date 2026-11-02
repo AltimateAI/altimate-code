@@ -17,10 +17,13 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
   // and PostgreSQL backticks can be operators. Unknown dialects keep both visible.
   const backtickIdentifiers = /^(mysql|mariadb|sqlite|bigquery|clickhouse|spark|databricks|hive)$/i.test(dialect ?? "")
   const bracketIdentifiers = /^(sqlserver|tsql|mssql|sqlite)$/i.test(dialect ?? "")
-  // A dialect these rules do not model (none, "generic", "unknown", oracle, trino...) may still
-  // escape a quote with a backslash or start a comment with #, so both make the SQL uncertain.
+  // A dialect that is not one of the supported warehouse types (none, "generic", "unknown"...)
+  // may still escape a quote with a backslash or start a comment with #, so both make the SQL
+  // uncertain. Oracle, Trino and Fabric do neither.
   const unmodeled =
-    !/^(mysql|mariadb|bigquery|clickhouse|sqlite|postgres|postgresql|duckdb|sqlserver|tsql|mssql|spark|databricks|hive|redshift|snowflake)$/i.test(dialect ?? "")
+    !/^(mysql|mariadb|bigquery|clickhouse|sqlite|postgres|postgresql|duckdb|sqlserver|tsql|mssql|fabric|spark|databricks|hive|redshift|snowflake|oracle|trino)$/i.test(
+      dialect ?? "",
+    )
   let complete = true
   let i = 0
   let code = 0
