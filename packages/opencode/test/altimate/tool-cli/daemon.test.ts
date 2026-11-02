@@ -396,6 +396,41 @@ describe("release ordering", () => {
     expect((await reply)?.status).toBe("ok")
   })
 
+  test("a run that finishes after stop releases nothing", async () => {
+    const dir = await temp()
+    const file = path.join(dir, "d.sock")
+    const runner = fakeRunner()
+    let finishRun!: () => void
+    const gate = new Promise<void>((resolve) => (finishRun = resolve))
+    let running!: () => void
+    const begun = new Promise<void>((resolve) => (running = resolve))
+    const run = runner.run.bind(runner)
+    runner.run = async (...args: Parameters<typeof run>) => {
+      running()
+      await gate
+      return run(...args)
+    }
+    let releases = 0
+    const daemon = await startDaemon({
+      directory: dir,
+      version: "1",
+      runner,
+      file,
+      idleMs: 60_000,
+      releaseFiles: async () => {
+        releases++
+      },
+    })
+    cleanups.push(() => daemon.stop())
+    const pending = send(file, { id: "1", name: "t" }).catch(() => undefined)
+    await begun
+    expect((await send(file, { id: "x", op: "stop" }))?.output).toBe("stopping")
+    finishRun()
+    await pending
+    await daemon.closed
+    expect(releases).toBe(0)
+  })
+
   test.skipIf(process.platform === "win32")("the socket is private to its owner", async () => {
     const { file } = await start()
     expect(statSync(file).mode & 0o777).toBe(0o600)

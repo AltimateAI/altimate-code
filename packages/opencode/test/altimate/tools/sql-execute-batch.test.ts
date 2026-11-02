@@ -125,6 +125,24 @@ describe("sql_execute batch references", () => {
     expect(sent).toBe("SELECT 1 WHERE x IN ('\\\\'') OR 1=1 --')")
   })
 
+  test("a column reference to a step over the row bound is refused even when not truncated", async () => {
+    const many = { columns: ["v"], rows: Array.from({ length: 1001 }, (_, i) => [i]), row_count: 1001, truncated: false }
+    dispatch.mockResolvedValueOnce(many as never).mockResolvedValue(rows(1) as never)
+    const tool = await initTool(SqlExecuteTool)
+    const result = await tool.execute(
+      {
+        warehouse: "main",
+        queries: [
+          { label: "src", query: "SELECT v FROM t", limit: 5000 },
+          { label: "use", query: "SELECT 1 WHERE x IN ({{src.v}})" },
+        ],
+      },
+      ctx,
+    )
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(result.output).toContain('step "src" has more than 1000 rows')
+  })
+
   test("duplicate labels are rejected", async () => {
     const tool = await initTool(SqlExecuteTool)
     await expect(

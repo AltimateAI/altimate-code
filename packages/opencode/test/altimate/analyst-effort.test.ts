@@ -101,6 +101,7 @@ describe("analyst default reasoning effort", () => {
     const wrap = (options: Record<string, any>) => ({ agent: analyst, model: { ...opus, options } })
     const defaults = analystEffortOptions({ agent: analyst, model: opus })
     expect(analystEffortOptions(wrap({ modelParams: null }))).toEqual(defaults)
+    expect(analystEffortOptions(wrap({ modelParams: "x" }))).toEqual(defaults)
     expect(analystEffortOptions(wrap({ output_config: null }))).toEqual(defaults)
     expect(analystEffortOptions(wrap({ output_config: { format: "json" } }))).toEqual(defaults)
     expect(analystEffortOptions(wrap({ output_config: { effort: "low" } }))).toEqual({})

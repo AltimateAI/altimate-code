@@ -1,6 +1,7 @@
 import { Effect } from "effect"
 import type { Tool } from "../../tool/tool"
 import { classifyAndCheck } from "../tools/sql-classify"
+import * as Registry from "../native/connections/registry"
 
 /** Permission kinds the data tools raise for reads; anything else is a write and needs `--allow-write`. */
 export const READ_PERMISSIONS: ReadonlySet<string> = new Set([
@@ -10,10 +11,21 @@ export const READ_PERMISSIONS: ReadonlySet<string> = new Set([
   "answer_commit",
 ])
 
-// Same statements the agent's `safetyDenials` rules refuse (agent/agent.ts), found by the SQL classifier
-// so leading comments and later statements of a multi-statement pattern are seen too.
-export function isBlockedStatement(pattern: string): boolean {
-  return classifyAndCheck(pattern).blocked
+const BLOCKED_STATEMENT = /^\s*(drop\s+(database|schema)\b|truncate\b)/i
+
+// Same statements the agent's `safetyDenials` rules refuse (agent/agent.ts). With the warehouse's
+// dialect the SQL classifier finds them past leading comments and in later statements; without
+// one, quoting differs by dialect (dollar quotes, backticks), so only the leading statement is
+// checked rather than risk an unoverridable denial of a valid read.
+export function isBlockedStatement(pattern: string, dialect?: string): boolean {
+  return dialect ? classifyAndCheck(pattern, dialect).blocked : BLOCKED_STATEMENT.test(pattern)
+}
+
+function dialectOf(metadata: unknown): string | undefined {
+  const warehouse = (metadata as { warehouse?: unknown } | undefined)?.warehouse
+  return typeof warehouse === "string" && warehouse
+    ? (Registry.canonicalType(Registry.getConfig(warehouse)?.type) ?? undefined)
+    : undefined
 }
 
 export function denied(permission: string, retry = "Re-run"): Error {
@@ -25,8 +37,9 @@ export function denied(permission: string, retry = "Re-run"): Error {
  * kind is denied unless writes were enabled, and blocked destructive statements are refused either way.
  */
 export function askFor(allowWrite: boolean, retry = "Re-run"): Tool.Context["ask"] {
-  return ({ permission, patterns }) => {
-    if (patterns?.some(isBlockedStatement)) {
+  return ({ permission, patterns, metadata }) => {
+    const dialect = dialectOf(metadata)
+    if (patterns?.some((pattern) => isBlockedStatement(pattern, dialect))) {
       return Effect.die(
         new Error(`Permission denied: ${permission}. DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety. This cannot be overridden.`),
       )

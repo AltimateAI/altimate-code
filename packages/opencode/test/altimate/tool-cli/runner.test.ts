@@ -165,8 +165,24 @@ describe("ask handler", () => {
     expect(Exit.isFailure(ask(true, "bash", ["truncate table x"]))).toBe(true)
     expect(isBlockedStatement("  Drop Schema s")).toBe(true)
     expect(isBlockedStatement("DROP TABLE t")).toBe(false)
-    expect(isBlockedStatement("/* c */ DROP SCHEMA s")).toBe(true)
-    expect(isBlockedStatement("SELECT 1; TRUNCATE t")).toBe(true)
+  })
+
+  test("with the warehouse dialect, later statements and leading comments are checked too", () => {
+    expect(isBlockedStatement("/* c */ DROP SCHEMA s", "postgres")).toBe(true)
+    expect(isBlockedStatement("SELECT 1; TRUNCATE t", "postgres")).toBe(true)
+    // Dollar-quoted text is a string in Postgres, not a second statement.
+    expect(isBlockedStatement("SELECT $q$; TRUNCATE staging$q$", "postgres")).toBe(false)
+    // Without a dialect quoting is unknown, so only the leading statement counts.
+    expect(isBlockedStatement("SELECT $q$; TRUNCATE staging$q$")).toBe(false)
+    Registry.setConfigs({ pg: { type: "postgres" } as any })
+    try {
+      const askWith = (patterns: string[]) =>
+        Effect.runSyncExit(askFor(false)({ permission: "sql_execute", patterns, always: [], metadata: { warehouse: "pg" } }))
+      expect(Exit.isFailure(askWith(["SELECT 1; TRUNCATE t"]))).toBe(true)
+      expect(Exit.isSuccess(askWith(["SELECT $q$; TRUNCATE staging$q$"]))).toBe(true)
+    } finally {
+      Registry.reset()
+    }
   })
 })
 
@@ -228,6 +244,7 @@ describe("data_diff write-carrying inputs", () => {
           source_warehouse: "wh",
           [field]: value,
         })
+        expect(result.status).toBe("error")
         expect(JSON.stringify(result)).toContain("read-only inputs")
       } finally {
         Registry.reset()

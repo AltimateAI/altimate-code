@@ -113,7 +113,7 @@ export const DataDiffTool = Tool.define("data_diff", {
       if (!result.success) {
         return {
           title: "Data diff: ERROR",
-          metadata: { success: false, steps: result.steps },
+          metadata: { success: false, steps: result.steps, error: result.error },
           output: `Data diff failed: ${result.error}`,
         }
       }

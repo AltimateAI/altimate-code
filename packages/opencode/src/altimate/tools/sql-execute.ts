@@ -643,6 +643,9 @@ function resolveStepRefs(
       if (!table) throw new Error(`${match}: storing step "${ref}" in scratch failed.`)
       return table
     }
+    // A caller limit above the bound returns more rows without marking the step truncated.
+    if (source.rows.length > MAX_BOUND_ROWS)
+      throw new Error(`${match}: step "${ref}" has more than ${MAX_BOUND_ROWS} rows; filter or aggregate it first.`)
     const index = source.columns.findIndex((name) => name.toLowerCase() === column.toLowerCase())
     // Some drivers return no column names for an empty result; an empty step is an empty list either way.
     if (index < 0 && !source.rows.length && !source.columns.length) return isMongoWarehouse(warehouse) ? "null" : "NULL"
