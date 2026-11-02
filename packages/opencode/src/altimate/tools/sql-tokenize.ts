@@ -56,6 +56,14 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
       if (quote === "'" || quote === '"' || (quote === "`" && backtickIdentifiers) || (quote === "[" && bracketIdentifiers)) {
         kind = quote === "'" ? "literal" : "identifier"
         const end = quote === "[" ? "]" : quote
+        // These strings always take backslash escapes: BigQuery '...' and "..." (except raw r'...'),
+        // and Redshift '...'.
+        const raw = /[rR][bB]?$|[bB][rR]$/.exec(sql.slice(Math.max(0, i - 2), i))
+        const bigquery = /^bigquery$/i.test(dialect ?? "")
+        const backslashEscapes =
+          (bigquery && (quote === "'" || quote === '"') && !(raw && !/[\w$]/.test(sql[i - raw[0].length - 1] ?? ""))) ||
+          (quote === "'" && /^redshift$/i.test(dialect ?? ""))
+        if (bigquery && quote === '"') kind = "literal"
         i += escaped ? 2 : 1
         let closed = false
         while (i < sql.length) {
@@ -65,10 +73,17 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
           if (
             sql[i] === "\\" &&
             !escaped &&
-            ((quote === "'" && /^(mysql|mariadb|clickhouse|snowflake)$/i.test(dialect ?? "")) ||
-              (quote === '"' && /^(mysql|mariadb)$/i.test(dialect ?? "")))
+            ((quote === "'" && /^(mysql|mariadb|clickhouse|snowflake|databricks|spark|hive)$/i.test(dialect ?? "")) ||
+              (quote === '"' && /^(mysql|mariadb|databricks|spark|hive)$/i.test(dialect ?? "")))
           ) complete = false
-          if (escaped && sql[i] === "\\") {
+          // Unknown dialect: after an odd run of backslashes a quote is escaped in BigQuery or
+          // MySQL but closes the literal elsewhere, so where it ends cannot be known.
+          if (!dialect && !escaped && quote !== "[" && sql[i] === end) {
+            let run = 0
+            for (let j = i - 1; j > start && sql[j] === "\\"; j--) run++
+            if (run % 2 === 1) complete = false
+          }
+          if ((escaped || backslashEscapes) && sql[i] === "\\") {
             i += 2
             continue
           }
@@ -95,6 +110,8 @@ export function tokenizeSql(sql: string, dialect?: string): { tokens: SqlToken[]
       }
     }
     if (!kind) {
+      // Unknown dialect: # starts a comment in MySQL and BigQuery, so what follows cannot be read.
+      if (!dialect && sql[start] === "#") complete = false
       i++
       continue
     }

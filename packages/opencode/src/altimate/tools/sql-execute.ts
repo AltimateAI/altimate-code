@@ -216,11 +216,13 @@ export const SqlExecuteTool = Tool.define(
             // MongoDB warehouses take JSON command documents; the SQL classifier would read
             // every one as a write. Dispatch the normalized `{command, collection}` form.
             const warehouse = args.warehouse || Registry.list().warehouses[0]?.name
-            // An omitted warehouse tries dbt before the registry fallback. Its dialect
-            // can differ, so only an explicit target can relax conservative SQL lexing.
-            const dialect = args.warehouse
-              ? (Registry.canonicalType(Registry.getConfig(args.warehouse)?.type) ?? undefined)
-              : undefined
+            // An omitted warehouse tries dbt before the registry fallback, so the SQL is read in
+            // every dialect it can reach; it counts as a write, or blocked, if any of them says so.
+            const target = args.warehouse ? undefined : await defaultTarget()
+            const dialects = args.warehouse
+              ? [Registry.canonicalType(Registry.getConfig(args.warehouse)?.type) ?? undefined]
+              : target!.dialects
+            const dialect = dialects[0]
             const mongoWarehouse = isMongoWarehouse(warehouse)
             const mongo = mongoWarehouse ? classifyMongoCommand(sql) : null
             if (mongoWarehouse && !mongo) {
@@ -228,7 +230,7 @@ export const SqlExecuteTool = Tool.define(
                 'A MongoDB query must be a JSON command, e.g. {"command":"find","collection":"c","filter":{}}. SQL text is not supported.',
               )
             }
-            const classification = mongo ?? classifyAndCheck(sql, dialect)
+            const classification = mongo ?? classifyEvery(sql, dialects)
             const { queryType, blocked } = classification
             const query = mongo?.normalized ?? sql
             if (blocked) {
@@ -244,8 +246,9 @@ export const SqlExecuteTool = Tool.define(
               // classifyAndCheck verifies complete lexical/parser agreement and every
               // statement's read status, including metadata. Unlike check/materialize,
               // execution does not wrap SQL in a subquery and accepts those reads.
-              const count = statementsOf(query, dialect).length
-              if (count === 0) throw new Error("SQL execution requires a statement.")
+              const counts = dialects.map((d) => statementsOf(query, d).length)
+              if (counts.includes(0)) throw new Error("SQL execution requires a statement.")
+              const count = Math.max(...counts)
               // Connectors expose one result set; several prepare only one statement
               // or cannot normalize a batch response. Do not silently drop reads.
               if (count > 1) {
@@ -264,7 +267,7 @@ export const SqlExecuteTool = Tool.define(
                 permission: "sql_execute_write",
                 patterns: [sql.slice(0, 200)],
                 always: ["*"],
-                metadata: { queryType, warehouse: args.warehouse, ...(parseError && { parseError }) },
+                metadata: { queryType, warehouse: args.warehouse || target?.warehouse, ...(parseError && { parseError }) },
               })
             }
             // altimate_change end
@@ -655,6 +658,32 @@ function resolveStepRefs(
     const type = Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? ""
     return values.length ? values.map((value) => sqlLiteral(value, type)).join(", ") : "NULL"
   })
+}
+
+/** Where a call without `warehouse` can run: a dbt project's adapter, or the registry's first
+ * warehouse (also dbt's fallback). Its SQL is read in every dialect that can apply: always the
+ * generic lexing (a dbt adapter's type may be unknown), the registry warehouse's, and the dbt
+ * manifest's adapter type. Read without starting dbt or loading the handlers. The registry
+ * warehouse's name is returned when no dbt project can take the call. */
+async function defaultTarget(): Promise<{ dialects: (string | undefined)[]; warehouse?: string }> {
+  const { dbtProjectAdapterType } = await import("../native/connections/dbt-adapter-type")
+  const dbt = await dbtProjectAdapterType()
+  const fallback = Registry.list().warehouses[0]
+  const dialects = [
+    ...new Set([undefined, ...[fallback?.type, dbt.type].map((type) => (type ? (Registry.canonicalType(type) ?? undefined) : undefined))]),
+  ]
+  return { dialects, ...(!dbt.project && fallback && { warehouse: fallback.name }) }
+}
+
+/** The classification under every dialect: a write if any reads it as one, blocked if any blocks it. */
+function classifyEvery(sql: string, dialects: (string | undefined)[]) {
+  const results = dialects.map((dialect) => classifyAndCheck(sql, dialect))
+  const parseError = results.find((result) => result.parseError)?.parseError
+  return {
+    queryType: results.some((result) => result.queryType === "write") ? ("write" as const) : ("read" as const),
+    blocked: results.some((result) => result.blocked),
+    ...(parseError && { parseError }),
+  }
 }
 
 /** Dialects whose string literals treat a backslash as an escape character. */

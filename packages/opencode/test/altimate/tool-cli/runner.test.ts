@@ -232,6 +232,47 @@ describe("shared adapter behaviour", () => {
   })
 })
 
+describe("sql_execute without a warehouse reads the SQL in the default connection's dialect", () => {
+  test("a BigQuery string escape cannot hide a DROP from the read-only default", async () => {
+    Registry.setConfigs({ bq: { type: "bigquery" } as any })
+    try {
+      for (const query of ["SELECT 'x\\'' ; DROP SCHEMA ds CASCADE; -- '", "ASSERT 'x\\'' = \"x'\"; DROP SCHEMA ds CASCADE; -- '"]) {
+        // Read in BigQuery's dialect, the DROP is a second statement: hard-blocked even with --allow-write.
+        const result = await runner.run("sql_execute", { query }, { allowWrite: true })
+        expect(result.status).toBe("error")
+        expect(result.output).toContain("blocked for safety")
+      }
+    } finally {
+      Registry.reset()
+    }
+  })
+
+  test("a comment holding a ; cannot hide a DROP SCHEMA on Databricks, named or default", async () => {
+    Registry.setConfigs({ dbx: { type: "databricks" } as any })
+    try {
+      const query = `SELECT 'x\\'' = "x'"; /* a ; b */ DROP SCHEMA ds CASCADE; -- '`
+      for (const args of [{ query }, { query, warehouse: "dbx" }]) {
+        const result = await runner.run("sql_execute", args, { allowWrite: true })
+        expect(result.status).toBe("error")
+        expect(result.output).toContain("blocked for safety")
+      }
+    } finally {
+      Registry.reset()
+    }
+  })
+
+  test("a MySQL # comment cannot turn the DROP SCHEMA hard block into an ordinary write", async () => {
+    Registry.setConfigs({ my: { type: "mysql" } as any })
+    try {
+      const result = await runner.run("sql_execute", { query: "# x\nDROP SCHEMA s" }, { allowWrite: true })
+      expect(result.status).toBe("error")
+      expect(result.output).toContain("blocked for safety")
+    } finally {
+      Registry.reset()
+    }
+  })
+})
+
 describe("data_diff write-carrying inputs", () => {
   const write = "SELECT 1 AS id) SELECT 1 AS id; DELETE FROM dbo.t; WITH __x AS (SELECT 1 AS id"
   for (const [field, value] of [

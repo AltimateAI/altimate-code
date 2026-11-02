@@ -13,6 +13,7 @@ import { defaultInspectionSchema, resolveInspectionTable, resolveInspectionTarge
 import { discoverContainers } from "./docker-discovery"
 import { parseDbtProfiles } from "./dbt-profiles"
 import { runDataDiff } from "./data-diff"
+import { dbtProjectAdapterType } from "./dbt-adapter-type"
 import type {
   SqlExecuteParams,
   SqlExecuteResult,
@@ -180,20 +181,7 @@ export async function resolveDefaultTarget(
 
 /** Fallback adapter type: the dbt manifest records it as `metadata.adapter_type`. */
 async function adapterTypeFromManifest(): Promise<string | undefined> {
-  try {
-    const { read: readDbtConfig } = await import("../../../../../dbt-tools/src/config")
-    const dbtConfig = await readDbtConfig()
-    if (!dbtConfig) return undefined
-    const fs = await import("fs")
-    const path = await import("path")
-    const manifestPath = path.join(dbtConfig.projectRoot, "target", "manifest.json")
-    if (!fs.existsSync(manifestPath)) return undefined
-    const raw = JSON.parse(fs.readFileSync(manifestPath, "utf8"))
-    const adapter = String(raw?.metadata?.adapter_type ?? "").toLowerCase()
-    return adapter || undefined
-  } catch {
-    return undefined
-  }
+  return (await dbtProjectAdapterType()).type
 }
 // altimate_change end
 

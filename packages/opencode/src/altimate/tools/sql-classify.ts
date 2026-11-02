@@ -187,8 +187,15 @@ function classifyFallback(sql: string, dialect?: string): { queryType: "read" | 
   for (const stmt of statements) {
     if (HARD_DENY_PATTERN.test(stmt)) blocked = true
   }
+  // When quoting or comments cannot be read with certainty, no reading of the literals or comments
+  // can be trusted to hide a hard deny: the words anywhere in the text block it (block comments
+  // removed first, so DROP/**/SCHEMA counts; the TRUNCATE() function does not).
+  if (!tokenizeSql(sql, dialect).complete && UNCERTAIN_HARD_DENY.test(sql.replace(/\/\*[\s\S]*?\*\//g, " ")))
+    blocked = true
   return { queryType: "write", blocked }
 }
+
+const UNCERTAIN_HARD_DENY = /\b(DROP\s+(DATABASE|SCHEMA)\b|TRUNCATE\b(?!\s*\())/i
 
 /** SQL wrapped in a subquery needs independent parser proof of exactly one query. */
 export function isSingleQuery(sql: string, dialect?: string): boolean {

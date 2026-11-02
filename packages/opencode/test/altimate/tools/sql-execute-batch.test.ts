@@ -49,7 +49,7 @@ describe("sql_execute batch references", () => {
   test("a backslash in a bound value cannot end the literal on a backslash-escaping dialect", async () => {
     dispatch.mockResolvedValueOnce(rows("\\') OR 1=1 --") as never).mockResolvedValue(rows(1) as never)
     const tool = await initTool(SqlExecuteTool)
-    await tool.execute(
+    const result = await tool.execute(
       {
         queries: [
           { label: "src", query: "SELECT v FROM t" },
@@ -58,8 +58,10 @@ describe("sql_execute batch references", () => {
       },
       ctx,
     )
-    const sent = (dispatch.mock.calls[1]![1] as { sql: string }).sql
-    expect(sent).toBe("SELECT 1 WHERE x IN ('\\\\'') OR 1=1 --')")
+    // Without a warehouse the step is read in the default's dialect too; Snowflake's lexer cannot
+    // prove where a backslash-escaped literal ends, so the step is refused rather than sent.
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(result.output).toContain("read-only")
   })
 
   const quoted = async (type: string) => {
@@ -83,16 +85,24 @@ describe("sql_execute batch references", () => {
     expect((dispatch.mock.calls[1]![1] as { sql: string }).sql).toBe("SELECT 1 WHERE x IN ('it''s')")
   })
 
-  // BigQuery and Databricks have no `''` escape (Databricks would read 'it''s' as 'its'), and the read-only
-  // check does not lex their backslash escape, so the step is refused rather than run with a wrong value.
-  test.each(["bigquery", "databricks"])("a quoted bound value never runs as '' in %s", async (type) => {
-    const result = await quoted(type)
+  // BigQuery has no `''` escape; its read-only check lexes the backslash escape, so the value runs as it's.
+  test("a quote in a bound value is backslash-escaped in bigquery", async () => {
+    await quoted("bigquery")
+    expect((dispatch.mock.calls[1]![1] as { sql: string }).sql).toBe("SELECT 1 WHERE x IN ('it\\'s')")
+  })
+
+  // Databricks would read 'it''s' as 'its', and whether it honours a backslash escape is configurable,
+  // so the step is refused rather than run with a wrong value.
+  test("a quoted bound value never runs as '' in databricks", async () => {
+    const result = await quoted("databricks")
     expect(dispatch).toHaveBeenCalledTimes(1)
     expect(result.output).toContain("[use]\nFailed to execute SQL")
   })
 
   test("the registry default warehouse picks the literal syntax when none is named", async () => {
-    config.mockImplementation(((name: string) => (name === "main" ? { type: "snowflake" } : undefined)) as never)
+    // Postgres keeps a backslash as is; the beforeEach Snowflake default would double it.
+    list.mockReturnValue({ warehouses: [{ name: "pg", type: "postgres" }] } as never)
+    config.mockImplementation(((name: string) => (name === "pg" ? { type: "postgres" } : undefined)) as never)
     dispatch.mockResolvedValueOnce(rows("a\\b") as never).mockResolvedValue(rows(1) as never)
     const tool = await initTool(SqlExecuteTool)
     await tool.execute(
@@ -104,7 +114,7 @@ describe("sql_execute batch references", () => {
       },
       ctx,
     )
-    expect((dispatch.mock.calls[1]![1] as { sql: string }).sql).toBe("SELECT 1 WHERE x IN ('a\\\\b')")
+    expect((dispatch.mock.calls[1]![1] as { sql: string }).sql).toBe("SELECT 1 WHERE x IN ('a\\b')")
   })
 
   test("a backslash in a bound value is doubled on redshift", async () => {
