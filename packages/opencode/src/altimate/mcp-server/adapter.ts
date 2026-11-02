@@ -9,7 +9,7 @@ import { Agent } from "@/agent/agent"
 import { Tool } from "@/tool/tool"
 import { Truncate } from "@/tool/truncate"
 import { outputLimits } from "./output-settings"
-import { renderAnswer } from "../tools/answer-commit"
+import { MAX_BASIS_CHARACTERS, renderAnswer } from "../tools/answer-commit"
 import { AnswerCommitConjunction } from "../tools/answer-commit-conjunction"
 import { MAX_SCANNED_CHARACTERS } from "../tools/answer-commit-checks"
 import * as Precedence from "../workspace/precedence"
@@ -183,7 +183,6 @@ export function compactSchema<T>(name: string, schema: T): T {
 }
 
 // The native tool caps `basis` at 400 characters; over the MCP boundary the text is trimmed instead of rejected.
-const BASIS_LIMIT = 400
 const MCP_ONLY_TOOLS = new Set(["answer_commit"])
 
 /**
@@ -203,7 +202,6 @@ const DEFAULT_EXTRA_TOOLS = [
   "sql_translate",
 ]
 export const DEFAULT_TOOLS: ReadonlySet<string> = new Set([...LEAN_TOOLS, ...DEFAULT_EXTRA_TOOLS])
-export const ALL_TOOLS: readonly string[] = Object.keys(EXPOSED)
 const MAX_FUSED_TABLES = 8
 
 /** Adds `tables` to the advertised sql_execute schema: tables described in the same call, before its queries. */
@@ -305,7 +303,7 @@ function recordRequest(messages: TurnMessage[], request: unknown) {
 }
 
 function relaxBasis<T>(schema: T): T {
-  const copy = JSON.parse(JSON.stringify(schema).replaceAll(`at most ${BASIS_LIMIT} characters`, "kept brief")) as {
+  const copy = JSON.parse(JSON.stringify(schema).replaceAll(`at most ${MAX_BASIS_CHARACTERS} characters`, "kept brief")) as {
     properties?: { basis?: { maxLength?: number } }
   }
   delete copy.properties?.basis?.maxLength
@@ -477,8 +475,8 @@ export async function createAdapter(options: AdapterOptions = {}) {
         // Fail closed for new permission kinds. sql_execute is the validated source-read permission.
         ask: askFor(allowWrite, retry),
       }
-      if (MCP_ONLY_TOOLS.has(name) && typeof args.basis === "string" && args.basis.length > BASIS_LIMIT)
-        args = { ...args, basis: args.basis.slice(0, BASIS_LIMIT) }
+      if (MCP_ONLY_TOOLS.has(name) && typeof args.basis === "string" && args.basis.length > MAX_BASIS_CHARACTERS)
+        args = { ...args, basis: args.basis.slice(0, MAX_BASIS_CHARACTERS) }
       let request: unknown
       if (name === "answer_commit") {
         const { request: text, ...rest } = args

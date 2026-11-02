@@ -2506,6 +2506,22 @@ describe("workspace skill sync", () => {
 describe("workspace skill sync mirrors into .claude/skills", () => {
   const SKILL = (name: string) => `---\nname: ${name}\ndescription: a skill\n---\nbody\n`
   const copy = (name: string) => path.join(project, ".claude", "skills", name, "SKILL.md")
+  const original = process.env.ALTIMATE_CLAUDE_SKILL_SYNC
+  beforeEach(() => {
+    process.env.ALTIMATE_CLAUDE_SKILL_SYNC = "1"
+  })
+  afterEach(() => {
+    if (original === undefined) delete process.env.ALTIMATE_CLAUDE_SKILL_SYNC
+    else process.env.ALTIMATE_CLAUDE_SKILL_SYNC = original
+  })
+
+  test("without the opt-in a sync writes no copies", async () => {
+    delete process.env.ALTIMATE_CLAUDE_SKILL_SYNC
+    mkdirSync(path.join(project, ".claude"), { recursive: true })
+    serve({ "pub-1": { "SKILL.md": SKILL("mirrored") } })
+    await syncSkills(project)
+    expect(existsSync(copy("mirrored"))).toBe(false)
+  })
 
   test("syncSkills and purgeManagedSnapshot keep the Claude Code copies in step", async () => {
     mkdirSync(path.join(project, ".claude"), { recursive: true })

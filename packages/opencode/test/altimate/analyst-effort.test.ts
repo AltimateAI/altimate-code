@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { createAnthropic } from "@ai-sdk/anthropic"
 import { ANALYST_EFFORT_ENV, analystEffortOptions } from "@/altimate/session/analyst-effort"
 import { begin, downgradeEffort } from "@/altimate/session/run-budget-effort"
@@ -42,8 +42,15 @@ function model(npm: string, id: string): Provider.Model {
 const analyst = { name: "analyst", options: {} }
 const opus = model("@ai-sdk/anthropic", "claude-opus-5-5")
 
-afterEach(() => {
+const ORIGINAL_EFFORT = process.env[ANALYST_EFFORT_ENV]
+
+beforeEach(() => {
   delete process.env[ANALYST_EFFORT_ENV]
+})
+
+afterEach(() => {
+  if (ORIGINAL_EFFORT === undefined) delete process.env[ANALYST_EFFORT_ENV]
+  else process.env[ANALYST_EFFORT_ENV] = ORIGINAL_EFFORT
 })
 
 describe("analyst default reasoning effort", () => {
@@ -76,6 +83,27 @@ describe("analyst default reasoning effort", () => {
     const tuned = { ...opus, options: { thinking: { type: "enabled", budgetTokens: 8000 } } }
     expect(analystEffortOptions({ agent: analyst, model: tuned })).toEqual({})
     expect(analystEffortOptions({ agent: analyst, model: { ...opus, options: { reasoningEffort: "low" } } })).toEqual({})
+  })
+
+  test("SAP model parameters and a disabled variant keep the configured behaviour", () => {
+    const sap = { ...opus, options: { modelParams: { output_config: { effort: "low" } } } }
+    expect(analystEffortOptions({ agent: analyst, model: sap })).toEqual({})
+    expect(
+      analystEffortOptions({ agent: analyst, model: { ...opus, options: { modelParams: { thinking: { type: "enabled" } } } } }),
+    ).toEqual({})
+    const { high: _high, ...rest } = opus.variants!
+    expect(analystEffortOptions({ agent: analyst, model: { ...opus, variants: rest } })).toEqual({})
+    const custom = { thinking: { type: "adaptive", display: "omitted" }, effort: "high" }
+    expect(analystEffortOptions({ agent: analyst, model: { ...opus, variants: { high: custom } } })).toEqual(custom)
+  })
+
+  test("null option levels do not throw, and output_config without effort does not count as a choice", () => {
+    const wrap = (options: Record<string, any>) => ({ agent: analyst, model: { ...opus, options } })
+    const defaults = analystEffortOptions({ agent: analyst, model: opus })
+    expect(analystEffortOptions(wrap({ modelParams: null }))).toEqual(defaults)
+    expect(analystEffortOptions(wrap({ output_config: null }))).toEqual(defaults)
+    expect(analystEffortOptions(wrap({ output_config: { format: "json" } }))).toEqual(defaults)
+    expect(analystEffortOptions(wrap({ output_config: { effort: "low" } }))).toEqual({})
   })
 
   test("the environment selects another effort or disables the default", () => {

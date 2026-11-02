@@ -5,7 +5,7 @@ description: "Call Altimate Code data tools from any shell, agent or CI job with
 
 # Tool CLI (Headless)
 
-Expose the data tools -- warehouse, SQL, schema, lineage, impact, PII, data-diff, FinOps and dbt -- as plain commands. No model or API key is involved, so Claude Code, Codex and CI jobs can call them directly.
+Expose the data tools -- warehouse, SQL, schema, lineage, impact, PII, data-diff, FinOps and dbt -- as plain commands. The local data tools use no model or API key, so Claude Code, Codex and CI jobs can call them directly. Linked workspace tools authenticate to Altimate and `workspace_execute` may use backend models.
 
 ## List tools
 
@@ -14,7 +14,7 @@ altimate-code tool list          # id and description
 altimate-code tool list --json   # id, description and JSON input schema
 ```
 
-`tool` and `mcp serve` share one implementation, so compact schemas, `sql_execute` with `tables`, `query_from` chaining, spilled result files, read-only enforcement and `answer_commit` (with its `request` argument) behave the same in both. `tool` exposes the full tool list. In a project linked to a workspace it also exposes `workspace_context`, `workspace_skill` and `workspace_execute`; the link is read from the project's saved state, with no network request. Pass `--workspace-tools` to add them to an unlinked project, or `--no-workspace-tools` to leave them out of a linked one.
+`tool` and `mcp serve` share one implementation, so compact schemas, `sql_execute` with `tables`, `query_from` chaining, spilled result files, read-only enforcement and `answer_commit` (with its `request` argument) are consistent in both. Their permission policies differ: the CLI requires `--allow-write` for local configuration writes such as `warehouse_add`, while `mcp serve` allows `warehouse_add` by default. `tool` exposes the full tool list. In a project linked to a workspace it also exposes `workspace_context`, `workspace_skill` and `workspace_execute`; the link is read from the project's saved state, with no network request. Pass `--workspace-tools` to add them to an unlinked project, or `--no-workspace-tools` to leave them out of a linked one.
 
 ## Startup context
 
@@ -22,7 +22,7 @@ altimate-code tool list --json   # id, description and JSON input schema
 altimate-code tool context [--connections <file>] [--json]
 ```
 
-Prints the analyst method and the connections known at startup (the same text `mcp serve` sends as its instructions), so a shell agent gets it in one call.
+Prints the analyst method and the connections known at startup (the same base instructions `mcp serve` sends, plus the linked workspace's name, skills and tools when workspace tools are enabled), so a shell agent gets it in one call.
 
 ## Run a tool
 
@@ -64,7 +64,7 @@ altimate-code tool daemon status
 altimate-code tool daemon stop
 ```
 
-`status` and `stop` locate the running daemon the same way `run` does: by project directory, CLI version, the `--connections` file (if any), whether workspace tools are on, and the caller's `ALTIMATE_CODE_CONN_*` environment variables. Run them with the same flags and `ALTIMATE_CODE_CONN_*` variables as the call that started the daemon, or they will report no daemon running for this project even though one is.
+`status` and `stop` locate the running daemon the same way `run` does: by project directory, CLI version, the `--connections` file (if any), whether workspace tools are on, and the caller's `ALTIMATE_CODE_CONN_*`, `ALTIMATE_DISABLE_SCHEMA_VALUES`, `ALTIMATE_INTEGRATIONS` and `ALTIMATE_DISABLE_WORKSPACE` environment variables. Run them with the same flags and variables as the call that started the daemon, or they will report no daemon running for this project even though one is.
 
 | Setting | Description |
 |---|---|

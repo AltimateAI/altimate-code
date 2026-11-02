@@ -1022,10 +1022,12 @@ export async function purgeManagedSnapshot(
   directory: string,
   why: string,
 ): Promise<"removed" | "absent" | "refused"> {
-  const outcome = await purgeSnapshot(directory, why)
-  // Unbound, so the Claude Code copies go too, even when the snapshot itself was refused.
-  await mirrorToClaude(directory, { withdraw: true })
-  return outcome
+  try {
+    return await purgeSnapshot(directory, why)
+  } finally {
+    // Unbound, so the Claude Code copies go too, even when the snapshot itself was refused.
+    await mirrorToClaude(directory, { withdraw: true })
+  }
 }
 
 async function purgeSnapshot(directory: string, why: string): Promise<"removed" | "absent" | "refused"> {
@@ -1147,7 +1149,7 @@ async function retireSyncState(canon: string, before: number): Promise<void> {
 }
 // altimate_change end
 
-/** Mirror the snapshot into `.claude/skills`. Its failure must never change what the sync reports. */
+/** Mirror the snapshot into `.claude/skills` (copies are written only when `ALTIMATE_CLAUDE_SKILL_SYNC=1`; withdrawal always runs). Its failure must never change what the sync reports. */
 async function mirrorToClaude(directory: string, opts?: { withdraw?: boolean }): Promise<void> {
   try {
     await (await import("./claude-skill-mirror")).mirrorClaudeSkills(directory, opts)

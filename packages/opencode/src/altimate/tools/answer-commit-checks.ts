@@ -122,7 +122,9 @@ export function coverageRejection(missing: string[], asked: string[]): string {
 /** A committed value as a plain decimal, or undefined for text that is not purely numeric. */
 function numericValue(value: Cell): Decimal | undefined {
   if (typeof value === "number") {
-    return Number.isFinite(value) ? new Decimal(value.toPrecision(FLOAT_NOISE_PRECISION)) : undefined
+    if (!Number.isFinite(value)) return undefined
+    // Safe integers are exact; only fractional values carry binary float noise.
+    return new Decimal(Number.isInteger(value) ? value.toString() : value.toPrecision(FLOAT_NOISE_PRECISION))
   }
   if (typeof value !== "string") return undefined
   const stripped = value.trim().replace(/^[$€£¥]\s*/, "").replace(/\s*%$/, "")

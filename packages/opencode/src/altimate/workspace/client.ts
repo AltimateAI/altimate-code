@@ -122,7 +122,19 @@ async function scopedContext(directory: string) {
     }
     let skills: string[] = []
     if ((await SkillSync.snapshotWorkspaceId(directory)) === binding.datamateId) {
-      skills = (await fs.readdir(SkillSync.snapshotRoot(directory))).filter(validSkillName).slice(0, 40)
+      const root = SkillSync.snapshotRoot(directory)
+      const entries = await fs.readdir(root, { withFileTypes: true }).catch((error) => {
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return []
+        throw error
+      })
+      const readable = await Promise.all(
+        entries.map(async (entry) =>
+          entry.isDirectory() && validSkillName(entry.name)
+            ? (await fs.lstat(path.join(root, entry.name, "SKILL.md")).catch(() => null))?.isFile() === true
+            : false,
+        ),
+      )
+      skills = entries.filter((_, index) => readable[index]).map((entry) => entry.name).slice(0, 40)
     }
     await assertIdentity(directory, token)
     return {
@@ -161,7 +173,8 @@ async function scopedReadSkill(directory: string, name: string, token: string) {
   const actualRoot = await fs.realpath(root)
   const actualFile = await fs.realpath(file)
   if (!actualFile.startsWith(actualRoot + path.sep)) throw new Error("Skill is outside the workspace snapshot.")
-  const handle = await fs.open(file, "r")
+  // O_NOFOLLOW: a SKILL.md swapped for a symlink after the check above is refused, not followed.
+  const handle = await fs.open(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW)
   let content: string
   try {
     if ((await handle.stat()).size > 32_000)

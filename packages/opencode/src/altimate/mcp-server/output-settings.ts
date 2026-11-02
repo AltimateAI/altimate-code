@@ -7,6 +7,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "@/global"
 import { ConfigPaths } from "@/config/paths"
 import { ConfigVariable } from "@/config/variable"
+import { ConfigManaged } from "@/config/managed"
 import { git } from "@/util/git"
 import { MAX_LINES, MAX_BYTES } from "@/tool/truncate-core"
 
@@ -39,9 +40,9 @@ export async function outputLimits() {
   const directory = process.cwd()
   const limits = { maxLines: MAX_LINES, maxBytes: MAX_BYTES }
   // `{env:VAR}`, `${VAR}` and `{file:path}` resolve as in the agent loader; text that cannot be substituted is skipped.
-  const apply = async (text: string, from: { path: string } | { source: string }) => {
+  const apply = async (text: string, from: { path: string } | { source: string; dir?: string }) => {
     const expanded = await ConfigVariable.substitute(
-      "path" in from ? { text, type: "path", path: from.path } : { text, type: "virtual", dir: directory, source: from.source },
+      "path" in from ? { text, type: "path", path: from.path } : { text, type: "virtual", dir: from.dir ?? directory, source: from.source },
     ).catch(() => undefined)
     if (!expanded) return
     const output = parse(expanded)?.tool_output
@@ -76,5 +77,11 @@ export async function outputLimits() {
   }
   const content = env("OPENCODE_CONFIG_CONTENT")
   if (content) await apply(content, { source: "OPENCODE_CONFIG_CONTENT" })
+  // Organisation-managed config merges last in the agent loader, so it caps everything above.
+  for (const name of ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"]) {
+    await load(path.join(ConfigManaged.managedConfigDir(), name))
+  }
+  const preferences = await ConfigManaged.readManagedPreferences().catch(() => undefined)
+  if (preferences) await apply(preferences.text, { source: preferences.source, dir: path.dirname(preferences.source) })
   return limits
 }

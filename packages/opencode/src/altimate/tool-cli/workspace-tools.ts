@@ -2,11 +2,9 @@
 //
 // Whether the `tool` CLI exposes the linked-workspace tools, and the workspace section of `tool context`.
 // An explicit flag always wins; without one the tools are on exactly when the project is linked.
-import fs from "node:fs/promises"
-import path from "node:path"
 import { readLocalBinding } from "../workspace/state"
 import * as WorkspaceClient from "../workspace/client"
-import * as SkillSync from "../workspace/skill-sync"
+import { workspaceLabel } from "../workspace/workspace-name"
 
 /** Whether the project in `directory` is linked to a workspace, judged from the saved link alone: every CLI call asks,
  * so it makes no network request. The workspace tools validate the link when one is called. Unlinked or signed out read as no. */
@@ -45,10 +43,15 @@ export function skillField(markdown: string, field: string): string {
 
 export const skillDescription = (markdown: string) => skillField(markdown, "description")
 
-/** The first sentence-sized slice of a description, so a skill list stays one line per skill. */
-function oneLine(text: string): string {
-  const flat = text.replace(/\s+/g, " ").trim()
-  return flat.length > 160 ? flat.slice(0, 159) + "…" : flat
+/** Workspace-authored text as one inert line: control characters and line separators become spaces, whitespace
+ * collapses and the length is bounded, so it cannot start a new line or forge a list entry. */
+function oneLine(text: string, max = 160): string {
+  const flat = text
+    .replace(/[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  const points = Array.from(flat)
+  return points.length > max ? points.slice(0, max - 1).join("") + "…" : flat
 }
 
 /**
@@ -59,22 +62,23 @@ function oneLine(text: string): string {
 export async function workspaceContextSection(directory: string): Promise<string | undefined> {
   try {
     const { workspace, skills } = await WorkspaceClient.context(directory)
-    const root = SkillSync.snapshotRoot(directory)
-    const described = await Promise.all(
+    const read = await Promise.all(
       skills.map(async (name) => {
-        const text = await fs.readFile(path.join(root, name, "SKILL.md"), "utf8").catch(() => "")
-        const title = skillField(text, "name")
+        const text = await WorkspaceClient.readSkill(directory, name, workspace.token).catch(() => undefined)
+        if (text === undefined) return undefined
+        const title = oneLine(skillField(text, "name"), 80)
         const label = title && title !== name ? `${title} (workspace_skill name: ${name})` : name
         const description = oneLine(skillDescription(text))
         return description ? `- ${label}: ${description}` : `- ${label}`
       }),
     )
+    const described = read.filter((line): line is string => line !== undefined)
     const { createWorkspaceAdapter } = await import("../mcp-server/workspace")
     const adapter = await createWorkspaceAdapter(directory)
     try {
       const tools = adapter.tools.map((tool) => `- ${tool.name}: ${tool.description ?? ""}`)
       return [
-        `Linked workspace: ${workspace.name}`,
+        `Linked workspace: ${workspaceLabel(workspace.name, String(workspace.id))}`,
         ...(described.length ? ["", "Workspace skills (read one with workspace_skill):", ...described] : []),
         "",
         "Workspace tools (run with `tool run <name> --args <json>`; start with workspace_context):",

@@ -87,15 +87,18 @@ const simple = (name: string, description = "d", body = "") => `---\nname: ${nam
 
 let project: string
 
+const ORIGINAL_SKILL_SYNC = process.env.ALTIMATE_CLAUDE_SKILL_SYNC
+
 beforeEach(() => {
-  delete process.env.ALTIMATE_CLAUDE_SKILL_SYNC
+  process.env.ALTIMATE_CLAUDE_SKILL_SYNC = "1"
   signIn()
   project = path.join(SANDBOX, `proj-${Math.random().toString(36).slice(2)}`)
   mkdirSync(path.join(project, ".claude"), { recursive: true })
 })
 
 afterAll(() => {
-  delete process.env.ALTIMATE_CLAUDE_SKILL_SYNC
+  if (ORIGINAL_SKILL_SYNC === undefined) delete process.env.ALTIMATE_CLAUDE_SKILL_SYNC
+  else process.env.ALTIMATE_CLAUDE_SKILL_SYNC = ORIGINAL_SKILL_SYNC
   if (ORIGINAL_XDG_STATE_HOME === undefined) delete process.env.XDG_STATE_HOME
   else process.env.XDG_STATE_HOME = ORIGINAL_XDG_STATE_HOME
   if (ORIGINAL_TEST_HOME === undefined) delete process.env.OPENCODE_TEST_HOME
@@ -775,6 +778,13 @@ describe("claude skill mirror", () => {
   })
 
   describe("gate", () => {
+    test("normal TUI does not copy skills without opt-in", async () => {
+      delete process.env.ALTIMATE_CLAUDE_SKILL_SYNC
+      writeSnapshot({ sk_1: { "SKILL.md": simple("a") } })
+      expect(await mirrorClaudeSkills(project)).toEqual({ changed: false })
+      expect(existsSync(skillPath("a"))).toBe(false)
+    })
+
     test("ALTIMATE_CLAUDE_SKILL_SYNC=0 skips entirely", async () => {
       process.env.ALTIMATE_CLAUDE_SKILL_SYNC = "0"
       writeSnapshot({ sk_1: { "SKILL.md": simple("a") } })

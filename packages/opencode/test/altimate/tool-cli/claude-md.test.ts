@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import {
@@ -74,6 +74,19 @@ describe("routing block", () => {
       await writeFile(path.join(dir, "CLAUDE.md"), "# Mine\n" + first)
       expect(await writeRoutingBlock(dir)).toBe(false)
       expect(await readFile(path.join(dir, "CLAUDE.md"), "utf8")).toBe("# Mine\n" + first)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("writeRoutingBlock leaves a symlinked CLAUDE.md and its target untouched", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "tool-cli-claude-md-link-"))
+    try {
+      const target = path.join(dir, "outside.md")
+      await writeFile(target, "# Elsewhere\n")
+      await symlink(target, path.join(dir, "CLAUDE.md"))
+      expect(await writeRoutingBlock(dir)).toBe(false)
+      expect(await readFile(target, "utf8")).toBe("# Elsewhere\n")
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

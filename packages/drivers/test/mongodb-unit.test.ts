@@ -145,6 +145,14 @@ describe("MongoDB read namespace validation", () => {
     expect(finds).toEqual([])
   })
 
+  test("listCollections on a missing database reports the available databases", async () => {
+    const { connector } = await fakeMongo()
+    await expect(connector.execute(JSON.stringify({ listCollections: 1, database: "missing" }))).rejects.toThrow(
+      'MongoDB database "missing" does not exist or is not accessible. Available databases: archive, test',
+    )
+    expect(await connector.execute(JSON.stringify({ listCollections: 1, database: "archive" }))).toMatchObject({ rows: [], truncated: false })
+  })
+
   test("wrong collection lists available collections before opening a cursor", async () => {
     const { connector, query, finds } = await fakeMongo()
     await expect(connector.execute(query("find", { collection: "missing" }))).rejects.toThrow(
@@ -181,9 +189,7 @@ describe("MongoDB read namespace validation", () => {
     expect(await connector.execute(JSON.stringify({ command: "listCollections", database: "archive" }))).toEqual({
       columns: ["name", "type"], rows: [], row_count: 0, truncated: false,
     })
-    // altimate_change start — an empty bounded cursor needs no unbounded metadata validation
-    expect(databaseLists).toEqual([])
-    // altimate_change end
+    expect(databaseLists).toEqual([{ nameOnly: true, authorizedDatabases: true, maxTimeMS: 120_000 }])
   })
 
   test("metadata failures cannot become an empty read", async () => {

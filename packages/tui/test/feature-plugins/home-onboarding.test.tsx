@@ -155,3 +155,31 @@ test("tips use beginner pool only for first-time users", async () => {
     random.mockRestore()
   }
 })
+
+for (const [name, index, text] of [
+  ["Claude Code", 2, "Using Claude Code? Run claude plugin install altimate-code"],
+  ["Codex", 3, "Using Codex? Run codex plugin marketplace add AltimateAI/altimate-codex-plugin"],
+] as const) {
+  test(`tips suggest the Altimate Code plugin for ${name}`, async () => {
+    // Plugin tips sit at fixed positions in the all-string beginner pool.
+    const random = spyOn(Math, "random").mockReturnValue((index + 0.5) / 14)
+
+    try {
+      const app = await testRender(() => <TipsHarness isFirstTime={true} connected={false} />, {
+        width: 200,
+        height: 4,
+      })
+
+      try {
+        await renderOnceSettled(app)
+        const frame = await captureSettledFrame(app)
+
+        expect(frame).toContain(text)
+      } finally {
+        app.renderer.destroy()
+      }
+    } finally {
+      random.mockRestore()
+    }
+  })
+}

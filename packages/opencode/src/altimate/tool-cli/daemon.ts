@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { spawn } from "node:child_process"
-import { lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs"
+import { chmodSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
@@ -43,11 +43,15 @@ export function resolveDirectory(directory: string): string {
 // The registry's CONN_ENV_PREFIX, repeated so a client call does not load the registry.
 const CONN_ENV_PREFIX = "ALTIMATE_CODE_CONN_"
 
-/** A short digest of the caller's `ALTIMATE_CODE_CONN_*` variables, empty when there are none. A daemon reads them
- * once at spawn, so callers with different values must not share one. */
+// Variables a daemon reads once at spawn that change what it returns or exposes (value sampling, integration
+// routing, workspace tools), so a caller with a different value must not be served by a daemon started without it.
+const BEHAVIOUR_ENV = ["ALTIMATE_DISABLE_SCHEMA_VALUES", "ALTIMATE_INTEGRATIONS", "ALTIMATE_DISABLE_WORKSPACE"]
+
+/** A short digest of the caller's `ALTIMATE_CODE_CONN_*` variables and the behaviour variables above, empty when
+ * none are set. A daemon reads them once at spawn, so callers with different values must not share one. */
 export function connectionEnvKey(env: NodeJS.ProcessEnv = process.env): string {
   const entries = Object.entries(env)
-    .filter(([key, value]) => key.startsWith(CONN_ENV_PREFIX) && value)
+    .filter(([key, value]) => (key.startsWith(CONN_ENV_PREFIX) || BEHAVIOUR_ENV.includes(key)) && value)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
   if (entries.length === 0) return ""
   return createHash("sha256").update(JSON.stringify(entries)).digest("hex").slice(0, 8)
@@ -186,6 +190,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let requests = 0
   let inflight = 0
   let reloading: Promise<void> | undefined
+  let releasing: Promise<void> | undefined
+  // A tool ran (and may have opened file connections) since the last release.
+  let dirty = false
   let stopping: Promise<void> | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   const sockets = new Set<net.Socket>()
@@ -194,10 +201,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const info = (): DaemonInfo => ({ pid: process.pid, directory, version: options.version, startedAt, idleMs: idle, requests })
 
-  const handle = async (request: Request): Promise<Response> => {
+  const handle = async (request: Request, afterReply: (action: () => void) => void): Promise<Response> => {
     if (request.op === "status") return { id: request.id, status: "ok", title: "Tool daemon", output: "running", metadata: { ...info() } }
     if (request.op === "stop") {
-      setImmediate(() => void stop())
+      afterReply(() => void stop())
       return { id: request.id, status: "ok", title: "Tool daemon", output: "stopping", metadata: {} }
     }
     requests++
@@ -205,6 +212,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return { id: request.id, status: "error", title: "Invalid request", output: "A tool name is required.", metadata: {} }
     // A reload closes cached connectors, so it runs only when no other request is in flight, and requests that
     // arrive meanwhile wait for it. A skipped check loses nothing: the edit stays pending until a request runs alone.
+    if (releasing) await releasing
     if (reloading) await reloading.catch(() => {})
     if (inflight === 1 && options.refreshConnections) {
       reloading = options.refreshConnections()
@@ -217,6 +225,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         reloading = undefined
       }
     }
+    dirty = true
     const result = await options.runner.run(request.name, request.args ?? {}, { allowWrite: request.allowWrite === true })
     return { id: request.id, ...result }
   }
@@ -224,7 +233,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const arm = () => {
     clearTimeout(timer)
     timer = setTimeout(() => {
-      if (inflight > 0) return arm()
+      if (inflight > 0 || releasing) return arm()
       void stop()
     }, idle)
   }
@@ -236,8 +245,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     lines(socket, (line) => {
       inflight++
       arm()
+      let afterReply: (() => void) | undefined
+      let stopRequest = false
       Promise.resolve()
-        .then(() => handle(JSON.parse(line) as Request))
+        .then(() => {
+          const request = JSON.parse(line) as Request
+          stopRequest = request.op === "stop"
+          return handle(request, (action) => (afterReply = action))
+        })
         .catch((error): Response => ({
           id: "",
           status: "error",
@@ -248,8 +263,18 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         .then(async (response) => {
           inflight--
           // Release DuckDB/SQLite file locks once idle, before replying, so a client running `dbt build` next finds the file free.
-          if (inflight === 0) await options.releaseFiles?.().catch(() => {})
-          if (!socket.destroyed) socket.write(JSON.stringify(response) + "\n")
+          // A request that arrives meanwhile waits for the release (see `handle`). Whichever request
+          // finishes last releases, so a run that finished while a status was in flight is covered.
+          // A stop is answered at once; the daemon then shuts down.
+          if (inflight === 0 && options.releaseFiles && dirty && !stopRequest) {
+            dirty = false
+            const release = options.releaseFiles().catch(() => {})
+            releasing = release
+            await release
+            if (releasing === release) releasing = undefined
+          }
+          if (socket.destroyed) afterReply?.()
+          else socket.write(JSON.stringify(response) + "\n", () => afterReply?.())
         })
         .finally(arm)
     })
@@ -275,6 +300,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       server.once("error", reject)
       server.listen(file, () => {
         server.removeListener("error", reject)
+        // Only the owner may connect to the socket.
+        if (process.platform !== "win32") {
+          try {
+            chmodSync(file, 0o600)
+          } catch (error) {
+            return reject(error)
+          }
+        }
         resolve()
       })
     })

@@ -11,6 +11,7 @@ const VARS = [
   "OPENCODE_CONFIG_CONTENT",
   "OPENCODE_CONFIG_DIR",
   "OPENCODE_DISABLE_PROJECT_CONFIG",
+  "OPENCODE_TEST_MANAGED_CONFIG_DIR",
   "ALTIMATE_CLI_CONFIG",
   "ALTIMATE_CLI_CONFIG_CONTENT",
   "ALTIMATE_CLI_CONFIG_DIR",
@@ -82,13 +83,25 @@ test("ALTIMATE_CLI_DISABLE_PROJECT_CONFIG skips project files", async () => {
 })
 
 test("substitutes {env:VAR} as the agent loader does", async () => {
+  const previous = process.env.MCP_OUTPUT_TEST_LINES
   process.env.MCP_OUTPUT_TEST_LINES = "11"
   try {
     await writeFile(path.join(repo, "opencode.json"), '{ "tool_output": { "max_lines": {env:MCP_OUTPUT_TEST_LINES} } }')
     expect(await outputLimits()).toEqual({ maxLines: 11, maxBytes: MAX_BYTES })
   } finally {
-    delete process.env.MCP_OUTPUT_TEST_LINES
+    if (previous === undefined) delete process.env.MCP_OUTPUT_TEST_LINES
+    else process.env.MCP_OUTPUT_TEST_LINES = previous
   }
+})
+
+test("organisation-managed config overrides every other source", async () => {
+  const managed = path.join(root, "managed")
+  await mkdir(managed)
+  await writeFile(path.join(managed, "opencode.json"), output({ max_lines: 2 }))
+  await writeFile(path.join(repo, "opencode.json"), output({ max_lines: 5, max_bytes: 500 }))
+  process.env.ALTIMATE_CLI_CONFIG_CONTENT = output({ max_lines: 7 })
+  process.env.OPENCODE_TEST_MANAGED_CONFIG_DIR = managed
+  expect(await outputLimits()).toEqual({ maxLines: 2, maxBytes: 500 })
 })
 
 test("an unreadable config path does not stop startup", async () => {

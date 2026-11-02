@@ -22,6 +22,7 @@ import { Instance } from "@/project/instance"
 import { Log } from "@/altimate/util/log"
 import type { ConnectionConfig, Connector } from "@altimateai/drivers"
 import { isLocalFilePath, normalizeConfig } from "@altimateai/drivers"
+import { absoluteFileUriPath } from "@altimateai/drivers/file-store"
 import { forgetCredentials, notRemovedWarning, resolveConfig, saveConnection } from "./credential-store"
 // altimate_change start — the shared home, which honours the test-isolation override
 import { Global } from "@/global"
@@ -176,7 +177,7 @@ export function globalConfigPath(): string {
  *
  * It is also the key of the per-project registry state (see `state()`).
  */
-function projectRoot(): string {
+export function projectRoot(): string {
   try {
     return Instance.directory
   } catch {
@@ -1046,7 +1047,8 @@ export async function releaseFileConnections(): Promise<void> {
     const config = s.configs.get(name)
     const type = canonicalType(config?.type)
     // An in-memory database holds no file lock, and closing it would discard its contents.
-    const file = typeof config?.path === "string" && config.path !== "" && config.path !== ":memory:"
+    const store = typeof config?.path === "string" ? config.path : ""
+    const file = isLocalFilePath(store) || absoluteFileUriPath(store) !== undefined
     if ((type === "duckdb" || type === "sqlite") && file) tasks.push(detachCached(s, name))
   }
   await Promise.all(tasks.map((task) => task()))

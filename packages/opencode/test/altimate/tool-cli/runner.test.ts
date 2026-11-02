@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -8,6 +8,7 @@ import { EXPOSED } from "../../../src/altimate/tool-cli/allow-list"
 import { askFor, isBlockedStatement } from "../../../src/altimate/tool-cli/permissions"
 import { Effect, Exit } from "effect"
 import { Global } from "../../../src/global"
+import * as Registry from "../../../src/altimate/native/connections/registry"
 import { registerDefaultNativeHandlers } from "../../lib/native-handlers"
 
 let dir: string
@@ -15,24 +16,27 @@ let runner: Runner
 let done: () => void
 let finished: Promise<void>
 let ready: Promise<void>
+let booted: Promise<unknown>
 
 beforeAll(async () => {
   registerDefaultNativeHandlers()
   dir = await mkdtemp(path.join(tmpdir(), "tool-cli-runner-"))
   finished = new Promise((resolve) => (done = resolve))
   ready = new Promise((resolve, reject) => {
-    bootstrap(dir, async () => {
+    booted = bootstrap(dir, async () => {
       runner = await createRunner()
       resolve()
       await finished
       await runner.close()
-    }).catch(reject)
+    })
+    booted.catch(reject)
   })
   await ready
 })
 
 afterAll(async () => {
   done()
+  await booted.catch(() => {})
   await rm(dir, { recursive: true, force: true })
 })
 
@@ -147,6 +151,13 @@ describe("ask handler", () => {
       expect(Exit.isFailure(ask(false, kind))).toBe(true)
   })
 
+  test("blocked statements are refused for read permissions too", () => {
+    for (const kind of ["sql_execute", "sql_execute_read", "schema_inspect", "answer_commit"])
+      for (const allowWrite of [false, true])
+        expect(Exit.isFailure(ask(allowWrite, kind, ["DROP SCHEMA s"]))).toBe(true)
+    expect(Exit.isSuccess(ask(false, "sql_execute_read", ["SELECT 1"]))).toBe(true)
+  })
+
   test("--allow-write opens writes but never destructive statements", () => {
     expect(Exit.isSuccess(ask(true, "sql_execute_write", ["INSERT INTO t VALUES (1)"]))).toBe(true)
     expect(Exit.isSuccess(ask(true, "bash", ["dbt run"]))).toBe(true)
@@ -154,6 +165,8 @@ describe("ask handler", () => {
     expect(Exit.isFailure(ask(true, "bash", ["truncate table x"]))).toBe(true)
     expect(isBlockedStatement("  Drop Schema s")).toBe(true)
     expect(isBlockedStatement("DROP TABLE t")).toBe(false)
+    expect(isBlockedStatement("/* c */ DROP SCHEMA s")).toBe(true)
+    expect(isBlockedStatement("SELECT 1; TRUNCATE t")).toBe(true)
   })
 })
 
@@ -175,11 +188,15 @@ describe("shared adapter behaviour", () => {
   test("workspace tools are listed only when requested", async () => {
     expect((await runner.list()).some((tool) => tool.id.startsWith("workspace_"))).toBe(false)
     expect((await runner.run("workspace_context", {})).output).toContain("Unknown tool")
-    let withWorkspace!: Runner
-    await bootstrap(dir, async () => {
-      withWorkspace = await createRunner({ workspaceTools: true })
-    })
+    // A separate project directory, so disposing this bootstrap leaves the shared runner's instance alone.
+    const other = await mkdtemp(path.join(tmpdir(), "tool-cli-runner-ws-"))
+    const cwd = spyOn(process, "cwd").mockReturnValue(other)
+    let withWorkspace: Runner | undefined
     try {
+      await bootstrap(other, async () => {
+        withWorkspace = await createRunner({ workspaceTools: true })
+      })
+      if (!withWorkspace) throw new Error("runner was not created")
       const ids = (await withWorkspace.list()).map((tool) => tool.id)
       for (const id of ["workspace_context", "workspace_skill", "workspace_execute"]) expect(ids).toContain(id)
       const unlinked = await withWorkspace.run("workspace_context", {})
@@ -187,9 +204,36 @@ describe("shared adapter behaviour", () => {
       const skill = await withWorkspace.run("workspace_skill", { name: "x" })
       expect(skill.status).toBe("error")
     } finally {
-      await withWorkspace.close()
+      cwd.mockRestore()
+      await withWorkspace?.close()
+      await rm(other, { recursive: true, force: true })
     }
   })
+})
+
+describe("data_diff write-carrying inputs", () => {
+  const write = "SELECT 1 AS id) SELECT 1 AS id; DELETE FROM dbo.t; WITH __x AS (SELECT 1 AS id"
+  for (const [field, value] of [
+    ["source", write],
+    ["target", write],
+    ["where_clause", "1=1); DELETE FROM dbo.t; --"],
+  ] as const) {
+    test(`refuses a write in ${field} without --allow-write`, async () => {
+      Registry.setConfigs({ wh: { type: "sqlserver" } as any })
+      try {
+        const result = await runner.run("data_diff", {
+          source: "orders",
+          target: "orders_v2",
+          key_columns: ["id"],
+          source_warehouse: "wh",
+          [field]: value,
+        })
+        expect(JSON.stringify(result)).toContain("read-only inputs")
+      } finally {
+        Registry.reset()
+      }
+    })
+  }
 })
 
 describe("results directory", () => {

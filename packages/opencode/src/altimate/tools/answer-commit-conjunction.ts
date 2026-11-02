@@ -88,7 +88,7 @@ const MAX_ADVISED_REQUESTS = 1_000
 const advised = new Set<string>()
 
 /** Near the run's time budget a rejected commit may not get another turn, so it is never rejected. */
-function budgetEnding(sessionID: string): boolean {
+export function budgetEnding(sessionID: string): boolean {
   const deadline = RunBudget.queryDeadline(sessionID)
   return toolsDisabled(sessionID) || effortOverride(sessionID) || (deadline !== undefined && Date.now() >= deadline)
 }

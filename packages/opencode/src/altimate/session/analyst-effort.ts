@@ -1,5 +1,4 @@
 import type { Provider } from "@/provider/provider"
-import { ProviderTransform } from "@/provider/transform"
 
 /** Reasoning effort the analyst requests when neither the user nor the agent config chooses one. */
 export const ANALYST_DEFAULT_EFFORT = "high"
@@ -31,9 +30,20 @@ export function analystEffortOptions(input: {
   if (input.small || input.variant || input.agent.name !== "analyst") return {}
   // llm.ts merges this after the model options, so a per-model choice must win here too.
   const configured = [input.agent.options ?? {}, input.model.options ?? {}]
-  if (configured.some((options) => EFFORT_KEYS.some((key) => key in options))) return {}
+  // SAP AI Core keeps its reasoning controls under `modelParams`.
+  const hasEffort = (options: Record<string, any>) =>
+    [options, options.modelParams].some(
+      (level) =>
+        level !== null &&
+        typeof level === "object" &&
+        (EFFORT_KEYS.some((key) => key in level) ||
+          (level.output_config !== null &&
+            typeof level.output_config === "object" &&
+            "effort" in level.output_config)),
+    )
+  if (configured.some(hasEffort)) return {}
   const effort = (process.env[ANALYST_EFFORT_ENV] ?? ANALYST_DEFAULT_EFFORT).trim().toLowerCase()
   if (DISABLED.has(effort) || !input.model.capabilities.reasoning) return {}
-  const options = ProviderTransform.variants(input.model)[effort]
+  const options = input.model.variants?.[effort]
   return adaptive(options) ? options! : {}
 }

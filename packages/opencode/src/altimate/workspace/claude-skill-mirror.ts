@@ -1,8 +1,8 @@
 // altimate_change - new file
 //
 // Mirror the workspace skill snapshot into Claude Code's project skills directory
-// (`<project>/.claude/skills/<name>/`), so linking or refreshing a project puts the
-// skills on disk before any Claude Code session starts.
+// (`<project>/.claude/skills/<name>/`) when `ALTIMATE_CLAUDE_SKILL_SYNC=1` is set (the Claude
+// Code plugin sets it when it refreshes the workspace); otherwise nothing is copied.
 //
 // Behaviour, marker file name and on-disk layout are shared with the Claude Code plugin's
 // `sync-workspace-skills.py`, which runs the same sync at session start. Both must agree on
@@ -542,7 +542,7 @@ async function reconcile(
  * not served to the signed-in account. `withdraw` removes every copy regardless of the snapshot
  * (unlink, feature off).
  *
- * Copying is skipped when `ALTIMATE_CLAUDE_SKILL_SYNC=0` (withdrawal still runs), and for a project with no `.claude` directory:
+ * Copying requires explicit `ALTIMATE_CLAUDE_SKILL_SYNC=1` (withdrawal still runs), and for a project with no `.claude` directory:
  * one that does not use Claude Code is left alone, and the plugin creates `.claude/skills` on
  * its first session. Never throws; a failure leaves the existing copies as they were. */
 export async function mirrorClaudeSkills(
@@ -551,7 +551,7 @@ export async function mirrorClaudeSkills(
 ): Promise<{ changed: boolean }> {
   try {
     // Withdrawal (unlink, feature off) is not copying, so the off switch does not stop it.
-    if (process.env.ALTIMATE_CLAUDE_SKILL_SYNC === "0" && opts?.withdraw !== true) return { changed: false }
+    if (process.env.ALTIMATE_CLAUDE_SKILL_SYNC !== "1" && opts?.withdraw !== true) return { changed: false }
     const project = path.resolve(directory)
     if (!(await lexists(path.join(project, ".claude")))) return { changed: false }
     // A symlinked `.claude` or `.claude/skills` could point outside the project; never write or remove through it.
