@@ -167,7 +167,8 @@ describe("dbt_lineage with the project's dbt adapter", () => {
         arguments: { model: "customers", column: "customer_lifetime_value" },
       })
       expect(answer.isError).toBe(false)
-      expect(answer.structuredContent).toEqual(TRACE)
+      // The MCP server adds the text report beside the trace (clients may show structured content in place of the text).
+      expect(answer.structuredContent).toEqual({ ...TRACE, report: expect.any(String) })
       expect((answer.content as { text: string }[])[0].text).toContain("Trace of customers.customer_lifetime_value")
     } finally {
       await client.close()

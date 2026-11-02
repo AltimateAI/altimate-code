@@ -6,6 +6,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { Telemetry } from "../telemetry"
+import { columnReach, exposuresOn, type ColumnReach, type ColumnReachExposure } from "../native/dbt/column-reach"
 
 export const ImpactAnalysisTool = Tool.define("impact_analysis", {
   description: [
@@ -20,14 +21,14 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
     '- impact_analysis({ manifest_path: "target/manifest.json", model: "dim_customers", change_type: "retype" })',
   ].join("\n"),
   parameters: z.object({
-    model: z.string().describe("dbt model name to analyze impact for (e.g., 'stg_orders', 'dim_customers')"),
+    model: z.string().describe("dbt model name or unique_id to analyze impact for (e.g., 'stg_orders', 'model.shop.dim_customers')"),
     column: z
       .string()
       .optional()
       .describe("Specific column to trace impact for. If omitted, analyzes model-level impact."),
     change_type: z.enum(["remove", "rename", "retype", "add", "modify"]).describe("Type of change being considered"),
     manifest_path: z.string().optional().default("target/manifest.json").describe("Path to dbt manifest.json file"),
-    dialect: z.string().optional().default("snowflake").describe("SQL dialect for lineage analysis"),
+    dialect: z.string().optional().describe("SQL dialect for column lineage (auto-detected from the manifest if omitted)"),
   }),
   async execute(args, ctx) {
     try {
@@ -43,9 +44,9 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       }
 
       // Step 2: Find the target model and its downstream dependents
-      const targetModel = manifest.models.find(
-        (m: { name: string }) => m.name === args.model || m.name.endsWith(`.${args.model}`),
-      )
+      const targetModel =
+        manifest.models.find((m: { unique_id?: string }) => m.unique_id === args.model) ??
+        manifest.models.find((m: { name: string }) => m.name === args.model || m.name.endsWith(`.${args.model}`))
 
       if (!targetModel) {
         const available = manifest.models
@@ -66,52 +67,55 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       }
 
       // Find all models that depend on the target (direct + transitive)
-      const downstream = findDownstream(args.model, manifest.models)
+      const downstream = findDownstream(targetModel.name, manifest.models, targetModel.unique_id)
       const direct = downstream.filter((d) => d.depth === 1)
       const transitive = downstream.filter((d) => d.depth > 1)
 
       // Step 4: Count only tests that reference the target model or its downstream models
-      const affectedModelIds = new Set([
-        targetModel.unique_id,
-        ...downstream.map((d) => modelsByName.get(d.name)?.unique_id).filter(Boolean),
-      ])
+      const affectedModelIds = new Set(
+        [targetModel.unique_id, ...downstream.map((d) => d.unique_id ?? modelsByName.get(d.name)?.unique_id)].filter(
+          (id): id is string => Boolean(id),
+        ),
+      )
       const affectedTests = (manifest.tests ?? []).filter((t) =>
         t.depends_on?.some((dep) => affectedModelIds.has(dep)),
       )
       const affectedTestCount = affectedTests.length
 
-      // Step 5: If column specified, attempt column-level lineage
-      let columnImpact: string[] = []
+      // Step 5: Exposures (dashboards) on the model or anything downstream, and, for a column, the
+      // downstream models whose SQL reads it, traced model by model through the compiled manifest.
+      let exposures: ColumnReachExposure[] = []
+      let reach: ColumnReach | undefined
+      let reachError: string | undefined
+      let exposuresError: string | undefined
+      try {
+        exposures = exposuresOn(args.manifest_path, affectedModelIds)
+      } catch (error) {
+        // A manifest the parser read but the raw loader cannot: say so rather than imply no dashboards.
+        exposuresError = error instanceof Error ? error.message : String(error)
+      }
       if (args.column) {
         try {
-          const lineageResult = await Dispatcher.call("lineage.check", {
-            sql: `SELECT * FROM ${args.model}`, // Use model reference for lineage tracing
-            dialect: args.dialect,
-          })
-          if (lineageResult.data?.column_dict) {
-            // Find which downstream columns reference our target column
-            for (const [outCol, sources] of Object.entries(lineageResult.data.column_dict)) {
-              const srcArray = Array.isArray(sources) ? sources : [sources]
-              if (srcArray.some((s: any) => JSON.stringify(s).includes(args.column!))) {
-                columnImpact.push(outCol)
-              }
-            }
-          }
-        } catch {
-          // Column lineage is best-effort — continue without it
+          reach = columnReach(args.manifest_path, targetModel.unique_id ?? args.model, args.column, args.dialect)
+        } catch (error) {
+          // The model-level impact still stands; the reason is reported beside it.
+          reachError = error instanceof Error ? error.message : String(error)
         }
       }
 
       // Step 6: Format the impact report
       const output = formatImpactReport({
-        model: args.model,
+        model: targetModel.name,
         column: args.column,
         changeType: args.change_type,
         direct,
         transitive,
         affectedTestCount,
-        columnImpact,
         totalModels: manifest.model_count,
+        exposures,
+        exposuresError,
+        columnReach: reach,
+        columnReachError: reachError,
       })
 
       const totalAffected = downstream.length
@@ -138,8 +142,16 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
           direct_count: direct.length,
           transitive_count: transitive.length,
           test_count: affectedTestCount,
-          column_impact: columnImpact.length,
+          column_reader_count: reach ? reach.models.length : 0,
           has_schema: false,
+          model: targetModel.name,
+          column: args.column ?? null,
+          change_type: args.change_type,
+          downstream: downstream.map((d) => ({ name: d.name, depth: d.depth, materialized: d.materialized ?? null, path: d.path })),
+          exposures,
+          ...(reach && { column_reach: reach }),
+          ...(reachError && { column_reach_error: reachError }),
+          ...(exposuresError && { exposures_error: exposuresError }),
           ...(findings.length > 0 && { findings }),
         },
         output,
@@ -157,6 +169,8 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
 
 export interface DownstreamModel {
   name: string
+  /** The node's unique_id when the manifest gives one (versions of a model share a name). */
+  unique_id?: string
   depth: number
   materialized?: string
   path: string[]
@@ -164,30 +178,41 @@ export interface DownstreamModel {
 
 export function findDownstream(
   targetName: string,
-  models: Array<{ name: string; depends_on: string[]; materialized?: string }>,
+  models: Array<{ name: string; unique_id?: string; depends_on: string[]; materialized?: string }>,
+  targetId?: string,
 ): DownstreamModel[] {
   const results: DownstreamModel[] = []
   const visited = new Set<string>()
 
-  function walk(name: string, depth: number, path: string[]) {
-    for (const model of models) {
-      if (visited.has(model.name)) continue
-      const deps = model.depends_on.map((d) => d.split(".").pop())
-      if (deps.includes(name)) {
-        visited.add(model.name)
-        const newPath = [...path, model.name]
+  // Breadth-first so a model's depth is its shortest distance from the target. A parent is matched
+  // by unique_id when known (a versioned model's id ends in its version, not its name; another
+  // package may have a model of the same name), else by the last segment of each dependency id.
+  let level: { name: string; id: string | undefined; path: string[] }[] = [
+    { name: targetName, id: targetId, path: [targetName] },
+  ]
+  for (let depth = 1; level.length > 0; depth++) {
+    const next: typeof level = []
+    for (const parent of level) {
+      for (const model of models) {
+        const key = model.unique_id ?? model.name
+        if (visited.has(key)) continue
+        // An exact id decides alone: another package's model of the same name is not this one.
+        const reads = parent.id ? model.depends_on.includes(parent.id) : model.depends_on.some((d) => d.split(".").pop() === parent.name)
+        if (!reads) continue
+        visited.add(key)
+        const path = [...parent.path, model.name]
         results.push({
           name: model.name,
+          ...(model.unique_id && { unique_id: model.unique_id }),
           depth,
           materialized: model.materialized,
-          path: newPath,
+          path,
         })
-        walk(model.name, depth + 1, newPath)
+        next.push({ name: model.name, id: model.unique_id, path })
       }
     }
+    level = next
   }
-
-  walk(targetName, 1, [targetName])
   return results
 }
 
@@ -198,8 +223,15 @@ export function formatImpactReport(data: {
   direct: DownstreamModel[]
   transitive: DownstreamModel[]
   affectedTestCount: number
-  columnImpact: string[]
   totalModels: number
+  /** Exposures (dashboards) on the model or anything downstream of it. */
+  exposures?: ColumnReachExposure[]
+  /** Why exposures could not be read, when reading them failed. */
+  exposuresError?: string
+  /** Downstream models that read the column, when one was given and traced. */
+  columnReach?: ColumnReach
+  /** Why the column could not be traced, when tracing failed. */
+  columnReachError?: string
 }): string {
   const lines: string[] = []
 
@@ -248,13 +280,42 @@ export function formatImpactReport(data: {
     lines.push("")
   }
 
-  // Column impact
-  if (data.column && data.columnImpact.length > 0) {
-    lines.push(`Affected Output Columns (${data.columnImpact.length})`)
+  // Column reach: the downstream models whose SQL reads the column
+  if (data.column && data.columnReach) {
+    const reach = data.columnReach
+    const dashboards = reach.exposures.length
+    lines.push(
+      `Column Reach: ${data.model}.${data.column} is read by ${reach.models.length} model${reach.models.length === 1 ? "" : "s"} and ${dashboards} exposure${dashboards === 1 ? "" : "s"}` +
+        `${reach.uncertain.length ? `; ${reach.uncertain.length} more may read it` : ""}` +
+        `${reach.untraced.length ? `; ${reach.untraced.length} could not be traced` : ""}${reach.truncated ? " (stopped early)" : ""}`,
+    )
     lines.push("".padEnd(40, "-"))
-    for (const col of data.columnImpact) {
-      lines.push(`  ${col}`)
-    }
+    for (const m of reach.models) lines.push(`  ${m.name}${m.columns.length ? ` → ${m.columns.join(", ")}` : ""}`)
+    for (const e of reach.exposures) lines.push(`  ◆ ${e.label} [${e.type}]`)
+    for (const m of reach.uncertain) lines.push(`  ? ${m.name}: ${m.reason}`)
+    for (const e of reach.uncertain_exposures) lines.push(`  ? ◆ ${e.label} [${e.type}] on a model that may read it`)
+    for (const m of reach.untraced) lines.push(`  ! ${m.name} not traced: ${m.reason}`)
+    lines.push("")
+  }
+
+  if (data.column && data.columnReachError) {
+    lines.push(`Column Reach: not traced (${data.columnReachError}); the model-level impact above stands`)
+    lines.push("")
+  }
+
+  // Exposures on anything affected, less those the column reach block already listed
+  const listed = new Set(
+    [...(data.columnReach?.exposures ?? []), ...(data.columnReach?.uncertain_exposures ?? [])].map((e) => e.unique_id),
+  )
+  const others = (data.exposures ?? []).filter((e) => !listed.has(e.unique_id))
+  if (others.length > 0) {
+    lines.push(`${data.columnReach ? "Other exposures" : "Exposures"} (${others.length})`)
+    lines.push("".padEnd(40, "-"))
+    for (const e of others) lines.push(`  ${e.label} [${e.type}]`)
+    lines.push("")
+  }
+  if (data.exposuresError) {
+    lines.push(`Exposures: not read (${data.exposuresError.replace(/\r?\n/g, " ")})`)
     lines.push("")
   }
 

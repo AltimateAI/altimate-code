@@ -43,6 +43,72 @@ export async function serverInstructions(): Promise<string> {
   }
 }
 
+// altimate_change start — lineage tools answer with structured content as well as text
+// Lineage tools also return their metadata as structured content, so a client that draws lineage
+// (the Claude Code plugin's lineage pane) reads edges and downstream lists without parsing text.
+// Claude Code shows structured content to the model in place of the text, so `report` carries the
+// (already truncated) text (dbt_lineage: its header, its mappings travel as data), only the lineage
+// fields are passed, and the whole is capped.
+const STRUCTURED_FIELDS: Record<string, readonly string[]> = {
+  dbt_lineage: ["model_name", "model_unique_id", "confidence", "confidence_factors", "upstream", "columns", "edges", "error"],
+  impact_analysis: [
+    "model",
+    "column",
+    "change_type",
+    "severity",
+    "direct_count",
+    "transitive_count",
+    "test_count",
+    "downstream",
+    "exposures",
+    "column_reach",
+    "column_reach_error",
+    "exposures_error",
+    "error",
+  ],
+}
+export const STRUCTURED_TOOLS: ReadonlySet<string> = new Set(Object.keys(STRUCTURED_FIELDS))
+const STRUCTURED_OUTPUT_SCHEMA = {
+  type: "object" as const,
+  properties: {
+    report: { type: "string", description: "The tool's text report" },
+    truncated: { type: "boolean", description: "True when the lineage fields were left out for size; the report stands" },
+  },
+  required: ["report"],
+  additionalProperties: true,
+}
+// The structured result reaches the model in Claude Code, so it stays within the same order of
+// size as a text result: past this, only the report is sent.
+const STRUCTURED_MAX_BYTES = 100_000
+
+export function structuredResult(tool: string, metadata: Record<string, unknown>, report: string): Record<string, unknown> {
+  // A tool that builds its own structured result (dbt_lineage from the dbt integration) hands it
+  // over whole; otherwise the lineage fields of its metadata are passed.
+  const own = metadata.structuredContent
+  if (own && typeof own === "object" && !Array.isArray(own)) {
+    const full = { ...(own as Record<string, unknown>), report }
+    return Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES ? full : { report, truncated: true }
+  }
+  const fields = Object.fromEntries((STRUCTURED_FIELDS[tool] ?? []).filter((key) => key in metadata).map((key) => [key, metadata[key]]))
+  // dbt_lineage's text prints the same mappings and edges as `columns` and `edges`: keep its header.
+  const head = tool === "dbt_lineage" && "columns" in fields ? report.split("\nColumn Mappings:")[0]!.trim() : report
+  const full = { ...fields, report: head }
+  return Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES ? full : { report, truncated: true }
+}
+/** An error report held to the same cap as a result, so a huge exception message cannot exceed it. */
+export function structuredError(message: string): Record<string, unknown> {
+  // Measured as sent: JSON escaping can grow the text (a newline is two bytes, a control
+  // character six), so the cap applies to the serialized result, shortening until it fits.
+  const size = (value: Record<string, unknown>) => Buffer.byteLength(JSON.stringify(value))
+  if (size({ report: message }) <= STRUCTURED_MAX_BYTES) return { report: message }
+  let report = message
+  while (report.length > 0 && size({ report, truncated: true }) > STRUCTURED_MAX_BYTES) {
+    report = report.slice(0, Math.floor(report.length * 0.9))
+  }
+  return { report, truncated: true }
+}
+// altimate_change end
+
 /** Spilled results: a resource_link next to the text, which keeps the preview, row count and path. */
 function resultLinks(metadata: Record<string, unknown>) {
   // A batched sql_execute call reports one saved file per spilled query.
@@ -97,6 +163,7 @@ export async function createServer(options: ServeOptions = {}) {
       name,
       description: descriptions[name] ?? tool.description,
       inputSchema: tool.jsonSchema as McpTool["inputSchema"],
+      ...(STRUCTURED_TOOLS.has(name) && { outputSchema: STRUCTURED_OUTPUT_SCHEMA }),
     })), ...(workspace?.tools ?? [])],
   }))
   // Ask the user once per session when the model weighed two readings and the client can ask; any
@@ -150,15 +217,21 @@ export async function createServer(options: ServeOptions = {}) {
       const structured = result.metadata?.structuredContent
       return {
         content: [{ type: "text" as const, text: result.output }, ...resultLinks(result.metadata)],
-        ...(structured && typeof structured === "object" && !isError
+        // Tools outside the declared set may still hand over a structured result of their own.
+        ...(structured && typeof structured === "object" && !isError && !STRUCTURED_TOOLS.has(request.params.name)
           ? { structuredContent: structured as Record<string, unknown> }
           : {}),
         isError,
+        ...(STRUCTURED_TOOLS.has(request.params.name) && {
+          structuredContent: structuredResult(request.params.name, result.metadata, result.output),
+        }),
       }
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
       return {
-        content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }],
+        content: [{ type: "text" as const, text: message }],
         isError: true,
+        ...(STRUCTURED_TOOLS.has(request.params.name) && { structuredContent: structuredError(message) }),
       }
     }
   }

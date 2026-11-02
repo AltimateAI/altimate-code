@@ -3,6 +3,8 @@ import path from "path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { DbtLineageResult } from "../native/types"
+import { loadRawManifest } from "../native/dbt/helpers"
+import { lineageGraph } from "../native/dbt/graph"
 
 /** The structured result of dbt-integration's `getModelLineage` (version 1), relayed as is. */
 export type ModelLineage = {
@@ -36,27 +38,37 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
   description:
     "Column-level lineage for a dbt model: its upstream models, seeds and sources, its downstream models, their columns, and the column edges between them across every hop. Pass `column` to trace one column. Uses the project's dbt integration (compiles on demand, no `dbt compile` needed) and returns the result as structured content; without it, reads the compiled SQL in the manifest.",
   parameters: z.object({
-    model: z.string().describe("Model name or unique_id (e.g. 'my_model' or 'model.project.my_model')"),
+    model: z
+      .string()
+      .describe("Model name, unique_id or project-relative SQL path (e.g. 'my_model', 'model.project.my_model', 'models/my_model.sql'); a snapshot by unique_id or path"),
     column: z.string().optional().describe("Trace only this column of the model, upstream and downstream"),
     manifest_path: z
       .string()
       .optional()
       .describe(
-        "manifest.json for the manifest-only fallback, read only when the dbt integration isn't available (default: the dbt project's target/manifest.json)",
+        "manifest.json for the manifest-only fallback, read only when the dbt integration isn't available, and for the graph (default: the dbt project's target/manifest.json)",
       ),
     dialect: z.string().optional().describe("SQL dialect override for the manifest-only fallback"),
+    include_graph: z
+      .boolean()
+      .optional()
+      .describe("Also return the model's graph from the manifest (two levels upstream, everything downstream up to 500 models with exposures and tests; graph.truncated is set when cut) in the metadata; for lineage viewers"),
   }),
   async execute(args, ctx) {
     const viaAdapter = await fromAdapter(args.model, args.column, ctx.abort)
     if (viaAdapter.result) {
       const result = viaAdapter.result
       const what = result.focus.column ? `${result.focus.name}.${result.focus.column}` : result.focus.name
+      // A lineage viewer also wants the manifest's graph: exposures and tests sit there, not here.
+      const graph = args.include_graph ? manifestGraph(args.manifest_path ?? (await defaultManifestPath()), result.focus.uniqueId) : undefined
       return {
         title: `dbt Lineage: ${what} [${result.confidence}]`,
         metadata: {
           model_name: result.focus.name,
+          model_unique_id: result.focus.uniqueId,
           confidence: result.confidence,
           structuredContent: result,
+          ...(graph && { graph }),
         },
         output: formatModelLineage(result),
       }
@@ -69,16 +81,26 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
         manifest_path: manifestPath,
         model: args.model,
         dialect: args.dialect,
+        include_graph: args.include_graph,
       })
       if (notUsed) result.confidence_factors.push(notUsed)
       if (args.column) {
         result.confidence_factors.push(`tracing ${args.column} needs the dbt integration; this is the whole model's lineage`)
       }
+      const lineage = result.raw_lineage as { column_dict?: Record<string, unknown>; column_lineage?: unknown[] }
       return {
         title: `dbt Lineage: ${result.model_name} [${result.confidence}]`,
+        // The same lineage as the text, as data: callers (the MCP server's structured result, the
+        // Claude Code plugin's lineage pane) read it here instead of parsing the text.
         metadata: {
           model_name: result.model_name,
+          model_unique_id: result.model_unique_id ?? null,
           confidence: result.confidence,
+          confidence_factors: result.confidence_factors,
+          upstream: result.upstream ?? [],
+          columns: lineage?.column_dict ?? {},
+          edges: Array.isArray(lineage?.column_lineage) ? lineage.column_lineage : [],
+          ...(result.graph && { graph: result.graph }),
         },
         output: formatDbtLineage(result),
       }
@@ -92,6 +114,16 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
     }
   },
 })
+
+/** The model's graph from the compiled manifest, or undefined when there is no manifest to read. */
+function manifestGraph(manifestPath: string, uniqueId: string) {
+  try {
+    const manifest = loadRawManifest(manifestPath)
+    return manifest ? lineageGraph(manifest, uniqueId) : undefined
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * The lineage from the project's dbt adapter, which the tool starts in read-only mode too: it
