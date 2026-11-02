@@ -655,7 +655,7 @@ function resolveStepRefs(
 }
 
 /** Dialects whose string literals treat a backslash as an escape character. */
-const BACKSLASH_ESCAPE_TYPES = new Set(["mysql", "bigquery", "snowflake", "databricks", "clickhouse"])
+const BACKSLASH_ESCAPE_TYPES = new Set(["mysql", "bigquery", "snowflake", "databricks", "clickhouse", "redshift"])
 /** Dialects with no `''` escape inside a string literal; a quote is escaped with a backslash. */
 const BACKSLASH_QUOTE_TYPES = new Set(["bigquery", "databricks"])
 

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import { spawn } from "node:child_process"
-import { lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs"
+import { chmodSync, lstatSync, mkdirSync, realpathSync, rmSync, statSync } from "node:fs"
 import net from "node:net"
 import os from "node:os"
 import path from "node:path"
@@ -191,6 +191,8 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let inflight = 0
   let reloading: Promise<void> | undefined
   let releasing: Promise<void> | undefined
+  // A tool ran (and may have opened file connections) since the last release.
+  let dirty = false
   let stopping: Promise<void> | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   const sockets = new Set<net.Socket>()
@@ -223,6 +225,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         reloading = undefined
       }
     }
+    dirty = true
     const result = await options.runner.run(request.name, request.args ?? {}, { allowWrite: request.allowWrite === true })
     return { id: request.id, ...result }
   }
@@ -230,7 +233,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   const arm = () => {
     clearTimeout(timer)
     timer = setTimeout(() => {
-      if (inflight > 0) return arm()
+      if (inflight > 0 || releasing) return arm()
       void stop()
     }, idle)
   }
@@ -243,8 +246,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       inflight++
       arm()
       let afterReply: (() => void) | undefined
+      let stopRequest = false
       Promise.resolve()
-        .then(() => handle(JSON.parse(line) as Request, (action) => (afterReply = action)))
+        .then(() => {
+          const request = JSON.parse(line) as Request
+          stopRequest = request.op === "stop"
+          return handle(request, (action) => (afterReply = action))
+        })
         .catch((error): Response => ({
           id: "",
           status: "error",
@@ -255,8 +263,11 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         .then(async (response) => {
           inflight--
           // Release DuckDB/SQLite file locks once idle, before replying, so a client running `dbt build` next finds the file free.
-          // A request that arrives meanwhile waits for the release (see `handle`).
-          if (inflight === 0 && options.releaseFiles) {
+          // A request that arrives meanwhile waits for the release (see `handle`). Whichever request
+          // finishes last releases, so a run that finished while a status was in flight is covered.
+          // A stop is answered at once; the daemon then shuts down.
+          if (inflight === 0 && options.releaseFiles && dirty && !stopRequest) {
+            dirty = false
             const release = options.releaseFiles().catch(() => {})
             releasing = release
             await release
@@ -289,6 +300,14 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       server.once("error", reject)
       server.listen(file, () => {
         server.removeListener("error", reject)
+        // Only the owner may connect to the socket.
+        if (process.platform !== "win32") {
+          try {
+            chmodSync(file, 0o600)
+          } catch (error) {
+            return reject(error)
+          }
+        }
         resolve()
       })
     })

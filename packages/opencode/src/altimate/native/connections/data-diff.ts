@@ -9,6 +9,8 @@
 
 import type { DataDiffParams, DataDiffResult, PartitionDiffResult } from "../types"
 import * as Registry from "./registry"
+import { requireReadOnlyQuery } from "../../tools/read-only-sql"
+import { classifyAndCheck } from "../../tools/sql-classify"
 
 // ---------------------------------------------------------------------------
 // Dialect mapping — bridge warehouse config types to Rust SqlDialect serde names
@@ -177,7 +179,7 @@ type Rows = (string | null)[][]
 /**
  * Execute a SQL statement against a named warehouse and return rows as string[][].
  */
-async function executeQuery(sql: string, warehouseName: string | undefined): Promise<Rows> {
+async function executeQuery(sql: string, warehouseName: string | undefined, metadata = false): Promise<Rows> {
   let connector
   if (warehouseName) {
     connector = await Registry.get(warehouseName)
@@ -190,10 +192,19 @@ async function executeQuery(sql: string, warehouseName: string | undefined): Pro
     connector = await Registry.get(warehouseName)
   }
 
+  // Validate every generated query before any driver executes it, including partition discovery.
+  const dialect = warehouseTypeToDialect(Registry.getConfig(warehouseName)?.type ?? "generic")
+  if (metadata) {
+    const check = classifyAndCheck(sql, dialect)
+    if (check.blocked || check.queryType !== "read") throw new Error("Data diff metadata must be read-only")
+  } else {
+    requireReadOnlyQuery(sql, dialect)
+  }
+
   // Bypass the driver's default LIMIT — data-diff needs complete result sets.
   const result = await connector.execute(sql, undefined, undefined, {
     noLimit: true,
-    ...(Registry.canonicalType(Registry.getConfig(warehouseName)?.type) === "postgres" ? { readOnly: true } : {}),
+    readOnly: true,
   })
 
   // Normalise to string[][] — drivers return mixed types
@@ -449,7 +460,7 @@ async function discoverExtraColumns(
 
   try {
     const sql = buildColumnDiscoverySQL(tableName, dialect)
-    const rows = await executeQuery(sql, warehouseName)
+    const rows = await executeQuery(sql, warehouseName, true)
     const columnInfos = parseColumnInfo(rows, dialect)
 
     if (columnInfos.length === 0) return undefined
@@ -881,6 +892,21 @@ async function runPartitionedDiff(params: DataDiffParams): Promise<DataDiffResul
 }
 
 export async function runDataDiff(params: DataDiffParams): Promise<DataDiffResult> {
+  // Validate both caller-controlled relations and the shared filter before discovery or engine startup.
+  try {
+    for (const [source, warehouse] of [
+      [params.source, params.source_warehouse],
+      [params.target, params.target_warehouse ?? params.source_warehouse],
+    ] as const) {
+      const type = warehouse ? Registry.getConfig(warehouse)?.type : Registry.list().warehouses[0]?.type
+      const dialect = warehouseTypeToDialect(type ?? "generic")
+      requireReadOnlyQuery(isQuery(source) ? source : `SELECT * FROM ${source}`, dialect)
+      if (params.where_clause) requireReadOnlyQuery(`SELECT 1 WHERE (${params.where_clause})`, dialect)
+    }
+  } catch (error) {
+    return { success: false, error: `Data diff requires read-only inputs: ${error instanceof Error ? error.message : String(error)}`, steps: 0 }
+  }
+
   // Dispatch to partitioned diff if partition_column is set
   if (params.partition_column) {
     return runPartitionedDiff(params)

@@ -1,5 +1,6 @@
 import { Effect } from "effect"
 import type { Tool } from "../../tool/tool"
+import { classifyAndCheck } from "../tools/sql-classify"
 
 /** Permission kinds the data tools raise for reads; anything else is a write and needs `--allow-write`. */
 export const READ_PERMISSIONS: ReadonlySet<string> = new Set([
@@ -9,11 +10,10 @@ export const READ_PERMISSIONS: ReadonlySet<string> = new Set([
   "answer_commit",
 ])
 
-// Same statements the agent's `safetyDenials` rules refuse (agent/agent.ts); matched case-insensitively.
-const BLOCKED_STATEMENT = /^\s*(drop\s+(database|schema)\b|truncate\b)/i
-
+// Same statements the agent's `safetyDenials` rules refuse (agent/agent.ts), found by the SQL classifier
+// so leading comments and later statements of a multi-statement pattern are seen too.
 export function isBlockedStatement(pattern: string): boolean {
-  return BLOCKED_STATEMENT.test(pattern)
+  return classifyAndCheck(pattern).blocked
 }
 
 export function denied(permission: string, retry = "Re-run"): Error {

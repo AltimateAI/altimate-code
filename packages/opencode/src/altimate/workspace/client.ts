@@ -123,7 +123,10 @@ async function scopedContext(directory: string) {
     let skills: string[] = []
     if ((await SkillSync.snapshotWorkspaceId(directory)) === binding.datamateId) {
       const root = SkillSync.snapshotRoot(directory)
-      const entries = await fs.readdir(root, { withFileTypes: true })
+      const entries = await fs.readdir(root, { withFileTypes: true }).catch((error) => {
+        if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return []
+        throw error
+      })
       const readable = await Promise.all(
         entries.map(async (entry) =>
           entry.isDirectory() && validSkillName(entry.name)

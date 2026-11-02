@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { existsSync, mkdirSync, symlinkSync } from "node:fs"
+import { existsSync, mkdirSync, statSync, symlinkSync } from "node:fs"
 import { mkdtemp, rm } from "node:fs/promises"
 import net from "node:net"
 import { tmpdir } from "node:os"
@@ -308,18 +308,97 @@ describe("release ordering", () => {
     const dir = await temp()
     const file = path.join(dir, "d.sock")
     const runner = fakeRunner()
+    let finishRelease!: () => void
+    const gate = new Promise<void>((resolve) => (finishRelease = resolve))
+    let started!: () => void
+    const begun = new Promise<void>((resolve) => (started = resolve))
     const daemon = await startDaemon({
       directory: dir,
       version: "1",
       runner,
       file,
       idleMs: 60_000,
-      releaseFiles: () => new Promise((resolve) => setTimeout(resolve, 150)),
+      releaseFiles: async () => {
+        started()
+        await gate
+      },
     })
     cleanups.push(() => daemon.stop())
+    const first = send(file, { id: "1", name: "t" }).catch(() => undefined)
+    await begun
     const reply = await send(file, { id: "x", op: "stop" })
     expect(reply?.output).toBe("stopping")
+    finishRelease()
+    await first
     await daemon.closed
+  })
+
+  test("the idle timer does not stop the daemon while a release is still running", async () => {
+    const dir = await temp()
+    const file = path.join(dir, "d.sock")
+    let finishRelease!: () => void
+    const gate = new Promise<void>((resolve) => (finishRelease = resolve))
+    let started!: () => void
+    const begun = new Promise<void>((resolve) => (started = resolve))
+    const daemon = await startDaemon({
+      directory: dir,
+      version: "1",
+      runner: fakeRunner(),
+      file,
+      idleMs: 100,
+      releaseFiles: async () => {
+        started()
+        await gate
+      },
+    })
+    cleanups.push(() => daemon.stop())
+    let stopped = false
+    void daemon.closed.then(() => (stopped = true))
+    const reply = send(file, { id: "1", name: "t" })
+    await begun
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    expect(stopped).toBe(false)
+    finishRelease()
+    expect((await reply)?.status).toBe("ok")
+  })
+
+  test("a status or a nameless run during a release neither releases again nor lets the idle timer stop", async () => {
+    const dir = await temp()
+    const file = path.join(dir, "d.sock")
+    let finishRelease!: () => void
+    const gate = new Promise<void>((resolve) => (finishRelease = resolve))
+    let started!: () => void
+    const begun = new Promise<void>((resolve) => (started = resolve))
+    let releases = 0
+    const daemon = await startDaemon({
+      directory: dir,
+      version: "1",
+      runner: fakeRunner(),
+      file,
+      idleMs: 100,
+      releaseFiles: async () => {
+        releases++
+        started()
+        if (releases === 1) await gate
+      },
+    })
+    cleanups.push(() => daemon.stop())
+    let stopped = false
+    void daemon.closed.then(() => (stopped = true))
+    const reply = send(file, { id: "1", name: "t" })
+    await begun
+    expect((await send(file, { id: "s", op: "status" }))?.output).toBe("running")
+    expect((await send(file, { id: "bad", op: "run" } as any))?.status).toBe("error")
+    await new Promise((resolve) => setTimeout(resolve, 350))
+    expect(stopped).toBe(false)
+    expect(releases).toBe(1)
+    finishRelease()
+    expect((await reply)?.status).toBe("ok")
+  })
+
+  test.skipIf(process.platform === "win32")("the socket is private to its owner", async () => {
+    const { file } = await start()
+    expect(statSync(file).mode & 0o777).toBe(0o600)
   })
 })
 

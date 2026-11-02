@@ -107,6 +107,24 @@ describe("sql_execute batch references", () => {
     expect((dispatch.mock.calls[1]![1] as { sql: string }).sql).toBe("SELECT 1 WHERE x IN ('a\\\\b')")
   })
 
+  test("a backslash in a bound value is doubled on redshift", async () => {
+    config.mockReturnValue({ type: "redshift" } as never)
+    dispatch.mockResolvedValueOnce(rows("\\') OR 1=1 --") as never).mockResolvedValue(rows(1) as never)
+    const tool = await initTool(SqlExecuteTool)
+    await tool.execute(
+      {
+        warehouse: "main",
+        queries: [
+          { label: "src", query: "SELECT v FROM t" },
+          { label: "use", query: "SELECT 1 WHERE x IN ({{src.v}})" },
+        ],
+      },
+      ctx,
+    )
+    const sent = (dispatch.mock.calls[1]![1] as { sql: string }).sql
+    expect(sent).toBe("SELECT 1 WHERE x IN ('\\\\'') OR 1=1 --')")
+  })
+
   test("duplicate labels are rejected", async () => {
     const tool = await initTool(SqlExecuteTool)
     await expect(

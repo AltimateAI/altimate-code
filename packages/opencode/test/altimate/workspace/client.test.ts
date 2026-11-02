@@ -148,6 +148,25 @@ test("context lists only snapshot folders that hold a readable SKILL.md", async 
   expect((await Client.context(directory)).skills).toEqual(["revenue"])
 })
 
+test("context reports no skills when the snapshot folder does not exist, and rethrows other read failures", async () => {
+  scope()
+  const directory = await mkdtemp(path.join(os.tmpdir(), "workspace-client-"))
+  cleanups.push(() => rm(directory, { recursive: true, force: true }))
+  replace(Contents, "workspaceContents", async () => ({
+    skills: [],
+    integrations: [],
+    memoryEnabled: true,
+    knowledge: { kind: "off" },
+  }))
+  replace(Sync, "readOnly", async () => ({ status: "loaded", blocks: [] }))
+  replace(Skills, "snapshotWorkspaceId", async () => 35)
+  replace(Skills, "snapshotRoot", () => path.join(directory, "missing"))
+  expect((await Client.context(directory)).skills).toEqual([])
+  await writeFile(path.join(directory, "not-a-folder"), "x")
+  replace(Skills, "snapshotRoot", () => path.join(directory, "not-a-folder"))
+  await expect(Client.context(directory)).rejects.toThrow()
+})
+
 test("named skill reader uses the current account snapshot and refuses traversal, symlinks and oversized files", async () => {
   scope()
   const directory = await mkdtemp(path.join(os.tmpdir(), "workspace-client-"))

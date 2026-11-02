@@ -97,6 +97,15 @@ describe("analyst default reasoning effort", () => {
     expect(analystEffortOptions({ agent: analyst, model: { ...opus, variants: { high: custom } } })).toEqual(custom)
   })
 
+  test("null option levels do not throw, and output_config without effort does not count as a choice", () => {
+    const wrap = (options: Record<string, any>) => ({ agent: analyst, model: { ...opus, options } })
+    const defaults = analystEffortOptions({ agent: analyst, model: opus })
+    expect(analystEffortOptions(wrap({ modelParams: null }))).toEqual(defaults)
+    expect(analystEffortOptions(wrap({ output_config: null }))).toEqual(defaults)
+    expect(analystEffortOptions(wrap({ output_config: { format: "json" } }))).toEqual(defaults)
+    expect(analystEffortOptions(wrap({ output_config: { effort: "low" } }))).toEqual({})
+  })
+
   test("the environment selects another effort or disables the default", () => {
     process.env[ANALYST_EFFORT_ENV] = "XHIGH"
     expect(analystEffortOptions({ agent: analyst, model: opus })).toMatchObject({ effort: "xhigh" })

@@ -177,7 +177,7 @@ export function globalConfigPath(): string {
  *
  * It is also the key of the per-project registry state (see `state()`).
  */
-function projectRoot(): string {
+export function projectRoot(): string {
   try {
     return Instance.directory
   } catch {

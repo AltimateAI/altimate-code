@@ -133,7 +133,7 @@ export const McpServeCommand = cmd({
   describe: "serve data tools over MCP stdio (no model required)",
   builder: (yargs) => yargs
     .option("connections", { type: "string", describe: "Connections JSON file" })
-    .option("allow-write", { type: "boolean", default: false, describe: "Allow SQL writes, warehouse_remove and driver installation (warehouse_add is always allowed)" })
+    .option("allow-write", { type: "boolean", default: false, describe: "Allow SQL writes (DROP DATABASE, DROP SCHEMA and TRUNCATE stay blocked), warehouse_remove and driver installation (warehouse_add is always allowed)" })
     .option("workspace-tools", { type: "boolean", default: false, describe: "Expose linked workspace context, skills and read tools" })
     .option("all-tools", { type: "boolean", default: false, describe: "Expose every tool on the allow-list, not just the default set" }),
   async handler(args) {

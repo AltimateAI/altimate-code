@@ -32,7 +32,15 @@ export function analystEffortOptions(input: {
   const configured = [input.agent.options ?? {}, input.model.options ?? {}]
   // SAP AI Core keeps its reasoning controls under `modelParams`.
   const hasEffort = (options: Record<string, any>) =>
-    [options, options.modelParams ?? {}].some((level) => EFFORT_KEYS.some((key) => key in level) || "output_config" in level)
+    [options, options.modelParams].some(
+      (level) =>
+        level !== null &&
+        typeof level === "object" &&
+        (EFFORT_KEYS.some((key) => key in level) ||
+          (level.output_config !== null &&
+            typeof level.output_config === "object" &&
+            "effort" in level.output_config)),
+    )
   if (configured.some(hasEffort)) return {}
   const effort = (process.env[ANALYST_EFFORT_ENV] ?? ANALYST_DEFAULT_EFFORT).trim().toLowerCase()
   if (DISABLED.has(effort) || !input.model.capabilities.reasoning) return {}

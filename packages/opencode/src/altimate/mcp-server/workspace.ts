@@ -215,8 +215,11 @@ export async function createWorkspaceAdapter(directory: string) {
       if (closed) throw new Error("Workspace server closed.")
       await WorkspaceClient.assertIdentity(directory, token)
       if (!refresh && active?.token === token) return active
-      if (active) await retire(active)
-      active = undefined
+      if (active) {
+        const previous = active
+        active = undefined
+        await retire(previous)
+      }
       const adapter = await createPinnedWorkspaceAdapter(directory)
       try {
         await WorkspaceClient.assertIdentity(directory, token)
