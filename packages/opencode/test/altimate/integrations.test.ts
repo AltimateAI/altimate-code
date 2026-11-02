@@ -316,6 +316,10 @@ describe("workspace connections", () => {
     expect(calls.filter((c) => c.path.startsWith("/datamates/"))).toEqual([])
   })
 
+  test("workspace info reports an unlinked project", async () => {
+    expect(await core.liveWorkspaceInfo()).toEqual({ name: "acme", tenant: "acme", linked: false, id: null })
+  })
+
   test("an already saved connection with no local secret is verified and reported as not linked", async () => {
     const row = api.seed({ name: `GitHub (from ${HOST})`, integration_id: "github" })
     const store = core.loadStore()

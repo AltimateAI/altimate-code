@@ -34,7 +34,7 @@ const SYNC_LABEL: Record<ProviderStatus["sync"], string> = {
 
 function printStatus(result: StatusResult, title: string) {
   out()
-  out(`${S.TEXT_HIGHLIGHT_BOLD}◆ ${title}${S.TEXT_NORMAL}  ${S.TEXT_DIM}workspace ${result.workspace.name} (${result.workspace.tenant})${S.TEXT_NORMAL}`)
+  out(`${S.TEXT_HIGHLIGHT_BOLD}◆ ${title}${S.TEXT_NORMAL}  ${S.TEXT_DIM}${result.workspace.linked ? `workspace ${result.workspace.name}` : "workspace not linked"} (${result.workspace.tenant})${S.TEXT_NORMAL}`)
   out()
   for (const p of result.providers) {
     const v = STATE_VIEW[p.state]

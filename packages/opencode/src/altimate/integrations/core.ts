@@ -46,7 +46,7 @@ export interface ProviderStatus {
 }
 
 export interface StatusResult {
-  workspace: { name: string; tenant: string }
+  workspace: WorkspaceInfo
   providers: ProviderStatus[]
 }
 
@@ -330,16 +330,25 @@ export function recordDetections(found: Detection[]): Store {
 
 // ---------------------------------------------------------------- status
 
-export function workspaceInfo() {
-  return { name: "Altimate Demo", tenant: "altimate" }
+export interface WorkspaceInfo {
+  name: string
+  tenant: string
+  /** Whether this directory is linked to a workspace. */
+  linked: boolean
+  /** The linked workspace id; null when not linked or offline. */
+  id: number | null
+}
+
+export function workspaceInfo(): WorkspaceInfo {
+  return { name: "Altimate Demo", tenant: "altimate", linked: true, id: null }
 }
 
 /** The workspace being talked to: the real tenant and, when this directory is linked, the linked workspace's name. */
-export async function liveWorkspaceInfo(): Promise<{ name: string; tenant: string }> {
+export async function liveWorkspaceInfo(): Promise<WorkspaceInfo> {
   const cfg = await realConfig()
   if (!cfg) return workspaceInfo()
   const binding = await resolveBinding(process.cwd()).catch(() => null)
-  return { name: binding?.datamateName || cfg.tenant, tenant: cfg.tenant }
+  return { name: binding?.datamateName || cfg.tenant, tenant: cfg.tenant, linked: Boolean(binding), id: binding?.datamateId ?? null }
 }
 
 function orderStatus(p: ProviderStatus): ProviderStatus {
