@@ -274,16 +274,19 @@ describe("data_diff write-carrying inputs", () => {
     }
   })
 
-  test("an omitted source warehouse is checked in the default warehouse's dialect", async () => {
+  test("an omitted or empty source warehouse is checked in the default warehouse's dialect", async () => {
     Registry.setConfigs({ pg: { type: "postgres" } as any })
     try {
-      const result = await runner.run("data_diff", {
-        source: "SELECT $$; DROP SCHEMA s;$$ AS id",
-        target: "orders",
-        key_columns: ["id"],
-        target_warehouse: "pg",
-      })
-      expect(JSON.stringify(result)).not.toContain("blocked for safety")
+      for (const source_warehouse of [undefined, ""]) {
+        const result = await runner.run("data_diff", {
+          source: "SELECT $$; DROP SCHEMA s;$$ AS id",
+          target: "orders",
+          key_columns: ["id"],
+          ...(source_warehouse === undefined ? {} : { source_warehouse }),
+          target_warehouse: "pg",
+        })
+        expect(JSON.stringify(result)).not.toContain("blocked for safety")
+      }
     } finally {
       Registry.reset()
     }

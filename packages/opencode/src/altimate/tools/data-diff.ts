@@ -87,10 +87,10 @@ export const DataDiffTool = Tool.define("data_diff", {
   }),
   async execute(args, ctx) {
     // Require read permission — data diff executes SELECT queries. Each side is checked in its own
-    // warehouse's dialect; one ask covers both when they run on the same warehouse. An omitted
-    // source is the registry's first warehouse, as the diff engine uses.
-    const sourceWarehouse = args.source_warehouse ?? Registry.list().warehouses[0]?.name
-    const targetWarehouse = args.target_warehouse ?? sourceWarehouse
+    // warehouse's dialect; one ask covers both when they run on the same warehouse. An omitted or
+    // empty source is the registry's first warehouse, as the diff engine resolves it.
+    const sourceWarehouse = args.source_warehouse || Registry.list().warehouses[0]?.name
+    const targetWarehouse = args.target_warehouse || sourceWarehouse
     const sides =
       targetWarehouse === sourceWarehouse
         ? [{ patterns: [args.source.slice(0, 120), args.target.slice(0, 120)], warehouse: sourceWarehouse }]
