@@ -104,7 +104,16 @@ async function fromAdapter(
 ): Promise<{ result?: ModelLineage; reason?: string }> {
   try {
     const { getDbtAdapter } = await import("../native/connections/register")
-    const adapter = await getDbtAdapter()
+    // Creating the adapter can take seconds; a cancel doesn't wait for it.
+    let stop = () => {}
+    const cancelled = new Promise<never>((_, reject) => {
+      stop = () => reject(signal.reason)
+      if (signal.aborted) stop()
+      else signal.addEventListener("abort", stop, { once: true })
+    })
+    const adapter = await Promise.race([getDbtAdapter(), cancelled]).finally(() =>
+      signal.removeEventListener("abort", stop),
+    )
     if (!adapter) return { reason: "no dbt project here" }
     if (adapter.isInitialized?.() === false) return { reason: "the dbt adapter didn't load the project" }
     if (typeof adapter.getModelLineage !== "function") return { reason: "dbt-integration has no getModelLineage" }

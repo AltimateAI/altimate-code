@@ -14,11 +14,14 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js"
 import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
 import { Dispatcher } from "@/altimate/native"
+import * as register from "@/altimate/native/connections/register"
 import {
   dbtAdapterInternals,
   getDbtAdapter,
+  getDbtProjectRoot,
   resetDbtAdapter,
 } from "@/altimate/native/connections/register"
+import { clearDbtLogs, getRecentDbtLogs } from "../../../dbt-tools/src/log-buffer"
 import { DbtLineageTool, type ModelLineage } from "@/altimate/tools/dbt-lineage"
 import { createServer } from "@/altimate/mcp-server/server"
 import { initTool } from "./tool-fixture"
@@ -298,23 +301,63 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
 
   test("stops on a call cancelled while the fallback looks for the manifest", async () => {
     const controller = new AbortController()
-    let reads = 0
-    dbtAdapterInternals.readConfig = async () => {
-      // The adapter reads the config first; the fallback's manifest lookup reads it second.
-      reads += 1
-      if (reads === 2) controller.abort()
-      return { projectRoot: project, pythonPath: "python3", dbtIntegration: "corecommand", queryLimit: 500 }
-    }
+    useConfig(false)
     dbtAdapterInternals.create = async () =>
       fakeAdapter(true, async () => {
         throw new Error("lookup failed")
       })
+    const root = spyOn(register, "getDbtProjectRoot").mockImplementation(async () => {
+      controller.abort()
+      return project
+    })
     const call = manifestOnly()
     try {
       const tool = await initTool(DbtLineageTool)
       await expect(tool.execute({ model: "customers" }, { ...ctx, abort: controller.signal })).rejects.toThrow()
-      expect(reads).toBe(2)
+      expect(root).toHaveBeenCalled()
       expect(call).not.toHaveBeenCalled()
+    } finally {
+      root.mockRestore()
+      call.mockRestore()
+    }
+  })
+
+  test("stops on a call cancelled while the adapter is still starting", async () => {
+    useConfig(false)
+    const controller = new AbortController()
+    dbtAdapterInternals.create = () => new Promise(() => {})
+    const call = manifestOnly()
+    try {
+      const tool = await initTool(DbtLineageTool)
+      const running = tool.execute({ model: "customers" }, { ...ctx, abort: controller.signal })
+      setTimeout(() => controller.abort(), 10)
+      // Bounded here: a call that waits for the adapter never settles.
+      const outcome = await Promise.race([
+        running.then(
+          () => "resolved",
+          () => "rejected",
+        ),
+        new Promise((resolve) => setTimeout(() => resolve("still waiting"), 1000)),
+      ])
+      expect(outcome).toBe("rejected")
+      expect(call).not.toHaveBeenCalled()
+    } finally {
+      call.mockRestore()
+    }
+  })
+
+  test("reuses the project root the adapter attempt read", async () => {
+    let reads = 0
+    dbtAdapterInternals.readConfig = async () => {
+      reads += 1
+      return { projectRoot: project, pythonPath: "python3", dbtIntegration: "corecommand", queryLimit: 500 }
+    }
+    dbtAdapterInternals.create = async () => fakeAdapter(true)
+    const call = manifestOnly()
+    try {
+      await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
+      expect(call.mock.calls[0]?.[1]).toMatchObject({ manifest_path: path.join(project, "target", "manifest.json") })
+      expect(reads).toBe(1)
     } finally {
       call.mockRestore()
     }
@@ -363,11 +406,35 @@ describe("the dbt adapter's integration mode", () => {
     expect(tried).toEqual(["core", "corecommand"])
   })
 
-  test("it falls back when the bridge can't start at all", async () => {
+  test("it falls back when the bridge can't start at all, and logs why", async () => {
+    clearDbtLogs()
     useConfig(true)
     dbtAdapterInternals.create = creating({ core: "throws", corecommand: true })
     expect(await getDbtAdapter()).toMatchObject({ mode: "corecommand" })
     expect(tried).toEqual(["core", "corecommand"])
+    expect(getRecentDbtLogs()).toContain("Python bridge did not start, using corecommand: bridge could not start")
+  })
+
+  test("user SQL never runs on the bridge chosen for a read-only process", async () => {
+    useConfig(true)
+    const ran: string[] = []
+    dbtAdapterInternals.create = async (config: { dbtIntegration: string }) => ({
+      ...fakeAdapter(true),
+      immediatelyExecuteSQL: async (sql: string) => {
+        ran.push(sql)
+        return { columnNames: ["n"], data: [{ n: 1 }] }
+      },
+      mode: config.dbtIntegration,
+    })
+    const bridge = await getDbtAdapter()
+    expect(bridge).toMatchObject({ mode: "core" })
+    // Even after the cache is reset, the bridge adapter itself is refused.
+    resetDbtAdapter()
+    dbtAdapterInternals.create = async () => bridge
+    useConfig(false)
+    // Whatever the native route answers, the bridge doesn't run the statement.
+    await Dispatcher.call("sql.execute", { sql: "create table t as select 1 as n" }).catch(() => {})
+    expect(ran).toEqual([])
   })
 
   test("a process that can run user SQL through dbt keeps the configured mode", async () => {

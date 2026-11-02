@@ -54,6 +54,10 @@ let dbtAdapter: any | null | undefined = undefined
 // permanent negative cache (`dbtAdapter === null`) is unchanged — a project that
 // becomes valid mid-session is still not retried.
 let dbtAdapterInflight: Promise<any | null> | undefined
+/** The project root the cached attempt read from the dbt config; null when it found none. */
+let dbtProjectRoot: string | null = null
+/** Python-bridge adapters chosen for a process that runs no user SQL; user SQL never runs on them. */
+const dbtBridgeAdapters = new WeakSet<object>()
 
 /** Test seams for the single-flight. Production leaves `readConfig` unset. */
 export const dbtAdapterInternals: {
@@ -103,6 +107,9 @@ async function ensureDbtAdapter(): Promise<any | null> {
       const dbtConfig = dbtAdapterInternals.readConfig
         ? ((await dbtAdapterInternals.readConfig()) as Awaited<ReturnType<typeof readDbtConfig>>)
         : await readDbtConfig()
+      if (dbtAdapterInflight === mine) {
+        dbtProjectRoot = typeof dbtConfig?.projectRoot === "string" ? dbtConfig.projectRoot : null
+      }
       if (!dbtConfig) return publish(null)
 
       // Check if dbt_project.yml exists
@@ -123,8 +130,15 @@ async function ensureDbtAdapter(): Promise<any | null> {
       // Only in a process that runs no user SQL through dbt: a `create table` run through the
       // bridge reports success and is not persisted.
       if (dbtAdapterInternals.noUserSql && dbtConfig.autoDiscovered && dbtConfig.dbtIntegration !== "core") {
-        const core = await create({ ...dbtConfig, dbtIntegration: "core" }).catch(() => null)
-        if (core?.isInitialized?.() === true) return publish(core)
+        const core = await create({ ...dbtConfig, dbtIntegration: "core" }).catch(async (e: unknown) => {
+          const { bufferLog } = await import("../../../../../dbt-tools/src/log-buffer")
+          bufferLog(`Python bridge did not start, using ${dbtConfig.dbtIntegration}: ${e instanceof Error ? e.message : String(e)}`)
+          return null
+        })
+        if (core?.isInitialized?.() === true) {
+          dbtBridgeAdapters.add(core)
+          return publish(core)
+        }
         await core?.dispose?.().catch(() => {})
       }
       return publish(await create(dbtConfig))
@@ -230,7 +244,8 @@ async function tryExecuteViaDbt(
     const raw = await executeQuery<any>({ type: "dbt" }, { queryTimeoutMs: timeoutMs }, context, async (options) => {
       const adapter = await ensureDbtAdapter()
       options.signal?.throwIfAborted()
-      if (!adapter) return null
+      // A write run through the bridge isn't persisted; the native driver takes the query instead.
+      if (!adapter || dbtBridgeAdapters.has(adapter)) return null
       return limit
         ? adapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
         : adapter.immediatelyExecuteSQL(sql, "")
@@ -299,6 +314,8 @@ export function declareNoDbtUserSql(): void {
 
 /** The dbt project's root as the adapter finds it: a dbt.json, or a walk up from the working directory. */
 export async function getDbtProjectRoot(): Promise<string | undefined> {
+  // Once an adapter attempt has settled, reuse the root it read rather than reading the config again.
+  if (dbtAdapter !== undefined) return dbtProjectRoot ?? undefined
   try {
     const config = dbtAdapterInternals.readConfig
       ? await dbtAdapterInternals.readConfig()
@@ -318,6 +335,8 @@ export function resetDbtAdapter(): void {
   dbtAdapterInflight = undefined
   dbtAdapterInternals.attempts = 0
   dbtAdapterInternals.writes = 0
+  dbtProjectRoot = null
+  delete dbtAdapterInternals.noUserSql
 }
 
 // ---------------------------------------------------------------------------
