@@ -62,6 +62,35 @@ describe("sql_execute batch references", () => {
     expect(sent).toBe("SELECT 1 WHERE x IN ('\\\\'') OR 1=1 --')")
   })
 
+  const quoted = async (type: string) => {
+    config.mockReturnValue({ type } as never)
+    dispatch.mockResolvedValueOnce(rows("it's") as never).mockResolvedValue(rows(1) as never)
+    const tool = await initTool(SqlExecuteTool)
+    return tool.execute(
+      {
+        warehouse: "main",
+        queries: [
+          { label: "src", query: "SELECT v FROM t" },
+          { label: "use", query: "SELECT 1 WHERE x IN ({{src.v}})" },
+        ],
+      },
+      ctx,
+    )
+  }
+
+  test("a quote in a bound value is doubled where the dialect allows it", async () => {
+    await quoted("postgres")
+    expect((dispatch.mock.calls[1]![1] as { sql: string }).sql).toBe("SELECT 1 WHERE x IN ('it''s')")
+  })
+
+  // BigQuery and Databricks have no `''` escape (Databricks would read 'it''s' as 'its'), and the read-only
+  // check does not lex their backslash escape, so the step is refused rather than run with a wrong value.
+  test.each(["bigquery", "databricks"])("a quoted bound value never runs as '' in %s", async (type) => {
+    const result = await quoted(type)
+    expect(dispatch).toHaveBeenCalledTimes(1)
+    expect(result.output).toContain("[use]\nFailed to execute SQL")
+  })
+
   test("the registry default warehouse picks the literal syntax when none is named", async () => {
     config.mockImplementation(((name: string) => (name === "main" ? { type: "snowflake" } : undefined)) as never)
     dispatch.mockResolvedValueOnce(rows("a\\b") as never).mockResolvedValue(rows(1) as never)

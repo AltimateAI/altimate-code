@@ -649,23 +649,23 @@ function resolveStepRefs(
     if (index < 0) throw new Error(`${match}: step "${ref}" has no column ${column} (columns: ${source.columns.join(", ")}).`)
     const values = [...new Set(source.rows.map((row) => row[index]).filter((value) => value !== null && value !== undefined))]
     if (isMongoWarehouse(warehouse)) return values.map((value) => JSON.stringify(value)).join(", ") || "null"
-    const backslashEscapes = BACKSLASH_ESCAPE_TYPES.has(
-      Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? "",
-    )
-    return values.length ? values.map((value) => sqlLiteral(value, backslashEscapes)).join(", ") : "NULL"
+    const type = Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? ""
+    return values.length ? values.map((value) => sqlLiteral(value, type)).join(", ") : "NULL"
   })
 }
 
 /** Dialects whose string literals treat a backslash as an escape character. */
 const BACKSLASH_ESCAPE_TYPES = new Set(["mysql", "bigquery", "snowflake", "databricks", "clickhouse"])
+/** Dialects with no `''` escape inside a string literal; a quote is escaped with a backslash. */
+const BACKSLASH_QUOTE_TYPES = new Set(["bigquery", "databricks"])
 
-function sqlLiteral(value: unknown, backslashEscapes: boolean): string {
+function sqlLiteral(value: unknown, type: string): string {
   if (typeof value === "number" && Number.isFinite(value)) return String(value)
   if (typeof value === "bigint") return value.toString()
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE"
   const text = typeof value === "string" ? value : value instanceof Date ? value.toISOString() : JSON.stringify(value)
-  const escaped = text.replaceAll("'", "''")
-  return `'${backslashEscapes ? escaped.replaceAll("\\", "\\\\") : escaped}'`
+  const slashed = BACKSLASH_ESCAPE_TYPES.has(type) ? text.replaceAll("\\", "\\\\") : text
+  return `'${slashed.replaceAll("'", BACKSLASH_QUOTE_TYPES.has(type) ? "\\'" : "''")}'`
 }
 
 const BATCH_CLIPPED = "…[output clipped]"
