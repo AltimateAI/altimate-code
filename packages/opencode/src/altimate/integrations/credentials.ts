@@ -8,8 +8,8 @@ import fs from "node:fs"
 import path from "node:path"
 import { createHash } from "node:crypto"
 import { spawnSync } from "node:child_process"
-import * as core from "./core"
-import * as backend from "./backend"
+import { IntegrationsCore as core } from "./core"
+import { IntegrationsBackend as backend } from "./backend"
 import type { ProviderId, Source, StoredProvider } from "./core"
 
 export interface FieldDef {
@@ -64,6 +64,8 @@ const humanise = (name: string) =>
     .replace(/^./, (c) => c.toUpperCase())
 const isObject = (v: unknown): v is Record<string, any> => typeof v === "object" && v !== null && !Array.isArray(v)
 
+const isKnownSecretField = (name: string) => Object.values(core.BUILTIN_SECRET_FIELDS).some((names) => names.includes(name))
+
 function parseFields(config: unknown): FieldDef[] {
   const entries: [string, Record<string, any>][] = Array.isArray(config)
     ? config.filter(isObject).map((f) => [String(f.key ?? f.name ?? f.id ?? ""), f])
@@ -79,7 +81,7 @@ function parseFields(config: unknown): FieldDef[] {
       label: String((f.key ? f.name : undefined) ?? f.label ?? f.title ?? f.display_name ?? humanise(name))
         .trim()
         .replace(/\s*:+$/, ""),
-      secret: f.encrypted === true || f.secret === true || f.is_secret === true || f.type === "password",
+      secret: f.encrypted === true || f.secret === true || f.is_secret === true || f.type === "password" || isKnownSecretField(name),
       required: f.required === true,
     }))
 }
@@ -341,18 +343,24 @@ export async function catalogSecretFields(id: ProviderId): Promise<Set<string>> 
   for (const v of [...(await loadCatalog(id, true)), ...BUILTIN_CATALOG[id]]) for (const f of v.fields) if (f.secret) names.add(f.name)
   return names
 }
+const draftSecretNames = async (id: ProviderId) => new Set([...core.BUILTIN_SECRET_FIELDS[id], ...(core.loadStore().providers[id]?.secretFields ?? []), ...(await catalogSecretFields(id))])
 /** Deletes the pasted secret drafts of every field the provider can ask for: those of each catalog variant and of the connected credential. */
 export async function discardDraftSecrets(id: ProviderId) {
-  const names = new Set([...core.BUILTIN_SECRET_FIELDS[id], ...(core.loadStore().providers[id]?.secretFields ?? []), ...(await catalogSecretFields(id))])
-  for (const name of names) await core.deleteSecret(core.secretKey("draft", id, name))
+  const names = await draftSecretNames(id)
+  await core.withLock(async () => {
+    for (const name of names) await core.deleteSecret(core.secretKey("draft", id, name))
+  })
 }
 
 /** Forgets everything typed or pasted into the form and not yet connected: its fields and secrets. A connected credential and its status are kept, so this also serves a cancelled update. */
 export async function discardDrafts(id: ProviderId) {
-  await discardDraftSecrets(id)
-  await core.updateStore((store) => {
-    const rec = store.providers[id]
-    if (rec?.drafts) store.providers[id] = { ...rec, drafts: undefined }
+  const names = await draftSecretNames(id)
+  await core.withLock(async () => {
+    for (const name of names) await core.deleteSecret(core.secretKey("draft", id, name))
+    await core.updateStore((store) => {
+      const rec = store.providers[id]
+      if (rec?.drafts) store.providers[id] = { ...rec, drafts: undefined }
+    })
   })
   return { provider: id }
 }
@@ -592,6 +600,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
     // Keeping a connection local moves it: the whole decision and move happen in one locked step with the uploads, so no workspace copy can appear after it was looked for.
     return await core.withLock(async (): Promise<CredentialResult> => {
       let detachNote: string | null = null
+      let removeFailure: string | null = null
       const wasBlocked = core.isBlocked(id)
       const signedIn = await core.realConfig()
       let hadCopy = Boolean(core.loadStore().providers[id]?.synced) || remoteManaged
@@ -605,29 +614,46 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       if (hadCopy && !signedIn && !core.mockMode())
         return local({ status: "failed", sync: "synced", message: `${name} is saved in your workspace. Sign in to Altimate first.` })
       if (opts.localOnly && !wasBlocked) await core.setBlocked([id], true)
+      // The local copy is made durable before the workspace copy is touched, so a failed write never leaves the credential nowhere.
+      // A write that fails part way puts back every secret this attempt touched and leaves the previous record as it was.
+      const written = new Set<string>()
+      const undo: [string, string | undefined][] = []
+      const put = async (key: string, value: string) => {
+        undo.push([key, core.readSecret(key)])
+        await core.storeSecret(key, value)
+      }
+      try {
+        for (const f of secretFields) if (r.values[f]) {
+          await put(core.secretKey("cred", id, f), r.values[f])
+          written.add(f)
+        }
+        if (secretFields[0] && r.values[secretFields[0]]) await put(id, r.values[secretFields[0]])
+      } catch (e) {
+        for (const [key, prev] of undo.reverse()) {
+          try {
+            if (prev === undefined) await core.deleteSecret(key)
+            else await core.storeSecret(key, prev)
+          } catch {}
+        }
+        if (opts.localOnly && !wasBlocked) await core.setBlocked([id], false)
+        return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: e instanceof Error ? e.message : String(e) })
+      }
+      // Switching variant must not leave the other variant's stored secret behind; only the old fields not just written are purged.
+      await core.purgeCredentialSecrets(id, rec, false, written)
+      await finish(false, { connectionId: null })
       if (signedIn && hadCopy) {
         try {
           detachNote = (await core.removeManaged(id, signedIn)).detachError
         } catch (e) {
-          if (opts.localOnly && !wasBlocked) await core.setBlocked([id], false)
-          return local({ status: "failed", sync: "synced", message: e instanceof Error ? e.message : String(e) })
+          removeFailure = e instanceof Error ? e.message : String(e)
         }
       }
-      // Switching variant must not leave the other variant's stored secret behind.
-      // The new secrets are stored first, so a failed write never leaves neither credential; only the old fields not just written are purged after.
-      const written = new Set<string>()
-      for (const f of secretFields) if (r.values[f]) {
-        await core.storeSecret(core.secretKey("cred", id, f), r.values[f])
-        written.add(f)
-      }
-      if (secretFields[0] && r.values[secretFields[0]]) await core.storeSecret(id, r.values[secretFields[0]])
-      await core.purgeCredentialSecrets(id, rec, false, written)
       if (hadCopy && !signedIn) await core.removeMockRemote(id)
-      await finish(false, { connectionId: null })
       const notSignedIn = wantSync && !blocked
       const notes = [
         unverified ? `${check.message} (kept on this machine, not verified yet)` : null,
         notSignedIn ? core.NOT_SIGNED_IN : blocked && wantSync ? "Sync is blocked for this provider, kept local." : null,
+        removeFailure ? core.REMOVE_FAILED_WARNING(removeFailure).trim() : null,
         detachNote ? `Could not detach it from the linked workspace: ${detachNote}` : null,
       ].filter(Boolean)
       return { ...base, provider: id, status: "connected", sync: "local", account: check.account, expiresAt: check.expiresAt, message: notes.length ? notes.join(" ") : null }
@@ -637,6 +663,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   opts.onStep?.("Saving to your workspace…")
   const config: Record<string, unknown> = {}
   for (const f of r.def.fields) if (r.values[f.name]) config[f.name] = r.values[f.name]
+  if (check.expiresAt) config.expires_at = check.expiresAt
   try {
     // The blocked check and the upload share one lock with Keep local, so a move to this machine cannot interleave with an upload.
     return await core.withLock(async (): Promise<CredentialResult> => {
@@ -679,3 +706,5 @@ function workspaceNote(w: core.UpsertResult["workspace"]): string | null {
   if ("notLinked" in w) return core.NOT_LINKED_LABEL
   return `Attached to workspace ${w.attached}`
 }
+
+export * as IntegrationsCredentials from "./credentials"

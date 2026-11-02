@@ -2,9 +2,10 @@ import { afterAll, afterEach, describe, expect, spyOn, test, beforeEach } from "
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import * as core from "../../src/altimate/integrations/core"
-import * as backend from "../../src/altimate/integrations/backend"
-import * as creds from "../../src/altimate/integrations/credentials"
+import { IntegrationsCore as core } from "../../src/altimate/integrations/core"
+import { skipsSynced } from "../../src/cli/cmd/integrations"
+import { IntegrationsBackend as backend } from "../../src/altimate/integrations/backend"
+import { IntegrationsCredentials as creds } from "../../src/altimate/integrations/credentials"
 import * as workspaceState from "../../src/altimate/workspace/state"
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "integrations-test-"))
@@ -206,11 +207,19 @@ describe("token", () => {
   })
 })
 
+describe("secret storage", () => {
+  test("a value with a line break is refused as not a token", async () => {
+    await expect(core.storeSecret("github", "abc\ndef")).rejects.toThrow("not a token")
+    expect(core.readSecret("github")).toBeUndefined()
+  })
+})
+
 describe("workspace connections", () => {
   const calls: { method: string; path: string; query: string; auth: string | null; tenant: string | null; body: any }[] = []
   const api = connectionsStub()
   let server: ReturnType<typeof Bun.serve>
   const saved = { ...process.env }
+  let githubApiBefore: string | undefined
 
   beforeEach(async () => {
     calls.length = 0
@@ -224,6 +233,10 @@ describe("workspace connections", () => {
       async fetch(req) {
         const url = new URL(req.url)
         const body = req.method === "POST" || req.method === "PATCH" ? await req.json().catch(() => null) : null
+        if (url.pathname === "/user") {
+          const bad = req.headers.get("authorization") === "Bearer gh_bad"
+          return bad ? Response.json({ message: "Bad credentials" }, { status: 401 }) : Response.json({ login: "octo" }, { headers: { "github-authentication-token-expiration": "2031-01-02 03:04:05 UTC" } })
+        }
         calls.push({ method: req.method, path: url.pathname, query: url.search, auth: req.headers.get("authorization"), tenant: req.headers.get("x-tenant"), body })
         return api.handle(req, url, body) ?? new Response("no", { status: 404 })
       },
@@ -234,6 +247,8 @@ describe("workspace connections", () => {
     process.env.ALTIMATE_INTEGRATIONS_TENANT = "acme"
     process.env.ALTIMATE_INTEGRATIONS_HOME = fs.mkdtempSync(path.join(tmp, "empty-"))
     process.env.GITHUB_TOKEN = "gh_env_token"
+    githubApiBefore = process.env.ALTIMATE_INTEGRATIONS_GITHUB_API
+    process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = `http://127.0.0.1:${server.port}`
     spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "unbound" })
     await core.recordDetections([{ id: "github", source: { kind: "env", label: "GITHUB_TOKEN" }, account: null, syncable: true, note: null }])
   })
@@ -242,6 +257,8 @@ describe("workspace connections", () => {
     server.stop(true)
     process.env.ALTIMATE_INTEGRATIONS_MOCK = "1"
     for (const k of ["ALTIMATE_INTEGRATIONS_API_URL", "ALTIMATE_INTEGRATIONS_TOKEN", "ALTIMATE_INTEGRATIONS_TENANT", "ALTIMATE_INTEGRATIONS_HOME"]) delete process.env[k]
+    if (githubApiBefore === undefined) delete process.env.ALTIMATE_INTEGRATIONS_GITHUB_API
+    else process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = githubApiBefore
     if (saved.GITHUB_TOKEN === undefined) delete process.env.GITHUB_TOKEN
     else process.env.GITHUB_TOKEN = saved.GITHUB_TOKEN
   })
@@ -252,7 +269,7 @@ describe("workspace connections", () => {
     expect(first.result).toBe("synced")
     expect(writes()).toHaveLength(1)
     expect(writes()[0]).toMatchObject({ method: "POST", path: "/connections/", auth: "Bearer bearer-1", tenant: "acme" })
-    expect(writes()[0].body).toEqual({ name: `GitHub (from ${HOST})`, integration_id: "github", config: { github_token: "gh_env_token" } })
+    expect(writes()[0].body).toEqual({ name: `GitHub (from ${HOST})`, integration_id: "github", config: { github_token: "gh_env_token", expires_at: "2031-01-02T03:04:05.000Z" } })
     expect(calls.find((c) => c.path.startsWith("/connections"))).toMatchObject({ method: "GET", path: "/connections/", query: "?include_shared=false" })
     expect(core.loadStore().providers.github).toMatchObject({ registered: true, synced: true, connectionId: 21 })
 
@@ -261,7 +278,7 @@ describe("workspace connections", () => {
     expect(second.result).toBe("synced")
     expect(second.steps).toEqual([{ label: "Updated connection", ok: true }, { label: "Not linked to a workspace: run altimate link", ok: false }])
     expect(writes()[1]).toMatchObject({ method: "PATCH", path: "/connections/21", auth: "Bearer bearer-1", tenant: "acme" })
-    expect(writes()[1].body).toEqual({ config: { github_token: "gh_env_token_2" } })
+    expect(writes()[1].body).toEqual({ config: { github_token: "gh_env_token_2", expires_at: "2031-01-02T03:04:05.000Z" } })
     expect(api.state.rows).toHaveLength(1)
   })
 
@@ -339,6 +356,20 @@ describe("workspace connections", () => {
     expect(core.mergeRemote(core.buildStatus(store, [], now), valid, now).providers.find((p) => p.id === "linear")!.state).toBe("connected")
   })
 
+  test("sync <provider> --keep-synced takes the attach-only path that sync --all takes", async () => {
+    expect(skipsSynced({ provider: undefined, all: true })).toBe(true)
+    expect(skipsSynced({ provider: "github" })).toBe(false)
+    expect(skipsSynced({ provider: "github", keepSynced: true })).toBe(true)
+    await core.syncProvider("github")
+    const before = writes().length
+    process.env.GITHUB_TOKEN = "gh_env_token_other"
+    const kept = await core.syncProvider("github", undefined, 0, skipsSynced({ provider: "github", keepSynced: true }))
+    expect(kept.steps[0]).toEqual({ label: "Connection already in the workspace", ok: true })
+    expect(writes()).toHaveLength(before)
+    await core.setBlocked(["github"], true)
+    expect((await core.syncProvider("github", undefined, 0, true)).result).toBe("kept_local")
+  })
+
   test("sync over every provider leaves a saved connection alone and only attaches it", async () => {
     await core.syncProvider("github")
     const before = writes().length
@@ -381,7 +412,7 @@ describe("workspace connections", () => {
     await core.storeSecret(core.secretKey("draft", "github", "github_token"), "draft_never_validated")
     const o = await core.syncProvider("github")
     expect(o.result).toBe("synced")
-    expect(writes()[0].body.config).toEqual({ github_token: "gh_env_token" })
+    expect(writes()[0].body.config).toEqual({ github_token: "gh_env_token", expires_at: "2031-01-02T03:04:05.000Z" })
   })
 
   test("sync moves a local credential to the workspace and leaves no secret here", async () => {
@@ -391,7 +422,7 @@ describe("workspace connections", () => {
     store.providers.github = { registered: true, synced: false, variant: "token", secretFields: ["github_token"], values: {} }
     core.saveStore(store)
     expect((await core.syncProvider("github")).result).toBe("synced")
-    expect(writes()[0].body.config).toEqual({ github_token: "gh_local_tok" })
+    expect(writes()[0].body.config).toEqual({ github_token: "gh_local_tok", expires_at: "2031-01-02T03:04:05.000Z" })
     expect(core.readSecret(core.secretKey("cred", "github", "github_token"))).toBeUndefined()
     expect(core.readSecret("github")).toBeUndefined()
     expect((await core.getToken("github")).status).toBe("unavailable")
@@ -501,14 +532,15 @@ describe("workspace connections", () => {
   })
 
   test("a sync prepared before a same-variant local update uploads nothing", async () => {
-    await connected("github", null, { account: "me" })
-    const original = creds.detectedConfig
-    const spy = spyOn(creds, "detectedConfig").mockImplementation(async (id: any) => {
-      const prepared = await original(id)
+    await connected("github", null, { account: "me", variant: "token", secretFields: ["github_token"], values: {} })
+    await core.storeSecret(core.secretKey("cred", "github", "github_token"), "gh_local_tok")
+    const original = creds.validate
+    const spy = spyOn(creds, "validate").mockImplementation(async (...args: Parameters<typeof original>) => {
+      const checked = await original(...args)
       await core.updateStore((st) => {
         st.providers.github = { ...st.providers.github, validatedAt: "2031-01-01T00:00:00Z" }
       })
-      return prepared
+      return checked
     })
     try {
       const out = await core.syncProvider("github")
@@ -535,6 +567,66 @@ describe("workspace connections", () => {
     } finally {
       spy.mockRestore()
     }
+  })
+
+  test("sync records the provider check: validatedAt and account on success, rejected for a refused stored credential", async () => {
+    const ok = await core.syncProvider("github")
+    expect(ok.result).toBe("synced")
+    const rec = core.loadStore().providers.github!
+    expect([rec.account, typeof rec.validatedAt, rec.rejected]).toEqual(["octo", "string", false])
+
+    await connected("github", null, { account: "me", variant: "token", secretFields: ["github_token"], values: {} }, null)
+    await core.storeSecret(core.secretKey("cred", "github", "github_token"), "gh_bad")
+    const before = writes().length
+    const refused = await core.syncProvider("github")
+    expect(refused.result).toBe("failed")
+    expect(writes().length).toBe(before)
+    const after = core.loadStore().providers.github!
+    expect([after.rejected, typeof after.validatedAt, after.registered, after.synced]).toEqual([true, "string", true, false])
+  })
+
+  test("sync uploads nothing when the provider rejects the detected credential, or cannot be reached", async () => {
+    process.env.GITHUB_TOKEN = "gh_bad"
+    const refused = await core.syncProvider("github")
+    expect([refused.result, refused.reason]).toEqual(["failed", "GitHub rejected the token (401): Bad credentials"])
+    expect(writes()).toEqual([])
+    expect(core.loadStore().providers.github?.registered).toBeFalsy()
+    process.env.GITHUB_TOKEN = "gh_env_token"
+    process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = "http://127.0.0.1:1"
+    const down = await core.syncProvider("github")
+    expect(down.result).toBe("failed")
+    expect(down.reason).toContain("Could not reach GitHub")
+    expect(writes()).toEqual([])
+  })
+
+  test("a synced connection carries the known expiry, so the workspace view shows it", async () => {
+    expect((await core.syncProvider("github")).result).toBe("synced")
+    expect((writes()[0].body.config as any).expires_at).toBe("2031-01-02T03:04:05.000Z")
+    expect((await core.statusRemote()).providers[0]).toMatchObject({ state: "connected", sync: "synced", expiresAt: "2031-01-02T03:04:05.000Z" })
+  })
+
+  test("sync over every provider says a synced connection deleted in the workspace is gone, not already there", async () => {
+    await core.syncProvider("github")
+    api.state.rows.find((r) => r.name === `GitHub (from ${HOST})`)!.deleted = true
+    const all = await core.syncProvider("github", undefined, 0, true)
+    expect([all.result, all.reason]).toEqual(["skipped", "The workspace connection was removed. Add the credentials again."])
+  })
+
+  test("sync over every provider attaches a workspace connection even when the only thing found here is a remote MCP server", async () => {
+    await core.recordDetections([{ id: "linear", source: { kind: "mcp-remote", label: "Claude MCP" }, account: null, syncable: false, note: "usable in Claude; connect in browser to sync" }])
+    api.seed({ name: `Linear (from ${HOST})`, integration_id: "linear" })
+    const all = await core.syncProvider("linear", undefined, 0, true)
+    expect([all.result, all.steps[0]]).toEqual(["synced", { label: "Connection already in the workspace", ok: true }])
+    const plain = await core.syncProvider("linear")
+    expect([plain.result, plain.reason]).toEqual(["skipped", "usable in Claude; connect in browser to sync"])
+  })
+
+  test("a credential found here is still offered next to a hand-made workspace connection", async () => {
+    api.seed({ name: "Hand made", integration_id: "github", last_validated_at: "2030-05-01T00:00:00Z" })
+    const shown = (await core.statusRemote()).providers[0]
+    expect([shown.state, shown.managed, shown.found]).toEqual(["connected", false, { source: { kind: "env", label: "GITHUB_TOKEN" }, account: null }])
+    const plain = (await core.statusRemote()).providers[1]
+    expect(plain.found).toBeUndefined()
   })
 
   test("purging a provider's secrets covers every variant, not only the connected one", async () => {
@@ -1105,10 +1197,56 @@ describe("credentials flow", () => {
         await creds.connectCredentials({ id: "github" })
         await token("github", "github_token")
         const r = await creds.connectCredentials({ id: "github", localOnly: true })
-        expect([r.status, r.sync, core.isBlocked("github")]).toEqual(["failed", "synced", false])
+        expect([r.status, r.sync, core.isBlocked("github")]).toEqual(["connected", "local", true])
+        expect(r.message).toContain("could not be removed from the workspace")
+        expect((await core.getToken("github")).status).toBe("ok")
       } finally {
         failing.mockRestore()
       }
+    })
+
+    test("Keep local removes nothing from the workspace when the local copy cannot be stored", async () => {
+      real()
+      api.seed({ name: `GitHub (from ${os.hostname()})`, integration_id: "github" })
+      await token("github", "github_token")
+      const del = spyOn(backend, "deleteConnection")
+      const store = spyOn(core, "storeSecret").mockRejectedValue(new Error("keychain locked"))
+      try {
+        const r = await creds.connectCredentials({ id: "github", localOnly: true })
+        expect([r.status, r.message]).toEqual(["failed", "keychain locked"])
+        expect(del).not.toHaveBeenCalled()
+        expect(api.state.rows.filter((x) => !x.deleted)).toHaveLength(1)
+        expect(core.isBlocked("github")).toBe(false)
+        expect(core.loadStore().providers.github?.registered).toBeUndefined()
+      } finally {
+        store.mockRestore()
+        del.mockRestore()
+      }
+    })
+
+    test("a local connect that fails part way restores the secrets it wrote", async () => {
+      await core.storeSecret(core.secretKey("cred", "jira", "jiraApiToken"), "old-token")
+      await creds.setDraft("jira", "jiraDomain", "acme")
+      await creds.setDraft("jira", "jiraEmail", "me@acme.com")
+      await token("jira", "jiraApiToken")
+      const original = core.storeSecret
+      let calls = 0
+      const store = spyOn(core, "storeSecret").mockImplementation(async (id: string, secret: string) => {
+        if (++calls === 2) throw new Error("keychain locked")
+        return original(id, secret)
+      })
+      try {
+        const r = await creds.connectCredentials({ id: "jira", localOnly: true })
+        expect(r.status).toBe("failed")
+      } finally {
+        store.mockRestore()
+      }
+      expect(core.readSecret(core.secretKey("cred", "jira", "jiraApiToken"))).toBe("old-token")
+    })
+
+    test("a catalog that omits the secret flags still treats the built-in secret fields as secret", () => {
+      const parsed = creds.parseCatalog([{ id: "github", config: [{ name: "github_token", required: true }, { name: "note" }] }])
+      expect(parsed.github![0].fields.map((f) => [f.name, f.secret])).toEqual([["github_token", true], ["note", false]])
     })
 
     test("a Jira variant naming the server is validated as the server", async () => {
@@ -1295,7 +1433,7 @@ describe("credentials flow", () => {
       expect([r.status, r.sync]).toEqual(["connected", "synced"])
       const [first, second] = synced()
       expect([first.method, first.path, second.method, second.path]).toEqual(["POST", "/connections/", "PATCH", "/connections/21"])
-      expect(second.body).toEqual({ config: { github_token: GOOD } })
+      expect(second.body).toEqual({ config: { github_token: GOOD, expires_at: "2031-01-02T03:04:05.000Z" } })
       expect(api.state.rows).toHaveLength(1)
     })
 
@@ -1308,7 +1446,7 @@ describe("credentials flow", () => {
       await core.setBlocked(["github"], false)
       const o = await core.syncProvider("github")
       expect(o.result).toBe("synced")
-      expect(synced()[0].body.config).toEqual({ github_token: GOOD })
+      expect(synced()[0].body.config).toEqual({ github_token: GOOD, expires_at: "2031-01-02T03:04:05.000Z" })
     })
 
     test("signed out, sync does not pretend to reach the workspace", async () => {

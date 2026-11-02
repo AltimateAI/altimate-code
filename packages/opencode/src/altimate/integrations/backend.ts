@@ -151,3 +151,5 @@ export async function getDatamate(cfg: BackendConfig, id: string): Promise<Datam
 /** Replaces the workspace's whole integrations list. */
 export const updateDatamateIntegrations = (cfg: BackendConfig, id: string, integrations: DatamateIntegrationEntry[]) =>
   call<unknown>(cfg, "PATCH", `/datamates/${encodeURIComponent(id)}`, { integrations })
+
+export * as IntegrationsBackend from "./backend"

@@ -9,8 +9,8 @@ import os from "node:os"
 import open from "open"
 import { cmd } from "./cmd"
 import { UI } from "../ui"
-import * as core from "../../altimate/integrations/core"
-import * as creds from "../../altimate/integrations/credentials"
+import { IntegrationsCore as core } from "../../altimate/integrations/core"
+import { IntegrationsCredentials as creds } from "../../altimate/integrations/credentials"
 import type { ProviderId, ProviderStatus, StatusResult } from "../../altimate/integrations/core"
 
 const S = UI.Style
@@ -116,6 +116,9 @@ async function runSync(ids: ProviderId[], asJson: boolean, skipSynced = false) {
   return outcomes
 }
 
+/** A run over every provider, or one provider asked to keep a saved connection, never overwrites a connection already synced to the workspace. */
+export const skipsSynced = (args: { provider?: string; all?: boolean; keepSynced?: boolean }) => !args.provider || Boolean(args.keepSynced)
+
 const SyncCommand = cmd({
   command: "sync [provider]",
   describe: "push detected and connected credentials to the workspace",
@@ -123,10 +126,11 @@ const SyncCommand = cmd({
     yargs
       .positional("provider", { type: "string", choices: core.PROVIDER_IDS })
       .option("all", { describe: "sync every provider", type: "boolean", default: false })
+      .option("keep-synced", { describe: "attach a connection already saved to the workspace instead of overwriting it, as sync --all does", type: "boolean", default: false })
       .option("json", jsonOption),
   handler: async (args) => {
     try {
-      const outcomes = await runSync(args.provider || args.all ? parseProviders(args.provider, args.all) : core.PROVIDER_IDS, args.json, !args.provider)
+      const outcomes = await runSync(args.provider || args.all ? parseProviders(args.provider, args.all) : core.PROVIDER_IDS, args.json, skipsSynced(args))
       if (outcomes.some((o) => o.result === "failed")) process.exitCode = 1
     } catch (e) {
       fail(e, args.json)

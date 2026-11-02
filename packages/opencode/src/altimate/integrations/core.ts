@@ -10,8 +10,8 @@ import { AsyncLocalStorage } from "node:async_hooks"
 import { spawnSync } from "node:child_process"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Global } from "../../global"
-import * as backend from "./backend"
-import * as creds from "./credentials"
+import { IntegrationsBackend as backend } from "./backend"
+import { IntegrationsCredentials as creds } from "./credentials"
 import { resolveBinding, resolveBindingOutcome } from "../workspace/state"
 
 export type ProviderId = "github" | "jira" | "linear"
@@ -48,6 +48,8 @@ export interface ProviderStatus {
   note: string | null
   /** False for a connection made by hand in the web app: shown, but this tool does not manage it. */
   managed?: boolean
+  /** A credential found on this machine while the row shows a connection made by hand in the web app: it can still be connected here. */
+  found?: { source: Source; account: string | null }
 }
 
 export interface StatusResult {
@@ -85,6 +87,7 @@ export interface Store {
 }
 
 const REJECTED_NOTE = "Token rejected, update it"
+const REMOVED_NOTE = "The workspace connection was removed. Add the credentials again."
 export const demoMode = () => process.env.ALTIMATE_INTEGRATIONS_DEMO === "1"
 export const mockMode = () => process.env.ALTIMATE_INTEGRATIONS_MOCK === "1" || demoMode()
 /** Backend login when real mode applies: signed in to Altimate and no mock switch set. */
@@ -175,16 +178,21 @@ export const BUILTIN_SECRET_FIELDS: Record<ProviderId, string[]> = {
   linear: ["linearApiKey"],
 }
 
+const KEYCHAIN_TIMEOUT_MS = 10_000
+
 export async function storeSecret(id: string, secret: string) {
-  // The secret goes to `security -i` on stdin so it never shows in the process list. A line break
-  // cannot be quoted for that parser, so such a value takes the file path below.
-  if (useKeychain() && !/[\r\n]/.test(secret)) {
+  // A token is one line. A line break cannot be quoted for `security -i` either, so such a value is refused rather than parked in a file.
+  if (/[\r\n]/.test(secret)) throw new Error("The value is not a token: it contains a line break")
+  if (useKeychain()) {
+    // The secret goes to `security -i` on stdin so it never shows in the process list. On macOS it is kept in the keychain only; a failed write is an error, never a plaintext file.
     const quote = (v: string) => `"${v.replace(/[\\"]/g, "\\$&")}"`
     const r = spawnSync("security", ["-i"], {
       input: `add-generic-password -U -s ${quote(KEYCHAIN_SERVICE)} -a ${quote(id)} -w ${quote(secret)}\n`,
       stdio: ["pipe", "ignore", "ignore"],
+      timeout: KEYCHAIN_TIMEOUT_MS,
     })
-    if (r.status === 0) return
+    if (r.status !== 0) throw new Error("Could not save the credential to the macOS keychain, so nothing was stored. Unlock the keychain and try again.")
+    return
   }
   await withLock(() => {
     const all = readJson<Record<string, string>>(secretsPath(), {})
@@ -197,13 +205,14 @@ export function readSecret(id: string): string | undefined {
     const r = spawnSync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id, "-w"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: KEYCHAIN_TIMEOUT_MS,
     })
     if (r.status === 0) return r.stdout.trim()
   }
   return readJson<Record<string, string>>(secretsPath(), {})[id]
 }
 export async function deleteSecret(id: string) {
-  if (useKeychain()) spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], { stdio: "ignore" })
+  if (useKeychain()) spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], { stdio: "ignore", timeout: KEYCHAIN_TIMEOUT_MS })
   await withLock(() => {
     const all = readJson<Record<string, string>>(secretsPath(), {})
     if (id in all) {
@@ -215,10 +224,12 @@ export async function deleteSecret(id: string) {
 /** Removes every draft and connected secret kept for a provider's credential form, of every variant it can have; fields in `keep` keep their connected secret. */
 export async function purgeCredentialSecrets(id: ProviderId, rec?: StoredProvider, includeDrafts = true, keep: Set<string> = new Set()) {
   const catalog = await creds.catalogSecretFields(id)
-  for (const field of new Set([...BUILTIN_SECRET_FIELDS[id], ...catalog, ...(rec?.secretFields ?? [])])) {
-    if (includeDrafts) await deleteSecret(secretKey("draft", id, field))
-    if (!keep.has(field)) await deleteSecret(secretKey("cred", id, field))
-  }
+  await withLock(async () => {
+    for (const field of new Set([...BUILTIN_SECRET_FIELDS[id], ...catalog, ...(rec?.secretFields ?? [])])) {
+      if (includeDrafts) await deleteSecret(secretKey("draft", id, field))
+      if (!keep.has(field)) await deleteSecret(secretKey("cred", id, field))
+    }
+  })
 }
 
 /** Claude MCP server maps that apply here: user level, this project, and the project `.mcp.json`. */
@@ -399,7 +410,7 @@ export async function liveWorkspaceInfo(): Promise<WorkspaceInfo> {
 }
 
 function orderStatus(p: ProviderStatus): ProviderStatus {
-  return { id: p.id, name: p.name, state: p.state, source: p.source, account: p.account, syncable: p.syncable, sync: p.sync, updatedAt: p.updatedAt, expiresAt: p.expiresAt, note: p.note, ...(p.managed === false ? { managed: false } : {}) }
+  return { id: p.id, name: p.name, state: p.state, source: p.source, account: p.account, syncable: p.syncable, sync: p.sync, updatedAt: p.updatedAt, expiresAt: p.expiresAt, note: p.note, ...(p.managed === false ? { managed: false } : {}), ...(p.found ? { found: p.found } : {}) }
 }
 
 export function buildStatus(store: Store, overlay: Detection[] = [], now = Date.now()): StatusResult {
@@ -511,7 +522,7 @@ export function mergeRemote(local: StatusResult, remote: RemoteProvider[], now =
     const managedId = r ? (r.managedId !== undefined ? r.managedId : r.managed ? r.connection_id : null) : null
     // Saved to the workspace and no longer there: the credential is kept nowhere, so it cannot read as connected on its own.
     const gone = orig.sync === "synced" && orig.state !== "detected" && managedId == null
-    const removed: Partial<ProviderStatus> = { state: "not_found", source: null, account: null, sync: "local", expiresAt: null, note: "The workspace connection was removed. Add the credentials again." }
+    const removed: Partial<ProviderStatus> = { state: "not_found", source: null, account: null, sync: "local", expiresAt: null, note: REMOVED_NOTE }
     if (gone && r?.connection_id == null) return orderStatus({ ...orig, ...removed } as ProviderStatus)
     // Another connection of the caller's is still there: it is what the workspace shows for the provider.
     let p: ProviderStatus = gone ? ({ ...orig, ...removed, note: null } as ProviderStatus) : orig
@@ -570,6 +581,8 @@ export function mergeRemote(local: StatusResult, remote: RemoteProvider[], now =
       expiresAt: r.expires_at,
       note: remoteExpired ? "access expired, reconnect to continue" : remoteRejected ? REJECTED_NOTE : null,
       ...(managedId != null ? {} : { managed: false }),
+      // A hand-made connection is shown, and what was found here stays offered next to it.
+      ...(managedId == null && orig.state === "detected" && orig.source && orig.sync !== "blocked" ? { found: { source: orig.source, account: orig.account } } : {}),
     })
   })
   return { ...local, providers }
@@ -669,6 +682,18 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const ALREADY_IN_WORKSPACE = "already in the workspace"
 const INVALID_IN_WORKSPACE = "the workspace connection is marked invalid; run update"
 
+/** Attaches this tool's workspace connection for a provider that has nothing to upload from this machine; `fallback` is the outcome when there is none to attach. */
+async function attachWithoutLocal(id: ProviderId, rec: StoredProvider | undefined, fallback: SyncOutcome, onStep?: (label: string, done: boolean) => void): Promise<SyncOutcome> {
+  const signedIn = await realConfig()
+  if (!signedIn) return fallback
+  try {
+    if (!(await managedInWorkspace(id))) return fallback
+  } catch (e) {
+    return { id, result: "failed", reason: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}`, steps: [] }
+  }
+  return syncReal(id, signedIn, undefined, rec, null, onStep, true)
+}
+
 /** `skipSynced` leaves a connection this tool already saved to the workspace as it is (it is only attached to the linked workspace), for runs that cover every provider. */
 export async function syncProvider(id: ProviderId, onStep?: (label: string, done: boolean) => void, pace = 0, skipSynced = false): Promise<SyncOutcome> {
   const store = loadStore()
@@ -679,20 +704,17 @@ export async function syncProvider(id: ProviderId, onStep?: (label: string, done
     const nothing: SyncOutcome = { id, result: "skipped", reason: "nothing detected or connected", steps: [] }
     // A run over every provider still attaches a workspace connection this tool made, when nothing for the provider is on this machine.
     if (!skipSynced || store.blocked[id]) return nothing
-    const signedIn = await realConfig()
-    if (!signedIn) return nothing
-    try {
-      if (!(await managedInWorkspace(id))) return nothing
-    } catch (e) {
-      return { id, result: "failed", reason: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}`, steps: [] }
-    }
-    return syncReal(id, signedIn, undefined, rec, null, onStep, true)
+    return attachWithoutLocal(id, rec, nothing, onStep)
   }
   if (store.blocked[id]) {
     // Blocked means the credential never leaves the machine; nothing is registered here without one.
     return { id, result: "kept_local", reason: "blocked by policy", steps: [] }
   }
-  if (!rec?.registered && det && !det.syncable) return { id, result: "skipped", reason: det.note ?? "not syncable", steps: [] }
+  if (!rec?.registered && det && !det.syncable) {
+    const notSyncable: SyncOutcome = { id, result: "skipped", reason: det.note ?? "not syncable", steps: [] }
+    // What was found here cannot be uploaded, but a workspace connection this tool made is still attached by a run over every provider.
+    return skipSynced ? attachWithoutLocal(id, rec, notSyncable, onStep) : notSyncable
+  }
   const account = rec?.account ?? det?.account ?? null
   const cfg = await realConfig()
   const alreadySynced = skipSynced && Boolean(rec?.registered && rec.synced)
@@ -916,7 +938,8 @@ async function syncReal(
       const own = await backend.listOwnConnections(cfg)
       // The workspace decides whether the connection is usable, not the flag kept here from an earlier check.
       const found = known == null ? findManaged(own, id) : own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id])
-      if (!found) return { id, result: "skipped", reason: collected.reason, steps: [] }
+      // A connection this machine saved that is gone from the workspace is not attached; it was deleted there.
+      if (!found) return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
       if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
       step("Connection already in the workspace")
       return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id))
@@ -924,6 +947,19 @@ async function syncReal(
       return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
     }
   }
+  // The provider accepts the credential before anything is uploaded, as connect checks it; a refused or unreachable provider uploads nothing.
+  const check = await creds.validate(id, collected.config.type === "server" ? "server" : "", collected.config as Record<string, string>)
+  if (!check.ok) {
+    // As connect does: a provider refusing the credential saved on this machine marks that record rejected; a detected one is not stored, so nothing is marked.
+    if (check.rejected && rec?.registered && rec.variant && rec.secretFields?.length) {
+      await updateStore((next) => {
+        next.providers[id] = { ...next.providers[id], rejected: true, validatedAt: new Date().toISOString() }
+      })
+    }
+    return { id, result: "failed", reason: check.message ?? "Could not validate the credentials", steps }
+  }
+  const expiresAt = check.expiresAt ?? rec?.expiresAt ?? null
+  const upload = expiresAt ? { ...collected.config, expires_at: expiresAt } : collected.config
   try {
     // The blocked check, the record check and the upload share one lock with Keep local and Disconnect. The config was prepared before the lock, so the record is compared again here.
     return await withLock(async (): Promise<SyncOutcome> => {
@@ -932,7 +968,7 @@ async function syncReal(
       const cur = now.providers[id]
       if (Boolean(cur?.registered) !== Boolean(rec?.registered) || Boolean(cur?.synced) !== Boolean(rec?.synced) || cur?.variant !== rec?.variant || (cur?.connectionId ?? null) !== (rec?.connectionId ?? null) || cur?.validatedAt !== rec?.validatedAt)
         return { id, result: "skipped", reason: "the connection changed while syncing, run sync again", steps: [] }
-      const res = await upsertManaged(cfg, id, collected.config)
+      const res = await upsertManaged(cfg, id, upload)
       if (!res.isValid) {
         // A workspace that refuses a new connection keeps nothing of it; the local copy stays.
         let warning = ""
@@ -950,12 +986,14 @@ async function syncReal(
         next.providers[id] = {
           ...next.providers[id],
           registered: true,
-          account,
+          account: check.account ?? account,
+          validatedAt: new Date().toISOString(),
           source: next.providers[id]?.source ?? det?.source,
           synced: true,
           rejected: false,
           unverified: false,
           connectionId: res.connectionId,
+          expiresAt,
           updatedAt: new Date().toISOString(),
         }
       })
@@ -1054,3 +1092,5 @@ export async function getToken(id: ProviderId): Promise<TokenOutcome> {
   if (isExpired(rec.expiresAt)) return { status: "failed", message: `The stored ${name} credential has expired. ${fix}` }
   return { status: "ok", token: secret, expiresAt: rec.expiresAt ?? null }
 }
+
+export * as IntegrationsCore from "./core"
