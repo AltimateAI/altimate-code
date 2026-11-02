@@ -5,7 +5,7 @@
 // without a dbt.json. The dbt adapter is replaced through `dbtAdapterInternals`, so
 // these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
@@ -153,6 +153,36 @@ describe("dbt_lineage with the project's dbt adapter", () => {
     const at = order.map((line) => result.output.indexOf(line))
     expect(at.every((i) => i >= 0)).toBe(true)
     expect(at).toEqual([...at].sort((a, b) => a - b))
+  })
+
+  test("a manifest named outside the adapter's project wins over the adapter", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "dbt-lineage-project-"))
+    const mine = path.join(dir, "mine")
+    const other = path.join(dir, "other")
+    await Promise.all([mine, other].map((d) => mkdir(path.join(d, "target"), { recursive: true })))
+    const empty = JSON.stringify({ metadata: { adapter_type: "duckdb" }, nodes: {}, sources: {} })
+    await writeFile(path.join(mine, "target", "manifest.json"), empty)
+    await writeFile(path.join(other, "target", "manifest.json"), empty)
+    const root = spyOn(register, "getDbtProjectRoot").mockResolvedValue(mine)
+    try {
+      const tool = await initTool(DbtLineageTool)
+      const fallback = await tool.execute({ model: "customers", manifest_path: path.join(other, "target", "manifest.json") }, ctx)
+      expect(fallback.metadata.structuredContent).toBeUndefined()
+      expect(fallback.output).toContain(`is not in the dbt project at ${mine}`)
+      const kept = await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "manifest.json") }, ctx)
+      expect(kept.metadata.structuredContent).toEqual(TRACE)
+      // A dbt project nested in this one's folder is another project.
+      const nested = path.join(mine, "subproject")
+      await mkdir(path.join(nested, "target"), { recursive: true })
+      await writeFile(path.join(nested, "dbt_project.yml"), "name: sub\n")
+      await writeFile(path.join(nested, "target", "manifest.json"), empty)
+      const inner = await tool.execute({ model: "customers", manifest_path: path.join(nested, "target", "manifest.json") }, ctx)
+      expect(inner.metadata.structuredContent).toBeUndefined()
+      expect(inner.output).toContain("belongs to the dbt project at")
+    } finally {
+      root.mockRestore()
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 
   test("is handed to an MCP client as structuredContent", async () => {

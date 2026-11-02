@@ -1,4 +1,5 @@
 import z from "zod"
+import fs from "fs"
 import path from "path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
@@ -55,7 +56,13 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
       .describe("Also return the model's graph from the manifest (two levels upstream, everything downstream up to 500 models with exposures and tests; graph.truncated is set when cut) in the metadata; for lineage viewers"),
   }),
   async execute(args, ctx) {
-    const viaAdapter = await fromAdapter(args.model, args.column, ctx.abort)
+    let viaAdapter = await fromAdapter(args.model, args.column, ctx.abort)
+    // The adapter answers for the project it found; a manifest named outside that project's folder
+    // wins, so its graph and its lineage are never mixed with this one's.
+    if (viaAdapter.result && args.manifest_path) {
+      const outside = await manifestOutsideAdapterProject(args.manifest_path)
+      if (outside) viaAdapter = { reason: outside }
+    }
     if (viaAdapter.result) {
       const result = viaAdapter.result
       const what = result.focus.column ? `${result.focus.name}.${result.focus.column}` : result.focus.name
@@ -114,6 +121,33 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
     }
   },
 })
+
+/**
+ * Why a named manifest is not the adapter's project's, or undefined when it is: it must lie in that
+ * project's folder (links resolved) with no other dbt_project.yml between (a nested project or an
+ * installed package is another project). A path that cannot be resolved counts as not this one's.
+ */
+async function manifestOutsideAdapterProject(manifestPath: string): Promise<string | undefined> {
+  const { getDbtProjectRoot } = await import("../native/connections/register")
+  const root = await getDbtProjectRoot()
+  if (!root) return "the dbt adapter has no project root"
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(path.resolve(p))
+    } catch {
+      return undefined
+    }
+  }
+  const projectDir = real(root)
+  const manifest = real(manifestPath)
+  if (!projectDir || !manifest) return `the manifest ${manifestPath} cannot be read`
+  const inside = path.relative(projectDir, manifest)
+  if (!inside || inside.startsWith("..") || path.isAbsolute(inside)) return `the manifest ${manifestPath} is not in the dbt project at ${root}`
+  for (let dir = path.dirname(manifest); dir !== projectDir && dir.startsWith(projectDir); dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, "dbt_project.yml"))) return `the manifest ${manifestPath} belongs to the dbt project at ${dir}`
+  }
+  return undefined
+}
 
 /** The model's graph from the compiled manifest, or undefined when there is no manifest to read. */
 function manifestGraph(manifestPath: string, uniqueId: string) {
