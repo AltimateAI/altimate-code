@@ -37,6 +37,9 @@ export async function serverInstructions(): Promise<string> {
     return summary ? `${SERVER_INSTRUCTIONS}\n\nConnections:\n${summary}` : SERVER_INSTRUCTIONS
   } catch {
     return SERVER_INSTRUCTIONS
+  } finally {
+    // The catalog listing opens local SQLite/DuckDB files; release them so other processes can open them while idle.
+    await Registry.releaseFileConnections().catch(() => {})
   }
 }
 

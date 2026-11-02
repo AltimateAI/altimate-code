@@ -8,6 +8,9 @@ import * as Registry from "./registry"
 const TABLE_LIMIT = 500
 const SCHEMA_LIMIT = 200
 const quoteIdent = (id: string) => `"${id.replace(/"/g, '""')}"`
+/** MySQL and Redshift drivers ignore bind values, so their schema filter is an escaped literal. */
+const INLINE_SCHEMA_TYPES = new Set(["mysql", "redshift"])
+const stringLiteral = (value: string) => `'${value.replace(/\\/g, "\\\\").replace(/'/g, "''")}'`
 
 /** Undefined means this driver has no supported catalog SQL, never a failed catalog query. */
 function catalogQuery(type: string, config: ConnectionConfig | undefined, schema?: string): string | undefined {
@@ -25,8 +28,10 @@ function catalogQuery(type: string, config: ConnectionConfig | undefined, schema
       : "information_schema.tables"
   const filters = ["t.table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_internal', 'INFORMATION_SCHEMA')"]
   if (type === "duckdb") filters.push("t.table_catalog = current_database()")
-  if (schema)
-    filters.push(`t.table_schema = ${type === "postgres" || type === "redshift" || type === "duckdb" ? "$1" : "?"}`)
+  if (schema) {
+    const placeholder = type === "postgres" || type === "duckdb" ? "$1" : "?"
+    filters.push(`t.table_schema = ${INLINE_SCHEMA_TYPES.has(type) ? stringLiteral(schema) : placeholder}`)
+  }
   if (!schema) {
     return `SELECT t.table_schema, COUNT(*) FROM ${catalog} t WHERE ${filters.join(" AND ")} GROUP BY t.table_schema ORDER BY t.table_schema LIMIT 201`
   }
@@ -89,7 +94,7 @@ export async function listSchemaTables(params: SchemaListParams, context?: Query
     }
     const names = await connector.listSchemas()
     const schemas: NonNullable<SchemaListResult["schemas"]> = []
-    for (const name of names.slice(0, SCHEMA_LIMIT).sort()) {
+    for (const name of [...names].sort().slice(0, SCHEMA_LIMIT)) {
       context?.signal?.throwIfAborted()
       let table_count: number | undefined
       if (type === "mongodb") {
@@ -114,7 +119,7 @@ export async function listSchemaTables(params: SchemaListParams, context?: Query
     const result = await run(
       query ?? JSON.stringify({ command: "listCollections", database: schema }),
       query ? TABLE_LIMIT + 1 : TABLE_LIMIT,
-      query && type !== "sqlite" ? [schema] : undefined,
+      query && type !== "sqlite" && !INLINE_SCHEMA_TYPES.has(type) ? [schema] : undefined,
     )
     truncated = result.rows.length > TABLE_LIMIT || result.truncated
     tables = result.rows.slice(0, TABLE_LIMIT).map((row) => ({

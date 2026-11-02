@@ -496,8 +496,8 @@ async function storeSpill(result: SqlExecuteResult, context: { signal: AbortSign
     if (spillCounters.size > MAX_SPILL_SESSIONS) spillCounters.delete(spillCounters.keys().next().value!)
     const table = `result_${next}`
     try {
-      await storeRows(table, result, context)
-      return table
+      const stored = await storeRows(table, result, context)
+      return stored.materialized === false ? undefined : table
     } catch (error) {
       context.signal.throwIfAborted()
       // A table the client created under this name: try the next number.
@@ -528,8 +528,11 @@ async function executeBatch(
   let linesLeft = configured.maxLines
   const blocks: string[] = []
   const summary: { label: string; rowCount: number; error?: string; result_path?: string }[] = []
+  let truncated = false
   const labels = items.map((item, index) => (item.label ?? "").replace(/\s+/g, " ").trim().slice(0, 60) || `q${index + 1}`)
   // Steps a later step references, as a value list ({{label.column}}) or a scratch table ({{label}}).
+  const duplicate = labels.find((label, index) => labels.indexOf(label) !== index)
+  if (duplicate) throw new Error(`queries labels must be unique; "${duplicate}" is used more than once.`)
   const listRefs = new Set<string>()
   const tableRefs = new Set<string>()
   for (const item of items.slice(1))
@@ -553,7 +556,13 @@ async function executeBatch(
     const warehouse = item.warehouse?.trim() || args.warehouse
     let result: LegacyResult
     try {
-      const query = resolveStepRefs(item.query, labels.slice(0, index), captured, stored, warehouse)
+      const query = resolveStepRefs(
+        item.query,
+        labels.slice(0, index),
+        captured,
+        stored,
+        warehouse || Registry.list().warehouses[0]?.name,
+      )
       result = await run(
         {
           query,
@@ -579,6 +588,8 @@ async function executeBatch(
     }
     const body = clipToBudget(result.output, budget.maxBytes, budget.maxLines)
     const block = separator + header + body
+    const itemMetadata = (result.metadata ?? {}) as Record<string, unknown>
+    if (body !== result.output || itemMetadata.truncated === true || itemMetadata.row_limited === true) truncated = true
     blocks.push(block)
     bytesLeft -= Buffer.byteLength(block, "utf8")
     linesLeft -= block.split("\n").length - (separator ? 1 : 0)
@@ -597,8 +608,8 @@ async function executeBatch(
       rowCount: summary.reduce((total, item) => total + item.rowCount, 0),
       queries: summary,
       result_paths: summary.flatMap((item) => (item.result_path ? [item.result_path] : [])),
-      // This tool owns clipping; every block is already bounded.
-      truncated: false,
+      // Every block is bounded here; the flag reports whether any item was row-limited or clipped.
+      truncated,
       ...(failed.length === items.length ? { error: failed.map((item) => `${item.label}: ${item.error}`).join("\n") } : {}),
     },
     output: blocks.join(""),
@@ -638,18 +649,23 @@ function resolveStepRefs(
     if (index < 0) throw new Error(`${match}: step "${ref}" has no column ${column} (columns: ${source.columns.join(", ")}).`)
     const values = [...new Set(source.rows.map((row) => row[index]).filter((value) => value !== null && value !== undefined))]
     if (isMongoWarehouse(warehouse)) return values.map((value) => JSON.stringify(value)).join(", ") || "null"
-    const mysql = ["mysql", "mariadb"].includes(Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? "")
-    return values.length ? values.map((value) => sqlLiteral(value, mysql)).join(", ") : "NULL"
+    const backslashEscapes = BACKSLASH_ESCAPE_TYPES.has(
+      Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? "",
+    )
+    return values.length ? values.map((value) => sqlLiteral(value, backslashEscapes)).join(", ") : "NULL"
   })
 }
 
-function sqlLiteral(value: unknown, mysql: boolean): string {
+/** Dialects whose string literals treat a backslash as an escape character. */
+const BACKSLASH_ESCAPE_TYPES = new Set(["mysql", "bigquery", "snowflake", "databricks", "clickhouse"])
+
+function sqlLiteral(value: unknown, backslashEscapes: boolean): string {
   if (typeof value === "number" && Number.isFinite(value)) return String(value)
   if (typeof value === "bigint") return value.toString()
   if (typeof value === "boolean") return value ? "TRUE" : "FALSE"
   const text = typeof value === "string" ? value : value instanceof Date ? value.toISOString() : JSON.stringify(value)
   const escaped = text.replaceAll("'", "''")
-  return `'${mysql ? escaped.replaceAll("\\", "\\\\") : escaped}'`
+  return `'${backslashEscapes ? escaped.replaceAll("\\", "\\\\") : escaped}'`
 }
 
 const BATCH_CLIPPED = "…[output clipped]"

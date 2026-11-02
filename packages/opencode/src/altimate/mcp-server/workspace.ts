@@ -199,16 +199,23 @@ export async function createWorkspaceAdapter(directory: string) {
   type Context = Awaited<ReturnType<typeof WorkspaceClient.context>>
   let cached: { value: Context; until: number } | undefined
   let load: { token: string; promise: Promise<Context> } | undefined
-  let active: { token: string; adapter: Awaited<ReturnType<typeof createPinnedWorkspaceAdapter>> } | undefined
+  type Pinned = Awaited<ReturnType<typeof createPinnedWorkspaceAdapter>>
+  type Active = { token: string; adapter: Pinned; running: Set<Promise<void>> }
+  let active: Active | undefined
   let queue = Promise.resolve()
   let closed = false
   const text = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value) }] })
+  // An adapter is closed only after the operations that hold it have finished.
+  const retire = async (entry: Active) => {
+    await Promise.all(entry.running)
+    await entry.adapter.close()
+  }
   const connection = (token: string, refresh = false) => {
     const job = queue.then(async () => {
       if (closed) throw new Error("Workspace server closed.")
       await WorkspaceClient.assertIdentity(directory, token)
-      if (!refresh && active?.token === token) return active.adapter
-      await active?.adapter.close()
+      if (!refresh && active?.token === token) return active
+      if (active) await retire(active)
       active = undefined
       const adapter = await createPinnedWorkspaceAdapter(directory)
       try {
@@ -218,14 +225,28 @@ export async function createWorkspaceAdapter(directory: string) {
         await adapter.close()
         throw error
       }
-      active = { token, adapter }
-      return adapter
+      active = { token, adapter, running: new Set() }
+      return active
     })
     queue = job.then(
       () => {},
       () => {},
     )
     return job
+  }
+  const withAdapter = async <A>(token: string, refresh: boolean, use: (adapter: Pinned) => Promise<A>) => {
+    const entry = await connection(token, refresh)
+    const run = Promise.resolve().then(() => use(entry.adapter))
+    const settled = run.then(
+      () => {},
+      () => {},
+    )
+    entry.running.add(settled)
+    try {
+      return await run
+    } finally {
+      entry.running.delete(settled)
+    }
   }
   return {
     tools,
@@ -261,15 +282,16 @@ export async function createWorkspaceAdapter(directory: string) {
         await WorkspaceClient.assertIdentity(directory, token)
         signal.throwIfAborted()
         if (args.include_tools !== true) return text({ status: "ready", ...value })
-        const adapter = await connection(token, args.refresh === true)
-        const operations = adapter.tools
-          .filter((tool) => tool.name !== "workspace_context" && tool.name !== "workspace_skill")
-          .map(({ name, description, inputSchema }) => ({
-            name: name.slice("workspace_".length),
-            description,
-            inputSchema,
-          }))
-        const engine = await adapter.engineStatus()
+        const { operations, engine } = await withAdapter(token, args.refresh === true, async (adapter) => ({
+          operations: adapter.tools
+            .filter((tool) => tool.name !== "workspace_context" && tool.name !== "workspace_skill")
+            .map(({ name, description, inputSchema }) => ({
+              name: name.slice("workspace_".length),
+              description,
+              inputSchema,
+            })),
+          engine: await adapter.engineStatus(),
+        }))
         signal.throwIfAborted()
         await WorkspaceClient.assertIdentity(directory, token)
         return text({ status: "ready", ...value, operations, ...engine })
@@ -287,13 +309,14 @@ export async function createWorkspaceAdapter(directory: string) {
         throw new Error("Workspace operation is not exposed by the read-only integration.")
       if (!args.arguments || typeof args.arguments !== "object" || Array.isArray(args.arguments))
         throw new Error("Operation arguments must be an object.")
-      const adapter = await connection(args.workspace_token)
       const operation = `workspace_${args.operation}`
-      if (!adapter.tools.some((tool) => tool.name === operation))
-        throw new Error(
-          "Workspace operation is unavailable. Read workspace_context with include_tools=true for the current catalog.",
-        )
-      const answer = await adapter.execute(operation, args.arguments as Record<string, unknown>, signal)
+      const answer = await withAdapter(args.workspace_token, false, async (adapter) => {
+        if (!adapter.tools.some((tool) => tool.name === operation))
+          throw new Error(
+            "Workspace operation is unavailable. Read workspace_context with include_tools=true for the current catalog.",
+          )
+        return adapter.execute(operation, args.arguments as Record<string, unknown>, signal)
+      })
       await WorkspaceClient.assertIdentity(directory, args.workspace_token)
       return answer
     },
@@ -301,7 +324,7 @@ export async function createWorkspaceAdapter(directory: string) {
       closed = true
       cached = undefined
       await queue
-      await active?.adapter.close()
+      if (active) await retire(active)
       active = undefined
     },
   }

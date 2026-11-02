@@ -45,7 +45,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
   ],
 }))
-server.setRequestHandler(CallToolRequestSchema, async (request) => ({
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  // A query containing SLOW_QUERY outlives a catalog refresh.
+  if (JSON.stringify(request.params.arguments ?? {}).includes("SLOW_QUERY")) await new Promise((resolve) => setTimeout(resolve, 3000))
+  return {
   content: [
     {
       type: "text",
@@ -56,5 +59,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => ({
       }),
     },
   ],
-}))
+  }
+})
 await server.connect(new StdioServerTransport())

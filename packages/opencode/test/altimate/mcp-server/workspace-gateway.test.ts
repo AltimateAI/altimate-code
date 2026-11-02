@@ -185,3 +185,30 @@ test("simultaneous relevant context reads coalesce but every request checks iden
   }
   await expect(server.execute("workspace_context", {}, signal)).rejects.toThrow("closed")
 })
+
+test("a context refresh waits for a running operation instead of closing its engine", async () => {
+  const f = scope()
+  f.link()
+  const server = await createWorkspaceAdapter(process.cwd())
+  try {
+    await server.execute("workspace_context", { include_tools: true }, signal)
+    const running = server.execute(
+      "workspace_execute",
+      {
+        workspace_token: "receipt",
+        operation: "snowflake_execute_database_query",
+        arguments: { connection_id: "fixture", sql_query: "SELECT SLOW_QUERY" },
+      },
+      signal,
+    )
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const [answer, refreshed] = await Promise.all([
+      running,
+      server.execute("workspace_context", { include_tools: true, refresh: true }, signal),
+    ])
+    expect(JSON.stringify(answer)).toContain("SLOW_QUERY")
+    expect(parse(refreshed).status).toBe("ready")
+  } finally {
+    await server.close()
+  }
+}, 30_000)

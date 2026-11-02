@@ -41,4 +41,25 @@ test("a description table naming a missing property or a required one to drop fa
   }
   // sql_check's table lists properties this schema lacks.
   expect(() => compactSchema("sql_check", schema)).toThrow(/has no property/)
+  const names = [
+    "sql",
+    "columns",
+    "column",
+    "pattern",
+    "left_sql",
+    "right_sql",
+    "on",
+    "join",
+    "left_col",
+    "right_col",
+    "left_warehouse",
+    "right_warehouse",
+    "query_timeout_ms",
+  ]
+  const complete = {
+    type: "object",
+    properties: Object.fromEntries(names.map((name) => [name, { type: "string" }])),
+    required: ["left_warehouse"],
+  }
+  expect(() => compactSchema("sql_check", complete)).toThrow(/cannot drop required property left_warehouse/)
 })

@@ -7,6 +7,7 @@ import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Global } from "@/global"
 import { ConfigPaths } from "@/config/paths"
 import { ConfigVariable } from "@/config/variable"
+import { ConfigManaged } from "@/config/managed"
 import { git } from "@/util/git"
 import { MAX_LINES, MAX_BYTES } from "@/tool/truncate-core"
 
@@ -76,5 +77,11 @@ export async function outputLimits() {
   }
   const content = env("OPENCODE_CONFIG_CONTENT")
   if (content) await apply(content, { source: "OPENCODE_CONFIG_CONTENT" })
+  // Organisation-managed config merges last in the agent loader, so it caps everything above.
+  for (const name of ["altimate-code.json", "altimate-code.jsonc", "opencode.json", "opencode.jsonc"]) {
+    await load(path.join(ConfigManaged.managedConfigDir(), name))
+  }
+  const preferences = await ConfigManaged.readManagedPreferences().catch(() => undefined)
+  if (preferences) await apply(preferences.text, { source: preferences.source })
   return limits
 }

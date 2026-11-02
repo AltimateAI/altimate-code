@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test"
 import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
@@ -15,24 +15,27 @@ let runner: Runner
 let done: () => void
 let finished: Promise<void>
 let ready: Promise<void>
+let booted: Promise<unknown>
 
 beforeAll(async () => {
   registerDefaultNativeHandlers()
   dir = await mkdtemp(path.join(tmpdir(), "tool-cli-runner-"))
   finished = new Promise((resolve) => (done = resolve))
   ready = new Promise((resolve, reject) => {
-    bootstrap(dir, async () => {
+    booted = bootstrap(dir, async () => {
       runner = await createRunner()
       resolve()
       await finished
       await runner.close()
-    }).catch(reject)
+    })
+    booted.catch(reject)
   })
   await ready
 })
 
 afterAll(async () => {
   done()
+  await booted.catch(() => {})
   await rm(dir, { recursive: true, force: true })
 })
 
@@ -147,6 +150,13 @@ describe("ask handler", () => {
       expect(Exit.isFailure(ask(false, kind))).toBe(true)
   })
 
+  test("blocked statements are refused for read permissions too", () => {
+    for (const kind of ["sql_execute", "sql_execute_read", "schema_inspect", "answer_commit"])
+      for (const allowWrite of [false, true])
+        expect(Exit.isFailure(ask(allowWrite, kind, ["DROP SCHEMA s"]))).toBe(true)
+    expect(Exit.isSuccess(ask(false, "sql_execute_read", ["SELECT 1"]))).toBe(true)
+  })
+
   test("--allow-write opens writes but never destructive statements", () => {
     expect(Exit.isSuccess(ask(true, "sql_execute_write", ["INSERT INTO t VALUES (1)"]))).toBe(true)
     expect(Exit.isSuccess(ask(true, "bash", ["dbt run"]))).toBe(true)
@@ -175,8 +185,11 @@ describe("shared adapter behaviour", () => {
   test("workspace tools are listed only when requested", async () => {
     expect((await runner.list()).some((tool) => tool.id.startsWith("workspace_"))).toBe(false)
     expect((await runner.run("workspace_context", {})).output).toContain("Unknown tool")
+    // A separate project directory, so disposing this bootstrap leaves the shared runner's instance alone.
+    const other = await mkdtemp(path.join(tmpdir(), "tool-cli-runner-ws-"))
+    const cwd = spyOn(process, "cwd").mockReturnValue(other)
     let withWorkspace!: Runner
-    await bootstrap(dir, async () => {
+    await bootstrap(other, async () => {
       withWorkspace = await createRunner({ workspaceTools: true })
     })
     try {
@@ -187,7 +200,9 @@ describe("shared adapter behaviour", () => {
       const skill = await withWorkspace.run("workspace_skill", { name: "x" })
       expect(skill.status).toBe("error")
     } finally {
+      cwd.mockRestore()
       await withWorkspace.close()
+      await rm(other, { recursive: true, force: true })
     }
   })
 })

@@ -96,7 +96,12 @@ describe("tool CLI", () => {
     try {
       expect(await list()).toContain("first_wh")
       // Wait until the daemon is the one answering.
-      for (let i = 0; i < 100 && (await run("daemon", "status").exited) !== 0; i++) await Bun.sleep(100)
+      let daemonReady = false
+      for (let i = 0; i < 100 && !daemonReady; i++) {
+        daemonReady = (await run("daemon", "status").exited) === 0
+        if (!daemonReady) await Bun.sleep(100)
+      }
+      expect(daemonReady).toBe(true)
       await writeFile(config, JSON.stringify({ second_wh: { type: "duckdb", path: path.join(dir, "b.duckdb"), create: true } }))
       const output = await list()
       expect(output).toContain("second_wh")

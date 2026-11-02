@@ -13,6 +13,8 @@ import { Telemetry } from "../../telemetry"
 // altimate_change end
 // altimate_change start — report driver readiness when adding a warehouse
 import { shellQuote } from "@altimateai/drivers/resolve"
+import { isLocalFilePath } from "@altimateai/drivers"
+import { Instance } from "@/project/instance"
 import {
   driverForWarehouseType,
   driverInstallDir,
@@ -232,10 +234,20 @@ async function nameIsBoundAnywhere(name: string): Promise<boolean> {
 // altimate_change end
 
 // altimate_change start — read-only detection for existing SQLite/DuckDB store files
+function projectDirectory(): string {
+  try {
+    return Instance.directory
+  } catch {
+    return process.cwd()
+  }
+}
+
 function unwritableFileStore(config: Record<string, unknown>): boolean {
   const type = String(config.type).toLowerCase()
-  const store = config.path
-  if ((type !== "sqlite" && type !== "duckdb") || typeof store !== "string" || !path.isAbsolute(store)) return false
+  if ((type !== "sqlite" && type !== "duckdb") || typeof config.path !== "string" || !isLocalFilePath(config.path))
+    return false
+  // Registry.add persists a relative path resolved against the project root.
+  const store = path.resolve(projectDirectory(), config.path)
   if (config.readonly !== undefined || !fs.existsSync(store)) return false
   try {
     fs.accessSync(store, fs.constants.W_OK)

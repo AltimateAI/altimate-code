@@ -43,11 +43,15 @@ export function resolveDirectory(directory: string): string {
 // The registry's CONN_ENV_PREFIX, repeated so a client call does not load the registry.
 const CONN_ENV_PREFIX = "ALTIMATE_CODE_CONN_"
 
-/** A short digest of the caller's `ALTIMATE_CODE_CONN_*` variables, empty when there are none. A daemon reads them
- * once at spawn, so callers with different values must not share one. */
+// Variables a daemon reads once at spawn that change what it returns or exposes (value sampling, integration
+// routing, workspace tools), so a caller with a different value must not be served by a daemon started without it.
+const BEHAVIOUR_ENV = ["ALTIMATE_DISABLE_SCHEMA_VALUES", "ALTIMATE_INTEGRATIONS", "ALTIMATE_DISABLE_WORKSPACE"]
+
+/** A short digest of the caller's `ALTIMATE_CODE_CONN_*` variables and the behaviour variables above, empty when
+ * none are set. A daemon reads them once at spawn, so callers with different values must not share one. */
 export function connectionEnvKey(env: NodeJS.ProcessEnv = process.env): string {
   const entries = Object.entries(env)
-    .filter(([key, value]) => key.startsWith(CONN_ENV_PREFIX) && value)
+    .filter(([key, value]) => (key.startsWith(CONN_ENV_PREFIX) || BEHAVIOUR_ENV.includes(key)) && value)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
   if (entries.length === 0) return ""
   return createHash("sha256").update(JSON.stringify(entries)).digest("hex").slice(0, 8)
@@ -186,6 +190,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
   let requests = 0
   let inflight = 0
   let reloading: Promise<void> | undefined
+  let releasing: Promise<void> | undefined
   let stopping: Promise<void> | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   const sockets = new Set<net.Socket>()
@@ -194,10 +199,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
 
   const info = (): DaemonInfo => ({ pid: process.pid, directory, version: options.version, startedAt, idleMs: idle, requests })
 
-  const handle = async (request: Request): Promise<Response> => {
+  const handle = async (request: Request, afterReply: (action: () => void) => void): Promise<Response> => {
     if (request.op === "status") return { id: request.id, status: "ok", title: "Tool daemon", output: "running", metadata: { ...info() } }
     if (request.op === "stop") {
-      setImmediate(() => void stop())
+      afterReply(() => void stop())
       return { id: request.id, status: "ok", title: "Tool daemon", output: "stopping", metadata: {} }
     }
     requests++
@@ -205,6 +210,7 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
       return { id: request.id, status: "error", title: "Invalid request", output: "A tool name is required.", metadata: {} }
     // A reload closes cached connectors, so it runs only when no other request is in flight, and requests that
     // arrive meanwhile wait for it. A skipped check loses nothing: the edit stays pending until a request runs alone.
+    if (releasing) await releasing
     if (reloading) await reloading.catch(() => {})
     if (inflight === 1 && options.refreshConnections) {
       reloading = options.refreshConnections()
@@ -236,8 +242,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
     lines(socket, (line) => {
       inflight++
       arm()
+      let afterReply: (() => void) | undefined
       Promise.resolve()
-        .then(() => handle(JSON.parse(line) as Request))
+        .then(() => handle(JSON.parse(line) as Request, (action) => (afterReply = action)))
         .catch((error): Response => ({
           id: "",
           status: "error",
@@ -248,8 +255,15 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
         .then(async (response) => {
           inflight--
           // Release DuckDB/SQLite file locks once idle, before replying, so a client running `dbt build` next finds the file free.
-          if (inflight === 0) await options.releaseFiles?.().catch(() => {})
-          if (!socket.destroyed) socket.write(JSON.stringify(response) + "\n")
+          // A request that arrives meanwhile waits for the release (see `handle`).
+          if (inflight === 0 && options.releaseFiles) {
+            const release = options.releaseFiles().catch(() => {})
+            releasing = release
+            await release
+            if (releasing === release) releasing = undefined
+          }
+          if (socket.destroyed) afterReply?.()
+          else socket.write(JSON.stringify(response) + "\n", () => afterReply?.())
         })
         .finally(arm)
     })

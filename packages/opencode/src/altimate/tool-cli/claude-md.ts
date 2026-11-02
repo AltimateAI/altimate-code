@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs"
+import { existsSync, lstatSync } from "node:fs"
 import { readFile, writeFile } from "node:fs/promises"
 import path from "node:path"
 
@@ -34,9 +34,10 @@ export function applyRoutingBlock(content: string): string {
   return content.replace(/\n*$/, "\n\n") + block + "\n"
 }
 
-/** Creates or updates `<directory>/CLAUDE.md`. Returns whether the file changed. */
+/** Creates or updates `<directory>/CLAUDE.md`. Returns whether the file changed. A symlinked file is left alone so the write never lands outside the project. */
 export async function writeRoutingBlock(directory: string): Promise<boolean> {
   const file = path.join(directory, "CLAUDE.md")
+  if (lstatSync(file, { throwIfNoEntry: false })?.isSymbolicLink()) return false
   const current = existsSync(file) ? await readFile(file, "utf8") : ""
   const next = applyRoutingBlock(current)
   if (next === current) return false

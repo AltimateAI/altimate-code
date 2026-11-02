@@ -26,13 +26,13 @@ export function denied(permission: string, retry = "Re-run"): Error {
  */
 export function askFor(allowWrite: boolean, retry = "Re-run"): Tool.Context["ask"] {
   return ({ permission, patterns }) => {
-    if (READ_PERMISSIONS.has(permission)) return Effect.void
-    if (!allowWrite) return Effect.die(denied(permission, retry))
     if (patterns?.some(isBlockedStatement)) {
       return Effect.die(
         new Error(`Permission denied: ${permission}. DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety. This cannot be overridden.`),
       )
     }
+    if (READ_PERMISSIONS.has(permission)) return Effect.void
+    if (!allowWrite) return Effect.die(denied(permission, retry))
     return Effect.void
   }
 }

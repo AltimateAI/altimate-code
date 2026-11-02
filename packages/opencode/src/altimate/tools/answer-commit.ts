@@ -326,8 +326,9 @@ function commitRejection(
   args: z.output<typeof parameters>,
   messages: Tool.Context["messages"],
   checkNumbers: boolean,
+  sessionID: string,
 ): string | undefined {
-  if (args.unresolved) return undefined
+  if (args.unresolved || AnswerCommitConjunction.budgetEnding(sessionID)) return undefined
   const missing = missingAskedItems(args)
   if (missing.length && priorRejections(messages, COVERAGE_REJECTION_MARKER) < MAX_COVERAGE_REJECTIONS)
     return coverageRejection(missing, args.asked!.map((item) => item.trim()).filter(Boolean))
@@ -372,7 +373,7 @@ export const AnswerCommitTool = Tool.define(
         // An MCP server sees only its own tool output, never the numbers a client computed in its own
         // shell or code, so the number-provenance check would reject correct derived values there.
         const checkNumbers = ctx.extra?.mcpClient !== true
-        const commitCheck = commitRejection(args, ctx.messages ?? [], checkNumbers)
+        const commitCheck = commitRejection(args, ctx.messages ?? [], checkNumbers, ctx.sessionID)
         const rejection =
           commitCheck ?? AnswerCommitConjunction.conjunctionRejection(args, ctx.messages ?? [], ctx.sessionID)
         if (rejection) {

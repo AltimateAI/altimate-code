@@ -41,7 +41,7 @@ Source writes are refused by default. Without `--allow-write`, source queries re
 
 <!-- altimate_change end -->
 
-The server writes only MCP protocol messages to stdout and sends logs to stderr. It does not initialize telemetry and honors `ALTIMATE_TELEMETRY_DISABLED`.
+The server writes only MCP protocol messages to stdout and sends logs to stderr. It honors `ALTIMATE_TELEMETRY_DISABLED`.
 
 ## Local MCP Servers
 

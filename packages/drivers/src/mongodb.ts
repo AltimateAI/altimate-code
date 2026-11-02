@@ -307,6 +307,24 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
     databaseNames = undefined
   }
 
+  /** An empty collection list is only valid for a database the user can see. */
+  async function assertDatabaseExists(name: string, maxTimeMS: number | undefined): Promise<void> {
+    const pendingNames: Promise<string[]> = databaseNames ?? client.db().admin()
+      .listDatabases({ nameOnly: true, authorizedDatabases: true, ...withMaxTime(maxTimeMS) })
+      .then((result: { databases: Array<{ name: string }> }) => result.databases.map((db) => db.name).sort())
+      .catch((error: unknown) => {
+        databaseNames = undefined
+        throw error
+      })
+    databaseNames = pendingNames
+    const names = await pendingNames
+    if (!names.includes(name)) {
+      throw new Error(
+        `MongoDB database "${name}" does not exist or is not accessible. Available databases: ${names.join(", ") || "(none)"}`,
+      )
+    }
+  }
+
   async function readCollections(db: any, maxTimeMS: number | undefined): Promise<Array<{ name: string; type: string }>> {
     const name = db.databaseName as string
     const pending: Promise<Array<{ name: string; type: string }>> = collectionCache.get(name)
@@ -320,22 +338,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
       throw error
     }
     // Visible collections prove the database exists without requiring database-listing privileges.
-    if (collections.length === 0) {
-      const pendingNames: Promise<string[]> = databaseNames ?? client.db().admin()
-        .listDatabases({ nameOnly: true, authorizedDatabases: true, ...withMaxTime(maxTimeMS) })
-        .then((result: { databases: Array<{ name: string }> }) => result.databases.map((db) => db.name).sort())
-        .catch((error: unknown) => {
-          databaseNames = undefined
-          throw error
-        })
-      databaseNames = pendingNames
-      const names = await pendingNames
-      if (!names.includes(name)) {
-        throw new Error(
-          `MongoDB database "${name}" does not exist or is not accessible. Available databases: ${names.join(", ") || "(none)"}`,
-        )
-      }
-    }
+    if (collections.length === 0) await assertDatabaseExists(name, maxTimeMS)
     return collections
   }
 
@@ -618,6 +621,7 @@ export async function connect(config: ConnectionConfig): Promise<Connector> {
         const matches = await readCursor(db.listCollections(parsed.filter ?? {}, {
           nameOnly: true, authorizedCollections: true, batchSize: Math.min(effectiveLimit + 1, 501), ...withMaxTime(maxTimeMS),
         }), effectiveLimit + 1)
+        if (matches.length === 0) await assertDatabaseExists(db.databaseName as string, maxTimeMS)
         const rows = matches.slice(0, effectiveLimit)
           .map((collection) => [collection.name, collection.type])
         return { columns: ["name", "type"], rows, row_count: rows.length, truncated: matches.length > effectiveLimit }

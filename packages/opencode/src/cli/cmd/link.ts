@@ -208,13 +208,11 @@ export const LinkCommand = cmd({
         describe: "Create a workspace with this name (defaults to the repo name) and link to it without prompting",
         type: "string",
       })
-      // altimate_change start — routing block for Claude Code
       .option("claude-md", {
         describe: "Also write the CLI routing block into the project's CLAUDE.md, for clients that do not use the altimate-code MCP server",
         type: "boolean",
         default: false,
       })
-      // altimate_change end
       .option("yes", {
         alias: "y",
         describe: "Allow replacing an existing link when --workspace or --create is used",

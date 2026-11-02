@@ -101,8 +101,11 @@ export const WarehouseListTool = Tool.define("warehouse_list", {
       }
 
       // Workspace-routed connections are served elsewhere; their local catalog is not the one queried.
-      if (mcp && !shadowedCount) {
-        const catalog = await discoverCatalog(warehouses, { signal: ctx.abort, sessionID: ctx.sessionID })
+      if (mcp) {
+        const catalog = await discoverCatalog(
+          warehouses.filter((warehouse) => !notes.has(warehouse.name)),
+          { signal: ctx.abort, sessionID: ctx.sessionID },
+        )
         if (catalog) lines.push("", "Tables (name: columns; e.g. = one sample row):", catalog)
       }
       // altimate_change end

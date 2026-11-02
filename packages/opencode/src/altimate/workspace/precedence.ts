@@ -201,6 +201,10 @@ export function bindLocalSession(sessionID: string): void {
 
 export function releaseLocalSession(sessionID: string): void {
   bySession.delete(sessionID)
+  announced.delete(sessionID)
+  publishing.delete(sessionID)
+  publishQueue.delete(sessionID)
+  unrecognisedWarned.delete(sessionID)
   incarnations.delete(sessionID)
 }
 /** One token per session incarnation: set when a session is first remembered or

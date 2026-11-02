@@ -1022,10 +1022,12 @@ export async function purgeManagedSnapshot(
   directory: string,
   why: string,
 ): Promise<"removed" | "absent" | "refused"> {
-  const outcome = await purgeSnapshot(directory, why)
-  // Unbound, so the Claude Code copies go too, even when the snapshot itself was refused.
-  await mirrorToClaude(directory, { withdraw: true })
-  return outcome
+  try {
+    return await purgeSnapshot(directory, why)
+  } finally {
+    // Unbound, so the Claude Code copies go too, even when the snapshot itself was refused.
+    await mirrorToClaude(directory, { withdraw: true })
+  }
 }
 
 async function purgeSnapshot(directory: string, why: string): Promise<"removed" | "absent" | "refused"> {

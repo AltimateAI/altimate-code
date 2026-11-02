@@ -308,6 +308,17 @@ mcpTest("MCP cancellation reaches the active tool abort signal", async () => {
   }
 })
 
+mcpTest("file database locks are released once the startup instructions are built", async () => {
+  const release = spyOn(Registry, "releaseFileConnections")
+  try {
+    const { client } = await fixture()
+    expect(client.getInstructions()).toContain("Connections:\n- source (sqlite): items")
+    expect(release).toHaveBeenCalled()
+  } finally {
+    release.mockRestore()
+  }
+})
+
 mcpTest("file database locks are released after a tool call returns to idle, never mid-flight", async () => {
   const { call } = await fixture()
   const release = spyOn(Registry, "releaseFileConnections").mockResolvedValue(undefined)
