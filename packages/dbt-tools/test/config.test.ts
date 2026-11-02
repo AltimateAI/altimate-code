@@ -43,7 +43,6 @@ describe("config", () => {
     await write(cfg)
     const result = await read()
     expect(result).toEqual(cfg)
-    expect(result!.autoDiscovered).toBeUndefined()
   })
 
   test("write creates .altimate-code directory", async () => {
@@ -78,7 +77,6 @@ describe("config", () => {
       expect(realpathSync(result!.projectRoot)).toBe(realpathSync(dir))
       expect(result!.dbtIntegration).toBe("corecommand")
       expect(result!.queryLimit).toBe(500)
-      expect(result!.autoDiscovered).toBe(true)
     } finally {
       process.chdir(origCwd)
     }
@@ -104,7 +102,6 @@ describe("config", () => {
       // Should fall through to auto-discovery instead of crashing
       expect(result).not.toBeNull()
       expect(result!.dbtIntegration).toBe("corecommand")
-      expect(result!.autoDiscovered).toBe(true)
     } finally {
       process.chdir(origCwd)
     }

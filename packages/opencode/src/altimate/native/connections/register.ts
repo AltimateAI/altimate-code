@@ -56,8 +56,6 @@ let dbtAdapter: any | null | undefined = undefined
 let dbtAdapterInflight: Promise<any | null> | undefined
 /** The project root the cached attempt read from the dbt config; null when it found none. */
 let dbtProjectRoot: string | null = null
-/** Python-bridge adapters chosen for a process that runs no user SQL; user SQL never runs on them. */
-const dbtBridgeAdapters = new WeakSet<object>()
 
 /** Test seams for the single-flight. Production leaves `readConfig` unset. */
 export const dbtAdapterInternals: {
@@ -65,8 +63,6 @@ export const dbtAdapterInternals: {
   readConfig?: () => Promise<unknown>
   /** Replaces dbt-tools' adapter creation, so a test can see which integration modes were tried. */
   create?: (config: any) => Promise<any>
-  /** Set by `declareNoDbtUserSql()`: no call in this process runs user SQL through dbt. */
-  noUserSql?: boolean
   /** Adapter creation attempts since the last reset — what single-flight bounds. */
   attempts: number
   /** Cache writes since the last reset: only the attempt that owns the slot writes. */
@@ -123,24 +119,6 @@ async function ensureDbtAdapter(): Promise<any | null> {
 
       // Create the adapter
       const create = dbtAdapterInternals.create ?? (await import("../../../../../dbt-tools/src/adapter")).create
-      // A project found without a dbt.json tries dbt-integration's Python-bridge mode ("core")
-      // first: a lineage lookup there takes milliseconds, against one dbt process per compiled
-      // model in "corecommand". When the bridge does not bring the project up (no dbt in that
-      // Python, or a bridge that cannot start), the configured mode is created as before.
-      // Only in a process that runs no user SQL through dbt: a `create table` run through the
-      // bridge reports success and is not persisted.
-      if (dbtAdapterInternals.noUserSql && dbtConfig.autoDiscovered && dbtConfig.dbtIntegration !== "core") {
-        const core = await create({ ...dbtConfig, dbtIntegration: "core" }).catch(async (e: unknown) => {
-          const { bufferLog } = await import("../../../../../dbt-tools/src/log-buffer")
-          bufferLog(`Python bridge did not start, using ${dbtConfig.dbtIntegration}: ${e instanceof Error ? e.message : String(e)}`)
-          return null
-        })
-        if (core?.isInitialized?.() === true) {
-          dbtBridgeAdapters.add(core)
-          return publish(core)
-        }
-        await core?.dispose?.().catch(() => {})
-      }
       return publish(await create(dbtConfig))
     } catch {
       // dbt-tools not available or config invalid — fall back to native
@@ -244,8 +222,7 @@ async function tryExecuteViaDbt(
     const raw = await executeQuery<any>({ type: "dbt" }, { queryTimeoutMs: timeoutMs }, context, async (options) => {
       const adapter = await ensureDbtAdapter()
       options.signal?.throwIfAborted()
-      // A write run through the bridge isn't persisted; the native driver takes the query instead.
-      if (!adapter || dbtBridgeAdapters.has(adapter)) return null
+      if (!adapter) return null
       return limit
         ? adapter.immediatelyExecuteSQLWithLimit(sql, "", limit)
         : adapter.immediatelyExecuteSQL(sql, "")
@@ -307,9 +284,16 @@ export function getDbtAdapter(): Promise<any | null> {
   return ensureDbtAdapter()
 }
 
-/** Declares that no call in this process runs user SQL through dbt (a read-only MCP server). */
-export function declareNoDbtUserSql(): void {
-  dbtAdapterInternals.noUserSql = true
+/**
+ * Stops the cached dbt adapter (its Python bridge and file watchers), for a server that is shutting
+ * down. An attempt still starting is stopped once it settles.
+ */
+export async function disposeDbtAdapter(): Promise<void> {
+  const settled = dbtAdapter
+  const inflight = dbtAdapterInflight
+  resetDbtAdapter()
+  void inflight?.then((adapter) => adapter?.dispose?.()).catch(() => {})
+  await settled?.dispose?.().catch(() => {})
 }
 
 /** The dbt project's root as the adapter finds it: a dbt.json, or a walk up from the working directory. */
@@ -336,7 +320,6 @@ export function resetDbtAdapter(): void {
   dbtAdapterInternals.attempts = 0
   dbtAdapterInternals.writes = 0
   dbtProjectRoot = null
-  delete dbtAdapterInternals.noUserSql
 }
 
 // ---------------------------------------------------------------------------
