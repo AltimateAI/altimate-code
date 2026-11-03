@@ -1160,6 +1160,12 @@ export namespace SessionPrompt {
           tasks.push(...task)
         }
       }
+      // altimate_change start — filterCompacted renders the retained tail after
+      // the summary, so the array-last finished assistant is a pre-compaction turn
+      // still carrying its overflowing usage. Select it by id so the overflow check
+      // sees the summary and does not compact again before the next request.
+      lastFinished = MessageV2.latest(msgs).finished
+      // altimate_change end
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
       // altimate_change start - only compaction-created continuations belong to the same request

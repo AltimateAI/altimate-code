@@ -32,6 +32,7 @@ import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "node:path"
+import { existsSync } from "node:fs" // altimate_change — ledger: drop snapshot-listed files that no longer exist
 import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 // altimate_change end
 // altimate_change start — replay cleanup uses server-side lesson delivery provenance.
@@ -827,7 +828,10 @@ export namespace SessionCompaction {
     exit?: number | null
     errored: boolean
   }
-  export type Ledger = { writes: LedgerWrite[]; calls: LedgerCall[]; sawBash: boolean }
+  // altimate_change start — `sawSnapshot`: the session recorded per-step snapshot
+  // diffs, so shell-made changes to tracked and non-ignored files are in `writes`.
+  export type Ledger = { writes: LedgerWrite[]; calls: LedgerCall[]; sawBash: boolean; sawSnapshot?: boolean }
+  // altimate_change end
 
   function callDetail(input: Record<string, any> | null | undefined): string {
     if (!input || typeof input !== "object") return ""
@@ -865,26 +869,61 @@ export namespace SessionCompaction {
     return (root ? path.resolve(root, normalized) : normalized).replaceAll("\\", "/")
   }
 
-  export function buildLedger(messages: MessageV2.WithParts[], root?: string): Ledger {
+  export function buildLedger(
+    messages: MessageV2.WithParts[],
+    root?: string,
+    // altimate_change — injectable so unit tests need no real files
+    exists: (file: string) => boolean = existsSync,
+  ): Ledger {
     const writes = new Map<string, LedgerWrite>()
     const calls: LedgerCall[] = []
     let sawBash = false
+    // altimate_change start — snapshot diffs record every file a step changed,
+    // however it was changed (bash redirects, scripts, `sed -i`), which edit-tool
+    // events alone miss.
+    let sawSnapshot = false
+    // altimate_change end
     for (const msg of messages) {
+      // altimate_change start
+      const toolWritten = new Set<string>()
+      let lastEnd: number | undefined
+      // altimate_change end
       for (const part of msg.parts) {
+        // altimate_change start — a patch part lists the files its step changed.
+        // Files already recorded by a write/edit tool in this step keep that
+        // attribution; a listed file that no longer exists was deleted.
+        if (part.type === "patch") {
+          sawSnapshot = true
+          const at = lastEnd ?? msg.info.time?.created ?? 0
+          for (const file of part.files) {
+            const key = ledgerPathKey(file, root)
+            if (toolWritten.has(key)) continue
+            if (!exists(key)) {
+              writes.delete(key)
+              continue
+            }
+            writes.set(key, { path: file, mtime: at, tool: "shell" })
+          }
+          continue
+        }
+        // altimate_change end
         if (part.type !== "tool") continue
         const state = part.state
         if (state.status !== "completed" && state.status !== "error") continue
         const errored = state.status === "error"
         const metadata: Record<string, any> = state.metadata ?? {}
         const exit = typeof metadata.exit === "number" || metadata.exit === null ? metadata.exit : undefined
+        lastEnd = state.time.end // altimate_change — patch-part write time
         calls.push({ tool: part.tool, detail: callDetail(state.input), exit, errored })
         if (part.tool === "bash") sawBash = true
         if (errored) continue
         if (LEDGER_WRITE_TOOLS.has(part.tool)) {
           const filePath = typeof state.input?.filePath === "string" ? state.input.filePath : undefined
           // mtime = tool-event completion time, NOT an fs.stat — corroborated facts only.
-          if (filePath)
+          if (filePath) {
             writes.set(ledgerPathKey(filePath, root), { path: filePath, mtime: state.time.end, tool: part.tool })
+            toolWritten.add(ledgerPathKey(filePath, root)) // altimate_change
+          }
         }
         if (part.tool === "apply_patch") {
           const files = Array.isArray(metadata.files) ? metadata.files : []
@@ -901,12 +940,14 @@ export namespace SessionCompaction {
             // it sends the continuing agent back to the path that was removed.
             if (typeof f?.movePath === "string" && source) writes.delete(ledgerPathKey(source, root))
             const target = typeof f?.movePath === "string" ? f.movePath : f?.filePath
-            if (typeof target === "string")
+            if (typeof target === "string") {
               writes.set(ledgerPathKey(target, root), {
                 path: target,
                 mtime: state.time.end,
                 tool: "apply_patch",
               })
+              toolWritten.add(ledgerPathKey(target, root)) // altimate_change
+            }
           }
         }
       }
@@ -915,6 +956,7 @@ export namespace SessionCompaction {
       writes: [...writes.values()].sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path)),
       calls,
       sawBash,
+      sawSnapshot, // altimate_change
     }
   }
 
@@ -929,18 +971,26 @@ export namespace SessionCompaction {
     if (!ledger.writes.length && !ledger.calls.length) return ""
     const lines: string[] = ["[Session state ledger — harness-recorded facts, generated automatically at compaction]"]
     if (ledger.writes.length) {
-      lines.push("Files you wrote this session (verified write/edit tool events):")
+      // altimate_change — includes files changed by shell commands, from snapshot diffs
+      lines.push("Files you wrote this session (verified by write/edit tool events or workspace snapshot diffs):")
       for (const w of ledger.writes) {
         lines.push(
           `- ${redactLedgerDetail(w.path)} — last written by you at ${new Date(w.mtime).toISOString()} via ${w.tool}`,
         )
       }
     }
-    if (ledger.sawBash) {
+    // altimate_change start — with snapshot diffs, shell changes are listed above
+    // except where the snapshot does not look: git-ignored files and files over 2 MB.
+    if (ledger.sawBash && ledger.sawSnapshot) {
+      lines.push(
+        "Files changed by shell commands are listed above (via shell); changes to git-ignored files or files over 2 MB are not tracked.",
+      )
+    } else if (ledger.sawBash) {
       lines.push(
         "Shell commands also ran this session; any file changes they made are possible but unverified (shell writes produce no edit event).",
       )
     }
+    // altimate_change end
     lines.push(
       "Advisory: these files were last written by you at the times shown — prefer this ledger over re-reading them; re-read a file only if a tool errored, you suspect external changes (e.g. IDE edits), or you are about to edit it.",
     )
