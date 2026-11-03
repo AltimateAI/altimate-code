@@ -163,8 +163,9 @@ function namesColumn(sql: string, column: string): boolean {
  * source from a column needs the engine's parse, not a pattern.
  */
 export function joinsNaturally(sql: string): boolean {
-  // Quoted names are emptied first: `as "natural join"` names a column.
-  const code = stripSql(sql).replace(/"(?:[^"]|"")*"|`[^`]*`|\[[^\]]*\]/g, '""')
+  // Double-quoted and backticked text is emptied first: `as "natural join"` names a column. Brackets
+  // are left alone, since they also hold array expressions (`array[(select …)]`).
+  const code = stripSql(sql).replace(/"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, '""')
   return /\bnatural\s+(?:(?:left|right|full|inner|cross|semi|anti)\s+){0,2}(?:outer\s+)?join\b/i.test(code)
 }
 

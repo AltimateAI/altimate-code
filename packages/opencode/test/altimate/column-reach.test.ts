@@ -618,7 +618,13 @@ describe("columnReach with a NATURAL JOIN", () => {
       'select a.id as "natural join", b.x as `natural join` from fct_orders a',
     ])
       expect(joinsNaturally(sql)).toBe(false)
-    for (const sql of ["select a.id from fct_orders a natural left semi join other b", "select * from a natural cross join b", "select * from a natural full outer join b"])
+    for (const sql of [
+      "select a.id from fct_orders a natural left semi join other b",
+      "select * from a natural cross join b",
+      "select * from a natural full outer join b",
+      "select array[(select max(a.id) from fct_orders a natural join other b)] as ids",
+      'select "a\\"b" as c from a natural join b where t = "z"',
+    ])
       expect(joinsNaturally(sql)).toBe(true)
   })
 
