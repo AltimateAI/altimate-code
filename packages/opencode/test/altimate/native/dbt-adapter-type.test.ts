@@ -9,6 +9,7 @@ let cwd: string
 const saved = { HOME: process.env.HOME, DBT_TARGET_PATH: process.env.DBT_TARGET_PATH, DBT_PROFILES_DIR: process.env.DBT_PROFILES_DIR }
 
 beforeEach(() => {
+  dbtRoute.root = undefined // another file in the same process may have created a dbt adapter
   cwd = process.cwd()
   dir = mkdtempSync(path.join(os.tmpdir(), "dbt-adapter-type-"))
   process.env.HOME = dir // no saved altimate-dbt config
