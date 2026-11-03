@@ -608,9 +608,36 @@ describe("columnReach with whole-row reads", () => {
     }
   })
 
-  test("qualified columns and the FROM clause itself are not whole-row reads", () => {
-    expect(readsWholeRow('select o.order_id, o.revenue as fct_orders from "shop"."main"."fct_orders" o where o.x > 1', ["fct_orders"])).toBe(false)
-    expect(readsWholeRow("select fct_orders.order_id from fct_orders join x on fct_orders.id = x.id", ["fct_orders"])).toBe(false)
-    expect(readsWholeRow("select count(*) from fct_orders o left join other on o.id = other.id", ["fct_orders"])).toBe(false)
+  test("a row through a quoted alias, a CTE, a subquery or after another join is a whole-row read", () => {
+    for (const sql of [
+      'select order_id, to_json("o") as j from fct_orders as "o"',
+      "select to_json(o) from other join fct_orders o on other.id = o.order_id",
+      "with c as (select * from fct_orders) select to_json(c) as j from c",
+      "select to_json(s) as j from (select * from fct_orders) s",
+    ])
+      expect(readsWholeRow(sql)).toBe(true)
+  })
+
+  test("import CTEs, aliases and qualified columns are not whole-row reads", () => {
+    for (const sql of [
+      'with fct_orders as (select * from "shop"."main"."fct_orders") select order_id from fct_orders',
+      "with a as (select 1 as x), fct_orders as (select * from fct_orders) select order_id from fct_orders",
+      "with a as (select 1 as x), fct_orders as materialized (select * from fct_orders) select order_id from fct_orders",
+      "select n from (select count(*) as n from fct_orders) fct_orders",
+      "select count(*) fct_orders from fct_orders",
+      'select o.order_id, o.revenue as fct_orders from "shop"."main"."fct_orders" o where o.x > 1',
+      "select fct_orders.order_id from fct_orders join x on fct_orders.id = x.id",
+      "select coalesce(o.a, o.b), cast(o.c as int) from fct_orders o left join other using (id)",
+    ])
+      expect(readsWholeRow(sql)).toBe(false)
+  })
+
+  test("a model that reads the column and a whole row passes the doubt on to its children", () => {
+    const value = manifest()
+    value.nodes["model.shop.fct_daily"].compiled_code = "select sum(revenue) as revenue, to_json(o) as j from fct_orders o"
+    value.nodes["model.shop.rpt_json"] = model("rpt_json", ["model.shop.fct_daily"], "select j from fct_daily", ["j"])
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    expect(reach.models.map((m) => m.name)).toContain("fct_daily")
+    expect(reach.uncertain.map((m) => m.name)).toContain("rpt_json")
   })
 })

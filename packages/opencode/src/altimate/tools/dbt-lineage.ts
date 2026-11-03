@@ -128,7 +128,8 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
  * project's folder (links resolved) with no other dbt_project.yml between (a nested project or an
  * installed package is another project). A manifest not written yet (an uncompiled project) is placed
  * by its path, its nearest existing folder's links resolved, so the project's own default path keeps
- * the adapter's answer.
+ * the adapter's answer; one with no dbt project above it at all (a default path resolved against
+ * another folder) names no other project either. A link whose target is missing cannot be placed.
  */
 async function manifestOutsideAdapterProject(manifestPath: string): Promise<string | undefined> {
   const { getDbtProjectRoot } = await import("../native/connections/register")
@@ -140,7 +141,7 @@ async function manifestOutsideAdapterProject(manifestPath: string): Promise<stri
       try {
         return path.join(fs.realpathSync(at), ...rest)
       } catch {
-        if (path.dirname(at) === at) return undefined
+        if (path.dirname(at) === at || fs.lstatSync(at, { throwIfNoEntry: false })?.isSymbolicLink()) return undefined
         rest.unshift(path.basename(at))
       }
     }
@@ -150,12 +151,23 @@ async function manifestOutsideAdapterProject(manifestPath: string): Promise<stri
   if (!projectDir || !manifest) return `the manifest ${manifestPath} cannot be placed`
   const inside = path.relative(projectDir, manifest)
   // Outside the project: the relative path climbs out (`..` as a whole segment, so `..data/` is inside).
-  if (!inside || inside === ".." || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) return `the manifest ${manifestPath} is not in the dbt project at ${root}`
+  if (!inside || inside === ".." || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) {
+    if (!fs.existsSync(manifest) && !projectAbove(manifest)) return undefined
+    return `the manifest ${manifestPath} is not in the dbt project at ${root}`
+  }
   // The manifest is inside, so walking up from it reaches the project folder itself.
   for (let dir = path.dirname(manifest); dir !== projectDir && dir !== path.dirname(dir); dir = path.dirname(dir)) {
     if (fs.existsSync(path.join(dir, "dbt_project.yml"))) return `the manifest ${manifestPath} belongs to the dbt project at ${dir}`
   }
   return undefined
+}
+
+/** Whether a dbt_project.yml sits in any folder above a path. */
+function projectAbove(file: string): boolean {
+  for (let dir = path.dirname(file); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, "dbt_project.yml"))) return true
+    if (path.dirname(dir) === dir) return false
+  }
 }
 
 /** The model's graph from the compiled manifest, or why there is none. */

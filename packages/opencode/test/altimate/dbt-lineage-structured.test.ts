@@ -4,7 +4,7 @@
 // adapter is up, and the manifest's lineage otherwise. The dbt adapter is replaced
 // through `dbtAdapterInternals`, so these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
@@ -196,9 +196,18 @@ describe("dbt_lineage with the project's dbt adapter", () => {
       const unwritten = await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "nope", "manifest.json") }, ctx)
       expect(unwritten.metadata.structuredContent).toEqual(TRACE)
       expect((await tool.execute({ model: "customers", manifest_path: uncompiled }, ctx)).metadata.structuredContent).toEqual(TRACE)
-      // One not written yet in another folder is still another project's.
+      // One not written yet in a folder no dbt project is above (a default path resolved against
+      // another folder) names no other project: the adapter answers.
+      const stray = await tool.execute({ model: "customers", manifest_path: path.join(other, "missing", "manifest.json") }, ctx)
+      expect(stray.metadata.structuredContent).toEqual(TRACE)
+      // One not written yet in another dbt project is that project's.
+      await writeFile(path.join(other, "dbt_project.yml"), "name: other\n")
       const elsewhere = await tool.execute({ model: "customers", manifest_path: path.join(other, "missing", "manifest.json") }, ctx)
       expect(elsewhere.metadata.structuredContent).toBeUndefined()
+      // A link to a manifest that is missing cannot be placed, wherever the link sits.
+      await symlink(path.join(other, "target", "gone.json"), path.join(mine, "target", "linked.json"))
+      const linked = await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "linked.json") }, ctx)
+      expect(linked.metadata.structuredContent).toBeUndefined()
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
