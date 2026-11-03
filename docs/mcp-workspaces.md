@@ -18,7 +18,7 @@ These commands output JSON. A context receipt binds account, workspace and proje
 
 Workspace context adds bounded data to a client's prompt; skills load on demand. Explicit knowledge calls can use backend models, memory publication can invoke the existing backend extractor, and warehouse calls retain warehouse costs. There is no new reasoning agent or per-row model loop. A CLI link can normally backfill existing memory; clients that expose linking without a backfill confirmation must disable memory for that subprocess, as the Claude plugin does. Do not pass `--yes` unless replacing a link was explicitly requested.
 
-Verification covers unit contracts, a real stdio protocol fixture and existing SQLite MCP behavior.
+Verification covers unit contracts, a real stdio protocol fixture and existing SQLite MCP behavior. A non-empty cloud memory round trip and real workspace-engine SQL and knowledge calls are not covered by tests yet.
 
 ## Automatic-client setup and stable gateway
 

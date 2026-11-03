@@ -185,6 +185,9 @@ const ToolSchemaCommand = cmd({
   },
 })
 
+// The messages an argument problem produces: invalid JSON, a non-object, a schema mismatch (built-in or workspace tool).
+const ARGUMENT_ERROR = /^(?:Tool arguments |The \S+ tool was called with invalid arguments|Arguments do not match the workspace operation schema)/
+
 const ToolRunCommand = cmd({
   command: "run <name>",
   describe: "run one data tool without a model and print its result",
@@ -227,7 +230,7 @@ const ToolRunCommand = cmd({
       result = { status: "error", title: "Tool run failed", output: error instanceof Error ? error.message : String(error), metadata: {} }
     }
     // Point to the schema only when the arguments were the problem, not for SQL, connection or permission errors.
-    if (result.status === "error" && /invalid arguments|Tool arguments/i.test(result.output))
+    if (result.status === "error" && ARGUMENT_ERROR.test(result.output))
       result = { ...result, output: `${result.output}\nInput schema: altimate-code tool schema ${name}` }
     if (args.json) {
       console.log(JSON.stringify({ status: result.status, title: result.title, output: result.output, metadata: result.metadata }))
