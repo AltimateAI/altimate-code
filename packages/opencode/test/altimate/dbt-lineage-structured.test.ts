@@ -5,7 +5,7 @@
 // never starts the adapter. The dbt adapter is replaced through `dbtAdapterInternals`,
 // so these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
@@ -22,7 +22,9 @@ import {
   getDbtProjectRoot,
   resetDbtAdapter,
 } from "@/altimate/native/connections/register"
-import { DbtLineageTool, dbtLineageInternals, type ModelLineage } from "@/altimate/tools/dbt-lineage"
+import { DbtLineageTool, dbtLineageInternals, isModelLineage } from "@/altimate/tools/dbt-lineage"
+import type { ModelLineage } from "@/altimate/native/types"
+import { lineageManifest } from "./dbt-model-lineage.fixture"
 import { createServer } from "@/altimate/mcp-server/server"
 import { initTool } from "./tool-fixture"
 
@@ -109,7 +111,20 @@ function useConfig(dbtIntegration = "corecommand") {
 beforeAll(async () => {
   project = await mkdtemp(path.join(os.tmpdir(), "dbt-lineage-structured-"))
   await writeFile(path.join(project, "dbt_project.yml"), "name: jaffle_shop\n")
+  await mkdir(path.join(project, "target"))
+  await writeFile(path.join(project, "target", "manifest.json"), JSON.stringify(lineageManifest()))
 })
+
+/** A manifest answer: version-1 lineage, with the reason in the structured result and the text. */
+function expectManifestAnswer(result: { output: string; metadata: Record<string, any> }, reason: string) {
+  const content = result.metadata.structuredContent
+  // Read before any toMatchObject: bun's writes its asymmetric matchers into the object it checks.
+  expect(content.reason).toContain(reason)
+  expect(content.reason).toContain("upstream_depth and downstream_depth don't apply")
+  expect([content.engine, content.version]).toEqual(["manifest", 1])
+  expect(isModelLineage(content)).toBe(true)
+  expect(result.output).toContain(`dbt integration not used: ${reason}`)
+}
 
 afterAll(async () => {
   await rm(project, { recursive: true, force: true })
@@ -184,13 +199,8 @@ describe("dbt_lineage with the project's dbt adapter", () => {
 })
 
 describe("dbt_lineage without dbt-integration's lineage", () => {
-  const manifestOnly = () =>
-    spyOn(Dispatcher, "call").mockImplementation((async () => ({
-      model_name: "customers",
-      raw_lineage: {},
-      confidence: "low",
-      confidence_factors: [],
-    })) as any)
+  // The real manifest handler runs: the project's target/manifest.json, or none in the working directory.
+  const manifestOnly = () => spyOn(Dispatcher, "call")
 
   test("falls back to the manifest when there is no dbt project", async () => {
     dbtAdapterInternals.readConfig = async () => null
@@ -198,13 +208,13 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     try {
       const tool = await initTool(DbtLineageTool)
       const result = await tool.execute({ model: "customers" }, ctx)
-      expect(call).toHaveBeenCalledWith("dbt.lineage", {
+      expect(call).toHaveBeenCalledWith("dbt.model_lineage", {
         manifest_path: path.join("target", "manifest.json"),
         model: "customers",
         dialect: undefined,
       })
-      expect(result.metadata.structuredContent).toMatchObject({ engine: "manifest", reason: "no dbt project here" })
-      expect(result.output).toContain("dbt integration not used: no dbt project here")
+      expectManifestAnswer(result, "no dbt project here")
+      expect(result.metadata.structuredContent.errors).toEqual(["Manifest file not found"])
     } finally {
       call.mockRestore()
     }
@@ -216,7 +226,7 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     const call = manifestOnly()
     try {
       const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
-      expect(result.output).toContain("dbt integration not used: dbt-integration has no getModelLineage")
+      expectManifestAnswer(result, "dbt-integration has no getModelLineage")
     } finally {
       call.mockRestore()
     }
@@ -231,7 +241,7 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     const call = manifestOnly()
     try {
       const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
-      expect(result.output).toContain("dbt integration not used: the dbt adapter didn't load the project")
+      expectManifestAnswer(result, "the dbt adapter didn't load the project")
     } finally {
       call.mockRestore()
     }
@@ -242,8 +252,22 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     dbtAdapterInternals.create = async () => fakeAdapter(true)
     const call = manifestOnly()
     try {
-      await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
+      const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
       expect(call.mock.calls[0]?.[1]).toMatchObject({ manifest_path: path.join(project, "target", "manifest.json") })
+      const content = result.metadata.structuredContent as ModelLineage
+      expect(content.nodes.map((n) => [n.uniqueId, n.direction])).toEqual([
+        ["model.jaffle_shop.customers", "focus"],
+        ["model.jaffle_shop.stg_customers", "upstream"],
+        ["model.jaffle_shop.stg_orders", "upstream"],
+        ["source.jaffle_shop.stripe.payments", "upstream"],
+      ])
+      expect(content.columnLineage).toContainEqual(
+        expect.objectContaining({
+          source: ["model.jaffle_shop.stg_customers", "first_name"],
+          target: ["model.jaffle_shop.customers", "first_name"],
+        }),
+      )
+      expect(result.output).toContain("customers.first_name ← stg_customers.first_name")
     } finally {
       call.mockRestore()
     }
@@ -261,12 +285,17 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     }
   })
 
-  test("says a column trace fell back to the whole model", async () => {
-    dbtAdapterInternals.readConfig = async () => null
+  test("says the manifest's column trace is one hop, and keeps only the edges into that column", async () => {
+    useConfig()
+    dbtAdapterInternals.create = async () => fakeAdapter(true)
     const call = manifestOnly()
     try {
-      const result = await (await initTool(DbtLineageTool)).execute({ model: "customers", column: "id" }, ctx)
-      expect(result.output).toContain("tracing id needs the dbt integration; this is the whole model's lineage")
+      const result = await (await initTool(DbtLineageTool)).execute({ model: "customers", column: "first_name" }, ctx)
+      expectManifestAnswer(result, "dbt-integration has no getModelLineage")
+      const content = result.metadata.structuredContent as ModelLineage & { reason: string }
+      expect(content.reason).toContain("the trace of first_name is one hop: the edges into it from those parents")
+      expect(content.focus.column).toBe("first_name")
+      expect(content.columnLineage.map((e) => e.target)).toEqual([["model.jaffle_shop.customers", "first_name"]])
     } finally {
       call.mockRestore()
     }
@@ -398,7 +427,7 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     const call = manifestOnly()
     try {
       const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
-      expect(result.output).toContain("dbt integration not used: the dbt adapter didn't start within 0.02 s")
+      expectManifestAnswer(result, "the dbt adapter didn't start within 0.02 s")
       expect(call).toHaveBeenCalled()
     } finally {
       dbtLineageInternals.adapterStartTimeoutMs = saved
@@ -412,7 +441,7 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     const call = manifestOnly()
     try {
       const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
-      expect(result.output).toContain("dbt integration not used: dbt-integration returned a lineage this tool can't read")
+      expectManifestAnswer(result, "dbt-integration returned a lineage this tool can't read")
     } finally {
       call.mockRestore()
     }
@@ -427,8 +456,12 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     const call = manifestOnly()
     try {
       const result = await (await initTool(DbtLineageTool)).execute({ model: "nope" }, ctx)
-      expect(result.metadata.structuredContent).toMatchObject({ engine: "manifest" })
-      expect(result.output).toContain("Model 'nope' is not in the project's manifest")
+      expectManifestAnswer(result, "Model 'nope' is not in the project's manifest")
+      expect(result.metadata.structuredContent).toMatchObject({
+        focus: { uniqueId: "nope", name: "nope" },
+        nodes: [],
+        errors: ["Model 'nope' not found in manifest"],
+      })
     } finally {
       call.mockRestore()
     }
@@ -453,11 +486,7 @@ describe("dbt_lineage in a read-only call", () => {
       }
     }
   })
-  const manifestOnly = () =>
-    spyOn(Dispatcher, "call").mockImplementation((async (method: string) => {
-      if (method !== "dbt.lineage") throw new Error(`unexpected ${method}`)
-      return { model_name: "customers", raw_lineage: {}, confidence: "low", confidence_factors: [] }
-    }) as any)
+  const manifestOnly = () => spyOn(Dispatcher, "call")
 
   test("answers from the manifest and never creates the dbt adapter", async () => {
     const call = manifestOnly()
@@ -469,11 +498,9 @@ describe("dbt_lineage in a read-only call", () => {
       )
       expect(created).toEqual([])
       expect(call).toHaveBeenCalledTimes(1)
-      expect(result.metadata.structuredContent).toMatchObject({
-        engine: "manifest",
-        reason: expect.stringContaining("this session is read-only"),
-      })
-      expect(result.output).toContain("dbt integration not used: this session is read-only")
+      expect(call.mock.calls[0]?.[0]).toBe("dbt.model_lineage")
+      expectManifestAnswer(result, "this session is read-only")
+      expect((result.metadata.structuredContent as ModelLineage).nodes).toHaveLength(4)
     } finally {
       call.mockRestore()
     }
@@ -489,7 +516,8 @@ describe("dbt_lineage in a read-only call", () => {
     try {
       const answer = await client.callTool({ name: "dbt_lineage", arguments: { model: "customers" } })
       expect(answer.isError).toBe(false)
-      expect(answer.structuredContent).toMatchObject({ engine: "manifest" })
+      expect(answer.structuredContent).toMatchObject({ engine: "manifest", version: 1 })
+      expect(isModelLineage(answer.structuredContent)).toBe(true)
       expect(created).toEqual([])
       call.mockRestore()
       await client.callTool({ name: "sql_execute", arguments: { query: "create table t as select 1 as n" } })

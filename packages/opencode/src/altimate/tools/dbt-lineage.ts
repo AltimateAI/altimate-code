@@ -2,35 +2,7 @@ import z from "zod"
 import path from "path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
-import type { DbtLineageResult } from "../native/types"
-
-/** The structured result of dbt-integration's `getModelLineage` (version 1), relayed as is. */
-export type ModelLineage = {
-  version: number
-  project: string
-  dialect: string
-  focus: { uniqueId: string; name: string; column?: string }
-  nodes: {
-    uniqueId: string
-    name: string
-    type: string
-    materialization?: string
-    direction: "focus" | "upstream" | "downstream"
-    depth: number
-    parents: string[]
-    columns: { name: string; dataType?: string; isDocumentedOnly?: true }[]
-  }[]
-  columnLineage: {
-    source: [string, string]
-    target: [string, string]
-    type: string
-    viewsType: string
-    viewsCode: string[]
-  }[]
-  confidence: string
-  errors: string[]
-  stats: Record<string, number>
-}
+import type { ModelLineage } from "../native/types"
 
 /** Test seams. */
 export const dbtLineageInternals = {
@@ -42,6 +14,9 @@ const DEFAULT_DEPTH = 3
 
 const READ_ONLY_REASON =
   "this session is read-only, and starting the dbt integration runs dbt deps and writes target/, and compiling can run SQL from macros"
+
+const MANIFEST_SCOPE =
+  "the manifest answer covers the model and its direct parents, so upstream_depth and downstream_depth don't apply"
 
 export const DbtLineageTool = Tool.define("dbt_lineage", {
   description:
@@ -94,28 +69,29 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
         output: formatModelLineage(result),
       }
     }
-    const notUsed = `dbt integration not used: ${viaAdapter.reason}`
+    const reason = [
+      viaAdapter.reason,
+      MANIFEST_SCOPE,
+      ...(args.column ? [`the trace of ${args.column} is one hop: the edges into it from those parents`] : []),
+    ].join("; ")
+    const notUsed = `dbt integration not used: ${reason}`
     const manifestPath = args.manifest_path ?? (await defaultManifestPath())
     ctx.abort.throwIfAborted()
     try {
-      const result = await Dispatcher.call("dbt.lineage", {
+      const result = await Dispatcher.call("dbt.model_lineage", {
         manifest_path: manifestPath,
         model: args.model,
         dialect: args.dialect,
+        ...(args.column ? { column: args.column } : {}),
       })
-      result.confidence_factors.push(notUsed)
-      if (args.column) {
-        result.confidence_factors.push(`tracing ${args.column} needs the dbt integration; this is the whole model's lineage`)
-      }
-      const { compiled_sql: _sql, ...rest } = result
       return {
-        title: `dbt Lineage: ${result.model_name} [${result.confidence}]`,
+        title: `dbt Lineage: ${result.focus.name} [${result.confidence}]`,
         metadata: {
-          model_name: result.model_name,
+          model_name: result.focus.name,
           confidence: result.confidence,
-          structuredContent: { engine: "manifest", reason: viaAdapter.reason, ...rest },
+          structuredContent: { engine: "manifest", reason, ...result },
         },
-        output: formatDbtLineage(result),
+        output: `${formatModelLineage(result)}\n\n${notUsed}`,
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
@@ -169,7 +145,7 @@ async function fromAdapter(params: LineageParams, signal: AbortSignal): Promise<
   }
 }
 
-function isModelLineage(value: unknown): value is ModelLineage {
+export function isModelLineage(value: unknown): value is ModelLineage {
   const v = value as Partial<ModelLineage> | null
   return (
     typeof v === "object" &&
@@ -232,53 +208,5 @@ export function formatModelLineage(result: ModelLineage): string {
   )
   if (documentedOnly.length > 0) lines.push("", `Documented but not in the relation: ${documentedOnly.join(", ")}`)
   if (result.errors.length > 0) lines.push("", `Notes: ${result.errors.join("; ")}`)
-  return lines.join("\n")
-}
-
-function formatDbtLineage(result: DbtLineageResult): string {
-  const lines: string[] = []
-
-  lines.push(`Model: ${result.model_name ?? "unknown"}`)
-  if (result.model_unique_id) lines.push(`ID: ${result.model_unique_id}`)
-  lines.push("")
-
-  if (result.confidence_factors.length > 0) {
-    lines.push(`Confidence: ${result.confidence ?? "unknown"}`)
-    lines.push(`  Note: ${result.confidence_factors.join("; ")}`)
-    lines.push("")
-  }
-
-  const lineage = result.raw_lineage
-  if (!lineage || Object.keys(lineage).length === 0) {
-    lines.push("No lineage data returned.")
-    if (!result.compiled_sql) {
-      lines.push("Run `dbt compile` first to generate compiled SQL.")
-    }
-    return lines.join("\n")
-  }
-
-  // column_dict: output columns -> source columns mapping
-  const columnDict = lineage.column_dict as Record<string, unknown> | undefined
-  if (columnDict) {
-    lines.push("Column Mappings:")
-    for (const [target, sources] of Object.entries(columnDict)) {
-      lines.push(`  ${target} ← ${JSON.stringify(sources)}`)
-    }
-    lines.push("")
-  }
-
-  // column_lineage: detailed edge list
-  const edges = lineage.column_lineage as unknown[] | undefined
-  if (edges?.length) {
-    lines.push("Lineage Edges:")
-    for (const edge of edges) {
-      lines.push(`  ${JSON.stringify(edge)}`)
-    }
-  }
-
-  if (!columnDict && !edges) {
-    lines.push(JSON.stringify(lineage, null, 2))
-  }
-
   return lines.join("\n")
 }

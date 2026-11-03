@@ -5,7 +5,7 @@
  */
 
 import * as core from "@altimateai/altimate-core"
-import type { DbtLineageParams, DbtLineageResult } from "../types"
+import type { DbtLineageParams, DbtLineageResult, DbtModelLineageParams, ModelLineage } from "../types"
 import { loadRawManifest, findModel, getUniqueId, detectDialect, buildSchemaContext } from "./helpers"
 
 /**
@@ -72,4 +72,216 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
     confidence: rawLineage.error ? "low" : "high",
     confidence_factors: rawLineage.error ? [String(rawLineage.error)] : [],
   }
+}
+
+type LineageNode = ModelLineage["nodes"][number]
+type LineageEdge = ModelLineage["columnLineage"][number]
+
+/**
+ * A model's lineage from the manifest alone, in dbt-integration's `getModelLineage` format
+ * (version 1): the model and its direct parents, with the column edges altimate-core reads from the
+ * compiled SQL in the manifest. Nothing is compiled and no warehouse is read.
+ */
+export function dbtModelLineage(params: DbtModelLineageParams): ModelLineage {
+  const startedAt = Date.now()
+  const raw = dbtLineage(params)
+  const errors = [...raw.confidence_factors]
+  let manifest: any = null
+  try {
+    manifest = loadRawManifest(params.manifest_path)
+  } catch {
+    // dbtLineage has already reported it.
+  }
+  const nodes: Record<string, any> = manifest?.nodes ?? {}
+  const sources: Record<string, any> = manifest?.sources ?? {}
+  const model = manifest ? findModel(nodes, params.model) : null
+  const dialect = params.dialect || (manifest ? detectDialect(manifest) : "")
+  const focusId: string = model?.unique_id ?? raw.model_unique_id ?? params.model
+  const focusName: string = model?.name ?? params.model
+  const sql: string = model?.compiled_code || model?.compiled_sql || ""
+  const parentIds: string[] = model ? [...new Set<string>(model.depends_on?.nodes ?? [])] : []
+
+  const result: LineageNode[] = []
+  if (model) {
+    const inResult = new Set([focusId, ...parentIds])
+    const parentsOf = (node: any, self: string) =>
+      [...new Set<string>(node?.depends_on?.nodes ?? [])].filter((p) => p !== self && inResult.has(p))
+    result.push({
+      uniqueId: focusId,
+      name: focusName,
+      type: "model",
+      ...(model.config?.materialized ? { materialization: model.config.materialized } : {}),
+      direction: "focus",
+      depth: 0,
+      parents: parentIds,
+      ...(model.original_file_path ? { path: model.original_file_path } : {}),
+      ...outputColumns(sql, dialect, focusName, raw.raw_lineage, errors),
+    })
+    for (const uid of parentIds) {
+      const node = nodes[uid] ?? sources[uid]
+      const type: string = node?.resource_type ?? uid.split(".")[0]
+      if (!node) errors.push(`${uid} is not in the manifest, so it has no columns`)
+      const columns = Object.entries(node?.columns ?? {}).map(([key, c]: [string, any]) => ({
+        name: c?.name || key,
+        ...(c?.data_type || c?.type ? { dataType: c.data_type || c.type } : {}),
+        ...(c?.description ? { description: c.description } : {}),
+      }))
+      const materialization = type === "source" || type === "seed" ? type : node?.config?.materialized
+      result.push({
+        uniqueId: uid,
+        name:
+          type === "source" && node
+            ? `${node.source_name}.${node.name}`
+            : (node?.name ?? uid.split(".").slice(2).join(".")),
+        type,
+        ...(materialization ? { materialization } : {}),
+        direction: "upstream",
+        depth: 1,
+        parents: parentsOf(node, uid),
+        ...(node?.original_file_path ? { path: node.original_file_path } : {}),
+        columns,
+        columnsFrom: columns.length > 0 ? "manifest" : "none",
+      })
+    }
+  }
+
+  const lineage = raw.raw_lineage as { column_lineage?: unknown; errors?: unknown }
+  for (const e of Array.isArray(lineage.errors) ? lineage.errors : []) {
+    errors.push(`${focusName}: ${typeof e === "string" ? e : (e?.message ?? JSON.stringify(e))}`)
+  }
+  const edges = lineageEdges(
+    Array.isArray(lineage.column_lineage) ? lineage.column_lineage : [],
+    tablesOf(parentIds, nodes, sources),
+    { uniqueId: focusId, name: focusName },
+    errors,
+  )
+  const wanted = params.column?.toLowerCase()
+  const columnLineage = wanted ? edges.filter((e) => e.target[1] === wanted) : edges
+  return {
+    version: 1,
+    project: manifest?.metadata?.project_name ?? model?.package_name ?? "",
+    dialect,
+    focus: { uniqueId: focusId, name: focusName, ...(params.column ? { column: params.column } : {}) },
+    nodes: result,
+    columnLineage,
+    confidence: errors.length === 0 ? "high" : "low",
+    errors,
+    stats: {
+      nodes: result.length,
+      edges: columnLineage.length,
+      compiled: sql ? 1 : 0,
+      fromWarehouse: 0,
+      ms: Date.now() - startedAt,
+    },
+  }
+}
+
+/**
+ * The focus model's columns: its compiled SQL's output columns. A `select *` the SQL alone can't
+ * expand takes the output columns altimate-core traced with the parents' schema instead, and says so.
+ */
+function outputColumns(sql: string, dialect: string, name: string, lineage: Record<string, unknown>, errors: string[]) {
+  if (!sql) return { columns: [], columnsFrom: "none" }
+  const resolved = Object.keys((lineage.column_dict as Record<string, unknown> | undefined) ?? {})
+  let names: string[] = []
+  let failure: unknown
+  try {
+    names = core.extractOutputColumns(sql, dialect)
+  } catch (e) {
+    failure = e
+  }
+  const explicit = names.filter((c) => c !== "*" && !c.endsWith(".*"))
+  if (failure === undefined && explicit.length === names.length && names.length > 0) {
+    return { columns: names.map((c) => ({ name: c })), columnsFrom: "compiled-sql" }
+  }
+  if (resolved.length > 0) {
+    errors.push(`${name}'s compiled SQL selects *, so its columns are only the ones traced to a parent`)
+    return { columns: resolved.map((c) => ({ name: c })), columnsFrom: "compiled-sql" }
+  }
+  errors.push(
+    failure === undefined
+      ? `${name}'s compiled SQL selects *, so not all its columns are known`
+      : `Could not read ${name}'s output columns: ${failure instanceof Error ? failure.message : String(failure)}`,
+  )
+  return { columns: explicit.map((c) => ({ name: c })), columnsFrom: explicit.length > 0 ? "compiled-sql" : "none" }
+}
+
+/**
+ * Each parent's table names, lowercased, as altimate-core can report them: the keys
+ * buildSchemaContext uses (alias, then name), then a source's identifier. The first parent to
+ * claim a name keeps it.
+ */
+function tablesOf(parentIds: string[], nodes: Record<string, any>, sources: Record<string, any>) {
+  const byTable = new Map<string, string>()
+  for (const uid of parentIds) {
+    const node = nodes[uid] ?? sources[uid]
+    for (const key of [node?.alias, node?.name, node?.identifier]) {
+      if (typeof key === "string" && key && !byTable.has(key.toLowerCase())) byTable.set(key.toLowerCase(), uid)
+    }
+  }
+  return byTable
+}
+
+/** A dotted SQL name's parts, unquoted: `"db"."schema"."t"."c"` gives db, schema, t, c. */
+function nameParts(name: string): string[] {
+  const parts: string[] = []
+  let current = ""
+  let quote: string | undefined
+  for (const ch of name) {
+    if (quote) {
+      if (ch === quote) quote = undefined
+      else current += ch
+    } else if (ch === '"' || ch === "`") quote = ch
+    else if (ch === ".") {
+      parts.push(current)
+      current = ""
+    } else current += ch
+  }
+  parts.push(current)
+  return parts
+}
+
+/**
+ * altimate-core's column edges as `getModelLineage`'s, from a parent's column to the focus model's.
+ * An edge whose table isn't one of the parents goes to `errors`. Edges are deduplicated: altimate-core
+ * 0.9 can report one edge under a qualified and a bare table name.
+ */
+export function lineageEdges(
+  raw: any[],
+  byTable: Map<string, string>,
+  focus: { uniqueId: string; name: string },
+  errors: string[],
+): LineageEdge[] {
+  const seen = new Set<string>()
+  const edges: LineageEdge[] = []
+  for (const e of raw) {
+    const from = nameParts(String(e?.source ?? ""))
+    const column = from.length >= 2 ? from[from.length - 1].toLowerCase() : ""
+    const table = from.length >= 2 ? from[from.length - 2].toLowerCase() : ""
+    const target =
+      nameParts(String(e?.target ?? ""))
+        .pop()
+        ?.toLowerCase() ?? ""
+    const parent = byTable.get(table)
+    if (!parent || !column || !target) {
+      errors.push(
+        `${e?.source} -> ${focus.name}.${e?.target}: ${table ? `${table} isn't one of ${focus.name}'s parents` : "no table"}, so the edge was left out`,
+      )
+      continue
+    }
+    const edge: LineageEdge = {
+      source: [parent, column],
+      target: [focus.uniqueId, target],
+      type: String(e?.lineage_type ?? ""),
+      viewsType: String(e?.lens_type ?? ""),
+      viewsCode: (Array.isArray(e?.lens_code) ? e.lens_code : [])
+        .map((step: any) => (typeof step === "string" ? step : step?.expression))
+        .filter((code: unknown): code is string => typeof code === "string"),
+    }
+    const key = [...edge.source, ...edge.target, edge.type, edge.viewsType].join("\u0000")
+    if (seen.has(key)) continue
+    seen.add(key)
+    edges.push(edge)
+  }
+  return edges
 }
