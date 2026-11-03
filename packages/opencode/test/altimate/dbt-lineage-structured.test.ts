@@ -550,6 +550,10 @@ describe("dbt_lineage in a read-only call", () => {
           ran.push(sql)
           return { columnNames: ["n"], columnTypes: ["integer"], data: [{ n: 1 }] }
         },
+        immediatelyExecuteSQLWithLimit: async (sql: string) => {
+          ran.push(sql)
+          return { columnNames: ["n"], columnTypes: ["integer"], data: [{ n: 1 }] }
+        },
       }
     }
   })
@@ -606,7 +610,7 @@ describe("dbt_lineage in a read-only call", () => {
       expect(isModelLineage(answer.structuredContent)).toBe(true)
       expect(created).toEqual([])
       call.mockRestore()
-      await client.callTool({ name: "sql_execute", arguments: { query: "create table t as select 1 as n" } })
+      await client.callTool({ name: "sql_execute", arguments: { query: "select 1 as n" } })
       expect(ran).toEqual([])
     } finally {
       call.mockRestore()

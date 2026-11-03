@@ -107,7 +107,7 @@ describe("dbt.model_lineage", () => {
       expect([STG_CUSTOMERS, STG_ORDERS, PAYMENTS]).toContain(edge.source[0])
       expect(edge.target[0]).toBe(CUSTOMERS)
     }
-    expect(result.stats).toMatchObject({ nodes: 4, edges: result.columnLineage.length, compiled: 1, fromWarehouse: 0 })
+    expect(result.stats).toMatchObject({ nodes: 4, edges: 2, compiled: 1, fromWarehouse: 0 })
   })
 
   test("keeps only the edges into a column it is asked to trace", async () => {
