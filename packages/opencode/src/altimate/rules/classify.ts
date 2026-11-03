@@ -41,7 +41,11 @@ const RULE_CUES: readonly [RegExp, string][] = [
   [/\b(?:name|prefix|suffix|alias)\s+\S+(?:\s+\S+)?\s+(?:as|with|like)\b/i, "a naming convention"],
 ]
 
-export function classify(text: string): { kind: Kind; cue?: string } {
+// The cues are read from the start of the text: some patterns backtrack, and a request to remember is short.
+const MAX_CLASSIFIED_CHARS = 2000
+
+export function classify(input: string): { kind: Kind; cue?: string } {
+  const text = input.slice(0, MAX_CLASSIFIED_CHARS)
   if (ASKED_RULE.test(text)) return { kind: "rule", cue: "asked for a rule" }
   if (ASKED_MEMORY.test(text)) return { kind: "memory", cue: "asked to remember it for themselves" }
   const memory = MEMORY_CUES.find(([pattern]) => pattern.test(text))

@@ -82,6 +82,7 @@ Options:
                                                                                             [string]"
 `;
 
+// altimate_change start — document the committed-answer echo allowance in run help
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode run --help 1`] = `
 "altimate-code run [message..]
 
@@ -143,6 +144,7 @@ Options:
       --dangerously-skip-permissions  auto-approve permissions that are not explicitly denied
                                       (dangerous!)                        [boolean] [default: false]"
 `;
+// altimate_change end
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode debug --help 1`] = `
 "altimate-code debug
