@@ -231,7 +231,7 @@ describe("formatImpactReport", () => {
     expect(report).toContain("  ? ◆ Ops [dashboard] on a model that may read it")
     expect(report).not.toContain("Exposures (")
     // Stopped early: the other exposures are not claimed as non-readers.
-    expect(report).toContain("Other exposures (1): column reach stopped early, so some of these were not checked")
+    expect(report).toContain("Other exposures (1): column reach stopped early, so some of these may not have been checked")
   })
 
   test("percentage calculation with 0 total models does not produce NaN or Infinity", () => {

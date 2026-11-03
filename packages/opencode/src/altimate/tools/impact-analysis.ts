@@ -309,7 +309,7 @@ export function formatImpactReport(data: {
   if (others.length > 0) {
     // When column reach stopped early, some of these may sit on models it never reached.
     const title = data.columnReach ? "Other exposures" : "Exposures"
-    const stoppedNote = ": column reach stopped early, so some of these were not checked"
+    const stoppedNote = ": column reach stopped early, so some of these may not have been checked"
     const unchecked = data.columnReach?.truncated ? stoppedNote : ""
     lines.push(`${title} (${others.length})${unchecked}`)
     lines.push("".padEnd(40, "-"))
