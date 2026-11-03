@@ -149,11 +149,11 @@ const FIELD_SOURCES: Record<string, { env: string[]; mcp: RegExp }> = {
 function fromMcpEnv(id: ProviderId, field: string): Found | undefined {
   const pattern = FIELD_SOURCES[field]?.mcp
   if (!pattern) return
-  for (const servers of core.mcpServerMaps(core.homeDir(), process.cwd())) {
+  for (const { scope, servers } of core.mcpServerMaps(core.homeDir(), process.cwd())) {
     for (const [name, server] of Object.entries(servers ?? {})) {
       if (!server || typeof server !== "object" || !core.providerMatchesMcp(id, name, server)) continue
       for (const [key, value] of Object.entries(server.env ?? {}))
-        if (pattern.test(key) && typeof value === "string" && value.trim()) return { value: value.trim(), source: { kind: "mcp", label: `Claude MCP (${name})` } }
+        if (pattern.test(key) && typeof value === "string" && value.trim()) return { value: value.trim(), source: { kind: "mcp", label: `Claude MCP (${name}, ${scope})` } }
     }
   }
 }
@@ -222,6 +222,8 @@ export interface Resolved {
   values: Record<string, string>
   origin: Record<string, "draft" | "stored" | "detected">
   detected: Source[]
+  /** Why a token found on this machine was not filled in, by field name. */
+  notes: Record<string, string>
 }
 
 /** The value of every field of the chosen variant: drafts first, then the connected copy, then this machine. `detectedOnly` reads this machine alone. */
@@ -239,6 +241,7 @@ export async function resolve(id: ProviderId, variantId?: string, offline = fals
   const origin: Resolved["origin"] = {}
   const detected: Source[] = []
   const foundFrom: Record<string, Source> = {}
+  const notes: Record<string, string> = {}
   for (const f of def.fields) {
     const draft = detectedOnly ? undefined : f.secret ? core.readSecret(core.secretKey("draft", id, f.name)) : rec?.drafts?.[f.name]
     if (draft) {
@@ -260,8 +263,8 @@ export async function resolve(id: ProviderId, variantId?: string, offline = fals
       detected.push(found.source)
     }
   }
-  if (id === "jira") dropMismatchedJiraToken(def, values, origin, detected, foundFrom)
-  return { id, variant: def.id, variants, def, values, origin, detected }
+  if (id === "jira") dropMismatchedJiraToken(def, values, origin, detected, foundFrom, notes)
+  return { id, variant: def.id, variants, def, values, origin, detected, notes }
 }
 
 const JIRA_SITE_FIELDS = new Set(["jiraDomain", "jiraBaseUrl"])
@@ -270,7 +273,7 @@ const sourceGroup = (s: Source) => (s.kind === "mcp" ? `mcp:${s.label}` : "machi
 const sameSource = (a: Source, b: Source) => sourceGroup(a) === sourceGroup(b)
 
 /** A site found on this machine is only paired with a token found in the same place, so a token is never sent to a site that came from somewhere else. A typed or stored site is the user's own and pairs with any token. */
-function dropMismatchedJiraToken(def: VariantDef, values: Record<string, string>, origin: Resolved["origin"], detected: Source[], foundFrom: Record<string, Source>) {
+function dropMismatchedJiraToken(def: VariantDef, values: Record<string, string>, origin: Resolved["origin"], detected: Source[], foundFrom: Record<string, Source>, notes: Record<string, string>) {
   const site = def.fields.find((f) => JIRA_SITE_FIELDS.has(f.name) && foundFrom[f.name])
   if (!site) return
   for (const f of def.fields) {
@@ -279,6 +282,7 @@ function dropMismatchedJiraToken(def: VariantDef, values: Record<string, string>
     delete values[f.name]
     delete origin[f.name]
     detected.splice(detected.indexOf(from), 1)
+    notes[f.name] = `Found in ${from.label}, but the site came from ${foundFrom[site.name].label}, so the token was not filled in`
   }
 }
 
@@ -286,7 +290,7 @@ function dropMismatchedJiraToken(def: VariantDef, values: Record<string, string>
 export async function detectedConfig(id: ProviderId): Promise<{ config: Record<string, unknown> } | { reason: string }> {
   const r = await resolve(id, undefined, false, true)
   const missing = r.def.fields.filter((f) => f.required && !r.values[f.name])
-  if (missing.length) return { reason: `Missing: ${missing.map((f) => f.label).join(", ")}` }
+  if (missing.length) return { reason: [`Missing: ${missing.map((f) => f.label).join(", ")}`, ...missing.map((f) => r.notes[f.name]).filter(Boolean)].join(". ") }
   const config: Record<string, unknown> = {}
   for (const f of r.def.fields) if (r.values[f.name]) config[f.name] = r.values[f.name]
   return { config: core.withVariant(id, r.variant, config) }
@@ -302,6 +306,7 @@ export interface FieldView {
   value: string | null
   hasValue: boolean
   masked: string | null
+  note?: string
 }
 export interface FieldsResult {
   provider: ProviderId
@@ -327,6 +332,7 @@ export async function describeFields(id: ProviderId, variantId?: string): Promis
         value: f.secret ? null : (v ?? null),
         hasValue: Boolean(v),
         masked: f.secret && v ? maskTail(v) : null,
+        ...(r.notes[f.name] ? { note: r.notes[f.name] } : {}),
       }
     }),
     tokenUrl: tokenUrl(id, r.variant),
@@ -725,7 +731,7 @@ function workspaceNote(w: core.UpsertResult["workspace"]): string | null {
   if (!w) return null
   if ("error" in w) return core.ATTACH_FAILED_PREFIX + w.error
   if ("notLinked" in w) return core.NOT_LINKED_LABEL
-  return `Attached to workspace ${w.attached}`
+  return w.kept ? `Kept the workspace's existing connection in ${w.attached}` : `Attached to workspace ${w.attached}`
 }
 
 export * as IntegrationsCredentials from "./credentials"

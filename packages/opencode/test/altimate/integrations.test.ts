@@ -1106,11 +1106,23 @@ describe("credentials flow", () => {
     test("a site from one source is not paired with a token from another", async () => {
       jiraCli()
       userMcp({ JIRA_PAT_TOKEN: GOOD })
-      expect(await creds.detectedConfig("jira")).toEqual({ reason: "Missing: Personal access token" })
+      expect(await creds.detectedConfig("jira")).toEqual({ reason: expect.stringContaining("Missing: Personal access token") })
       fs.rmSync(path.join(home, ".config"), { recursive: true, force: true })
       userMcp({ JIRA_URL: base() })
       process.env.JIRA_PAT_TOKEN = GOOD
-      expect(await creds.detectedConfig("jira")).toEqual({ reason: "Missing: Personal access token" })
+      expect(await creds.detectedConfig("jira")).toEqual({ reason: expect.stringContaining("Missing: Personal access token") })
+    })
+
+    test("same-named servers in the user and project scopes are separate sources", async () => {
+      fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({
+        mcpServers: { jira: { command: "npx", args: ["mcp-jira"], env: { JIRA_PAT_TOKEN: GOOD } } },
+        projects: { [project]: { mcpServers: { jira: { command: "npx", args: ["mcp-jira"], env: { JIRA_URL: base() } } } } },
+      }))
+      cwd = spyOn(process, "cwd").mockReturnValue(project)
+      expect(await creds.detectedConfig("jira")).toEqual({ reason: expect.stringContaining("Missing: Personal access token") })
+      expect(calls.filter((c) => c.path.includes("myself"))).toEqual([])
+      const f = await creds.describeFields("jira", "server")
+      expect(f.fields.find((x) => x.name === "jiraPatToken")?.note).toContain("Claude MCP (jira, user)")
     })
 
     test("a site and a token from the same source are used together", async () => {
@@ -1819,6 +1831,26 @@ describe("attach keeps another connection", () => {
     expect(core.attachToIntegrations([{ id: "jira", tools: [], connection_id: "9" }], "jira", 9, keys)[0].connection_id).toBe("9")
     const shared = core.attachToIntegrations([{ id: "jira", tools: [], connection_id: "3", connection_ids: ["3"] }], "jira", 9, keys)[0]
     expect([shared.connection_id, shared.connection_ids]).toEqual(["3", ["3", "9"]])
+  })
+  test("an entry on a connection that no longer exists takes this one", () => {
+    const gone = core.attachToIntegrations([{ id: "jira", tools: [], connection_id: "3" }], "jira", 9, [], [9, 4])
+    expect(gone[0].connection_id).toBe("9")
+    const live = core.attachToIntegrations([{ id: "jira", tools: [], connection_id: "3" }], "jira", 9, [], [9, 3])
+    expect(live[0].connection_id).toBe("3")
+  })
+  test("attach reports when the workspace kept its own connection", async () => {
+    const spies = [
+      spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS" } } as any),
+      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, integrations: [{ id: "jira", tools: [], connection_id: "3" }] } as any),
+      spyOn(backend, "updateDatamateIntegrations").mockResolvedValue(undefined as any),
+    ]
+    try {
+      const cfg = { url: "http://x", tenant: "t", token: "k" } as any
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9, 3])).toEqual({ attached: "WS", kept: true })
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9])).toEqual({ attached: "WS" })
+    } finally {
+      for (const sp of spies) sp.mockRestore()
+    }
   })
   test("detach leaves an entry on another connection alone", () => {
     const out = core.detachFromIntegrations([{ id: "jira", tools: [], connection_id: "3" }], 9)

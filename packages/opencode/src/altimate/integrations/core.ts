@@ -234,9 +234,12 @@ export async function purgeCredentialSecrets(id: ProviderId, rec?: StoredProvide
 }
 
 /** Claude MCP server maps the user set up themselves: user level and this project's entry in ~/.claude.json. A repository's own `.mcp.json` is not among them, as whoever controls the repository can write it; it only signals presence in `detectFromClaudeConfigs`. */
-export function mcpServerMaps(home: string, cwd: string): Record<string, McpServer>[] {
+export function mcpServerMaps(home: string, cwd: string): { scope: "user" | "project"; servers: Record<string, McpServer> }[] {
   const claude = readJson<any>(path.join(home, ".claude.json"), {})
-  return [claude.mcpServers ?? {}, claude.projects?.[cwd]?.mcpServers ?? {}]
+  return [
+    { scope: "user", servers: claude.mcpServers ?? {} },
+    { scope: "project", servers: claude.projects?.[cwd]?.mcpServers ?? {} },
+  ]
 }
 export const providerMatchesMcp = (id: ProviderId, name: string, server: McpServer) =>
   MCP_MATCHERS[id].test([name, server.command, server.url, ...(server.args ?? [])].filter(Boolean).join(" "))
@@ -807,7 +810,7 @@ export interface UpsertResult {
   isValid: boolean
   message: string | null
   /** What happened to the workspace attach; absent when the connection was saved invalid. */
-  workspace?: { attached: string } | { notLinked: true } | { error: string }
+  workspace?: { attached: string; kept?: true } | { notLinked: true } | { error: string }
 }
 
 export const NOT_LINKED_LABEL = "Not linked to a workspace: run altimate link"
@@ -837,12 +840,12 @@ export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, 
 }
 
 /** Attaches the connection to the workspace this directory is linked to, reporting instead of throwing. */
-export async function attachToBoundWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number): Promise<NonNullable<UpsertResult["workspace"]>> {
+export async function attachToBoundWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number, live?: (number | string)[]): Promise<NonNullable<UpsertResult["workspace"]>> {
   try {
     const binding = await resolveBinding(process.cwd())
     if (!binding) return { notLinked: true }
-    await attachToWorkspace(cfg, id, connectionId, String(binding.datamateId))
-    return { attached: binding.datamateName }
+    const kept = await attachToWorkspace(cfg, id, connectionId, String(binding.datamateId), live)
+    return kept ? { attached: binding.datamateName, kept: true } : { attached: binding.datamateName }
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) }
   }
@@ -860,21 +863,25 @@ export function attachToIntegrations(
   providerIntegrationId: string,
   connectionId: number | string,
   catalogToolKeys: string[],
+  liveConnectionIds?: (number | string)[],
 ): backend.DatamateIntegrationEntry[] {
+  const live = liveConnectionIds && new Set(liveConnectionIds.map(String))
   const conn = String(connectionId)
   if (!entries.some((e) => String(e.id) === providerIntegrationId)) {
     return [...entries, { id: providerIntegrationId, tools: catalogToolKeys.filter((k) => READ_ONLY_TOOL.test(k)).map((key) => ({ key })), connection_id: conn }]
   }
   return entries.map((e) => {
     if (String(e.id) !== providerIntegrationId) return e
-    // An entry already wired to another connection keeps it; only an empty one, or one on this connection, is set.
-    const next = e.connection_id == null || String(e.connection_id) === conn ? { ...e, connection_id: conn } : { ...e }
+    // An entry already wired to another live connection keeps it; only an empty one, a deleted one, or one on this connection is set.
+    const stale = live && e.connection_id != null && !live.has(String(e.connection_id))
+    const next = e.connection_id == null || stale || String(e.connection_id) === conn ? { ...e, connection_id: conn } : { ...e }
     if (Array.isArray(e.connection_ids) && !e.connection_ids.map(String).includes(conn)) next.connection_ids = [...e.connection_ids, conn]
     return next
   })
 }
 
-async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number, datamateId: string): Promise<void> {
+/** Resolves true when the workspace's entry kept a different live connection instead of taking this one. */
+async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number, datamateId: string, liveIds?: (number | string)[]): Promise<boolean> {
   const integrationId = INTEGRATION_IDS[id]
   const first = await backend.getDatamate(cfg, datamateId)
   if (first.is_owner === false)
@@ -888,7 +895,11 @@ async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, con
   }
   // The backend replaces the whole list, so it is read again right before writing and only this entry changes.
   const datamate = await backend.getDatamate(cfg, datamateId)
-  await backend.updateDatamateIntegrations(cfg, datamateId, attachToIntegrations(datamate.integrations, integrationId, connectionId, keys))
+  const live = liveIds ?? (await backend.listOwnConnections(cfg)).map((c) => c.id)
+  const next = attachToIntegrations(datamate.integrations, integrationId, connectionId, keys, live)
+  await backend.updateDatamateIntegrations(cfg, datamateId, next)
+  const entry = next.find((e) => String(e.id) === integrationId)
+  return entry?.connection_id != null && String(entry.connection_id) !== String(connectionId)
 }
 
 /** The integrations list without references to the connection; other entries pass through untouched. */
@@ -938,7 +949,7 @@ async function syncReal(
   }
   const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>): SyncOutcome => {
     if ("error" in w) return { id, result: "failed", reason: ATTACH_FAILED_PREFIX + w.error, steps }
-    if ("attached" in w) step(`Attached to workspace "${w.attached}"`)
+    if ("attached" in w) step(w.kept ? `Kept the workspace's existing connection in "${w.attached}"` : `Attached to workspace "${w.attached}"`)
     else {
       steps.push({ label: NOT_LINKED_LABEL, ok: false })
       onStep?.(NOT_LINKED_LABEL, false)
@@ -957,7 +968,7 @@ async function syncReal(
       if (!found) return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
       if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
       step("Connection already in the workspace")
-      return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id))
+      return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, own.map((c) => c.id)))
     } catch (e) {
       return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
     }
