@@ -4,6 +4,9 @@ import { createOpencodeClient } from "@opencode-ai/sdk/v2"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { RunAccounting } from "@/cli/cmd/run-accounting"
+// altimate_change start — --max-tokens shares the budget finalization path
+import { RunTokenBudget } from "@/cli/cmd/run-token-budget"
+// altimate_change end
 import { SessionTermination } from "@/session/termination"
 import { cliIt } from "../../lib/cli-process"
 import { raw, reply } from "../../lib/llm-server"
@@ -210,6 +213,101 @@ describe("budget finalization accounting", () => {
     expect(accounting.takeBudgetFinalizationAllowance()).toBeUndefined()
   })
 })
+
+// altimate_change start — token budget: child-session usage counts, exhaustion fires once, no flag means no change
+describe("token budget accounting", () => {
+  const root = "ses_root"
+  const stepFinish = (sessionID: string, id: string, tokens: Partial<RunTokenBudget.StepTokens>) => ({
+    type: "message.part.updated",
+    properties: { part: { id, sessionID, messageID: `${id}_msg`, type: "step-finish", reason: "tool-calls", tokens } },
+  })
+  const child = (id: string, parentID: string) => ({ type: "session.created", properties: { info: { id, parentID } } })
+
+  test("bills cache reads at a tenth and everything else at face value", () => {
+    expect(RunTokenBudget.billedTokens({ input: 100, output: 20, cache: { read: 1000, write: 30 } })).toBe(250)
+  })
+
+  test.each([0, -1, 1.5, NaN, Infinity, "100", undefined])("rejects an unenforceable limit: %p", (value) => {
+    expect(RunTokenBudget.isValidMaxTokens(value)).toBe(false)
+  })
+
+  test("a child session's usage counts toward the root's total", () => {
+    const budget = RunTokenBudget.create(root, 100)
+    expect(budget.observe(stepFinish(root, "root_1", { input: 50, output: 10, cache: { read: 0, write: 0 } }))).toBe(false)
+    expect(budget.total).toBe(60)
+    budget.observe(child("ses_child", root))
+    expect(budget.isDescendant("ses_child")).toBe(true)
+    expect(budget.observe(stepFinish("ses_child", "child_1", { input: 30, output: 10, cache: { read: 0, write: 0 } }))).toBe(
+      true,
+    )
+    expect(budget.total).toBe(100)
+    expect(budget.exhausted).toBe(true)
+  })
+
+  test("a grandchild linked before its parent is admitted once the chain closes", () => {
+    const budget = RunTokenBudget.create(root, 10)
+    budget.observe(child("ses_grandchild", "ses_child"))
+    expect(budget.isDescendant("ses_grandchild")).toBe(false)
+    budget.observe(child("ses_child", root))
+    expect(budget.isDescendant("ses_grandchild")).toBe(true)
+    expect(budget.observe(stepFinish("ses_grandchild", "gc_1", { input: 10, output: 0, cache: { read: 0, write: 0 } }))).toBe(
+      true,
+    )
+  })
+
+  test("a task tool part links the child before its session event arrives", () => {
+    const budget = RunTokenBudget.create(root, 10)
+    budget.observe({
+      type: "message.part.updated",
+      properties: {
+        part: { id: "task_1", sessionID: root, messageID: "m", type: "tool", tool: "task", state: { metadata: { sessionId: "ses_task" } } },
+      },
+    })
+    expect(budget.isDescendant("ses_task")).toBe(true)
+  })
+
+  test("another session's usage and a repeated step are not counted", () => {
+    const budget = RunTokenBudget.create(root, 100)
+    expect(budget.observe(stepFinish("ses_other", "other_1", { input: 500, output: 0, cache: { read: 0, write: 0 } }))).toBe(false)
+    expect(budget.total).toBe(0)
+    budget.observe(stepFinish(root, "root_1", { input: 40, output: 0, cache: { read: 0, write: 0 } }))
+    budget.observe(stepFinish(root, "root_1", { input: 40, output: 0, cache: { read: 0, write: 0 } }))
+    expect(budget.total).toBe(40)
+  })
+
+  test("exhaustion is reported once and later steps keep counting", () => {
+    const budget = RunTokenBudget.create(root, 50)
+    expect(budget.observe(stepFinish(root, "root_1", { input: 60, output: 0, cache: { read: 0, write: 0 } }))).toBe(true)
+    expect(budget.observe(stepFinish(root, "root_2", { input: 60, output: 0, cache: { read: 0, write: 0 } }))).toBe(false)
+    expect(budget.total).toBe(120)
+    expect(budget.exhausted).toBe(true)
+  })
+
+  test("without a limit nothing is ever exhausted", () => {
+    const budget = RunTokenBudget.create(root, undefined)
+    expect(budget.observe(stepFinish(root, "root_1", { input: 1_000_000, output: 0, cache: { read: 0, write: 0 } }))).toBe(false)
+    expect(budget.exhausted).toBe(false)
+    expect(budget.limit).toBeUndefined()
+  })
+
+  test("a token abort recovers the exit status only through an answered finalization, like a time abort", () => {
+    const accounting = RunAccounting.create()
+    accounting.onStepStart("work")
+    accounting.onBudgetExhausted("time")
+    accounting.onSessionError("MessageAbortedError", "intentional token-budget abort")
+    expect(accounting.fatal).toBe(true)
+    expect(accounting.takeBudgetFinalizationAllowance()).toBe(2)
+    expect(accounting.takeBudgetFinalizationAllowance()).toBeUndefined()
+    accounting.onStepStart("finalization")
+    accounting.onText("finalization", "The partial result.")
+    accounting.onStepFinish("finalization", "stop")
+    accounting.onPromptResult({ finish: "stop" })
+    expect(accounting.completeBudgetFinalization(true)).toBe(true)
+    expect(accounting.fatal).toBe(false)
+    expect(accounting.termination().why_harness_stopped).toBe("budget-exhausted")
+  })
+})
+// altimate_change end
 
 function isFinalization(body: Record<string, unknown>) {
   const messages = body.messages as { role?: string; content?: unknown }[] | undefined
@@ -754,13 +852,16 @@ describe("opencode run: budget finalization subprocess", () => {
   )
   // altimate_change end
   // altimate_change start — exhausted budgets must disable execution even if the model calls a tool
-  for (const budget of ["turn", "time"] as const) {
+  for (const budget of ["turn", "time", "token"] as const) {
     cliIt.concurrent(
       `${budget}-budget finalization omits tools and rejects a model-requested write`,
       ({ llm, opencode, home }) =>
         Effect.gen(function* () {
           const forbidden = path.join(home, "after-budget.txt")
-          yield* llm.tool("glob", { pattern: "*.sql", path: home })
+          // The token budget is reached by this one step's usage: 80 + 30 billed against a limit of 100.
+          if (budget === "token") {
+            yield* llm.push(reply().tool("glob", { pattern: "*.sql", path: home }).usage({ input: 80, output: 30 }).item())
+          } else yield* llm.tool("glob", { pattern: "*.sql", path: home })
           yield* llm.toolMatch(({ body }) => isFinalization(body), "write", {
             filePath: forbidden,
             content: "work continued after the hard budget",
@@ -769,7 +870,8 @@ describe("opencode run: budget finalization subprocess", () => {
           if (budget === "time") yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().hang())
           const result = yield* opencode.run("Inspect SQL files and report the available evidence.", {
             format: "json",
-            extraArgs: budget === "turn" ? ["--max-turns", "1"] : ["--time-budget", "5"],
+            extraArgs:
+              budget === "turn" ? ["--max-turns", "1"] : budget === "time" ? ["--time-budget", "5"] : ["--max-tokens", "100"],
             env: {
               OPENCODE_CONFIG_CONTENT: JSON.stringify({
                 ...testProviderConfig(llm.url),
@@ -783,7 +885,18 @@ describe("opencode run: budget finalization subprocess", () => {
           const events = opencode.parseJsonEvents(result.stdout)
           const exhausted = events.filter((event) => event.type === "budget_exhausted")
           expect(exhausted).toHaveLength(1)
-          expect(exhausted[0]).toMatchObject(budget === "turn" ? { limit: 1 } : { limit_seconds: 5 })
+          expect(exhausted[0]).toMatchObject(
+            budget === "turn" ? { limit: 1 } : budget === "time" ? { limit_seconds: 5 } : { limit_tokens: 100, tokens_used: 110 },
+          )
+          // altimate_change start — the token budget is reported where the time budget is
+          if (budget === "token") {
+            expect(events.filter((event) => event.type === "termination")).toMatchObject([
+              { why_harness_stopped: "budget-exhausted", max_tokens: 100, tokens_used: 110, token_budget_exhausted: true },
+            ])
+          } else {
+            expect(events.filter((event) => event.type === "termination")[0]).not.toHaveProperty("max_tokens")
+          }
+          // altimate_change end
           expect(events.filter((event) => event.type === "tool_use").map((event) => event.part)).toContainEqual(
             expect.objectContaining({ tool: "glob", state: expect.objectContaining({ status: "completed" }) }),
           )
