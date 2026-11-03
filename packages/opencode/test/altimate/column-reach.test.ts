@@ -392,6 +392,7 @@ describe("columnReach on a model the engine cannot fully trace", () => {
     try {
       const reach = columnReach(manifestFile(constant), "fct_orders", "revenue")
       expect([...reach.untraced, ...reach.uncertain].map((m) => m.name)).not.toContain("rpt_ltv")
+      expect(reach.models.map((m) => m.name)).not.toContain("rpt_ltv")
     } finally {
       again.mockRestore()
     }

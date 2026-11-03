@@ -322,15 +322,15 @@ export function columnReach(manifestPath: string, model: string, column: string,
       uncertain.push(entry(id, "reads an ephemeral parent, inlined as a CTE the lineage engine cannot trace through"))
       continue
     }
+    const named = parents.flatMap((parent) => [...tracked.get(parent)!].filter((col) => namesColumn(sqlText, col)))
     // No edge at all while the SQL names the column (a PIVOT, say) is the engine not seeing through
     // it, so its outputs are unknown. SQL that never names it (`select 1`, `count(*)`) reads nothing and
     // falls through. Below an unsure parent it is already reported as uncertain.
-    if (edges.length === 0 && !fromUnsure && parents.some((p) => [...tracked.get(p)!].some((col) => namesColumn(sqlText, col)))) {
+    if (edges.length === 0 && !fromUnsure && named.length > 0) {
       uncertain.push(entry(id, "names it, but the lineage engine found no column edges in its SQL"))
       unsure.add(id)
       continue
     }
-    const named = parents.flatMap((parent) => [...tracked.get(parent)!].filter((col) => namesColumn(sqlText, col)))
     const shared = named.some((col) => allParents.filter((other) => documentedColumns(lookup(other)).has(col)).length > 1)
     if (ambiguous || named.length > 0 || fromUnsure) {
       if (ambiguous || fromUnsure) unsure.add(id)
