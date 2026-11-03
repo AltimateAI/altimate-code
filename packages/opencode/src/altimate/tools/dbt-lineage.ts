@@ -142,6 +142,8 @@ async function fromAdapter(params: LineageParams, signal: AbortSignal): Promise<
     if (adapter.isInitialized?.() === false) return { reason: "the dbt adapter didn't load the project" }
     if (typeof adapter.getModelLineage !== "function") return { reason: "dbt-integration has no getModelLineage" }
     const result: unknown = await adapter.getModelLineage(params, signal)
+    // A lookup that finishes after a cancel doesn't answer.
+    signal.throwIfAborted()
     if (!isModelLineage(result)) return { reason: "dbt-integration returned a lineage this tool can't read" }
     return { result, reason: "" }
   } catch (e) {

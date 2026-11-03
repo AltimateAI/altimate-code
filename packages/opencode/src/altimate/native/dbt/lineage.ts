@@ -214,24 +214,27 @@ function outputColumns(sql: string, dialect: string, name: string, lineage: Reco
 }
 
 /**
- * Each parent's table names, lowercased, as altimate-core can report them: the keys
- * buildSchemaContext uses (alias, then name), then a source's identifier. The first parent to
- * claim a name keeps it. `shared` holds the parents whose schema name (`alias || name`) another
- * parent has too: the schema keeps only one of them, so a column can bind to the wrong one.
+ * Each parent's table names, lowercased, as altimate-core can report them. The schema names
+ * buildSchemaContext uses (`alias || name`) are claimed first, then the other names and a source's
+ * identifier; the first parent to claim a name keeps it. `shared` holds the parents whose schema
+ * name another parent has too: the schema keeps only one of them, so a column can bind to the wrong one.
  */
 function tablesOf(parentIds: string[], nodes: Record<string, any>, sources: Record<string, any>) {
   const byTable = new Map<string, string>()
   const bySchemaName = new Map<string, string[]>()
+  const claim = (key: unknown, uid: string) => {
+    if (typeof key === "string" && key && !byTable.has(key.toLowerCase())) byTable.set(key.toLowerCase(), uid)
+  }
+  const nodeOf = (uid: string) => nodes[uid] ?? sources[uid]
   for (const uid of parentIds) {
-    const node = nodes[uid] ?? sources[uid]
-    const schemaName = node?.alias || node?.name
-    if (typeof schemaName === "string" && schemaName) {
-      const key = schemaName.toLowerCase()
-      bySchemaName.set(key, [...(bySchemaName.get(key) ?? []), uid])
-    }
-    for (const key of [node?.alias, node?.name, node?.identifier]) {
-      if (typeof key === "string" && key && !byTable.has(key.toLowerCase())) byTable.set(key.toLowerCase(), uid)
-    }
+    const schemaName = nodeOf(uid)?.alias || nodeOf(uid)?.name
+    if (typeof schemaName !== "string" || !schemaName) continue
+    claim(schemaName, uid)
+    const key = schemaName.toLowerCase()
+    bySchemaName.set(key, [...(bySchemaName.get(key) ?? []), uid])
+  }
+  for (const uid of parentIds) {
+    for (const key of [nodeOf(uid)?.alias, nodeOf(uid)?.name, nodeOf(uid)?.identifier]) claim(key, uid)
   }
   const shared = new Set([...bySchemaName.values()].filter((ids) => ids.length > 1).flat())
   return { byTable, shared }
@@ -275,10 +278,8 @@ export function lineageEdges(
     const from = nameParts(String(e?.source ?? ""))
     const column = from.length >= 2 ? from[from.length - 1].toLowerCase() : ""
     const table = from.length >= 2 ? from[from.length - 2].toLowerCase() : ""
-    const target =
-      nameParts(String(e?.target ?? ""))
-        .pop()
-        ?.toLowerCase() ?? ""
+    // The target is an output column's name, which can contain a dot (`as "customer.id"`).
+    const target = String(e?.target ?? "").toLowerCase()
     const parent = byTable.get(table)
     if (!parent || !column || !target) {
       errors.push(

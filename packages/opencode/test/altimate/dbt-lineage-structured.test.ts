@@ -349,6 +349,24 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     }
   })
 
+  test("doesn't answer with a lookup that finishes after the call was cancelled", async () => {
+    useConfig()
+    const controller = new AbortController()
+    dbtAdapterInternals.create = async () =>
+      fakeAdapter(true, async () => {
+        controller.abort()
+        return TRACE
+      })
+    const call = manifestOnly()
+    try {
+      const tool = await initTool(DbtLineageTool)
+      await expect(tool.execute({ model: "customers" }, { ...ctx, abort: controller.signal })).rejects.toThrow()
+      expect(call).not.toHaveBeenCalled()
+    } finally {
+      call.mockRestore()
+    }
+  })
+
   test("stops on a call cancelled while the fallback looks for the manifest", async () => {
     const controller = new AbortController()
     useConfig()

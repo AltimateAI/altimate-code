@@ -170,6 +170,66 @@ join "jaffle"."main"."stg_customers" c on c.customer_id = o.customer_id`)
     )
   })
 
+  // Parents whose name, alias and schema name overlap across parents.
+  const withParents = (sql: string, parents: [string, string][]) => {
+    const manifest = lineageManifest(sql) as ReturnType<typeof lineageManifest> & { nodes: Record<string, any> }
+    for (const [name, alias] of parents) {
+      manifest.nodes[`model.jaffle_shop.${name}`] = {
+        unique_id: `model.jaffle_shop.${name}`,
+        resource_type: "model",
+        name,
+        alias,
+        config: { materialized: "table" },
+        depends_on: { nodes: [] },
+        columns: { id: { name: "id" } },
+      }
+    }
+    manifest.nodes[CUSTOMERS].depends_on.nodes = parents.map(([name]) => `model.jaffle_shop.${name}`)
+    return manifest
+  }
+
+  test("maps a table name to the parent whose schema name it is before another's plain name", async () => {
+    const manifest = withParents(`select b.id from "jaffle"."main"."orders" b`, [
+      ["orders", "historical_orders"],
+      ["current_orders", "orders"],
+    ])
+    const result = dbtModelLineage({ manifest_path: await manifestFile("precedence", manifest), model: "customers" })
+    expect(result.columnLineage.map((e) => e.source)).toEqual([["model.jaffle_shop.current_orders", "id"]])
+    expect(result.errors).toEqual([])
+  })
+
+  test("keeps the edges of a parent whose schema name another parent's shared name shadows", async () => {
+    const manifest = withParents(
+      `select o.id as clean_id, d.id as dup_id from "jaffle"."main"."orders" o join "jaffle"."main"."dup" d on d.id = o.id`,
+      [
+        ["orders", "dup"],
+        ["other_orders", "dup"],
+        ["clean_orders", "orders"],
+      ],
+    )
+    const result = dbtModelLineage({ manifest_path: await manifestFile("shadowed", manifest), model: "customers" })
+    expect(result.errors).toEqual([
+      "customers reads model.jaffle_shop.orders, model.jaffle_shop.other_orders, which share a table name in altimate-core's schema, so their column edges into it were left out",
+    ])
+    expect(result.columnLineage.map((e) => e.source)).toEqual([["model.jaffle_shop.clean_orders", "id"]])
+  })
+
+  test("keeps a dotted output column's name whole", async () => {
+    const sql = `select c.customer_id as "customer.id" from "jaffle"."main"."stg_customers" c`
+    const result = dbtModelLineage({
+      manifest_path: await manifestFile("dotted", lineageManifest(sql)),
+      model: "customers",
+      column: "customer.id",
+    })
+    expect(result.nodes[0].columns.map((c) => c.name)).toEqual(["customer.id"])
+    expect(result.columnLineage.map((e) => [e.source, e.target])).toEqual([
+      [
+        [STG_CUSTOMERS, "customer_id"],
+        [CUSTOMERS, "customer.id"],
+      ],
+    ])
+  })
+
   test("lists the model without columns when the manifest has no compiled SQL", async () => {
     const result = dbtModelLineage({
       manifest_path: await manifestFile("uncompiled", lineageManifest(null)),
