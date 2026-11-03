@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import * as core from "@altimateai/altimate-core"
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { columnReach, exposuresOn, parentsNamed, joinsNaturally, selectsStar } from "../../src/altimate/native/dbt/column-reach"
@@ -74,9 +74,14 @@ describe("columnReach", () => {
 
   test("an output alias or a comment naming the column is not a read", () => {
     const value = manifest()
-    value.nodes["model.shop.rpt_counts"].compiled_code = "select count(order_id) as revenue /* revenue */ from fct_orders -- revenue"
-    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
-    expect(reach.uncertain.map((m) => m.name)).toEqual(["rpt_big_orders"])
+    for (const sql of [
+      "select count(order_id) as revenue /* revenue */ from fct_orders -- revenue",
+      "select count(order_id) as `revenue` from fct_orders",
+    ]) {
+      value.nodes["model.shop.rpt_counts"].compiled_code = sql
+      const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+      expect(reach.uncertain.map((m) => m.name)).toEqual(["rpt_big_orders"])
+    }
   })
 
   test("a downstream model without compiled SQL is reported untraced, and what reads it only may read the column", () => {
@@ -262,6 +267,8 @@ describe("selectsStar", () => {
     for (const sql of [
       "select revenue * 100 as cents from a",
       "select count(*) as n from a",
+      "select count_big(*) as n from a",
+      "select count_if(*) as n from a",
       "select a, b*c as d from t",
       "select '*' as s from a",
       "select (a + b) * c as d from t",
@@ -583,6 +590,10 @@ describe("dbtLineage", () => {
     // `./` and Windows separators spell the same path.
     expect(dbtLineage({ manifest_path: file, model: "./models/mart_ltv.sql" }).model_unique_id).toBe("model.shop.mart_ltv")
     expect(dbtLineage({ manifest_path: file, model: "models\\mart_ltv.sql" }).model_unique_id).toBe("model.shop.mart_ltv")
+    // An empty path is no model's, not the first one's without a file path.
+    const pathless = JSON.parse(readFileSync(file, "utf8"))
+    delete pathless.nodes["model.shop.fct_orders"].original_file_path
+    expect(dbtLineage({ manifest_path: manifestFile(pathless), model: "./" }).confidence_factors).toContain("Model './' not found in manifest")
     const withSnapshot: any = manifest()
     withSnapshot.nodes["snapshot.shop.snap"] = { ...model("snap", ["model.shop.fct_orders"], "select order_id from fct_orders", ["order_id"]), resource_type: "snapshot", unique_id: "snapshot.shop.snap" }
     expect(dbtLineage({ manifest_path: manifestFile(withSnapshot), model: "snap" }).model_unique_id).toBe("snapshot.shop.snap")
@@ -635,6 +646,7 @@ describe("columnReach with a NATURAL JOIN", () => {
       "select a.id from a natural # mysql\njoin b",
       "select a.id from a natural // snowflake\njoin b",
       "select a.id from a natural -- old mac\rjoin b",
+      "select a.id from a natural /* " + "x".repeat(5000) + " */ join b",
       // Many `natural` words in a string before the real join: each is checked in a bounded window.
       "select $$" + "natural /* ".repeat(4000) + "$$ as s from a natural join b",
       "select '/*' as s from a natural /* c */ join b",

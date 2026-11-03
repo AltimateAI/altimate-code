@@ -221,6 +221,12 @@ describe("dbt_lineage with the project's dbt adapter", () => {
       await symlink("../../otherproj/target/manifest.json", path.join(realOther, "proj", "target", "manifest.json"))
       const climbed = await tool.execute({ model: "customers", manifest_path: path.join(mine, "linked_target", "manifest.json") }, ctx)
       expect(climbed.metadata.structuredContent).toBeUndefined()
+      // `..` after a link climbs from where the link points, as the system opens it: a manifest reached
+      // through `<mine>/out/..` is the other project's, though the path reads as this one's.
+      await mkdir(path.join(other, "deep"), { recursive: true })
+      await symlink(path.join(other, "deep"), path.join(mine, "out"))
+      const viaDots = await tool.execute({ model: "customers", manifest_path: `${mine}/out/../target/manifest.json` }, ctx)
+      expect(viaDots.metadata.structuredContent).toBeUndefined()
       // A path through a file is not a folder: it is placed, not thrown on.
       const through = await tool.execute({ model: "customers", manifest_path: path.join(mine, "dbt_project.yml", "manifest.json") }, ctx)
       expect(through.metadata.structuredContent).toEqual(TRACE)

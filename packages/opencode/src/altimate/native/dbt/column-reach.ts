@@ -171,9 +171,10 @@ const GAP = String.raw`(?:\s|(?:--|#|\/\/)[^\r\n]*[\r\n]|\/\*(?:[^*]|\*(?!\/))*\
 // The join's modifiers in any dialect: LEFT/RIGHT/FULL/INNER/CROSS, OUTER, Spark's SEMI/ANTI, Snowflake's DIRECTED.
 const NATURAL = new RegExp(String.raw`^natural${GAP}(?:(?:left|right|full|inner|cross|outer|semi|anti|directed)${GAP}){0,4}join\b`, "i")
 // How far past a `natural` the rest of the join is looked for, and how many are looked at: past that
-// many the SQL may well have one, which only adds doubt. The work stays bounded on any input.
-// Limit: comments longer than the window between the keywords hide the join.
-const NATURAL_WINDOW = 1000
+// many the SQL may well have one, which only adds doubt. An unclosed `/*` makes each check read to the
+// window's end, so the window is what keeps crafted input cheap.
+// Limit: more than 10,000 characters of comments between the keywords hide the join.
+const NATURAL_WINDOW = 10_000
 const MAX_NATURALS = 100
 export function joinsNaturally(sql: string): boolean {
   let seen = 0

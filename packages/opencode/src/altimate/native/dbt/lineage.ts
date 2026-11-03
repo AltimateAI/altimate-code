@@ -47,7 +47,7 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
   const filePath = (p: unknown) => String(p ?? "").replace(/\\/g, "/").replace(/^(?:\.\/)+/, "")
   const byPath = () =>
     Object.values<any>(nodes).find(
-      (node) => ["model", "snapshot"].includes(node?.resource_type) && filePath(node.original_file_path) === filePath(params.model),
+      (node) => !!filePath(params.model) && ["model", "snapshot"].includes(node?.resource_type) && filePath(node.original_file_path) === filePath(params.model),
     )
   const modelNode =
     findModel(nodes, params.model) ??
