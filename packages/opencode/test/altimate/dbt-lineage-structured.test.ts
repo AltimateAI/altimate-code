@@ -221,12 +221,19 @@ describe("dbt_lineage with the project's dbt adapter", () => {
       await symlink("../../otherproj/target/manifest.json", path.join(realOther, "proj", "target", "manifest.json"))
       const climbed = await tool.execute({ model: "customers", manifest_path: path.join(mine, "linked_target", "manifest.json") }, ctx)
       expect(climbed.metadata.structuredContent).toBeUndefined()
-      // `..` after a link climbs from where the link points, as the system opens it: a manifest reached
-      // through `<mine>/out/..` is the other project's, though the path reads as this one's.
+      // `..` after a link is collapsed first, as the manifest reader opens it: `<mine>/out/..` is read
+      // as this project's manifest, so the adapter answers, matching the graph include_graph reads.
       await mkdir(path.join(other, "deep"), { recursive: true })
       await symlink(path.join(other, "deep"), path.join(mine, "out"))
       const viaDots = await tool.execute({ model: "customers", manifest_path: `${mine}/out/../target/manifest.json` }, ctx)
-      expect(viaDots.metadata.structuredContent).toBeUndefined()
+      expect(viaDots.metadata.structuredContent).toEqual(TRACE)
+      // Many folders not written yet below the project are climbed, not counted as links.
+      const deep = path.join(mine, ...Array.from({ length: 80 }, (_, i) => `d${i}`), "manifest.json")
+      expect((await tool.execute({ model: "customers", manifest_path: deep }, ctx)).metadata.structuredContent).toEqual(TRACE)
+      // A link loop cannot be placed.
+      await symlink(path.join(mine, "target", "loop-b"), path.join(mine, "target", "loop-a"))
+      await symlink(path.join(mine, "target", "loop-a"), path.join(mine, "target", "loop-b"))
+      expect((await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "loop-a") }, ctx)).metadata.structuredContent).toBeUndefined()
       // A path through a file is not a folder: it is placed, not thrown on.
       const through = await tool.execute({ model: "customers", manifest_path: path.join(mine, "dbt_project.yml", "manifest.json") }, ctx)
       expect(through.metadata.structuredContent).toEqual(TRACE)

@@ -6,7 +6,6 @@ import { Dispatcher } from "../native"
 import type { DbtLineageResult } from "../native/types"
 import { loadRawManifest } from "../native/dbt/helpers"
 import { lineageGraph } from "../native/dbt/graph"
-import { Filesystem } from "../../util/filesystem"
 
 /** The structured result of dbt-integration's `getModelLineage` (version 1), relayed as is. */
 export type ModelLineage = {
@@ -131,21 +130,38 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
  * by its path, its nearest existing folder's links resolved, so the project's own default path keeps
  * the adapter's answer; one with no dbt project above it at all (a default path resolved against
  * another folder) names no other project either. A link to a manifest not written yet is placed where
- * it points; a link loop cannot be placed.
+ * it points.
  */
 async function manifestOutsideAdapterProject(manifestPath: string): Promise<string | undefined> {
   const { getDbtProjectRoot } = await import("../native/connections/register")
   const root = await getDbtProjectRoot()
   if (!root) return "the dbt adapter has no project root"
-  // Where the system would open the path: links resolved segment by segment before `..` (so
-  // `<project>/link/../x` lands where the link points), parts not written yet kept, a link to a missing
-  // file followed. A relative path is joined to the working folder as written, never normalized first.
+  // The path with its links resolved, the parts not written yet appended; a link to a missing file is
+  // followed to where it points. `..` is collapsed first, as the manifest reader (loadRawManifest's
+  // realpathSync) does, so this places the file that reader opens. Undefined past 64 links (a loop);
+  // climbing to the nearest existing folder is not counted.
   const real = (p: string) => {
-    try {
-      return Filesystem.realLocation(path.isAbsolute(p) ? p : `${process.cwd()}${path.sep}${p}`)
-    } catch {
-      return undefined
+    const rest: string[] = []
+    let at = path.resolve(p)
+    for (let links = 0; links < 64; ) {
+      try {
+        return path.join(fs.realpathSync(at), ...rest)
+      } catch {}
+      let link: string | undefined
+      try {
+        if (fs.lstatSync(at).isSymbolicLink()) link = fs.readlinkSync(at)
+      } catch {}
+      if (link !== undefined) {
+        links++
+        // From the link's real folder, as the system resolves it: `..` climbs from there.
+        at = path.resolve(fs.realpathSync(path.dirname(at)), link)
+        continue
+      }
+      if (path.dirname(at) === at) return undefined
+      rest.unshift(path.basename(at))
+      at = path.dirname(at)
     }
+    return undefined
   }
   const projectDir = real(root)
   const manifest = real(manifestPath)
