@@ -201,15 +201,17 @@ function outputColumns(sql: string, dialect: string, name: string, lineage: Reco
   if (failure === undefined && explicit.length === names.length && names.length > 0) {
     return { columns: names.map((c) => ({ name: c })), columnsFrom: "compiled-sql" }
   }
+  const why =
+    failure !== undefined
+      ? `Could not read ${name}'s output columns (${failure instanceof Error ? failure.message : String(failure)})`
+      : names.length === 0
+        ? `altimate-core read no output columns from ${name}'s compiled SQL`
+        : `${name}'s compiled SQL selects *`
   if (resolved.length > 0) {
-    errors.push(`${name}'s compiled SQL selects *, so its columns are only the ones traced to a parent`)
+    errors.push(`${why}, so its columns are only the ones traced to a parent`)
     return { columns: resolved.map((c) => ({ name: c })), columnsFrom: "compiled-sql" }
   }
-  errors.push(
-    failure === undefined
-      ? `${name}'s compiled SQL selects *, so not all its columns are known`
-      : `Could not read ${name}'s output columns: ${failure instanceof Error ? failure.message : String(failure)}`,
-  )
+  errors.push(explicit.length > 0 ? `${why}, so not all its columns are known` : why)
   return { columns: explicit.map((c) => ({ name: c })), columnsFrom: explicit.length > 0 ? "compiled-sql" : "none" }
 }
 

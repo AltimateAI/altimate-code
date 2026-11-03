@@ -136,7 +136,7 @@ select * from final`
     expect(result.nodes[0].columnsFrom).toBe("compiled-sql")
     expect(result.nodes[0].columns.map((c) => c.name)).toEqual(["customer_id", "first_name"])
     expect(result.errors).toEqual([
-      "customers's compiled SQL selects *, so its columns are only the ones traced to a parent",
+      "Could not read customers's output columns (unable to extract output columns due to star: *), so its columns are only the ones traced to a parent",
     ])
     expect(result.columnLineage).toHaveLength(2)
   })

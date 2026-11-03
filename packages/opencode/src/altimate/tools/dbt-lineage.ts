@@ -160,6 +160,12 @@ export function isModelLineage(value: unknown): value is ModelLineage {
   return (
     typeof v === "object" &&
     v !== null &&
+    v.version === 1 &&
+    typeof v.project === "string" &&
+    typeof v.dialect === "string" &&
+    typeof v.confidence === "string" &&
+    typeof v.stats === "object" &&
+    v.stats !== null &&
     typeof v.focus?.uniqueId === "string" &&
     typeof v.focus?.name === "string" &&
     Array.isArray(v.nodes) &&

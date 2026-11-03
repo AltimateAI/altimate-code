@@ -501,6 +501,19 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     }
   })
 
+  test("falls back when the adapter's lineage lacks version-1 fields", async () => {
+    useConfig()
+    const { confidence: _c, stats: _s, ...partial } = TRACE
+    dbtAdapterInternals.create = async () => fakeAdapter(true, async () => partial)
+    const call = manifestOnly()
+    try {
+      const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
+      expectManifestAnswer(result, "dbt-integration returned a lineage this tool can't read")
+    } finally {
+      call.mockRestore()
+    }
+  })
+
   test("falls back with the reason when the lookup fails", async () => {
     useConfig()
     dbtAdapterInternals.create = async () =>
