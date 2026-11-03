@@ -196,17 +196,19 @@ export function joinsNaturally(sql: string): boolean {
   return false
 }
 
-// `IDENTIFIER (`, comments allowed before and inside the parenthesis, then its string or bind variable.
+// `IDENTIFIER (` with comments allowed around its parts; when its whole argument is one string
+// literal, that string (group 1) and the closing parenthesis (group 2).
 const IDENTIFIER_CALL = new RegExp(
-  String.raw`^identifier(?:${GAP})?\((?:${GAP})?(?:'((?:[^'\\]|''|\\[\s\S])*)'|([$:?]))`,
+  String.raw`^identifier(?:${GAP})?\((?:${GAP})?(?:'((?:[^'\\]|''|\\[\s\S])*)'(?:${GAP})?(\))?)?`,
   "i",
 )
 
 /**
- * Whether the SQL names one of `columns` through Snowflake's `IDENTIFIER('…')`, or passes it a bind
- * variable (`IDENTIFIER($col)`): the lineage engine reads the argument as a string, so it reports no
- * edge for the column. Bounded like joinsNaturally: each `identifier` is read in a window, and past
- * 100 of them the SQL counts as naming it.
+ * Whether the SQL may name one of `columns` through `IDENTIFIER(…)` (Snowflake, Databricks): the
+ * lineage engine reads the argument as a string, so it reports no edge for the column. Only an
+ * argument that is one plain string literal naming none of them is cleared; anything else (a bind or
+ * session variable, a concatenation, a function, an escape) counts, which only adds doubt. Bounded like
+ * joinsNaturally: each `identifier` is read in a window, and past 100 of them the SQL counts.
  */
 export function namesThroughIdentifier(sql: string, columns: string[]): boolean {
   const wanted = new Set(columns.map((one) => one.toLowerCase()))
@@ -214,15 +216,14 @@ export function namesThroughIdentifier(sql: string, columns: string[]): boolean 
   for (const match of sql.matchAll(/(?<![\w$])identifier(?![\w$])/gi)) {
     if (++seen > MAX_NATURALS) return true
     const call = IDENTIFIER_CALL.exec(sql.slice(match.index!, match.index! + NATURAL_WINDOW))
+    // `identifier` not called is a name, not the function.
     if (!call) continue
-    if (call[2]) return true
-    // Any mention of the column in the string counts (qualified, quoted, with dots in a quoted name):
-    // telling those apart needs a parse, and a wider match only adds doubt.
-    // A string that is not a plain name (an escape such as `\x72`, any other character) is not decoded:
-    // it counts, which only adds doubt.
-    if (!/^[\w$."]*$/.test(call[1]!.replace(/''/g, "'"))) return true
-    // A doubled quote inside a quoted name (`"a""b"`) is one quote in the name.
-    const text = call[1]!.replace(/''/g, "'").replace(/""/g, '"').toLowerCase()
+    if (call[1] === undefined || !call[2]) return true
+    const literal = call[1].replace(/''/g, "'")
+    if (!/^[\w$."]*$/.test(literal)) return true
+    // Any mention of the column in the string counts (qualified, quoted, with dots in a quoted name);
+    // a doubled quote inside a quoted name (`"a""b"`) is one quote.
+    const text = literal.replace(/""/g, '"').toLowerCase()
     if ([...wanted].some((column) => text.includes(column))) return true
   }
   return false

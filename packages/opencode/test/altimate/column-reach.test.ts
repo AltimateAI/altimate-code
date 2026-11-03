@@ -976,6 +976,18 @@ describe("columnReach through Snowflake IDENTIFIER()", () => {
       expect(namesThroughIdentifier(sql, ["revenue"])).toBe(true)
     // A tracked column whose quoted name holds a dot.
     expect(namesThroughIdentifier(`select identifier('"net.amount"') from t`, ["net.amount"])).toBe(true)
+    // Anything but one plain string literal counts: concatenations, variables, functions.
+    for (const sql of [
+      "select identifier('o.' || :col) from t",
+      "select identifier('rev' || 'enue') from t",
+      "select identifier(session.col_name) from t",
+      "select identifier(col_var) from t",
+      "select identifier(concat('rev', 'enue')) from t",
+      "select identifier('order_id'",
+    ])
+      expect(namesThroughIdentifier(sql, ["revenue"])).toBe(true)
+    // `identifier` as a plain name is not the function.
+    expect(namesThroughIdentifier("select identifier, other from t", ["revenue"])).toBe(false)
     // An escape, or any text that is not a plain name, is not decoded: it counts.
     for (const sql of [
       String.raw`select identifier('\x72evenue') from t`,
