@@ -168,7 +168,8 @@ function namesColumn(sql: string, column: string): boolean {
 // Between the keywords: whitespace, or a comment (`--`, `#` or `//` to the line's end, `/* … */` to its
 // first `*/`). Limit: a nested Postgres comment between them is not read as one.
 const GAP = String.raw`(?:\s|(?:--|#|\/\/)[^\r\n]*[\r\n]|\/\*(?:[^*]|\*(?!\/))*\*\/)+`
-const NATURAL = new RegExp(String.raw`^natural${GAP}(?:(?:left|right|full|inner|cross|semi|anti)${GAP}){0,2}(?:outer${GAP})?join\b`, "i")
+// The join's modifiers in any dialect: LEFT/RIGHT/FULL/INNER/CROSS, OUTER, Spark's SEMI/ANTI, Snowflake's DIRECTED.
+const NATURAL = new RegExp(String.raw`^natural${GAP}(?:(?:left|right|full|inner|cross|outer|semi|anti|directed)${GAP}){0,4}join\b`, "i")
 // How far past a `natural` the rest of the join is looked for, and how many are looked at: past that
 // many the SQL may well have one, which only adds doubt. The work stays bounded on any input.
 // Limit: comments longer than the window between the keywords hide the join.
