@@ -87,20 +87,26 @@ export function structuredResult(tool: string, metadata: Record<string, unknown>
   const own = metadata.structuredContent
   if (own && typeof own === "object" && !Array.isArray(own)) {
     const full = { ...(own as Record<string, unknown>), report }
-    return Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES ? full : { report, truncated: true }
+    return Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES ? full : capReport(report, true)
   }
   const fields = Object.fromEntries((STRUCTURED_FIELDS[tool] ?? []).filter((key) => key in metadata).map((key) => [key, metadata[key]]))
   // dbt_lineage's text prints the same mappings and edges as `columns` and `edges`: keep its header.
   const head = tool === "dbt_lineage" && "columns" in fields ? report.split("\nColumn Mappings:")[0]!.trim() : report
   const full = { ...fields, report: head }
-  return Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES ? full : { report, truncated: true }
+  return Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES ? full : capReport(report, true)
 }
 /** An error report held to the same cap as a result, so a huge exception message cannot exceed it. */
 export function structuredError(message: string): Record<string, unknown> {
+  return capReport(message, false)
+}
+// `dropped`: the result's other fields were left out, so it is marked truncated even when the
+// report itself fits.
+function capReport(message: string, dropped: boolean): Record<string, unknown> {
   // Measured as sent: JSON escaping can grow the text (a newline is two bytes, a control
   // character six), so the cap applies to the serialized result, shortening until it fits.
   const size = (value: Record<string, unknown>) => Buffer.byteLength(JSON.stringify(value))
-  if (size({ report: message }) <= STRUCTURED_MAX_BYTES) return { report: message }
+  const whole = dropped ? { report: message, truncated: true } : { report: message }
+  if (size(whole) <= STRUCTURED_MAX_BYTES) return whole
   let report = message
   while (report.length > 0 && size({ report, truncated: true }) > STRUCTURED_MAX_BYTES) {
     report = report.slice(0, Math.floor(report.length * 0.9))

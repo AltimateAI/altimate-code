@@ -368,6 +368,14 @@ describe("structuredError", () => {
   })
 })
 
+describe("structuredResult over the cap", () => {
+  test("a report too big on its own is shortened too", () => {
+    const out = structuredResult("dbt_lineage", { structuredContent: { focus: {} } }, "x".repeat(300_000))
+    expect(out.truncated).toBe(true)
+    expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(100_000)
+  })
+})
+
 describe("structuredError escaping", () => {
   test("the cap holds for the serialized result, whatever JSON escaping adds", () => {
     for (const text of ["\n".repeat(100_000), "\u0000".repeat(300_000), "é".repeat(80_000)]) {
