@@ -1,6 +1,6 @@
 // altimate_change - new file
 //
-// The part of a dbt manifest's graph a lineage viewer draws for one model: two levels upstream,
+// The part of a dbt manifest's graph a lineage viewer draws for one model: everything upstream,
 // everything downstream (with the tests counted as ids), and the links between them. Clients that
 // cannot read a large manifest themselves (the Claude Code plugin reads files up to 4 MiB) get it
 // from the CLI (`altimate tool run dbt_lineage --json` with include_graph); MCP carries no graph.
@@ -24,11 +24,14 @@ export interface LineageGraph {
   children: Record<string, string[]>
   /** True when downstream stopped at the node limit. */
   truncated: boolean
+  /** True when upstream stopped at the node limit. */
+  upTruncated: boolean
 }
 
 const GROUPS = ["nodes", "sources", "exposures", "metrics", "semantic_models", "saved_queries", "unit_tests"] as const
-/** Limit on downstream models only; the target, its two upstream levels and test nodes come on top. */
+/** Limits on each side; the target and test nodes come on top. A source-to-mart chain of a few hundred models fits. */
 const MAX_DOWNSTREAM = 500
+const MAX_UPSTREAM = 500
 
 function lookup(manifest: any, id: string): any {
   for (const group of GROUPS) if (manifest[group]?.[id]) return manifest[group][id]
@@ -76,29 +79,26 @@ export function lineageGraph(manifest: any, id: string): LineageGraph {
   const { parents, children } = mapsOf(manifest)
   const isTest = (one: string) => ["test", "unit_test"].includes(lookup(manifest, one)?.resource_type ?? one.split(".")[0])
   const keep = new Set([id])
-  for (const parent of parents[id] ?? []) {
-    keep.add(parent)
-    for (const grand of parents[parent] ?? []) keep.add(grand)
-  }
-  let truncated = false
-  const queue = [id]
-  const seen = new Set([id])
-  let count = 0
-  while (queue.length) {
-    for (const child of children[queue.shift()!] ?? []) {
-      if (seen.has(child) || isTest(child)) continue
-      if (count >= MAX_DOWNSTREAM) {
-        truncated = true
-        queue.length = 0
-        break
+  // Breadth first, so a cut keeps the nearest nodes.
+  const walk = (links: Record<string, string[]>, limit: number) => {
+    const queue = [id]
+    const seen = new Set([id])
+    let count = 0
+    while (queue.length) {
+      for (const next of links[queue.shift()!] ?? []) {
+        if (seen.has(next) || isTest(next)) continue
+        if (count >= limit) return true
+        seen.add(next)
+        keep.add(next)
+        count++
+        queue.push(next)
       }
-      seen.add(child)
-      keep.add(child)
-      count++
-      queue.push(child)
     }
+    return false
   }
-  const graph: LineageGraph = { nodes: {}, parents: {}, children: {}, truncated }
+  const upTruncated = walk(parents, MAX_UPSTREAM)
+  const truncated = walk(children, MAX_DOWNSTREAM)
+  const graph: LineageGraph = { nodes: {}, parents: {}, children: {}, truncated, upTruncated }
   for (const one of keep) {
     graph.nodes[one] = nodeOf(one, lookup(manifest, one))
     graph.parents[one] = (parents[one] ?? []).filter((other) => keep.has(other))

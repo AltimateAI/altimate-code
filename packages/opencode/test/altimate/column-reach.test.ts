@@ -320,7 +320,22 @@ describe("columnReach on SQL the engine cannot parse", () => {
 })
 
 describe("lineageGraph", () => {
-  test("two levels up, everything downstream, tests as ids, from dbt's child_map when present", () => {
+  test("a twelve-hop chain comes back whole to its source; upstream past 500 nodes is cut and marked", () => {
+    const chain: Record<string, any> = {}
+    for (let i = 1; i <= 12; i++) chain[`model.shop.m${i}`] = model(`m${i}`, [i === 1 ? "source.shop.raw.orders" : `model.shop.m${i - 1}`], "select 1", [])
+    const graph = lineageGraph({ nodes: chain, sources: { "source.shop.raw.orders": { resource_type: "source", name: "orders", source_name: "raw" } } }, "model.shop.m12")
+    expect(graph.nodes["source.shop.raw.orders"]).toBeDefined()
+    expect(Object.keys(graph.nodes)).toHaveLength(13)
+    expect(graph.upTruncated).toBe(false)
+
+    const wide: Record<string, any> = { "model.shop.top": model("top", Array.from({ length: 600 }, (_, i) => `model.shop.p${i}`), "select 1", []) }
+    for (let i = 0; i < 600; i++) wide[`model.shop.p${i}`] = model(`p${i}`, [], "select 1", [])
+    const cut = lineageGraph({ nodes: wide }, "model.shop.top")
+    expect(cut.upTruncated).toBe(true)
+    expect(Object.keys(cut.nodes)).toHaveLength(501)
+  })
+
+  test("everything up and downstream, tests as ids, from dbt's child_map when present", () => {
     const value = {
       ...manifest(),
       nodes: { ...manifest().nodes, "test.shop.t1": { resource_type: "test", name: "t1", depends_on: { nodes: ["model.shop.fct_daily"] } } },

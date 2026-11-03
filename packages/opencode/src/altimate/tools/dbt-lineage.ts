@@ -53,7 +53,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
     include_graph: z
       .boolean()
       .optional()
-      .describe("Also return the model's graph from the manifest (two levels upstream, everything downstream up to 500 models with exposures and tests; graph.truncated is set when cut) in the metadata; for lineage viewers"),
+      .describe("Also return the model's graph from the manifest (everything upstream and downstream, up to 500 nodes each side, with exposures and tests; graph.upTruncated / graph.truncated are set when a side is cut) in the metadata; for lineage viewers"),
   }),
   async execute(args, ctx) {
     let viaAdapter = await fromAdapter(args.model, args.column, ctx.abort)

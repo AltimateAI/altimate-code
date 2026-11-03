@@ -1076,7 +1076,7 @@ export interface DbtLineageParams {
   manifest_path: string
   model: string
   dialect?: string
-  /** Also return the model's lineage graph (two levels up, everything downstream). */
+  /** Also return the model's lineage graph (everything upstream and downstream, up to 500 nodes each side). */
   include_graph?: boolean
 }
 
