@@ -1,10 +1,11 @@
 // altimate_change start — MCP output limits resolve like the agent's config loader
-import { afterEach, beforeEach, expect, test } from "bun:test"
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test"
 import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { outputLimits } from "../../../src/altimate/mcp-server/output-settings"
 import { MAX_BYTES, MAX_LINES } from "../../../src/tool/truncate-core"
+import { ConfigManaged } from "../../../src/config/managed"
 
 const VARS = [
   "OPENCODE_CONFIG",
@@ -109,4 +110,22 @@ test("an unreadable config path does not stop startup", async () => {
   await writeFile(path.join(repo, "opencode.jsonc"), output({ max_lines: 8 }))
   expect(await outputLimits()).toEqual({ maxLines: 8, maxBytes: MAX_BYTES })
 })
+
+test("managed preferences with a relative {file:...} keep their limits", async () => {
+  // The plist arrives as JSON; a relative file reference elsewhere in it must resolve next to the
+  // plist, or substitution fails and every limit from that source is dropped.
+  const prefs = path.join(root, "Managed Preferences", "user")
+  await mkdir(prefs, { recursive: true })
+  await writeFile(path.join(prefs, "key.txt"), "secret")
+  const spy = spyOn(ConfigManaged, "readManagedPreferences").mockResolvedValue({
+    text: JSON.stringify({ tool_output: { max_lines: 7 }, provider: { p: { options: { apiKey: "{file:key.txt}" } } } }),
+    source: `mobileconfig:${path.join(prefs, "com.example.plist")}`,
+  } as never)
+  try {
+    expect((await outputLimits()).maxLines).toBe(7)
+  } finally {
+    spy.mockRestore()
+  }
+})
+
 // altimate_change end
