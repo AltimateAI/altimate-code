@@ -82,7 +82,6 @@ Options:
                                                                                             [string]"
 `;
 
-// altimate_change start — document the committed-answer echo allowance in run help
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode run --help 1`] = `
 "altimate-code run [message..]
 
@@ -144,7 +143,6 @@ Options:
       --dangerously-skip-permissions  auto-approve permissions that are not explicitly denied
                                       (dangerous!)                        [boolean] [default: false]"
 `;
-// altimate_change end
 
 exports[`opencode CLI help-text snapshots every documented command emits stable help text: opencode debug --help 1`] = `
 "altimate-code debug
@@ -889,8 +887,9 @@ Options:
                          local drivers                      [string] [choices: "workspace", "local"]
       --args             tool arguments as a JSON object, or - to read them from stdin      [string]
       --args-file        read the tool arguments (JSON) from a file                         [string]
-      --allow-write      allow writes (DROP DATABASE, DROP SCHEMA and TRUNCATE stay blocked)
-                                                                          [boolean] [default: false]
+      --allow-write      allow writes: DML, DDL and statements read as writes, such as SET, ATTACH,
+                         COPY ... TO and INSTALL (DROP DATABASE, DROP SCHEMA and TRUNCATE stay
+                         blocked)                                         [boolean] [default: false]
       --daemon           use a long-running process that keeps connections warm; --no-daemon runs in
                          this process                                      [boolean] [default: true]
       --json             print {status,title,output,metadata} as JSON     [boolean] [default: false]

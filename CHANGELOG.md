@@ -10,15 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Claude Code and other coding agents can call altimate-code's data tools directly.** `altimate-code mcp serve` and the new model-free `altimate-code tool` CLI run the same tools without a second model: reads by default, writes only with `--allow-write`. In projects linked to a workspace, what people teach the agent can become a team rule: they confirm it on a card, the workspace owner reviews it, and approved rules reach every teammate's sessions. Also in this release: `auth logout` removes the saved Altimate gateway key, the analyst stays read-only whatever config grants, and the home screen suggests the Claude Code and Codex plugins.
 
 **Heads-up for support:**
-- **MCP and `tool run` requests are read-only unless `--allow-write`.** `DROP DATABASE`, `DROP SCHEMA` and `TRUNCATE` are refused even then. The block reads the SQL text, so it is best effort; for a hard guarantee, connect with a database user that lacks those privileges.
+- **MCP and `tool run` requests are read-only unless `--allow-write`.** The database enforces read-only on PostgreSQL, SQLite and DuckDB; on other warehouses it rests on SQL classification, so stored functions with side effects are not blocked. `DROP DATABASE`, `DROP SCHEMA` and `TRUNCATE` are refused even with `--allow-write`, but that block also reads the SQL text and is best effort. Use a read-only database user for a hard guarantee. `--allow-write` is all or nothing, and statements such as `SET`, `ATTACH`, `COPY ... TO`, `INSTALL` and DuckDB `SUMMARIZE` count as writes.
+- **`mcp serve` allows `warehouse_add` without `--allow-write`**, so a calling agent can save a connection; `tool run` needs `--allow-write` for it. Tool results, including query rows and sample values, go to the calling agent's model provider. Large results are spilled to private local files.
 - **`tool` commands start a per-project background process** that keeps connections warm and exits after 10 idle minutes.
-- **Workspace skill syncs also write copies into `<project>/.claude/skills/`** so Claude Code sessions pick them up. Skills you wrote with the same name are never touched, and unlinking removes the copies.
+- **Workspace skill syncs can write copies into `<project>/.claude/skills/`** when `ALTIMATE_CLAUDE_SKILL_SYNC=1` is set, which the Claude Code plugin does. Skills you wrote with the same name are never touched; unlinking or signing out removes the copies.
 - **`schema_inspect` without a table** lists schemas, or up to 500 tables with catalog row estimates, instead of scanning.
 - **`learn status` prints `Learning from sessions: on|off (source)`** where it printed `Capture:`, and learn messages say "rule" where they said "lesson". The JSON output only gains a `rules` block.
 - **In a linked project, `training_save` with `kind: "rule"` shows a proposal card** instead of writing training, and `learn bootstrap` / `learn import-reviews` send what they find for review.
-- **Telemetry carries the signed-in user and tenant** when the machine is signed in to Altimate; anonymous rows keep the machine id. Turning telemetry off sends one final `telemetry_opted_out` event (machine id and opt-out source only), then nothing.
-- **The analyst's write tools stay off whatever config grants**, including `"*": "allow"`. `task` from the analyst is limited to `data-explorer`.
+- **Telemetry carries the signed-in user ID and tenant** when the machine is signed in to Altimate, so those events are not anonymous; no email address, hashed or not, is sent. One `GET /users/me` lookup per credential finds them, and none is made while telemetry is off. Rows from machines that are not signed in keep the machine id. Turning telemetry off sends one final `telemetry_opted_out` event (machine id and opt-out source only), then nothing.
+- **The analyst's write tools stay off whatever config grants**, including `"*": "allow"`: file edits, SQL writes, memory saves, shell and delegation. Configs that relied on a grant to give the analyst more power will see those tools denied. `task` from the analyst is limited to `data-explorer`; MCP and custom tools still follow config.
 - **A symlink inside an allowed external folder that points elsewhere now asks** for the folder it points to, for every agent.
+- **`auth logout` removes the saved gateway key**, `~/.altimate/altimate.json`, MCP server entries that carry that key (add the datamate again after signing in), and the cached telemetry identity.
 - **Ctrl+C during browser sign-in exits with status 130**, not 0.
 - **The Altimate LLM Gateway free-token allowance is 1M tokens.**
 
@@ -38,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`auth logout` removes the saved Altimate gateway key.** (#1606)
+- **`auth logout` removes the saved Altimate gateway key** and the MCP entries that carry it. Sign-out now also removes the cached telemetry identity, as the telemetry reference says. (#1606)
 - **Ctrl+C during browser sign-in exits 130** instead of reporting success. (#1624)
 - **Docs and the TUI show the 1M free-token allowance.** (#1611)
 
