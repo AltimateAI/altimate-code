@@ -179,6 +179,18 @@ describe("dbt_lineage with the project's dbt adapter", () => {
       const inner = await tool.execute({ model: "customers", manifest_path: path.join(nested, "target", "manifest.json") }, ctx)
       expect(inner.metadata.structuredContent).toBeUndefined()
       expect(inner.output).toContain("belongs to the dbt project at")
+      // A folder whose name starts with `..` is still inside the project.
+      const dotted = path.join(mine, "..data")
+      await mkdir(path.join(dotted, "target"), { recursive: true })
+      await writeFile(path.join(dotted, "target", "manifest.json"), empty)
+      const own = await tool.execute({ model: "customers", manifest_path: path.join(dotted, "target", "manifest.json") }, ctx)
+      expect(own.metadata.structuredContent).toEqual(TRACE)
+      // A sibling whose name only starts with this project's is outside it.
+      const sibling = `${mine}-2`
+      await mkdir(path.join(sibling, "target"), { recursive: true })
+      await writeFile(path.join(sibling, "target", "manifest.json"), empty)
+      const next = await tool.execute({ model: "customers", manifest_path: path.join(sibling, "target", "manifest.json") }, ctx)
+      expect(next.metadata.structuredContent).toBeUndefined()
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

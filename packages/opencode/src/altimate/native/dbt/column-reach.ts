@@ -216,8 +216,11 @@ export function columnReach(manifestPath: string, model: string, column: string,
   // case tells apart, neither typed as given, leave the column unsettled: no reader of either is certain.
   const spellings = Object.entries<any>(target.columns ?? {}).map(([key, col]) => String(col?.name ?? key))
   const matches = spellings.filter((name) => name.toLowerCase() === column0)
-  const unsettled = !spellings.includes(column) && matches.length > 1
-  const spelled = spellings.includes(column) ? [column] : unsettled ? [] : matches.length > 0 ? matches : [column]
+  const exact = spellings.includes(column)
+  const unsettled = !exact && matches.length > 1
+  let spelled: string[] = [column]
+  if (unsettled) spelled = []
+  else if (!exact && matches.length > 0) spelled = matches
   const trackedExact = new Map<string, Set<string>>([[targetId, new Set(spelled)]])
   const carries = (parent: string, source: { column: string; exact: string }) =>
     !!tracked.get(parent)?.has(source.column) &&
@@ -331,9 +334,11 @@ export function columnReach(manifestPath: string, model: string, column: string,
     }
   }
 
-  const reachedIds = new Set([targetId, ...reached.map((m) => m.unique_id)])
+  // An unsettled spelling leaves the target's own dashboards uncertain too: which column they read is unknown.
+  const reachedIds = new Set([...(unsettled ? [] : [targetId]), ...reached.map((m) => m.unique_id)])
   const certain = exposuresOn(manifestPath, reachedIds)
-  const maybe = exposuresOn(manifestPath, [...uncertain, ...untraced].map((m) => m.unique_id)).filter(
+  const unsureIds = [...uncertain, ...untraced].map((m) => m.unique_id)
+  const maybe = exposuresOn(manifestPath, unsettled ? [targetId, ...unsureIds] : unsureIds).filter(
     (e) => !certain.some((c) => c.unique_id === e.unique_id),
   )
   return { models: reached, uncertain, untraced, exposures: certain, uncertain_exposures: maybe, truncated }

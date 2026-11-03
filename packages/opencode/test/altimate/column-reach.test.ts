@@ -329,6 +329,15 @@ describe("columnReach case handling", () => {
     expect(reach.models.map((m) => m.name)).not.toContain("rpt_case")
     expect(reach.uncertain.map((m) => m.name)).toEqual(expect.arrayContaining(["fct_daily", "rpt_case"]))
   })
+
+  test("with the spelling unsettled, a dashboard on the model itself is uncertain too", () => {
+    const value: any = manifest()
+    value.nodes["model.shop.fct_orders"].columns = { revenue: column("revenue"), Revenue: column("Revenue") }
+    value.exposures["exposure.shop.orders_board"] = { name: "orders_board", type: "dashboard", depends_on: { nodes: ["model.shop.fct_orders"] } }
+    const reach = columnReach(manifestFile(value), "fct_orders", "REVENUE")
+    expect(reach.exposures.map((e) => e.unique_id)).not.toContain("exposure.shop.orders_board")
+    expect(reach.uncertain_exposures.map((e) => e.unique_id)).toContain("exposure.shop.orders_board")
+  })
 })
 
 describe("columnReach with an empty column_lineage", () => {

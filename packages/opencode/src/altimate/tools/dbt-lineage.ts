@@ -143,8 +143,10 @@ async function manifestOutsideAdapterProject(manifestPath: string): Promise<stri
   const manifest = real(manifestPath)
   if (!projectDir || !manifest) return `the manifest ${manifestPath} cannot be read`
   const inside = path.relative(projectDir, manifest)
-  if (!inside || inside.startsWith("..") || path.isAbsolute(inside)) return `the manifest ${manifestPath} is not in the dbt project at ${root}`
-  for (let dir = path.dirname(manifest); dir !== projectDir && dir.startsWith(projectDir); dir = path.dirname(dir)) {
+  // Outside the project: the relative path climbs out (`..` as a whole segment, so `..data/` is inside).
+  if (!inside || inside === ".." || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) return `the manifest ${manifestPath} is not in the dbt project at ${root}`
+  // The manifest is inside, so walking up from it reaches the project folder itself.
+  for (let dir = path.dirname(manifest); dir !== projectDir && dir !== path.dirname(dir); dir = path.dirname(dir)) {
     if (fs.existsSync(path.join(dir, "dbt_project.yml"))) return `the manifest ${manifestPath} belongs to the dbt project at ${dir}`
   }
   return undefined
