@@ -265,8 +265,9 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           // Release DuckDB/SQLite file locks once idle, before replying, so a client running `dbt build` next finds the file free.
           // A request that arrives meanwhile waits for the release (see `handle`). Whichever request
           // finishes last releases, so a run that finished while a status was in flight is covered.
-          // A stop is answered at once; the daemon then shuts down.
-          if (inflight === 0 && options.releaseFiles && dirty && !stopRequest) {
+          // A stop is answered at once; the daemon then shuts down, and a run that finishes after it
+          // neither releases nor re-arms (stop() closes the runner).
+          if (inflight === 0 && options.releaseFiles && dirty && !stopRequest && !stopping) {
             dirty = false
             const release = options.releaseFiles().catch(() => {})
             releasing = release
@@ -276,7 +277,10 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           if (socket.destroyed) afterReply?.()
           else socket.write(JSON.stringify(response) + "\n", () => afterReply?.())
         })
-        .finally(arm)
+        // After stop() nothing re-arms the idle timer.
+        .finally(() => {
+          if (!stopping) arm()
+        })
     })
   })
 
@@ -305,7 +309,13 @@ export async function startDaemon(options: DaemonOptions): Promise<Daemon> {
           try {
             chmodSync(file, 0o600)
           } catch (error) {
-            return reject(error)
+            // Leave nothing bound behind: no connection, no listening server, then no socket file.
+            for (const socket of sockets) socket.destroy()
+            server.close(() => {
+              removeSocket(file)
+              reject(error)
+            })
+            return
           }
         }
         resolve()
