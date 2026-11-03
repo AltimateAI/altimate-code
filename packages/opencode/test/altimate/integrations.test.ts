@@ -220,6 +220,19 @@ describe("keychain", () => {
     await expect(del()).rejects.toThrow("exit 51")
   })
 
+  test("a disconnect the keychain refuses keeps the record, so it can be retried", async () => {
+    // The data dir falls back to the suite's temporary XDG location here, never the real one.
+    on(1)
+    await core.updateStore((s) => {
+      s.providers.github = { registered: true, synced: false, account: "me", variant: "token", values: {}, secretFields: ["github_token"], updatedAt: null } as any
+    })
+    await expect(core.disconnect("github")).rejects.toThrow("macOS keychain")
+    expect(core.loadStore().providers.github?.registered).toBe(true)
+    await core.updateStore((s) => {
+      delete s.providers.github
+    })
+  })
+
   test("a failed keychain write is an error", async () => {
     on(1)
     await expect(core.storeSecret("cred:github:github_token", "x")).rejects.toThrow("macOS keychain")

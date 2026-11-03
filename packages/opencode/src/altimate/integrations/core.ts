@@ -974,18 +974,26 @@ async function syncReal(
   }
   if ("reason" in collected) {
     // Nothing local to upload, but a connection already in the workspace may still need attaching to it: the one this machine saved, or one it has no record of.
-    const known = rec?.registered ? (rec.synced && rec.connectionId ? rec.connectionId : undefined) : collected.reason === ALREADY_IN_WORKSPACE ? null : undefined
-    if (known === undefined) return { id, result: "skipped", reason: collected.reason, steps: [] }
+    const knownFor = (r: StoredProvider | undefined) =>
+      r?.registered ? (r.synced && r.connectionId ? r.connectionId : undefined) : collected.reason === ALREADY_IN_WORKSPACE ? null : undefined
+    if (knownFor(rec) === undefined) return { id, result: "skipped", reason: collected.reason, steps: [] }
     try {
-      const visible = await backend.listVisibleConnections(cfg)
-      const own = backend.ownConnections(visible)
-      // The workspace decides whether the connection is usable, not the flag kept here from an earlier check.
-      const found = known == null ? findManaged(own, id) : own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id])
-      // A connection this machine saved that is gone from the workspace is not attached; it was deleted there.
-      if (!found) return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
-      if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
-      step("Connection already in the workspace")
-      return reportWorkspace(await withLock(() => attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id))))
+      // The record, the blocked flag and the workspace's connections are all read under the lock that the attach runs in.
+      return await withLock(async (): Promise<SyncOutcome> => {
+        const store = loadStore()
+        if (store.blocked[id]) return { id, result: "kept_local", steps: [] }
+        const known = knownFor(store.providers[id])
+        if (known === undefined) return { id, result: "skipped", reason: collected.reason, steps: [] }
+        const visible = await backend.listVisibleConnections(cfg)
+        const own = backend.ownConnections(visible)
+        // The workspace decides whether the connection is usable, not the flag kept here from an earlier check.
+        const found = known == null ? findManaged(own, id) : own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id])
+        // A connection this machine saved that is gone from the workspace is not attached; it was deleted there.
+        if (!found) return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
+        if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
+        step("Connection already in the workspace")
+        return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id)))
+      })
     } catch (e) {
       return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
     }
@@ -1073,13 +1081,15 @@ export function disconnect(id: ProviderId): Promise<DisconnectResult> {
 
 function disconnectLocal(id: ProviderId): Promise<boolean> {
   return withLock(async () => {
-    const store = loadStore()
-    const had = Boolean(store.providers[id]?.registered)
-    const rec = store.providers[id]
-    if (rec) store.providers[id] = { detection: rec.detection, updatedAt: new Date().toISOString() }
-    saveStore(store)
+    const rec = loadStore().providers[id]
+    const had = Boolean(rec?.registered)
+    // Secrets go first: if the keychain refuses, the record still says what is stored, so a retry can finish.
     await deleteSecret(id)
     await purgeCredentialSecrets(id, rec)
+    const store = loadStore()
+    const cur = store.providers[id]
+    if (cur) store.providers[id] = { detection: cur.detection, updatedAt: new Date().toISOString() }
+    saveStore(store)
     return (await removeMockRemote(id)) || had
   })
 }
