@@ -186,7 +186,7 @@ const ToolSchemaCommand = cmd({
 })
 
 // The messages an argument problem produces: invalid JSON, a non-object, a schema mismatch (built-in or workspace tool).
-const ARGUMENT_ERROR = /^(?:Tool arguments |The \S+ tool was called with invalid arguments|Arguments do not match the workspace operation schema)/
+const ARGUMENT_ERROR = /^(?:Tool arguments |The \S+ tool was called with invalid arguments|Arguments do not match the workspace operation schema|A workspace skill name is required|A SQL query in \S+ is required)/
 
 const ToolRunCommand = cmd({
   command: "run <name>",

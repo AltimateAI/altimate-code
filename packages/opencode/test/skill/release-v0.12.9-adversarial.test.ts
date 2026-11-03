@@ -482,11 +482,12 @@ describe("v0.12.9 adversarial: rule classify", () => {
       expect(classifyRule(text), text).toEqual({ kind: "ambiguous" })
   })
 
-  test("a text past the length cap is ambiguous at once, even with an explicit choice at its end", () => {
+  test("long texts are read whole and stay fast", () => {
     const start = performance.now()
-    expect(classifyRule("remember ".repeat(50_000) + "always")).toEqual({ kind: "ambiguous" })
-    expect(classifyRule("x ".repeat(1_500) + "save this as a team rule")).toEqual({ kind: "ambiguous" })
-    expect(performance.now() - start).toBeLessThan(15_000)
+    expect(classifyRule("remember ".repeat(50_000) + "always").kind).toBe("rule")
+    expect(classifyRule("remember that ".repeat(30_000) + "x").kind).toBe("memory")
+    expect(classifyRule("x ".repeat(1_500) + "save this as a team rule")).toEqual({ kind: "rule", cue: "asked for a rule" })
+    expect(performance.now() - start).toBeLessThan(5_000)
   })
 
   test("cues across lines are still found", () => {
