@@ -72,7 +72,7 @@ const STRUCTURED_OUTPUT_SCHEMA = {
   type: "object" as const,
   properties: {
     report: { type: "string", description: "The tool's text report" },
-    truncated: { type: "boolean", description: "True when the lineage fields were left out for size; the report stands" },
+    truncated: { type: "boolean", description: "True when the lineage fields were left out for size; the report is kept, shortened if it is too large on its own" },
   },
   required: ["report"],
   additionalProperties: true,
@@ -219,7 +219,6 @@ export async function createServer(options: ServeOptions = {}) {
       const clarified = request.params.name === "answer_commit" ? await clarifyReading(request.params.arguments, result, extra.signal) : undefined
       if (clarified) return { content: [{ type: "text" as const, text: clarified }], isError: true }
       const isError = resultFailed(result)
-      // A tool that builds a structured result (dbt_lineage) hands it over beside its text.
       const structured = result.metadata?.structuredContent
       return {
         content: [{ type: "text" as const, text: result.output }, ...resultLinks(result.metadata)],

@@ -373,6 +373,7 @@ describe("structuredResult over the cap", () => {
     const out = structuredResult("dbt_lineage", { structuredContent: { focus: {} } }, "x".repeat(300_000))
     expect(out.truncated).toBe(true)
     expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(100_000)
+    expect("x".repeat(300_000).startsWith(out.report as string)).toBe(true)
   })
 })
 
