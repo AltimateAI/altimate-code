@@ -70,6 +70,16 @@ const withParallel = testEffect(
   }),
 )
 // altimate_change end
+// altimate_change start — upstream_fix: the background experiment publishes task.background.
+const withBackground = testEffect(
+  LayerNode.buildLayer(root, {
+    replacements: [
+      LayerNode.replace(Config.node, configLayer),
+      LayerNode.replace(RuntimeFlags.node, RuntimeFlags.layer({ experimentalBackgroundSubagents: true })),
+    ],
+  }),
+)
+// altimate_change end
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -101,6 +111,26 @@ describe("tool.registry", () => {
       expect((task?.jsonSchema?.properties as Record<string, unknown> | undefined)?.background).toBeUndefined()
     }),
   )
+
+  // altimate_change start — upstream_fix: the background experiment publishes task.background.
+  withBackground.instance("exposes task background parameter when experimental background subagents are enabled", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agent = yield* Agent.Service
+      const build = yield* agent.get("build")
+      if (!build) throw new Error("build agent not found")
+      const task = (yield* registry.tools({
+        providerID: ProviderID.opencode,
+        modelID: ModelID.make("test"),
+        agent: build,
+      })).find((tool) => tool.id === "task")
+
+      const properties = task?.jsonSchema?.properties as Record<string, { type?: string }> | undefined
+      expect(properties?.background?.type).toBe("boolean")
+      expect(properties?.task_id).toBeDefined()
+    }),
+  )
+  // altimate_change end
 
   withParallel.instance("exposes websearch for non-opencode providers when Parallel is enabled", () =>
     Effect.gen(function* () {

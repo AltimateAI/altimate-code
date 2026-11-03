@@ -12,6 +12,9 @@ import { BatchTool } from "./batch"
 // altimate_change end
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
+// altimate_change start — upstream_fix: the task tool owns the background schema and its env fallback.
+import { backgroundSubagentsEnabled as backgroundSubagentsFromEnv, taskBackgroundJsonSchema } from "./task"
+// altimate_change end
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
 import { WriteTool } from "./write"
@@ -343,9 +346,7 @@ export namespace ToolRegistry {
 
   function backgroundSubagentsEnabled(flags?: ToolRuntimeFlags) {
     if (flags) return flags.experimentalBackgroundSubagents
-    const value = process.env["OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS"]
-    if (value !== undefined) return ["1", "true", "yes"].includes(value.toLowerCase())
-    return Flag.OPENCODE_EXPERIMENTAL
+    return backgroundSubagentsFromEnv()
   }
 
   // altimate_change start — upstream_fix: allow Parallel-enabled websearch for non-opencode providers.
@@ -361,13 +362,18 @@ export namespace ToolRegistry {
   // altimate_change end
 
   function applyRuntimeToolSchemaFlags<T extends Tool.DefWithoutID>(id: string, tool: T, flags?: ToolRuntimeFlags): T {
-    if (id !== "task" || backgroundSubagentsEnabled(flags)) return tool
+    if (id !== "task") return tool
     const schema = tool.jsonSchema
     if (!schema || typeof schema !== "object" || !schema.properties || typeof schema.properties !== "object") {
       return tool
     }
 
     const properties = { ...(schema.properties as Record<string, unknown>) }
+    // The task tool's default contract omits `background`; the experiment flag publishes it.
+    if (backgroundSubagentsEnabled(flags)) {
+      if ("background" in properties || !taskBackgroundJsonSchema) return tool
+      return { ...tool, jsonSchema: { ...schema, properties: { ...properties, background: taskBackgroundJsonSchema } } }
+    }
     if (!("background" in properties)) return tool
     delete properties.background
 
