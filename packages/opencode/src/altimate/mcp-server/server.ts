@@ -91,7 +91,7 @@ export function structuredResult(tool: string, metadata: Record<string, unknown>
   }
   const fields = Object.fromEntries((STRUCTURED_FIELDS[tool] ?? []).filter((key) => key in metadata).map((key) => [key, metadata[key]]))
   // dbt_lineage's text prints the same mappings and edges as `columns` and `edges`: keep its header.
-  const head = tool === "dbt_lineage" && "columns" in fields ? report.split("\nColumn Mappings:")[0]!.trim() : report
+  const head = tool === "dbt_lineage" && "columns" in fields ? report.split(/\n(?:Column Mappings|Lineage Edges):/)[0]!.trim() : report
   const full = { ...fields, report: head }
   return Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES ? full : capReport(report, true)
 }

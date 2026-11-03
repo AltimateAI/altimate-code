@@ -96,9 +96,9 @@ function fakeAdapter(initialized: boolean, lineage?: (params: { model: string; c
   }
 }
 
-function useConfig(autoDiscovered: boolean, dbtIntegration = "corecommand") {
+function useConfig(autoDiscovered: boolean, dbtIntegration = "corecommand", projectRoot = project) {
   dbtAdapterInternals.readConfig = async () => ({
-    projectRoot: project,
+    projectRoot,
     pythonPath: "python3",
     dbtIntegration,
     queryLimit: 500,
@@ -161,9 +161,12 @@ describe("dbt_lineage with the project's dbt adapter", () => {
     const other = path.join(dir, "other")
     await Promise.all([mine, other].map((d) => mkdir(path.join(d, "target"), { recursive: true })))
     const empty = JSON.stringify({ metadata: { adapter_type: "duckdb" }, nodes: {}, sources: {} })
+    await writeFile(path.join(mine, "dbt_project.yml"), "name: mine\n")
     await writeFile(path.join(mine, "target", "manifest.json"), empty)
     await writeFile(path.join(other, "target", "manifest.json"), empty)
-    const root = spyOn(register, "getDbtProjectRoot").mockResolvedValue(mine)
+    // The adapter itself is configured with `mine`, so the tool reads the root the adapter cached.
+    resetDbtAdapter()
+    useConfig(false, "corecommand", mine)
     try {
       const tool = await initTool(DbtLineageTool)
       const fallback = await tool.execute({ model: "customers", manifest_path: path.join(other, "target", "manifest.json") }, ctx)
@@ -180,9 +183,16 @@ describe("dbt_lineage with the project's dbt adapter", () => {
       expect(inner.metadata.structuredContent).toBeUndefined()
       expect(inner.output).toContain("belongs to the dbt project at")
     } finally {
-      root.mockRestore()
       await rm(dir, { recursive: true, force: true })
     }
+  })
+
+  test("include_graph with no manifest to read says so in graph_error", async () => {
+    const tool = await initTool(DbtLineageTool)
+    const result = await tool.execute({ model: "customers", include_graph: true }, ctx)
+    expect(result.metadata.structuredContent).toEqual(TRACE)
+    expect(result.metadata.graph).toBeUndefined()
+    expect(result.metadata.graph_error).toBe(`no manifest at ${path.join(project, "target", "manifest.json")}`)
   })
 
   test("is handed to an MCP client as structuredContent", async () => {

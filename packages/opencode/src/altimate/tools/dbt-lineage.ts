@@ -53,7 +53,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
     include_graph: z
       .boolean()
       .optional()
-      .describe("Also return the model's graph from the manifest (everything upstream and downstream, up to 500 nodes each side, with exposures and tests; graph.upTruncated / graph.truncated are set when a side is cut) in the metadata; for lineage viewers"),
+      .describe("Also return the model's graph from the manifest (everything upstream and downstream, up to 500 nodes each side; the exposures and tests are those of the model and its downstream, upstream tests are not included; graph.upTruncated / graph.truncated are set when a side is cut) in the metadata; for lineage viewers"),
   }),
   async execute(args, ctx) {
     let viaAdapter = await fromAdapter(args.model, args.column, ctx.abort)
@@ -75,7 +75,8 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
           model_unique_id: result.focus.uniqueId,
           confidence: result.confidence,
           structuredContent: result,
-          ...(graph && { graph }),
+          ...(graph?.graph && { graph: graph.graph }),
+          ...(graph?.error && { graph_error: graph.error }),
         },
         output: formatModelLineage(result),
       }
@@ -149,13 +150,13 @@ async function manifestOutsideAdapterProject(manifestPath: string): Promise<stri
   return undefined
 }
 
-/** The model's graph from the compiled manifest, or undefined when there is no manifest to read. */
-function manifestGraph(manifestPath: string, uniqueId: string) {
+/** The model's graph from the compiled manifest, or why there is none. */
+function manifestGraph(manifestPath: string, uniqueId: string): { graph?: ReturnType<typeof lineageGraph>; error?: string } {
   try {
     const manifest = loadRawManifest(manifestPath)
-    return manifest ? lineageGraph(manifest, uniqueId) : undefined
-  } catch {
-    return undefined
+    return manifest ? { graph: lineageGraph(manifest, uniqueId) } : { error: `no manifest at ${manifestPath}` }
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) }
   }
 }
 

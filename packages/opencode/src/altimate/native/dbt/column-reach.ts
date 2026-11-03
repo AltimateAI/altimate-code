@@ -103,12 +103,13 @@ function documentedColumns(node: any): Set<string> {
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
 /**
- * Whether compiled SQL names the column anywhere but as an output alias, comments and string
- * literals aside. Used only to mark a model as one that may read the column.
+ * SQL with comments blanked and string literals (quoted or dollar-quoted) emptied, in one pass so
+ * none can swallow another.
  */
-/** SQL with comments blanked and string literals emptied, in one pass so neither can swallow the other. */
 function stripSql(sql: string): string {
-  return sql.replace(/'(?:[^']|'')*'|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (match) => (match.startsWith("'") ? "''" : " "))
+  return sql.replace(/'(?:[^']|'')*'|\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (match) =>
+    match.startsWith("'") || match.startsWith("$") ? "''" : " ",
+  )
 }
 
 /**
@@ -128,7 +129,9 @@ export function selectsStar(sql: string): boolean {
     if (prev === "(" && next === ")" && /\bcount\s*\($/i.test(before)) continue
     if (prev === "." || next === "" || next === "," || next === ")" || ends.test(after)) return true
     const operand = /[\w"'`\])]/
-    if (operand.test(prev) && (operand.test(next) || next === "(" || /\d/.test(next))) {
+    // A sign on the right operand (`revenue * -1`) belongs to it.
+    const right = after.replace(/^[+-]\s*/, "")[0] ?? ""
+    if (operand.test(prev) && (operand.test(right) || right === "(" || /\d/.test(right))) {
       // An operand before the `*` that is itself a keyword (SELECT, DISTINCT, ALL, STRUCT) is no operand.
       if (/\b(select|distinct|all|struct)$/i.test(before)) return true
       continue
@@ -138,6 +141,10 @@ export function selectsStar(sql: string): boolean {
   return false
 }
 
+/**
+ * Whether compiled SQL names the column anywhere but as an output alias, comments and string
+ * literals aside. Used only to mark a model as one that may read the column.
+ */
 function namesColumn(sql: string, column: string): boolean {
   const code = stripSql(sql)
   const name = escapeRegExp(column)
@@ -204,7 +211,11 @@ export function columnReach(manifestPath: string, model: string, column: string,
   // Columns certainly carried from the traced column, per node.
   const tracked = new Map<string, Set<string>>([[targetId, new Set([column0])]])
   // The same columns with their case kept: consulted only where a parent's names differ by case alone.
-  const trackedExact = new Map<string, Set<string>>([[targetId, new Set([column])]])
+  // The target's own spelling comes from the manifest: the caller's when documented as typed, else
+  // every spelling matching ignoring case, else the caller's.
+  const spellings = Object.entries<any>(target.columns ?? {}).map(([key, col]) => String(col?.name ?? key))
+  const spelled = spellings.includes(column) ? [column] : spellings.filter((name) => name.toLowerCase() === column0)
+  const trackedExact = new Map<string, Set<string>>([[targetId, new Set(spelled.length > 0 ? spelled : [column])]])
   const carries = (parent: string, source: { column: string; exact: string }) =>
     !!tracked.get(parent)?.has(source.column) &&
     (!caseCollides(lookup(parent), source.column) || !!trackedExact.get(parent)?.has(source.exact))
@@ -236,7 +247,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
       unsure.add(id)
       continue
     }
-    const edges: { source: unknown; target: string; lineage_type?: string }[] = Array.isArray(lineage?.column_lineage)
+    const edges: { source: unknown; target: string; lineage_type?: string }[] = lineage?.column_lineage?.length
       ? lineage.column_lineage
       : Object.entries<any>(lineage?.column_dict ?? {}).flatMap(([out, sources]) =>
           (Array.isArray(sources) ? sources : [sources]).map((source) => ({ source, target: out, lineage_type: "direct" })),
@@ -298,8 +309,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
       uncertain.push(entry(id, "reads an ephemeral parent, inlined as a CTE the lineage engine cannot trace through"))
       continue
     }
-    const sql: string = nodes[id]?.compiled_code || nodes[id]?.compiled_sql || ""
-    const named = parents.flatMap((parent) => [...tracked.get(parent)!].filter((col) => namesColumn(sql, col)))
+    const named = parents.flatMap((parent) => [...tracked.get(parent)!].filter((col) => namesColumn(sqlText, col)))
     const shared = named.some((col) => allParents.filter((other) => documentedColumns(lookup(other)).has(col)).length > 1)
     if (ambiguous || named.length > 0 || fromUnsure) {
       if (ambiguous || fromUnsure) unsure.add(id)

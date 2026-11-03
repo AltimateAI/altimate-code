@@ -6,7 +6,7 @@
 
 import * as core from "@altimateai/altimate-core"
 import type { DbtLineageParams, DbtLineageResult } from "../types"
-import { loadRawManifest, findModel, getUniqueId, detectDialect, buildSchemaContext } from "./helpers"
+import { loadRawManifest, findModel, detectDialect, buildSchemaContext } from "./helpers"
 import { lineageGraph } from "./graph"
 
 function unparsed(lineage: Record<string, unknown>): boolean {
@@ -42,23 +42,25 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
   const nodes = manifest.nodes || {}
   const sources = manifest.sources || {}
 
-  // Find target model by name or unique_id; a snapshot by its unique_id (it has compiled SQL too)
   // A model by name or unique_id; a snapshot by unique_id; either by its project-relative file path.
-  const byPath = Object.entries<any>(nodes).find(
-    ([, node]) => ["model", "snapshot"].includes(node?.resource_type) && node.original_file_path === params.model,
-  )
+  const byPath = () =>
+    Object.values<any>(nodes).find(
+      (node) => ["model", "snapshot"].includes(node?.resource_type) && node.original_file_path === params.model,
+    )
   const modelNode =
     findModel(nodes, params.model) ??
     (nodes[params.model]?.resource_type === "snapshot" ? nodes[params.model] : null) ??
-    byPath?.[1] ??
+    byPath() ??
     Object.values<any>(nodes).find((node) => node?.resource_type === "snapshot" && node.name === params.model) ??
     null
   if (!modelNode) {
     return emptyResult([`Model '${params.model}' not found in manifest`])
   }
+  // The id of the node that was selected, not of whatever else in the manifest the request string spells.
   const uniqueId =
-    getUniqueId(nodes, params.model) ??
-    (nodes[params.model] ? params.model : (byPath?.[0] ?? Object.keys(nodes).find((id) => nodes[id] === modelNode)))
+    (typeof modelNode.unique_id === "string" && nodes[modelNode.unique_id] === modelNode ? modelNode.unique_id : undefined) ??
+    Object.keys(nodes).find((id) => nodes[id] === modelNode) ??
+    params.model
   const graph = params.include_graph && uniqueId ? { graph: lineageGraph(manifest, uniqueId) } : {}
 
   // Extract compiled SQL

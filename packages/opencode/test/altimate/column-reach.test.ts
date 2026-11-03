@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, spyOn, test } from "bun:test"
+import * as core from "@altimateai/altimate-core"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -253,6 +254,12 @@ describe("selectsStar", () => {
       "select (a + b) * c as d from t",
       "select a * (b + c) as d from t",
       "select x from a -- select *",
+      "select revenue * -1 as x from t",
+      "select a*-1 as x from t",
+      "select a * + b as x from t",
+      "select a * - (b + c) as x from t",
+      "select $$ * $$ as s from a",
+      "select $q$ select * $q$ as s from a",
     ])
       expect(selectsStar(sql)).toBe(false)
     // A function over the whole row reads every column; only count(*) reads none.
@@ -307,6 +314,30 @@ describe("columnReach with columns that differ only by case", () => {
   })
 })
 
+describe("columnReach case handling", () => {
+  test("a caller's spelling of a column the parent documents twice by case still reaches its readers", () => {
+    const value: any = manifest()
+    value.nodes["model.shop.fct_orders"].columns = { revenue: column("revenue"), Revenue: column("Revenue") }
+    const reach = columnReach(manifestFile(value), "fct_orders", "REVENUE")
+    expect(reach.models.map((m) => m.name)).toContain("fct_daily")
+  })
+})
+
+describe("columnReach with an empty column_lineage", () => {
+  test("falls back to column_dict edges", () => {
+    const spy = spyOn(core, "columnLineage").mockImplementation((() => ({
+      column_lineage: [],
+      column_dict: { revenue: ['"shop"."main"."fct_orders"."revenue"'] },
+    })) as any)
+    try {
+      const reach = columnReach(manifestFile(), "fct_orders", "revenue")
+      expect(reach.models.find((m) => m.name === "fct_daily")?.columns).toEqual(["revenue"])
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
 describe("columnReach on SQL the engine cannot parse", () => {
   test("is untraced, and a dashboard on it is reported apart", () => {
     const value = manifest()
@@ -336,6 +367,19 @@ describe("lineageGraph", () => {
     const cut = lineageGraph({ nodes: wide }, "model.shop.top")
     expect(cut.upTruncated).toBe(true)
     expect(Object.keys(cut.nodes)).toHaveLength(501)
+  })
+
+  test("downstream past 500 nodes is cut and marked; downstream tests are still counted", () => {
+    const wide: Record<string, any> = { "model.shop.top": model("top", [], "select 1", []) }
+    for (let i = 0; i < 600; i++) wide[`model.shop.c${i}`] = model(`c${i}`, ["model.shop.top"], "select 1", [])
+    wide["test.shop.top_unique"] = { resource_type: "test", name: "top_unique", depends_on: { nodes: ["model.shop.top"] } }
+    wide["test.shop.c0_unique"] = { resource_type: "test", name: "c0_unique", depends_on: { nodes: ["model.shop.c0"] } }
+    const cut = lineageGraph({ nodes: wide }, "model.shop.top")
+    expect(cut.truncated).toBe(true)
+    expect(cut.upTruncated).toBe(false)
+    const kept = Object.values(cut.nodes)
+    expect(kept.filter((n) => n.type !== "test")).toHaveLength(501)
+    expect(kept.filter((n) => n.type === "test").map((n) => n.id).sort()).toEqual(["test.shop.c0_unique", "test.shop.top_unique"])
   })
 
   test("everything up and downstream, tests as ids, from dbt's child_map when present", () => {
@@ -421,6 +465,12 @@ describe("structuredResult", () => {
       edges: [],
       report: "Model: x\nID: y",
     })
+    // With no column_dict the text has no Column Mappings section: the edges are cut at their own header.
+    expect(structuredResult("dbt_lineage", { columns: {}, edges: [] }, "Model: x\nID: y\n\nLineage Edges:\n  {}")).toEqual({
+      columns: {},
+      edges: [],
+      report: "Model: x\nID: y",
+    })
   })
 })
 
@@ -436,5 +486,9 @@ describe("dbtLineage", () => {
     const withSnapshot: any = manifest()
     withSnapshot.nodes["snapshot.shop.snap"] = { ...model("snap", ["model.shop.fct_orders"], "select order_id from fct_orders", ["order_id"]), resource_type: "snapshot", unique_id: "snapshot.shop.snap" }
     expect(dbtLineage({ manifest_path: manifestFile(withSnapshot), model: "snap" }).model_unique_id).toBe("snapshot.shop.snap")
+    // A snapshot named like another node's unique_id keeps its own id.
+    withSnapshot.nodes["test.shop.t1"] = { resource_type: "test", name: "t1", depends_on: { nodes: [] } }
+    withSnapshot.nodes["snapshot.shop.odd"] = { ...withSnapshot.nodes["snapshot.shop.snap"], unique_id: "snapshot.shop.odd", name: "test.shop.t1" }
+    expect(dbtLineage({ manifest_path: manifestFile(withSnapshot), model: "test.shop.t1" }).model_unique_id).toBe("snapshot.shop.odd")
   })
 })

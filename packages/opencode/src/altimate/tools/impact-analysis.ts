@@ -61,11 +61,6 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       }
 
       // Step 3: Build the dependency graph and find all downstream models
-      const modelsByName = new Map<string, any>()
-      for (const m of manifest.models) {
-        modelsByName.set(m.name, m)
-      }
-
       // Find all models that depend on the target (direct + transitive)
       const downstream = findDownstream(targetModel.name, manifest.models, targetModel.unique_id)
       const direct = downstream.filter((d) => d.depth === 1)
@@ -73,7 +68,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
 
       // Step 4: Count only tests that reference the target model or its downstream models
       const affectedModelIds = new Set(
-        [targetModel.unique_id, ...downstream.map((d) => d.unique_id ?? modelsByName.get(d.name)?.unique_id)].filter(
+        [targetModel.unique_id, ...downstream.map((d) => d.unique_id)].filter(
           (id): id is string => Boolean(id),
         ),
       )
@@ -147,7 +142,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
           model: targetModel.name,
           column: args.column ?? null,
           change_type: args.change_type,
-          downstream: downstream.map((d) => ({ name: d.name, depth: d.depth, materialized: d.materialized ?? null, path: d.path })),
+          downstream: downstream.map((d) => ({ name: d.name, depth: d.depth, materialized: d.materialized ?? null })),
           exposures,
           ...(reach && { column_reach: reach }),
           ...(reachError && { column_reach_error: reachError }),
