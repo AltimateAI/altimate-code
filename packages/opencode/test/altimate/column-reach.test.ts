@@ -3,7 +3,7 @@ import * as core from "@altimateai/altimate-core"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { columnReach, exposuresOn, parentsNamed, readsWholeRow, selectsStar } from "../../src/altimate/native/dbt/column-reach"
+import { columnReach, exposuresOn, parentsNamed, joinsNaturally, selectsStar } from "../../src/altimate/native/dbt/column-reach"
 import { lineageGraph } from "../../src/altimate/native/dbt/graph"
 import { structuredError, structuredResult } from "../../src/altimate/mcp-server/server"
 import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
@@ -593,51 +593,26 @@ describe("dbtLineage", () => {
   })
 })
 
-describe("columnReach with whole-row reads", () => {
-  test("a parent's row used as a value, or a NATURAL JOIN, is a possible read, never a confident non-reader", () => {
-    for (const sql of [
-      "select order_id, to_json(o) as j from fct_orders o",
-      "select order_id, md5(cast(o as varchar)) as h from fct_orders o",
-      "select a.order_id from fct_orders a natural join other b",
-    ]) {
-      const value = manifest()
-      value.nodes["model.shop.rpt_counts"].compiled_code = sql
-      const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
-      expect(reach.uncertain.map((m) => m.name).sort()).toEqual(["rpt_big_orders", "rpt_counts"])
-      expect(reach.uncertain_exposures.map((e) => e.name)).toEqual(["ops"])
-    }
-  })
-
-  test("a row through a quoted alias, a CTE, a subquery or after another join is a whole-row read", () => {
-    for (const sql of [
-      'select order_id, to_json("o") as j from fct_orders as "o"',
-      "select to_json(o) from other join fct_orders o on other.id = o.order_id",
-      "with c as (select * from fct_orders) select to_json(c) as j from c",
-      "select to_json(s) as j from (select * from fct_orders) s",
-    ])
-      expect(readsWholeRow(sql)).toBe(true)
-  })
-
-  test("import CTEs, aliases and qualified columns are not whole-row reads", () => {
-    for (const sql of [
-      'with fct_orders as (select * from "shop"."main"."fct_orders") select order_id from fct_orders',
-      "with a as (select 1 as x), fct_orders as (select * from fct_orders) select order_id from fct_orders",
-      "with a as (select 1 as x), fct_orders as materialized (select * from fct_orders) select order_id from fct_orders",
-      "select n from (select count(*) as n from fct_orders) fct_orders",
-      "select count(*) fct_orders from fct_orders",
-      'select o.order_id, o.revenue as fct_orders from "shop"."main"."fct_orders" o where o.x > 1',
-      "select fct_orders.order_id from fct_orders join x on fct_orders.id = x.id",
-      "select coalesce(o.a, o.b), cast(o.c as int) from fct_orders o left join other using (id)",
-    ])
-      expect(readsWholeRow(sql)).toBe(false)
-  })
-
-  test("a model that reads the column and a whole row passes the doubt on to its children", () => {
+describe("columnReach with a NATURAL JOIN", () => {
+  test("a NATURAL JOIN is a possible read, never a confident non-reader", () => {
     const value = manifest()
-    value.nodes["model.shop.fct_daily"].compiled_code = "select sum(revenue) as revenue, to_json(o) as j from fct_orders o"
-    value.nodes["model.shop.rpt_json"] = model("rpt_json", ["model.shop.fct_daily"], "select j from fct_daily", ["j"])
+    value.nodes["model.shop.rpt_counts"].compiled_code = "select a.order_id from fct_orders a natural join other b"
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    expect(reach.uncertain.map((m) => m.name).sort()).toEqual(["rpt_big_orders", "rpt_counts"])
+    expect(reach.uncertain_exposures.map((e) => e.name)).toEqual(["ops"])
+  })
+
+  test("a model that reads the column through a NATURAL JOIN passes the doubt on to its children", () => {
+    const value = manifest()
+    value.nodes["model.shop.fct_daily"].compiled_code = "select sum(revenue) as revenue from fct_orders natural left join other"
+    value.nodes["model.shop.rpt_after"] = model("rpt_after", ["model.shop.fct_daily"], "select count(*) as n from fct_daily", ["n"])
     const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
     expect(reach.models.map((m) => m.name)).toContain("fct_daily")
-    expect(reach.uncertain.map((m) => m.name)).toContain("rpt_json")
+    expect(reach.uncertain.map((m) => m.name)).toContain("rpt_after")
+  })
+
+  test("aggregates and casts under their own names, and the word natural elsewhere, are not a NATURAL JOIN", () => {
+    for (const sql of ["select sum(revenue) as revenue, cast(d as date) as d from fct_orders", "select natural_key, 'natural join' as s from fct_orders -- natural join"])
+      expect(joinsNaturally(sql)).toBe(false)
   })
 })

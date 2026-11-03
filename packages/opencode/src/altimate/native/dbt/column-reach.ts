@@ -157,35 +157,13 @@ function namesColumn(sql: string, column: string): boolean {
   return false
 }
 
-const KEYWORD = String.raw`(?:on|using|where|join|left|right|full|inner|outer|cross|natural|semi|anti|group|order|limit|union|except|intersect|minus|having|qualify|window|lateral|as|select|with|pivot|unpivot|tablesample|for|from)\b`
-const NAME = String.raw`(?:[A-Za-z_][\w$]*|"[^"]+"|` + "`[^`]+`" + String.raw`|\[[^\]]+\])`
-const unquote = (name: string) => name.replace(/^["`[]|["`\]]$/g, "").toLowerCase()
-
 /**
- * Whether the SQL reads whole rows, which the lineage engine traces to no column: a NATURAL JOIN, or
- * a row source (a table, its alias, a CTE or a subquery alias; quoted or not) passed whole to a call
- * (`to_json(o)`, `md5(cast(o as varchar))`). Used only to mark a model as one that may read the column;
- * a row source named in a select list by itself is not caught.
+ * Whether the SQL has a NATURAL JOIN, whose join columns the lineage engine reports no edge for.
+ * Limit: a parent's whole row passed as a value (`to_json(o)`) is not seen either; telling a row
+ * source from a column needs the engine's parse, not a pattern.
  */
-export function readsWholeRow(sql: string): boolean {
-  const code = stripSql(sql)
-  if (/\bnatural\s+(?:(?:left|right|full|inner)\s+(?:outer\s+)?)?join\b/i.test(code)) return true
-  const sources = new Set<string>()
-  // FROM/JOIN relations (their last part) and aliases; an alias is never a keyword, so `join` that
-  // follows a relation is left for the next match.
-  const relation = new RegExp(String.raw`\b(?:from|join)\s+(${NAME}(?:\s*\.\s*${NAME})*)(?:\s+(?:as\s+)?(?!${KEYWORD})(${NAME}))?`, "gi")
-  for (const match of code.matchAll(relation)) {
-    sources.add(unquote(match[1]!.split(".").pop()!.trim()))
-    if (match[2]) sources.add(unquote(match[2]))
-  }
-  // CTE names (`name as (`) and subquery aliases (`) name`, `) as name`).
-  for (const match of code.matchAll(new RegExp(String.raw`(${NAME})\s+as\s+(?:not\s+)?(?:materialized\s+)?\(`, "gi"))) sources.add(unquote(match[1]!))
-  for (const match of code.matchAll(new RegExp(String.raw`\)\s*(?:as\s+)?(?!${KEYWORD})(${NAME})`, "gi"))) sources.add(unquote(match[1]!))
-  // A row source alone as a call's argument: after `(` or `,`, before `)`, `,` or a cast's `as <type>`.
-  // A CTE defined after a comma (`, b as (`, `, b as materialized (`) is not an argument.
-  const argument = new RegExp(String.raw`[(,]\s*(${NAME})\s*(?=\)|,|as\s+(?!(?:not\s+)?materialized\b)[A-Za-z])`, "gi")
-  for (const match of code.matchAll(argument)) if (sources.has(unquote(match[1]!))) return true
-  return false
+export function joinsNaturally(sql: string): boolean {
+  return /\bnatural\s+(?:(?:left|right|full|inner)\s+(?:outer\s+)?)?join\b/i.test(stripSql(sql))
 }
 
 function childMapOf(manifest: any): Record<string, string[]> {
@@ -334,13 +312,13 @@ export function columnReach(manifestPath: string, model: string, column: string,
     // The engine has no schema for the tables inside an inlined ephemeral parent, so it reports no
     // edge through it: unknown, not unread, even when another parent's edges are traced.
     const viaEphemeral = parents.some((p) => lookup(p)?.config?.materialized === "ephemeral")
-    const wholeRow = readsWholeRow(sqlText)
+    const natural = joinsNaturally(sqlText)
     if (reads) {
       tracked.set(id, carried)
       trackedExact.set(id, carriedExact)
       // Outputs fed by an unsettled or ephemeral parent, or read through an ambiguous name, stay unsettled.
-      // A whole row read beside the column (`select revenue, to_json(o)`) may carry it on in another output.
-      if (ambiguous || fromUnsure || viaEphemeral || partial || wholeRow) unsure.add(id)
+      // A NATURAL JOIN beside the column may join on it, or carry it on in another output.
+      if (ambiguous || fromUnsure || viaEphemeral || partial || natural) unsure.add(id)
       reached.push({ name: nodes[id]?.name ?? id, unique_id: id, columns: [...carried].sort() })
       continue
     }
@@ -364,11 +342,10 @@ export function columnReach(manifestPath: string, model: string, column: string,
       unsure.add(id)
       continue
     }
-    // A whole row read as one value (`to_json(o)`, a NATURAL JOIN) carries the column with no edge the
-    // engine can report.
-    if (!fromUnsure && !ambiguous && named.length === 0 && wholeRow) {
+    // A NATURAL JOIN may join on the column with no edge the engine can report.
+    if (!fromUnsure && !ambiguous && named.length === 0 && natural) {
       unsure.add(id)
-      uncertain.push(entry(id, "reads whole rows of a parent (a NATURAL JOIN, or the row as a value) the lineage engine cannot trace by column"))
+      uncertain.push(entry(id, "uses a NATURAL JOIN, whose join columns the lineage engine cannot trace"))
       continue
     }
     const shared = named.some((col) => allParents.filter((other) => documentedColumns(lookup(other)).has(col)).length > 1)

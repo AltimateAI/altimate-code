@@ -129,22 +129,35 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
  * installed package is another project). A manifest not written yet (an uncompiled project) is placed
  * by its path, its nearest existing folder's links resolved, so the project's own default path keeps
  * the adapter's answer; one with no dbt project above it at all (a default path resolved against
- * another folder) names no other project either. A link whose target is missing cannot be placed.
+ * another folder) names no other project either. A link to a manifest not written yet is placed where
+ * it points.
  */
 async function manifestOutsideAdapterProject(manifestPath: string): Promise<string | undefined> {
   const { getDbtProjectRoot } = await import("../native/connections/register")
   const root = await getDbtProjectRoot()
   if (!root) return "the dbt adapter has no project root"
+  // The path with its links resolved, the parts not written yet appended; a link to a missing file is
+  // followed to where it points. Undefined past 64 links (a loop).
   const real = (p: string) => {
     const rest: string[] = []
-    for (let at = path.resolve(p); ; at = path.dirname(at)) {
+    let at = path.resolve(p)
+    for (let step = 0; step < 64; step++) {
       try {
         return path.join(fs.realpathSync(at), ...rest)
-      } catch {
-        if (path.dirname(at) === at || fs.lstatSync(at, { throwIfNoEntry: false })?.isSymbolicLink()) return undefined
-        rest.unshift(path.basename(at))
+      } catch {}
+      let link: string | undefined
+      try {
+        if (fs.lstatSync(at).isSymbolicLink()) link = fs.readlinkSync(at)
+      } catch {}
+      if (link !== undefined) {
+        at = path.resolve(path.dirname(at), link)
+        continue
       }
+      if (path.dirname(at) === at) return undefined
+      rest.unshift(path.basename(at))
+      at = path.dirname(at)
     }
+    return undefined
   }
   const projectDir = real(root)
   const manifest = real(manifestPath)

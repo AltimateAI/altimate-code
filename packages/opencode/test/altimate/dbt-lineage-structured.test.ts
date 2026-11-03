@@ -204,10 +204,17 @@ describe("dbt_lineage with the project's dbt adapter", () => {
       await writeFile(path.join(other, "dbt_project.yml"), "name: other\n")
       const elsewhere = await tool.execute({ model: "customers", manifest_path: path.join(other, "missing", "manifest.json") }, ctx)
       expect(elsewhere.metadata.structuredContent).toBeUndefined()
-      // A link to a manifest that is missing cannot be placed, wherever the link sits.
+      // A link to a manifest not written yet is placed where it points: in another project, that one's;
+      // in this one, the adapter answers.
       await symlink(path.join(other, "target", "gone.json"), path.join(mine, "target", "linked.json"))
       const linked = await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "linked.json") }, ctx)
       expect(linked.metadata.structuredContent).toBeUndefined()
+      await symlink(path.join(mine, "target", "real.json"), path.join(mine, "target", "own.json"))
+      const own2 = await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "own.json") }, ctx)
+      expect(own2.metadata.structuredContent).toEqual(TRACE)
+      // A path through a file is not a folder: it is placed, not thrown on.
+      const through = await tool.execute({ model: "customers", manifest_path: path.join(mine, "dbt_project.yml", "manifest.json") }, ctx)
+      expect(through.metadata.structuredContent).toEqual(TRACE)
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
