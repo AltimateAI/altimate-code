@@ -315,11 +315,19 @@ describe("columnReach with columns that differ only by case", () => {
 })
 
 describe("columnReach case handling", () => {
-  test("a caller's spelling of a column the parent documents twice by case still reaches its readers", () => {
+  test("a spelling matching one documented column ignoring case reaches its readers", () => {
+    const reach = columnReach(manifestFile(), "fct_orders", "REVENUE")
+    expect(reach.models.map((m) => m.name)).toContain("fct_daily")
+  })
+
+  test("a spelling matching two columns that differ only by case leaves both columns' readers uncertain, never certain", () => {
     const value: any = manifest()
     value.nodes["model.shop.fct_orders"].columns = { revenue: column("revenue"), Revenue: column("Revenue") }
+    value.nodes["model.shop.rpt_case"] = model("rpt_case", ["model.shop.fct_orders"], 'select "Revenue" as other from fct_orders', ["other"])
     const reach = columnReach(manifestFile(value), "fct_orders", "REVENUE")
-    expect(reach.models.map((m) => m.name)).toContain("fct_daily")
+    expect(reach.models.map((m) => m.name)).not.toContain("fct_daily")
+    expect(reach.models.map((m) => m.name)).not.toContain("rpt_case")
+    expect(reach.uncertain.map((m) => m.name)).toEqual(expect.arrayContaining(["fct_daily", "rpt_case"]))
   })
 })
 

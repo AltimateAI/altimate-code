@@ -212,16 +212,19 @@ export function columnReach(manifestPath: string, model: string, column: string,
   const tracked = new Map<string, Set<string>>([[targetId, new Set([column0])]])
   // The same columns with their case kept: consulted only where a parent's names differ by case alone.
   // The target's own spelling comes from the manifest: the caller's when documented as typed, else
-  // every spelling matching ignoring case, else the caller's.
+  // the one spelling matching ignoring case, else the caller's. Two documented spellings that only
+  // case tells apart, neither typed as given, leave the column unsettled: no reader of either is certain.
   const spellings = Object.entries<any>(target.columns ?? {}).map(([key, col]) => String(col?.name ?? key))
-  const spelled = spellings.includes(column) ? [column] : spellings.filter((name) => name.toLowerCase() === column0)
-  const trackedExact = new Map<string, Set<string>>([[targetId, new Set(spelled.length > 0 ? spelled : [column])]])
+  const matches = spellings.filter((name) => name.toLowerCase() === column0)
+  const unsettled = !spellings.includes(column) && matches.length > 1
+  const spelled = spellings.includes(column) ? [column] : unsettled ? [] : matches.length > 0 ? matches : [column]
+  const trackedExact = new Map<string, Set<string>>([[targetId, new Set(spelled)]])
   const carries = (parent: string, source: { column: string; exact: string }) =>
     !!tracked.get(parent)?.has(source.column) &&
     (!caseCollides(lookup(parent), source.column) || !!trackedExact.get(parent)?.has(source.exact))
   // Nodes whose outputs are unknown (untraced, or read through an ambiguous name): their children
   // may read the column too. A node that only filters on it was traced and carries nothing on.
-  const unsure = new Set<string>()
+  const unsure = new Set<string>(unsettled ? [targetId] : [])
   const reached: ColumnReachModel[] = []
   const uncertain: ColumnReachUnsure[] = []
   const untraced: ColumnReachUnsure[] = []
