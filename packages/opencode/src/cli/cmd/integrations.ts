@@ -335,28 +335,6 @@ const OpenTokenPageCommand = cmd({
   },
 })
 
-const TokenCommand = cmd({
-  command: "token <provider>",
-  describe: "print the stored local credential for local tools",
-  builder: (yargs: Argv) => yargs.positional("provider", { type: "string", choices: core.PROVIDER_IDS, demandOption: true }).option("json", jsonOption),
-  handler: async (args) => {
-    try {
-      const id = parseProviders(args.provider, false)[0]
-      const r = await core.getToken(id)
-      if (r.status !== "ok") {
-        if (args.json) json({ provider: id, status: r.status, message: r.message })
-        else console.error(r.message)
-        process.exitCode = 1
-        return
-      }
-      if (args.json) return json({ provider: id, status: "ok", token: r.token, expiresAt: r.expiresAt })
-      console.log(r.token)
-    } catch (e) {
-      fail(e, args.json)
-    }
-  },
-})
-
 export const IntegrationsCommand = cmd({
   command: "integrations",
   describe: "connect GitHub, Jira and Linear and sync them to your workspace",
@@ -374,7 +352,6 @@ export const IntegrationsCommand = cmd({
       .command(SyncCommand)
       .command(policyCommand("block"))
       .command(policyCommand("unblock"))
-      .command(TokenCommand)
       .command(DisconnectCommand)
       .demandCommand(),
   async handler() {},

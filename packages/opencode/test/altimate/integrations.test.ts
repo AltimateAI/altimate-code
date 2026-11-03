@@ -1,6 +1,7 @@
 import { afterAll, afterEach, describe, expect, spyOn, test, beforeEach } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
+import childProcess from "node:child_process"
 import path from "node:path"
 import { IntegrationsCore as core } from "../../src/altimate/integrations/core"
 import { skipsSynced } from "../../src/cli/cmd/integrations"
@@ -167,43 +168,62 @@ describe("expiry", () => {
 
 })
 
-describe("token", () => {
-  const fixHint = (m: string, id: string) => {
-    expect(m).toContain(`altimate integrations update ${id}`)
-    expect(m).toContain(`connect ${id} --local-only`)
+describe("keychain", () => {
+  const realDir = process.env.ALTIMATE_INTEGRATIONS_DIR
+  const platform = Object.getOwnPropertyDescriptor(process, "platform")!
+  const calls: { cmd: string; args: string[]; input?: string }[] = []
+  let spawn: ReturnType<typeof spyOn> | undefined
+  const on = (status = 0, stdout = "") => {
+    delete process.env.ALTIMATE_INTEGRATIONS_DIR
+    Object.defineProperty(process, "platform", { value: "darwin" })
+    calls.length = 0
+    spawn = spyOn(childProcess, "spawnSync").mockImplementation(((cmd: string, args: string[], opts: any) => {
+      calls.push({ cmd, args, input: opts?.input })
+      return { status, stdout, stderr: "" }
+    }) as any)
   }
-
-  test("not connected, and no stored credential, say how to fix it", async () => {
-    const none = await core.getToken("github")
-    expect(none.status).toBe("not_connected")
-    await connected("github", null, { synced: true, connectionId: 7 }, null)
-    const r = await core.getToken("github")
-    expect(r.status).toBe("unavailable")
-    expect((r as { message: string }).message).toContain("saved in your workspace only")
-    expect((r as { message: string }).message).toContain("connect github --local-only")
-    await connected("jira", null, {}, null)
-    fixHint(((await core.getToken("jira")) as { message: string }).message, "jira")
+  afterEach(() => {
+    spawn?.mockRestore()
+    spawn = undefined
+    process.env.ALTIMATE_INTEGRATIONS_DIR = realDir
+    Object.defineProperty(process, "platform", platform)
   })
 
-  test("returns the stored token while fresh", async () => {
-    await connected("linear", new Date(Date.now() + 3_600_000).toISOString())
-    expect(await core.getToken("linear")).toMatchObject({ status: "ok", token: "tok_linear" })
+  test("a secret goes to security on stdin, quoted, and never in argv", async () => {
+    on()
+    await core.storeSecret("cred:github:github_token", 'a"b\\c')
+    expect(calls).toHaveLength(1)
+    expect(calls[0].cmd).toBe("security")
+    expect(calls[0].args).toEqual(["-i"])
+    expect(calls[0].input).toBe('add-generic-password -U -s "altimate-code-integrations" -a "cred:github:github_token" -w "a\\"b\\\\c"\n')
   })
 
-  test("a rejected credential is reported with the fix", async () => {
-    await connected("jira", null, { rejected: true })
-    const r = await core.getToken("jira")
-    expect(r.status).toBe("failed")
-    fixHint((r as { message: string }).message, "jira")
+  test("read and delete use the keychain by account", async () => {
+    on(0, "stored-value\n")
+    expect(core.readSecret("cred:github:github_token")).toBe("stored-value")
+    await core.deleteSecret("cred:github:github_token")
+    expect(calls.map((c) => [c.cmd, ...c.args])).toEqual([
+      ["security", "find-generic-password", "-s", "altimate-code-integrations", "-a", "cred:github:github_token", "-w"],
+      ["security", "delete-generic-password", "-s", "altimate-code-integrations", "-a", "cred:github:github_token"],
+    ])
   })
 
-  test("an expired token, or one inside the 60 second margin, is reported", async () => {
-    await connected("jira", new Date(Date.now() - 1000).toISOString())
-    expect((await core.getToken("jira")).status).toBe("failed")
-    await connected("github", new Date(Date.now() + 30_000).toISOString())
-    const r = await core.getToken("github")
-    expect(r.status).toBe("failed")
-    fixHint((r as { message: string }).message, "github")
+  test("a failed keychain write is an error", async () => {
+    on(1)
+    await expect(core.storeSecret("cred:github:github_token", "x")).rejects.toThrow("macOS keychain")
+  })
+
+  test("an account id outside the allowed characters is refused before security runs", async () => {
+    on()
+    for (const id of ["a\nadd-generic-password -a x", 'a"b', "a b", ""]) await expect(core.storeSecret(id, "x")).rejects.toThrow("not valid")
+    expect(calls).toEqual([])
+  })
+})
+
+describe("state file", () => {
+  test("is written for the owner only", () => {
+    core.saveStore({ blocked: {}, providers: {} })
+    expect(fs.statSync(path.join(tmp, "integrations.json")).mode & 0o777).toBe(0o600)
   })
 })
 
@@ -437,7 +457,7 @@ describe("workspace connections", () => {
     expect(writes()[0].body.config).toEqual({ github_token: "gh_local_tok", expires_at: "2031-01-02T03:04:05.000Z" })
     expect(core.readSecret(core.secretKey("cred", "github", "github_token"))).toBeUndefined()
     expect(core.readSecret("github")).toBeUndefined()
-    expect((await core.getToken("github")).status).toBe("unavailable")
+    expect(core.readSecret("github")).toBeUndefined()
   })
 
   test("a sync that lost the race to Keep local uploads nothing", async () => {
@@ -804,12 +824,12 @@ describe("jira domain and cli flags", () => {
       expect(core.normaliseJiraDomain(v)).toBe("acme")
   })
 
-  test("the browser sign-in flags are gone and token explains a missing connection", () => {
+  test("the browser sign-in flags are gone and the token command is removed", () => {
     const cli = path.join(import.meta.dir, "../../src/index.ts")
     const run = (...args: string[]) =>
       Bun.spawnSync(["bun", "run", cli, "integrations", ...args], { env: { ...process.env, ALTIMATE_INTEGRATIONS_DIR: tmp, ALTIMATE_INTEGRATIONS_MOCK: "1" }, stdout: "pipe", stderr: "pipe" })
     const all = (r: ReturnType<typeof run>) => r.stderr.toString() + r.stdout.toString()
-    expect(all(run("token", "github"))).toContain("not connected")
+    expect(all(run("--help"))).not.toContain("token <provider>")
     const help = all(run("connect", "--help"))
     for (const flag of ["--oauth", "--reauth", "--no-frontend", "--port"]) expect(help).not.toContain(flag)
     expect(help).toContain("--local-only")
@@ -1040,6 +1060,77 @@ describe("credentials flow", () => {
     })
   })
 
+  describe("where Jira values may come from", () => {
+    const JIRA_ENV = ["JIRA_PAT_TOKEN", "JIRA_PERSONAL_TOKEN", "JIRA_PAT", "JIRA_BASE_URL", "JIRA_URL", "JIRA_API_TOKEN", "ATLASSIAN_API_TOKEN"]
+    const project = fs.mkdtempSync(path.join(os.tmpdir(), "integ-project-"))
+    let cwd: ReturnType<typeof spyOn> | undefined
+    const plant = (env: Record<string, string>) => {
+      fs.writeFileSync(path.join(project, ".mcp.json"), JSON.stringify({ mcpServers: { jira: { command: "npx", args: ["mcp-jira"], env } } }))
+      cwd = spyOn(process, "cwd").mockReturnValue(project)
+    }
+    const userMcp = (env: Record<string, string>) => fs.writeFileSync(path.join(home, ".claude.json"), JSON.stringify({ mcpServers: { jira: { command: "npx", args: ["mcp-jira"], env } } }))
+    const jiraCli = () => {
+      fs.mkdirSync(path.join(home, ".config/.jira"), { recursive: true })
+      fs.writeFileSync(path.join(home, ".config/.jira/.config.yml"), `server: ${base()}\nlogin: me@corp.example\n`)
+    }
+    afterEach(() => {
+      cwd?.mockRestore()
+      cwd = undefined
+      fs.rmSync(path.join(project, ".mcp.json"), { force: true })
+      for (const k of JIRA_ENV) delete process.env[k]
+    })
+
+    test("a planted project file cannot point the user's token at another host", async () => {
+      plant({ JIRA_URL: base() })
+      process.env.JIRA_PAT_TOKEN = GOOD
+      expect((await creds.describeFields("jira", "server")).fields.map((f) => [f.name, f.value, f.hasValue])).toEqual([["jiraBaseUrl", null, false], ["jiraPatToken", null, true]])
+      expect(await creds.detectedConfig("jira")).toEqual({ reason: "Missing: Site, Email, API token" })
+      const r = await creds.connectCredentials({ id: "jira", variant: "server", localOnly: true })
+      expect(r.status).toBe("missing_fields")
+      expect(calls.filter((c) => c.path.includes("myself"))).toEqual([])
+    })
+
+    test("a token planted in a project file is not used", async () => {
+      plant({ JIRA_PAT_TOKEN: GOOD })
+      process.env.JIRA_BASE_URL = base()
+      expect((await creds.detectedConfig("jira"))).toEqual({ reason: "Missing: Personal access token" })
+      expect(calls).toEqual([])
+    })
+
+    test("a project file still counts as present, without being syncable", () => {
+      plant({ JIRA_PAT_TOKEN: GOOD })
+      const found = core.detectFromClaudeConfigs(home, project).find((d) => d.id === "jira")!
+      expect([found.source.kind, found.syncable]).toEqual(["mcp-remote", false])
+    })
+
+    test("a site from one source is not paired with a token from another", async () => {
+      jiraCli()
+      userMcp({ JIRA_PAT_TOKEN: GOOD })
+      expect(await creds.detectedConfig("jira")).toEqual({ reason: "Missing: Personal access token" })
+      fs.rmSync(path.join(home, ".config"), { recursive: true, force: true })
+      userMcp({ JIRA_URL: base() })
+      process.env.JIRA_PAT_TOKEN = GOOD
+      expect(await creds.detectedConfig("jira")).toEqual({ reason: "Missing: Personal access token" })
+    })
+
+    test("a site and a token from the same source are used together", async () => {
+      process.env.JIRA_BASE_URL = base()
+      process.env.JIRA_PAT_TOKEN = GOOD
+      expect(await creds.detectedConfig("jira")).toMatchObject({ config: { jiraBaseUrl: base(), jiraPatToken: GOOD } })
+      delete process.env.JIRA_BASE_URL
+      delete process.env.JIRA_PAT_TOKEN
+      userMcp({ JIRA_URL: base(), JIRA_PAT_TOKEN: GOOD })
+      expect(await creds.detectedConfig("jira")).toMatchObject({ config: { jiraBaseUrl: base(), jiraPatToken: GOOD } })
+    })
+
+    test("a site the user typed pairs with a detected token", async () => {
+      process.env.JIRA_PAT_TOKEN = GOOD
+      await creds.setDraft("jira", "jiraBaseUrl", base())
+      const f = await creds.describeFields("jira", "server")
+      expect(f.fields.map((x) => [x.name, x.value, x.hasValue])).toEqual([["jiraBaseUrl", base(), true], ["jiraPatToken", null, true]])
+    })
+  })
+
   describe("validators", () => {
     const cases: [core.ProviderId, string, Record<string, string>, Record<string, string>, string][] = [
       ["github", "token", { github_token: GOOD }, { github_token: "bad" }, "octo"],
@@ -1091,7 +1182,7 @@ describe("credentials flow", () => {
       expect(JSON.stringify(rec)).not.toContain(GOOD)
       const p = core.status().providers[0]
       expect([p.state, p.sync, p.account, p.expiresAt]).toEqual(["connected", "blocked", "octo", "2031-01-02T03:04:05.000Z"])
-      expect((await core.getToken("github")).status).toBe("ok")
+      expect(core.readSecret("github")).toBeTruthy()
     })
 
     test("a 2xx without an account is not accepted as a valid credential", async () => {
@@ -1211,7 +1302,7 @@ describe("credentials flow", () => {
         const r = await creds.connectCredentials({ id: "github", localOnly: true })
         expect([r.status, r.sync, core.isBlocked("github")]).toEqual(["connected", "local", true])
         expect(r.message).toContain("could not be removed from the workspace")
-        expect((await core.getToken("github")).status).toBe("ok")
+        expect(core.readSecret("github")).toBeTruthy()
       } finally {
         failing.mockRestore()
       }
@@ -1292,7 +1383,7 @@ describe("credentials flow", () => {
         expect(r.message).toContain("not verified yet")
         const p = core.status().providers[0]
         expect([p.state, p.note]).toEqual(["connected", "not verified yet, the provider could not be reached"])
-        expect((await core.getToken("github")).status).toBe("ok")
+        expect(core.readSecret("github")).toBeTruthy()
       } finally {
         down.stop(true)
         process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = base()
@@ -1483,7 +1574,7 @@ describe("credentials flow", () => {
       expect(core.readSecret(core.secretKey("cred", "github", "github_token"))).toBe(GOOD)
       const s = await core.statusRemote()
       expect([s.providers[0].state, s.providers[0].sync]).toEqual(["connected", "blocked"])
-      expect((await core.getToken("github")).status).toBe("ok")
+      expect(core.readSecret("github")).toBeTruthy()
     })
 
     test("keeping a synced connection local while signed out changes nothing", async () => {
@@ -1538,7 +1629,7 @@ describe("credentials flow", () => {
       expect([r.status, r.sync]).toEqual(["connected", "local"])
       expect(api.state.rows.filter((x) => !x.deleted)).toHaveLength(0)
       expect(core.isBlocked("github")).toBe(true)
-      expect((await core.getToken("github")).status).toBe("ok")
+      expect(core.readSecret("github")).toBeTruthy()
     })
 
     test("Keep local on a local record finds a workspace copy uploaded after it was recorded", async () => {
@@ -1578,7 +1669,7 @@ describe("credentials flow", () => {
       api.state.fail = { status: 500, body: { detail: "boom" } }
       const o = await core.syncProvider("github")
       expect(o.result).toBe("failed")
-      expect((await core.getToken("github")).status).toBe("ok")
+      expect(core.readSecret("github")).toBeTruthy()
     })
 
     test("a hand-made connection cannot be updated from here", async () => {
@@ -1622,7 +1713,7 @@ describe("credentials flow", () => {
       await token("github", "github_token", "bad_token_0000")
       expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("rejected")
       expect(core.status().providers[0].state).toBe("connected")
-      expect((await core.getToken("github")).status).toBe("ok")
+      expect(core.readSecret("github")).toBeTruthy()
       expect(core.readSecret(core.secretKey("draft", "github", "github_token"))).toBeUndefined()
     })
 
@@ -1716,6 +1807,22 @@ describe("attachToIntegrations", () => {
     const out = core.attachToIntegrations([{ id: "jira", tools: [{ key: "t" }], connection_id: null, connection_ids: ["3"] }, other], "jira", 9, keys)
     expect(out[0]).toEqual({ id: "jira", tools: [{ key: "t" }], connection_id: "9", connection_ids: ["3", "9"] })
     expect(out[1]).toBe(other)
+  })
+})
+
+describe("attach keeps another connection", () => {
+  test("an entry on another connection keeps it, an empty one or this one is set", () => {
+    const keys: string[] = []
+    const other = core.attachToIntegrations([{ id: "jira", tools: [], connection_id: "3" }], "jira", 9, keys)
+    expect(other[0].connection_id).toBe("3")
+    expect(core.attachToIntegrations([{ id: "jira", tools: [], connection_id: null }], "jira", 9, keys)[0].connection_id).toBe("9")
+    expect(core.attachToIntegrations([{ id: "jira", tools: [], connection_id: "9" }], "jira", 9, keys)[0].connection_id).toBe("9")
+    const shared = core.attachToIntegrations([{ id: "jira", tools: [], connection_id: "3", connection_ids: ["3"] }], "jira", 9, keys)[0]
+    expect([shared.connection_id, shared.connection_ids]).toEqual(["3", ["3", "9"]])
+  })
+  test("detach leaves an entry on another connection alone", () => {
+    const out = core.detachFromIntegrations([{ id: "jira", tools: [], connection_id: "3" }], 9)
+    expect(out[0].connection_id).toBe("3")
   })
 })
 

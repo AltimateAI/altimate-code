@@ -7,7 +7,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { AsyncLocalStorage } from "node:async_hooks"
-import { spawnSync } from "node:child_process"
+import childProcess, { spawnSync } from "node:child_process"
 import { Flock } from "@opencode-ai/core/util/flock"
 import { Global } from "../../global"
 import { IntegrationsBackend as backend } from "./backend"
@@ -164,7 +164,7 @@ export function loadStore(): Store {
   return { blocked: raw.blocked ?? {}, providers: raw.providers ?? {} }
 }
 export function saveStore(store: Store) {
-  writeJson(statePath(), store)
+  writeJson(statePath(), store, 0o600)
 }
 
 // ---------------------------------------------------------------- secrets
@@ -184,9 +184,10 @@ export async function storeSecret(id: string, secret: string) {
   // A token is one line. A line break cannot be quoted for `security -i` either, so such a value is refused rather than parked in a file.
   if (/[\r\n]/.test(secret)) throw new Error("The value is not a token: it contains a line break")
   if (useKeychain()) {
+    if (!/^[A-Za-z0-9:._-]+$/.test(id)) throw new Error("The credential id is not valid")
     // The secret goes to `security -i` on stdin so it never shows in the process list. On macOS it is kept in the keychain only; a failed write is an error, never a plaintext file.
     const quote = (v: string) => `"${v.replace(/[\\"]/g, "\\$&")}"`
-    const r = spawnSync("security", ["-i"], {
+    const r = childProcess.spawnSync("security", ["-i"], {
       input: `add-generic-password -U -s ${quote(KEYCHAIN_SERVICE)} -a ${quote(id)} -w ${quote(secret)}\n`,
       stdio: ["pipe", "ignore", "ignore"],
       timeout: KEYCHAIN_TIMEOUT_MS,
@@ -202,7 +203,7 @@ export async function storeSecret(id: string, secret: string) {
 }
 export function readSecret(id: string): string | undefined {
   if (useKeychain()) {
-    const r = spawnSync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id, "-w"], {
+    const r = childProcess.spawnSync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id, "-w"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: KEYCHAIN_TIMEOUT_MS,
@@ -212,7 +213,7 @@ export function readSecret(id: string): string | undefined {
   return readJson<Record<string, string>>(secretsPath(), {})[id]
 }
 export async function deleteSecret(id: string) {
-  if (useKeychain()) spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], { stdio: "ignore", timeout: KEYCHAIN_TIMEOUT_MS })
+  if (useKeychain()) childProcess.spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], { stdio: "ignore", timeout: KEYCHAIN_TIMEOUT_MS })
   await withLock(() => {
     const all = readJson<Record<string, string>>(secretsPath(), {})
     if (id in all) {
@@ -232,12 +233,10 @@ export async function purgeCredentialSecrets(id: ProviderId, rec?: StoredProvide
   })
 }
 
-/** Claude MCP server maps that apply here: user level, this project, and the project `.mcp.json`. */
+/** Claude MCP server maps the user set up themselves: user level and this project's entry in ~/.claude.json. A repository's own `.mcp.json` is not among them, as whoever controls the repository can write it; it only signals presence in `detectFromClaudeConfigs`. */
 export function mcpServerMaps(home: string, cwd: string): Record<string, McpServer>[] {
   const claude = readJson<any>(path.join(home, ".claude.json"), {})
-  const maps: Record<string, McpServer>[] = [claude.mcpServers ?? {}, claude.projects?.[cwd]?.mcpServers ?? {}]
-  maps.push(readJson<any>(path.join(cwd, ".mcp.json"), {}).mcpServers ?? {})
-  return maps
+  return [claude.mcpServers ?? {}, claude.projects?.[cwd]?.mcpServers ?? {}]
 }
 export const providerMatchesMcp = (id: ProviderId, name: string, server: McpServer) =>
   MCP_MATCHERS[id].test([name, server.command, server.url, ...(server.args ?? [])].filter(Boolean).join(" "))
@@ -258,6 +257,8 @@ const MCP_MATCHERS: Record<ProviderId, RegExp> = {
   linear: /linear/i,
 }
 
+const PROJECT_MCP_ORIGIN = ".mcp.json"
+
 /** Detections from parsed Claude MCP server maps. Pure: reads nothing from disk. */
 export function detectFromMcpServers(servers: Record<string, McpServer>, origin: string): Detection[] {
   const found: Detection[] = []
@@ -275,6 +276,14 @@ export function detectFromMcpServers(servers: Record<string, McpServer>, origin:
           account: null,
           syncable: false,
           note: "usable in Claude; connect in browser to sync",
+        })
+      } else if (hasToken && origin === PROJECT_MCP_ORIGIN) {
+        found.push({
+          id,
+          source: { kind: "mcp-remote", label: `Claude MCP (${name})` },
+          account: null,
+          syncable: false,
+          note: "usable in Claude; its token is not read from a repository file, set it in your environment to sync",
         })
       } else if (hasToken) {
         found.push({
@@ -297,7 +306,7 @@ export function detectFromClaudeConfigs(home: string, cwd: string): Detection[] 
   out.push(...detectFromMcpServers(claude.projects?.[cwd]?.mcpServers ?? {}, "~/.claude.json"))
   try {
     const project = JSON.parse(fs.readFileSync(path.join(cwd, ".mcp.json"), "utf8"))
-    out.push(...detectFromMcpServers(project.mcpServers ?? {}, ".mcp.json"))
+    out.push(...detectFromMcpServers(project.mcpServers ?? {}, PROJECT_MCP_ORIGIN))
   } catch {}
   return out
 }
@@ -843,7 +852,7 @@ const READ_ONLY_TOOL = /(^|_)(get|list|search)_/
 
 /**
  * The workspace's integrations list with the connection attached to the provider's entry. An
- * existing entry keeps its tools; a new one enables only the read-only tools. Other entries pass
+ * existing entry keeps its tools and any other primary connection; a new one enables only the read-only tools. Other entries pass
  * through untouched.
  */
 export function attachToIntegrations(
@@ -858,7 +867,8 @@ export function attachToIntegrations(
   }
   return entries.map((e) => {
     if (String(e.id) !== providerIntegrationId) return e
-    const next = { ...e, connection_id: conn }
+    // An entry already wired to another connection keeps it; only an empty one, or one on this connection, is set.
+    const next = e.connection_id == null || String(e.connection_id) === conn ? { ...e, connection_id: conn } : { ...e }
     if (Array.isArray(e.connection_ids) && !e.connection_ids.map(String).includes(conn)) next.connection_ids = [...e.connection_ids, conn]
     return next
   })
@@ -1077,25 +1087,6 @@ export async function removeManaged(id: ProviderId, config: backend.BackendConfi
     await backend.deleteConnection(config, c.id)
   }
   return { removed: managed.length, detachError }
-}
-
-export type TokenOutcome =
-  | { status: "ok"; token: string; expiresAt: string | null }
-  | { status: "not_connected" | "unavailable" | "failed"; message: string }
-
-/** The stored local credential for local tools; it says how to fix it when there is none or it was refused. */
-export async function getToken(id: ProviderId): Promise<TokenOutcome> {
-  const name = PROVIDER_NAMES[id]
-  const rec = loadStore().providers[id]
-  const fix = rec?.synced
-    ? `It is saved in your workspace only. Run: altimate integrations update ${id}, or connect ${id} --local-only to move it to this machine`
-    : `Run: altimate integrations update ${id} (or connect ${id} --local-only)`
-  if (!rec?.registered) return { status: "not_connected", message: `${name} is not connected. Run: altimate integrations connect ${id} --local-only` }
-  const secret = readSecret(id)
-  if (!secret) return { status: "unavailable", message: `No ${name} credential is stored on this machine. ${fix}` }
-  if (rec.rejected) return { status: "failed", message: `${name} rejected the stored credential. ${fix}` }
-  if (isExpired(rec.expiresAt)) return { status: "failed", message: `The stored ${name} credential has expired. ${fix}` }
-  return { status: "ok", token: secret, expiresAt: rec.expiresAt ?? null }
 }
 
 export * as IntegrationsCore from "./core"

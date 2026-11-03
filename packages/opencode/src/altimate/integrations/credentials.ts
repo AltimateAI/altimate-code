@@ -238,6 +238,7 @@ export async function resolve(id: ProviderId, variantId?: string, offline = fals
   const values: Record<string, string> = {}
   const origin: Resolved["origin"] = {}
   const detected: Source[] = []
+  const foundFrom: Record<string, Source> = {}
   for (const f of def.fields) {
     const draft = detectedOnly ? undefined : f.secret ? core.readSecret(core.secretKey("draft", id, f.name)) : rec?.drafts?.[f.name]
     if (draft) {
@@ -255,10 +256,30 @@ export async function resolve(id: ProviderId, variantId?: string, offline = fals
     if (found) {
       values[f.name] = found.value
       origin[f.name] = "detected"
+      foundFrom[f.name] = found.source
       detected.push(found.source)
     }
   }
+  if (id === "jira") dropMismatchedJiraToken(def, values, origin, detected, foundFrom)
   return { id, variant: def.id, variants, def, values, origin, detected }
+}
+
+const JIRA_SITE_FIELDS = new Set(["jiraDomain", "jiraBaseUrl"])
+/** The environment and jira-cli's own config are one place (jira-cli reads its token from the environment); each MCP server is its own. */
+const sourceGroup = (s: Source) => (s.kind === "mcp" ? `mcp:${s.label}` : "machine")
+const sameSource = (a: Source, b: Source) => sourceGroup(a) === sourceGroup(b)
+
+/** A site found on this machine is only paired with a token found in the same place, so a token is never sent to a site that came from somewhere else. A typed or stored site is the user's own and pairs with any token. */
+function dropMismatchedJiraToken(def: VariantDef, values: Record<string, string>, origin: Resolved["origin"], detected: Source[], foundFrom: Record<string, Source>) {
+  const site = def.fields.find((f) => JIRA_SITE_FIELDS.has(f.name) && foundFrom[f.name])
+  if (!site) return
+  for (const f of def.fields) {
+    const from = foundFrom[f.name]
+    if (!f.secret || !from || sameSource(from, foundFrom[site.name])) continue
+    delete values[f.name]
+    delete origin[f.name]
+    detected.splice(detected.indexOf(from), 1)
+  }
 }
 
 /** The config to upload for a provider found on this machine, read the same way connect reads it. Typed-in drafts and stored copies are never part of it. */

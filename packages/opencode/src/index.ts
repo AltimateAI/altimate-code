@@ -107,6 +107,7 @@ const CLI_COMMAND_NAMES = new Set([
   "review", "pr", "session", "plugin", "plug", "db", "trace", "recap", "skill", "check", "completion", "tool",
   // altimate_change start — attribute learning commands to their CLI entry point
   "learn",
+  "integrations",
   // altimate_change end
   // registered conditionally below (workspace / local-install builds)
   "link", "workspace", "workspace-serve", "workspace-client",
