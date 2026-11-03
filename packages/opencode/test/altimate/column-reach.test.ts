@@ -964,11 +964,14 @@ describe("columnReach through Snowflake IDENTIFIER()", () => {
       "select identifier('revenue') from t",
       `select IDENTIFIER('o."REVENUE"') from t`,
       "select identifier(/* source column */ 'revenue') as copied from t",
+      `select identifier('o."net.revenue"') from t`,
       "select identifier /* c */ ( -- why\n 'revenue') from t",
       "select identifier($col) from t",
       "select identifier(:col) from t",
     ])
       expect(namesThroughIdentifier(sql, ["revenue"])).toBe(true)
+    // A tracked column whose quoted name holds a dot.
+    expect(namesThroughIdentifier(`select identifier('"net.amount"') from t`, ["net.amount"])).toBe(true)
     expect(namesThroughIdentifier("select identifier('order_id') from t", ["revenue"])).toBe(false)
   })
 })

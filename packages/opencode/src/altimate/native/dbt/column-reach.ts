@@ -213,8 +213,10 @@ export function namesThroughIdentifier(sql: string, columns: string[]): boolean 
     const call = IDENTIFIER_CALL.exec(sql.slice(match.index!, match.index! + NATURAL_WINDOW))
     if (!call) continue
     if (call[2]) return true
-    const name = call[1]!.replace(/''/g, "'").split(".").pop()!.trim().replace(/^"|"$/g, "")
-    if (wanted.has(name.toLowerCase())) return true
+    // Any mention of the column in the string counts (qualified, quoted, with dots in a quoted name):
+    // telling those apart needs a parse, and a wider match only adds doubt.
+    const text = call[1]!.replace(/''/g, "'").toLowerCase()
+    if ([...wanted].some((column) => text.includes(column))) return true
   }
   return false
 }
