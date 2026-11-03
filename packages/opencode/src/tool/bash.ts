@@ -21,6 +21,9 @@ import { Plugin } from "@/plugin"
 import { Global } from "@/global"
 // altimate_change start — upstream_fix: resolve literal shell paths for permission matching
 import type { Node } from "web-tree-sitter"
+import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { Wildcard } from "@opencode-ai/core/util/wildcard"
+import { PermissionEvaluate } from "@/permission/evaluate"
 
 function shellWords(node: Node, includeNumbers = false) {
   const types = ["command_name", "word", "string", "raw_string", "concatenation"]
@@ -163,6 +166,106 @@ function quoteLike(word: Node, text: string) {
   if (word.type === "string") return `"${text}"`
   if (word.type === "raw_string") return `'${text}'`
   return text
+}
+// altimate_change end
+
+// altimate_change start — apply a configured `external_directory: deny` to every path a command names
+// The operand check above only covers a fixed list of file commands. When the effective
+// external_directory rule for "*" is deny, every literal path the command names is checked
+// as well: absolute, `~` and `..` arguments, a command run by path, redirection targets and
+// the directories commands run in. Under the default ("ask") and "allow" nothing changes.
+// This is a guard rail over literal command text, not an OS sandbox.
+
+// Character devices that are not files in any directory.
+const DEVICE_PATHS = new Set([
+  "/dev/null",
+  "/dev/stdin",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/dev/tty",
+  "/dev/zero",
+  "/dev/random",
+  "/dev/urandom",
+])
+// Running a system binary by its full path (`/usr/bin/env python`) is not a project escape.
+const SYSTEM_BIN_DIRS = new Set([
+  "/bin",
+  "/sbin",
+  "/usr/bin",
+  "/usr/sbin",
+  "/usr/local/bin",
+  "/usr/local/sbin",
+  "/opt/homebrew/bin",
+])
+
+export function externalDirectoryDenied(rules: PermissionV1.Ruleset | undefined) {
+  const rule = rules?.findLast((item) => Wildcard.match("external_directory", item.permission) && item.pattern === "*")
+  return rule?.action === "deny"
+}
+
+function namesPath(arg: string) {
+  return path.isAbsolute(arg) || /(^|[\\/])\.\.([\\/]|$)/.test(arg)
+}
+
+function isDevice(target: string) {
+  return DEVICE_PATHS.has(target) || /^\/dev\/fd\/\d+$/.test(target)
+}
+
+// Literal path candidates a command names, resolved against every directory it may run in.
+function commandPathCandidates(root: Node, cwd: string) {
+  const candidates = new Set<string>()
+  for (const { node, cwds } of shellCommands(root, [cwd])) {
+    for (const commandCwd of cwds) candidates.add(commandCwd)
+    const words = shellWords(node, true)
+    const name = words[0] ? literalWord(words[0]) : undefined
+    if (name?.includes("/")) {
+      for (const commandCwd of cwds) {
+        const target = path.resolve(commandCwd, name)
+        if (!SYSTEM_BIN_DIRS.has(path.dirname(target))) candidates.add(target)
+      }
+    }
+    for (const word of words.slice(1)) {
+      const arg = literalWord(word)
+      // Option values (`--out=/x`) and URLs are not read as paths.
+      if (!arg || arg.startsWith("-") || !namesPath(arg)) continue
+      for (const commandCwd of cwds) candidates.add(path.resolve(commandCwd, arg))
+    }
+  }
+  // Redirection targets anywhere in the script; heredoc bodies hold no file_redirect nodes.
+  const stack: Node[] = [root]
+  while (stack.length) {
+    const node = stack.pop()!
+    if (node.type === "file_redirect") {
+      const destination = node.childForFieldName("destination") ?? node.namedChildren.at(-1) ?? null
+      const target = literalWord(destination)
+      if (target && namesPath(target)) candidates.add(path.resolve(cwd, target))
+    }
+    for (const child of node.namedChildren) if (child) stack.push(child)
+  }
+  return [...candidates].filter((target) => !isDevice(target))
+}
+
+// Out-of-project locations a command names, as the directory an external_directory rule matches.
+async function externalCommandPaths(root: Node, cwd: string) {
+  const found: { path: string; dir: string }[] = []
+  for (const target of commandPathCandidates(root, cwd)) {
+    const real = await realpathThroughParents(target)
+    if (!real || isDevice(real)) continue
+    // Text whose first segment does not exist (an awk or sed program such as `/x/ {print}`)
+    // names no real location.
+    const first = real.split(path.sep).filter(Boolean)[0]
+    if (first && !(await fs.stat(path.join(path.parse(real).root, first)).catch(() => undefined))) continue
+    if (Instance.containsPath(real)) continue
+    const dir = (await Filesystem.isDir(real)) ? real : path.dirname(real)
+    found.push({ path: real, dir })
+  }
+  return found
+}
+
+function directoryGlob(dir: string) {
+  // Preserve POSIX-looking paths with /s, even on Windows
+  if (dir.startsWith("/")) return `${dir.replace(/[\\/]+$/, "")}/*`
+  return path.join(dir, "*")
 }
 // altimate_change end
 
@@ -417,6 +520,39 @@ export const BashTool = Tool.define("bash", async () => {
         }
       }
 
+      // altimate_change start — apply a configured `external_directory: deny` to every path a command names
+      const guarded = externalDirectoryDenied(ctx.permissions)
+      const externalPaths = new Set<string>()
+      if (guarded) {
+        const named = await externalCommandPaths(tree.rootNode, cwd)
+        // A directory the operand check found is listed only when no named path inside it is.
+        const found = [
+          ...Array.from(directories)
+            .filter((dir) => !named.some((item) => item.path === dir || item.path.startsWith(dir + path.sep)))
+            .map((dir) => ({ path: dir, dir })),
+          ...named,
+        ]
+        const denied = new Set<string>()
+        for (const item of found) {
+          externalPaths.add(item.path)
+          // Paths here are symlink-resolved, so rules are matched with their resolved spelling too.
+          const rule = PermissionEvaluate.evaluateResolved(
+            "external_directory",
+            directoryGlob(item.dir),
+            ctx.permissions!,
+          )
+          if (rule.action === "deny") denied.add(item.path)
+          else directories.add(item.dir)
+        }
+        if (denied.size > 0) {
+          throw new Error(
+            `external_directory is denied: this command touches ${denied.size === 1 ? "a path" : "paths"} outside the project (${Instance.worktree === "/" ? Instance.directory : Instance.worktree}): ${[...denied].join(", ")}. ` +
+              "Use paths inside the project instead.",
+          )
+        }
+      }
+      // altimate_change end
+
       if (directories.size > 0) {
         const globs = Array.from(directories).map((dir) => {
           // Preserve POSIX-looking paths with /s, even on Windows
@@ -427,7 +563,9 @@ export const BashTool = Tool.define("bash", async () => {
           permission: "external_directory",
           patterns: globs,
           always: globs,
-          metadata: {},
+          // altimate_change start — under `external_directory: deny` the globs are symlink-resolved paths
+          metadata: guarded ? { resolvedPatterns: globs } : {},
+          // altimate_change end
         })
       }
 
@@ -662,6 +800,9 @@ export const BashTool = Tool.define("bash", async () => {
           // Ordinary non-zero exits (for example, grep no-match) retain their
           // exit status without declaring an execution failure to the wrapper.
           ...(failureKind && { failure_kind: failureKind }),
+          // altimate_change end
+          // altimate_change start — out-of-project paths permitted under `external_directory: deny`
+          ...(externalPaths.size > 0 && { external_paths: [...externalPaths] }),
           // altimate_change end
         },
         output,
