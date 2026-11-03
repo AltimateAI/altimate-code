@@ -2417,3 +2417,30 @@ test("parseManagedPlist handles empty config", async () => {
   )
   expect(config.$schema).toBe("https://opencode.ai/config.json")
 })
+
+// altimate_change start — workspace rules: which `learn` keys outrank the project file once it is re-read from disk
+describe("learn keys set above project files", () => {
+  it.instance("inline config's learn keys are recorded as above the project; the project file's own are not", () =>
+    withProcessEnv(
+      "OPENCODE_CONFIG_CONTENT",
+      JSON.stringify({ $schema: "https://opencode.ai/config.json", learn: { capture: false } }),
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        yield* writeConfigEffect(test.directory, { $schema: "https://opencode.ai/config.json", learn: { enabled: true, capture: true } })
+        const config = yield* Config.use.get()
+        expect(config.learn).toMatchObject({ enabled: true, capture: false })
+        expect([...Config.learnKeysAboveProject(test.directory)]).toEqual(["capture"])
+      }),
+    ),
+  )
+
+  it.instance("with only a project file, no learn key is above it", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      yield* writeConfigEffect(test.directory, { $schema: "https://opencode.ai/config.json", learn: { enabled: true } })
+      yield* Config.use.get()
+      expect([...Config.learnKeysAboveProject(test.directory)]).toEqual([])
+    }),
+  )
+})
+// altimate_change end

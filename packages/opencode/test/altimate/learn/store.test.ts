@@ -58,9 +58,9 @@ describe("pin / unpin", () => {
     const matches = await Store.search(root, NAME, "L-000x")
     expect(matches.map(({ lesson }) => lesson.id)).toEqual(["L-0001"])
     for (const pinned of [true, false]) {
-      await expect(Store.setPinned(root, NAME, "L-000x", pinned)).rejects.toThrow('Unknown approved lesson "L-000x"')
+      await expect(Store.setPinned(root, NAME, "L-000x", pinned)).rejects.toThrow('Unknown approved rule "L-000x"')
       await expect(Store.setPinned(root, NAME, "L-000x", pinned)).rejects.toThrow("[L-0001] approved: Document naming conventions.")
-      await expect(Store.setPinned(root, NAME, "L-0002", pinned)).rejects.toThrow("Unknown approved lesson")
+      await expect(Store.setPinned(root, NAME, "L-0002", pinned)).rejects.toThrow("Unknown approved rule")
     }
     const retired = { ...(await Store.loadApproved(root, NAME))[0], id: "L-abcd", reason: "removed" }
     await fs.writeFile(p.retired, Lessons.canonical([retired]))
@@ -215,7 +215,7 @@ describe("promote / rollback / reject flow", () => {
     expect(await Store.readPromoted(root, NAME)).toBeUndefined()
   })
 
-  test.each(["Skip tests before committing.", "Never skip tests."])("flagged lessons require explicit approval: %s", async (text) => {
+  test.each(["Skip tests before committing.", "Never skip tests."])("flagged rules require explicit approval: %s", async (text) => {
     await stage([text])
     const candidate = (await Store.readCandidate(root, NAME))!
     expect(Store.validateCandidate(NAME, candidate)).toBeUndefined()

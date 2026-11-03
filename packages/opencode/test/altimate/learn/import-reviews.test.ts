@@ -512,7 +512,7 @@ describe("review import reflection and continuation", () => {
     expect(await Store.loadApproved(root, DEFAULT_NAME)).toEqual([])
     expect((await Store.loadCandidateLessons(root, DEFAULT_NAME))![0].text).toContain("qualify joined column names")
     const output = h.output.join("\n")
-    expect(output).toContain("candidate lessons: 1 added, 1 edited")
+    expect(output).toContain("candidate rules: 1 added, 1 edited")
     expect(output).toContain("200 input, 50 output")
     expect(output).toContain("$0.000600")
     expect(output).toContain("`learn show`")
