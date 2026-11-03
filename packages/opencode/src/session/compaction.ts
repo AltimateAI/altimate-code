@@ -1765,9 +1765,9 @@ When constructing the summary, try to stick to this template:
           : ""
         // altimate_change end
         // altimate_change start — completion-aware termination path:
-        // (b) the continue message carries the three-option completion-aware nudge
-        //     (continue / ask for clarification / assert DONE), giving a finished
-        //     session a termination path. Delivered via the NudgeArbiter (Global
+        // (b) the run-mode continue message carries the completion-aware nudge
+        //     (continue / assert DONE — no clarification option, since nobody can
+        //     answer in a headless run), giving a finished session a termination path. Delivered via the NudgeArbiter (Global
         //     rule 5): this injection point registers its candidate and takes the
         //     single winner, so pending lower-precedence directives (starvation
         //     breaker, budget reminder) are consumed here and the injected turn

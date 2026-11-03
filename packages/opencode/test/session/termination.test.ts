@@ -159,14 +159,26 @@ describe("SessionTermination.explicitDoneStop (stop-path decision)", () => {
 })
 
 describe("SessionTermination directive texts (/c/d wording contracts)", () => {
-  test("the completion nudge offers all three options and instructs the DONE token", () => {
+  // altimate_change start — the run-mode nudge has no clarification option
+  test("the run-mode completion nudge offers continue or DONE, never a clarification stop", () => {
     const nudge = SessionTermination.COMPLETION_NUDGE
     expect(nudge).toContain("(1)")
     expect(nudge).toContain("(2)")
-    expect(nudge).toContain("(3)")
-    expect(nudge).toContain("ask for clarification")
+    expect(nudge).not.toContain("(3)")
+    expect(nudge).not.toContain("clarification")
+    expect(nudge).toContain("do not end your turn with a question")
     expect(nudge).toContain(`reply with ${SessionTermination.DONE_TOKEN}`)
   })
+
+  test("the interactive compaction continuation is unchanged and stays out of the run-mode nudge", async () => {
+    const compaction = await Bun.file(new URL("../../src/session/compaction.ts", import.meta.url).pathname).text()
+    // Byte-for-byte pin of the interactive continuation text.
+    expect(compaction).toContain(
+      '"Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."',
+    )
+    expect(compaction).toMatch(/if \(Flag\.ALTIMATE_RUN_MODE\) \{\s*NudgeArbiter\.register\(/)
+  })
+  // altimate_change end
 
   test("the confirm challenge asks for DONE or what remains — outcome-neutral", () => {
     const challenge = SessionTermination.CONFIRM_DONE_CHALLENGE
@@ -257,19 +269,23 @@ describe("builder completion contract", () => {
   // The instruction still reaches an ordinary non-compacted RUN — the wording is
   // unchanged, it simply moved out of the static prompt file so that it is
   // injected per-run rather than shipped to every surface.
-  test("only a run-mode builder receives the trailing DONE contract", () => {
-    const instruction = SessionTermination.completionInstruction({ runMode: true, agent: "builder" })
+  // altimate_change start — run mode gives every agent the contract; interactive gives none
+  test("run mode receives the trailing DONE contract; interactive never does", () => {
+    const instruction = SessionTermination.completionInstruction({ runMode: true })
+    expect(instruction).toBe(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION)
     expect(instruction).toContain("literal token `DONE` on its own")
     expect(instruction).toContain("Do not emit `DONE` while work or verification remains")
-    expect(SessionTermination.completionInstruction({ runMode: false, agent: "builder" })).toBeUndefined()
-    expect(SessionTermination.completionInstruction({ runMode: true, agent: "plan" })).toBeUndefined()
+    expect(SessionTermination.completionInstruction({ runMode: false })).toBeUndefined()
   })
 
-  test("prompt assembly wires the contract to the run-mode flag", async () => {
+  test("prompt assembly wires the contract to the run-mode flag only, not to an agent allowlist", async () => {
     const prompt = await Bun.file(new URL("../../src/session/prompt.ts", import.meta.url).pathname).text()
     expect(prompt).toMatch(
-      /SessionTermination\.completionInstruction\(\{\s*runMode: Flag\.ALTIMATE_RUN_MODE,\s*agent: agent\.name,\s*\}\)/,
+      /SessionTermination\.completionInstruction\(\{\s*runMode: Flag\.ALTIMATE_RUN_MODE,\s*\}\)/,
     )
+    const termination = await Bun.file(new URL("../../src/session/termination.ts", import.meta.url).pathname).text()
+    expect(termination).not.toContain("COMPLETION_CONTRACT_AGENTS")
+    // altimate_change end
     expect(prompt).toMatch(/if \(completionInstruction\) system\.push\(completionInstruction\)/)
     expect(prompt).not.toMatch(/ALTIMATE_CODE_HEADLESS[^\n]*RUN_MODE_COMPLETION_INSTRUCTION/)
   })
