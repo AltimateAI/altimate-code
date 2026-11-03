@@ -3,7 +3,13 @@ import * as core from "@altimateai/altimate-core"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { columnReach, exposuresOn, parentsNamed, joinsNaturally, selectsStar } from "../../src/altimate/native/dbt/column-reach"
+import {
+  columnReach,
+  exposuresOn,
+  parentsNamed,
+  joinsNaturally,
+  selectsStar,
+} from "../../src/altimate/native/dbt/column-reach"
 import { lineageGraph } from "../../src/altimate/native/dbt/graph"
 import { structuredError, structuredResult } from "../../src/altimate/mcp-server/server"
 import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
@@ -32,19 +38,50 @@ const model = (name: string, deps: string[], sql: string, columns: string[], ext
 // rpt_ltv), filtered on by rpt_big_orders, and never read by rpt_counts.
 function manifest() {
   const nodes: Record<string, any> = {
-    "model.shop.fct_orders": model("fct_orders", [], "select order_id, revenue, gross_revenue from raw.orders", ["order_id", "revenue", "gross_revenue"]),
-    "model.shop.fct_daily": model("fct_daily", ["model.shop.fct_orders"], "select sum(revenue) as revenue from fct_orders", ["revenue"]),
-    "model.shop.mart_ltv": model("mart_ltv", ["model.shop.fct_orders"], "select order_id, revenue as ltv from fct_orders", ["order_id", "ltv"]),
-    "model.shop.rpt_ltv": model("rpt_ltv", ["model.shop.mart_ltv"], "select max(ltv) as top_ltv from mart_ltv", ["top_ltv"]),
-    "model.shop.rpt_big_orders": model("rpt_big_orders", ["model.shop.fct_orders"], "select order_id from fct_orders where revenue > 100", ["order_id"]),
-    "model.shop.rpt_counts": model("rpt_counts", ["model.shop.fct_orders"], "select count(order_id) as orders from fct_orders", ["orders"]),
+    "model.shop.fct_orders": model("fct_orders", [], "select order_id, revenue, gross_revenue from raw.orders", [
+      "order_id",
+      "revenue",
+      "gross_revenue",
+    ]),
+    "model.shop.fct_daily": model(
+      "fct_daily",
+      ["model.shop.fct_orders"],
+      "select sum(revenue) as revenue from fct_orders",
+      ["revenue"],
+    ),
+    "model.shop.mart_ltv": model(
+      "mart_ltv",
+      ["model.shop.fct_orders"],
+      "select order_id, revenue as ltv from fct_orders",
+      ["order_id", "ltv"],
+    ),
+    "model.shop.rpt_ltv": model("rpt_ltv", ["model.shop.mart_ltv"], "select max(ltv) as top_ltv from mart_ltv", [
+      "top_ltv",
+    ]),
+    "model.shop.rpt_big_orders": model(
+      "rpt_big_orders",
+      ["model.shop.fct_orders"],
+      "select order_id from fct_orders where revenue > 100",
+      ["order_id"],
+    ),
+    "model.shop.rpt_counts": model(
+      "rpt_counts",
+      ["model.shop.fct_orders"],
+      "select count(order_id) as orders from fct_orders",
+      ["orders"],
+    ),
   }
   return {
     metadata: { adapter_type: "duckdb" },
     nodes,
     sources: {},
     exposures: {
-      "exposure.shop.exec_revenue": { name: "exec_revenue", label: "Exec Revenue", type: "dashboard", depends_on: { nodes: ["model.shop.fct_daily"] } },
+      "exposure.shop.exec_revenue": {
+        name: "exec_revenue",
+        label: "Exec Revenue",
+        type: "dashboard",
+        depends_on: { nodes: ["model.shop.fct_daily"] },
+      },
       "exposure.shop.ops": { name: "ops", type: "application", depends_on: { nodes: ["model.shop.rpt_counts"] } },
     },
   }
@@ -65,10 +102,16 @@ describe("columnReach", () => {
     expect(byName).toEqual({ fct_daily: ["revenue"], mart_ltv: ["ltv"], rpt_ltv: ["top_ltv"] })
     // The engine reports no edge for a filter: the model is a possible reader, not a certain one.
     expect(reach.uncertain).toEqual([
-      { name: "rpt_big_orders", unique_id: "model.shop.rpt_big_orders", reason: "names it only outside its select list (WHERE, JOIN, GROUP BY or HAVING)" },
+      {
+        name: "rpt_big_orders",
+        unique_id: "model.shop.rpt_big_orders",
+        reason: "names it only outside its select list (WHERE, JOIN, GROUP BY or HAVING)",
+      },
     ])
     expect(reach.untraced).toEqual([])
-    expect(reach.exposures).toEqual([{ unique_id: "exposure.shop.exec_revenue", name: "exec_revenue", label: "Exec Revenue", type: "dashboard" }])
+    expect(reach.exposures).toEqual([
+      { unique_id: "exposure.shop.exec_revenue", name: "exec_revenue", label: "Exec Revenue", type: "dashboard" },
+    ])
     expect(reach.truncated).toBe(false)
   })
 
@@ -92,19 +135,30 @@ describe("columnReach", () => {
     expect(reach.untraced).toEqual([
       { name: "mart_ltv", unique_id: "model.shop.mart_ltv", reason: "No compiled SQL found — run `dbt compile` first" },
     ])
-    expect(reach.uncertain.map((m) => [m.name, m.reason])).toContainEqual(["rpt_ltv", "is downstream of a model that could not be traced or reads it ambiguously"])
+    expect(reach.uncertain.map((m) => [m.name, m.reason])).toContainEqual([
+      "rpt_ltv",
+      "is downstream of a model that could not be traced or reads it ambiguously",
+    ])
   })
 
   test("a model that only filters on the column passes nothing on to its children", () => {
     const value = manifest()
-    value.nodes["model.shop.rpt_after_filter"] = model("rpt_after_filter", ["model.shop.rpt_big_orders"], "select count(order_id) as n from rpt_big_orders", ["n"])
+    value.nodes["model.shop.rpt_after_filter"] = model(
+      "rpt_after_filter",
+      ["model.shop.rpt_big_orders"],
+      "select count(order_id) as n from rpt_big_orders",
+      ["n"],
+    )
     const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
     expect(reach.uncertain.map((m) => m.name)).toEqual(["rpt_big_orders"])
   })
 
   test("a join key another parent also documents is a possible read, not a dropped one", () => {
     const value = manifest()
-    value.nodes["model.shop.dim_orders"] = model("dim_orders", [], "select order_id, revenue from raw.dim", ["order_id", "revenue"])
+    value.nodes["model.shop.dim_orders"] = model("dim_orders", [], "select order_id, revenue from raw.dim", [
+      "order_id",
+      "revenue",
+    ])
     value.nodes["model.shop.rpt_joined"] = model(
       "rpt_joined",
       ["model.shop.fct_orders", "model.shop.dim_orders"],
@@ -120,7 +174,14 @@ describe("columnReach", () => {
   test("a source and a model with the same table name: a qualified source column is not the model's", () => {
     const value: any = manifest()
     value.sources = {
-      "source.shop.raw.fct_orders": { resource_type: "source", name: "fct_orders", identifier: "fct_orders", schema: "raw", database: "shop", columns: { revenue: column("revenue") } },
+      "source.shop.raw.fct_orders": {
+        resource_type: "source",
+        name: "fct_orders",
+        identifier: "fct_orders",
+        schema: "raw",
+        database: "shop",
+        columns: { revenue: column("revenue") },
+      },
     }
     value.nodes["model.shop.rpt_src"] = model(
       "rpt_src",
@@ -134,25 +195,56 @@ describe("columnReach", () => {
 
   test("a table name two parents share is ambiguous; a schema-qualified one is not", () => {
     const base = manifest()
-    const other = model("orders_copy", [], "select order_id, revenue from raw.copy", ["order_id", "revenue"], { alias: "fct_orders", schema: "archive" })
+    const other = model("orders_copy", [], "select order_id, revenue from raw.copy", ["order_id", "revenue"], {
+      alias: "fct_orders",
+      schema: "archive",
+    })
     const sql = (from: string) => `select b.revenue as kept from ${from}`
     const child = (from: string) =>
       model("rpt_join", ["model.shop.fct_orders", "model.shop.orders_copy"], sql(from), ["kept"])
-    const bare = { ...base, nodes: { ...base.nodes, "model.shop.orders_copy": other, "model.shop.rpt_join": child("fct_orders a join fct_orders b on a.order_id = b.order_id") } }
+    const bare = {
+      ...base,
+      nodes: {
+        ...base.nodes,
+        "model.shop.orders_copy": other,
+        "model.shop.rpt_join": child("fct_orders a join fct_orders b on a.order_id = b.order_id"),
+      },
+    }
     const ambiguous = columnReach(manifestFile(bare), "fct_orders", "revenue")
     expect(ambiguous.models.map((m) => m.name)).not.toContain("rpt_join")
-    expect(ambiguous.uncertain.find((m) => m.name === "rpt_join")?.reason).toBe("reads a parent whose table name another parent shares")
+    expect(ambiguous.uncertain.find((m) => m.name === "rpt_join")?.reason).toBe(
+      "reads a parent whose table name another parent shares",
+    )
 
     // Only archive.fct_orders (not traced) is read: no reader.
-    const qualified = { ...base, nodes: { ...base.nodes, "model.shop.orders_copy": other, "model.shop.rpt_join": child("main.fct_orders a join archive.fct_orders b on a.order_id = b.order_id") } }
+    const qualified = {
+      ...base,
+      nodes: {
+        ...base.nodes,
+        "model.shop.orders_copy": other,
+        "model.shop.rpt_join": child("main.fct_orders a join archive.fct_orders b on a.order_id = b.order_id"),
+      },
+    }
     const reach = columnReach(manifestFile(qualified), "fct_orders", "revenue")
     expect(reach.models.map((m) => m.name)).not.toContain("rpt_join")
   })
 
   test("a snapshot is traced and carries the column on", () => {
     const value = manifest()
-    value.nodes["snapshot.shop.snap_orders"] = { ...model("snap_orders", ["model.shop.fct_orders"], "select order_id, revenue from fct_orders", ["order_id", "revenue"]), resource_type: "snapshot", unique_id: "snapshot.shop.snap_orders" }
-    value.nodes["model.shop.rpt_snap"] = model("rpt_snap", ["snapshot.shop.snap_orders"], "select sum(revenue) as snap_revenue from snap_orders", ["snap_revenue"])
+    value.nodes["snapshot.shop.snap_orders"] = {
+      ...model("snap_orders", ["model.shop.fct_orders"], "select order_id, revenue from fct_orders", [
+        "order_id",
+        "revenue",
+      ]),
+      resource_type: "snapshot",
+      unique_id: "snapshot.shop.snap_orders",
+    }
+    value.nodes["model.shop.rpt_snap"] = model(
+      "rpt_snap",
+      ["snapshot.shop.snap_orders"],
+      "select sum(revenue) as snap_revenue from snap_orders",
+      ["snap_revenue"],
+    )
     const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
     const byName = Object.fromEntries(reach.models.map((m) => [m.name, m.columns]))
     expect(byName.snap_orders).toEqual(["revenue"])
@@ -167,7 +259,9 @@ describe("columnReach", () => {
 
   test("an unknown model or a missing manifest throws", () => {
     expect(() => columnReach(manifestFile(), "nope", "revenue")).toThrow(/not found/)
-    expect(() => columnReach(join(tmpdir(), "no-such-manifest.json"), "fct_orders", "revenue")).toThrow(/Manifest not found/)
+    expect(() => columnReach(join(tmpdir(), "no-such-manifest.json"), "fct_orders", "revenue")).toThrow(
+      /Manifest not found/,
+    )
   })
 })
 
@@ -179,15 +273,25 @@ describe("exposuresOn through metrics", () => {
       "metric.shop.order_count": { depends_on: { nodes: ["semantic_model.shop.orders"] } },
       "metric.shop.double_count": { depends_on: { nodes: ["metric.shop.order_count"] } },
     }
-    value.exposures["exposure.shop.kpi"] = { name: "kpi", type: "dashboard", depends_on: { nodes: ["metric.shop.double_count"] } }
-    expect(exposuresOn(manifestFile(value), ["model.shop.rpt_counts"]).map((e) => e.unique_id).sort()).toEqual(["exposure.shop.kpi", "exposure.shop.ops"])
+    value.exposures["exposure.shop.kpi"] = {
+      name: "kpi",
+      type: "dashboard",
+      depends_on: { nodes: ["metric.shop.double_count"] },
+    }
+    expect(
+      exposuresOn(manifestFile(value), ["model.shop.rpt_counts"])
+        .map((e) => e.unique_id)
+        .sort(),
+    ).toEqual(["exposure.shop.kpi", "exposure.shop.ops"])
   })
 })
 
 describe("exposuresOn", () => {
   test("lists exposures on any of the given nodes, by label when there is one", () => {
     const file = manifestFile()
-    expect(exposuresOn(file, ["model.shop.rpt_counts"])).toEqual([{ unique_id: "exposure.shop.ops", name: "ops", label: "ops", type: "application" }])
+    expect(exposuresOn(file, ["model.shop.rpt_counts"])).toEqual([
+      { unique_id: "exposure.shop.ops", name: "ops", label: "ops", type: "application" },
+    ])
     expect(exposuresOn(file, ["model.shop.fct_orders"])).toEqual([])
   })
 })
@@ -210,19 +314,40 @@ describe("columnReach where the engine's schema falls short", () => {
   test("select * from a parent whose schema.yml does not list the column is a possible read, and its children may read it", () => {
     const value = manifest()
     value.nodes["model.shop.fct_orders"].columns = { order_id: column("order_id") }
-    value.nodes["model.shop.rpt_star"] = model("rpt_star", ["model.shop.fct_orders"], 'select * from "shop"."main"."fct_orders"', [])
-    value.nodes["model.shop.rpt_after_star"] = model("rpt_after_star", ["model.shop.rpt_star"], "select sum(revenue) as total from rpt_star", ["total"])
+    value.nodes["model.shop.rpt_star"] = model(
+      "rpt_star",
+      ["model.shop.fct_orders"],
+      'select * from "shop"."main"."fct_orders"',
+      [],
+    )
+    value.nodes["model.shop.rpt_after_star"] = model(
+      "rpt_after_star",
+      ["model.shop.rpt_star"],
+      "select sum(revenue) as total from rpt_star",
+      ["total"],
+    )
     const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
-    expect(reach.uncertain.find((m) => m.name === "rpt_star")?.reason).toBe("selects * from a parent whose schema.yml does not list the column")
+    expect(reach.uncertain.find((m) => m.name === "rpt_star")?.reason).toBe(
+      "selects * from a parent whose schema.yml does not list the column",
+    )
     expect(reach.uncertain.map((m) => m.name)).toContain("rpt_after_star")
   })
 
   test("a dashboard downstream of a wildcard reader in any dialect form is reported, not dropped", () => {
-    for (const sql of ["select distinct on (order_id) * from fct_orders", "select top 10 * from fct_orders", 'select "shop"."main"."fct_orders".* from "shop"."main"."fct_orders"']) {
+    for (const sql of [
+      "select distinct on (order_id) * from fct_orders",
+      "select top 10 * from fct_orders",
+      'select "shop"."main"."fct_orders".* from "shop"."main"."fct_orders"',
+    ]) {
       const value: any = manifest()
       value.nodes["model.shop.fct_orders"].columns = { order_id: column("order_id") }
       value.nodes["model.shop.rpt_star"] = model("rpt_star", ["model.shop.fct_orders"], sql, [])
-      value.exposures["exposure.shop.star_board"] = { name: "star_board", label: "Star Board", type: "dashboard", depends_on: { nodes: ["model.shop.rpt_star"] } }
+      value.exposures["exposure.shop.star_board"] = {
+        name: "star_board",
+        label: "Star Board",
+        type: "dashboard",
+        depends_on: { nodes: ["model.shop.rpt_star"] },
+      }
       const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
       expect(reach.uncertain.map((m) => m.name)).toContain("rpt_star")
       expect(reach.uncertain_exposures.map((e) => e.label)).toContain("Star Board")
@@ -232,7 +357,12 @@ describe("columnReach where the engine's schema falls short", () => {
   test("a column name with a dot, quoted, is matched whole", () => {
     const value = manifest()
     value.nodes["model.shop.fct_orders"].columns = { "net.amount": column("net.amount") }
-    value.nodes["model.shop.rpt_net"] = model("rpt_net", ["model.shop.fct_orders"], 'select "net.amount" as net from fct_orders', ["net"])
+    value.nodes["model.shop.rpt_net"] = model(
+      "rpt_net",
+      ["model.shop.fct_orders"],
+      'select "net.amount" as net from fct_orders',
+      ["net"],
+    )
     const reach = columnReach(manifestFile(value), "fct_orders", "net.amount")
     expect(reach.models.find((m) => m.name === "rpt_net")?.columns).toEqual(["net"])
   })
@@ -283,7 +413,12 @@ describe("selectsStar", () => {
     ])
       expect(selectsStar(sql)).toBe(false)
     // A function over the whole row reads every column; only count(*) reads none.
-    for (const sql of ["select id, hash(*) as h from a", "select object_construct(*) as o from a", "select to_json(struct(*)) as j from a", "select columns(*) from a"])
+    for (const sql of [
+      "select id, hash(*) as h from a",
+      "select object_construct(*) as o from a",
+      "select to_json(struct(*)) as j from a",
+      "select columns(*) from a",
+    ])
       expect(selectsStar(sql)).toBe(true)
   })
 })
@@ -291,7 +426,10 @@ describe("selectsStar", () => {
 describe("columnReach through an ephemeral parent", () => {
   test("a model reading an ephemeral parent is a possible read, never a silent zero", () => {
     const value = manifest()
-    value.nodes["model.shop.eph"] = { ...model("eph", ["model.shop.fct_orders"], "select order_id, revenue from fct_orders", ["order_id", "revenue"]), config: { materialized: "ephemeral" } }
+    value.nodes["model.shop.eph"] = {
+      ...model("eph", ["model.shop.fct_orders"], "select order_id, revenue from fct_orders", ["order_id", "revenue"]),
+      config: { materialized: "ephemeral" },
+    }
     value.nodes["model.shop.rpt_eph"] = model(
       "rpt_eph",
       ["model.shop.eph"],
@@ -309,7 +447,13 @@ describe("columnReach through an ephemeral parent", () => {
 describe("columnReach with an ephemeral and a regular parent", () => {
   test("a traced edge from the regular parent does not hide what flows through the ephemeral one", () => {
     const value = manifest()
-    value.nodes["model.shop.eph"] = { ...model("eph", ["model.shop.fct_orders"], "select order_id, revenue as renamed from fct_orders", ["order_id", "renamed"]), config: { materialized: "ephemeral" } }
+    value.nodes["model.shop.eph"] = {
+      ...model("eph", ["model.shop.fct_orders"], "select order_id, revenue as renamed from fct_orders", [
+        "order_id",
+        "renamed",
+      ]),
+      config: { materialized: "ephemeral" },
+    }
     value.nodes["model.shop.mix"] = model(
       "mix",
       ["model.shop.fct_daily", "model.shop.eph"],
@@ -327,7 +471,12 @@ describe("columnReach with columns that differ only by case", () => {
   test('"Revenue" is not revenue where the parent documents both', () => {
     const value: any = manifest()
     value.nodes["model.shop.fct_orders"].columns = { revenue: column("revenue"), Revenue: column("Revenue") }
-    value.nodes["model.shop.rpt_case"] = model("rpt_case", ["model.shop.fct_orders"], 'select "Revenue" as other from fct_orders', ["other"])
+    value.nodes["model.shop.rpt_case"] = model(
+      "rpt_case",
+      ["model.shop.fct_orders"],
+      'select "Revenue" as other from fct_orders',
+      ["other"],
+    )
     const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
     expect(reach.models.map((m) => m.name)).not.toContain("rpt_case")
     expect(reach.models.map((m) => m.name)).toContain("fct_daily")
@@ -343,7 +492,12 @@ describe("columnReach case handling", () => {
   test("a spelling matching two columns that differ only by case leaves both columns' readers uncertain, never certain", () => {
     const value: any = manifest()
     value.nodes["model.shop.fct_orders"].columns = { revenue: column("revenue"), Revenue: column("Revenue") }
-    value.nodes["model.shop.rpt_case"] = model("rpt_case", ["model.shop.fct_orders"], 'select "Revenue" as other from fct_orders', ["other"])
+    value.nodes["model.shop.rpt_case"] = model(
+      "rpt_case",
+      ["model.shop.fct_orders"],
+      'select "Revenue" as other from fct_orders',
+      ["other"],
+    )
     const reach = columnReach(manifestFile(value), "fct_orders", "REVENUE")
     expect(reach.models.map((m) => m.name)).not.toContain("fct_daily")
     expect(reach.models.map((m) => m.name)).not.toContain("rpt_case")
@@ -353,7 +507,11 @@ describe("columnReach case handling", () => {
   test("with the spelling unsettled, a dashboard on the model itself is uncertain too", () => {
     const value: any = manifest()
     value.nodes["model.shop.fct_orders"].columns = { revenue: column("revenue"), Revenue: column("Revenue") }
-    value.exposures["exposure.shop.orders_board"] = { name: "orders_board", type: "dashboard", depends_on: { nodes: ["model.shop.fct_orders"] } }
+    value.exposures["exposure.shop.orders_board"] = {
+      name: "orders_board",
+      type: "dashboard",
+      depends_on: { nodes: ["model.shop.fct_orders"] },
+    }
     const reach = columnReach(manifestFile(value), "fct_orders", "REVENUE")
     expect(reach.exposures.map((e) => e.unique_id)).not.toContain("exposure.shop.orders_board")
     expect(reach.uncertain_exposures.map((e) => e.unique_id)).toContain("exposure.shop.orders_board")
@@ -378,13 +536,21 @@ describe("columnReach with an empty column_lineage", () => {
 describe("columnReach on a model the engine cannot fully trace", () => {
   const answer = (byModel: (sql: string) => unknown) =>
     spyOn(core, "columnLineage").mockImplementation(((sql: string) => byModel(sql)) as any)
-  const direct = (sql: string) => ({ column_lineage: [{ source: '"shop"."main"."fct_orders"."revenue"', target: "revenue", lineage_type: "direct" }], column_dict: {} })
+  const direct = (sql: string) => ({
+    column_lineage: [{ source: '"shop"."main"."fct_orders"."revenue"', target: "revenue", lineage_type: "direct" }],
+    column_dict: {},
+  })
 
   test("no edge at all: SQL that names the column (a PIVOT) is uncertain and so is its child; SQL that never names it reads nothing", () => {
     const pivot = "select * from fct_orders pivot(sum(revenue) for status in ('paid' as paid_total))"
     const chain: any = manifest()
     chain.nodes["model.shop.fct_daily"].compiled_code = pivot
-    chain.nodes["model.shop.rpt_ltv"] = model("rpt_ltv", ["model.shop.fct_daily"], "select max(paid_total) as top from fct_daily", ["top"])
+    chain.nodes["model.shop.rpt_ltv"] = model(
+      "rpt_ltv",
+      ["model.shop.fct_daily"],
+      "select max(paid_total) as top from fct_daily",
+      ["top"],
+    )
     const spy = answer((sql) => (sql === pivot ? { column_lineage: [], column_dict: {} } : direct(sql)))
     try {
       const reach = columnReach(manifestFile(chain), "fct_orders", "revenue")
@@ -410,12 +576,23 @@ describe("columnReach on a model the engine cannot fully trace", () => {
     value.nodes["model.shop.fct_daily"].compiled_code = "select 3"
     value.nodes["model.shop.rpt_counts"].compiled_code = "select 4"
     // Its SQL never names the column: only its partly traced parent makes it a possible reader.
-    value.nodes["model.shop.rpt_ltv"] = model("rpt_ltv", ["model.shop.fct_daily"], "select max(total) as top from fct_daily", ["top"])
+    value.nodes["model.shop.rpt_ltv"] = model(
+      "rpt_ltv",
+      ["model.shop.fct_daily"],
+      "select max(total) as top from fct_daily",
+      ["top"],
+    )
     const spy = answer((sql) =>
       sql === "select 3"
         ? { ...direct(sql), errors: ["partial"] }
         : sql === "select 4"
-          ? { column_lineage: [{ source: '"shop"."main"."fct_orders"."order_id"', target: "orders", lineage_type: "direct" }], column_dict: {}, errors: ["partial"] }
+          ? {
+              column_lineage: [
+                { source: '"shop"."main"."fct_orders"."order_id"', target: "orders", lineage_type: "direct" },
+              ],
+              column_dict: {},
+              errors: ["partial"],
+            }
           : direct(sql),
     )
     try {
@@ -425,7 +602,9 @@ describe("columnReach on a model the engine cannot fully trace", () => {
       expect(reach.uncertain.map((m) => m.name)).toContain("rpt_ltv")
       expect(reach.models.map((m) => m.name)).not.toContain("rpt_ltv")
       // Its own child is checked though fct_daily carried the column on.
-      expect(reach.uncertain.find((m) => m.name === "rpt_counts")?.reason).toBe("the lineage engine traced only part of its SQL")
+      expect(reach.uncertain.find((m) => m.name === "rpt_counts")?.reason).toBe(
+        "the lineage engine traced only part of its SQL",
+      )
       expect(reach.uncertain_exposures.map((e) => e.unique_id)).toContain("exposure.shop.ops")
       expect(reach.exposures.map((e) => e.unique_id)).not.toContain("exposure.shop.ops")
     } finally {
@@ -442,23 +621,48 @@ describe("columnReach on SQL the engine cannot parse", () => {
     expect(reach.untraced.map((m) => m.name)).toEqual(["fct_daily"])
     expect(reach.untraced[0]!.reason).toContain("Parse error")
     expect(reach.exposures).toEqual([])
-    expect(reach.uncertain_exposures).toEqual([{ unique_id: "exposure.shop.exec_revenue", name: "exec_revenue", label: "Exec Revenue", type: "dashboard" }])
+    expect(reach.uncertain_exposures).toEqual([
+      { unique_id: "exposure.shop.exec_revenue", name: "exec_revenue", label: "Exec Revenue", type: "dashboard" },
+    ])
   })
 })
 
 describe("lineageGraph", () => {
   test("a twelve-hop chain comes back whole to its source; upstream past 500 nodes is cut and marked", () => {
     const chain: Record<string, any> = {}
-    for (let i = 1; i <= 12; i++) chain[`model.shop.m${i}`] = model(`m${i}`, [i === 1 ? "source.shop.raw.orders" : `model.shop.m${i - 1}`], "select 1", [])
-    chain["test.shop.m3_unique"] = { resource_type: "test", name: "m3_unique", depends_on: { nodes: ["model.shop.m3"] } }
-    const graph = lineageGraph({ nodes: chain, sources: { "source.shop.raw.orders": { resource_type: "source", name: "orders", source_name: "raw" } } }, "model.shop.m12")
+    for (let i = 1; i <= 12; i++)
+      chain[`model.shop.m${i}`] = model(
+        `m${i}`,
+        [i === 1 ? "source.shop.raw.orders" : `model.shop.m${i - 1}`],
+        "select 1",
+        [],
+      )
+    chain["test.shop.m3_unique"] = {
+      resource_type: "test",
+      name: "m3_unique",
+      depends_on: { nodes: ["model.shop.m3"] },
+    }
+    const graph = lineageGraph(
+      {
+        nodes: chain,
+        sources: { "source.shop.raw.orders": { resource_type: "source", name: "orders", source_name: "raw" } },
+      },
+      "model.shop.m12",
+    )
     // An upstream model's tests are left out: only the target's and downstream tests are counted.
     expect(graph.nodes["test.shop.m3_unique"]).toBeUndefined()
     expect(graph.nodes["source.shop.raw.orders"]).toBeDefined()
     expect(Object.keys(graph.nodes)).toHaveLength(13)
     expect(graph.upTruncated).toBe(false)
 
-    const wide: Record<string, any> = { "model.shop.top": model("top", Array.from({ length: 600 }, (_, i) => `model.shop.p${i}`), "select 1", []) }
+    const wide: Record<string, any> = {
+      "model.shop.top": model(
+        "top",
+        Array.from({ length: 600 }, (_, i) => `model.shop.p${i}`),
+        "select 1",
+        [],
+      ),
+    }
     for (let i = 0; i < 600; i++) wide[`model.shop.p${i}`] = model(`p${i}`, [], "select 1", [])
     const cut = lineageGraph({ nodes: wide }, "model.shop.top")
     expect(cut.upTruncated).toBe(true)
@@ -468,20 +672,32 @@ describe("lineageGraph", () => {
   test("downstream past 500 nodes is cut and marked; downstream tests are still counted", () => {
     const wide: Record<string, any> = { "model.shop.top": model("top", [], "select 1", []) }
     for (let i = 0; i < 600; i++) wide[`model.shop.c${i}`] = model(`c${i}`, ["model.shop.top"], "select 1", [])
-    wide["test.shop.top_unique"] = { resource_type: "test", name: "top_unique", depends_on: { nodes: ["model.shop.top"] } }
+    wide["test.shop.top_unique"] = {
+      resource_type: "test",
+      name: "top_unique",
+      depends_on: { nodes: ["model.shop.top"] },
+    }
     wide["test.shop.c0_unique"] = { resource_type: "test", name: "c0_unique", depends_on: { nodes: ["model.shop.c0"] } }
     const cut = lineageGraph({ nodes: wide }, "model.shop.top")
     expect(cut.truncated).toBe(true)
     expect(cut.upTruncated).toBe(false)
     const kept = Object.values(cut.nodes)
     expect(kept.filter((n) => n.type !== "test")).toHaveLength(501)
-    expect(kept.filter((n) => n.type === "test").map((n) => n.id).sort()).toEqual(["test.shop.c0_unique", "test.shop.top_unique"])
+    expect(
+      kept
+        .filter((n) => n.type === "test")
+        .map((n) => n.id)
+        .sort(),
+    ).toEqual(["test.shop.c0_unique", "test.shop.top_unique"])
   })
 
   test("everything up and downstream, tests as ids, from dbt's child_map when present", () => {
     const value = {
       ...manifest(),
-      nodes: { ...manifest().nodes, "test.shop.t1": { resource_type: "test", name: "t1", depends_on: { nodes: ["model.shop.fct_daily"] } } },
+      nodes: {
+        ...manifest().nodes,
+        "test.shop.t1": { resource_type: "test", name: "t1", depends_on: { nodes: ["model.shop.fct_daily"] } },
+      },
     }
     const graph = lineageGraph(value, "model.shop.mart_ltv")
     expect(graph.parents["model.shop.mart_ltv"]).toEqual(["model.shop.fct_orders"])
@@ -497,7 +713,14 @@ describe("lineageGraph", () => {
       columns: ["order_id", "ltv"],
     })
     expect(graph.truncated).toBe(false)
-    const fromFct = lineageGraph({ ...value, child_map: { "model.shop.fct_orders": ["model.shop.fct_daily", "test.shop.t1"], "model.shop.fct_daily": [] }, parent_map: { "model.shop.fct_orders": [], "test.shop.t1": ["model.shop.fct_orders"] } }, "model.shop.fct_orders")
+    const fromFct = lineageGraph(
+      {
+        ...value,
+        child_map: { "model.shop.fct_orders": ["model.shop.fct_daily", "test.shop.t1"], "model.shop.fct_daily": [] },
+        parent_map: { "model.shop.fct_orders": [], "test.shop.t1": ["model.shop.fct_orders"] },
+      },
+      "model.shop.fct_orders",
+    )
     expect(Object.keys(fromFct.nodes).sort()).toEqual(["model.shop.fct_daily", "model.shop.fct_orders", "test.shop.t1"])
     expect(fromFct.nodes["test.shop.t1"]!.type).toBe("test")
     expect(fromFct.parents["test.shop.t1"]).toEqual(["model.shop.fct_orders"])
@@ -522,15 +745,22 @@ describe("structuredError", () => {
     expect(Buffer.byteLength(out.report as string)).toBeLessThanOrEqual(60_000)
   })
   test("a tool's own structured result sends the report's header, not its edge lists", () => {
-    const text = "Model: x (model.a.x) · table · confidence high\n\nUpstream (0):\n  none\n\nColumn edges (1):\n  x.a ← y.a\n\nNotes: n"
+    const text =
+      "Model: x (model.a.x) · table · confidence high\n\nUpstream (0):\n  none\n\nColumn edges (1):\n  x.a ← y.a\n\nNotes: n"
     expect(structuredResult("dbt_lineage", { structuredContent: { columnLineage: [1] } }, text)).toEqual({
       columnLineage: [1],
       report: "Model: x (model.a.x) · table · confidence high\n\nUpstream (0):\n  none",
     })
-    expect((structuredResult("dbt_lineage", { structuredContent: {} }, "Model: x\n\nTrace of x.a (1 edges):\n  e") as any).report).toBe("Model: x")
+    expect(
+      (structuredResult("dbt_lineage", { structuredContent: {} }, "Model: x\n\nTrace of x.a (1 edges):\n  e") as any)
+        .report,
+    ).toBe("Model: x")
   })
   test("exposures_error reaches the structured fields", () => {
-    expect(structuredResult("impact_analysis", { exposures_error: "bad json" }, "R")).toEqual({ exposures_error: "bad json", report: "R" })
+    expect(structuredResult("impact_analysis", { exposures_error: "bad json" }, "R")).toEqual({
+      exposures_error: "bad json",
+      report: "R",
+    })
   })
 })
 
@@ -553,10 +783,11 @@ describe("structuredError escaping", () => {
   })
 })
 
-
 describe("structuredResult", () => {
   test("passes the lineage fields with the report, and only the report when they are too big", () => {
-    expect(structuredResult("impact_analysis", { severity: "LOW", findings: [{ category: "x" }], downstream: [] }, "Impact")).toEqual({
+    expect(
+      structuredResult("impact_analysis", { severity: "LOW", findings: [{ category: "x" }], downstream: [] }, "Impact"),
+    ).toEqual({
       severity: "LOW",
       downstream: [],
       report: "Impact",
@@ -564,13 +795,21 @@ describe("structuredResult", () => {
     const huge = { edges: Array.from({ length: 5000 }, (_, i) => ({ source: `"t"."c${i}"`, target: `c${i}` })) }
     expect(structuredResult("dbt_lineage", huge, "Model: x")).toEqual({ report: "Model: x", truncated: true })
     // dbt_lineage's text repeats the columns and edges: only its header goes with them.
-    expect(structuredResult("dbt_lineage", { columns: {}, edges: [], graph: { nodes: {} } }, "Model: x\nID: y\n\nColumn Mappings:\n  a ← [\"t.a\"]")).toEqual({
+    expect(
+      structuredResult(
+        "dbt_lineage",
+        { columns: {}, edges: [], graph: { nodes: {} } },
+        'Model: x\nID: y\n\nColumn Mappings:\n  a ← ["t.a"]',
+      ),
+    ).toEqual({
       columns: {},
       edges: [],
       report: "Model: x\nID: y",
     })
     // With no column_dict the text has no Column Mappings section: the edges are cut at their own header.
-    expect(structuredResult("dbt_lineage", { columns: {}, edges: [] }, "Model: x\nID: y\n\nLineage Edges:\n  {}")).toEqual({
+    expect(
+      structuredResult("dbt_lineage", { columns: {}, edges: [] }, "Model: x\nID: y\n\nLineage Edges:\n  {}"),
+    ).toEqual({
       columns: {},
       edges: [],
       report: "Model: x\nID: y",
@@ -584,23 +823,45 @@ describe("dbtLineage", () => {
     const result = dbtLineage({ manifest_path: file, model: "mart_ltv" })
     expect(result.upstream).toEqual(["model.shop.fct_orders"])
     expect(result.graph).toBeUndefined()
-    expect(Object.keys(dbtLineage({ manifest_path: file, model: "mart_ltv", include_graph: true }).graph!.nodes)).toContain("model.shop.rpt_ltv")
+    expect(
+      Object.keys(dbtLineage({ manifest_path: file, model: "mart_ltv", include_graph: true }).graph!.nodes),
+    ).toContain("model.shop.rpt_ltv")
     // By project-relative path too.
-    expect(dbtLineage({ manifest_path: file, model: "models/mart_ltv.sql" }).model_unique_id).toBe("model.shop.mart_ltv")
+    expect(dbtLineage({ manifest_path: file, model: "models/mart_ltv.sql" }).model_unique_id).toBe(
+      "model.shop.mart_ltv",
+    )
     // `./` and Windows separators spell the same path.
-    expect(dbtLineage({ manifest_path: file, model: "./models/mart_ltv.sql" }).model_unique_id).toBe("model.shop.mart_ltv")
-    expect(dbtLineage({ manifest_path: file, model: "models\\mart_ltv.sql" }).model_unique_id).toBe("model.shop.mart_ltv")
+    expect(dbtLineage({ manifest_path: file, model: "./models/mart_ltv.sql" }).model_unique_id).toBe(
+      "model.shop.mart_ltv",
+    )
+    expect(dbtLineage({ manifest_path: file, model: "models\\mart_ltv.sql" }).model_unique_id).toBe(
+      "model.shop.mart_ltv",
+    )
     // An empty path is no model's, not the first one's without a file path.
     const pathless = JSON.parse(readFileSync(file, "utf8"))
     delete pathless.nodes["model.shop.fct_orders"].original_file_path
-    expect(dbtLineage({ manifest_path: manifestFile(pathless), model: "./" }).confidence_factors).toContain("Model './' not found in manifest")
+    expect(dbtLineage({ manifest_path: manifestFile(pathless), model: "./" }).confidence_factors).toContain(
+      "Model './' not found in manifest",
+    )
     const withSnapshot: any = manifest()
-    withSnapshot.nodes["snapshot.shop.snap"] = { ...model("snap", ["model.shop.fct_orders"], "select order_id from fct_orders", ["order_id"]), resource_type: "snapshot", unique_id: "snapshot.shop.snap" }
-    expect(dbtLineage({ manifest_path: manifestFile(withSnapshot), model: "snap" }).model_unique_id).toBe("snapshot.shop.snap")
+    withSnapshot.nodes["snapshot.shop.snap"] = {
+      ...model("snap", ["model.shop.fct_orders"], "select order_id from fct_orders", ["order_id"]),
+      resource_type: "snapshot",
+      unique_id: "snapshot.shop.snap",
+    }
+    expect(dbtLineage({ manifest_path: manifestFile(withSnapshot), model: "snap" }).model_unique_id).toBe(
+      "snapshot.shop.snap",
+    )
     // A snapshot named like another node's unique_id keeps its own id.
     withSnapshot.nodes["test.shop.t1"] = { resource_type: "test", name: "t1", depends_on: { nodes: [] } }
-    withSnapshot.nodes["snapshot.shop.odd"] = { ...withSnapshot.nodes["snapshot.shop.snap"], unique_id: "snapshot.shop.odd", name: "test.shop.t1" }
-    expect(dbtLineage({ manifest_path: manifestFile(withSnapshot), model: "test.shop.t1" }).model_unique_id).toBe("snapshot.shop.odd")
+    withSnapshot.nodes["snapshot.shop.odd"] = {
+      ...withSnapshot.nodes["snapshot.shop.snap"],
+      unique_id: "snapshot.shop.odd",
+      name: "test.shop.t1",
+    }
+    expect(dbtLineage({ manifest_path: manifestFile(withSnapshot), model: "test.shop.t1" }).model_unique_id).toBe(
+      "snapshot.shop.odd",
+    )
   })
 })
 
@@ -615,8 +876,14 @@ describe("columnReach with a NATURAL JOIN", () => {
 
   test("a model that reads the column through a NATURAL JOIN passes the doubt on to its children", () => {
     const value = manifest()
-    value.nodes["model.shop.fct_daily"].compiled_code = "select sum(revenue) as revenue from fct_orders natural left join other"
-    value.nodes["model.shop.rpt_after"] = model("rpt_after", ["model.shop.fct_daily"], "select count(*) as n from fct_daily", ["n"])
+    value.nodes["model.shop.fct_daily"].compiled_code =
+      "select sum(revenue) as revenue from fct_orders natural left join other"
+    value.nodes["model.shop.rpt_after"] = model(
+      "rpt_after",
+      ["model.shop.fct_daily"],
+      "select count(*) as n from fct_daily",
+      ["n"],
+    )
     const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
     expect(reach.models.map((m) => m.name)).toContain("fct_daily")
     expect(reach.uncertain.map((m) => m.name)).toContain("rpt_after")
@@ -659,8 +926,14 @@ describe("columnReach with a NATURAL JOIN", () => {
 
   test("a NATURAL JOIN model that names the column outside its select list also passes the doubt on", () => {
     const value = manifest()
-    value.nodes["model.shop.rpt_big_orders"].compiled_code = "select a.order_id from fct_orders a natural join other b where a.revenue > 100"
-    value.nodes["model.shop.rpt_after"] = model("rpt_after", ["model.shop.rpt_big_orders"], "select count(*) as n from rpt_big_orders", ["n"])
+    value.nodes["model.shop.rpt_big_orders"].compiled_code =
+      "select a.order_id from fct_orders a natural join other b where a.revenue > 100"
+    value.nodes["model.shop.rpt_after"] = model(
+      "rpt_after",
+      ["model.shop.rpt_big_orders"],
+      "select count(*) as n from rpt_big_orders",
+      ["n"],
+    )
     const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
     expect(reach.uncertain.map((m) => m.name)).toContain("rpt_after")
   })

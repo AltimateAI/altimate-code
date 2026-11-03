@@ -44,12 +44,17 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
 
   // A model by name or unique_id; a snapshot by unique_id; either by its project-relative file path.
   // `./models/x.sql` and `models\\x.sql` are the manifest's `models/x.sql`.
-  const filePath = (p: unknown) => String(p ?? "").replace(/\\/g, "/").replace(/^(?:\.\/)+/, "")
+  const filePath = (p: unknown) =>
+    String(p ?? "")
+      .replace(/\\/g, "/")
+      .replace(/^(?:\.\/)+/, "")
   // An empty request (`./`) is no model's path.
   const wanted = filePath(params.model)
   const byPath = () =>
     wanted
-      ? Object.values<any>(nodes).find((node) => ["model", "snapshot"].includes(node?.resource_type) && filePath(node.original_file_path) === wanted)
+      ? Object.values<any>(nodes).find(
+          (node) => ["model", "snapshot"].includes(node?.resource_type) && filePath(node.original_file_path) === wanted,
+        )
       : undefined
   const modelNode =
     findModel(nodes, params.model) ??
@@ -62,7 +67,9 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
   }
   // The id of the node that was selected, not of whatever else in the manifest the request string spells.
   const uniqueId =
-    (typeof modelNode.unique_id === "string" && nodes[modelNode.unique_id] === modelNode ? modelNode.unique_id : undefined) ??
+    (typeof modelNode.unique_id === "string" && nodes[modelNode.unique_id] === modelNode
+      ? modelNode.unique_id
+      : undefined) ??
     Object.keys(nodes).find((id) => nodes[id] === modelNode) ??
     params.model
   const graph = params.include_graph && uniqueId ? { graph: lineageGraph(manifest, uniqueId) } : {}
@@ -103,7 +110,11 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
     raw_lineage: rawLineage,
     // The engine reports SQL it cannot parse in `errors` with no edges, rather than throwing.
     confidence: rawLineage.error || unparsed(rawLineage) ? "low" : "high",
-    confidence_factors: rawLineage.error ? [String(rawLineage.error)] : unparsed(rawLineage) ? [String((rawLineage.errors as unknown[])[0])] : [],
+    confidence_factors: rawLineage.error
+      ? [String(rawLineage.error)]
+      : unparsed(rawLineage)
+        ? [String((rawLineage.errors as unknown[])[0])]
+        : [],
     upstream: upstreamIds,
     ...graph,
   }

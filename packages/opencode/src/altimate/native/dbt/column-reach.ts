@@ -56,18 +56,27 @@ const TRACED = new Set(["model", "snapshot"])
 
 /** "db"."schema"."orders"."amount" → { parts: ["db","schema","orders"], column: "amount" }, lower-cased. */
 function splitSource(source: unknown): { parts: string[]; column: string; exact: string } | null {
-  const text = typeof source === "string" ? source : typeof (source as any)?.source === "string" ? (source as any).source : null
+  const text =
+    typeof source === "string" ? source : typeof (source as any)?.source === "string" ? (source as any).source : null
   if (!text) return null
   // Split on dots outside quotes: "a"."net.amount" is table a, column net.amount.
-  const raw = [...text.matchAll(/"([^"]*)"|`([^`]*)`|\[([^\]]*)\]|([^."`\[\]]+)/g)].map((m) => m[1] ?? m[2] ?? m[3] ?? m[4] ?? "")
+  const raw = [...text.matchAll(/"([^"]*)"|`([^`]*)`|\[([^\]]*)\]|([^."`\[\]]+)/g)].map(
+    (m) => m[1] ?? m[2] ?? m[3] ?? m[4] ?? "",
+  )
   if (raw.length < 2) return null
   // `exact` keeps the column's case, for parents that document two columns differing only by case.
-  return { parts: raw.slice(0, -1).map((part) => part.toLowerCase()), column: raw.at(-1)!.toLowerCase(), exact: raw.at(-1)! }
+  return {
+    parts: raw.slice(0, -1).map((part) => part.toLowerCase()),
+    column: raw.at(-1)!.toLowerCase(),
+    exact: raw.at(-1)!,
+  }
 }
 
 /** The ways a parent's relation can be written in a child's compiled SQL, most qualified first. */
 function relationKeys(node: any): string[] {
-  const table = [node?.alias, node?.identifier, node?.name].filter((v): v is string => typeof v === "string" && v !== "")
+  const table = [node?.alias, node?.identifier, node?.name].filter(
+    (v): v is string => typeof v === "string" && v !== "",
+  )
   const schema = typeof node?.schema === "string" ? node.schema : null
   const database = typeof node?.database === "string" ? node.database : null
   const keys = new Set<string>()
@@ -169,7 +178,10 @@ function namesColumn(sql: string, column: string): boolean {
 // first `*/`). Limit: a nested Postgres comment between them is not read as one.
 const GAP = String.raw`(?:\s|(?:--|#|\/\/)[^\r\n]*[\r\n]|\/\*(?:[^*]|\*(?!\/))*\*\/)+`
 // The join's modifiers in any dialect: LEFT/RIGHT/FULL/INNER/CROSS, OUTER, Spark's SEMI/ANTI, Snowflake's DIRECTED.
-const NATURAL = new RegExp(String.raw`^natural${GAP}(?:(?:left|right|full|inner|cross|outer|semi|anti|directed)${GAP}){0,4}join\b`, "i")
+const NATURAL = new RegExp(
+  String.raw`^natural${GAP}(?:(?:left|right|full|inner|cross|outer|semi|anti|directed)${GAP}){0,4}join\b`,
+  "i",
+)
 // How far past a `natural` the rest of the join is looked for, and how many are looked at: past that
 // many the SQL may well have one, which only adds doubt. An unclosed `/*` makes each check read to the
 // window's end, so the window is what keeps crafted input cheap.
@@ -283,7 +295,11 @@ export function columnReach(manifestPath: string, model: string, column: string,
     const edges: { source: unknown; target: string; lineage_type?: string }[] = lineage?.column_lineage?.length
       ? lineage.column_lineage
       : Object.entries<any>(lineage?.column_dict ?? {}).flatMap(([out, sources]) =>
-          (Array.isArray(sources) ? sources : [sources]).map((source) => ({ source, target: out, lineage_type: "direct" })),
+          (Array.isArray(sources) ? sources : [sources]).map((source) => ({
+            source,
+            target: out,
+            lineage_type: "direct",
+          })),
         )
     // Errors beside some edges: the engine traced only part of the SQL.
     const partial = Array.isArray(lineage?.errors) && lineage.errors.length > 0
@@ -298,11 +314,17 @@ export function columnReach(manifestPath: string, model: string, column: string,
     }
     const collides = parents.some((p) => allParents.some((other) => other !== p && bareName(other) === bareName(p)))
     const wildcard =
-      selectsStar(sqlText) && parents.some((p) => [...tracked.get(p)!].some((col) => !documentedColumns(lookup(p)).has(col)))
+      selectsStar(sqlText) &&
+      parents.some((p) => [...tracked.get(p)!].some((col) => !documentedColumns(lookup(p)).has(col)))
     if (collides || wildcard) {
       unsure.add(id)
       uncertain.push(
-        entry(id, collides ? "reads a parent whose table name another parent shares" : "selects * from a parent whose schema.yml does not list the column"),
+        entry(
+          id,
+          collides
+            ? "reads a parent whose table name another parent shares"
+            : "selects * from a parent whose schema.yml does not list the column",
+        ),
       )
       continue
     }
@@ -366,7 +388,9 @@ export function columnReach(manifestPath: string, model: string, column: string,
       uncertain.push(entry(id, "uses a NATURAL JOIN, whose join columns the lineage engine cannot trace"))
       continue
     }
-    const shared = named.some((col) => allParents.filter((other) => documentedColumns(lookup(other)).has(col)).length > 1)
+    const shared = named.some(
+      (col) => allParents.filter((other) => documentedColumns(lookup(other)).has(col)).length > 1,
+    )
     if (ambiguous || named.length > 0 || fromUnsure) {
       if (ambiguous || fromUnsure || natural) unsure.add(id)
       uncertain.push(
@@ -399,7 +423,10 @@ export function exposuresOn(manifestPath: string, ids: Iterable<string>): Column
   const manifest = loadRawManifest(manifestPath)
   const wanted = new Set(ids)
   // A metric reads its semantic model, which reads a model: whatever depends on one depends on the others.
-  const layers = [...Object.entries<any>(manifest?.semantic_models ?? {}), ...Object.entries<any>(manifest?.metrics ?? {})]
+  const layers = [
+    ...Object.entries<any>(manifest?.semantic_models ?? {}),
+    ...Object.entries<any>(manifest?.metrics ?? {}),
+  ]
   for (let grew = true; grew; ) {
     grew = false
     for (const [id, node] of layers) {
@@ -410,5 +437,10 @@ export function exposuresOn(manifestPath: string, ids: Iterable<string>): Column
   }
   return Object.entries<any>(manifest?.exposures ?? {})
     .filter(([, node]) => (node?.depends_on?.nodes ?? []).some((dep: string) => wanted.has(dep)))
-    .map(([id, node]) => ({ unique_id: id, name: node?.name ?? id, label: node?.label || node?.name || id, type: node?.type ?? "exposure" }))
+    .map(([id, node]) => ({
+      unique_id: id,
+      name: node?.name ?? id,
+      label: node?.label || node?.name || id,
+      type: node?.type ?? "exposure",
+    }))
 }

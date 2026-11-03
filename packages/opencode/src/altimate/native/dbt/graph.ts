@@ -41,7 +41,8 @@ function lookup(manifest: any, id: string): any {
 function relationOf(node: any): string | null {
   // A manifest that carries relation_name with null (ephemeral models, analyses, tests) has no relation.
   if (node && "relation_name" in node && !node.relation_name) return null
-  if (typeof node?.relation_name === "string" && node.relation_name) return node.relation_name.replace(/[`"\[\]]/g, "").toLowerCase()
+  if (typeof node?.relation_name === "string" && node.relation_name)
+    return node.relation_name.replace(/[`"\[\]]/g, "").toLowerCase()
   const parts = [node?.database, node?.schema, node?.alias ?? node?.identifier ?? node?.name].filter(
     (part): part is string => typeof part === "string" && part !== "",
   )
@@ -77,7 +78,8 @@ function mapsOf(manifest: any): { parents: Record<string, string[]>; children: R
 
 export function lineageGraph(manifest: any, id: string): LineageGraph {
   const { parents, children } = mapsOf(manifest)
-  const isTest = (one: string) => ["test", "unit_test"].includes(lookup(manifest, one)?.resource_type ?? one.split(".")[0])
+  const isTest = (one: string) =>
+    ["test", "unit_test"].includes(lookup(manifest, one)?.resource_type ?? one.split(".")[0])
   const keep = new Set([id])
   // Breadth first, so a cut keeps the nearest nodes.
   const walk = (links: Record<string, string[]>, limit: number, seen = new Set([id])) => {
