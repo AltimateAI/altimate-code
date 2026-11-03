@@ -78,15 +78,18 @@ const STRUCTURED_OUTPUT_SCHEMA = {
   additionalProperties: true,
 }
 // The structured result reaches the model in Claude Code, so it stays within the same order of
-// size as a text result: past this, only the report is sent.
-const STRUCTURED_MAX_BYTES = 100_000
+// size as a text result: past this, only the report is sent. Claude Code caps an MCP result at
+// 25k tokens by default and JSON of ids and edges runs ~3-4 characters a token, so this stays under that.
+const STRUCTURED_MAX_BYTES = 60_000
 
 export function structuredResult(tool: string, metadata: Record<string, unknown>, report: string): Record<string, unknown> {
   // A tool that builds its own structured result (dbt_lineage from the dbt integration) hands it
   // over whole; otherwise the lineage fields of its metadata are passed.
   const own = metadata.structuredContent
   if (own && typeof own === "object" && !Array.isArray(own)) {
-    const full = { ...(own as Record<string, unknown>), report }
+    // The text repeats every edge that `columnLineage` already carries: only its header goes with them.
+    const head = report.split(/\n(?:Column edges \(|Trace of )/)[0]!.trim()
+    const full = { ...(own as Record<string, unknown>), report: head }
     return Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES ? full : capReport(report, true)
   }
   const fields = Object.fromEntries((STRUCTURED_FIELDS[tool] ?? []).filter((key) => key in metadata).map((key) => [key, metadata[key]]))

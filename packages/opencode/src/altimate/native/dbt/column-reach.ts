@@ -258,6 +258,8 @@ export function columnReach(manifestPath: string, model: string, column: string,
       : Object.entries<any>(lineage?.column_dict ?? {}).flatMap(([out, sources]) =>
           (Array.isArray(sources) ? sources : [sources]).map((source) => ({ source, target: out, lineage_type: "direct" })),
         )
+    // Errors beside some edges: the engine traced only part of the SQL.
+    const partial = Array.isArray(lineage?.errors) && lineage.errors.length > 0
 
     // Two parents with the same table name share one entry in the engine's schema, so its edges
     // cannot say which one is read; a `select *` from a parent whose schema does not list the
@@ -305,14 +307,26 @@ export function columnReach(manifestPath: string, model: string, column: string,
       tracked.set(id, carried)
       trackedExact.set(id, carriedExact)
       // Outputs fed by an unsettled or ephemeral parent, or read through an ambiguous name, stay unsettled.
-      if (ambiguous || fromUnsure || viaEphemeral) unsure.add(id)
+      if (ambiguous || fromUnsure || viaEphemeral || partial) unsure.add(id)
       reached.push({ name: nodes[id]?.name ?? id, unique_id: id, columns: [...carried].sort() })
       continue
     }
 
+    if (partial) {
+      unsure.add(id)
+      uncertain.push(entry(id, "the lineage engine traced only part of its SQL"))
+      continue
+    }
     if (viaEphemeral) {
       unsure.add(id)
       uncertain.push(entry(id, "reads an ephemeral parent, inlined as a CTE the lineage engine cannot trace through"))
+      continue
+    }
+    // With a known parent, no edge at all (a PIVOT, say) is the engine not seeing through the SQL,
+    // not a model that reads nothing. Below an unsure parent it is already reported as uncertain.
+    if (edges.length === 0 && !fromUnsure) {
+      untraced.push(entry(id, "the lineage engine found no column edges in its SQL"))
+      unsure.add(id)
       continue
     }
     const named = parents.flatMap((parent) => [...tracked.get(parent)!].filter((col) => namesColumn(sqlText, col)))
@@ -348,6 +362,16 @@ export function columnReach(manifestPath: string, model: string, column: string,
 export function exposuresOn(manifestPath: string, ids: Iterable<string>): ColumnReachExposure[] {
   const manifest = loadRawManifest(manifestPath)
   const wanted = new Set(ids)
+  // A metric reads its semantic model, which reads a model: whatever depends on one depends on the others.
+  const layers = [...Object.entries<any>(manifest?.semantic_models ?? {}), ...Object.entries<any>(manifest?.metrics ?? {})]
+  for (let grew = true; grew; ) {
+    grew = false
+    for (const [id, node] of layers) {
+      if (wanted.has(id) || !(node?.depends_on?.nodes ?? []).some((dep: string) => wanted.has(dep))) continue
+      wanted.add(id)
+      grew = true
+    }
+  }
   return Object.entries<any>(manifest?.exposures ?? {})
     .filter(([, node]) => (node?.depends_on?.nodes ?? []).some((dep: string) => wanted.has(dep)))
     .map(([id, node]) => ({ unique_id: id, name: node?.name ?? id, label: node?.label || node?.name || id, type: node?.type ?? "exposure" }))

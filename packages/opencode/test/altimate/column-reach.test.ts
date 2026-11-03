@@ -166,6 +166,19 @@ describe("columnReach", () => {
   })
 })
 
+describe("exposuresOn through metrics", () => {
+  test("an exposure on a metric reaches the model under its semantic model", () => {
+    const value: any = manifest()
+    value.semantic_models = { "semantic_model.shop.orders": { depends_on: { nodes: ["model.shop.rpt_counts"] } } }
+    value.metrics = {
+      "metric.shop.order_count": { depends_on: { nodes: ["semantic_model.shop.orders"] } },
+      "metric.shop.double_count": { depends_on: { nodes: ["metric.shop.order_count"] } },
+    }
+    value.exposures["exposure.shop.kpi"] = { name: "kpi", type: "dashboard", depends_on: { nodes: ["metric.shop.double_count"] } }
+    expect(exposuresOn(manifestFile(value), ["model.shop.rpt_counts"]).map((e) => e.unique_id).sort()).toEqual(["exposure.shop.kpi", "exposure.shop.ops"])
+  })
+})
+
 describe("exposuresOn", () => {
   test("lists exposures on any of the given nodes, by label when there is one", () => {
     const file = manifestFile()
@@ -355,6 +368,60 @@ describe("columnReach with an empty column_lineage", () => {
   })
 })
 
+describe("columnReach on a model the engine cannot fully trace", () => {
+  const answer = (byModel: (sql: string) => unknown) =>
+    spyOn(core, "columnLineage").mockImplementation(((sql: string) => byModel(sql)) as any)
+  const direct = (sql: string) => ({ column_lineage: [{ source: '"shop"."main"."fct_orders"."revenue"', target: "revenue", lineage_type: "direct" }], column_dict: {} })
+
+  test("no edge at all is untraced, and its child is uncertain", () => {
+    const value: any = manifest()
+    value.nodes["model.shop.rpt_ltv"] = model("rpt_ltv", ["model.shop.mart_ltv"], "select 1", ["top_ltv"])
+    const spy = answer((sql) => (sql === "select 1" ? { column_lineage: [], column_dict: {} } : direct(sql)))
+    try {
+      const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+      expect(reach.untraced.map((m) => m.name)).toEqual(["rpt_ltv"])
+      expect(reach.untraced[0]!.reason).toContain("no column edges")
+    } finally {
+      spy.mockRestore()
+    }
+    const chain: any = manifest()
+    chain.nodes["model.shop.fct_daily"].compiled_code = "select 2"
+    chain.nodes["model.shop.rpt_ltv"] = model("rpt_ltv", ["model.shop.fct_daily"], "select max(revenue) as top from fct_daily", ["top"])
+    const again = answer((sql) => (sql === "select 2" ? { column_lineage: [], column_dict: {} } : direct(sql)))
+    try {
+      const reach = columnReach(manifestFile(chain), "fct_orders", "revenue")
+      expect(reach.untraced.map((m) => m.name)).toEqual(["fct_daily"])
+      expect(reach.uncertain.map((m) => m.name)).toContain("rpt_ltv")
+    } finally {
+      again.mockRestore()
+    }
+  })
+
+  test("errors beside edges: a reader stays reached but unsure, a non-reader is uncertain", () => {
+    const value: any = manifest()
+    value.nodes["model.shop.fct_daily"].compiled_code = "select 3"
+    value.nodes["model.shop.rpt_counts"].compiled_code = "select 4"
+    value.nodes["model.shop.rpt_ltv"] = model("rpt_ltv", ["model.shop.fct_daily"], "select max(revenue) as top from fct_daily", ["top"])
+    const spy = answer((sql) =>
+      sql === "select 3"
+        ? { ...direct(sql), errors: ["partial"] }
+        : sql === "select 4"
+          ? { column_lineage: [{ source: '"shop"."main"."fct_orders"."order_id"', target: "orders", lineage_type: "direct" }], column_dict: {}, errors: ["partial"] }
+          : direct(sql),
+    )
+    try {
+      const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+      expect(reach.models.map((m) => m.name)).toContain("fct_daily")
+      // Its own child is checked though fct_daily carried the column on.
+      expect(reach.uncertain.find((m) => m.name === "rpt_counts")?.reason).toBe("the lineage engine traced only part of its SQL")
+      expect(reach.uncertain_exposures.map((e) => e.unique_id)).toContain("exposure.shop.ops")
+      expect(reach.exposures.map((e) => e.unique_id)).not.toContain("exposure.shop.ops")
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
 describe("columnReach on SQL the engine cannot parse", () => {
   test("is untraced, and a dashboard on it is reported apart", () => {
     const value = manifest()
@@ -440,7 +507,15 @@ describe("structuredError", () => {
     expect(structuredError("boom")).toEqual({ report: "boom" })
     const out = structuredError("x".repeat(300_000))
     expect(out.truncated).toBe(true)
-    expect(Buffer.byteLength(out.report as string)).toBeLessThanOrEqual(100_000)
+    expect(Buffer.byteLength(out.report as string)).toBeLessThanOrEqual(60_000)
+  })
+  test("a tool's own structured result sends the report's header, not its edge lists", () => {
+    const text = "Model: x (model.a.x) · table · confidence high\n\nUpstream (0):\n  none\n\nColumn edges (1):\n  x.a ← y.a\n\nNotes: n"
+    expect(structuredResult("dbt_lineage", { structuredContent: { columnLineage: [1] } }, text)).toEqual({
+      columnLineage: [1],
+      report: "Model: x (model.a.x) · table · confidence high\n\nUpstream (0):\n  none",
+    })
+    expect((structuredResult("dbt_lineage", { structuredContent: {} }, "Model: x\n\nTrace of x.a (1 edges):\n  e") as any).report).toBe("Model: x")
   })
   test("exposures_error reaches the structured fields", () => {
     expect(structuredResult("impact_analysis", { exposures_error: "bad json" }, "R")).toEqual({ exposures_error: "bad json", report: "R" })
@@ -451,7 +526,7 @@ describe("structuredResult over the cap", () => {
   test("a report too big on its own is shortened too", () => {
     const out = structuredResult("dbt_lineage", { structuredContent: { focus: {} } }, "x".repeat(300_000))
     expect(out.truncated).toBe(true)
-    expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(100_000)
+    expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(60_000)
     expect("x".repeat(300_000).startsWith(out.report as string)).toBe(true)
   })
 })
@@ -460,7 +535,7 @@ describe("structuredError escaping", () => {
   test("the cap holds for the serialized result, whatever JSON escaping adds", () => {
     for (const text of ["\n".repeat(100_000), "\u0000".repeat(300_000), "é".repeat(80_000)]) {
       const out = structuredError(text)
-      expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(100_000)
+      expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(60_000)
       expect(out.truncated).toBe(true)
     }
   })
