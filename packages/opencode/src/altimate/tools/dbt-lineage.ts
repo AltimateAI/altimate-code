@@ -111,7 +111,8 @@ async function fromAdapter(
     signal.throwIfAborted()
     // A read-only call never starts or uses the dbt adapter (the doc comment above predates this):
     // starting it runs dbt deps and writes target/, and compiling renders Jinja, which can run SQL.
-    if (isReadOnlyCall(signal)) return { reason: READ_ONLY_REASON }
+    // It answers from the manifest as main does, with no note: there's nothing for the user to fix.
+    if (isReadOnlyCall(signal)) return {}
     // Starting the adapter can take a while (dbt deps, a parse): a cancel doesn't wait for it, and
     // past the deadline the manifest answers. The start goes on, for the next call.
     let stop = () => {}
@@ -153,9 +154,6 @@ export const dbtLineageInternals = {
 
 /** Hops each way the adapter's lineage covers, which bounds the size of the structured result. */
 const LINEAGE_DEPTH = 3
-
-const READ_ONLY_REASON =
-  "this session is read-only, and starting the dbt integration runs dbt deps and writes target/, and compiling can run SQL from macros"
 
 /** Whether a value has the version-1 shape this tool relays and formats. */
 export function isModelLineage(value: unknown): value is ModelLineage {

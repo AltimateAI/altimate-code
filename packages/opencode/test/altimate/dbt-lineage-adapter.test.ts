@@ -123,14 +123,14 @@ describe("dbt_lineage in a read-only call", () => {
     }
   })
 
-  test("answers from the manifest and never creates the dbt adapter", async () => {
+  test("answers from the manifest with no note, and never creates the dbt adapter", async () => {
     const call = manifestOnly()
     try {
       const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, readOnly())
       expect(created).toEqual([])
       expect(call.mock.calls.map(([method]) => method)).toEqual(["dbt.lineage"])
       expect(result.metadata.structuredContent).toBeUndefined()
-      expect(result.output).toContain("dbt integration not used: this session is read-only")
+      expect(result.output).not.toContain("dbt integration not used")
     } finally {
       call.mockRestore()
     }
@@ -148,7 +148,7 @@ describe("dbt_lineage in a read-only call", () => {
     try {
       const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, readOnly())
       expect(lookups).toEqual([])
-      expect(result.output).toContain("dbt integration not used: this session is read-only")
+      expect(result.output).not.toContain("dbt integration not used")
     } finally {
       call.mockRestore()
     }
@@ -164,9 +164,7 @@ describe("dbt_lineage in a read-only call", () => {
     try {
       const answer = await client.callTool({ name: "dbt_lineage", arguments: { model: "customers" } })
       expect(answer.isError).toBe(false)
-      expect((answer.content as { text: string }[])[0].text).toContain(
-        "dbt integration not used: this session is read-only",
-      )
+      expect((answer.content as { text: string }[])[0].text).not.toContain("dbt integration not used")
       expect(created).toEqual([])
       call.mockRestore()
       // A read passes the permission check, so this reaches sql_execute's dbt routing.
