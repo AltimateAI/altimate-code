@@ -1,6 +1,7 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import * as Registry from "../native/connections/registry"
 
 export const DataDiffTool = Tool.define("data_diff", {
   description: [
@@ -85,13 +86,20 @@ export const DataDiffTool = Tool.define("data_diff", {
       .describe("For numeric partition columns: size of each bucket. E.g. 100000 splits l_orderkey into ranges of 100K. Omit for date or categorical columns."),
   }),
   async execute(args, ctx) {
-    // Require read permission — data diff executes SELECT queries
-    await ctx.ask({
-      permission: "sql_execute_read",
-      patterns: [args.source.slice(0, 120), args.target.slice(0, 120)],
-      always: ["*"],
-      metadata: {},
-    })
+    // Require read permission — data diff executes SELECT queries. Each side is checked in its own
+    // warehouse's dialect; one ask covers both when they run on the same warehouse. An omitted or
+    // empty source is the registry's first warehouse, as the diff engine resolves it.
+    const sourceWarehouse = args.source_warehouse || Registry.list().warehouses[0]?.name
+    const targetWarehouse = args.target_warehouse || sourceWarehouse
+    const sides =
+      targetWarehouse === sourceWarehouse
+        ? [{ patterns: [args.source.slice(0, 120), args.target.slice(0, 120)], warehouse: sourceWarehouse }]
+        : [
+            { patterns: [args.source.slice(0, 120)], warehouse: sourceWarehouse },
+            { patterns: [args.target.slice(0, 120)], warehouse: targetWarehouse },
+          ]
+    for (const side of sides)
+      await ctx.ask({ permission: "sql_execute_read", patterns: side.patterns, always: ["*"], metadata: { warehouse: side.warehouse } })
 
     try {
       const result = await Dispatcher.call("data.diff", {
@@ -113,7 +121,7 @@ export const DataDiffTool = Tool.define("data_diff", {
       if (!result.success) {
         return {
           title: "Data diff: ERROR",
-          metadata: { success: false, steps: result.steps },
+          metadata: { success: false, steps: result.steps, error: result.error },
           output: `Data diff failed: ${result.error}`,
         }
       }

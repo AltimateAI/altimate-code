@@ -82,6 +82,6 @@ export async function outputLimits() {
     await load(path.join(ConfigManaged.managedConfigDir(), name))
   }
   const preferences = await ConfigManaged.readManagedPreferences().catch(() => undefined)
-  if (preferences) await apply(preferences.text, { source: preferences.source, dir: path.dirname(preferences.source) })
+  if (preferences) await apply(preferences.text, { source: preferences.source, dir: path.dirname(preferences.source.replace(/^mobileconfig:/, "")) })
   return limits
 }

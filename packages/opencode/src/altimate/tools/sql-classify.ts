@@ -187,7 +187,44 @@ function classifyFallback(sql: string, dialect?: string): { queryType: "read" | 
   for (const stmt of statements) {
     if (HARD_DENY_PATTERN.test(stmt)) blocked = true
   }
+  // When quoting or comments cannot be read with certainty, no reading of the literals or comments
+  // can be trusted to hide a hard deny (a misread literal can make a real statement look like a
+  // comment), so the words alone decide; the TRUNCATE() function does not count.
+  if (!tokenizeSql(sql, dialect).complete && mentionsHardDeny(sql)) blocked = true
   return { queryType: "write", blocked }
+}
+
+/** The word DROP with DATABASE or SCHEMA anywhere after it, or TRUNCATE not followed by `(`. Only
+ * words count: quotes and comments are ignored, since how they read is what is uncertain, so no
+ * comment or quote placement can separate the words. One forward pass. */
+function mentionsHardDeny(sql: string): boolean {
+  let drop = false
+  let i = 0
+  while (i < sql.length) {
+    if (!/[A-Za-z_]/.test(sql[i])) {
+      i++
+      continue
+    }
+    let j = i + 1
+    while (j < sql.length && /\w/.test(sql[j])) j++
+    const word = sql.slice(i, j).toUpperCase()
+    if (word === "DROP") drop = true
+    else if (drop && (word === "DATABASE" || word === "SCHEMA")) return true
+    else if (word === "TRUNCATE") {
+      // The TRUNCATE() function: "(" next, past whitespace and closed block comments.
+      let k = j
+      for (;;) {
+        while (k < sql.length && /\s/.test(sql[k])) k++
+        if (!sql.startsWith("/*", k)) break
+        const end = sql.indexOf("*/", k + 2)
+        if (end < 0) break
+        k = end + 2
+      }
+      if (sql[k] !== "(") return true
+    }
+    i = j
+  }
+  return false
 }
 
 /** SQL wrapped in a subquery needs independent parser proof of exactly one query. */

@@ -1,9 +1,8 @@
 // altimate_change - new file
 //
 // dbt_lineage returns dbt-integration's structured lineage when the project's dbt
-// adapter is up, and the adapter prefers the Python-bridge mode for a project found
-// without a dbt.json. The dbt adapter is replaced through `dbtAdapterInternals`, so
-// these tests need no Python or dbt.
+// adapter is up, and the manifest's lineage otherwise. The dbt adapter is replaced
+// through `dbtAdapterInternals`, so these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
@@ -21,7 +20,6 @@ import {
   getDbtProjectRoot,
   resetDbtAdapter,
 } from "@/altimate/native/connections/register"
-import { clearDbtLogs, getRecentDbtLogs } from "../../../dbt-tools/src/log-buffer"
 import { DbtLineageTool, type ModelLineage } from "@/altimate/tools/dbt-lineage"
 import { createServer } from "@/altimate/mcp-server/server"
 import { initTool } from "./tool-fixture"
@@ -124,7 +122,6 @@ afterEach(() => {
   resetDbtAdapter()
   delete dbtAdapterInternals.readConfig
   delete dbtAdapterInternals.create
-  delete dbtAdapterInternals.noUserSql
 })
 
 describe("dbt_lineage with the project's dbt adapter", () => {
@@ -140,7 +137,7 @@ describe("dbt_lineage with the project's dbt adapter", () => {
   test("returns dbt-integration's result as structured content, with a readable text", async () => {
     const tool = await initTool(DbtLineageTool)
     const result = await tool.execute({ model: "customers", column: "customer_lifetime_value" }, ctx)
-    expect(requests).toEqual([{ model: "customers", column: "customer_lifetime_value" }])
+    expect(requests).toEqual([{ model: "customers", column: "customer_lifetime_value", upstreamDepth: 3, downstreamDepth: 3 }])
     expect(result.metadata.structuredContent).toEqual(TRACE)
     expect(result.title).toBe("dbt Lineage: customers.customer_lifetime_value [high]")
     expect(result.output).toContain("Upstream (2):")
@@ -196,7 +193,7 @@ describe("dbt_lineage with the project's dbt adapter", () => {
   })
 
   test("is handed to an MCP client as structuredContent", async () => {
-    const server = await createServer()
+    const server = await createServer({ allowWrite: true })
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
     await server.connect(serverTransport)
     const client = new Client({ name: "test", version: "0" })
@@ -418,78 +415,5 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     } finally {
       call.mockRestore()
     }
-  })
-})
-
-describe("the dbt adapter's integration mode", () => {
-  const tried: string[] = []
-  const creating = (initialized: Record<string, boolean | "throws">) => async (config: { dbtIntegration: string }) => {
-    tried.push(config.dbtIntegration)
-    if (initialized[config.dbtIntegration] === "throws") throw new Error("bridge could not start")
-    return { mode: config.dbtIntegration, ...fakeAdapter(initialized[config.dbtIntegration] === true) }
-  }
-  beforeEach(() => {
-    tried.length = 0
-    dbtAdapterInternals.noUserSql = true
-  })
-
-  test("a project found without a dbt.json uses the Python bridge when it brings the project up", async () => {
-    useConfig(true)
-    dbtAdapterInternals.create = creating({ core: true })
-    expect(await getDbtAdapter()).toMatchObject({ mode: "core" })
-    expect(tried).toEqual(["core"])
-  })
-
-  test("it falls back to the configured mode when the bridge doesn't", async () => {
-    useConfig(true)
-    dbtAdapterInternals.create = creating({ core: false, corecommand: true })
-    expect(await getDbtAdapter()).toMatchObject({ mode: "corecommand" })
-    expect(tried).toEqual(["core", "corecommand"])
-  })
-
-  test("it falls back when the bridge can't start at all, and logs why", async () => {
-    clearDbtLogs()
-    useConfig(true)
-    dbtAdapterInternals.create = creating({ core: "throws", corecommand: true })
-    expect(await getDbtAdapter()).toMatchObject({ mode: "corecommand" })
-    expect(tried).toEqual(["core", "corecommand"])
-    expect(getRecentDbtLogs()).toContain("Python bridge did not start, using corecommand: bridge could not start")
-  })
-
-  test("user SQL never runs on the bridge chosen for a read-only process", async () => {
-    useConfig(true)
-    const ran: string[] = []
-    dbtAdapterInternals.create = async (config: { dbtIntegration: string }) => ({
-      ...fakeAdapter(true),
-      immediatelyExecuteSQL: async (sql: string) => {
-        ran.push(sql)
-        return { columnNames: ["n"], data: [{ n: 1 }] }
-      },
-      mode: config.dbtIntegration,
-    })
-    const bridge = await getDbtAdapter()
-    expect(bridge).toMatchObject({ mode: "core" })
-    // Even after the cache is reset, the bridge adapter itself is refused.
-    resetDbtAdapter()
-    dbtAdapterInternals.create = async () => bridge
-    useConfig(false)
-    // Whatever the native route answers, the bridge doesn't run the statement.
-    await Dispatcher.call("sql.execute", { sql: "create table t as select 1 as n" }).catch(() => {})
-    expect(ran).toEqual([])
-  })
-
-  test("a process that can run user SQL through dbt keeps the configured mode", async () => {
-    delete dbtAdapterInternals.noUserSql
-    useConfig(true)
-    dbtAdapterInternals.create = creating({ core: true, corecommand: true })
-    expect(await getDbtAdapter()).toMatchObject({ mode: "corecommand" })
-    expect(tried).toEqual(["corecommand"])
-  })
-
-  test("a dbt.json's mode is used as configured", async () => {
-    useConfig(false)
-    dbtAdapterInternals.create = creating({ core: true, corecommand: true })
-    expect(await getDbtAdapter()).toMatchObject({ mode: "corecommand" })
-    expect(tried).toEqual(["corecommand"])
   })
 })

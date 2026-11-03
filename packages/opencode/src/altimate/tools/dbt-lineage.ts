@@ -170,26 +170,78 @@ async function fromAdapter(
   signal: AbortSignal,
 ): Promise<{ result?: ModelLineage; reason?: string }> {
   try {
-    const { getDbtAdapter } = await import("../native/connections/register")
-    // Creating the adapter can take seconds; a cancel doesn't wait for it.
+    const [{ getDbtAdapter }, { isReadOnlyCall }] = await Promise.all([
+      import("../native/connections/register"),
+      import("../mcp-server/read-only-calls"),
+    ])
+    // The imports yield: a call cancelled meanwhile starts nothing.
+    signal.throwIfAborted()
+    // A read-only call never starts or uses the dbt adapter (the doc comment above predates this):
+    // starting it runs dbt deps and writes target/, and compiling renders Jinja, which can run SQL.
+    // It answers from the manifest as main does, with no note: there's nothing for the user to fix.
+    if (isReadOnlyCall(signal)) return {}
+    // Starting the adapter can take a while (dbt deps, a parse): a cancel doesn't wait for it, and
+    // past the deadline the manifest answers. The start goes on, for the next call.
     let stop = () => {}
-    const cancelled = new Promise<never>((_, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const waited = new Promise<never>((_, reject) => {
       stop = () => reject(signal.reason)
-      if (signal.aborted) stop()
-      else signal.addEventListener("abort", stop, { once: true })
+      signal.addEventListener("abort", stop, { once: true })
+      const seconds = dbtLineageInternals.adapterStartTimeoutMs / 1000
+      timer = setTimeout(
+        () => reject(new Error(`the dbt adapter didn't start within ${seconds} s`)),
+        dbtLineageInternals.adapterStartTimeoutMs,
+      )
     })
-    const adapter = await Promise.race([getDbtAdapter(), cancelled]).finally(() =>
-      signal.removeEventListener("abort", stop),
-    )
+    const adapter = await Promise.race([getDbtAdapter(), waited]).finally(() => {
+      signal.removeEventListener("abort", stop)
+      clearTimeout(timer)
+    })
     if (!adapter) return { reason: "no dbt project here" }
     if (adapter.isInitialized?.() === false) return { reason: "the dbt adapter didn't load the project" }
     if (typeof adapter.getModelLineage !== "function") return { reason: "dbt-integration has no getModelLineage" }
-    return { result: (await adapter.getModelLineage({ model, ...(column ? { column } : {}) }, signal)) as ModelLineage }
+    const params = { model, ...(column ? { column } : {}), upstreamDepth: LINEAGE_DEPTH, downstreamDepth: LINEAGE_DEPTH }
+    const result: unknown = await adapter.getModelLineage(params, signal)
+    // A lookup that finishes after a cancel doesn't answer.
+    signal.throwIfAborted()
+    if (!isModelLineage(result)) return { reason: "dbt-integration returned a lineage this tool can't read" }
+    return { result }
   } catch (e) {
     // A cancelled call stops here rather than starting the manifest fallback.
     if (signal.aborted) throw e
     return { reason: e instanceof Error ? e.message : String(e) }
   }
+}
+
+/** Test seams. */
+export const dbtLineageInternals = {
+  /** How long a call waits for the dbt adapter to start before it answers from the manifest. */
+  adapterStartTimeoutMs: 120_000,
+}
+
+/** Hops each way the adapter's lineage covers, which bounds the size of the structured result. */
+const LINEAGE_DEPTH = 3
+
+/** Whether a value has the version-1 shape this tool relays and formats. */
+export function isModelLineage(value: unknown): value is ModelLineage {
+  const v = value as Partial<ModelLineage> | null
+  return (
+    typeof v === "object" &&
+    v !== null &&
+    v.version === 1 &&
+    typeof v.project === "string" &&
+    typeof v.dialect === "string" &&
+    typeof v.confidence === "string" &&
+    typeof v.stats === "object" &&
+    v.stats !== null &&
+    typeof v.focus?.uniqueId === "string" &&
+    typeof v.focus?.name === "string" &&
+    Array.isArray(v.nodes) &&
+    v.nodes.every((n) => typeof n?.uniqueId === "string" && Array.isArray(n.columns)) &&
+    Array.isArray(v.columnLineage) &&
+    v.columnLineage.every((e) => Array.isArray(e?.source) && Array.isArray(e?.target) && Array.isArray(e?.viewsCode)) &&
+    Array.isArray(v.errors)
+  )
 }
 
 /** target/manifest.json in the project the dbt adapter finds, which may be above the working directory. */

@@ -370,3 +370,50 @@ test("a quoted remote-execute function name is still classified as a write", () 
 test("duckdb line comments end at CR so a following DROP is blocked", () => {
   expect(classifyAndCheck("SELECT 1 -- x\r; DROP SCHEMA s", "duckdb").blocked).toBe(true)
 })
+
+describe("literal and comment lexing where the dialect decides", () => {
+  test("BigQuery and Redshift backslash escapes keep a quote inside the literal", () => {
+    expect(classifyAndCheck("SELECT 'it\\'s' AS v", "bigquery")).toEqual({ queryType: "read", blocked: false })
+    expect(classifyAndCheck("SELECT \"a\\\"b\" AS v", "bigquery")).toEqual({ queryType: "read", blocked: false })
+    expect(classifyAndCheck("SELECT REGEXP_CONTAINS(x, r'\\d+') FROM t", "bigquery")).toEqual({ queryType: "read", blocked: false })
+    expect(classifyAndCheck("SELECT 'a\\\\b' AS v", "redshift")).toEqual({ queryType: "read", blocked: false })
+    expect(classifyAndCheck("SELECT 'x\\'' ; DROP SCHEMA s; -- '", "bigquery").blocked).toBe(true)
+    expect(classifyAndCheck("SELECT 'x\\'' ; DROP SCHEMA s; -- '", "redshift").blocked).toBe(true)
+  })
+
+  test("without a dialect, an escapable quote or # makes the SQL a write and keeps the hard block", () => {
+    expect(classifyAndCheck("SELECT 'x\\'' ; DROP SCHEMA s; -- '").blocked).toBe(true)
+    expect(classifyAndCheck("# x\nDROP SCHEMA s").blocked).toBe(true)
+    expect(classifyAndCheck("SELECT 'x\\'' AS v").queryType).toBe("write")
+    // An even run of backslashes ends the literal the same way in every dialect; # inside a literal is text.
+    expect(classifyAndCheck("SELECT 'a\\\\' AS v")).toEqual({ queryType: "read", blocked: false })
+    expect(classifyAndCheck("SELECT '#tag' AS v")).toEqual({ queryType: "read", blocked: false })
+    // Uncertain SQL is blocked on the words anywhere, however comments split it; TRUNCATE() is a function.
+    const commented = `SELECT 'x\\'' = "x'"; /* a ; b */ DROP SCHEMA ds CASCADE; -- '`
+    for (const dialect of [undefined, "databricks", "spark", "bigquery"]) expect(classifyAndCheck(commented, dialect).blocked).toBe(true)
+    expect(classifyAndCheck("SELECT TRUNCATE(amount, 2), 'a\\'b' FROM t", "mysql").blocked).toBe(false)
+    // Nothing is stripped first: in BigQuery the DROP below runs, though a naive reading sees a comment.
+    for (const dialect of ["bigquery", "databricks", undefined]) {
+      expect(classifyAndCheck("SELECT 'a\\' /* ' ; DROP SCHEMA s; -- */", dialect).blocked).toBe(true)
+      expect(classifyAndCheck("SELECT 'a\\' /* ' ; DROP /* x */ SCHEMA s; -- */", dialect).blocked).toBe(true)
+    }
+    // Linear on repeated unterminated comments.
+    const started = performance.now()
+    classifyAndCheck("DROP /* ".repeat(32_768), "bigquery")
+    expect(performance.now() - started).toBeLessThan(2_000)
+    expect(classifyAndCheck("SELECT 'x\\'' ; DROP -- c\n SCHEMA s").blocked).toBe(true)
+    // A dialect the lexer does not model gets the same guards as none.
+    for (const dialect of ["generic", "unknown"])
+      expect(classifyAndCheck("SELECT 'x\\'' ; DROP SCHEMA s; -- '", dialect).blocked).toBe(true)
+    // Oracle, Trino and Fabric neither escape quotes with a backslash nor comment with #.
+    for (const dialect of ["oracle", "trino", "fabric"]) {
+      expect(classifyAndCheck("SELECT * FROM t WHERE c LIKE '%\\_%' ESCAPE '\\'", dialect)).toEqual({ queryType: "read", blocked: false })
+      expect(classifyAndCheck("SELECT 'C:\\reports\\' AS p FROM t", dialect)).toEqual({ queryType: "read", blocked: false })
+    }
+    expect(classifyAndCheck("SELECT order# FROM orders", "oracle").queryType).toBe("read")
+    // A comment between TRUNCATE and ( keeps it the function.
+    expect(classifyAndCheck("SELECT TRUNCATE /* c */ (amount, 2), 'a\\'b' AS v FROM t", "mysql").blocked).toBe(false)
+    // Complete SQL keeps its literals: hard-deny text inside a string is not a statement.
+    expect(classifyAndCheck("SELECT '; DROP SCHEMA x' AS v", "postgres")).toEqual({ queryType: "read", blocked: false })
+  })
+})

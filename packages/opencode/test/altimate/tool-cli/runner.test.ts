@@ -165,8 +165,29 @@ describe("ask handler", () => {
     expect(Exit.isFailure(ask(true, "bash", ["truncate table x"]))).toBe(true)
     expect(isBlockedStatement("  Drop Schema s")).toBe(true)
     expect(isBlockedStatement("DROP TABLE t")).toBe(false)
-    expect(isBlockedStatement("/* c */ DROP SCHEMA s")).toBe(true)
-    expect(isBlockedStatement("SELECT 1; TRUNCATE t")).toBe(true)
+  })
+
+  test("with the warehouse dialect, later statements and leading comments are checked too", () => {
+    expect(isBlockedStatement("/* c */ DROP SCHEMA s", "postgres")).toBe(true)
+    expect(isBlockedStatement("SELECT 1; TRUNCATE t", "postgres")).toBe(true)
+    // Dollar-quoted text is a string in Postgres, not a second statement.
+    expect(isBlockedStatement("SELECT $q$; TRUNCATE staging$q$", "postgres")).toBe(false)
+    // Each dialect's comments apply: nested block comments (Postgres), # comments (MySQL).
+    expect(isBlockedStatement("/* outer /* inner */ DROP SCHEMA s */ SELECT 1", "postgres")).toBe(false)
+    expect(isBlockedStatement("# note\nDROP DATABASE db", "mysql")).toBe(true)
+    // Comments between keywords, executable comments and CR line ends are seen in any dialect.
+    for (const sql of ["/* note */ DROP SCHEMA s", "DROP/**/SCHEMA s", "/*!50000 DROP */ SCHEMA s", "-- note\rDROP SCHEMA s"])
+      expect(isBlockedStatement(sql)).toBe(true)
+    expect(isBlockedStatement("/* DROP SCHEMA s */ SELECT 1")).toBe(false)
+    Registry.setConfigs({ pg: { type: "postgres" } as any })
+    try {
+      const askWith = (patterns: string[]) =>
+        Effect.runSyncExit(askFor(false)({ permission: "sql_execute", patterns, always: [], metadata: { warehouse: "pg" } }))
+      expect(Exit.isFailure(askWith(["SELECT 1; TRUNCATE t"]))).toBe(true)
+      expect(Exit.isSuccess(askWith(["SELECT $q$; TRUNCATE staging$q$"]))).toBe(true)
+    } finally {
+      Registry.reset()
+    }
   })
 })
 
@@ -211,6 +232,47 @@ describe("shared adapter behaviour", () => {
   })
 })
 
+describe("sql_execute without a warehouse reads the SQL in the default connection's dialect", () => {
+  test("a BigQuery string escape cannot hide a DROP from the read-only default", async () => {
+    Registry.setConfigs({ bq: { type: "bigquery" } as any })
+    try {
+      for (const query of ["SELECT 'x\\'' ; DROP SCHEMA ds CASCADE; -- '", "ASSERT 'x\\'' = \"x'\"; DROP SCHEMA ds CASCADE; -- '"]) {
+        // Read in BigQuery's dialect, the DROP is a second statement: hard-blocked even with --allow-write.
+        const result = await runner.run("sql_execute", { query }, { allowWrite: true })
+        expect(result.status).toBe("error")
+        expect(result.output).toContain("blocked for safety")
+      }
+    } finally {
+      Registry.reset()
+    }
+  })
+
+  test("a comment holding a ; cannot hide a DROP SCHEMA on Databricks, named or default", async () => {
+    Registry.setConfigs({ dbx: { type: "databricks" } as any })
+    try {
+      const query = `SELECT 'x\\'' = "x'"; /* a ; b */ DROP SCHEMA ds CASCADE; -- '`
+      for (const args of [{ query }, { query, warehouse: "dbx" }]) {
+        const result = await runner.run("sql_execute", args, { allowWrite: true })
+        expect(result.status).toBe("error")
+        expect(result.output).toContain("blocked for safety")
+      }
+    } finally {
+      Registry.reset()
+    }
+  })
+
+  test("a MySQL # comment cannot turn the DROP SCHEMA hard block into an ordinary write", async () => {
+    Registry.setConfigs({ my: { type: "mysql" } as any })
+    try {
+      const result = await runner.run("sql_execute", { query: "# x\nDROP SCHEMA s" }, { allowWrite: true })
+      expect(result.status).toBe("error")
+      expect(result.output).toContain("blocked for safety")
+    } finally {
+      Registry.reset()
+    }
+  })
+})
+
 describe("data_diff write-carrying inputs", () => {
   const write = "SELECT 1 AS id) SELECT 1 AS id; DELETE FROM dbo.t; WITH __x AS (SELECT 1 AS id"
   for (const [field, value] of [
@@ -228,12 +290,48 @@ describe("data_diff write-carrying inputs", () => {
           source_warehouse: "wh",
           [field]: value,
         })
+        expect(result.status).toBe("error")
         expect(JSON.stringify(result)).toContain("read-only inputs")
       } finally {
         Registry.reset()
       }
     })
   }
+
+  test("each side's hard-block check uses its own warehouse dialect", async () => {
+    Registry.setConfigs({ my: { type: "mysql" } as any, pg: { type: "postgres" } as any })
+    try {
+      // Dollar-quoted text is a string in Postgres; read as MySQL it would look like a DROP SCHEMA.
+      const result = await runner.run("data_diff", {
+        source: "orders",
+        target: "SELECT $$; DROP SCHEMA s;$$ AS id",
+        key_columns: ["id"],
+        source_warehouse: "my",
+        target_warehouse: "pg",
+      })
+      expect(JSON.stringify(result)).not.toContain("blocked for safety")
+    } finally {
+      Registry.reset()
+    }
+  })
+
+  test("an omitted or empty source warehouse is checked in the default warehouse's dialect", async () => {
+    Registry.setConfigs({ pg: { type: "postgres" } as any })
+    try {
+      for (const source_warehouse of [undefined, ""]) {
+        const result = await runner.run("data_diff", {
+          source: "SELECT $$; DROP SCHEMA s;$$ AS id",
+          target: "orders",
+          key_columns: ["id"],
+          ...(source_warehouse === undefined ? {} : { source_warehouse }),
+          target_warehouse: "pg",
+        })
+        expect(JSON.stringify(result)).not.toContain("blocked for safety")
+      }
+    } finally {
+      Registry.reset()
+    }
+  })
 })
 
 describe("results directory", () => {
