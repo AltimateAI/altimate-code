@@ -35,6 +35,8 @@ import { pathToFileURL } from "url"
 // altimate_change — config.ts reads Global from "@/global" (opencode, app=altimate-code); the
 // test must swap THAT module's Path.config, not core's, or the global config never loads.
 import { Global } from "@/global"
+// altimate_change — the agent loaders log folded keys through Log.Default
+import { Log } from "@/util/log"
 import { ProjectV2 } from "@opencode-ai/core/project"
 import { Filesystem } from "@/util/filesystem"
 import { ConfigPlugin } from "@/config/plugin"
@@ -2440,6 +2442,90 @@ describe("learn keys set above project files", () => {
       yield* writeConfigEffect(test.directory, { $schema: "https://opencode.ai/config.json", learn: { enabled: true } })
       yield* Config.use.get()
       expect([...Config.learnKeysAboveProject(test.directory)]).toEqual([])
+    }),
+  )
+})
+// altimate_change end
+
+// altimate_change start — a top-level agent key outside the schema is folded into options and logged
+describe("agent config keys outside the schema", () => {
+  let warn: ReturnType<typeof spyOn<typeof Log.Default, "warn">>
+  beforeEach(() => {
+    warn = spyOn(Log.Default, "warn").mockImplementation(() => {})
+  })
+  afterEach(() => {
+    warn.mockRestore()
+  })
+  const folded = () =>
+    warn.mock.calls
+      .filter(([message]) => String(message).includes("folded into options"))
+      .map(([, extra]) => extra as Record<string, string>)
+
+  it.instance("a markdown agent's unknown frontmatter key is kept under options and named in a warning", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      yield* FSUtil.use.writeWithDirs(
+        path.join(test.directory, ".opencode", "agent", "exec.md"),
+        `---
+model: test/model
+audience: executive
+budget: 100
+---
+Executive summaries only`,
+      )
+      const config = yield* Config.use.get()
+      expect(config.agent?.["exec"]).toMatchObject({
+        model: "test/model",
+        options: { audience: "executive", budget: 100 },
+      })
+      expect(folded()).toEqual([
+        expect.objectContaining({
+          agent: "exec",
+          keys: "audience,budget",
+          source: expect.stringContaining("exec.md"),
+          known: expect.stringContaining("steps"),
+        }),
+      ])
+    }),
+  )
+
+  it.instance("a JSON agent's unknown key is kept under options and named in a warning", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      yield* writeConfigEffect(test.directory, {
+        agent: { helper: { model: "test/model", budget: 100 } },
+        mode: { focus: { model: "test/model", retries: 2 } },
+      })
+      const config = yield* Config.use.get()
+      expect(config.agent?.["helper"]).toMatchObject({ model: "test/model", options: { budget: 100 } })
+      expect(config.agent?.["focus"]).toMatchObject({ mode: "primary", options: { retries: 2 } })
+      expect(folded()).toEqual([
+        expect.objectContaining({ agent: "helper", keys: "budget" }),
+        expect.objectContaining({ agent: "focus", keys: "retries" }),
+      ])
+    }),
+  )
+
+  it.instance("known keys and keys nested under options are not reported", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      yield* writeConfigEffect(test.directory, {
+        agent: { quiet: { model: "test/model", steps: 4, options: { audience: "executive" } } },
+      })
+      yield* FSUtil.use.writeWithDirs(
+        path.join(test.directory, ".opencode", "agent", "plain.md"),
+        `---
+model: test/model
+steps: 2
+options:
+  audience: technical
+---
+Plain agent`,
+      )
+      const config = yield* Config.use.get()
+      expect(config.agent?.["quiet"]).toMatchObject({ steps: 4, options: { audience: "executive" } })
+      expect(config.agent?.["plain"]).toMatchObject({ steps: 2, options: { audience: "technical" } })
+      expect(folded()).toEqual([])
     }),
   )
 })
