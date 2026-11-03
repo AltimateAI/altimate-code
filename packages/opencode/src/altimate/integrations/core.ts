@@ -905,7 +905,7 @@ async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, con
   let keys: string[] = []
   if (!first.integrations.some((e) => String(e.id) === integrationId)) {
     const catalog = await backend.integrationsCatalog(cfg)
-    const list: any[] = Array.isArray(catalog) ? catalog : ((catalog as any)?.integrations ?? [])
+    const list: any[] = backend.catalogEntries(catalog)
     const found = list.find((c) => String(c?.id) === integrationId)
     keys = (found?.tools ?? []).map((t: any) => t?.key).filter((k: unknown): k is string => typeof k === "string")
   }

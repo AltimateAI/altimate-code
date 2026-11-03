@@ -92,9 +92,8 @@ function parseFields(config: unknown): FieldDef[] {
  * An entry's `config` is its default variant and `additionalConfigVariants` (or `variants`) lists the others.
  */
 export function parseCatalog(data: unknown): Catalog {
-  const list = Array.isArray(data) ? data : isObject(data) ? (data.items ?? data.integrations ?? data.data ?? []) : []
   const out: Catalog = {}
-  for (const entry of Array.isArray(list) ? list : []) {
+  for (const entry of backend.catalogEntries(data)) {
     if (!isObject(entry) || typeof entry.id !== "string" || !core.isProvider(entry.id)) continue
     const id = entry.id
     const first = BUILTIN_CATALOG[id][0]
@@ -246,13 +245,13 @@ export async function resolve(id: ProviderId, variantId?: string, offline = fals
   for (const f of def.fields) {
     const draft = detectedOnly ? undefined : f.secret ? core.readSecret(core.secretKey("draft", id, f.name)) : rec?.drafts?.[f.name]
     if (draft) {
-      values[f.name] = draft
+      values[f.name] = f.name === "jiraDomain" ? core.normaliseJiraDomain(draft) : draft
       origin[f.name] = "draft"
       continue
     }
     const stored = detectedOnly ? undefined : f.secret ? core.readSecret(core.secretKey("cred", id, f.name)) : rec?.values?.[f.name]
     if (stored) {
-      values[f.name] = stored
+      values[f.name] = f.name === "jiraDomain" ? core.normaliseJiraDomain(stored) : stored
       origin[f.name] = "stored"
       continue
     }
@@ -356,7 +355,7 @@ export async function setDraft(id: ProviderId, name: string, value: string) {
   if (f.secret) throw new Error(`"${name}" is a secret. Use: altimate integrations set-secret ${id} ${name} --from-clipboard`)
   await core.updateStore((store) => {
     const rec = store.providers[id] ?? {}
-    const trimmed = value.trim()
+    const trimmed = name === "jiraDomain" ? core.normaliseJiraDomain(value) : value.trim()
     const drafts = { ...rec.drafts }
     if (trimmed) drafts[name] = trimmed
     else delete drafts[name]

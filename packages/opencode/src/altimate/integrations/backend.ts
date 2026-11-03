@@ -39,12 +39,21 @@ export interface Connection {
 export async function backendConfig(): Promise<BackendConfig | null> {
   const env = { url: process.env.ALTIMATE_INTEGRATIONS_API_URL, tenant: process.env.ALTIMATE_INTEGRATIONS_TENANT, token: process.env.ALTIMATE_INTEGRATIONS_TOKEN }
   if (env.url && env.tenant && env.token) return { apiUrl: env.url.replace(/\/+$/, ""), tenant: env.tenant, token: env.token }
-  const creds = await AltimateApi.getCredentials().catch(() => null)
+  const creds = await AltimateApi.getCredentials().catch((e) => {
+    if (e instanceof Error && /credentials not found/i.test(e.message)) return null
+    throw new Error(`Could not read your Altimate login (${e instanceof Error ? e.message : e}). Fix or remove the credentials file, then sign in again.`)
+  })
   const apiUrl = (creds?.altimateUrl || "").replace(/\/+$/, "")
   const token = creds?.altimateApiKey || ""
   const tenant = creds?.altimateInstanceName || ""
   if (!apiUrl || !token || !tenant) return null
   return { apiUrl, tenant, token }
+}
+
+/** The entries of a catalog response: a bare list, or one wrapped in `items`, `integrations` or `data`. */
+export function catalogEntries(data: unknown): any[] {
+  const list = Array.isArray(data) ? data : isObject(data) ? (data.items ?? data.integrations ?? data.data ?? []) : []
+  return Array.isArray(list) ? list : []
 }
 
 const FAILURE_TEXT: Record<number, string> = {

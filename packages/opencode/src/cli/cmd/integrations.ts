@@ -15,6 +15,12 @@ import type { ProviderId, ProviderStatus, StatusResult } from "../../altimate/in
 
 const S = UI.Style
 const out = (text = "") => console.log(text)
+/** Text from config, a provider or the network, safe to print: escape sequences, control characters and bidi marks are removed. */
+// eslint-disable-next-line no-control-regex
+const ANSI = /\u001b\[[0-?]*[ -\/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g
+// eslint-disable-next-line no-control-regex
+const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+export const clean = (value: unknown) => String(value ?? "").replace(ANSI, "").replace(UNSAFE, " ").replace(/ {2,}/g, " ").trim()
 const json = (value: unknown) => console.log(JSON.stringify(value, null, 2))
 const jsonOption = { describe: "print machine-readable JSON", type: "boolean", default: false } as const
 
@@ -35,13 +41,13 @@ const SYNC_LABEL: Record<ProviderStatus["sync"], string> = {
 
 function printStatus(result: StatusResult, title: string) {
   out()
-  out(`${S.TEXT_HIGHLIGHT_BOLD}◆ ${title}${S.TEXT_NORMAL}  ${S.TEXT_DIM}${result.workspace.linked ? `workspace ${result.workspace.name}` : "workspace not linked"}${result.workspace.tenant ? ` (${result.workspace.tenant})` : ""}${S.TEXT_NORMAL}`)
+  out(`${S.TEXT_HIGHLIGHT_BOLD}◆ ${title}${S.TEXT_NORMAL}  ${S.TEXT_DIM}${result.workspace.linked ? `workspace ${clean(result.workspace.name)}` : "workspace not linked"}${result.workspace.tenant ? ` (${clean(result.workspace.tenant)})` : ""}${S.TEXT_NORMAL}`)
   out()
   for (const p of result.providers) {
     const v = STATE_VIEW[p.state]
-    const src = p.source ? `${p.source.label}${p.account ? ` · ${p.account}` : ""}` : "-"
+    const src = p.source ? `${clean(p.source.label)}${p.account ? ` · ${clean(p.account)}` : ""}` : "-"
     out(`  ${v.color}${v.icon}${S.TEXT_NORMAL} ${S.TEXT_NORMAL_BOLD}${p.name.padEnd(8)}${S.TEXT_NORMAL} ${v.color}${v.label.padEnd(10)}${S.TEXT_NORMAL} ${src}`)
-    if (p.state !== "not_found") out(`    ${S.TEXT_DIM}${SYNC_LABEL[p.sync]}${p.expiresAt && p.state === "connected" ? ` · expires ${p.expiresAt}` : ""}${p.note ? ` · ${p.note}` : ""}${S.TEXT_NORMAL}`)
+    if (p.state !== "not_found") out(`    ${S.TEXT_DIM}${SYNC_LABEL[p.sync]}${p.expiresAt && p.state === "connected" ? ` · expires ${clean(p.expiresAt)}` : ""}${p.note ? ` · ${clean(p.note)}` : ""}${S.TEXT_NORMAL}`)
   }
   out()
 }
@@ -53,7 +59,7 @@ function parseProviders(value: unknown, all: boolean | undefined): ProviderId[] 
 }
 
 function fail(error: unknown, asJson = false) {
-  const message = error instanceof Error ? error.message : String(error)
+  const message = clean(error instanceof Error ? error.message : String(error))
   if (asJson) json({ status: "failed", message })
   else UI.error(message)
   process.exitCode = 1
@@ -92,9 +98,9 @@ const DetectCommand = cmd({
 
 function renderSync(o: core.SyncOutcome) {
   const name = core.PROVIDER_NAMES[o.id]
-  if (o.result === "kept_local") return out(`  ${S.TEXT_WARNING}⊘${S.TEXT_NORMAL} ${name}: kept local (${o.reason})`)
-  if (o.result === "failed") return out(`  ${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: sync failed (${o.reason})`)
-  if (o.result === "skipped") return out(`  ${S.TEXT_DIM}- ${name}: skipped (${o.reason})${S.TEXT_NORMAL}`)
+  if (o.result === "kept_local") return out(`  ${S.TEXT_WARNING}⊘${S.TEXT_NORMAL} ${name}: kept local (${clean(o.reason)})`)
+  if (o.result === "failed") return out(`  ${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: sync failed (${clean(o.reason)})`)
+  if (o.result === "skipped") return out(`  ${S.TEXT_DIM}- ${name}: skipped (${clean(o.reason)})${S.TEXT_NORMAL}`)
   out(`  ${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} synced to workspace (private)`)
 }
 
@@ -204,9 +210,9 @@ async function runCredentials(args: any, update: boolean) {
     if (r.status !== "connected") process.exitCode = 1
     if (args.json) return json({ provider: r.provider, status: r.status, sync: r.sync, account: r.account, expiresAt: r.expiresAt, message: r.message, ...(r.code ? { code: r.code } : {}), ...(r.missing ? { missing: r.missing } : {}) })
     if (r.status === "connected") {
-      out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} ${update ? "updated" : "connected"}${r.account ? ` as ${S.TEXT_NORMAL_BOLD}${r.account}${S.TEXT_NORMAL}` : ""}`)
-      out(`  ${S.TEXT_DIM}${r.sync === "synced" ? `synced to your workspace from ${os.hostname()}` : "kept local, not synced"}${r.expiresAt ? ` · expires ${r.expiresAt}` : ""}${r.message ? ` · ${r.message}` : ""}${S.TEXT_NORMAL}`)
-    } else out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: ${r.message ?? r.status}`)
+      out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} ${update ? "updated" : "connected"}${r.account ? ` as ${S.TEXT_NORMAL_BOLD}${clean(r.account)}${S.TEXT_NORMAL}` : ""}`)
+      out(`  ${S.TEXT_DIM}${r.sync === "synced" ? `synced to your workspace from ${os.hostname()}` : "kept local, not synced"}${r.expiresAt ? ` · expires ${clean(r.expiresAt)}` : ""}${r.message ? ` · ${clean(r.message)}` : ""}${S.TEXT_NORMAL}`)
+    } else out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: ${clean(r.message ?? r.status)}`)
   } catch (e) {
     fail(e, args.json)
   }
@@ -241,13 +247,13 @@ const FieldsCommand = cmd({
       const id = parseProviders(args.provider, false)[0]
       const r = await creds.describeFields(id, args.variant)
       if (args.json) return json(r)
-      out(`\n${S.TEXT_HIGHLIGHT_BOLD}◆ ${core.PROVIDER_NAMES[id]}${S.TEXT_NORMAL} ${S.TEXT_DIM}${r.variant}${r.variants.length > 1 ? ` (also: ${r.variants.filter((v) => v !== r.variant).join(", ")})` : ""}${S.TEXT_NORMAL}\n`)
+      out(`\n${S.TEXT_HIGHLIGHT_BOLD}◆ ${core.PROVIDER_NAMES[id]}${S.TEXT_NORMAL} ${S.TEXT_DIM}${clean(r.variant)}${r.variants.length > 1 ? ` (also: ${r.variants.filter((v) => v !== r.variant).map(clean).join(", ")})` : ""}${S.TEXT_NORMAL}\n`)
       for (const f of r.fields) {
-        const shown = f.secret ? (f.hasValue ? `✓ ${f.masked}` : "not set") : (f.value ?? "not set")
-        out(`  ${f.label}${f.required ? "" : " (optional)"}: ${shown}`)
-        if (f.note) out(`    ${S.TEXT_DIM}${f.note}${S.TEXT_NORMAL}`)
+        const shown = f.secret ? (f.hasValue ? `✓ ${f.masked}` : "not set") : (clean(f.value) || "not set")
+        out(`  ${clean(f.label)}${f.required ? "" : " (optional)"}: ${shown}`)
+        if (f.note) out(`    ${S.TEXT_DIM}${clean(f.note)}${S.TEXT_NORMAL}`)
       }
-      if (r.tokenUrl) out(`\n  ${S.TEXT_DIM}Create a token: ${r.tokenUrl}${S.TEXT_NORMAL}`)
+      if (r.tokenUrl) out(`\n  ${S.TEXT_DIM}Create a token: ${clean(r.tokenUrl)}${S.TEXT_NORMAL}`)
       out()
     } catch (e) {
       fail(e, args.json)
@@ -321,13 +327,13 @@ const DiscardCommand = cmd({
 const OpenTokenPageCommand = cmd({
   command: "open-token-page <provider>",
   describe: "open the page where the provider's token is created",
-  builder: (yargs: Argv) => credentialOptions(yargs).option("open", { describe: "open the browser (--no-open prints the URL only)", type: "boolean", default: true }),
+  builder: (yargs: Argv) => credentialOptions(yargs).option("open", { describe: "open the browser (on by default; with --json only when --open is given)", type: "boolean" }),
   handler: async (args) => {
     try {
       const id = parseProviders(args.provider, false)[0]
       const { variant, tokenUrl } = await creds.describeFields(id, args.variant)
       if (!tokenUrl) throw new Error(`${core.PROVIDER_NAMES[id]} (${variant}) has no token page. Create the token in your Jira profile.`)
-      if (args.open) await open(tokenUrl).catch(() => undefined)
+      if (args.open ?? !args.json) await open(tokenUrl).catch(() => undefined)
       if (args.json) return json({ provider: id, variant, tokenUrl })
       out(tokenUrl)
     } catch (e) {

@@ -4,9 +4,10 @@ import os from "node:os"
 import childProcess from "node:child_process"
 import path from "node:path"
 import { IntegrationsCore as core } from "../../src/altimate/integrations/core"
-import { skipsSynced } from "../../src/cli/cmd/integrations"
+import { skipsSynced, clean } from "../../src/cli/cmd/integrations"
 import { IntegrationsBackend as backend } from "../../src/altimate/integrations/backend"
 import { IntegrationsCredentials as creds } from "../../src/altimate/integrations/credentials"
+import { AltimateApi } from "../../src/altimate/api/client"
 import * as workspaceState from "../../src/altimate/workspace/state"
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "integrations-test-"))
@@ -174,6 +175,7 @@ describe("keychain", () => {
   const calls: { cmd: string; args: string[]; input?: string }[] = []
   let spawn: ReturnType<typeof spyOn> | undefined
   const on = (status = 0, stdout = "") => {
+    spawn?.mockRestore()
     delete process.env.ALTIMATE_INTEGRATIONS_DIR
     Object.defineProperty(process, "platform", { value: "darwin" })
     calls.length = 0
@@ -1081,6 +1083,14 @@ describe("credentials flow", () => {
   })
 
   describe("set and set-secret", () => {
+    test("a typed Jira site is reduced to the subdomain before it is stored", async () => {
+      for (const typed of ["https://acme.atlassian.net", "acme.atlassian.net/", " http://Acme.atlassian.net/jira?x=1 "]) {
+        await creds.setDraft("jira", "jiraDomain", typed)
+        expect(core.loadStore().providers.jira?.drafts?.jiraDomain).toBe(typed.includes("Acme") ? "Acme" : "acme")
+        expect((await creds.resolve("jira")).values.jiraDomain).toBe(typed.includes("Acme") ? "Acme" : "acme")
+      }
+    })
+
     test("set stores a non-secret draft and rejects secrets and unknown fields", async () => {
       await creds.setDraft("jira", "jiraDomain", " acme ")
       expect(core.loadStore().providers.jira?.drafts).toEqual({ jiraDomain: "acme" })
@@ -1944,5 +1954,53 @@ describe("detachFromIntegrations", () => {
     const other = { id: "linear", tools: [], connection_id: "5" }
     const out = core.detachFromIntegrations([{ id: "jira", tools: [{ key: "t" }], connection_id: "9", connection_ids: ["3", "9"] }, other], 9)
     expect(out).toEqual([{ id: "jira", tools: [{ key: "t" }], connection_id: null, connection_ids: ["3"] }, other])
+  })
+})
+
+describe("printed text and catalog shape", () => {
+  test("clean removes escape sequences, control and bidi characters", () => {
+    expect(clean("a\u001b[31mred\u001b[0m\nb\r\u0007c\u202ed")).toBe("ared b c d")
+    expect(clean("\u001b]0;title\u0007ok")).toBe("ok")
+    expect(clean(null)).toBe("")
+  })
+
+  test("catalogEntries unwraps a list, items, integrations and data alike", () => {
+    const entry = { id: "github", tools: [{ key: "read_repo" }] }
+    for (const body of [[entry], { items: [entry] }, { integrations: [entry] }, { data: [entry] }]) {
+      expect(backend.catalogEntries(body)).toEqual([entry])
+      expect(Object.keys(creds.parseCatalog(body))).toEqual(Object.keys(creds.parseCatalog([entry])))
+    }
+    expect(backend.catalogEntries({ items: "x" })).toEqual([])
+    expect(backend.catalogEntries(null)).toEqual([])
+  })
+})
+
+describe("saved login", () => {
+  const saved = { url: process.env.ALTIMATE_INTEGRATIONS_API_URL, tenant: process.env.ALTIMATE_INTEGRATIONS_TENANT, token: process.env.ALTIMATE_INTEGRATIONS_TOKEN }
+  beforeEach(() => {
+    delete process.env.ALTIMATE_INTEGRATIONS_API_URL
+    delete process.env.ALTIMATE_INTEGRATIONS_TENANT
+    delete process.env.ALTIMATE_INTEGRATIONS_TOKEN
+  })
+  afterEach(() => {
+    for (const [k, v] of [["ALTIMATE_INTEGRATIONS_API_URL", saved.url], ["ALTIMATE_INTEGRATIONS_TENANT", saved.tenant], ["ALTIMATE_INTEGRATIONS_TOKEN", saved.token]] as const) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  })
+
+  test("a missing credentials file is signed out, an unreadable one is an error", async () => {
+    const missing = spyOn(AltimateApi, "getCredentials").mockRejectedValue(new Error("Altimate credentials not found at /x/altimate.json"))
+    try {
+      expect(await backend.backendConfig()).toBeNull()
+    } finally {
+      missing.mockRestore()
+    }
+    const corrupt = spyOn(AltimateApi, "getCredentials").mockRejectedValue(new SyntaxError("Unexpected token } in JSON"))
+    try {
+      await expect(backend.backendConfig()).rejects.toThrow("Could not read your Altimate login (Unexpected token } in JSON)")
+    } finally {
+      corrupt.mockRestore()
+    }
   })
 })
