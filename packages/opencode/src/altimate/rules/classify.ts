@@ -30,7 +30,7 @@ const MEMORY_CUES: readonly [RegExp, string][] = [
   [/\bmy\s+(?:preference|style|default|setup|machine|laptop)\b/i, "a personal preference"],
   [/\bremember\s+(?:that|our|the)\b(?!.{0,2000}\b(?:always|never|must)\b)/i, "a fact to remember"],
   [/\b(?:our|the)\s+(?:warehouse|database|account|cluster|stack|region|team|company|org)\s+(?:is|uses|runs|lives)\b/i, "a fact about the environment"],
-  [/\b[A-Z]{2,}\s+(?:means|stands for|is short for)\b|\bmeans\b.*\b(?:revenue|users?|customers?|metric)\b/, "a glossary term"],
+  [/\b[A-Z]{2,}\s+(?:means|stands for|is short for)\b|\bmeans\b.{0,500}\b(?:revenue|users?|customers?|metric)\b/, "a glossary term"],
 ]
 
 const RULE_CUES: readonly [RegExp, string][] = [
