@@ -245,6 +245,7 @@ const FieldsCommand = cmd({
       for (const f of r.fields) {
         const shown = f.secret ? (f.hasValue ? `✓ ${f.masked}` : "not set") : (f.value ?? "not set")
         out(`  ${f.label}${f.required ? "" : " (optional)"}: ${shown}`)
+        if (f.note) out(`    ${S.TEXT_DIM}${f.note}${S.TEXT_NORMAL}`)
       }
       if (r.tokenUrl) out(`\n  ${S.TEXT_DIM}Create a token: ${r.tokenUrl}${S.TEXT_NORMAL}`)
       out()

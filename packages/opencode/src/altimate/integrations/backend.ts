@@ -113,10 +113,16 @@ async function call<T>(cfg: BackendConfig, method: string, path: string, body?: 
   }
 }
 
+/** Every connection the caller can see, their own and those shared with them. */
+export async function listVisibleConnections(cfg: BackendConfig): Promise<Connection[]> {
+  const res = await call<{ connections?: Connection[] }>(cfg, "GET", "/connections/?include_shared=true")
+  return res?.connections ?? []
+}
 /** The caller's own connections only: nothing shared with them. */
+export const ownConnections = (all: Connection[]): Connection[] => all.filter((c) => c.is_owner !== false)
 export async function listOwnConnections(cfg: BackendConfig): Promise<Connection[]> {
   const res = await call<{ connections?: Connection[] }>(cfg, "GET", "/connections/?include_shared=false")
-  return (res?.connections ?? []).filter((c) => c.is_owner !== false)
+  return ownConnections(res?.connections ?? [])
 }
 export const createConnection = (cfg: BackendConfig, body: { name: string; integration_id: string; config: Record<string, unknown> }) =>
   call<Connection>(cfg, "POST", "/connections/", body)

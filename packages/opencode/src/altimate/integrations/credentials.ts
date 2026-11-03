@@ -10,6 +10,7 @@ import { createHash } from "node:crypto"
 import { spawnSync } from "node:child_process"
 import { IntegrationsCore as core } from "./core"
 import { IntegrationsBackend as backend } from "./backend"
+import { workspaceLabel } from "../workspace/workspace-name"
 import type { ProviderId, Source, StoredProvider } from "./core"
 
 export interface FieldDef {
@@ -577,7 +578,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   const r = await resolve(id, opts.variant ?? (opts.update ? rec?.variant : undefined), Boolean(opts.localOnly) || blocked)
   const missing = r.def.fields.filter((f) => f.required && !r.values[f.name])
   if (missing.length)
-    return local({ status: "missing_fields", sync: "local", message: `Missing: ${missing.map((f) => f.label).join(", ")}`, code: "missing_fields", missing: missing.map((f) => f.name) })
+    return local({ status: "missing_fields", sync: "local", message: [`Missing: ${missing.map((f) => f.label).join(", ")}`, ...missing.map((f) => r.notes[f.name]).filter(Boolean)].join(". "), code: "missing_fields", missing: missing.map((f) => f.name) })
 
   opts.onStep?.("Testing connection…")
   const check = await validate(id, r.variant, r.values)
@@ -731,7 +732,7 @@ function workspaceNote(w: core.UpsertResult["workspace"]): string | null {
   if (!w) return null
   if ("error" in w) return core.ATTACH_FAILED_PREFIX + w.error
   if ("notLinked" in w) return core.NOT_LINKED_LABEL
-  return w.kept ? `Kept the workspace's existing connection in ${w.attached}` : `Attached to workspace ${w.attached}`
+  return w.kept ? `Kept the workspace's existing connection in ${workspaceLabel(w.attached, w.workspaceId)}` : `Attached to ${workspaceLabel(w.attached, w.workspaceId)}`
 }
 
 export * as IntegrationsCredentials from "./credentials"

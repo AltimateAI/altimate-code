@@ -208,6 +208,18 @@ describe("keychain", () => {
     ])
   })
 
+  test("a failed keychain delete is an error unless the item was already absent", async () => {
+    const del = () => core.deleteSecret("cred:github:github_token")
+    on(0)
+    await del()
+    on(44)
+    await del()
+    on(1)
+    await expect(del()).rejects.toThrow("macOS keychain")
+    on(51)
+    await expect(del()).rejects.toThrow("exit 51")
+  })
+
   test("a failed keychain write is an error", async () => {
     on(1)
     await expect(core.storeSecret("cred:github:github_token", "x")).rejects.toThrow("macOS keychain")
@@ -290,7 +302,8 @@ describe("workspace connections", () => {
     expect(writes()).toHaveLength(1)
     expect(writes()[0]).toMatchObject({ method: "POST", path: "/connections/", auth: "Bearer bearer-1", tenant: "acme" })
     expect(writes()[0].body).toEqual({ name: `GitHub (from ${HOST})`, integration_id: "github", config: { github_token: "gh_env_token", expires_at: "2031-01-02T03:04:05.000Z" } })
-    expect(calls.find((c) => c.path.startsWith("/connections"))).toMatchObject({ method: "GET", path: "/connections/", query: "?include_shared=false" })
+    expect(calls.find((c) => c.path.startsWith("/connections"))).toMatchObject({ method: "GET", path: "/connections/", query: "?include_shared=true" })
+    expect(calls.filter((c) => c.method === "GET" && c.path === "/connections/")).toHaveLength(1)
     expect(core.loadStore().providers.github).toMatchObject({ registered: true, synced: true, connectionId: 21 })
 
     process.env.GITHUB_TOKEN = "gh_env_token_2"
@@ -400,6 +413,36 @@ describe("workspace connections", () => {
     expect(writes()).toHaveLength(before)
     await core.setBlocked(["github"], true)
     expect((await core.syncProvider("github", undefined, 0, true)).result).toBe("kept_local")
+  })
+
+  test("attach-only runs under the lock and names the kept workspace inert, with its id", async () => {
+    await core.syncProvider("github")
+    const events: string[] = []
+    const spies = [
+      spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS\nx" } } as any),
+      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, integrations: [{ id: "github", tools: [], connection_id: "999" }] } as any),
+      spyOn(backend, "updateDatamateIntegrations").mockImplementation((async () => void events.push("patch")) as any),
+    ]
+    api.seed({ name: "Teammate's", integration_id: "github", is_owner: false })
+    api.state.rows[api.state.rows.length - 1].id = 999
+    let release = () => {}
+    const holder = core.withLock(() => new Promise<void>((r) => (release = r)))
+    await Bun.sleep(50)
+    try {
+      const pending = core.syncProvider("github", undefined, 0, true)
+      await Bun.sleep(400)
+      expect(events).toEqual([])
+      release()
+      await holder
+      const out = await pending
+      expect(events).toEqual(["patch"])
+      const kept = out.steps.find((st) => st.label.startsWith("Kept"))!.label
+      expect(kept).toContain("(id 5)")
+      expect(kept).not.toContain("\n")
+    } finally {
+      release()
+      for (const sp of spies) sp.mockRestore()
+    }
   })
 
   test("sync over every provider leaves a saved connection alone and only attaches it", async () => {
@@ -1107,6 +1150,8 @@ describe("credentials flow", () => {
       jiraCli()
       userMcp({ JIRA_PAT_TOKEN: GOOD })
       expect(await creds.detectedConfig("jira")).toEqual({ reason: expect.stringContaining("Missing: Personal access token") })
+      const connect = await creds.connectCredentials({ id: "jira", variant: "server", localOnly: true })
+      expect([connect.status, connect.message]).toEqual(["missing_fields", expect.stringContaining("the token was not filled in")])
       fs.rmSync(path.join(home, ".config"), { recursive: true, force: true })
       userMcp({ JIRA_URL: base() })
       process.env.JIRA_PAT_TOKEN = GOOD
@@ -1838,6 +1883,29 @@ describe("attach keeps another connection", () => {
     const live = core.attachToIntegrations([{ id: "jira", tools: [], connection_id: "3" }], "jira", 9, [], [9, 3])
     expect(live[0].connection_id).toBe("3")
   })
+  test("an entry on a connection shared by another member is kept; a deleted one is taken over, with its id dropped from the list", async () => {
+    const entry = { id: "jira", tools: [], connection_id: "3", connection_ids: ["3", "4"] }
+    const updates: any[] = []
+    const spies = [
+      spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS" } } as any),
+      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, integrations: [entry] } as any),
+      spyOn(backend, "updateDatamateIntegrations").mockImplementation((async (_c: any, _id: any, list: any) => void updates.push(list)) as any),
+    ]
+    const listing = (ids: Array<[number, boolean]>) => spyOn(backend, "listVisibleConnections").mockResolvedValue(ids.map(([id, own]) => ({ id, is_owner: own })) as any)
+    try {
+      const cfg = { url: "http://x", tenant: "t", token: "k" } as any
+      let list = listing([[3, false], [4, true], [9, true]])
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toMatchObject({ kept: true })
+      expect(updates[0][0].connection_id).toBe("3")
+      list.mockRestore()
+      list = listing([[4, true], [9, true]])
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).not.toHaveProperty("kept")
+      expect([updates[1][0].connection_id, updates[1][0].connection_ids]).toEqual(["9", ["4", "9"]])
+      list.mockRestore()
+    } finally {
+      for (const sp of spies) sp.mockRestore()
+    }
+  })
   test("attach reports when the workspace kept its own connection", async () => {
     const spies = [
       spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS" } } as any),
@@ -1846,8 +1914,8 @@ describe("attach keeps another connection", () => {
     ]
     try {
       const cfg = { url: "http://x", tenant: "t", token: "k" } as any
-      expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9, 3])).toEqual({ attached: "WS", kept: true })
-      expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9])).toEqual({ attached: "WS" })
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9, 3])).toEqual({ attached: "WS", workspaceId: "5", kept: true })
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9])).toEqual({ attached: "WS", workspaceId: "5" })
     } finally {
       for (const sp of spies) sp.mockRestore()
     }

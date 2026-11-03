@@ -13,6 +13,7 @@ import { Global } from "../../global"
 import { IntegrationsBackend as backend } from "./backend"
 import { IntegrationsCredentials as creds } from "./credentials"
 import { resolveBinding, resolveBindingOutcome } from "../workspace/state"
+import { workspaceLabel } from "../workspace/workspace-name"
 
 export type ProviderId = "github" | "jira" | "linear"
 export const PROVIDER_IDS: ProviderId[] = ["github", "jira", "linear"]
@@ -212,8 +213,18 @@ export function readSecret(id: string): string | undefined {
   }
   return readJson<Record<string, string>>(secretsPath(), {})[id]
 }
+/** `security` exits with this when the item does not exist. */
+const KEYCHAIN_ITEM_NOT_FOUND = 44
 export async function deleteSecret(id: string) {
-  if (useKeychain()) childProcess.spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], { stdio: "ignore", timeout: KEYCHAIN_TIMEOUT_MS })
+  if (useKeychain()) {
+    const r = childProcess.spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], {
+      encoding: "utf8",
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: KEYCHAIN_TIMEOUT_MS,
+    })
+    const notFound = r.status === KEYCHAIN_ITEM_NOT_FOUND || /could not be found/i.test(String(r.stderr ?? ""))
+    if (r.status !== 0 && !notFound) throw new Error(`Could not remove a stored credential from the macOS keychain${r.error ? `: ${r.error.message}` : r.status != null ? ` (exit ${r.status})` : ""}`)
+  }
   await withLock(() => {
     const all = readJson<Record<string, string>>(secretsPath(), {})
     if (id in all) {
@@ -810,7 +821,7 @@ export interface UpsertResult {
   isValid: boolean
   message: string | null
   /** What happened to the workspace attach; absent when the connection was saved invalid. */
-  workspace?: { attached: string; kept?: true } | { notLinked: true } | { error: string }
+  workspace?: { attached: string; workspaceId?: string; kept?: true } | { notLinked: true } | { error: string }
 }
 
 export const NOT_LINKED_LABEL = "Not linked to a workspace: run altimate link"
@@ -829,14 +840,15 @@ export const rejectionMessage = (res: Pick<UpsertResult, "created">) => (res.cre
  * integration and name among the caller's own connections), created otherwise.
  */
 export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, config: Record<string, unknown>): Promise<UpsertResult> {
-  const existing = findManaged(await backend.listOwnConnections(cfg), id)
+  const visible = await backend.listVisibleConnections(cfg)
+  const existing = findManaged(backend.ownConnections(visible), id)
   const saved = existing
     ? await backend.updateConnection(cfg, existing.id, { config })
     : await backend.createConnection(cfg, { name: managedName(id), integration_id: INTEGRATION_IDS[id], config })
   const isValid = saved.is_valid !== false
   const result: UpsertResult = { connectionId: saved.id, created: !existing, isValid, message: isValid ? null : rejectionMessage({ created: !existing }) }
   if (!isValid) return result
-  return { ...result, workspace: await attachToBoundWorkspace(cfg, id, saved.id) }
+  return { ...result, workspace: await attachToBoundWorkspace(cfg, id, saved.id, visible.map((c) => c.id)) }
 }
 
 /** Attaches the connection to the workspace this directory is linked to, reporting instead of throwing. */
@@ -845,7 +857,8 @@ export async function attachToBoundWorkspace(cfg: backend.BackendConfig, id: Pro
     const binding = await resolveBinding(process.cwd())
     if (!binding) return { notLinked: true }
     const kept = await attachToWorkspace(cfg, id, connectionId, String(binding.datamateId), live)
-    return kept ? { attached: binding.datamateName, kept: true } : { attached: binding.datamateName }
+    const workspaceId = String(binding.datamateId)
+    return kept ? { attached: binding.datamateName, workspaceId, kept: true } : { attached: binding.datamateName, workspaceId }
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) }
   }
@@ -875,7 +888,10 @@ export function attachToIntegrations(
     // An entry already wired to another live connection keeps it; only an empty one, a deleted one, or one on this connection is set.
     const stale = live && e.connection_id != null && !live.has(String(e.connection_id))
     const next = e.connection_id == null || stale || String(e.connection_id) === conn ? { ...e, connection_id: conn } : { ...e }
-    if (Array.isArray(e.connection_ids) && !e.connection_ids.map(String).includes(conn)) next.connection_ids = [...e.connection_ids, conn]
+    if (Array.isArray(e.connection_ids)) {
+      const kept = stale ? e.connection_ids.filter((c) => String(c) !== String(e.connection_id)) : e.connection_ids
+      next.connection_ids = kept.map(String).includes(conn) ? kept : [...kept, conn]
+    }
     return next
   })
 }
@@ -895,7 +911,7 @@ async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, con
   }
   // The backend replaces the whole list, so it is read again right before writing and only this entry changes.
   const datamate = await backend.getDatamate(cfg, datamateId)
-  const live = liveIds ?? (await backend.listOwnConnections(cfg)).map((c) => c.id)
+  const live = liveIds ?? (await backend.listVisibleConnections(cfg)).map((c) => c.id)
   const next = attachToIntegrations(datamate.integrations, integrationId, connectionId, keys, live)
   await backend.updateDatamateIntegrations(cfg, datamateId, next)
   const entry = next.find((e) => String(e.id) === integrationId)
@@ -949,7 +965,7 @@ async function syncReal(
   }
   const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>): SyncOutcome => {
     if ("error" in w) return { id, result: "failed", reason: ATTACH_FAILED_PREFIX + w.error, steps }
-    if ("attached" in w) step(w.kept ? `Kept the workspace's existing connection in "${w.attached}"` : `Attached to workspace "${w.attached}"`)
+    if ("attached" in w) step(w.kept ? `Kept the workspace's existing connection in ${workspaceLabel(w.attached, w.workspaceId)}` : `Attached to ${workspaceLabel(w.attached, w.workspaceId)}`)
     else {
       steps.push({ label: NOT_LINKED_LABEL, ok: false })
       onStep?.(NOT_LINKED_LABEL, false)
@@ -961,14 +977,15 @@ async function syncReal(
     const known = rec?.registered ? (rec.synced && rec.connectionId ? rec.connectionId : undefined) : collected.reason === ALREADY_IN_WORKSPACE ? null : undefined
     if (known === undefined) return { id, result: "skipped", reason: collected.reason, steps: [] }
     try {
-      const own = await backend.listOwnConnections(cfg)
+      const visible = await backend.listVisibleConnections(cfg)
+      const own = backend.ownConnections(visible)
       // The workspace decides whether the connection is usable, not the flag kept here from an earlier check.
       const found = known == null ? findManaged(own, id) : own.find((c) => c.id === known && c.integration_id === INTEGRATION_IDS[id])
       // A connection this machine saved that is gone from the workspace is not attached; it was deleted there.
       if (!found) return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
       if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
       step("Connection already in the workspace")
-      return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, own.map((c) => c.id)))
+      return reportWorkspace(await withLock(() => attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id))))
     } catch (e) {
       return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
     }
