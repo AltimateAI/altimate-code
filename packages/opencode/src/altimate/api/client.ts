@@ -3,6 +3,7 @@ import path from "path"
 import { rm } from "node:fs/promises"
 import { Global } from "../../global"
 import { Filesystem } from "../../util/filesystem"
+import { currentCredentials } from "./credentials-context"
 import {
   findGlobalConfigPaths,
   findProjectConfigPaths,
@@ -81,6 +82,7 @@ export namespace AltimateApi {
   }
 
   export async function isConfigured(): Promise<boolean> {
+    if (currentCredentials()) return true
     return Filesystem.exists(credentialsPath())
   }
 
@@ -99,6 +101,8 @@ export namespace AltimateApi {
   }
 
   export async function getCredentials(): Promise<AltimateCredentials> {
+    const scoped = currentCredentials()
+    if (scoped) return scoped
     const p = credentialsPath()
     if (!(await Filesystem.exists(p))) {
       throw new Error(`Altimate credentials not found at ${p}`)
@@ -182,7 +186,10 @@ export namespace AltimateApi {
    *  `projectDir` loads. Fails without deleting the file when the key can't be read: the file holds the
    *  only copy, and without it leftover MCP entries can never be matched. */
   export async function signOut(projectDir: string): Promise<Array<{ name: string; path: string }>> {
-    if (!(await isConfigured())) return []
+    if (!(await isConfigured())) {
+      await withdrawClaudeSkills(projectDir)
+      return []
+    }
     let key: string
     try {
       key = (await getCredentials()).altimateApiKey
@@ -205,7 +212,16 @@ export namespace AltimateApi {
       }
     }
     await clearCredentials()
+    await withdrawClaudeSkills(projectDir)
     return removed
+  }
+
+  /** This project's Claude Code copies of the workspace skills belong to the account signing out.
+   * Imported here: the mirror itself imports this module. */
+  async function withdrawClaudeSkills(projectDir: string): Promise<void> {
+    await import("../workspace/claude-skill-mirror")
+      .then((mirror) => mirror.mirrorClaudeSkills(projectDir, { withdraw: true }))
+      .catch(() => {})
   }
 
   const VALID_TENANT_REGEX = /^[a-z_][a-z0-9_-]*$/

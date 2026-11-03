@@ -7,11 +7,13 @@
  */
 
 import { register } from "../dispatcher"
+import { listSchemaTables } from "./schema-list"
 import * as Registry from "./registry"
 import { defaultInspectionSchema, resolveInspectionTable, resolveInspectionTarget } from "./inspection-target"
 import { discoverContainers } from "./docker-discovery"
 import { parseDbtProfiles } from "./dbt-profiles"
 import { runDataDiff } from "./data-diff"
+import { dbtProjectAdapterType, dbtRoute } from "./dbt-adapter-type"
 import type {
   SqlExecuteParams,
   SqlExecuteResult,
@@ -81,9 +83,10 @@ async function ensureDbtAdapter(): Promise<any | null> {
   // Likewise the cache: a superseded attempt returns its result to the callers that
   // awaited it but must not publish it, or it would overwrite what the newer attempt
   // stored. Every write goes through here.
-  const publish = (value: any | null): any | null => {
+  const publish = (value: any | null, root?: string): any | null => {
     if (dbtAdapterInflight === mine) {
       dbtAdapter = value
+      dbtRoute.root = value ? (root ?? null) : null
       dbtAdapterInternals.writes += 1
     }
     return value
@@ -111,7 +114,7 @@ async function ensureDbtAdapter(): Promise<any | null> {
 
       // Create the adapter
       const { create } = await import("../../../../../dbt-tools/src/adapter")
-      return publish(await create(dbtConfig))
+      return publish(await create(dbtConfig), dbtConfig.projectRoot)
     } catch {
       // dbt-tools not available or config invalid — fall back to native
       return publish(null)
@@ -179,20 +182,7 @@ export async function resolveDefaultTarget(
 
 /** Fallback adapter type: the dbt manifest records it as `metadata.adapter_type`. */
 async function adapterTypeFromManifest(): Promise<string | undefined> {
-  try {
-    const { read: readDbtConfig } = await import("../../../../../dbt-tools/src/config")
-    const dbtConfig = await readDbtConfig()
-    if (!dbtConfig) return undefined
-    const fs = await import("fs")
-    const path = await import("path")
-    const manifestPath = path.join(dbtConfig.projectRoot, "target", "manifest.json")
-    if (!fs.existsSync(manifestPath)) return undefined
-    const raw = JSON.parse(fs.readFileSync(manifestPath, "utf8"))
-    const adapter = String(raw?.metadata?.adapter_type ?? "").toLowerCase()
-    return adapter || undefined
-  } catch {
-    return undefined
-  }
+  return (await dbtProjectAdapterType()).type
 }
 // altimate_change end
 
@@ -274,6 +264,7 @@ async function tryExecuteViaDbt(
 /** Reset dbt adapter (for testing). */
 export function resetDbtAdapter(): void {
   dbtAdapter = undefined
+  dbtRoute.root = undefined
   // altimate_change — drop any in-flight creation too, or a test that resets mid-flight
   // would still receive the previous adapter.
   dbtAdapterInflight = undefined
@@ -525,7 +516,7 @@ register("sql.execute", async (params: SqlExecuteParams, context): Promise<SqlEx
     // dbt knows how to connect using profiles.yml — no separate connection config needed.
     // altimate_change start — dbt cannot enforce the connector's read-only option.
     // Protected requests must reach the native driver's transaction handling.
-    if (!params.warehouse && !params.read_only) {
+    if (!params.warehouse && !params.read_only && !context?.forceReadOnly) {
       const dbtResult = await tryExecuteViaDbt(
         params.sql,
         params.limit,
@@ -559,7 +550,7 @@ register("sql.execute", async (params: SqlExecuteParams, context): Promise<SqlEx
       Registry.getConfig(fallbackName),
       {
         queryTimeoutMs: params.query_timeout_ms,
-        ...(fallbackType === "postgres" && params.read_only ? { readOnly: true } : {}),
+        ...(context?.forceReadOnly || (fallbackType === "postgres" && params.read_only) ? { readOnly: true } : {}),
       },
       context,
       async (options) => {
@@ -744,6 +735,8 @@ register("warehouse.discover", async (): Promise<WarehouseDiscoverResult> => {
     }
   }
 })
+
+register("schema.list", listSchemaTables)
 
 // --- schema.inspect ---
 function schemaAddressingHint(): string {

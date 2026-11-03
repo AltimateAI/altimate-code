@@ -51,6 +51,7 @@ import { LLMRequestEvent } from "@/altimate/observability/tracing"
 // altimate_change start — run deadlines override reasoning effort for each remaining request
 import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
 import { activeRun, effortOverride, hasActiveRuns, toolsDisabled } from "@/altimate/session/run-budget-effort"
+import { analystEffortOptions } from "@/altimate/session/analyst-effort"
 import { Session } from "@/session"
 import { SessionID } from "@/session/schema"
 // altimate_change end
@@ -194,6 +195,16 @@ export namespace LLM {
     const options: Record<string, any> = pipe(
       base,
       mergeDeep(input.model.options),
+      // altimate_change start — analyst default reasoning effort; agent options and variants still win
+      mergeDeep(
+        analystEffortOptions({
+          agent: input.agent,
+          model: input.model,
+          variant: input.user.variant,
+          small: input.small,
+        }),
+      ),
+      // altimate_change end
       mergeDeep(input.agent.options),
       mergeDeep(variant),
     )
