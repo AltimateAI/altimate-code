@@ -624,6 +624,11 @@ describe("columnReach with a NATURAL JOIN", () => {
       "select 'a\\'b' as c from a natural join b where t = 'z'",
       'select "C:\\" as p from a natural join b where t = "z"',
       "select * from a natural /* inner */ join b",
+      "select a.id from a natural -- why\n join b",
+      "select a.id from a natural left -- x\nouter join b",
+      "select a.id from a natural # mysql\njoin b",
+      "select '/*' as s from a natural /* c */ join b",
+      "-- see /* note\nselect * from a natural /* c */ join b",
       // The words in a string or comment count too: that only adds doubt.
       "select 'natural join' as s from fct_orders",
     ])

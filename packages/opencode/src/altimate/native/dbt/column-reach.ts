@@ -160,14 +160,17 @@ function namesColumn(sql: string, column: string): boolean {
 /**
  * Whether the SQL may have a NATURAL JOIN, whose join columns the lineage engine reports no edge for.
  * Read from the raw SQL: the words inside a string, comment or quoted name count too, which only adds
- * doubt, while masking quotes would let a dialect's quoting rules hide a real join.
+ * doubt (a comment mentioning one marks the model uncertain), while masking quotes would let a dialect's
+ * quoting rules hide a real join. Comments between the keywords are read as gaps.
  * Limit: a parent's whole row passed as a value (`to_json(o)`) is not seen; telling a row source from
  * a column needs the engine's parse, not a pattern.
  */
+// Between the keywords: whitespace, or a comment (`--` or `#` to the line's end, `/* … */` to its first
+// `*/`). Limit: a nested Postgres comment between them is not read as one.
+const GAP = String.raw`(?:\s|--[^\n]*\n|#[^\n]*\n|\/\*(?:[^*]|\*(?!\/))*\*\/)+`
+const NATURAL = new RegExp(String.raw`\bnatural${GAP}(?:(?:left|right|full|inner|cross|semi|anti)${GAP}){0,2}(?:outer${GAP})?join\b`, "i")
 export function joinsNaturally(sql: string): boolean {
-  const natural = /\bnatural\s+(?:(?:left|right|full|inner|cross|semi|anti)\s+){0,2}(?:outer\s+)?join\b/i
-  // Also with block comments blanked, so `natural /* … */ join` counts: either match only adds doubt.
-  return natural.test(sql) || natural.test(sql.replace(/\/\*[\s\S]*?\*\//g, " "))
+  return NATURAL.test(sql)
 }
 
 function childMapOf(manifest: any): Record<string, string[]> {
