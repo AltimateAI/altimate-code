@@ -173,8 +173,9 @@ export function explicitDoneStop(input: {
   return isExplicitDone(lastText.text)
 }
 
+// altimate_change start — run-mode completion contract for every agent
 /**
- * Run-mode completion instruction for builder.
+ * Run-mode completion instruction.
  *
  * This wording lived in `builder.txt`, but builder is a PRIMARY agent, so a
  * static instruction there also governs interactive chat — where nothing
@@ -182,10 +183,9 @@ export function explicitDoneStop(input: {
  * final answer, including mid-conversation on follow-ups. `isExplicitDone()`
  * is only consumed by the run-mode accounting path.
  *
- * Injected only in run mode, and only for the agents named in
- * COMPLETION_CONTRACT_AGENTS below (builder). Byte-identical to builder's
- * original run-mode behaviour, from when this text was still static in
- * `builder.txt`. Prompt-visible text — changes need extra review.
+ * Injected only in run mode. Byte-identical to builder's original run-mode
+ * behaviour, from when this text was still static in `builder.txt`.
+ * Prompt-visible text — changes need extra review.
  */
 export const RUN_MODE_COMPLETION_INSTRUCTION =
   "**Signal completion explicitly**: only after every requirement above is satisfied, end your final " +
@@ -193,27 +193,34 @@ export const RUN_MODE_COMPLETION_INSTRUCTION =
   "while work or verification remains."
 
 /**
- * Agents that receive the run-mode completion-token contract. builder is the
- * historical (and currently sole) carrier.
+ * The sole gate for injecting the completion-token contract into a prompt.
+ * In run mode it applies to every agent — builder, custom agents and
+ * subagents started by the task tool — because nobody can answer a question
+ * in a headless run, so any agent without the contract can end on one.
+ * Interactive sessions never receive it.
  */
-const COMPLETION_CONTRACT_AGENTS = new Set(["builder"])
-
-/** The sole gate for injecting the completion-token contract into a prompt. */
-export function completionInstruction(input: { runMode: boolean; agent: string }): string | undefined {
-  return input.runMode && COMPLETION_CONTRACT_AGENTS.has(input.agent) ? RUN_MODE_COMPLETION_INSTRUCTION : undefined
+export function completionInstruction(input: { runMode: boolean }): string | undefined {
+  return input.runMode ? RUN_MODE_COMPLETION_INSTRUCTION : undefined
 }
+// altimate_change end
 
+// altimate_change start — run-mode post-compaction nudge without a clarification option
 /**
- * Three-option completion-aware post-compaction nudge. Replaces the
+ * Completion-aware post-compaction nudge, sent only in run mode (interactive
+ * compaction keeps its ordinary continuation in compaction.ts). Replaces the
  * two-option "Continue … or stop and ask for clarification" text, which gave a
- * finished session no way to terminate. Prompt-visible text — changes need
- * extra review.
+ * finished session no way to terminate. It offers no "ask for clarification"
+ * option: nobody can answer in a headless run, and that option is how runs
+ * ended on a question instead of finishing. Prompt-visible text — changes
+ * need extra review.
  */
 export const COMPLETION_NUDGE =
-  "Context was compacted; the summary above is the record of the work so far. Choose exactly one: " +
-  "(1) if concrete next steps remain toward the original task, continue with them; " +
-  "(2) if you are blocked or unsure how to proceed, stop and ask for clarification; " +
-  `(3) if the deliverable is complete and verified, reply with ${DONE_TOKEN} alone on the final line and stop.`
+  "Context was compacted; the summary above is the record of the work so far. " +
+  "No one can answer questions during this run, so do not end your turn with a question. Choose exactly one: " +
+  "(1) if concrete next steps remain toward the original task, continue with them; if you are unsure how to " +
+  "proceed, pick the most reasonable interpretation, state your assumption, and continue; " +
+  `(2) if the deliverable is complete and verified, reply with ${DONE_TOKEN} alone on the final line and stop.`
+// altimate_change end
 
 /**
  * One-shot confirm-DONE challenge injected by the run-mode

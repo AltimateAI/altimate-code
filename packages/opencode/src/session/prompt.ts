@@ -2124,11 +2124,10 @@ export namespace SessionPrompt {
       // used to sit in builder.txt, but builder is a PRIMARY agent, so it also
       // reached interactive chat, where nothing interprets or strips the token
       // and the user saw a literal DONE on every final answer. Scoped to run
-      // mode AND to builder, which reproduces the previous run-mode behaviour
-      // exactly — builder was the only agent prompt that carried it.
+      // mode, where it reaches every agent — including custom agents and task
+      // subagents, whose child sessions are prompted through this same loop.
       const completionInstruction = SessionTermination.completionInstruction({
         runMode: Flag.ALTIMATE_RUN_MODE,
-        agent: agent.name,
       })
       if (completionInstruction) system.push(completionInstruction)
       // altimate_change end
