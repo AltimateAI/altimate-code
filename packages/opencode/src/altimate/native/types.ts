@@ -1087,43 +1087,6 @@ export interface DbtLineageResult {
   confidence_factors: string[]
 }
 
-export interface DbtModelLineageParams extends DbtLineageParams {
-  column?: string
-}
-
-/**
- * dbt-integration's `getModelLineage` result (version 1). `dbt.model_lineage` builds the same
- * shape from the manifest alone.
- */
-export interface ModelLineage {
-  version: number
-  project: string
-  dialect: string
-  focus: { uniqueId: string; name: string; column?: string }
-  nodes: {
-    uniqueId: string
-    name: string
-    type: string
-    materialization?: string
-    direction: "focus" | "upstream" | "downstream"
-    depth: number
-    parents: string[]
-    path?: string
-    columns: { name: string; dataType?: string; description?: string; isDocumentedOnly?: true }[]
-    columnsFrom?: string
-  }[]
-  columnLineage: {
-    source: [string, string]
-    target: [string, string]
-    type: string
-    viewsType: string
-    viewsCode: string[]
-  }[]
-  confidence: string
-  errors: string[]
-  stats: Record<string, number>
-}
-
 // --- dbt Profile Discovery ---
 
 export interface DbtProfilesParams {
@@ -1273,7 +1236,6 @@ export const BridgeMethods = {
   "dbt.run": {} as { params: DbtRunParams; result: DbtRunResult },
   "dbt.manifest": {} as { params: DbtManifestParams; result: DbtManifestResult },
   "dbt.lineage": {} as { params: DbtLineageParams; result: DbtLineageResult },
-  "dbt.model_lineage": {} as { params: DbtModelLineageParams; result: ModelLineage },
   "dbt.unit_test_gen": {} as { params: DbtUnitTestGenParams; result: DbtUnitTestGenResult },
   "warehouse.list": {} as { params: WarehouseListParams; result: WarehouseListResult },
   "warehouse.test": {} as { params: WarehouseTestParams; result: WarehouseTestResult },
