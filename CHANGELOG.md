@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.9] - 2026-11-04
+
+**Claude Code and other coding agents can call altimate-code's data tools directly.** `altimate-code mcp serve` and the new model-free `altimate-code tool` CLI run the same tools without a second model: reads by default, writes only with `--allow-write`. In projects linked to a workspace, what people teach the agent can become a team rule: they confirm it on a card, the workspace owner reviews it, and approved rules reach every teammate's sessions. Also in this release: `auth logout` removes the saved Altimate gateway key, the analyst stays read-only whatever config grants, and the home screen suggests the Claude Code and Codex plugins.
+
+**Heads-up for support:**
+- **MCP and `tool run` requests are read-only unless `--allow-write`.** `DROP DATABASE`, `DROP SCHEMA` and `TRUNCATE` are refused even then. The block reads the SQL text, so it is best effort; for a hard guarantee, connect with a database user that lacks those privileges.
+- **`tool` commands start a per-project background process** that keeps connections warm and exits after 10 idle minutes.
+- **Workspace skill syncs also write copies into `<project>/.claude/skills/`** so Claude Code sessions pick them up. Skills you wrote with the same name are never touched, and unlinking removes the copies.
+- **`schema_inspect` without a table** lists schemas, or up to 500 tables with catalog row estimates, instead of scanning.
+- **`learn status` prints `Learning from sessions: on|off (source)`** where it printed `Capture:`, and learn messages say "rule" where they said "lesson". The JSON output only gains a `rules` block.
+- **In a linked project, `training_save` with `kind: "rule"` shows a proposal card** instead of writing training, and `learn bootstrap` / `learn import-reviews` send what they find for review.
+- **Telemetry carries the signed-in user and tenant** when the machine is signed in to Altimate; anonymous rows keep the machine id. Turning telemetry off sends one final `telemetry_opted_out` event (machine id and opt-out source only), then nothing.
+- **The analyst's write tools stay off whatever config grants**, including `"*": "allow"`. `task` from the analyst is limited to `data-explorer`.
+- **A symlink inside an allowed external folder that points elsewhere now asks** for the folder it points to, for every agent.
+- **Ctrl+C during browser sign-in exits with status 130**, not 0.
+- **The Altimate LLM Gateway free-token allowance is 1M tokens.**
+
+### Added
+
+- **`altimate-code tool` CLI and expanded `mcp serve`.** `tool list`, `schema`, `run`, `context` and `daemon` call the same tools as `mcp serve` through one adapter, one allow-list and one permission layer. Default MCP tools now include `impact_analysis`, `dbt_lineage`, `altimate_core_column_lineage`, `schema_detect_pii`, `data_diff`, `altimate_core_equivalence` and `sql_translate`; `--all-tools` exposes the full list. Workspace tools are on for `tool` commands in linked projects (`--no-workspace-tools` turns them off) and opt-in for `mcp serve` (`--workspace-tools`). `link --claude-md` writes routing guidance into `CLAUDE.md`. (#1609)
+- **Workspace rules.** A proposal card in the TUI (`ctrl+x p`), owner review with approve, edit and "Not a rule", `/rules` and a sidebar `rules:` line, `learn sync`, and approved rules delivered into every session with their `applies_to` paths. See "Workspace rules" in the learn docs. (#1605)
+- **Plugin tips on the home screen** for Claude Code and Codex, and a README section on using altimate-code from them. (#1625)
+- **Workspace telemetry** for linking, usage, the engine and the starter. The telemetry reference lists every new event. (#1513)
+- **Signed-in identity on telemetry and a final opt-out event.** (#1501)
+
+### Changed
+
+- **The analyst stays read-only.** After config, it denies again every built-in tool that changes state, so a wildcard or explicit grant cannot turn them back on, and it can read the files that ship with global skills. (#1597)
+- **External-directory checks follow symlinks**, so a link in an allowed folder cannot reach a folder that is not allowed. (#1597)
+- **The analyst asks for high reasoning effort** on adaptive-thinking models unless the user or agent config sets one. (#1609)
+
+### Fixed
+
+- **`auth logout` removes the saved Altimate gateway key.** (#1606)
+- **Ctrl+C during browser sign-in exits 130** instead of reporting success. (#1624)
+- **Docs and the TUI show the 1M free-token allowance.** (#1611)
+
 ## [0.12.8] - 2026-10-23
 
 **Claude Code can work through your Altimate workspace.** With the Altimate Code plugin installed and the project linked, tasks Claude hands to altimate-code run with the workspace's skills, knowledge and shared memory, and a headless `run` no longer hangs waiting on a stdin nobody writes to. Also in this release: the curl and PowerShell installers add an `altimate-code` command, the analyst can read workspace memory, `learn status` shows whether a lesson keeps being corrected, `schema_inspect` shows what column values look like, and SQL policy checks fail closed on statements they cannot analyze.
