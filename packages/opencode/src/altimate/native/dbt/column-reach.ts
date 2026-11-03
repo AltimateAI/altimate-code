@@ -196,6 +196,21 @@ export function joinsNaturally(sql: string): boolean {
   return false
 }
 
+/**
+ * Whether the SQL names one of `columns` through Snowflake's `IDENTIFIER('…')`, or passes it a bind
+ * variable (`IDENTIFIER($col)`): the lineage engine reads the argument as a string, so it reports no
+ * edge for the column.
+ */
+export function namesThroughIdentifier(sql: string, columns: string[]): boolean {
+  const wanted = new Set(columns.map((one) => one.toLowerCase()))
+  for (const match of sql.matchAll(/\bidentifier\s*\(\s*(?:'((?:[^']|'')*)'|([$:?]))/gi)) {
+    if (match[2]) return true
+    const name = match[1]!.replace(/''/g, "'").split(".").pop()!.trim().replace(/^"|"$/g, "")
+    if (wanted.has(name.toLowerCase())) return true
+  }
+  return false
+}
+
 function childMapOf(manifest: any): Record<string, string[]> {
   if (manifest.child_map) return manifest.child_map
   const children: Record<string, string[]> = {}
@@ -353,12 +368,18 @@ export function columnReach(manifestPath: string, model: string, column: string,
     // edge through it: unknown, not unread, even when another parent's edges are traced.
     const viaEphemeral = parents.some((p) => lookup(p)?.config?.materialized === "ephemeral")
     const natural = joinsNaturally(sqlText)
+    // The column named as a string the engine cannot trace: its outputs are unknown, like a NATURAL JOIN's.
+    const viaIdentifier = namesThroughIdentifier(
+      sqlText,
+      parents.flatMap((parent) => [...tracked.get(parent)!]),
+    )
+    const opaque = natural || viaIdentifier
     if (reads) {
       tracked.set(id, carried)
       trackedExact.set(id, carriedExact)
       // Outputs fed by an unsettled or ephemeral parent, or read through an ambiguous name, stay unsettled.
       // A NATURAL JOIN beside the column may join on it, or carry it on in another output.
-      if (ambiguous || fromUnsure || viaEphemeral || partial || natural) unsure.add(id)
+      if (ambiguous || fromUnsure || viaEphemeral || partial || opaque) unsure.add(id)
       reached.push({ name: nodes[id]?.name ?? id, unique_id: id, columns: [...carried].sort() })
       continue
     }
@@ -383,16 +404,23 @@ export function columnReach(manifestPath: string, model: string, column: string,
       continue
     }
     // A NATURAL JOIN may join on the column with no edge the engine can report.
-    if (!fromUnsure && !ambiguous && named.length === 0 && natural) {
+    if (!fromUnsure && !ambiguous && named.length === 0 && opaque) {
       unsure.add(id)
-      uncertain.push(entry(id, "uses a NATURAL JOIN, whose join columns the lineage engine cannot trace"))
+      uncertain.push(
+        entry(
+          id,
+          viaIdentifier
+            ? "names it through IDENTIFIER(), which the lineage engine cannot trace"
+            : "uses a NATURAL JOIN, whose join columns the lineage engine cannot trace",
+        ),
+      )
       continue
     }
     const shared = named.some(
       (col) => allParents.filter((other) => documentedColumns(lookup(other)).has(col)).length > 1,
     )
     if (ambiguous || named.length > 0 || fromUnsure) {
-      if (ambiguous || fromUnsure || natural) unsure.add(id)
+      if (ambiguous || fromUnsure || opaque) unsure.add(id)
       uncertain.push(
         entry(
           id,

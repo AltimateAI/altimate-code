@@ -41,7 +41,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
   parameters: z.object({
     model: z
       .string()
-      .describe("Model name, unique_id or project-relative SQL path (e.g. 'my_model', 'model.project.my_model', 'models/my_model.sql'); a snapshot by unique_id or path"),
+      .describe("Model name, unique_id or project-relative SQL path (e.g. 'my_model', 'model.project.my_model', 'models/my_model.sql'); a snapshot by name, unique_id or path"),
     column: z.string().optional().describe("Trace only this column of the model, upstream and downstream"),
     manifest_path: z
       .string()

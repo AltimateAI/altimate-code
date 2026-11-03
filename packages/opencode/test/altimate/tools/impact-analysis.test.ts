@@ -219,7 +219,7 @@ describe("formatImpactReport", () => {
       },
     })
     expect(report).toContain(
-      "Column Reach: fct_orders.revenue is read by 1 model and 1 exposure; 1 more may read it; 1 could not be traced (stopped early)",
+      "Column Reach: fct_orders.revenue is read by at least 1 model and at least 1 exposure; 1 more may read it; 1 could not be traced (stopped early)",
     )
     expect(report).toContain("  fct_daily → revenue")
     expect(report).toContain("  ◆ Exec Revenue [dashboard]")

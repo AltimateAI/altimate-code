@@ -8,6 +8,7 @@ import {
   exposuresOn,
   parentsNamed,
   joinsNaturally,
+  namesThroughIdentifier,
   selectsStar,
 } from "../../src/altimate/native/dbt/column-reach"
 import { lineageGraph } from "../../src/altimate/native/dbt/graph"
@@ -936,5 +937,35 @@ describe("columnReach with a NATURAL JOIN", () => {
     )
     const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
     expect(reach.uncertain.map((m) => m.name)).toContain("rpt_after")
+  })
+})
+
+describe("columnReach through Snowflake IDENTIFIER()", () => {
+  test("a column named as IDENTIFIER('…') is a possible read, and its child and dashboard are not dropped", () => {
+    const value = manifest()
+    value.nodes["model.shop.rpt_counts"].compiled_code = "select identifier('revenue') as copied from fct_orders"
+    value.nodes["model.shop.rpt_copy"] = model("rpt_copy", ["model.shop.rpt_counts"], "select copied from rpt_counts", [
+      "copied",
+    ])
+    const exposures: Record<string, unknown> = value.exposures
+    exposures["exposure.shop.copy_board"] = {
+      name: "copy_board",
+      type: "dashboard",
+      depends_on: { nodes: ["model.shop.rpt_copy"] },
+    }
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    expect(reach.uncertain.map((m) => m.name)).toEqual(expect.arrayContaining(["rpt_counts", "rpt_copy"]))
+    expect(reach.uncertain_exposures.map((e) => e.name)).toEqual(expect.arrayContaining(["ops", "copy_board"]))
+  })
+
+  test("IDENTIFIER() with the column, quoted or qualified, or a bind variable counts; another column does not", () => {
+    for (const sql of [
+      "select identifier('revenue') from t",
+      `select IDENTIFIER('o."REVENUE"') from t`,
+      "select identifier($col) from t",
+      "select identifier(:col) from t",
+    ])
+      expect(namesThroughIdentifier(sql, ["revenue"])).toBe(true)
+    expect(namesThroughIdentifier("select identifier('order_id') from t", ["revenue"])).toBe(false)
   })
 })

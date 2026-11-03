@@ -280,7 +280,8 @@ export function formatImpactReport(data: {
     const reach = data.columnReach
     const dashboards = reach.exposures.length
     lines.push(
-      `Column Reach: ${data.model}.${data.column} is read by ${reach.models.length} model${reach.models.length === 1 ? "" : "s"} and ${dashboards} exposure${dashboards === 1 ? "" : "s"}` +
+      // Stopped early: the counts are lower bounds, and exposures past the stop may read the column too.
+      `Column Reach: ${data.model}.${data.column} is read by ${reach.truncated ? "at least " : ""}${reach.models.length} model${reach.models.length === 1 ? "" : "s"} and ${reach.truncated ? "at least " : ""}${dashboards} exposure${dashboards === 1 ? "" : "s"}` +
         `${reach.uncertain.length ? `; ${reach.uncertain.length} more may read it` : ""}` +
         `${reach.untraced.length ? `; ${reach.untraced.length} could not be traced` : ""}${reach.truncated ? " (stopped early)" : ""}`,
     )
@@ -304,7 +305,8 @@ export function formatImpactReport(data: {
   )
   const others = (data.exposures ?? []).filter((e) => !listed.has(e.unique_id))
   if (others.length > 0) {
-    lines.push(`${data.columnReach ? "Other exposures" : "Exposures"} (${others.length})`)
+    // When column reach stopped early, the rest are unchecked rather than known not to read the column.
+    lines.push(`${data.columnReach ? (data.columnReach.truncated ? "Other exposures (column reach stopped before checking them)" : "Other exposures") : "Exposures"} (${others.length})`)
     lines.push("".padEnd(40, "-"))
     for (const e of others) lines.push(`  ${e.label} [${e.type}]`)
     lines.push("")
