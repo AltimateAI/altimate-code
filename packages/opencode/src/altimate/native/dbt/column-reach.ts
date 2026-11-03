@@ -197,7 +197,10 @@ export function joinsNaturally(sql: string): boolean {
 }
 
 // `IDENTIFIER (`, comments allowed before and inside the parenthesis, then its string or bind variable.
-const IDENTIFIER_CALL = new RegExp(String.raw`^identifier(?:${GAP})?\((?:${GAP})?(?:'((?:[^']|'')*)'|([$:?]))`, "i")
+const IDENTIFIER_CALL = new RegExp(
+  String.raw`^identifier(?:${GAP})?\((?:${GAP})?(?:'((?:[^'\\]|''|\\[\s\S])*)'|([$:?]))`,
+  "i",
+)
 
 /**
  * Whether the SQL names one of `columns` through Snowflake's `IDENTIFIER('…')`, or passes it a bind
@@ -215,6 +218,9 @@ export function namesThroughIdentifier(sql: string, columns: string[]): boolean 
     if (call[2]) return true
     // Any mention of the column in the string counts (qualified, quoted, with dots in a quoted name):
     // telling those apart needs a parse, and a wider match only adds doubt.
+    // A string that is not a plain name (an escape such as `\x72`, any other character) is not decoded:
+    // it counts, which only adds doubt.
+    if (!/^[\w$."]*$/.test(call[1]!.replace(/''/g, "'"))) return true
     // A doubled quote inside a quoted name (`"a""b"`) is one quote in the name.
     const text = call[1]!.replace(/''/g, "'").replace(/""/g, '"').toLowerCase()
     if ([...wanted].some((column) => text.includes(column))) return true

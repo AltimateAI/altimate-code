@@ -941,22 +941,26 @@ describe("columnReach with a NATURAL JOIN", () => {
 })
 
 describe("columnReach through Snowflake IDENTIFIER()", () => {
-  test("a column named as IDENTIFIER('…') is a possible read, and its child and dashboard are not dropped", () => {
-    const value = manifest()
-    value.nodes["model.shop.rpt_counts"].compiled_code =
-      "select identifier(/* source column */ 'revenue') as copied from fct_orders"
-    value.nodes["model.shop.rpt_copy"] = model("rpt_copy", ["model.shop.rpt_counts"], "select copied from rpt_counts", [
-      "copied",
-    ])
-    const exposures: Record<string, unknown> = value.exposures
-    exposures["exposure.shop.copy_board"] = {
-      name: "copy_board",
-      type: "dashboard",
-      depends_on: { nodes: ["model.shop.rpt_copy"] },
+  test("a column named as IDENTIFIER('…'), plain or escaped, is a possible read, and its child and dashboard are not dropped", () => {
+    for (const call of ["identifier(/* source column */ 'revenue')", String.raw`identifier('\x72evenue')`]) {
+      const value = manifest()
+      value.nodes["model.shop.rpt_counts"].compiled_code = `select ${call} as copied from fct_orders`
+      value.nodes["model.shop.rpt_copy"] = model(
+        "rpt_copy",
+        ["model.shop.rpt_counts"],
+        "select copied from rpt_counts",
+        ["copied"],
+      )
+      const exposures: Record<string, unknown> = value.exposures
+      exposures["exposure.shop.copy_board"] = {
+        name: "copy_board",
+        type: "dashboard",
+        depends_on: { nodes: ["model.shop.rpt_copy"] },
+      }
+      const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+      expect(reach.uncertain.map((m) => m.name)).toEqual(expect.arrayContaining(["rpt_counts", "rpt_copy"]))
+      expect(reach.uncertain_exposures.map((e) => e.name)).toEqual(expect.arrayContaining(["ops", "copy_board"]))
     }
-    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
-    expect(reach.uncertain.map((m) => m.name)).toEqual(expect.arrayContaining(["rpt_counts", "rpt_copy"]))
-    expect(reach.uncertain_exposures.map((e) => e.name)).toEqual(expect.arrayContaining(["ops", "copy_board"]))
   })
 
   test("IDENTIFIER() with the column, quoted or qualified, or a bind variable counts; another column does not", () => {
@@ -972,6 +976,13 @@ describe("columnReach through Snowflake IDENTIFIER()", () => {
       expect(namesThroughIdentifier(sql, ["revenue"])).toBe(true)
     // A tracked column whose quoted name holds a dot.
     expect(namesThroughIdentifier(`select identifier('"net.amount"') from t`, ["net.amount"])).toBe(true)
+    // An escape, or any text that is not a plain name, is not decoded: it counts.
+    for (const sql of [
+      String.raw`select identifier('\x72evenue') from t`,
+      String.raw`select identifier('it\'s.revenue') from t`,
+      `select identifier('"my col"') from t`,
+    ])
+      expect(namesThroughIdentifier(sql, ["revenue"])).toBe(true)
     // A quote in a column's name, doubled inside the quoted identifier.
     expect(namesThroughIdentifier(`select identifier('"a""b"') from t`, ['a"b'])).toBe(true)
     expect(namesThroughIdentifier("select identifier('order_id') from t", ["revenue"])).toBe(false)
