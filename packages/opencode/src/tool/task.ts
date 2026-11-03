@@ -31,6 +31,9 @@ import { interruptedTaskOutput, lastTaskText } from "../session/task-output"
 // altimate_change start — redact provider error messages before they reach the parent's task result
 import { redactSecrets } from "@/altimate/learn/digest"
 // altimate_change end
+// altimate_change start — upstream_fix: background subagents follow the experiment flag at execution time.
+import { Flag } from "@/flag/flag"
+// altimate_change end
 const log = Log.create({ service: "tool.task" })
 
 /**
@@ -57,7 +60,12 @@ const parameters = z.object({
     .optional(),
   command: z.string().describe("The command that triggered this task").optional(),
   // altimate_change start — upstream_fix: keep accepting legacy/manual background calls internally.
-  background: z.boolean().optional(),
+  background: z
+    .boolean()
+    .describe(
+      "Run the subagent in the background and return immediately with a task_id. Call task again with that task_id (same subagent_type) to wait for and collect its result.",
+    )
+    .optional(),
   // altimate_change end
 })
 
@@ -75,6 +83,39 @@ const taskJsonSchema = (() => {
     ...(Array.isArray(schema.required) ? { required: schema.required.filter((field) => field !== "background") } : {}),
   }
 })()
+// altimate_change end
+
+// altimate_change start — upstream_fix: background subagents run without blocking the parent turn.
+/** The `background` property the registry adds to the task schema when the experiment is on. */
+export const taskBackgroundJsonSchema = (zodToJsonSchema(parameters).properties as Record<string, unknown>).background
+
+/** Env fallback for OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS, shared with the registry's schema gate. */
+export function backgroundSubagentsEnabled() {
+  const value = process.env["OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS"]
+  if (value !== undefined) return ["1", "true", "yes"].includes(value.toLowerCase())
+  return Flag.OPENCODE_EXPERIMENTAL
+}
+
+type TaskResult = {
+  title: string
+  metadata: {
+    sessionId: SessionID
+    model: { modelID: string; providerID: string }
+    interrupted?: boolean
+    background?: boolean
+  }
+  output: string
+}
+
+/**
+ * Background children keyed by child session id. Each child is bound to the abort signal of the
+ * parent tool call that started it. That signal is the parent prompt loop's generation signal,
+ * which session/prompt.ts aborts on cancel, on a run-budget hard deadline, and in the loop's
+ * cleanup when the parent's run ends. A child still running when its parent's run ends is therefore
+ * cancelled, and its entry dropped: nothing remains in that run to join it, and an orphaned child
+ * would keep spending tokens with no reader.
+ */
+const backgroundTasks = new Map<string, { parentSessionID: string; result: Promise<TaskResult> }>()
 // altimate_change end
 
 export const TaskTool = Tool.define("task", async (ctx) => {
@@ -100,9 +141,18 @@ export const TaskTool = Tool.define("task", async (ctx) => {
     // altimate_change end
     async execute(params: z.infer<typeof parameters>, ctx) {
       const config = await Config.get()
-      if (params.background === true) {
+      // altimate_change start — upstream_fix: honour background only behind the experiment flag; a
+      // task_id naming a running background child of this session joins it instead of re-prompting.
+      const background = params.background === true
+      if (background && !backgroundSubagentsEnabled()) {
         throw new Error("Background subagents require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true")
       }
+      const pending = params.task_id ? backgroundTasks.get(params.task_id) : undefined
+      if (params.task_id && pending?.parentSessionID === ctx.sessionID) {
+        backgroundTasks.delete(params.task_id)
+        return await pending.result
+      }
+      // altimate_change end
 
       // Skip permission check when user explicitly invoked via @ or command subtask
       if (!ctx.extra?.bypassAgentCheck) {
@@ -217,77 +267,97 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         })
         // altimate_change end
       }
-      ctx.abort.addEventListener("abort", cancel)
-      using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
-      const promptParts = promptOps
-        ? await Effect.runPromise(promptOps.resolvePromptParts(params.prompt))
-        : await SessionPrompt.resolvePromptParts(params.prompt)
-      // altimate_change start — upstream_fix: cancellation during task preparation must not start new child work.
-      ctx.abort.throwIfAborted()
-      // altimate_change end
+      // altimate_change start — upstream_fix: the child run is a unit a background task can detach.
+      const run = async (): Promise<TaskResult> => {
+        ctx.abort.addEventListener("abort", cancel)
+        using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
+        const promptParts = promptOps
+          ? await Effect.runPromise(promptOps.resolvePromptParts(params.prompt))
+          : await SessionPrompt.resolvePromptParts(params.prompt)
+        // altimate_change start — upstream_fix: cancellation during task preparation must not start new child work.
+        ctx.abort.throwIfAborted()
+        // altimate_change end
 
-      const promptInput: SessionPrompt.PromptInput = {
-        messageID,
-        sessionID: session.id,
-        model: {
-          // altimate_change start — re-brand to provider/schema ModelID/ProviderID
-          // (identity at runtime); agent.model carries the core ModelV2/ProviderV2 brands.
-          modelID: ModelID.make(model.modelID),
-          providerID: ProviderID.make(model.providerID),
-          // altimate_change end
-        },
-        agent: agent.name,
-        parts: promptParts,
+        const promptInput: SessionPrompt.PromptInput = {
+          messageID,
+          sessionID: session.id,
+          model: {
+            // altimate_change start — re-brand to provider/schema ModelID/ProviderID
+            // (identity at runtime); agent.model carries the core ModelV2/ProviderV2 brands.
+            modelID: ModelID.make(model.modelID),
+            providerID: ProviderID.make(model.providerID),
+            // altimate_change end
+          },
+          agent: agent.name,
+          parts: promptParts,
+        }
+        // altimate_change start — keep the inherited query cutoff scoped to this child prompt
+        using queryBudget = defer(RunBudget.registerQueryDeadline(session.id, RunBudget.queryDeadline(ctx.sessionID)))
+        // altimate_change end
+        // altimate_change start — upstream_fix: return partial child findings after cancellation, even if its last turn is empty.
+        let partialOutput: string | undefined
+        const result = await (promptOps
+          ? Effect.runPromise(promptOps.prompt(promptInput))
+          : SessionPrompt.prompt(promptInput)
+        ).catch(async (error) => {
+          if (!ctx.abort.aborted) throw error
+          partialOutput = await interruptedTaskOutput(session.id, messageID)
+          if (!partialOutput) throw error
+          return undefined
+        })
+        if (ctx.abort.aborted) partialOutput ??= await interruptedTaskOutput(session.id, messageID)
+
+        const text = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
+        // altimate_change start — a child that ends on an error or with no text must not reach the
+        // parent as an empty result, which reads as "done, nothing found". An error is reported even
+        // when the child wrote text before it, since that text may be incomplete.
+        const childError = result?.info.role === "assistant" ? result.info.error : undefined
+        const status =
+          ctx.abort.aborted || (text.trim() && !childError)
+            ? []
+            : await emptyTaskStatus(session.id, messageID, childError, text)
+        // altimate_change end
+
+        const output = partialOutput ?? [
+          `task_id: ${session.id} (for resuming to continue this task if needed)`,
+          "",
+          "<task_result>",
+          ...(ctx.abort.aborted ? ["Task interrupted. Findings may be incomplete."] : []),
+          ...status,
+          text,
+          "</task_result>",
+        ].join("\n")
+        // altimate_change end
+
+        return {
+          title: params.description,
+          metadata: {
+            sessionId: session.id,
+            model,
+            // altimate_change start — upstream_fix: distinguish partial task findings from completed work.
+            ...(ctx.abort.aborted ? { interrupted: true } : {}),
+            // altimate_change end
+          },
+          output,
+        }
       }
-      // altimate_change start — keep the inherited query cutoff scoped to this child prompt
-      using queryBudget = defer(RunBudget.registerQueryDeadline(session.id, RunBudget.queryDeadline(ctx.sessionID)))
-      // altimate_change end
-      // altimate_change start — upstream_fix: return partial child findings after cancellation, even if its last turn is empty.
-      let partialOutput: string | undefined
-      const result = await (promptOps
-        ? Effect.runPromise(promptOps.prompt(promptInput))
-        : SessionPrompt.prompt(promptInput)
-      ).catch(async (error) => {
-        if (!ctx.abort.aborted) throw error
-        partialOutput = await interruptedTaskOutput(session.id, messageID)
-        if (!partialOutput) throw error
-        return undefined
-      })
-      if (ctx.abort.aborted) partialOutput ??= await interruptedTaskOutput(session.id, messageID)
+      if (!background) return await run()
 
-      const text = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
-      // altimate_change start — a child that ends on an error or with no text must not reach the
-      // parent as an empty result, which reads as "done, nothing found". An error is reported even
-      // when the child wrote text before it, since that text may be incomplete.
-      const childError = result?.info.role === "assistant" ? result.info.error : undefined
-      const status =
-        ctx.abort.aborted || (text.trim() && !childError)
-          ? []
-          : await emptyTaskStatus(session.id, messageID, childError, text)
-      // altimate_change end
-
-      const output = partialOutput ?? [
-        `task_id: ${session.id} (for resuming to continue this task if needed)`,
-        "",
-        "<task_result>",
-        ...(ctx.abort.aborted ? ["Task interrupted. Findings may be incomplete."] : []),
-        ...status,
-        text,
-        "</task_result>",
-      ].join("\n")
-      // altimate_change end
-
+      // The abort listener and query budget registered inside run() stay in place until the child
+      // settles, so a background child remains bound to the parent's abort signal and run budget.
+      const result = run()
+      result.catch((err) => log.warn("background task failed", { sessionID: session.id, err }))
+      backgroundTasks.set(session.id, { parentSessionID: ctx.sessionID, result })
+      ctx.abort.addEventListener("abort", () => backgroundTasks.delete(session.id), { once: true })
       return {
         title: params.description,
-        metadata: {
-          sessionId: session.id,
-          model,
-          // altimate_change start — upstream_fix: distinguish partial task findings from completed work.
-          ...(ctx.abort.aborted ? { interrupted: true } : {}),
-          // altimate_change end
-        },
-        output,
+        metadata: { sessionId: session.id, model, background: true },
+        output: [
+          `task_id: ${session.id}`,
+          "Task is running in the background. Call task again with this task_id to wait for and collect its result.",
+        ].join("\n"),
       }
+      // altimate_change end
     },
   }
 })
