@@ -211,7 +211,7 @@ async function runCredentials(args: any, update: boolean) {
     if (args.json) return json({ provider: r.provider, status: r.status, sync: r.sync, account: r.account, expiresAt: r.expiresAt, message: r.message, ...(r.code ? { code: r.code } : {}), ...(r.missing ? { missing: r.missing } : {}) })
     if (r.status === "connected") {
       out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} ${update ? "updated" : "connected"}${r.account ? ` as ${S.TEXT_NORMAL_BOLD}${clean(r.account)}${S.TEXT_NORMAL}` : ""}`)
-      out(`  ${S.TEXT_DIM}${r.sync === "synced" ? `synced to your workspace from ${os.hostname()}` : "kept local, not synced"}${r.expiresAt ? ` · expires ${clean(r.expiresAt)}` : ""}${r.message ? ` · ${clean(r.message)}` : ""}${S.TEXT_NORMAL}`)
+      out(`  ${S.TEXT_DIM}${r.sync === "synced" ? `synced to your workspace from ${clean(os.hostname())}` : "kept local, not synced"}${r.expiresAt ? ` · expires ${clean(r.expiresAt)}` : ""}${r.message ? ` · ${clean(r.message)}` : ""}${S.TEXT_NORMAL}`)
     } else out(`${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: ${clean(r.message ?? r.status)}`)
   } catch (e) {
     fail(e, args.json)
@@ -249,7 +249,7 @@ const FieldsCommand = cmd({
       if (args.json) return json(r)
       out(`\n${S.TEXT_HIGHLIGHT_BOLD}◆ ${core.PROVIDER_NAMES[id]}${S.TEXT_NORMAL} ${S.TEXT_DIM}${clean(r.variant)}${r.variants.length > 1 ? ` (also: ${r.variants.filter((v) => v !== r.variant).map(clean).join(", ")})` : ""}${S.TEXT_NORMAL}\n`)
       for (const f of r.fields) {
-        const shown = f.secret ? (f.hasValue ? `✓ ${f.masked}` : "not set") : (clean(f.value) || "not set")
+        const shown = f.secret ? (f.hasValue ? `✓ ${clean(f.masked)}` : "not set") : (clean(f.value) || "not set")
         out(`  ${clean(f.label)}${f.required ? "" : " (optional)"}: ${shown}`)
         if (f.note) out(`    ${S.TEXT_DIM}${clean(f.note)}${S.TEXT_NORMAL}`)
       }
