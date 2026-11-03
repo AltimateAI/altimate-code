@@ -612,7 +612,11 @@ describe("columnReach with a NATURAL JOIN", () => {
   })
 
   test("every NATURAL join form counts, whatever the quoting around it; aggregates under their own names do not", () => {
-    for (const sql of ["select sum(revenue) as revenue, cast(d as date) as d from fct_orders", "select natural_key, naturally from fct_orders"])
+    for (const sql of [
+      "select sum(revenue) as revenue, cast(d as date) as d from fct_orders",
+      "select natural_key, naturally from fct_orders",
+      "select 'natural ' as a, 'natural' as b from fct_orders natural_join",
+    ])
       expect(joinsNaturally(sql)).toBe(false)
     for (const sql of [
       "select a.id from fct_orders a natural left semi join other b",
@@ -627,6 +631,10 @@ describe("columnReach with a NATURAL JOIN", () => {
       "select a.id from a natural -- why\n join b",
       "select a.id from a natural left -- x\nouter join b",
       "select a.id from a natural # mysql\njoin b",
+      "select a.id from a natural // snowflake\njoin b",
+      "select a.id from a natural -- old mac\rjoin b",
+      // Many `natural` words in a string before the real join: each is checked in a bounded window.
+      "select $$" + "natural /* ".repeat(4000) + "$$ as s from a natural join b",
       "select '/*' as s from a natural /* c */ join b",
       "-- see /* note\nselect * from a natural /* c */ join b",
       // The words in a string or comment count too: that only adds doubt.

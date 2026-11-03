@@ -165,12 +165,21 @@ function namesColumn(sql: string, column: string): boolean {
  * Limit: a parent's whole row passed as a value (`to_json(o)`) is not seen; telling a row source from
  * a column needs the engine's parse, not a pattern.
  */
-// Between the keywords: whitespace, or a comment (`--` or `#` to the line's end, `/* … */` to its first
-// `*/`). Limit: a nested Postgres comment between them is not read as one.
-const GAP = String.raw`(?:\s|--[^\n]*\n|#[^\n]*\n|\/\*(?:[^*]|\*(?!\/))*\*\/)+`
-const NATURAL = new RegExp(String.raw`\bnatural${GAP}(?:(?:left|right|full|inner|cross|semi|anti)${GAP}){0,2}(?:outer${GAP})?join\b`, "i")
+// Between the keywords: whitespace, or a comment (`--`, `#` or `//` to the line's end, `/* … */` to its
+// first `*/`). Limit: a nested Postgres comment between them is not read as one.
+const GAP = String.raw`(?:\s|(?:--|#|\/\/)[^\r\n]*[\r\n]|\/\*(?:[^*]|\*(?!\/))*\*\/)+`
+const NATURAL = new RegExp(String.raw`^natural${GAP}(?:(?:left|right|full|inner|cross|semi|anti)${GAP}){0,2}(?:outer${GAP})?join\b`, "i")
+// How far past a `natural` the rest of the join is looked for, and how many are looked at: past that
+// many the SQL may well have one, which only adds doubt. The work stays bounded on any input.
+// Limit: comments longer than the window between the keywords hide the join.
+const NATURAL_WINDOW = 1000
+const MAX_NATURALS = 100
 export function joinsNaturally(sql: string): boolean {
-  return NATURAL.test(sql)
+  let seen = 0
+  for (const match of sql.matchAll(/(?<![\w$])natural(?![\w$])/gi)) {
+    if (++seen > MAX_NATURALS || NATURAL.test(sql.slice(match.index!, match.index! + NATURAL_WINDOW))) return true
+  }
+  return false
 }
 
 function childMapOf(manifest: any): Record<string, string[]> {
