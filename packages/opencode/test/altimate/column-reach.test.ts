@@ -401,7 +401,8 @@ describe("columnReach on a model the engine cannot fully trace", () => {
     const value: any = manifest()
     value.nodes["model.shop.fct_daily"].compiled_code = "select 3"
     value.nodes["model.shop.rpt_counts"].compiled_code = "select 4"
-    value.nodes["model.shop.rpt_ltv"] = model("rpt_ltv", ["model.shop.fct_daily"], "select max(revenue) as top from fct_daily", ["top"])
+    // Its SQL never names the column: only its partly traced parent makes it a possible reader.
+    value.nodes["model.shop.rpt_ltv"] = model("rpt_ltv", ["model.shop.fct_daily"], "select max(total) as top from fct_daily", ["top"])
     const spy = answer((sql) =>
       sql === "select 3"
         ? { ...direct(sql), errors: ["partial"] }
@@ -412,6 +413,9 @@ describe("columnReach on a model the engine cannot fully trace", () => {
     try {
       const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
       expect(reach.models.map((m) => m.name)).toContain("fct_daily")
+      // fct_daily is reached but only partly traced: its child may read the column, so it is uncertain, never a confident non-reader.
+      expect(reach.uncertain.map((m) => m.name)).toContain("rpt_ltv")
+      expect(reach.models.map((m) => m.name)).not.toContain("rpt_ltv")
       // Its own child is checked though fct_daily carried the column on.
       expect(reach.uncertain.find((m) => m.name === "rpt_counts")?.reason).toBe("the lineage engine traced only part of its SQL")
       expect(reach.uncertain_exposures.map((e) => e.unique_id)).toContain("exposure.shop.ops")
