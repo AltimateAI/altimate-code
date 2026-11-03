@@ -516,13 +516,17 @@ export function deriveRemote(connections: backend.Connection[], host = os.hostna
 }
 
 /** Local status merged with the workspace view of this user's connections (real mode only). */
-export function mergeRemote(local: StatusResult, remote: RemoteProvider[], now = Date.now()): StatusResult {
+export function mergeRemote(local: StatusResult, remote: RemoteProvider[], now = Date.now(), detections: Detection[] = []): StatusResult {
   const providers = local.providers.map((orig): ProviderStatus => {
     const r = remote.find((x) => x.integration_id === orig.id)
     const managedId = r ? (r.managedId !== undefined ? r.managedId : r.managed ? r.connection_id : null) : null
     // Saved to the workspace and no longer there: the credential is kept nowhere, so it cannot read as connected on its own.
     const gone = orig.sync === "synced" && orig.state !== "detected" && managedId == null
-    const removed: Partial<ProviderStatus> = { state: "not_found", source: null, account: null, sync: "local", expiresAt: null, note: REMOVED_NOTE }
+    // A credential still found on this machine is offered again, so it can be connected once more.
+    const det = gone ? detections.find((d) => d.id === orig.id && d.source.kind !== "mcp-remote") : undefined
+    const removed: Partial<ProviderStatus> = det
+      ? { state: "detected", source: det.source, account: det.account, sync: "local", expiresAt: null, note: "The workspace connection was removed. Connect it again." }
+      : { state: "not_found", source: null, account: null, sync: "local", expiresAt: null, note: REMOVED_NOTE }
     if (gone && r?.connection_id == null) return orderStatus({ ...orig, ...removed } as ProviderStatus)
     // Another connection of the caller's is still there: it is what the workspace shows for the provider.
     let p: ProviderStatus = gone ? ({ ...orig, ...removed, note: null } as ProviderStatus) : orig
@@ -582,7 +586,7 @@ export function mergeRemote(local: StatusResult, remote: RemoteProvider[], now =
       note: remoteExpired ? "access expired, reconnect to continue" : remoteRejected ? REJECTED_NOTE : null,
       ...(managedId != null ? {} : { managed: false }),
       // A hand-made connection is shown, and what was found here stays offered next to it.
-      ...(managedId == null && orig.state === "detected" && orig.source && orig.sync !== "blocked" ? { found: { source: orig.source, account: orig.account } } : {}),
+      ...(managedId == null && p.state === "detected" && p.source && p.sync !== "blocked" ? { found: { source: p.source, account: p.account } } : {}),
     })
   })
   return { ...local, providers }
@@ -594,7 +598,8 @@ export async function statusRemote(): Promise<StatusResult> {
   if (!cfg) return local
   try {
     const remote = deriveRemote(await backend.listOwnConnections(cfg))
-    return { ...mergeRemote(local, remote), workspace: await liveWorkspaceInfo() }
+    const detections = Object.values(loadStore().providers).flatMap((rec) => (rec?.detection ? [rec.detection] : []))
+    return { ...mergeRemote(local, remote, Date.now(), detections), workspace: await liveWorkspaceInfo() }
   } catch {
     return { ...local, workspace: await liveWorkspaceInfo() }
   }

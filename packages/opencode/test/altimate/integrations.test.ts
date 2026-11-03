@@ -339,7 +339,19 @@ describe("workspace connections", () => {
     expect([gone.state, gone.sync, gone.managed]).toEqual(["connected", "synced", false])
     api.state.rows.find((r) => r.name === "GitHub (from elsewhere)")!.deleted = true
     const none = (await core.statusRemote()).providers[0]
-    expect([none.state, none.sync]).toEqual(["not_found", "local"])
+    // gh still holds the token here, so it is offered again rather than shown as missing.
+    expect([none.state, none.sync]).toEqual(["detected", "local"])
+  })
+
+  test("a synced credential deleted in the workspace is offered again when it is still found here", () => {
+    const now = Date.parse("2026-11-03T00:00:00Z")
+    const detection = { id: "github" as const, source: { kind: "cli" as const, label: "gh CLI" }, account: "me", syncable: true, note: null }
+    const store = { blocked: {}, providers: { github: { detection, registered: true, synced: true, connectionId: 9, account: "me", variant: "token", values: {}, secretFields: ["github_token"], updatedAt: null, validatedAt: null } } } as any
+    const local = core.buildStatus(store, [], now)
+    const found = core.mergeRemote(local, [], now, [detection]).providers.find((p) => p.id === "github")!
+    expect([found.state, found.sync, found.source?.label, found.account]).toEqual(["detected", "local", "gh CLI", "me"])
+    const gone = core.mergeRemote(local, [], now).providers.find((p) => p.id === "github")!
+    expect([gone.state, gone.note]).toEqual(["not_found", "The workspace connection was removed. Add the credentials again."])
   })
 
   test("a saved record shows the newest validated connection, a newer hand-made one included", () => {
