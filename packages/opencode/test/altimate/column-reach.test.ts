@@ -323,7 +323,10 @@ describe("lineageGraph", () => {
   test("a twelve-hop chain comes back whole to its source; upstream past 500 nodes is cut and marked", () => {
     const chain: Record<string, any> = {}
     for (let i = 1; i <= 12; i++) chain[`model.shop.m${i}`] = model(`m${i}`, [i === 1 ? "source.shop.raw.orders" : `model.shop.m${i - 1}`], "select 1", [])
+    chain["test.shop.m3_unique"] = { resource_type: "test", name: "m3_unique", depends_on: { nodes: ["model.shop.m3"] } }
     const graph = lineageGraph({ nodes: chain, sources: { "source.shop.raw.orders": { resource_type: "source", name: "orders", source_name: "raw" } } }, "model.shop.m12")
+    // An upstream model's tests are left out: only the target's and downstream tests are counted.
+    expect(graph.nodes["test.shop.m3_unique"]).toBeUndefined()
     expect(graph.nodes["source.shop.raw.orders"]).toBeDefined()
     expect(Object.keys(graph.nodes)).toHaveLength(13)
     expect(graph.upTruncated).toBe(false)

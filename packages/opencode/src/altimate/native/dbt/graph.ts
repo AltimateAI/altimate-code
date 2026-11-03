@@ -80,9 +80,8 @@ export function lineageGraph(manifest: any, id: string): LineageGraph {
   const isTest = (one: string) => ["test", "unit_test"].includes(lookup(manifest, one)?.resource_type ?? one.split(".")[0])
   const keep = new Set([id])
   // Breadth first, so a cut keeps the nearest nodes.
-  const walk = (links: Record<string, string[]>, limit: number) => {
+  const walk = (links: Record<string, string[]>, limit: number, seen = new Set([id])) => {
     const queue = [id]
-    const seen = new Set([id])
     let count = 0
     while (queue.length) {
       for (const next of links[queue.shift()!] ?? []) {
@@ -97,14 +96,16 @@ export function lineageGraph(manifest: any, id: string): LineageGraph {
     return false
   }
   const upTruncated = walk(parents, MAX_UPSTREAM)
-  const truncated = walk(children, MAX_DOWNSTREAM)
+  // Tests are counted for the target and what is downstream of it only; upstream ones would only add weight.
+  const counted = new Set([id])
+  const truncated = walk(children, MAX_DOWNSTREAM, counted)
   const graph: LineageGraph = { nodes: {}, parents: {}, children: {}, truncated, upTruncated }
   for (const one of keep) {
     graph.nodes[one] = nodeOf(one, lookup(manifest, one))
     graph.parents[one] = (parents[one] ?? []).filter((other) => keep.has(other))
     graph.children[one] = (children[one] ?? []).filter((other) => {
       if (keep.has(other)) return true
-      if (!isTest(other)) return false
+      if (!isTest(other) || !counted.has(one)) return false
       if (!graph.nodes[other]) {
         graph.nodes[other] = { ...nodeOf(other, lookup(manifest, other)), type: "test" }
         graph.parents[other] = (parents[other] ?? []).filter((p) => keep.has(p))
