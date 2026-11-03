@@ -1,4 +1,5 @@
 import z from "zod"
+import fs from "fs"
 import path from "path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
@@ -113,7 +114,7 @@ type LineageParams = { model: string; column?: string; upstreamDepth: number; do
  */
 async function fromAdapter(params: LineageParams, signal: AbortSignal): Promise<{ result?: ModelLineage; reason: string }> {
   try {
-    const { getDbtAdapter } = await import("../native/connections/register")
+    const { getDbtAdapter, getDbtProjectRoot } = await import("../native/connections/register")
     // Starting the adapter can take a while (dbt deps, a parse): a cancel doesn't wait for it, and
     // past the deadline the manifest answers. The start goes on, for the next call.
     let stop = () => {}
@@ -132,7 +133,12 @@ async function fromAdapter(params: LineageParams, signal: AbortSignal): Promise<
       signal.removeEventListener("abort", stop)
       clearTimeout(timer)
     })
-    if (!adapter) return { reason: "no dbt project here" }
+    if (!adapter) {
+      // A project was found, so its adapter failed to start (an older dbt-integration under Bun, say).
+      const root = await getDbtProjectRoot()
+      const found = root !== undefined && fs.existsSync(path.join(root, "dbt_project.yml"))
+      return { reason: found ? "the dbt adapter couldn't start for this project" : "no dbt project here" }
+    }
     if (adapter.isInitialized?.() === false) return { reason: "the dbt adapter didn't load the project" }
     if (typeof adapter.getModelLineage !== "function") return { reason: "dbt-integration has no getModelLineage" }
     const result: unknown = await adapter.getModelLineage(params, signal)

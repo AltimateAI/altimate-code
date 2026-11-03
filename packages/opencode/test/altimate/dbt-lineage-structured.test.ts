@@ -220,6 +220,20 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     }
   })
 
+  test("says the adapter couldn't start when the project is there but creating it fails", async () => {
+    useConfig()
+    dbtAdapterInternals.create = async () => {
+      throw new Error("Cannot find module 'python-bridge'")
+    }
+    const call = manifestOnly()
+    try {
+      const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
+      expectManifestAnswer(result, "the dbt adapter couldn't start for this project")
+    } finally {
+      call.mockRestore()
+    }
+  })
+
   test("falls back when the dbt-integration in use has no getModelLineage", async () => {
     useConfig()
     dbtAdapterInternals.create = async () => fakeAdapter(true)
