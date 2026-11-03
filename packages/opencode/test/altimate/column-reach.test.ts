@@ -611,12 +611,8 @@ describe("columnReach with a NATURAL JOIN", () => {
     expect(reach.uncertain.map((m) => m.name)).toContain("rpt_after")
   })
 
-  test("every NATURAL join form counts; aggregates under their own names and the words in names, strings or comments do not", () => {
-    for (const sql of [
-      "select sum(revenue) as revenue, cast(d as date) as d from fct_orders",
-      "select natural_key, 'natural join' as s from fct_orders -- natural join",
-      'select a.id as "natural join", b.x as `natural join` from fct_orders a',
-    ])
+  test("every NATURAL join form counts, whatever the quoting around it; aggregates under their own names do not", () => {
+    for (const sql of ["select sum(revenue) as revenue, cast(d as date) as d from fct_orders", "select natural_key, naturally from fct_orders"])
       expect(joinsNaturally(sql)).toBe(false)
     for (const sql of [
       "select a.id from fct_orders a natural left semi join other b",
@@ -624,6 +620,12 @@ describe("columnReach with a NATURAL JOIN", () => {
       "select * from a natural full outer join b",
       "select array[(select max(a.id) from fct_orders a natural join other b)] as ids",
       'select "a\\"b" as c from a natural join b where t = "z"',
+      `select "it's" as c from a natural join b where y = 'q'`,
+      "select 'a\\'b' as c from a natural join b where t = 'z'",
+      'select "C:\\" as p from a natural join b where t = "z"',
+      "select * from a natural /* inner */ join b",
+      // The words in a string or comment count too: that only adds doubt.
+      "select 'natural join' as s from fct_orders",
     ])
       expect(joinsNaturally(sql)).toBe(true)
   })

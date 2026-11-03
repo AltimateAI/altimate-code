@@ -158,15 +158,16 @@ function namesColumn(sql: string, column: string): boolean {
 }
 
 /**
- * Whether the SQL has a NATURAL JOIN, whose join columns the lineage engine reports no edge for.
- * Limit: a parent's whole row passed as a value (`to_json(o)`) is not seen either; telling a row
- * source from a column needs the engine's parse, not a pattern.
+ * Whether the SQL may have a NATURAL JOIN, whose join columns the lineage engine reports no edge for.
+ * Read from the raw SQL: the words inside a string, comment or quoted name count too, which only adds
+ * doubt, while masking quotes would let a dialect's quoting rules hide a real join.
+ * Limit: a parent's whole row passed as a value (`to_json(o)`) is not seen; telling a row source from
+ * a column needs the engine's parse, not a pattern.
  */
 export function joinsNaturally(sql: string): boolean {
-  // Double-quoted and backticked text is emptied first: `as "natural join"` names a column. Brackets
-  // are left alone, since they also hold array expressions (`array[(select …)]`).
-  const code = stripSql(sql).replace(/"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, '""')
-  return /\bnatural\s+(?:(?:left|right|full|inner|cross|semi|anti)\s+){0,2}(?:outer\s+)?join\b/i.test(code)
+  const natural = /\bnatural\s+(?:(?:left|right|full|inner|cross|semi|anti)\s+){0,2}(?:outer\s+)?join\b/i
+  // Also with block comments blanked, so `natural /* … */ join` counts: either match only adds doubt.
+  return natural.test(sql) || natural.test(sql.replace(/\/\*[\s\S]*?\*\//g, " "))
 }
 
 function childMapOf(manifest: any): Record<string, string[]> {
