@@ -149,11 +149,18 @@ export function dbtModelLineage(params: DbtModelLineageParams): ModelLineage {
   for (const e of Array.isArray(lineage.errors) ? lineage.errors : []) {
     errors.push(`${focusName}: ${typeof e === "string" ? e : (e?.message ?? JSON.stringify(e))}`)
   }
+  const { byTable, shared } = tablesOf(parentIds, nodes, sources)
+  if (shared.size > 0) {
+    errors.push(
+      `${focusName} reads ${[...shared].join(", ")}, which share a table name in altimate-core's schema, so their column edges into it were left out`,
+    )
+  }
   const edges = lineageEdges(
     Array.isArray(lineage.column_lineage) ? lineage.column_lineage : [],
-    tablesOf(parentIds, nodes, sources),
+    byTable,
     { uniqueId: focusId, name: focusName },
     errors,
+    shared,
   )
   const wanted = params.column?.toLowerCase()
   const columnLineage = wanted ? edges.filter((e) => e.target[1] === wanted) : edges
@@ -209,17 +216,25 @@ function outputColumns(sql: string, dialect: string, name: string, lineage: Reco
 /**
  * Each parent's table names, lowercased, as altimate-core can report them: the keys
  * buildSchemaContext uses (alias, then name), then a source's identifier. The first parent to
- * claim a name keeps it.
+ * claim a name keeps it. `shared` holds the parents whose schema name (`alias || name`) another
+ * parent has too: the schema keeps only one of them, so a column can bind to the wrong one.
  */
 function tablesOf(parentIds: string[], nodes: Record<string, any>, sources: Record<string, any>) {
   const byTable = new Map<string, string>()
+  const bySchemaName = new Map<string, string[]>()
   for (const uid of parentIds) {
     const node = nodes[uid] ?? sources[uid]
+    const schemaName = node?.alias || node?.name
+    if (typeof schemaName === "string" && schemaName) {
+      const key = schemaName.toLowerCase()
+      bySchemaName.set(key, [...(bySchemaName.get(key) ?? []), uid])
+    }
     for (const key of [node?.alias, node?.name, node?.identifier]) {
       if (typeof key === "string" && key && !byTable.has(key.toLowerCase())) byTable.set(key.toLowerCase(), uid)
     }
   }
-  return byTable
+  const shared = new Set([...bySchemaName.values()].filter((ids) => ids.length > 1).flat())
+  return { byTable, shared }
 }
 
 /** A dotted SQL name's parts, unquoted: `"db"."schema"."t"."c"` gives db, schema, t, c. */
@@ -243,14 +258,16 @@ function nameParts(name: string): string[] {
 
 /**
  * altimate-core's column edges as `getModelLineage`'s, from a parent's column to the focus model's.
- * An edge whose table isn't one of the parents goes to `errors`. Edges are deduplicated: altimate-core
- * 0.9 can report one edge under a qualified and a bare table name.
+ * An edge whose table isn't one of the parents goes to `errors`; one from a parent in `leaveOut`
+ * (already reported) is dropped. Edges are deduplicated: altimate-core 0.9 can report one edge under
+ * a qualified and a bare table name.
  */
 export function lineageEdges(
   raw: any[],
   byTable: Map<string, string>,
   focus: { uniqueId: string; name: string },
   errors: string[],
+  leaveOut: Set<string> = new Set(),
 ): LineageEdge[] {
   const seen = new Set<string>()
   const edges: LineageEdge[] = []
@@ -269,6 +286,7 @@ export function lineageEdges(
       )
       continue
     }
+    if (leaveOut.has(parent)) continue
     const edge: LineageEdge = {
       source: [parent, column],
       target: [focus.uniqueId, target],

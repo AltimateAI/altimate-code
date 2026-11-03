@@ -141,6 +141,35 @@ select * from final`
     expect(result.columnLineage).toHaveLength(2)
   })
 
+  test("names two parents that share a table name, and leaves out their edges", async () => {
+    const manifest = lineageManifest(`select o.order_id, c.first_name
+from (select order_id, customer_id from "jaffle"."shopify_us"."orders"
+      union all select order_id, customer_id from "jaffle"."shopify_eu"."orders") o
+join "jaffle"."main"."stg_customers" c on c.customer_id = o.customer_id`)
+    const orders = (region: string) => ({
+      unique_id: `source.jaffle_shop.shopify_${region}.orders`,
+      resource_type: "source",
+      source_name: `shopify_${region}`,
+      name: "orders",
+      identifier: "orders",
+      schema: `shopify_${region}`,
+      columns: { order_id: { name: "order_id" }, customer_id: { name: "customer_id" } },
+    })
+    const US = "source.jaffle_shop.shopify_us.orders"
+    const EU = "source.jaffle_shop.shopify_eu.orders"
+    Object.assign(manifest.sources, { [US]: orders("us"), [EU]: orders("eu") })
+    manifest.nodes["model.jaffle_shop.customers"].depends_on.nodes = [US, EU, STG_CUSTOMERS]
+    const result = dbtModelLineage({ manifest_path: await manifestFile("shared", manifest), model: "customers" })
+    expect(result.errors).toEqual([
+      `customers reads ${US}, ${EU}, which share a table name in altimate-core's schema, so their column edges into it were left out`,
+    ])
+    expect(result.confidence).toBe("low")
+    expect(result.columnLineage.filter((e) => [US, EU].includes(e.source[0]))).toEqual([])
+    expect(result.columnLineage).toContainEqual(
+      expect.objectContaining({ source: [STG_CUSTOMERS, "first_name"], target: [CUSTOMERS, "first_name"] }),
+    )
+  })
+
   test("lists the model without columns when the manifest has no compiled SQL", async () => {
     const result = dbtModelLineage({
       manifest_path: await manifestFile("uncompiled", lineageManifest(null)),
