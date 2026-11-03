@@ -943,7 +943,8 @@ describe("columnReach with a NATURAL JOIN", () => {
 describe("columnReach through Snowflake IDENTIFIER()", () => {
   test("a column named as IDENTIFIER('…') is a possible read, and its child and dashboard are not dropped", () => {
     const value = manifest()
-    value.nodes["model.shop.rpt_counts"].compiled_code = "select identifier('revenue') as copied from fct_orders"
+    value.nodes["model.shop.rpt_counts"].compiled_code =
+      "select identifier(/* source column */ 'revenue') as copied from fct_orders"
     value.nodes["model.shop.rpt_copy"] = model("rpt_copy", ["model.shop.rpt_counts"], "select copied from rpt_counts", [
       "copied",
     ])
@@ -962,6 +963,8 @@ describe("columnReach through Snowflake IDENTIFIER()", () => {
     for (const sql of [
       "select identifier('revenue') from t",
       `select IDENTIFIER('o."REVENUE"') from t`,
+      "select identifier(/* source column */ 'revenue') as copied from t",
+      "select identifier /* c */ ( -- why\n 'revenue') from t",
       "select identifier($col) from t",
       "select identifier(:col) from t",
     ])

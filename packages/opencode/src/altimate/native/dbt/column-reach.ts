@@ -196,16 +196,24 @@ export function joinsNaturally(sql: string): boolean {
   return false
 }
 
+// `IDENTIFIER (`, comments allowed before and inside the parenthesis, then its string or bind variable.
+const IDENTIFIER_CALL = new RegExp(String.raw`^identifier(?:${GAP})?\((?:${GAP})?(?:'((?:[^']|'')*)'|([$:?]))`, "i")
+
 /**
  * Whether the SQL names one of `columns` through Snowflake's `IDENTIFIER('…')`, or passes it a bind
  * variable (`IDENTIFIER($col)`): the lineage engine reads the argument as a string, so it reports no
- * edge for the column.
+ * edge for the column. Bounded like joinsNaturally: each `identifier` is read in a window, and past
+ * 100 of them the SQL counts as naming it.
  */
 export function namesThroughIdentifier(sql: string, columns: string[]): boolean {
   const wanted = new Set(columns.map((one) => one.toLowerCase()))
-  for (const match of sql.matchAll(/\bidentifier\s*\(\s*(?:'((?:[^']|'')*)'|([$:?]))/gi)) {
-    if (match[2]) return true
-    const name = match[1]!.replace(/''/g, "'").split(".").pop()!.trim().replace(/^"|"$/g, "")
+  let seen = 0
+  for (const match of sql.matchAll(/(?<![\w$])identifier(?![\w$])/gi)) {
+    if (++seen > MAX_NATURALS) return true
+    const call = IDENTIFIER_CALL.exec(sql.slice(match.index!, match.index! + NATURAL_WINDOW))
+    if (!call) continue
+    if (call[2]) return true
+    const name = call[1]!.replace(/''/g, "'").split(".").pop()!.trim().replace(/^"|"$/g, "")
     if (wanted.has(name.toLowerCase())) return true
   }
   return false
