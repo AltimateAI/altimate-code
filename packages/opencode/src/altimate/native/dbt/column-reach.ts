@@ -215,7 +215,8 @@ export function namesThroughIdentifier(sql: string, columns: string[]): boolean 
     if (call[2]) return true
     // Any mention of the column in the string counts (qualified, quoted, with dots in a quoted name):
     // telling those apart needs a parse, and a wider match only adds doubt.
-    const text = call[1]!.replace(/''/g, "'").toLowerCase()
+    // A doubled quote inside a quoted name (`"a""b"`) is one quote in the name.
+    const text = call[1]!.replace(/''/g, "'").replace(/""/g, '"').toLowerCase()
     if ([...wanted].some((column) => text.includes(column))) return true
   }
   return false

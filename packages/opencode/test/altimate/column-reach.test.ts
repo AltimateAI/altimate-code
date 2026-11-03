@@ -972,6 +972,8 @@ describe("columnReach through Snowflake IDENTIFIER()", () => {
       expect(namesThroughIdentifier(sql, ["revenue"])).toBe(true)
     // A tracked column whose quoted name holds a dot.
     expect(namesThroughIdentifier(`select identifier('"net.amount"') from t`, ["net.amount"])).toBe(true)
+    // A quote in a column's name, doubled inside the quoted identifier.
+    expect(namesThroughIdentifier(`select identifier('"a""b"') from t`, ['a"b'])).toBe(true)
     expect(namesThroughIdentifier("select identifier('order_id') from t", ["revenue"])).toBe(false)
   })
 })
