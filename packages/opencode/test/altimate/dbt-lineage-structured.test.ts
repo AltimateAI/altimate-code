@@ -451,6 +451,28 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
     }
   })
 
+  test("a call cancelled while the tool loads the adapter module starts nothing", async () => {
+    useConfig()
+    let created = 0
+    dbtAdapterInternals.create = async () => {
+      created += 1
+      return fakeAdapter(true, async () => TRACE)
+    }
+    const call = manifestOnly()
+    const controller = new AbortController()
+    try {
+      const tool = await initTool(DbtLineageTool)
+      // execute runs up to its first await (the module import) before this abort.
+      const running = tool.execute({ model: "customers" }, { ...ctx, abort: controller.signal })
+      controller.abort()
+      await expect(running).rejects.toThrow()
+      expect(created).toBe(0)
+      expect(call).not.toHaveBeenCalled()
+    } finally {
+      call.mockRestore()
+    }
+  })
+
   test("answers from the manifest when the adapter doesn't start in time", async () => {
     useConfig()
     dbtAdapterInternals.create = () => new Promise(() => {})
@@ -533,6 +555,25 @@ describe("dbt_lineage in a read-only call", () => {
       expect(call.mock.calls[0]?.[0]).toBe("dbt.model_lineage")
       expectManifestAnswer(result, "this session is read-only")
       expect((result.metadata.structuredContent as ModelLineage).nodes).toHaveLength(4)
+    } finally {
+      call.mockRestore()
+    }
+  })
+
+  test("ignores a dbt adapter another tool already started", async () => {
+    const lookups: unknown[] = []
+    dbtAdapterInternals.create = async () =>
+      fakeAdapter(true, async (params) => {
+        lookups.push(params)
+        return TRACE
+      })
+    expect(await register.getDbtAdapter()).toBeTruthy()
+    const call = manifestOnly()
+    try {
+      const tool = await initTool(DbtLineageTool)
+      const result = await tool.execute({ model: "customers" }, { ...ctx, extra: { forceReadOnly: true } })
+      expect(lookups).toEqual([])
+      expectManifestAnswer(result, "this session is read-only")
     } finally {
       call.mockRestore()
     }

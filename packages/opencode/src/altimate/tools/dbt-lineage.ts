@@ -115,6 +115,8 @@ type LineageParams = { model: string; column?: string; upstreamDepth: number; do
 async function fromAdapter(params: LineageParams, signal: AbortSignal): Promise<{ result?: ModelLineage; reason: string }> {
   try {
     const { getDbtAdapter, getDbtProjectRoot } = await import("../native/connections/register")
+    // The import yields: a cancel that lands meanwhile starts no adapter.
+    signal.throwIfAborted()
     // Starting the adapter can take a while (dbt deps, a parse): a cancel doesn't wait for it, and
     // past the deadline the manifest answers. The start goes on, for the next call.
     let stop = () => {}
