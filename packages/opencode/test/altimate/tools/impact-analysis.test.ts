@@ -208,7 +208,10 @@ describe("formatImpactReport", () => {
       transitive: [],
       affectedTestCount: 0,
       totalModels: 5,
-      exposures: [{ unique_id: "exposure.p.exec", name: "exec", label: "Exec Revenue", type: "dashboard" }],
+      exposures: [
+        { unique_id: "exposure.p.exec", name: "exec", label: "Exec Revenue", type: "dashboard" },
+        { unique_id: "exposure.p.far", name: "far", label: "Far Board", type: "dashboard" },
+      ],
       columnReach: {
         models: [{ name: "fct_daily", unique_id: "model.p.fct_daily", columns: ["revenue"] }],
         uncertain: [{ name: "rpt_big", unique_id: "model.p.rpt_big", reason: "names it only outside its select list (WHERE, JOIN, GROUP BY or HAVING)" }],
@@ -219,7 +222,7 @@ describe("formatImpactReport", () => {
       },
     })
     expect(report).toContain(
-      "Column Reach: fct_orders.revenue is read by at least 1 model and at least 1 exposure; 1 more may read it; 1 could not be traced (stopped early)",
+      "Column Reach: fct_orders.revenue is read by at least 1 model and at least 1 exposure; at least 1 more may read it; at least 1 could not be traced (stopped early)",
     )
     expect(report).toContain("  fct_daily → revenue")
     expect(report).toContain("  ◆ Exec Revenue [dashboard]")
@@ -227,6 +230,8 @@ describe("formatImpactReport", () => {
     expect(report).toContain("  ! mart_ltv not traced: No compiled SQL found — run `dbt compile` first")
     expect(report).toContain("  ? ◆ Ops [dashboard] on a model that may read it")
     expect(report).not.toContain("Exposures (")
+    // Stopped early: the other exposures are not claimed as non-readers.
+    expect(report).toContain("Other exposures (1): column reach stopped early, so some of these were not checked")
   })
 
   test("percentage calculation with 0 total models does not produce NaN or Infinity", () => {

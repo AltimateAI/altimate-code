@@ -279,12 +279,14 @@ export function formatImpactReport(data: {
   if (data.column && data.columnReach) {
     const reach = data.columnReach
     const dashboards = reach.exposures.length
-    lines.push(
-      // Stopped early: the counts are lower bounds, and exposures past the stop may read the column too.
-      `Column Reach: ${data.model}.${data.column} is read by ${reach.truncated ? "at least " : ""}${reach.models.length} model${reach.models.length === 1 ? "" : "s"} and ${reach.truncated ? "at least " : ""}${dashboards} exposure${dashboards === 1 ? "" : "s"}` +
-        `${reach.uncertain.length ? `; ${reach.uncertain.length} more may read it` : ""}` +
-        `${reach.untraced.length ? `; ${reach.untraced.length} could not be traced` : ""}${reach.truncated ? " (stopped early)" : ""}`,
-    )
+    // Stopped early: every count is a lower bound, since the models past the stop were never traced.
+    const atLeast = reach.truncated ? "at least " : ""
+    const plural = (n: number, word: string) => `${atLeast}${n} ${word}${n === 1 ? "" : "s"}`
+    const readers = `${plural(reach.models.length, "model")} and ${plural(dashboards, "exposure")}`
+    const maybe = reach.uncertain.length ? `; ${atLeast}${reach.uncertain.length} more may read it` : ""
+    const lost = reach.untraced.length ? `; ${atLeast}${reach.untraced.length} could not be traced` : ""
+    const stopped = reach.truncated ? " (stopped early)" : ""
+    lines.push(`Column Reach: ${data.model}.${data.column} is read by ${readers}${maybe}${lost}${stopped}`)
     lines.push("".padEnd(40, "-"))
     for (const m of reach.models) lines.push(`  ${m.name}${m.columns.length ? ` → ${m.columns.join(", ")}` : ""}`)
     for (const e of reach.exposures) lines.push(`  ◆ ${e.label} [${e.type}]`)
@@ -305,8 +307,11 @@ export function formatImpactReport(data: {
   )
   const others = (data.exposures ?? []).filter((e) => !listed.has(e.unique_id))
   if (others.length > 0) {
-    // When column reach stopped early, the rest are unchecked rather than known not to read the column.
-    lines.push(`${data.columnReach ? (data.columnReach.truncated ? "Other exposures (column reach stopped before checking them)" : "Other exposures") : "Exposures"} (${others.length})`)
+    // When column reach stopped early, some of these may sit on models it never reached.
+    const title = data.columnReach ? "Other exposures" : "Exposures"
+    const stoppedNote = ": column reach stopped early, so some of these were not checked"
+    const unchecked = data.columnReach?.truncated ? stoppedNote : ""
+    lines.push(`${title} (${others.length})${unchecked}`)
     lines.push("".padEnd(40, "-"))
     for (const e of others) lines.push(`  ${e.label} [${e.type}]`)
     lines.push("")

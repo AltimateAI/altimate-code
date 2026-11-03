@@ -386,11 +386,10 @@ export function columnReach(manifestPath: string, model: string, column: string,
     // edge through it: unknown, not unread, even when another parent's edges are traced.
     const viaEphemeral = parents.some((p) => lookup(p)?.config?.materialized === "ephemeral")
     const natural = joinsNaturally(sqlText)
+    // The traced columns this model's parents carry.
+    const trackedColumns = parents.flatMap((parent) => [...tracked.get(parent)!])
     // The column named as a string the engine cannot trace: its outputs are unknown, like a NATURAL JOIN's.
-    const viaIdentifier = namesThroughIdentifier(
-      sqlText,
-      parents.flatMap((parent) => [...tracked.get(parent)!]),
-    )
+    const viaIdentifier = namesThroughIdentifier(sqlText, trackedColumns)
     const opaque = natural || viaIdentifier
     if (reads) {
       tracked.set(id, carried)
@@ -412,7 +411,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
       uncertain.push(entry(id, "reads an ephemeral parent, inlined as a CTE the lineage engine cannot trace through"))
       continue
     }
-    const named = parents.flatMap((parent) => [...tracked.get(parent)!].filter((col) => namesColumn(sqlText, col)))
+    const named = trackedColumns.filter((col) => namesColumn(sqlText, col))
     // No edge at all while the SQL names the column (a PIVOT, say) is the engine not seeing through
     // it, so its outputs are unknown. SQL that never names it (`select 1`, `count(*)`) reads nothing and
     // falls through. Below an unsure parent it is already reported as uncertain.
