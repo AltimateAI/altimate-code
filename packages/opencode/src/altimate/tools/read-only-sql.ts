@@ -9,6 +9,8 @@ import { hasSideEffectFunction } from "./sql-function-policy"
  * that writes or runs SQL (dynamic query() included). Undefined otherwise. */
 function readOnlyBody(sql: string, dialect?: string): { masked: string; body: string } | undefined {
   const { queryType, blocked } = classifyAndCheck(sql, dialect)
+  // Settled already; the function scan below is costly on deeply nested input.
+  if (blocked || queryType !== "read") return undefined
   const { tokens, complete } = tokenizeSql(sql, dialect)
   const masked = maskSql(tokens)
   // All calls use real code '(' tokens.

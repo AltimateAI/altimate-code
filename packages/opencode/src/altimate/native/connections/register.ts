@@ -13,7 +13,7 @@ import { defaultInspectionSchema, resolveInspectionTable, resolveInspectionTarge
 import { discoverContainers } from "./docker-discovery"
 import { parseDbtProfiles } from "./dbt-profiles"
 import { runDataDiff } from "./data-diff"
-import { dbtProjectAdapterType } from "./dbt-adapter-type"
+import { dbtProjectAdapterType, dbtRoute } from "./dbt-adapter-type"
 import type {
   SqlExecuteParams,
   SqlExecuteResult,
@@ -83,9 +83,10 @@ async function ensureDbtAdapter(): Promise<any | null> {
   // Likewise the cache: a superseded attempt returns its result to the callers that
   // awaited it but must not publish it, or it would overwrite what the newer attempt
   // stored. Every write goes through here.
-  const publish = (value: any | null): any | null => {
+  const publish = (value: any | null, root?: string): any | null => {
     if (dbtAdapterInflight === mine) {
       dbtAdapter = value
+      dbtRoute.root = value ? (root ?? null) : null
       dbtAdapterInternals.writes += 1
     }
     return value
@@ -113,7 +114,7 @@ async function ensureDbtAdapter(): Promise<any | null> {
 
       // Create the adapter
       const { create } = await import("../../../../../dbt-tools/src/adapter")
-      return publish(await create(dbtConfig))
+      return publish(await create(dbtConfig), dbtConfig.projectRoot)
     } catch {
       // dbt-tools not available or config invalid — fall back to native
       return publish(null)
@@ -263,6 +264,7 @@ async function tryExecuteViaDbt(
 /** Reset dbt adapter (for testing). */
 export function resetDbtAdapter(): void {
   dbtAdapter = undefined
+  dbtRoute.root = undefined
   // altimate_change — drop any in-flight creation too, or a test that resets mid-flight
   // would still receive the previous adapter.
   dbtAdapterInflight = undefined

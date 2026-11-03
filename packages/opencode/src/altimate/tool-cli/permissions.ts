@@ -36,7 +36,10 @@ export function denied(permission: string, retry = "Re-run"): Error {
 export function askFor(allowWrite: boolean, retry = "Re-run"): Tool.Context["ask"] {
   return ({ permission, patterns, metadata }) => {
     const dialect = dialectOf(metadata)
-    if (patterns?.some((pattern) => isBlockedStatement(pattern, dialect))) {
+    // sql_execute has already checked its whole SQL; its pattern is a 200-character preview, which a cut
+    // inside a literal would make read differently.
+    const checked = (metadata as { hardDenyChecked?: unknown } | undefined)?.hardDenyChecked === true
+    if (!checked && patterns?.some((pattern) => isBlockedStatement(pattern, dialect))) {
       return Effect.die(
         new Error(`Permission denied: ${permission}. DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety. This cannot be overridden.`),
       )
