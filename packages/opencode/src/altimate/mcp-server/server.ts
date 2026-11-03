@@ -228,10 +228,10 @@ export async function createServer(options: ServeOptions = {}) {
         // Tools outside the declared set may still hand over a structured result of their own, held to
         // the same cap: past it only the text goes.
         ...(structured &&
-        typeof structured === "object" &&
-        !isError &&
-        !STRUCTURED_TOOLS.has(request.params.name) &&
-        Buffer.byteLength(JSON.stringify(structured)) <= STRUCTURED_MAX_BYTES
+          typeof structured === "object" &&
+          !isError &&
+          !STRUCTURED_TOOLS.has(request.params.name) &&
+          Buffer.byteLength(JSON.stringify(structured)) <= STRUCTURED_MAX_BYTES
           ? { structuredContent: structured as Record<string, unknown> }
           : {}),
         isError,
