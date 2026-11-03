@@ -611,8 +611,22 @@ describe("columnReach with a NATURAL JOIN", () => {
     expect(reach.uncertain.map((m) => m.name)).toContain("rpt_after")
   })
 
-  test("aggregates and casts under their own names, and the word natural elsewhere, are not a NATURAL JOIN", () => {
-    for (const sql of ["select sum(revenue) as revenue, cast(d as date) as d from fct_orders", "select natural_key, 'natural join' as s from fct_orders -- natural join"])
+  test("every NATURAL join form counts; aggregates under their own names and the words in names, strings or comments do not", () => {
+    for (const sql of [
+      "select sum(revenue) as revenue, cast(d as date) as d from fct_orders",
+      "select natural_key, 'natural join' as s from fct_orders -- natural join",
+      'select a.id as "natural join", b.x as `natural join` from fct_orders a',
+    ])
       expect(joinsNaturally(sql)).toBe(false)
+    for (const sql of ["select a.id from fct_orders a natural left semi join other b", "select * from a natural cross join b", "select * from a natural full outer join b"])
+      expect(joinsNaturally(sql)).toBe(true)
+  })
+
+  test("a NATURAL JOIN model that names the column outside its select list also passes the doubt on", () => {
+    const value = manifest()
+    value.nodes["model.shop.rpt_big_orders"].compiled_code = "select a.order_id from fct_orders a natural join other b where a.revenue > 100"
+    value.nodes["model.shop.rpt_after"] = model("rpt_after", ["model.shop.rpt_big_orders"], "select count(*) as n from rpt_big_orders", ["n"])
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    expect(reach.uncertain.map((m) => m.name)).toContain("rpt_after")
   })
 })

@@ -212,6 +212,15 @@ describe("dbt_lineage with the project's dbt adapter", () => {
       await symlink(path.join(mine, "target", "real.json"), path.join(mine, "target", "own.json"))
       const own2 = await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "own.json") }, ctx)
       expect(own2.metadata.structuredContent).toEqual(TRACE)
+      // A relative link climbs from its real folder: through a linked folder, `..` leaves this project.
+      const realOther = path.join(dir, "real")
+      await mkdir(path.join(realOther, "proj", "target"), { recursive: true })
+      await mkdir(path.join(realOther, "otherproj"), { recursive: true })
+      await writeFile(path.join(realOther, "otherproj", "dbt_project.yml"), "name: o\n")
+      await symlink(path.join(realOther, "proj", "target"), path.join(mine, "linked_target"))
+      await symlink("../../otherproj/target/manifest.json", path.join(realOther, "proj", "target", "manifest.json"))
+      const climbed = await tool.execute({ model: "customers", manifest_path: path.join(mine, "linked_target", "manifest.json") }, ctx)
+      expect(climbed.metadata.structuredContent).toBeUndefined()
       // A path through a file is not a folder: it is placed, not thrown on.
       const through = await tool.execute({ model: "customers", manifest_path: path.join(mine, "dbt_project.yml", "manifest.json") }, ctx)
       expect(through.metadata.structuredContent).toEqual(TRACE)

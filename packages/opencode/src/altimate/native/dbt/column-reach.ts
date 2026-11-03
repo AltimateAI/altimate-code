@@ -163,7 +163,9 @@ function namesColumn(sql: string, column: string): boolean {
  * source from a column needs the engine's parse, not a pattern.
  */
 export function joinsNaturally(sql: string): boolean {
-  return /\bnatural\s+(?:(?:left|right|full|inner)\s+(?:outer\s+)?)?join\b/i.test(stripSql(sql))
+  // Quoted names are emptied first: `as "natural join"` names a column.
+  const code = stripSql(sql).replace(/"(?:[^"]|"")*"|`[^`]*`|\[[^\]]*\]/g, '""')
+  return /\bnatural\s+(?:(?:left|right|full|inner|cross|semi|anti)\s+){0,2}(?:outer\s+)?join\b/i.test(code)
 }
 
 function childMapOf(manifest: any): Record<string, string[]> {
@@ -350,7 +352,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
     }
     const shared = named.some((col) => allParents.filter((other) => documentedColumns(lookup(other)).has(col)).length > 1)
     if (ambiguous || named.length > 0 || fromUnsure) {
-      if (ambiguous || fromUnsure) unsure.add(id)
+      if (ambiguous || fromUnsure || natural) unsure.add(id)
       uncertain.push(
         entry(
           id,

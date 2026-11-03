@@ -150,7 +150,8 @@ async function manifestOutsideAdapterProject(manifestPath: string): Promise<stri
         if (fs.lstatSync(at).isSymbolicLink()) link = fs.readlinkSync(at)
       } catch {}
       if (link !== undefined) {
-        at = path.resolve(path.dirname(at), link)
+        // From the link's real folder, as the system resolves it: `..` climbs from there.
+        at = path.resolve(fs.realpathSync(path.dirname(at)), link)
         continue
       }
       if (path.dirname(at) === at) return undefined
