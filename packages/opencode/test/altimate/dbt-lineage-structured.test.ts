@@ -225,8 +225,11 @@ describe("dbt_lineage with the project's dbt adapter", () => {
       // as this project's manifest, so the adapter answers, matching the graph include_graph reads.
       await mkdir(path.join(other, "deep"), { recursive: true })
       await symlink(path.join(other, "deep"), path.join(mine, "out"))
-      const viaDots = await tool.execute({ model: "customers", manifest_path: `${mine}/out/../target/manifest.json` }, ctx)
+      // The other project's manifest is made unreadable: a graph read from it would fail to parse.
+      await writeFile(path.join(other, "target", "manifest.json"), "{ not json")
+      const viaDots = await tool.execute({ model: "customers", manifest_path: `${mine}/out/../target/manifest.json`, include_graph: true }, ctx)
       expect(viaDots.metadata.structuredContent).toEqual(TRACE)
+      expect(String(viaDots.metadata.graph_error ?? "")).not.toMatch(/json|parse/i)
       // Many folders not written yet below the project are climbed, not counted as links.
       const deep = path.join(mine, ...Array.from({ length: 80 }, (_, i) => `d${i}`), "manifest.json")
       expect((await tool.execute({ model: "customers", manifest_path: deep }, ctx)).metadata.structuredContent).toEqual(TRACE)
