@@ -142,7 +142,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
           model: targetModel.name,
           column: args.column ?? null,
           change_type: args.change_type,
-          downstream: downstream.map((d) => ({ name: d.name, depth: d.depth, materialized: d.materialized ?? null })),
+          downstream: downstream.map((d) => ({ name: d.name, ...(d.unique_id && { unique_id: d.unique_id }), depth: d.depth, materialized: d.materialized ?? null })),
           exposures,
           ...(reach && { column_reach: reach }),
           ...(reachError && { column_reach_error: reachError }),

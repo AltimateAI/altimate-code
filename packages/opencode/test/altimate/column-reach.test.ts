@@ -3,7 +3,7 @@ import * as core from "@altimateai/altimate-core"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { columnReach, exposuresOn, parentsNamed, selectsStar } from "../../src/altimate/native/dbt/column-reach"
+import { columnReach, exposuresOn, parentsNamed, readsWholeRow, selectsStar } from "../../src/altimate/native/dbt/column-reach"
 import { lineageGraph } from "../../src/altimate/native/dbt/graph"
 import { structuredError, structuredResult } from "../../src/altimate/mcp-server/server"
 import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
@@ -580,6 +580,9 @@ describe("dbtLineage", () => {
     expect(Object.keys(dbtLineage({ manifest_path: file, model: "mart_ltv", include_graph: true }).graph!.nodes)).toContain("model.shop.rpt_ltv")
     // By project-relative path too.
     expect(dbtLineage({ manifest_path: file, model: "models/mart_ltv.sql" }).model_unique_id).toBe("model.shop.mart_ltv")
+    // `./` and Windows separators spell the same path.
+    expect(dbtLineage({ manifest_path: file, model: "./models/mart_ltv.sql" }).model_unique_id).toBe("model.shop.mart_ltv")
+    expect(dbtLineage({ manifest_path: file, model: "models\\mart_ltv.sql" }).model_unique_id).toBe("model.shop.mart_ltv")
     const withSnapshot: any = manifest()
     withSnapshot.nodes["snapshot.shop.snap"] = { ...model("snap", ["model.shop.fct_orders"], "select order_id from fct_orders", ["order_id"]), resource_type: "snapshot", unique_id: "snapshot.shop.snap" }
     expect(dbtLineage({ manifest_path: manifestFile(withSnapshot), model: "snap" }).model_unique_id).toBe("snapshot.shop.snap")
@@ -587,5 +590,27 @@ describe("dbtLineage", () => {
     withSnapshot.nodes["test.shop.t1"] = { resource_type: "test", name: "t1", depends_on: { nodes: [] } }
     withSnapshot.nodes["snapshot.shop.odd"] = { ...withSnapshot.nodes["snapshot.shop.snap"], unique_id: "snapshot.shop.odd", name: "test.shop.t1" }
     expect(dbtLineage({ manifest_path: manifestFile(withSnapshot), model: "test.shop.t1" }).model_unique_id).toBe("snapshot.shop.odd")
+  })
+})
+
+describe("columnReach with whole-row reads", () => {
+  test("a parent's row used as a value, or a NATURAL JOIN, is a possible read, never a confident non-reader", () => {
+    for (const sql of [
+      "select order_id, to_json(o) as j from fct_orders o",
+      "select order_id, md5(cast(o as varchar)) as h from fct_orders o",
+      "select a.order_id from fct_orders a natural join other b",
+    ]) {
+      const value = manifest()
+      value.nodes["model.shop.rpt_counts"].compiled_code = sql
+      const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+      expect(reach.uncertain.map((m) => m.name).sort()).toEqual(["rpt_big_orders", "rpt_counts"])
+      expect(reach.uncertain_exposures.map((e) => e.name)).toEqual(["ops"])
+    }
+  })
+
+  test("qualified columns and the FROM clause itself are not whole-row reads", () => {
+    expect(readsWholeRow('select o.order_id, o.revenue as fct_orders from "shop"."main"."fct_orders" o where o.x > 1', ["fct_orders"])).toBe(false)
+    expect(readsWholeRow("select fct_orders.order_id from fct_orders join x on fct_orders.id = x.id", ["fct_orders"])).toBe(false)
+    expect(readsWholeRow("select count(*) from fct_orders o left join other on o.id = other.id", ["fct_orders"])).toBe(false)
   })
 })

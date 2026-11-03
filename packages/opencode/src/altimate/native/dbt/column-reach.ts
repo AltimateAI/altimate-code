@@ -126,7 +126,7 @@ export function selectsStar(sql: string): boolean {
     const prev = before.at(-1) ?? ""
     const next = after[0] ?? ""
     // count(*) reads no column; hash(*), object_construct(*), struct(*) read them all.
-    if (prev === "(" && next === ")" && /\bcount\s*\($/i.test(before)) continue
+    if (prev === "(" && next === ")" && /\bcount(?:_big|_if)?\s*\($/i.test(before)) continue
     if (prev === "." || next === "" || next === "," || next === ")" || ends.test(after)) return true
     const operand = /[\w"'`\])]/
     // A sign on the right operand (`revenue * -1`) belongs to it.
@@ -151,7 +151,42 @@ function namesColumn(sql: string, column: string): boolean {
   const ident = new RegExp(`(^|[^A-Za-z0-9_$])("${name}"|${name})(?![A-Za-z0-9_$])`, "gi")
   for (const match of code.matchAll(ident)) {
     const before = code.slice(0, match.index! + match[1]!.length)
-    if (/\bas\s*$/i.test(before)) continue
+    if (/\bas\s*`?$/i.test(before)) continue
+    return true
+  }
+  return false
+}
+
+const NOT_ALIAS = /^(on|using|where|join|left|right|full|inner|outer|cross|natural|group|order|limit|union|having|qualify|window|lateral|as|select|with|pivot|unpivot)$/i
+const PART = String.raw`(?:[A-Za-z_][\w$]*|"[^"]+"|` + "`[^`]+`" + String.raw`|\[[^\]]+\])`
+const RELATION = new RegExp(String.raw`\b(?:from|join)\s+(${PART}(?:\s*\.\s*${PART})*)(?:\s+(?:as\s+)?([A-Za-z_][\w$]*))?`, "gi")
+
+/**
+ * Whether the SQL reads whole rows of a parent, which the lineage engine traces to no column: a
+ * NATURAL JOIN, or a parent's table name or alias used as a value (`to_json(o)`, `cast(o as varchar)`).
+ * `tables` are the parents' bare table names. Used only to mark a model as one that may read the column.
+ */
+export function readsWholeRow(sql: string, tables: string[]): boolean {
+  const code = stripSql(sql)
+  if (/\bnatural\s+(?:(?:left|right|full|inner)\s+(?:outer\s+)?)?join\b/i.test(code)) return true
+  const names = new Set(tables.map((one) => one.toLowerCase()))
+  const rows = new Set<string>()
+  // The FROM and JOIN clauses that name a parent: where it is named, not used.
+  const declared: [number, number][] = []
+  for (const match of code.matchAll(RELATION)) {
+    const table = match[1]!.split(".").pop()!.trim().replace(/^["`[]|["`\]]$/g, "").toLowerCase()
+    if (!names.has(table)) continue
+    declared.push([match.index!, match.index! + match[0].length])
+    rows.add(table)
+    if (match[2] && !NOT_ALIAS.test(match[2])) rows.add(match[2].toLowerCase())
+  }
+  if (rows.size === 0) return false
+  // A bare name that is not qualified (`o.x`), not qualifying (`o.`), not an output alias and not a call.
+  for (const match of code.matchAll(/(?<![\w$."`\]])([A-Za-z_][\w$]*)(?![\w$])/g)) {
+    const at = match.index!
+    if (!rows.has(match[1]!.toLowerCase()) || declared.some(([from, to]) => at >= from && at < to)) continue
+    const after = code.slice(at + match[1]!.length)
+    if (/^\s*[.(]/.test(after) || /\bas\s*$/i.test(code.slice(0, at))) continue
     return true
   }
   return false
@@ -329,6 +364,13 @@ export function columnReach(manifestPath: string, model: string, column: string,
     if (edges.length === 0 && !fromUnsure && named.length > 0) {
       uncertain.push(entry(id, "names it, but the lineage engine found no column edges in its SQL"))
       unsure.add(id)
+      continue
+    }
+    // A whole row of a parent read as one value (`to_json(o)`, a NATURAL JOIN) carries the column with
+    // no edge the engine can report.
+    if (!fromUnsure && !ambiguous && named.length === 0 && readsWholeRow(sqlText, parents.map(bareName))) {
+      unsure.add(id)
+      uncertain.push(entry(id, "reads whole rows of a parent (a NATURAL JOIN, or the row as a value) the lineage engine cannot trace by column"))
       continue
     }
     const shared = named.some((col) => allParents.filter((other) => documentedColumns(lookup(other)).has(col)).length > 1)

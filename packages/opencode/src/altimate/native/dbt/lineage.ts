@@ -43,9 +43,11 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
   const sources = manifest.sources || {}
 
   // A model by name or unique_id; a snapshot by unique_id; either by its project-relative file path.
+  // `./models/x.sql` and `models\\x.sql` are the manifest's `models/x.sql`.
+  const filePath = (p: unknown) => String(p ?? "").replace(/\\/g, "/").replace(/^(?:\.\/)+/, "")
   const byPath = () =>
     Object.values<any>(nodes).find(
-      (node) => ["model", "snapshot"].includes(node?.resource_type) && node.original_file_path === params.model,
+      (node) => ["model", "snapshot"].includes(node?.resource_type) && filePath(node.original_file_path) === filePath(params.model),
     )
   const modelNode =
     findModel(nodes, params.model) ??

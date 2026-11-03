@@ -53,7 +53,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
     include_graph: z
       .boolean()
       .optional()
-      .describe("Also return the model's graph from the manifest (everything upstream and downstream, up to 500 nodes each side; the exposures and tests are those of the model and its downstream, upstream tests are not included; graph.upTruncated / graph.truncated are set when a side is cut) in the metadata; for lineage viewers"),
+      .describe("Also return the model's graph from the manifest (everything upstream and downstream, up to 500 nodes each side; the exposures and tests are those of the model and its downstream, upstream tests are not included; graph.upTruncated / graph.truncated are set when a side is cut) in the metadata; for lineage viewers. Over MCP the graph is left out of the structured result: read it with `altimate tool run dbt_lineage --json`"),
   }),
   async execute(args, ctx) {
     let viaAdapter = await fromAdapter(args.model, args.column, ctx.abort)
@@ -126,22 +126,28 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
 /**
  * Why a named manifest is not the adapter's project's, or undefined when it is: it must lie in that
  * project's folder (links resolved) with no other dbt_project.yml between (a nested project or an
- * installed package is another project). A path that cannot be resolved counts as not this one's.
+ * installed package is another project). A manifest not written yet (an uncompiled project) is placed
+ * by its path, its nearest existing folder's links resolved, so the project's own default path keeps
+ * the adapter's answer.
  */
 async function manifestOutsideAdapterProject(manifestPath: string): Promise<string | undefined> {
   const { getDbtProjectRoot } = await import("../native/connections/register")
   const root = await getDbtProjectRoot()
   if (!root) return "the dbt adapter has no project root"
   const real = (p: string) => {
-    try {
-      return fs.realpathSync(path.resolve(p))
-    } catch {
-      return undefined
+    const rest: string[] = []
+    for (let at = path.resolve(p); ; at = path.dirname(at)) {
+      try {
+        return path.join(fs.realpathSync(at), ...rest)
+      } catch {
+        if (path.dirname(at) === at) return undefined
+        rest.unshift(path.basename(at))
+      }
     }
   }
   const projectDir = real(root)
   const manifest = real(manifestPath)
-  if (!projectDir || !manifest) return `the manifest ${manifestPath} cannot be read`
+  if (!projectDir || !manifest) return `the manifest ${manifestPath} cannot be placed`
   const inside = path.relative(projectDir, manifest)
   // Outside the project: the relative path climbs out (`..` as a whole segment, so `..data/` is inside).
   if (!inside || inside === ".." || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) return `the manifest ${manifestPath} is not in the dbt project at ${root}`

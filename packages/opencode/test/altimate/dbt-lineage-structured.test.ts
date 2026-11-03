@@ -191,6 +191,14 @@ describe("dbt_lineage with the project's dbt adapter", () => {
       await writeFile(path.join(sibling, "target", "manifest.json"), empty)
       const next = await tool.execute({ model: "customers", manifest_path: path.join(sibling, "target", "manifest.json") }, ctx)
       expect(next.metadata.structuredContent).toBeUndefined()
+      // An uncompiled project's own default manifest, not written yet, keeps the adapter's answer.
+      const uncompiled = path.join(mine, "fresh", "target", "manifest.json")
+      const unwritten = await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "nope", "manifest.json") }, ctx)
+      expect(unwritten.metadata.structuredContent).toEqual(TRACE)
+      expect((await tool.execute({ model: "customers", manifest_path: uncompiled }, ctx)).metadata.structuredContent).toEqual(TRACE)
+      // One not written yet in another folder is still another project's.
+      const elsewhere = await tool.execute({ model: "customers", manifest_path: path.join(other, "missing", "manifest.json") }, ctx)
+      expect(elsewhere.metadata.structuredContent).toBeUndefined()
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
