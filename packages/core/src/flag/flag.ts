@@ -25,6 +25,15 @@ export function truthy(key: string) {
   return value === "true" || value === "1"
 }
 
+// altimate_change start — the one fail-closed kill-switch parse, shared with readers that take an explicit environment
+/** A kill switch fails closed: any value but empty, `0` or `false` turns the feature off, so `yes` or `on` cannot leave
+ * it running while the operator believes it is off. */
+export function killSwitchSet(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase()
+  return normalized !== undefined && normalized !== "" && normalized !== "0" && normalized !== "false"
+}
+// altimate_change end
+
 /** An Effect `Config` boolean with the same documented-name-first rule, for the flags
  * that are resolved through the ambient ConfigProvider rather than `process.env`. The
  * documented value is read as a string and judged by `truthy`'s rule, so a set-but-invalid
@@ -122,10 +131,7 @@ export const Flag = {
   // runtime `--` middleware can flip it between plugin activation and command execution.
   // Unrelated to OPENCODE_EXPERIMENTAL_WORKSPACES (multi-instance control plane).
   get ALTIMATE_DISABLE_WORKSPACE() {
-    // A kill switch fails closed: any value but empty, `0` or `false` turns workspaces off, so `yes`
-    // or `on` cannot leave them running while the operator believes they are off.
-    const value = env("ALTIMATE_DISABLE_WORKSPACE")?.trim().toLowerCase()
-    return value !== undefined && value !== "" && value !== "0" && value !== "false"
+    return killSwitchSet(env("ALTIMATE_DISABLE_WORKSPACE"))
   },
   /**
    * Workspace precedence escape hatch, set by `--integrations=local`. When on, the

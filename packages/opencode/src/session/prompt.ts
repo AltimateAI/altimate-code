@@ -1,6 +1,6 @@
 import path from "path"
 import { Token } from "@/util/token"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import os from "os"
 import fs from "fs/promises"
 import z from "zod"
@@ -11,6 +11,8 @@ import { MessageV2, isEchoTransportError } from "./message-v2"
 // altimate_change end
 // altimate_change — a linked workspace with no skills yet still waits for the skill sync; see `prompt`
 import { emptyRecordPath } from "../altimate/workspace/empty-record-path"
+// altimate_change — workspace rules: the prompt path skips them in a project that cannot have any
+import { Global } from "../global"
 import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "."
@@ -119,8 +121,9 @@ import { trackWorkspaceToolCall } from "../altimate/workspace/tool-call-telemetr
 // altimate_change end
 import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
-// altimate_change start — the session's bound workspace rides on every telemetry row
-import { readLocalBinding } from "@/altimate/workspace/state"
+// altimate_change start — the session's bound workspace rides on every telemetry row; workspace rules canonicalize bound
+// directories like the bindings cache does
+import { canonicalDirectory, readLocalBinding } from "@/altimate/workspace/state"
 
 /** The session's workspace use, as session_end fields. Read only: the row is tracked first, then the
  * turn ends its telemetry entries (`Telemetry.endSession`), so the row itself still carries the
@@ -146,6 +149,34 @@ import * as RunBudgetEffort from "@/altimate/session/run-budget-effort"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
+
+// altimate_change start — workspace rules: sessions that already had their session-start pull in this process
+const rulesSessionsStarted = new Set<string>()
+/** Rules state in this project, or a cached workspace binding for this directory: otherwise the project cannot have
+ * workspace rules, and the prompt path skips them. Synchronous, local checks only: the bindings cache is parsed once per
+ * change of the file (size and mtime), not on every prompt. */
+let boundDirs: { stamp: string; dirs: ReadonlySet<string> } | undefined
+const boundDirectories = (): ReadonlySet<string> => {
+  const file = path.join(Global.Path.state, "altimate-workspace-bindings.json")
+  try {
+    const stat = statSync(file)
+    // A same-sized atomic replacement within one mtime tick still changes the inode or ctime.
+    const stamp = `${stat.ino}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`
+    if (boundDirs?.stamp !== stamp) {
+      const cache = JSON.parse(readFileSync(file, "utf8")) as { bindings?: Record<string, unknown> }
+      boundDirs = { stamp, dirs: new Set(Object.keys(cache.bindings ?? {}).map(canonicalDirectory)) }
+    }
+    return boundDirs.dirs
+  } catch {
+    return new Set()
+  }
+}
+const mayHaveWorkspaceRules = (root: string, directory: string) => {
+  if (existsSync(path.join(root, ".altimate-code", "learn", "workspace-rules", "rules.json"))) return true
+  const dirs = boundDirectories()
+  return dirs.size > 0 && dirs.has(canonicalDirectory(directory))
+}
+// altimate_change end
 
 const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
 
@@ -796,6 +827,19 @@ export namespace SessionPrompt {
     // An unused project pays only an existence check; do not load stores, migrate,
     // create state, or even schedule async learning work on that default-off path.
     const learnRoot = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+    // Workspace rules: a bounded pull before a session's first turn, so it delivers newly approved rules. Only the
+    // first prompt of a session awaits anything; every later prompt stays on the synchronous path.
+    // A project that cannot have workspace rules pays only the existence checks in `mayHaveWorkspaceRules`: the rules
+    // module graph is not loaded on its prompt path.
+    if (!rulesSessionsStarted.has(sessionID) && mayHaveWorkspaceRules(learnRoot, Instance.directory)) {
+      // Bounded: a long-lived server sees many sessions; the oldest is forgotten first, which only costs it another
+      // bounded wait if it is resumed.
+      if (rulesSessionsStarted.size >= 1000) rulesSessionsStarted.delete(rulesSessionsStarted.values().next().value!)
+      rulesSessionsStarted.add(sessionID)
+      await import("../altimate/rules/service")
+        .then((m) => m.RulesService.sessionStart(learnRoot, Instance.directory, altCfg.learn))
+        .catch((error) => log.warn("rules session sync failed", { error }))
+    }
     const lessonState = existsSync(path.join(learnRoot, ".altimate-code", "learn"))
       ? new LessonDelivery(learnRoot, altCfg.learn, Instance.directory)
       : undefined
