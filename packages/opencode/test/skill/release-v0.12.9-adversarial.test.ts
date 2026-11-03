@@ -490,6 +490,17 @@ describe("v0.12.9 adversarial: rule classify", () => {
     expect(performance.now() - start).toBeLessThan(5_000)
   })
 
+  test.each(["means ", "remember ", "remember that ", "for me ", "i prefer ", "our warehouse ", "use x ", "name x ", "don't use "])(
+    "450 KB of %p classifies in bounded time",
+    (word) => {
+      const text = word.repeat(Math.ceil(450_000 / word.length))
+      const start = performance.now()
+      classifyRule(text)
+      memoryScope(text)
+      expect(performance.now() - start).toBeLessThan(5_000)
+    },
+  )
+
   test("cues across lines are still found", () => {
     expect(classifyRule("Staging models:\n\nalways prefix with stg_").kind).toBe("rule")
   })
