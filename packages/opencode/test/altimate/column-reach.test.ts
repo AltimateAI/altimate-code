@@ -373,25 +373,25 @@ describe("columnReach on a model the engine cannot fully trace", () => {
     spyOn(core, "columnLineage").mockImplementation(((sql: string) => byModel(sql)) as any)
   const direct = (sql: string) => ({ column_lineage: [{ source: '"shop"."main"."fct_orders"."revenue"', target: "revenue", lineage_type: "direct" }], column_dict: {} })
 
-  test("no edge at all is untraced, and its child is uncertain", () => {
-    const value: any = manifest()
-    value.nodes["model.shop.rpt_ltv"] = model("rpt_ltv", ["model.shop.mart_ltv"], "select 1", ["top_ltv"])
-    const spy = answer((sql) => (sql === "select 1" ? { column_lineage: [], column_dict: {} } : direct(sql)))
+  test("no edge at all: SQL that names the column (a PIVOT) is uncertain and so is its child; SQL that never names it reads nothing", () => {
+    const pivot = "select * from fct_orders pivot(sum(revenue) for status in ('paid' as paid_total))"
+    const chain: any = manifest()
+    chain.nodes["model.shop.fct_daily"].compiled_code = pivot
+    chain.nodes["model.shop.rpt_ltv"] = model("rpt_ltv", ["model.shop.fct_daily"], "select max(paid_total) as top from fct_daily", ["top"])
+    const spy = answer((sql) => (sql === pivot ? { column_lineage: [], column_dict: {} } : direct(sql)))
     try {
-      const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
-      expect(reach.untraced.map((m) => m.name)).toEqual(["rpt_ltv"])
-      expect(reach.untraced[0]!.reason).toContain("no column edges")
+      const reach = columnReach(manifestFile(chain), "fct_orders", "revenue")
+      expect(reach.uncertain.map((m) => m.name)).toEqual(expect.arrayContaining(["fct_daily", "rpt_ltv"]))
+      expect(reach.uncertain.find((m) => m.name === "fct_daily")!.reason).toContain("no column edges")
     } finally {
       spy.mockRestore()
     }
-    const chain: any = manifest()
-    chain.nodes["model.shop.fct_daily"].compiled_code = "select 2"
-    chain.nodes["model.shop.rpt_ltv"] = model("rpt_ltv", ["model.shop.fct_daily"], "select max(revenue) as top from fct_daily", ["top"])
-    const again = answer((sql) => (sql === "select 2" ? { column_lineage: [], column_dict: {} } : direct(sql)))
+    const constant: any = manifest()
+    constant.nodes["model.shop.rpt_ltv"] = model("rpt_ltv", ["model.shop.mart_ltv"], "select 1 as one", ["one"])
+    const again = answer((sql) => (sql === "select 1 as one" ? { column_lineage: [], column_dict: {} } : direct(sql)))
     try {
-      const reach = columnReach(manifestFile(chain), "fct_orders", "revenue")
-      expect(reach.untraced.map((m) => m.name)).toEqual(["fct_daily"])
-      expect(reach.uncertain.map((m) => m.name)).toContain("rpt_ltv")
+      const reach = columnReach(manifestFile(constant), "fct_orders", "revenue")
+      expect([...reach.untraced, ...reach.uncertain].map((m) => m.name)).not.toContain("rpt_ltv")
     } finally {
       again.mockRestore()
     }
