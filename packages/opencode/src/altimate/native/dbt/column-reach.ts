@@ -159,9 +159,13 @@ export function selectsStar(sql: string): boolean {
 function namesColumn(sql: string, column: string): boolean {
   const code = stripSql(sql)
   const name = escapeRegExp(column)
-  // Quoted, a quote in the name is written doubled: a"b is "a""b".
-  const quoted = escapeRegExp(column.replaceAll('"', '""'))
-  const ident = new RegExp(`(^|[^A-Za-z0-9_$])("${quoted}"|${name})(?![A-Za-z0-9_$])`, "gi")
+  // Quoted, the closing delimiter in the name is written doubled: "a""b", `a``b`, [a]]b].
+  const quoted = [
+    `"${column.replaceAll('"', '""')}"`,
+    `\`${column.replaceAll("`", "``")}\``,
+    `[${column.replaceAll("]", "]]")}]`,
+  ].map(escapeRegExp)
+  const ident = new RegExp(`(^|[^A-Za-z0-9_$])(${[...quoted, name].join("|")})(?![A-Za-z0-9_$])`, "gi")
   for (const match of code.matchAll(ident)) {
     const before = code.slice(0, match.index! + match[1]!.length)
     if (/\bas\s*`?$/i.test(before)) continue

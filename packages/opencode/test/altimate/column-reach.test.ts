@@ -381,6 +381,44 @@ describe("columnReach where the engine's schema falls short", () => {
     const ids = [...reach.models, ...reach.uncertain].map((m) => m.unique_id)
     expect(ids).toContain("model.shop.rpt_quoted")
   })
+
+  test("stops at 300 traced models and says so", () => {
+    const value = manifest()
+    for (let i = 0; i < 300; i++) {
+      value.nodes[`model.shop.copy_${i}`] = model(`copy_${i}`, ["model.shop.fct_orders"], "select revenue from fct_orders", [
+        "revenue",
+      ])
+    }
+    const spy = spyOn(core, "columnLineage").mockImplementation((() => ({
+      column_lineage: [{ source: '"shop"."main"."fct_orders"."revenue"', target: "revenue", lineage_type: "direct" }],
+      column_dict: {},
+    })) as any)
+    try {
+      const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+      expect(reach.truncated).toBe(true)
+      expect(reach.models.length + reach.uncertain.length + reach.untraced.length).toBe(300)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test("a column read only in WHERE, its backtick or bracket in the name doubled, is uncertain", () => {
+    for (const [spelling, quoted, dialect] of [
+      ["a`b", "`a``b`", "bigquery"],
+      ["a]b", "[a]]b]", "tsql"],
+    ]) {
+      const value = manifest()
+      value.nodes["model.shop.fct_orders"].columns = { [spelling!]: column(spelling!) }
+      value.nodes["model.shop.rpt_filtered"] = model(
+        "rpt_filtered",
+        ["model.shop.fct_orders"],
+        `select order_id from fct_orders where ${quoted} > 0`,
+        ["order_id"],
+      )
+      const reach = columnReach(manifestFile(value), "fct_orders", spelling!, dialect)
+      expect(reach.uncertain.map((m) => m.unique_id)).toContain("model.shop.rpt_filtered")
+    }
+  })
 })
 
 describe("selectsStar", () => {

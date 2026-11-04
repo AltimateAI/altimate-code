@@ -300,6 +300,14 @@ describe("dbt_lineage's wait for the dbt adapter", () => {
       { ...TRACE, columnLineage: [{ ...edge, target: [null, null] }] },
       { ...TRACE, columnLineage: [{ ...edge, viewsCode: [1] }] },
       { ...TRACE, errors: [null] },
+      { ...TRACE, focus: { ...TRACE.focus, column: 1 } },
+      { ...TRACE, nodes: [{ ...node, materialization: 1 }] },
+      { ...TRACE, nodes: [{ ...node, parents: undefined }] },
+      { ...TRACE, nodes: [{ ...node, parents: [1] }] },
+      { ...TRACE, nodes: [{ ...node, columns: [{ name: "id", dataType: 1 }] }] },
+      { ...TRACE, nodes: [{ ...node, columns: [{ name: "id", isDocumentedOnly: "yes" }] }] },
+      { ...TRACE, stats: [] },
+      { ...TRACE, stats: { nodes: "3" } },
     ]
     for (const unreadable of [{ version: 1, nodes: "?" }, partial, { ...TRACE, version: 2 }, ...nested]) {
       resetDbtAdapter()

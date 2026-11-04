@@ -6,6 +6,7 @@ import { Dispatcher } from "../native"
 import type { DbtLineageResult } from "../native/types"
 import { loadRawManifest } from "../native/dbt/helpers"
 import { lineageGraph } from "../native/dbt/graph"
+import { projectRoot } from "../native/connections/registry"
 
 /** The structured result of dbt-integration's `getModelLineage` (version 1), relayed as is. */
 export type ModelLineage = {
@@ -59,7 +60,10 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
     // A call without write permission (MCP, `tool run`) and a plan-mode session's own calls are read-only;
     // a subagent plan mode starts runs under its own agent's permissions.
     const readOnly = ctx.extra?.forceReadOnly === true || ctx.agent === "plan"
-    let viaAdapter = await fromAdapter(args.model, args.column, ctx.abort, readOnly)
+    // Read once per call, and only when needed: it reads the dbt config.
+    let project: ReturnType<typeof sessionProject> | undefined
+    const session = () => (project ??= sessionProject())
+    let viaAdapter = await fromAdapter(args.model, args.column, ctx.abort, readOnly, session)
     // The adapter answers for the project it found; a manifest named outside that project's folder
     // wins, so its graph and its lineage are never mixed with this one's.
     if (viaAdapter.result && args.manifest_path) {
@@ -70,7 +74,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
       const result = viaAdapter.result
       const what = result.focus.column ? `${result.focus.name}.${result.focus.column}` : result.focus.name
       // A lineage viewer also wants the manifest's graph: exposures and tests sit there, not here.
-      const graph = args.include_graph ? manifestGraph(args.manifest_path ?? (await defaultManifestPath()), result.focus.uniqueId) : undefined
+      const graph = args.include_graph ? manifestGraph(args.manifest_path ?? (await defaultManifestPath(session)), result.focus.uniqueId) : undefined
       return {
         title: `dbt Lineage: ${what} [${result.confidence}]`,
         metadata: {
@@ -85,7 +89,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
       }
     }
     const notUsed = viaAdapter.reason ? `dbt integration not used: ${viaAdapter.reason}` : undefined
-    const manifestPath = args.manifest_path ?? (await defaultManifestPath())
+    const manifestPath = args.manifest_path ?? (await defaultManifestPath(session))
     ctx.abort.throwIfAborted()
     try {
       const result = await Dispatcher.call("dbt.lineage", {
@@ -203,13 +207,15 @@ function manifestGraph(manifestPath: string, uniqueId: string): { graph?: Return
 /**
  * The lineage from the project's dbt adapter, used only where writes are allowed: starting it runs
  * dbt deps and writes target/, and it compiles and reads column metadata. A read-only call never
- * starts or uses it. `reason` says why it wasn't used.
+ * starts or uses it, nor does a session in another dbt project than the adapter's. `reason` says why
+ * it wasn't used.
  */
 async function fromAdapter(
   model: string,
   column: string | undefined,
   signal: AbortSignal,
   readOnly: boolean,
+  session: () => ReturnType<typeof sessionProject>,
 ): Promise<{ result?: ModelLineage; reason?: string }> {
   try {
     const { getDbtAdapter, getDbtProjectRoot } = await import("../native/connections/register")
@@ -219,6 +225,10 @@ async function fromAdapter(
     // target/, and compiling renders Jinja, which can run SQL.
     // It answers from the manifest as main does, with no note: there's nothing for the user to fix.
     if (readOnly) return {}
+    const project = await session()
+    if (project?.other && project.root) {
+      return { reason: `the dbt adapter is set up for ${project.root}, not ${project.other}` }
+    }
     // Starting the adapter can take a while (dbt deps, a parse): a cancel doesn't wait for it, and
     // past the deadline the manifest answers. The start goes on, for the next call.
     let stop = () => {}
@@ -278,18 +288,29 @@ export function isModelLineage(value: unknown): value is ModelLineage {
     typeof v.confidence === "string" &&
     typeof v.stats === "object" &&
     v.stats !== null &&
+    !Array.isArray(v.stats) &&
+    Object.values(v.stats).every((n) => typeof n === "number") &&
     typeof v.focus?.uniqueId === "string" &&
     typeof v.focus?.name === "string" &&
+    optional(v.focus.column, "string") &&
     Array.isArray(v.nodes) &&
     v.nodes.every(
       (n) =>
         typeof n?.uniqueId === "string" &&
         typeof n.name === "string" &&
         typeof n.type === "string" &&
+        optional(n.materialization, "string") &&
         (n.direction === "focus" || n.direction === "upstream" || n.direction === "downstream") &&
         typeof n.depth === "number" &&
+        Array.isArray(n.parents) &&
+        n.parents.every((p) => typeof p === "string") &&
         Array.isArray(n.columns) &&
-        n.columns.every((c) => typeof c?.name === "string"),
+        n.columns.every(
+          (c) =>
+            typeof c?.name === "string" &&
+            optional(c.dataType, "string") &&
+            (c.isDocumentedOnly === undefined || c.isDocumentedOnly === true),
+        ),
     ) &&
     Array.isArray(v.columnLineage) &&
     v.columnLineage.every(
@@ -306,15 +327,50 @@ export function isModelLineage(value: unknown): value is ModelLineage {
   )
 }
 
+/** An optional field: absent, or of the type. */
+function optional(value: unknown, type: "string"): boolean {
+  return value === undefined || typeof value === type
+}
+
 /** A [node id, column] pair, as the lineage's edges name each end. */
 function isPair(value: unknown): value is [string, string] {
   return Array.isArray(value) && value.length === 2 && value.every((part) => typeof part === "string")
 }
 
-/** target/manifest.json in the project the dbt adapter finds, which may be above the working directory. */
-async function defaultManifestPath(): Promise<string> {
+/**
+ * target/manifest.json in the project the dbt adapter finds, which may be above the session's
+ * directory, or in the session's own project when that is another one.
+ */
+async function defaultManifestPath(session: () => ReturnType<typeof sessionProject>): Promise<string> {
+  const project = await session()
+  const root = project ? (project.other ?? project.root) : await (await import("../native/connections/register")).getDbtProjectRoot()
+  return path.join(root ?? "", "target", "manifest.json")
+}
+
+/**
+ * The adapter's project root and, when the session's directory is in another dbt project, that one
+ * (`other`, both links resolved): a dbt.json saved for one project, or a server started in one,
+ * doesn't answer for a session in another. Undefined, the dbt config not read, when the session's
+ * directory is in no dbt project: the adapter's own discovery (a dbt.json, or a walk up from the
+ * process's working directory) decides then.
+ */
+async function sessionProject(): Promise<{ root?: string; other?: string } | undefined> {
+  const { findProjectRoot } = await import("../../../../dbt-tools/src/config")
+  const found = findProjectRoot(projectRoot())
+  if (!found) return undefined
   const { getDbtProjectRoot } = await import("../native/connections/register")
-  return path.join((await getDbtProjectRoot()) ?? "", "target", "manifest.json")
+  const root = await getDbtProjectRoot()
+  const real = (p: string) => {
+    try {
+      return fs.realpathSync(p)
+    } catch {
+      return path.resolve(p)
+    }
+  }
+  const here = real(found)
+  // path.relative ignores case on win32.
+  if (!root) return { other: here }
+  return path.relative(real(root), here) ? { root: real(root), other: here } : { root }
 }
 
 const MAX_TEXT_EDGES = 200

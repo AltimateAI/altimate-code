@@ -5,6 +5,9 @@
 // through `dbtAdapterInternals`, so these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
+import { realpathSync } from "node:fs"
+import { Instance } from "@/project/instance"
+import { disposeInstance } from "@/effect/instance-registry"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
@@ -338,6 +341,39 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
       expect(call.mock.calls[0]?.[1]).toMatchObject({ manifest_path: path.join(project, "target", "manifest.json") })
     } finally {
       call.mockRestore()
+    }
+  })
+
+  test("a session in another dbt project than a saved dbt.json's answers from its own project", async () => {
+    useConfig(false)
+    let created = 0
+    dbtAdapterInternals.create = async () => {
+      created++
+      return fakeAdapter(true, async () => TRACE)
+    }
+    const here = await mkdtemp(path.join(os.tmpdir(), "dbt-lineage-here-"))
+    await writeFile(path.join(here, "dbt_project.yml"), "name: other\n")
+    const inSession = (dir: string, context: Tool.Context) =>
+      Instance.provide({ directory: dir, fn: async () => (await initTool(DbtLineageTool)).execute({ model: "customers" }, context) })
+    const call = manifestOnly()
+    try {
+      const writable = await inSession(here, ctx)
+      const readOnly = await inSession(here, { ...ctx, extra: { ...ctx.extra, forceReadOnly: true } })
+      const ownManifest = { manifest_path: path.join(realpathSync(here), "target", "manifest.json") }
+      expect(call.mock.calls.map((c) => c[1])).toMatchObject([ownManifest, ownManifest])
+      expect(writable.output).toContain(`dbt integration not used: the dbt adapter is set up for ${realpathSync(project)}`)
+      expect(readOnly.output).not.toContain("dbt integration not used")
+      expect(created).toBe(0)
+      // A subfolder of the saved project is that project: the adapter answers.
+      await mkdir(path.join(project, "models"), { recursive: true })
+      const sub = await inSession(path.join(project, "models"), ctx)
+      expect(sub.output).not.toContain("dbt integration not used")
+      expect(created).toBe(1)
+    } finally {
+      call.mockRestore()
+      await disposeInstance(here)
+      await disposeInstance(path.join(project, "models"))
+      await rm(here, { recursive: true, force: true })
     }
   })
 
