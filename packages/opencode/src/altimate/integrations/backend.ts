@@ -58,7 +58,7 @@ export function catalogEntries(data: unknown): any[] {
 
 const FAILURE_TEXT: Record<number, string> = {
   400: "The request was rejected",
-  404: "The connection was not found",
+  404: "The requested resource was not found",
   409: "The saved credential changed, reload and try again",
   422: "The connection details were not accepted",
 }
@@ -107,9 +107,14 @@ async function call<T>(cfg: BackendConfig, method: string, path: string, body?: 
     })
     const text = await res.text()
     let data: any = null
+    let unreadable = false
     try {
       data = text ? JSON.parse(text) : null
-    } catch {}
+    } catch {
+      unreadable = true
+    }
+    // A success that cannot be read is not an empty answer: an empty list would read as "no connections".
+    if (res.ok && unreadable) throw new BackendError(`The Altimate API answered ${res.status} with a body that is not JSON`, res.status, null)
     if (!res.ok) {
       throw new BackendError(describeFailure(res.status, data), res.status, failureCode(data))
     }

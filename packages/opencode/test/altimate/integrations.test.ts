@@ -10,9 +10,16 @@ import { IntegrationsCredentials as creds } from "../../src/altimate/integration
 import { AltimateApi } from "../../src/altimate/api/client"
 import * as workspaceState from "../../src/altimate/workspace/state"
 
+const envBefore = { ...process.env }
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "integrations-test-"))
 process.env.ALTIMATE_INTEGRATIONS_DIR = tmp
 process.env.ALTIMATE_INTEGRATIONS_MOCK = "1"
+
+afterAll(() => {
+  for (const k of Object.keys(process.env)) if (!(k in envBefore)) delete process.env[k]
+  for (const [k, v] of Object.entries(envBefore)) if (v !== undefined) process.env[k] = v
+  fs.rmSync(tmp, { recursive: true, force: true })
+})
 
 beforeEach(() => {
   for (const f of fs.readdirSync(tmp)) fs.rmSync(path.join(tmp, f), { recursive: true, force: true })
@@ -39,6 +46,14 @@ describe("detection parsing", () => {
     expect(by.linear.syncable).toBe(false)
     expect(by.jira.source.kind).toBe("mcp-remote")
     expect(by.jira.note).toBe("usable in Claude; connect in browser to sync")
+  })
+
+  test("an MCP server env value counts as a credential only when it is one the provider reads", () => {
+    const github = (env: Record<string, string>) => core.detectFromMcpServers({ github: { command: "npx", args: ["server-github"], env } }, "~/.claude.json")
+    expect(github({ LOG_LEVEL: "debug", GITHUB_API_URL: "https://x" })).toEqual([])
+    expect(github({ GITHUB_PERSONAL_ACCESS_TOKEN: "   " })).toEqual([])
+    expect(github({ GITHUB_PERSONAL_ACCESS_TOKEN: "ghp_x" })[0].syncable).toBe(true)
+    expect(core.detectFromMcpServers({ linear: { command: "npx", args: ["linear-mcp"], env: { PLACEHOLDER: "x" } } }, "~/.claude.json")).toEqual([])
   })
 
   test("jira-cli config", () => {
@@ -441,8 +456,13 @@ describe("workspace connections", () => {
     api.seed({ name: "Teammate's", integration_id: "github", is_owner: false })
     api.state.rows[api.state.rows.length - 1].id = 999
     let release = () => {}
-    const holder = core.withLock(() => new Promise<void>((r) => (release = r)))
-    await Bun.sleep(50)
+    let acquired!: () => void
+    const ready = new Promise<void>((resolve) => (acquired = resolve))
+    const holder = core.withLock(() => {
+      acquired()
+      return new Promise<void>((r) => (release = r))
+    })
+    await ready
     try {
       const pending = core.syncProvider("github", undefined, 0, true)
       await Bun.sleep(400)
@@ -487,8 +507,13 @@ describe("workspace connections", () => {
   test("disconnect waits for a running upload instead of interleaving with it", async () => {
     await core.syncProvider("github")
     let release = () => {}
-    const holder = core.withLock(() => new Promise<void>((r) => (release = r)))
-    await Bun.sleep(50)
+    let acquired!: () => void
+    const ready = new Promise<void>((resolve) => (acquired = resolve))
+    const holder = core.withLock(() => {
+      acquired()
+      return new Promise<void>((r) => (release = r))
+    })
+    await ready
     const pending = core.disconnect("github")
     await Bun.sleep(400)
     expect(calls.filter((c) => c.method === "DELETE")).toEqual([])
@@ -523,6 +548,102 @@ describe("workspace connections", () => {
     const o = await core.syncProvider("github")
     expect(o.result).toBe("kept_local")
     expect(writes()).toEqual([])
+  })
+
+  test("a block that lands while an attach-only sync waits for the lock keeps the credential local and says why", async () => {
+    await core.syncProvider("github")
+    let acquired!: () => void
+    const ready = new Promise<void>((resolve) => (acquired = resolve))
+    const holder = core.withLock(async () => {
+      acquired()
+      await Bun.sleep(300)
+      await core.setBlocked(["github"], true)
+    })
+    await ready
+    const o = await core.syncProvider("github", undefined, 0, true)
+    await holder
+    expect([o.result, o.reason]).toEqual(["kept_local", "blocked by policy"])
+  })
+
+  test("a refusal of a record that was replaced while the provider was being asked does not mark the new record rejected", async () => {
+    const keep = async () => {
+      await core.storeSecret(core.secretKey("cred", "github", "github_token"), "old_token_value")
+      await core.updateStore((st) => {
+        st.providers.github = { registered: true, synced: false, account: "me", variant: "token", values: {}, secretFields: ["github_token"], validatedAt: "2030-01-01T00:00:00Z" }
+      })
+    }
+    const refused = { ok: false, rejected: true, unavailable: false, account: null, expiresAt: null, message: "GitHub rejected the token (401)" }
+    await keep()
+    const replaced = spyOn(creds, "validate").mockImplementation(async () => {
+      await core.updateStore((st) => {
+        st.providers.github = { ...st.providers.github!, validatedAt: "2030-02-02T00:00:00Z" }
+      })
+      return refused
+    })
+    try {
+      expect((await core.syncProvider("github")).result).toBe("failed")
+      expect(core.loadStore().providers.github?.rejected).toBeFalsy()
+      replaced.mockImplementation(async () => refused)
+      expect((await core.syncProvider("github")).result).toBe("failed")
+      expect(core.loadStore().providers.github?.rejected).toBe(true)
+    } finally {
+      replaced.mockRestore()
+    }
+  })
+
+  test("a link that cannot be looked up is reported, not read as not linked; without a login there is nothing to look up", async () => {
+    const outcome = workspaceState.resolveBindingOutcome as any
+    outcome.mockResolvedValue({ status: "unknown" })
+    const login = spyOn(AltimateApi, "isConfigured").mockResolvedValue(true)
+    try {
+      const o = await core.syncProvider("github")
+      expect([o.result, o.reason]).toEqual(["failed", expect.stringContaining(core.ATTACH_FAILED_PREFIX)])
+      expect(o.reason).toContain("could not tell whether this directory is linked")
+      await core.disconnect("github")
+      login.mockResolvedValue(false)
+      const bare = await core.syncProvider("github")
+      expect([bare.result, bare.steps.at(-1)?.label]).toEqual(["synced", core.NOT_LINKED_LABEL])
+    } finally {
+      login.mockRestore()
+    }
+  })
+
+  test("a local cleanup that fails after the workspace accepted the connection is reported on a synced result", async () => {
+    await core.storeSecret("github", "leftover_token")
+    const rename = fs.renameSync
+    const spy = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
+      if (String(to).endsWith("integrations-secrets.json")) throw new Error("disk full")
+      return rename(from, to)
+    }) as any)
+    try {
+      const o = await core.syncProvider("github")
+      expect(o.result).toBe("synced")
+      expect(o.steps.find((st) => !st.ok)?.label).toContain("local copy could not be removed: disk full")
+    } finally {
+      spy.mockRestore()
+    }
+    expect(core.isSynced("github")).toBe(true)
+  })
+
+  test("a record that cannot be written after the workspace accepted the upload is reported, and a retry updates the same connection", async () => {
+    await core.storeSecret("github", "leftover_token")
+    const rename = fs.renameSync
+    const spy = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
+      if (String(to).endsWith("integrations.json")) throw new Error("disk full")
+      return rename(from, to)
+    }) as any)
+    let first: core.SyncOutcome
+    try {
+      first = await core.syncProvider("github")
+    } finally {
+      spy.mockRestore()
+    }
+    expect(first.result).toBe("failed")
+    expect(first.reason).toContain("Saved to your workspace, but the record on this machine could not be written (disk full)")
+    expect(core.isSynced("github")).toBe(false)
+    const again = await core.syncProvider("github")
+    expect(again.result).toBe("synced")
+    expect(again.steps[0]?.label).toBe("Updated connection")
   })
 
   test("disconnect says when the connection could not be detached from the linked workspace", async () => {
@@ -874,6 +995,21 @@ describe("failure descriptions", () => {
     expect(backend.describeFailure(404, { detail: { code: "gone", message: "Connection not found" } })).toBe("Connection not found (gone)")
     expect(backend.describeFailure(500, null)).toBe("status 500")
   })
+
+  test("a 404 does not claim a connection was missing, as it can come from a workspace or the catalog", () => {
+    expect(backend.describeFailure(404, null)).toBe("The requested resource was not found")
+  })
+
+  test("a success whose body is not JSON is an error, not an empty list", async () => {
+    const odd = Bun.serve({ port: 0, fetch: () => new Response("<html>gateway</html>", { status: 200 }) })
+    try {
+      const cfg = { apiUrl: `http://127.0.0.1:${odd.port}`, tenant: "acme", token: "t" }
+      await expect(backend.listOwnConnections(cfg)).rejects.toThrow(/not JSON/)
+      await expect(backend.listVisibleConnections(cfg)).rejects.toThrow(/not JSON/)
+    } finally {
+      odd.stop(true)
+    }
+  })
 })
 
 describe("jira domain and cli flags", () => {
@@ -1032,6 +1168,7 @@ describe("credentials flow", () => {
 
     test("jiraVariantFor", () => {
       expect([undefined, "", "acme", "https://a.atlassian.net/x", "https://jira.corp.example"].map(creds.jiraVariantFor)).toEqual(["cloud", "cloud", "cloud", "cloud", "server"])
+      expect(["localhost", "http://localhost:8080", "jira-internal:8443", "http://jira-internal", "https://acme.atlassian.net:443"].map(creds.jiraVariantFor)).toEqual(["server", "server", "server", "server", "cloud"])
     })
 
     test("workspace catalog is read, cached and used when offline", async () => {
@@ -1234,6 +1371,42 @@ describe("credentials flow", () => {
       expect([r.ok, r.rejected]).toEqual([false, false])
       process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = base()
     })
+    test("a GitHub rate-limit 403 is not a rejected token and keeps the typed draft", async () => {
+      const limited = Bun.serve({ port: 0, fetch: () => Response.json({ message: "API rate limit exceeded" }, { status: 403, headers: { "x-ratelimit-remaining": "0" } }) })
+      const retry = Bun.serve({ port: 0, fetch: () => Response.json({ message: "slow down" }, { status: 403, headers: { "retry-after": "30" } }) })
+      try {
+        for (const s of [limited, retry]) {
+          process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = `http://127.0.0.1:${s.port}`
+          const r = await creds.validate("github", "token", { github_token: GOOD })
+          expect([r.ok, r.rejected, r.unavailable]).toEqual([false, false, true])
+        }
+        process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = `http://127.0.0.1:${limited.port}`
+        await token("github", "github_token")
+        const c = await creds.connectCredentials({ id: "github" })
+        expect(c.status).toBe("failed")
+        expect(core.readSecret(core.secretKey("draft", "github", "github_token"))).toBe(GOOD)
+      } finally {
+        process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = base()
+        limited.stop(true)
+        retry.stop(true)
+      }
+    })
+    test("a 403 without rate-limit signs is still a rejected token", async () => {
+      const denied = Bun.serve({ port: 0, fetch: () => Response.json({ message: "Resource not accessible" }, { status: 403 }) })
+      try {
+        process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = `http://127.0.0.1:${denied.port}`
+        expect((await creds.validate("github", "token", { github_token: GOOD })).rejected).toBe(true)
+      } finally {
+        process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = base()
+        denied.stop(true)
+      }
+    })
+    test("a variant that matches nothing is an error, not the first variant", async () => {
+      await expect(creds.connectCredentials({ id: "jira", variant: "srevre" })).rejects.toThrow(/no variant "srevre".*cloud, server/)
+      await expect(creds.describeFields("jira", "srevre")).rejects.toThrow(/no variant/)
+      expect((await creds.describeFields("jira", "server")).variant).toBe("server")
+      expect((await creds.describeFields("jira")).variant).toBe("cloud")
+    })
     test("a plain-http Jira server URL is refused", async () => {
       expect((await creds.validate("jira", "server", { jiraBaseUrl: "http://jira.corp.example", jiraPatToken: GOOD })).message).toContain("https")
     })
@@ -1380,12 +1553,64 @@ describe("credentials flow", () => {
         await creds.connectCredentials({ id: "github" })
         await token("github", "github_token")
         const r = await creds.connectCredentials({ id: "github", localOnly: true })
-        expect([r.status, r.sync, core.isBlocked("github")]).toEqual(["connected", "local", true])
+        expect([r.status, r.sync, core.isBlocked("github")]).toEqual(["failed", "synced", true])
         expect(r.message).toContain("could not be removed from the workspace")
         expect(core.readSecret("github")).toBeTruthy()
       } finally {
         failing.mockRestore()
       }
+    })
+
+    test("a record that cannot be written after the upload says the workspace has the connection, and connecting again updates it", async () => {
+      real()
+      await token("github", "github_token")
+      const rename = fs.renameSync
+      const spy = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
+        if (String(to).endsWith("integrations.json")) throw new Error("disk full")
+        return rename(from, to)
+      }) as any)
+      try {
+        const r = await creds.connectCredentials({ id: "github" })
+        expect([r.status, r.sync]).toEqual(["failed", "synced"])
+        expect(r.message).toContain("Saved to your workspace, but the record on this machine could not be written (disk full)")
+        expect(r.message).toContain("Connect again")
+      } finally {
+        spy.mockRestore()
+      }
+      const create = spyOn(backend, "createConnection")
+      try {
+        await token("github", "github_token")
+        const r = await creds.connectCredentials({ id: "github" })
+        expect([r.status, r.sync]).toEqual(["connected", "synced"])
+        expect(create).not.toHaveBeenCalled()
+      } finally {
+        create.mockRestore()
+      }
+    })
+
+    test("an MCP env value that is only an unresolved reference does not count as a token", () => {
+      expect(creds.mcpEnvHasToken("github", { GITHUB_TOKEN: "${MISSING_TOKEN}" })).toBe(false)
+      expect(creds.mcpEnvHasToken("github", { GITHUB_TOKEN: " $MISSING_TOKEN " })).toBe(false)
+      expect(creds.mcpEnvHasToken("github", { GITHUB_TOKEN: "ghp_real" })).toBe(true)
+    })
+
+    test("a local cleanup that fails after the upload is a warning on a connected result, and the record says synced", async () => {
+      real()
+      await core.storeSecret("github", "leftover_token")
+      await token("github", "github_token")
+      const rename = fs.renameSync
+      const spy = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
+        if (String(to).endsWith("integrations-secrets.json")) throw new Error("disk full")
+        return rename(from, to)
+      }) as any)
+      try {
+        const r = await creds.connectCredentials({ id: "github" })
+        expect([r.status, r.sync]).toEqual(["connected", "synced"])
+        expect(r.message).toContain("local copy of the credential could not be removed: disk full")
+      } finally {
+        spy.mockRestore()
+      }
+      expect(core.isSynced("github")).toBe(true)
     })
 
     test("Keep local removes nothing from the workspace when the local copy cannot be stored", async () => {

@@ -102,6 +102,7 @@ function renderSync(o: core.SyncOutcome) {
   if (o.result === "failed") return out(`  ${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: sync failed (${clean(o.reason)})`)
   if (o.result === "skipped") return out(`  ${S.TEXT_DIM}- ${name}: skipped (${clean(o.reason)})${S.TEXT_NORMAL}`)
   out(`  ${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} synced to workspace (private)`)
+  for (const st of o.steps) if (!st.ok && st.label.startsWith(core.LOCAL_CLEANUP_FAILED_PREFIX)) out(`  ${S.TEXT_WARNING}!${S.TEXT_NORMAL} ${clean(st.label)}`)
 }
 
 async function runSync(ids: ProviderId[], asJson: boolean, skipSynced = false) {

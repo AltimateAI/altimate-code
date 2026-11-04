@@ -146,6 +146,18 @@ const FIELD_SOURCES: Record<string, { env: string[]; mcp: RegExp }> = {
   jiraBaseUrl: { env: ["JIRA_BASE_URL", "JIRA_URL"], mcp: /^JIRA_(URL|BASE_URL)$/i },
 }
 
+/** A value that is only a reference to another environment variable, such as ${NAME} or $NAME, holds no credential until it is resolved. */
+const isEnvReference = (value: string) => {
+  const v = value.trim()
+  return v.length === 0 || /^\$\{[^}]*\}$/.test(v) || /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(v)
+}
+
+/** Whether an MCP server's environment holds a credential this flow reads for the provider, not just any value. */
+export function mcpEnvHasToken(id: ProviderId, env: Record<string, string> | undefined): boolean {
+  const patterns = core.BUILTIN_SECRET_FIELDS[id].flatMap((field) => FIELD_SOURCES[field]?.mcp ?? [])
+  return Object.entries(env ?? {}).some(([key, value]) => typeof value === "string" && !isEnvReference(value) && patterns.some((p) => p.test(key)))
+}
+
 function fromMcpEnv(id: ProviderId, field: string): Found | undefined {
   const pattern = FIELD_SOURCES[field]?.mcp
   if (!pattern) return
@@ -153,7 +165,7 @@ function fromMcpEnv(id: ProviderId, field: string): Found | undefined {
     for (const [name, server] of Object.entries(servers ?? {})) {
       if (!server || typeof server !== "object" || !core.providerMatchesMcp(id, name, server)) continue
       for (const [key, value] of Object.entries(server.env ?? {}))
-        if (pattern.test(key) && typeof value === "string" && value.trim()) return { value: value.trim(), source: { kind: "mcp", label: `Claude MCP (${name}, ${scope})` } }
+        if (pattern.test(key) && typeof value === "string" && !isEnvReference(value)) return { value: value.trim(), source: { kind: "mcp", label: `Claude MCP (${name}, ${scope})` } }
     }
   }
 }
@@ -198,12 +210,14 @@ function detectField(id: ProviderId, field: string): Found | undefined {
   }
 }
 
-/** Cloud when the site is empty, a bare subdomain or on atlassian.net; anything else is Server / Data Center. */
+/** Cloud when the site is empty, a bare subdomain or on atlassian.net; anything else is Server / Data Center, including an address with a scheme or a port and a host without a dot such as localhost. */
 export function jiraVariantFor(site: string | undefined): "cloud" | "server" {
   const s = (site ?? "").trim()
   if (!s) return "cloud"
   const host = s.replace(/^[a-z]+:\/\//i, "").replace(/[/?#].*$/, "")
-  return !host.includes(".") || /\.atlassian\.net$/i.test(host) ? "cloud" : "server"
+  if (/\.atlassian\.net(:\d+)?$/i.test(host)) return "cloud"
+  if (/^[a-z]+:\/\//i.test(s) || /:\d+$/.test(host) || /^localhost$/i.test(host)) return "server"
+  return host.includes(".") ? "server" : "cloud"
 }
 
 const tokenUrls: Record<string, string | null> = {
@@ -236,7 +250,10 @@ export async function resolve(id: ProviderId, variantId?: string, offline = fals
     want = jiraVariantFor(site)
   }
   const key = want?.toLowerCase()
-  const def = (key && variants.find((v) => v.id.toLowerCase().includes(key) || v.label.toLowerCase().includes(key))) || variants[0]
+  const match = key ? variants.find((v) => v.id.toLowerCase().includes(key) || v.label.toLowerCase().includes(key)) : undefined
+  // A variant that was asked for and does not exist is an error: falling back to the first one would test and save a different credential type.
+  if (variantId && !match) throw new Error(`${core.PROVIDER_NAMES[id]} has no variant "${variantId}". Variants: ${variants.map((v) => v.id).join(", ")}.`)
+  const def = match || variants[0]
   const values: Record<string, string> = {}
   const origin: Resolved["origin"] = {}
   const detected: Source[] = []
@@ -490,6 +507,9 @@ export async function validate(id: ProviderId, variant: string, v: Record<string
   try {
     if (id === "github") {
       const { res, data } = await request(`${githubApi()}/user`, { headers: { Authorization: `Bearer ${v.github_token}`, Accept: "application/vnd.github+json", "User-Agent": "altimate-code" } })
+      // GitHub also answers 403 when it is rate limiting: that says nothing about the token.
+      if (res.status === 403 && (res.headers.get("x-ratelimit-remaining") === "0" || res.headers.has("retry-after") || /rate limit/i.test(String(data?.message ?? ""))))
+        return unreachable("GitHub is rate limiting requests, try again later")
       if (res.status === 401 || res.status === 403) return refused(`GitHub rejected the token (${res.status})${data?.message ? `: ${data.message}` : ""}`)
       if (!res.ok) return unreachable(`GitHub answered ${res.status}`)
       if (typeof data?.login !== "string" || !data.login) return badInput("GitHub answered without an account, check the token")
@@ -591,7 +611,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       // Only a re-test of exactly the stored values (every field, not just the secrets) shows that credential has stopped working.
       if (rec?.registered && secretFields.length && r.variant === rec.variant && r.def.fields.every((f) => !r.values[f.name] || r.origin[f.name] === "stored")) {
         await core.updateStore((store) => {
-          store.providers[id] = { ...store.providers[id], rejected: true, validatedAt: new Date().toISOString() }
+          // The check ran outside the lock: a record that was replaced since is not the credential that was refused.
+          if (core.sameRecord(store.providers[id], rec)) store.providers[id] = { ...store.providers[id], rejected: true, validatedAt: new Date().toISOString() }
         })
       }
     }
@@ -616,10 +637,12 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
     expiresAt: check.expiresAt,
     drafts: undefined,
   }
-  const finish = async (synced: boolean, extra: Partial<StoredProvider> = {}) => {
-    await core.updateStore((store) => {
+  const record = (synced: boolean, extra: Partial<StoredProvider> = {}) =>
+    core.updateStore((store) => {
       store.providers[id] = { ...store.providers[id], ...common, source: handDone || !detectedSource ? MANUAL_SOURCE : detectedSource, synced, updatedAt: stamp, ...extra }
     })
+  const finish = async (synced: boolean, extra: Partial<StoredProvider> = {}) => {
+    await record(synced, extra)
     await discardDraftSecrets(id)
   }
 
@@ -678,12 +701,14 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       if (hadCopy && !signedIn) await core.removeMockRemote(id)
       const notSignedIn = wantSync && !blocked
       const notes = [
+        removeFailure ? "The credential is kept on this machine, but the workspace copy is still there." : null,
         unverified ? `${check.message} (kept on this machine, not verified yet)` : null,
         notSignedIn ? core.NOT_SIGNED_IN : blocked && wantSync ? "Sync is blocked for this provider, kept local." : null,
         removeFailure ? core.REMOVE_FAILED_WARNING(removeFailure).trim() : null,
         detachNote ? `Could not detach it from the linked workspace: ${detachNote}` : null,
       ].filter(Boolean)
-      return { ...base, provider: id, status: "connected", sync: "local", account: check.account, expiresAt: check.expiresAt, message: notes.length ? notes.join(" ") : null }
+      // A workspace copy that could not be removed means the move is not done: it is reported as failed, and connecting again with --local-only retries the removal.
+      return { ...base, provider: id, status: removeFailure ? "failed" : "connected", sync: removeFailure ? "synced" : "local", account: check.account, expiresAt: check.expiresAt, message: notes.length ? notes.join(" ") : null }
     })
   }
 
@@ -717,10 +742,22 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         return warning ? { ...refusal, message: (refusal.message ?? "") + warning } : refusal
       }
       // The connection lives in the workspace and was accepted; no secret is kept on this machine.
-      await core.purgeCredentialSecrets(id, rec, false)
-      await core.deleteSecret(id)
-      await finish(true, { connectionId: res.connectionId })
-      return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: check.expiresAt, message: workspaceNote(res.workspace) }
+      // The record is saved first: the workspace has the connection, so a cleanup that fails afterwards is reported, not turned into a failed connect.
+      try {
+        await record(true, { connectionId: res.connectionId })
+      } catch (e) {
+        return { ...base, provider: id, status: "failed", sync: "synced", account: check.account, expiresAt: check.expiresAt, message: core.RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Connect again") }
+      }
+      let leftover: string | null = null
+      try {
+        await core.purgeCredentialSecrets(id, rec, false)
+        await core.deleteSecret(id)
+        await discardDraftSecrets(id)
+      } catch (e) {
+        leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}`
+      }
+      const message = [workspaceNote(res.workspace), leftover].filter(Boolean).join(" ") || null
+      return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: check.expiresAt, message }
     })
   } catch (e) {
     return local({ status: "failed", sync: "local", message: e instanceof Error ? e.message : String(e) })

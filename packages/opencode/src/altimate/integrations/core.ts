@@ -12,6 +12,7 @@ import { Flock } from "@opencode-ai/core/util/flock"
 import { Global } from "../../global"
 import { IntegrationsBackend as backend } from "./backend"
 import { IntegrationsCredentials as creds } from "./credentials"
+import { AltimateApi } from "../api/client"
 import { resolveBinding, resolveBindingOutcome } from "../workspace/state"
 import { workspaceLabel } from "../workspace/workspace-name"
 
@@ -282,7 +283,7 @@ export function detectFromMcpServers(servers: Record<string, McpServer>, origin:
     for (const id of PROVIDER_IDS) {
       if (!MCP_MATCHERS[id].test(haystack)) continue
       const remote = Boolean(server.url) || server.type === "http" || server.type === "sse"
-      const hasToken = Object.values(server.env ?? {}).some((v) => typeof v === "string" && v.length > 0)
+      const hasToken = creds.mcpEnvHasToken(id, server.env)
       if (remote) {
         found.push({
           id,
@@ -815,6 +816,14 @@ export async function collectConfig(id: ProviderId, rec: StoredProvider | undefi
   return creds.detectedConfig(id)
 }
 
+/** Whether the saved record is still the one a step started from: a connect, sync or disconnect in between changes it. */
+export const sameRecord = (cur: StoredProvider | undefined, rec: StoredProvider | undefined) =>
+  Boolean(cur?.registered) === Boolean(rec?.registered) &&
+  Boolean(cur?.synced) === Boolean(rec?.synced) &&
+  cur?.variant === rec?.variant &&
+  (cur?.connectionId ?? null) === (rec?.connectionId ?? null) &&
+  cur?.validatedAt === rec?.validatedAt
+
 export interface UpsertResult {
   connectionId: number
   created: boolean
@@ -831,6 +840,9 @@ export const NOT_SIGNED_IN = "Not signed in to Altimate, kept local."
 
 const INVALID_MESSAGE = "The workspace saved the connection but marked it invalid. Check the fields and run update."
 const REFUSED_MESSAGE = "The workspace refused the connection as invalid. Check the fields and try again."
+export const RECORD_WRITE_FAILED = (error: string, retry: string) =>
+  `Saved to your workspace, but the record on this machine could not be written (${error}). ${retry} to update the same connection.`
+export const LOCAL_CLEANUP_FAILED_PREFIX = "Saved to the workspace, but the local copy could not be removed: "
 export const REMOVE_FAILED_WARNING = (error: string) => ` It could not be removed from the workspace, remove it there: ${error}`
 /** What to tell the user when the workspace marked a connection invalid: a new one was removed again, an updated one is left marked. */
 export const rejectionMessage = (res: Pick<UpsertResult, "created">) => (res.created ? REFUSED_MESSAGE : INVALID_MESSAGE)
@@ -854,8 +866,14 @@ export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, 
 /** Attaches the connection to the workspace this directory is linked to, reporting instead of throwing. */
 export async function attachToBoundWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number, live?: (number | string)[]): Promise<NonNullable<UpsertResult["workspace"]>> {
   try {
-    const binding = await resolveBinding(process.cwd())
-    if (!binding) return { notLinked: true }
+    const outcome = await resolveBindingOutcome(process.cwd())
+    if (outcome.status === "unbound") return { notLinked: true }
+    if (outcome.status === "unknown") {
+      // Without an Altimate login (only the integrations backend variables are set) there is nothing to look a link up with.
+      if (!(await AltimateApi.isConfigured())) return { notLinked: true }
+      return { error: "could not tell whether this directory is linked to a workspace, so the connection was not attached to one" }
+    }
+    const binding = outcome.binding
     const kept = await attachToWorkspace(cfg, id, connectionId, String(binding.datamateId), live)
     const workspaceId = String(binding.datamateId)
     return kept ? { attached: binding.datamateName, workspaceId, kept: true } : { attached: binding.datamateName, workspaceId }
@@ -981,7 +999,7 @@ async function syncReal(
       // The record, the blocked flag and the workspace's connections are all read under the lock that the attach runs in.
       return await withLock(async (): Promise<SyncOutcome> => {
         const store = loadStore()
-        if (store.blocked[id]) return { id, result: "kept_local", steps: [] }
+        if (store.blocked[id]) return { id, result: "kept_local", reason: "blocked by policy", steps: [] }
         const known = knownFor(store.providers[id])
         if (known === undefined) return { id, result: "skipped", reason: collected.reason, steps: [] }
         const visible = await backend.listVisibleConnections(cfg)
@@ -1004,7 +1022,8 @@ async function syncReal(
     // As connect does: a provider refusing the credential saved on this machine marks that record rejected; a detected one is not stored, so nothing is marked.
     if (check.rejected && rec?.registered && rec.variant && rec.secretFields?.length) {
       await updateStore((next) => {
-        next.providers[id] = { ...next.providers[id], rejected: true, validatedAt: new Date().toISOString() }
+        // The check ran outside the lock: a record that was replaced since is not the credential that was refused.
+        if (sameRecord(next.providers[id], rec)) next.providers[id] = { ...next.providers[id], rejected: true, validatedAt: new Date().toISOString() }
       })
     }
     return { id, result: "failed", reason: check.message ?? "Could not validate the credentials", steps }
@@ -1017,7 +1036,7 @@ async function syncReal(
       const now = loadStore()
       if (now.blocked[id]) return { id, result: "kept_local", reason: "blocked by policy", steps: [] }
       const cur = now.providers[id]
-      if (Boolean(cur?.registered) !== Boolean(rec?.registered) || Boolean(cur?.synced) !== Boolean(rec?.synced) || cur?.variant !== rec?.variant || (cur?.connectionId ?? null) !== (rec?.connectionId ?? null) || cur?.validatedAt !== rec?.validatedAt)
+      if (!sameRecord(cur, rec))
         return { id, result: "skipped", reason: "the connection changed while syncing, run sync again", steps: [] }
       const res = await upsertManaged(cfg, id, upload)
       if (!res.isValid) {
@@ -1033,7 +1052,8 @@ async function syncReal(
         return { id, result: "failed", reason: rejectionMessage(res) + warning, steps }
       }
       step(res.created ? "Created connection" : "Updated connection")
-      await updateStore((next) => {
+      try {
+        await updateStore((next) => {
         next.providers[id] = {
           ...next.providers[id],
           registered: true,
@@ -1047,10 +1067,18 @@ async function syncReal(
           expiresAt,
           updatedAt: new Date().toISOString(),
         }
-      })
+        })
+      } catch (e) {
+        return { id, result: "failed", reason: RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Run sync again"), steps }
+      }
       // The connection is in the workspace and accepted: no secret stays on this machine, the same as when it is connected there directly.
-      await purgeCredentialSecrets(id, rec, false)
-      await deleteSecret(id)
+      try {
+        await purgeCredentialSecrets(id, rec, false)
+        await deleteSecret(id)
+      } catch (e) {
+        // The workspace holds the connection and the record says so; only the local cleanup is left to redo, which running sync for this provider does.
+        steps.push({ label: `${LOCAL_CLEANUP_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}. Run altimate integrations sync ${id} to remove it.`, ok: false })
+      }
       return reportWorkspace(res.workspace ?? { notLinked: true })
     })
   } catch (e) {
