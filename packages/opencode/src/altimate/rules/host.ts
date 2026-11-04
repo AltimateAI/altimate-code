@@ -231,7 +231,8 @@ export function rememberedRule(prompt: string): string | undefined {
   const rest = REMEMBER.exec(prompt)?.[1]
   if (!rest) return undefined
   const line = rest.split(/\r?\n/)[0]
-  const end = /[.!?](?=\s|$)/.exec(line)
+  // A sentence end, not an abbreviation ("e.g.", "i.e.", "etc.", "vs.").
+  const end = /(?<!\b(?:e\.g|i\.e|etc|vs|cf))[.!?](?=\s|$)/i.exec(line)
   const rule = (end ? line.slice(0, end.index + 1) : line).trim()
   return rule.length >= MIN_REMEMBERED ? rule : undefined
 }
@@ -372,14 +373,7 @@ async function syncAfterCheck(input: Parameters<typeof check>[0]) {
     log.warn("rules sync after host check failed", { error: errorText(error) })
     return undefined
   })
-  if (report?.pull?.ok) return
-  const { accountDigest } = await import("../workspace/state")
-  const account = await accountDigest().catch(() => null)
-  await RulesStore.update(input.root, (s) => {
-    s.pull_failed_at = new Date().toISOString()
-    if (account) s.pull_failed_with = account
-    else delete s.pull_failed_with
-  }).catch((error) => log.warn("rules sync outcome not recorded", { error: errorText(error) }))
+  await RulesSync.recordPullOutcome(input.root, report)
 }
 
 /**

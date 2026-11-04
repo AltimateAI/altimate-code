@@ -967,6 +967,7 @@ describe("host session, review round 3", () => {
     ["Remember this as a team rule: use `ordered_at` for order timestamps. Now fix the stg_orders model.", "use `ordered_at` for order timestamps."],
     ["Remember this as a team rule:\nAlways alias joined tables.\nThen rerun the build.", "Always alias joined tables."],
     ["save as a rule - name staging models stg_<source>", "name staging models stg_<source>"],
+    ["Remember this as a team rule: prefer CTEs, e.g. in staging models. Then fix it.", "prefer CTEs, e.g. in staging models."],
   ])("a request's rule is its first sentence: %s", (prompt, expected) => {
     expect(RulesHost.rememberedRule(prompt)).toBe(expected)
   })
@@ -1096,6 +1097,13 @@ describe("host session, review round 3", () => {
     })
     await RulesSync.enqueue(root, { change: "add", text: other.text, applies_to: [], origin: "session", evidence_sessions: 1, corrections: [] }, undefined, undefined, { id: other.id })
     expect(await RuleProposal.replyStored({ root, directory: root, learn, id: other.id }, { action: "dismiss" })).toMatchObject({ ok: false, code: "not_available" })
+    // A send the workspace refused acted on nothing: it holds no other answer back.
+    const refused = (await RuleProposal.ask({ sessionID: "claude:ac", root, directory: root, learn, draft: draft("Name the ship column shipped_at."), persist: true }))!
+    await RulesStore.update(root, (s) => {
+      s.proposals.find((p) => p.card.id === refused.id)!.claim = { pid: dead, at: new Date().toISOString(), answering: "send" }
+      s.push_outcomes[refused.id] = { status: "refused", error: "invalid_text" }
+    })
+    expect(await RuleProposal.replyStored({ root, directory: root, learn, id: refused.id }, { action: "dismiss" })).toMatchObject({ ok: true })
   })
 
   test("an account change between the check and the claim is refused, with a sign-in message for the same workspace", async () => {

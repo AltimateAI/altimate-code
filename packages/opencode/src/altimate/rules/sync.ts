@@ -829,23 +829,7 @@ export async function pullOnly(root: string, directory: string, learn: LearnConf
     const report = ctx.status === "ready" ? { context: ctx, pull: await pull(root, ctx) } : await unready(root, key, ctx)
     if (report.pull?.ok) failedAt.delete(key)
     else if (report.pull) failedAt.set(key, Date.now())
-    // Each host hook is a new process, so `failedAt` does not outlive it: a failure is kept on disk too, with the
-    // credential it failed under, and the next session start does not wait on another pull for `REFRESH_MS`. Only a pull
-    // that ran and failed, or a link or account the server could not confirm: signed out, unlinked or no remote is not
-    // a failure to back off from (signing in pulls at once).
-    const failed = report.pull ? !report.pull.ok : TRANSIENT.has(report.context.status === "skipped" ? report.context.code : "")
-    const { accountDigest } = await import("../workspace/state")
-    const account = failed ? await accountDigest().catch(() => null) : null
-    await RulesStore.update(root, (s) => {
-      if (failed) {
-        s.pull_failed_at = new Date().toISOString()
-        if (account) s.pull_failed_with = account
-        else delete s.pull_failed_with
-      } else {
-        delete s.pull_failed_at
-        delete s.pull_failed_with
-      }
-    }).catch((error) => log.warn("rules pull outcome not recorded", { error: errorText(error) }))
+    await recordPullOutcome(root, report)
     RulesTelemetry.synced(trigger, report, startedAt)
     return report
   } catch (error) {
@@ -856,6 +840,28 @@ export async function pullOnly(root: string, directory: string, learn: LearnConf
 
 /** Context skips that are a failure to reach or confirm the workspace, not the person's setup. */
 const TRANSIENT = new Set<string>(["link_unconfirmed", "account_unconfirmed"])
+
+/**
+ * Keep a run's pull outcome on disk (`pull_failed_at`, with the credential it failed under): each host hook is a new
+ * process, so `failedAt` does not outlive it, and the next one does not wait on another pull for `REFRESH_MS`. Only a
+ * pull that ran and failed, a run that threw (`report` undefined), or a link or account the server could not confirm
+ * is a failure: signed out, unlinked or no remote is not one to back off from (signing in pulls at once).
+ */
+export async function recordPullOutcome(root: string, report: RunReport | undefined): Promise<void> {
+  const failed = !report || (report.pull ? !report.pull.ok : TRANSIENT.has(report.context.status === "skipped" ? report.context.code : ""))
+  const { accountDigest } = await import("../workspace/state")
+  const account = failed ? await accountDigest().catch(() => null) : null
+  await RulesStore.update(root, (s) => {
+    if (failed) {
+      s.pull_failed_at = new Date().toISOString()
+      if (account) s.pull_failed_with = account
+      else delete s.pull_failed_with
+    } else {
+      delete s.pull_failed_at
+      delete s.pull_failed_with
+    }
+  }).catch((error) => log.warn("rules pull outcome not recorded", { error: errorText(error) }))
+}
 
 /** A pull without a sync run failed within `REFRESH_MS` (`pullOnly`), under the credential signed in now: not worth
  * waiting on again yet. Signed in as someone else since, it is. */

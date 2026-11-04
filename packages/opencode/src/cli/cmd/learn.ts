@@ -672,7 +672,8 @@ async function readHookInput(): Promise<import("../../altimate/rules/host").Hook
     }
   } finally {
     clearTimeout(timer)
-    reader.releaseLock()
+    // A read still pending after the timeout is abandoned with the reader.
+    await reader.cancel().catch(() => {})
   }
   const parsed = (() => {
     try {

@@ -574,7 +574,9 @@ function unavailable(state: RulesStore.State, proposal: RulesStore.StoredProposa
  * Other answers cannot be checked, and count as acted. */
 function acted(state: RulesStore.State, id: string, action: string): boolean {
   if (action !== "send" && action !== "approve" && action !== "approve_anyway") return true
-  return state.outbox.some((entry) => entry.id === id) || !!state.push_outcomes[id]
+  // A send the server refused acted on nothing: only one still queued, or recorded as sent, did.
+  const outcome = state.push_outcomes[id]
+  return state.outbox.some((entry) => entry.id === id) || (!!outcome && !outcome.error)
 }
 
 const WRITE_BACK_ATTEMPTS = 3
