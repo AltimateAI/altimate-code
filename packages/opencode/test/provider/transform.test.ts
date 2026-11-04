@@ -2341,7 +2341,7 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
     })
 
     test("keeps text and tool calls next to unsigned reasoning", () => {
-      const content = [
+      const content: ModelMessage["content"] = [
         { type: "text", text: "Answer" },
         { type: "tool-call", toolCallId: "call_1", toolName: "lookup", input: {} },
       ]
@@ -2355,7 +2355,7 @@ describe("ProviderTransform.message - anthropic empty content filtering", () => 
     })
 
     test("does not remove unsigned reasoning for other providers", () => {
-      const content = [{ type: "reasoning", text: "Partial thought" }]
+      const content: ModelMessage["content"] = [{ type: "reasoning", text: "Partial thought" }]
       const result = ProviderTransform.message(
         [{ role: "assistant", content }] as ModelMessage[],
         anthropicModel as any,
