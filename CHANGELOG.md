@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.12.9] - 2026-11-04
 
-**Claude Code and other coding agents can call altimate-code's data tools directly.** `altimate-code mcp serve` and the new model-free `altimate-code tool` CLI run the same tools without a second model: reads by default, writes only with `--allow-write` (over MCP, `warehouse_add` can save a connection without it). In projects linked to a workspace, what people teach the agent can become a team rule: they confirm it on a card, the workspace owner reviews it, and approved rules reach every teammate's sessions. Also in this release: `auth logout` removes the saved Altimate gateway key, the analyst stays read-only whatever config grants, and the home screen suggests the Claude Code and Codex plugins.
+**Claude Code and other coding agents can call altimate-code's data tools directly.** `altimate-code mcp serve` and the new model-free `altimate-code tool` CLI run the same tools without a second model: reads by default, writes only with `--allow-write` (over MCP, `warehouse_add` can save a connection without it). In projects linked to a workspace, what people teach the agent can become a team rule: they confirm it on a card, the workspace owner reviews it, and approved rules reach every teammate's sessions. `dbt_lineage` and `impact_analysis` now return structured lineage, and column impact traces each downstream model's compiled SQL. Also in this release: `auth logout` removes the saved Altimate gateway key, the analyst stays read-only whatever config grants, and the home screen suggests the Claude Code and Codex plugins.
 
 **Heads-up for support:**
 - **MCP and `tool run` requests are read-only unless `--allow-write`.** The database enforces read-only on PostgreSQL, SQLite and DuckDB; on other warehouses it rests on SQL classification, so stored functions with side effects are not blocked. `DROP DATABASE`, `DROP SCHEMA` and `TRUNCATE` are refused even with `--allow-write`, but that block also reads the SQL text and is best effort. Use a read-only database user for a hard guarantee. `--allow-write` is all or nothing, and statements such as `SET`, `ATTACH`, `COPY ... TO`, `INSTALL` and DuckDB `SUMMARIZE` count as writes.
@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`auth logout` removes the saved gateway key**, `~/.altimate/altimate.json`, MCP server entries that carry that key (add the datamate again after signing in), and the cached telemetry identity.
 - **Ctrl+C during browser sign-in exits with status 130**, not 0.
 - **The Altimate LLM Gateway free-token allowance is 1M tokens.**
+- **Read-only `dbt_lineage` calls never start the dbt adapter**, which runs `dbt deps`, writes `target/` and can run macro SQL: MCP and `tool run` calls without `--allow-write`, and plan-mode calls, answer from the manifest. With writes allowed it asks the adapter when the installed dbt integration has `getModelLineage`, and otherwise answers from the manifest and says why.
+- **`impact_analysis` with a column can report models as `uncertain` or `untraced`** instead of a confident answer, for example a `select *` from a parent whose schema.yml doesn't list the column, a NATURAL JOIN, or a model with no compiled SQL. A parent's whole row passed as a value (`to_json(o)`) is not caught yet.
 
 ### Added
 
@@ -31,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Plugin tips on the home screen** for Claude Code and Codex, and a README section on using altimate-code from them. (#1625)
 - **Workspace telemetry** for linking, usage, the engine and the starter. The telemetry reference lists every new event. (#1513)
 - **Signed-in identity on telemetry and a final opt-out event.** (#1501)
+- **Structured `dbt_lineage`.** It returns the model's nodes, columns and column edges (3 hops each way) as structured content when the dbt integration answers, and its own lineage fields from the manifest otherwise. It finds a model by name, unique_id or project-relative SQL path. `include_graph` adds the whole graph, up to 500 nodes each side; over MCP the graph is left out. (#1637, #1635)
+- **Column reach in `impact_analysis`.** With a column, it traces each downstream model's and snapshot's compiled SQL in dependency order, following renames, and returns `column_reach`: certain readers with the output columns they feed, `uncertain` and `untraced` models, and the exposures on each. It also returns `downstream` and `exposures`. Over MCP both tools declare an output schema and return structured content capped at 60 KB. (#1635)
 
 ### Changed
 
