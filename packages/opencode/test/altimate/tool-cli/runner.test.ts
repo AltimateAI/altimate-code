@@ -162,6 +162,16 @@ describe("ask handler", () => {
     expect(Exit.isSuccess(ask(true, "sql_execute_write", ["INSERT INTO t VALUES (1)"]))).toBe(true)
     expect(Exit.isSuccess(ask(true, "bash", ["dbt run"]))).toBe(true)
     expect(Exit.isFailure(ask(true, "sql_execute_write", ["DROP DATABASE x"]))).toBe(true)
+    // sql_execute checked its whole SQL already; a preview cut inside a literal is not re-read.
+    const preview = "UPDATE t SET note = 'drop the old schema"
+    expect(Exit.isFailure(ask(true, "sql_execute_write", [preview]))).toBe(true)
+    expect(
+      Exit.isSuccess(
+        Effect.runSyncExit(
+          askFor(true)({ permission: "sql_execute_write", patterns: [preview], always: [], metadata: { hardDenyChecked: true } }),
+        ),
+      ),
+    ).toBe(true)
     expect(Exit.isFailure(ask(true, "bash", ["truncate table x"]))).toBe(true)
     expect(isBlockedStatement("  Drop Schema s")).toBe(true)
     expect(isBlockedStatement("DROP TABLE t")).toBe(false)
@@ -273,6 +283,63 @@ describe("sql_execute without a warehouse reads the SQL in the default connectio
   })
 })
 
+describe("sql_execute reads T-SQL as SQL Server does", () => {
+  for (const type of ["sqlserver", "fabric"]) {
+    test(`${type}: E'\\' is no escape string, so a following DELETE or DROP DATABASE is seen, named or default`, async () => {
+      Registry.setConfigs({ ms: { type } as any })
+      try {
+        for (const named of [true, false]) {
+          const where = named ? { warehouse: "ms" } : {}
+          const del = await runner.run("sql_execute", { query: "SELECT E'\\' FROM (SELECT 1 E) x; DELETE FROM dbo.t; -- '", ...where })
+          expect(del.status).toBe("error")
+          expect(del.output).toContain("--allow-write")
+          const bare = await runner.run("sql_execute", { query: "SELECT * FROM dbo.t WHERE x = E'\\' DELETE FROM dbo.t --'", ...where })
+          expect(bare.output).toContain("--allow-write")
+          for (const allowWrite of [false, true]) {
+            const drop = await runner.run(
+              "sql_execute",
+              { query: "SELECT E'\\' FROM (SELECT 1 E) x; DROP DATABASE prod; -- '", ...where },
+              { allowWrite },
+            )
+            expect(drop.output).toContain("blocked for safety")
+          }
+        }
+      } finally {
+        Registry.reset()
+      }
+    })
+  }
+})
+
+describe("sql_execute without a warehouse keeps the default connection's reads", () => {
+  for (const [type, query] of [
+    ["postgres", "SELECT $$a; DROP SCHEMA s; b$$ AS v"],
+    ["bigquery", "SELECT 'it\\'s' AS v"],
+    ["sqlserver", "SELECT 'C:\\reports\\' AS p"],
+    ["sqlserver", "SELECT * FROM #temp"],
+    ["trino", "SELECT * FROM t WHERE c LIKE '%\\_%' ESCAPE '\\'"],
+  ] as const) {
+    test(`${type}: ${query}`, async () => {
+      Registry.setConfigs({ def: { type } as any })
+      const sent: string[] = []
+      const get = spyOn(Registry, "get").mockResolvedValue({
+        execute: async (sql: string) => {
+          sent.push(sql)
+          return { columns: ["v"], rows: [[1]], row_count: 1, truncated: false }
+        },
+      } as any)
+      try {
+        const result = await runner.run("sql_execute", { query })
+        expect(result.output).not.toMatch(/--allow-write|blocked for safety/)
+        expect(sent.length).toBe(1)
+      } finally {
+        get.mockRestore()
+        Registry.reset()
+      }
+    })
+  }
+})
+
 describe("data_diff write-carrying inputs", () => {
   const write = "SELECT 1 AS id) SELECT 1 AS id; DELETE FROM dbo.t; WITH __x AS (SELECT 1 AS id"
   for (const [field, value] of [
@@ -328,6 +395,22 @@ describe("data_diff write-carrying inputs", () => {
         })
         expect(JSON.stringify(result)).not.toContain("blocked for safety")
       }
+    } finally {
+      Registry.reset()
+    }
+  })
+})
+
+describe("data_diff hard block on long SQL", () => {
+  test("is checked on the whole SQL, not the 120-character preview", async () => {
+    Registry.setConfigs({ pg: { type: "postgres" } as any })
+    try {
+      const run = (source: string) =>
+        runner.run("data_diff", { source, target: "orders", key_columns: ["id"], source_warehouse: "pg" })
+      const quoted = "SELECT '" + "a".repeat(90) + " DROP SCHEMA s " + "b".repeat(90) + "' AS id"
+      expect(JSON.stringify(await run(quoted))).not.toContain("blocked for safety")
+      const tail = "SELECT 1 AS id" + " ".repeat(150) + "; DROP SCHEMA s"
+      expect(JSON.stringify(await run(tail))).toContain("blocked for safety")
     } finally {
       Registry.reset()
     }

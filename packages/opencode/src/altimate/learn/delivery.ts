@@ -12,6 +12,10 @@ import { assertLearnLock } from "./lock"
 import { validateName } from "./playbook"
 import { estimateTokens, fileHookEnabled, renderSection, resolveLimits, retrieve, selectFile, selectStart, type Limits } from "./select"
 import * as Store from "./store"
+// altimate_change start — workspace rules: telemetry of rules added to a session's context, and the workspaces switch
+import { RulesTelemetry } from "../rules/telemetry"
+import { workspacesOn } from "./config"
+// altimate_change end
 
 const log = Log.create({ service: "learn.delivery" })
 const LOCK_OPTIONS = { timeoutMs: 5000 }
@@ -85,6 +89,44 @@ export type ShownSnapshot = {
   shown: { name: string; id: string; textHash: string; tier: Shown["tier"]; at: string }[]
 }
 
+/** The snapshot files present now (`<sha256(session)>.json`), all of them, with when each was last written (ms). */
+export async function snapshotFiles(root: string): Promise<Map<string, number>> {
+  const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+  await SafeFS.assertSafePath(root, dir)
+  const names = await fs.readdir(dir).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return []
+    throw error
+  })
+  return new Map(await Promise.all(names.map(async (name) =>
+    [name, await fs.lstat(path.join(dir, name)).then((stat) => stat.mtimeMs, () => 0)] as const)))
+}
+
+/** The snapshot file name of `session`. */
+export const snapshotFile = (session: string) => Store.sha256(session) + ".json"
+
+async function readSnapshotFile(root: string, file: string): Promise<ShownSnapshot> {
+  const raw = await read(root, file)
+  if (raw === undefined) throw Object.assign(new Error(`no snapshot: ${file}`), { code: "ENOENT" })
+  const state = State.parse(JSON.parse(raw))
+  if (path.basename(file) !== Store.sha256(state.session) + ".json") throw new Error("Learn session state belongs to another session")
+  return { session: state.session, shown: state.shown.map(({ name, lesson, tier, at }) => ({
+    name, id: lesson.id, textHash: lessonTextHash(lesson.text), tier, at,
+  })) }
+}
+
+/** One session's snapshot, or undefined when it has none (or it cannot be read). */
+export async function readShownSnapshot(root: string, session: string): Promise<ShownSnapshot | undefined> {
+  const dir = path.join(root, ".altimate-code", "learn", ".sessions")
+  await SafeFS.assertSafePath(root, dir)
+  const file = path.join(dir, snapshotFile(session))
+  return readSnapshotFile(root, file).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined
+    if (error instanceof SafeFS.UnsafeLearnPathError) throw error
+    log.warn("learn session snapshot skipped", { file, error })
+    return undefined
+  })
+}
+
 export async function readShownSnapshots(root: string, options: { limit?: number } = {}) {
   const dir = path.join(root, ".altimate-code", "learn", ".sessions")
   const coverage = { sessions_analyzed: 0, sessions_skipped_malformed: 0, truncated: false }
@@ -102,11 +144,7 @@ export async function readShownSnapshots(root: string, options: { limit?: number
   coverage.truncated = files.length > limit
   for (const { file } of files.sort((a, b) => b.mtime - a.mtime || a.file.localeCompare(b.file)).slice(0, limit)) {
     try {
-      const state = State.parse(JSON.parse((await read(root, file)) ?? ""))
-      if (path.basename(file) !== Store.sha256(state.session) + ".json") throw new Error("Learn session state belongs to another session")
-      snapshots.push({ session: state.session, shown: state.shown.map(({ name, lesson, tier, at }) => ({
-        name, id: lesson.id, textHash: lessonTextHash(lesson.text), tier, at,
-      })) })
+      snapshots.push(await readSnapshotFile(root, file))
     } catch (error) {
       if (error instanceof SafeFS.UnsafeLearnPathError) throw error
       coverage.sessions_skipped_malformed++
@@ -179,7 +217,17 @@ export class Delivery {
     // Older versions froze unchecked content. Rebuild unsafe snapshots on the next prepare;
     // valid snapshots retain their byte-identical prefix across resume and approved edits.
     const grandfathered = new Map<string, Pick<Lesson, "id" | "text">[]>()
+    // Read once per check, an unreadable mirror (null) included.
+    let mirrored: Promise<Set<string> | null> | undefined
     for (const { name, lesson } of state.shown) {
+      // altimate_change start — workspace rules: a session's cached section and notes keep a team rule only while sync
+      // still vouches for it: workspaces on, and the rule still in the mirror (an edit keeps its id, so its frozen
+      // wording stays). Otherwise (workspaces off, signed out, unlinked, another workspace, retired) it is rebuilt.
+      if (name === Store.WORKSPACE_RULES_STORE && (!workspacesOn() || (await (mirrored ??= this.mirroredIds()))?.has(lesson.id) === false)) {
+        log.info("learn session snapshot rebuilt without team rules", { session })
+        return undefined
+      }
+      // altimate_change end
       if (lesson.text.length > MAX_TEXT && !grandfathered.has(name))
         grandfathered.set(name, await Store.grandfathered(this.root, name, { migrate: false }).catch(() => []))
       const safe = sanitize(name, lesson, grandfathered.get(name))
@@ -191,6 +239,20 @@ export class Delivery {
     return state
   }
 
+  // altimate_change start — workspace rules: the ids the team-rules mirror holds now; a missing mirror holds none, and
+  // one that cannot be read is unknown (null): the snapshot is kept rather than rebuilt on a passing read error
+  private async mirroredIds(): Promise<Set<string> | null> {
+    const raw = await read(this.root, Store.paths(this.root, Store.WORKSPACE_RULES_STORE).approved).catch(() => null)
+    if (raw === null) return null
+    if (raw === undefined) return new Set()
+    try {
+      return new Set(parse(raw).map((lesson) => lesson.id))
+    } catch {
+      return null
+    }
+  }
+  // altimate_change end
+
   private async approved(): Promise<Approved[]> {
     const result: Approved[] = []
     const names = (await fs.readdir(this.dir, { withFileTypes: true }))
@@ -200,6 +262,9 @@ export class Delivery {
       }).map((entry) => entry.name).sort()
     for (const name of names) {
       try { validateName(name) } catch { continue }
+      // altimate_change start — workspace rules: with workspaces turned off, the last pulled team rules are not delivered
+      if (name === Store.WORKSPACE_RULES_STORE && !workspacesOn()) continue
+      // altimate_change end
       // Read approved snapshots directly: migration/capture may write, and merely opening a
       // candidate-only project must not mutate it. Capture being off does NOT disable these
       // rules: a person already approved them. An unused project only pays the existence check.
@@ -288,6 +353,22 @@ export class Delivery {
     return added
   }
 
+  // altimate_change start — workspace rules telemetry
+  /** Report the rules `add` put into the session since `before` (counts and size only). */
+  private delivered(state: State, before: number, tier: "start" | "request" | "file") {
+    const added = state.shown.slice(before)
+    RulesTelemetry.delivered({
+      session_id: state.session,
+      tier,
+      rules: added.length,
+      team_rules: added.filter((entry) => entry.name === Store.WORKSPACE_RULES_STORE).length,
+      chars: added.reduce((sum, entry) => sum + entry.lesson.text.length, 0),
+      session_rules: state.shown.length,
+      budget_tokens: this.limits.budget_tokens,
+    })
+  }
+  // altimate_change end
+
   private mentionedPaths(query: string) {
     // Paths mentioned for creation count too; never traverse the project tree.
     const found = new Set<string>()
@@ -364,6 +445,7 @@ export class Delivery {
       }
       const approved = await this.approved()
       if (!state && !approved.length) return { ...EMPTY }
+      let added: { before: number; tier: "start" | "request" } | undefined
       if (!state) {
         // Count earlier deliveries before replacing an unsafe snapshot; retain the session ledger
         // so selecting its approved replacement cannot count the same ID twice.
@@ -375,6 +457,7 @@ export class Delivery {
         const start = selectStart(corpus(approved), initialQuery, this.limits)
         state = { version: 1, session, firstMessage: message, query: redactedQuery, touchedPaths: previous?.touchedPaths ?? [], section: start.section, shown: [], requests: [], requestParts: previous?.requestParts ?? [], compactions: [], counted: previous?.counted ?? [] }
         for (const item of start.lessons) this.add(state, approved, [item.lesson], item.tier, initialQuery)
+        added = { before: 0, tier: "start" }
         state.requests.push({ message, note: "" })
       } else {
         state.query = redactedQuery
@@ -384,10 +467,13 @@ export class Delivery {
           paths: [...state.touchedPaths, ...this.mentionedPaths(query)],
         })
         const rendered = renderSection(matches, this.limits.budget_tokens, "Team rules for this request:")
+        added = { before: state.shown.length, tier: "request" }
         this.add(state, approved, rendered.lessons, "request", query)
         state.requests.push({ message, note: rendered.section })
       }
       await this.save(state)
+      // Reported once saved: a save that throws is retried, and would otherwise count the same rules twice.
+      if (added) this.delivered(state, added.before, added.tier)
       await this.log(state)
       return { section: state.section, requestNote: state.requests.find((request) => request.message === message)!.note }
     }, LOCK_OPTIONS)
@@ -442,8 +528,10 @@ export class Delivery {
         exclude: state.shown.map((entry) => identity(entry.name, entry.lesson.id)),
       })
       const rendered = renderSection(matches, this.limits.budget_tokens, `Team rules for ${singleLine(relative)}:`)
+      const before = state.shown.length
       const added = this.add(state, approved, rendered.lessons, "file", relative)
       if (touched || added.length) await this.save(state)
+      this.delivered(state, before, "file")
       if (!added.length) return ""
       await this.log(state)
       return rendered.section

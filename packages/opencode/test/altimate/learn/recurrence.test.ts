@@ -181,17 +181,17 @@ describe("recurrence attribution", () => {
     const text = formatRecurrence({ ...run([signal()], [shown], [lesson, quiet]), coverage: { sessions_analyzed: 1, sessions_skipped_malformed: 0, truncated: false } })
     expect(text).toContain("team-playbook/L-0001: 1 sessions shown; 1 matching correction after exposure")
     expect(text).not.toContain("L-0002")
-    expect(text).toContain("1 other shown lessons: no observed correction")
+    expect(text).toContain("1 other shown rules: no observed correction")
   })
 
-  test("human status reports coverage, uncertainty and no matching current lesson", () => {
+  test("human status reports coverage, uncertainty and no matching current rule", () => {
     const unmatched = (session: string) => signal(session, { id: `sig_u_${session}`, text: "No, filter out _is_deleted rows" })
     const text = formatRecurrence({ ...run([unmatched("s1"), unmatched("s2")], [snapshot("s1"), snapshot("s2")]), coverage: { sessions_analyzed: 2, sessions_skipped_malformed: 0, truncated: false } })
     expect(text).toContain("    _is_deleted: 2 sessions (sig_u_s1, sig_u_s2)")
     expect(text).toContain("Recurrence")
     expect(text).toContain("no observed correction")
     expect(text).toContain("counts need capture on")
-    expect(text).toContain("no matching current lesson")
+    expect(text).toContain("no matching current rule")
     expect(text).not.toContain("followed")
   })
 })

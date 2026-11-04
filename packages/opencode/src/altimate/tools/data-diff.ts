@@ -2,6 +2,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import * as Registry from "../native/connections/registry"
+import { classifyAndCheck } from "./sql-classify"
 
 export const DataDiffTool = Tool.define("data_diff", {
   description: [
@@ -98,8 +99,19 @@ export const DataDiffTool = Tool.define("data_diff", {
             { patterns: [args.source.slice(0, 120)], warehouse: sourceWarehouse },
             { patterns: [args.target.slice(0, 120)], warehouse: targetWarehouse },
           ]
+    // The hard deny is checked on the whole SQL here; the ask's patterns are 120-character previews,
+    // which a cut inside a literal would make read differently.
+    const dialectOf = (warehouse?: string) => Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? undefined
+    for (const [sql, warehouse] of [[args.source, sourceWarehouse], [args.target, targetWarehouse]] as const)
+      if (classifyAndCheck(sql, dialectOf(warehouse)).blocked)
+        throw new Error("DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety. This cannot be overridden.")
     for (const side of sides)
-      await ctx.ask({ permission: "sql_execute_read", patterns: side.patterns, always: ["*"], metadata: { warehouse: side.warehouse } })
+      await ctx.ask({
+        permission: "sql_execute_read",
+        patterns: side.patterns,
+        always: ["*"],
+        metadata: { warehouse: side.warehouse, hardDenyChecked: true },
+      })
 
     try {
       const result = await Dispatcher.call("data.diff", {

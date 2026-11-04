@@ -217,7 +217,7 @@ describe("sql_execute parser read boundary", () => {
             permission: "sql_execute_write",
             patterns: [query],
             always: ["*"],
-            metadata: { queryType: "write", warehouse: "source" },
+            metadata: { queryType: "write", warehouse: "source", hardDenyChecked: true },
           })
           expect(dispatch).not.toHaveBeenCalled()
           expect(precedence).not.toHaveBeenCalled()
