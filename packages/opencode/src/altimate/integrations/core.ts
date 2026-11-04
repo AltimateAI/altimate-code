@@ -136,11 +136,15 @@ export function readJsonStrict<T>(file: string, fallback: T): T {
     if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return fallback
     throw new Error(`Could not read ${file} (${e instanceof Error ? e.message : String(e)}). Fix or remove it, then run the command again.`)
   }
+  const fail = (why: string) => new Error(`Could not read ${file} (${why}). Fix or remove it, then run the command again.`)
+  let parsed: unknown
   try {
-    return JSON.parse(text) as T
+    parsed = JSON.parse(text)
   } catch (e) {
-    throw new Error(`Could not read ${file} (${e instanceof Error ? e.message : String(e)}). Fix or remove it, then run the command again.`)
+    throw fail(e instanceof Error ? e.message : String(e))
   }
+  if (typeof fallback === "object" && fallback !== null && !Array.isArray(fallback) && (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))) throw fail("expected a JSON object")
+  return parsed as T
 }
 /** Writes through a temp file in the same directory and renames it over the target, so a reader or a crash never sees half a file. The mode is set when the file is created; the temp file never outlives a failed write. */
 export function writeJson(file: string, value: unknown, mode = 0o666) {
@@ -201,6 +205,50 @@ export const BUILTIN_SECRET_FIELDS: Record<ProviderId, string[]> = {
 
 const KEYCHAIN_TIMEOUT_MS = 10_000
 
+interface SecurityResult {
+  status: number | null
+  stdout: string
+  stderr: string
+  error?: Error
+}
+/** Runs the macOS `security` tool without blocking the event loop, so the lock's refresh timer keeps firing while the keychain answers. Output is only collected when asked for; `input` goes to stdin. */
+function runSecurity(args: string[], opts: { input?: string; stdout?: boolean; stderr?: boolean } = {}): Promise<SecurityResult> {
+  return new Promise((resolve) => {
+    let out = ""
+    let err = ""
+    let settled = false
+    const done = (r: SecurityResult) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(r)
+    }
+    let child: ReturnType<typeof childProcess.spawn>
+    try {
+      child = childProcess.spawn("security", args, {
+        stdio: [opts.input !== undefined ? "pipe" : "ignore", opts.stdout ? "pipe" : "ignore", opts.stderr ? "pipe" : "ignore"],
+      })
+    } catch (e) {
+      resolve({ status: null, stdout: "", stderr: "", error: e instanceof Error ? e : new Error(String(e)) })
+      return
+    }
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL")
+      done({ status: null, stdout: out, stderr: err, error: new Error("timed out") })
+    }, KEYCHAIN_TIMEOUT_MS)
+    child.stdout?.setEncoding("utf8")
+    child.stdout?.on("data", (d: string) => (out += d))
+    child.stderr?.setEncoding("utf8")
+    child.stderr?.on("data", (d: string) => (err += d))
+    child.on("error", (e) => done({ status: null, stdout: out, stderr: err, error: e }))
+    child.on("close", (code) => done({ status: code, stdout: out, stderr: err }))
+    if (opts.input !== undefined) {
+      child.stdin?.on("error", () => {})
+      child.stdin?.end(opts.input)
+    }
+  })
+}
+
 export async function storeSecret(id: string, secret: string) {
   // A token is one line. A line break cannot be quoted for `security -i` either, so such a value is refused rather than parked in a file.
   if (/[\r\n]/.test(secret)) throw new Error("The value is not a token: it contains a line break")
@@ -208,11 +256,7 @@ export async function storeSecret(id: string, secret: string) {
     if (!/^[A-Za-z0-9:._-]+$/.test(id)) throw new Error("The credential id is not valid")
     // The secret goes to `security -i` on stdin so it never shows in the process list. On macOS it is kept in the keychain only; a failed write is an error, never a plaintext file.
     const quote = (v: string) => `"${v.replace(/[\\"]/g, "\\$&")}"`
-    const r = childProcess.spawnSync("security", ["-i"], {
-      input: `add-generic-password -U -s ${quote(KEYCHAIN_SERVICE)} -a ${quote(id)} -w ${quote(secret)}\n`,
-      stdio: ["pipe", "ignore", "ignore"],
-      timeout: KEYCHAIN_TIMEOUT_MS,
-    })
+    const r = await runSecurity(["-i"], { input: `add-generic-password -U -s ${quote(KEYCHAIN_SERVICE)} -a ${quote(id)} -w ${quote(secret)}\n` })
     if (r.status !== 0) throw new Error("Could not save the credential to the macOS keychain, so nothing was stored. Unlock the keychain and try again.")
     return
   }
@@ -222,13 +266,9 @@ export async function storeSecret(id: string, secret: string) {
     writeJson(secretsPath(), all, 0o600)
   })
 }
-export function readSecret(id: string): string | undefined {
+export async function readSecret(id: string): Promise<string | undefined> {
   if (useKeychain()) {
-    const r = childProcess.spawnSync("security", ["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id, "-w"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: KEYCHAIN_TIMEOUT_MS,
-    })
+    const r = await runSecurity(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id, "-w"], { stdout: true })
     if (r.status === 0) return r.stdout.trim()
   }
   return readJsonStrict<Record<string, string>>(secretsPath(), {})[id]
@@ -237,12 +277,8 @@ export function readSecret(id: string): string | undefined {
 const KEYCHAIN_ITEM_NOT_FOUND = 44
 export async function deleteSecret(id: string) {
   if (useKeychain()) {
-    const r = childProcess.spawnSync("security", ["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], {
-      encoding: "utf8",
-      stdio: ["ignore", "ignore", "pipe"],
-      timeout: KEYCHAIN_TIMEOUT_MS,
-    })
-    const notFound = r.status === KEYCHAIN_ITEM_NOT_FOUND || /could not be found/i.test(String(r.stderr ?? ""))
+    const r = await runSecurity(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], { stderr: true })
+    const notFound = r.status === KEYCHAIN_ITEM_NOT_FOUND || /could not be found/i.test(r.stderr)
     if (r.status !== 0 && !notFound) throw new Error(`Could not remove a stored credential from the macOS keychain${r.error ? `: ${r.error.message}` : r.status != null ? ` (exit ${r.status})` : ""}`)
   }
   await withLock(() => {
@@ -507,6 +543,9 @@ export interface RemoteProvider {
   managed: boolean
   /** The connection this tool made for the provider, shown or not; null when there is none. */
   managedId?: number | null
+  /** Expiry and validity of the connection this tool made, which can differ from the one shown. */
+  managedExpiresAt?: string | null
+  managedValid?: boolean | null
   source: { kind?: string; label?: string } | null
   expires_at: string | null
   expired: boolean
@@ -549,6 +588,8 @@ export function deriveRemote(connections: backend.Connection[], host = os.hostna
       account: null,
       managed: pick.id === managed?.id,
       managedId: managed?.id ?? null,
+      managedExpiresAt: managed ? connectionExpiry(managed) : null,
+      managedValid: managed ? managed.is_valid : null,
       source: null,
       expires_at: connectionExpiry(pick),
       expired: false,
@@ -588,13 +629,17 @@ export function mergeRemote(local: StatusResult, remote: RemoteProvider[], now =
       if (managedId == null) return p
       // A synced credential is held by the workspace, so once the workspace reports an expiry it replaces the older local value; with none reported, the local one stands.
       if (orig.sync === "synced") {
-        const known = r.expires_at != null || r.expired
-        const expired = known ? remoteExpired : p.state === "expired"
-        const rejectedNow = !expired && remoteRejected
+        // Expiry and validity come from the connection this tool made; the one shown may be a hand-made one.
+        const mExpiresAt = r.managedExpiresAt !== undefined ? r.managedExpiresAt : r.expires_at
+        const mValid = r.managedValid !== undefined ? r.managedValid : r.is_valid
+        const mExpired = isExpired(mExpiresAt, now) || (r.managed && r.expired)
+        const known = mExpiresAt != null || mExpired
+        const expired = known ? mExpired : p.state === "expired"
+        const rejectedNow = !expired && mValid === false
         return orderStatus({
           ...p,
           state: expired ? "expired" : rejectedNow ? "rejected" : "connected",
-          expiresAt: r.expires_at ?? p.expiresAt,
+          expiresAt: mExpiresAt ?? p.expiresAt,
           note: expired ? "access expired, reconnect to continue" : rejectedNow ? REJECTED_NOTE : p.state === "connected" ? p.note : null,
         })
       }
@@ -637,15 +682,21 @@ export function mergeRemote(local: StatusResult, remote: RemoteProvider[], now =
 
 export async function statusRemote(): Promise<StatusResult> {
   const local = status()
-  const cfg = await realConfig()
+  const unchecked = (e: unknown): StatusResult => ({ ...local, workspace: workspaceInfo(), workspaceUnchecked: e instanceof Error ? e.message : String(e) })
+  // An unreadable login is the same as an unreadable workspace: what is shown comes from this machine alone.
+  let cfg: backend.BackendConfig | null
+  try {
+    cfg = await realConfig()
+  } catch (e) {
+    return unchecked(e)
+  }
   if (!cfg) return local
   try {
     const remote = deriveRemote(await backend.listOwnConnections(cfg))
     const detections = Object.values(loadStore().providers).flatMap((rec) => (rec?.detection ? [rec.detection] : []))
     return { ...mergeRemote(local, remote, Date.now(), detections), workspace: await liveWorkspaceInfo() }
   } catch (e) {
-    // The workspace could not be read, so what is shown comes from this machine alone.
-    return { ...local, workspace: await liveWorkspaceInfo(), workspaceUnchecked: e instanceof Error ? e.message : String(e) }
+    return { ...unchecked(e), workspace: await liveWorkspaceInfo().catch(() => workspaceInfo()) }
   }
 }
 
@@ -830,9 +881,14 @@ export const isJiraServer = (variant: string | undefined) => /server/i.test(vari
 export async function collectConfig(id: ProviderId, rec: StoredProvider | undefined): Promise<{ config: Record<string, unknown> } | { reason: string }> {
   if (rec?.registered && rec.variant) {
     const config: Record<string, unknown> = { ...rec.values }
+    // Only a required secret has to be there; an optional one that was never filled in is simply left out.
+    const fields = (await creds.loadCatalog(id, true)).find((v) => v.id === rec.variant)?.fields
     for (const field of rec.secretFields ?? []) {
-      const value = readSecret(secretKey("cred", id, field))
-      if (!value) return { reason: "no local credential to upload" }
+      const value = await readSecret(secretKey("cred", id, field))
+      if (!value) {
+        if (fields?.find((f) => f.name === field)?.required === false) continue
+        return { reason: "no local credential to upload" }
+      }
       config[field] = value
     }
     return { config: withVariant(id, rec.variant, config) }
@@ -953,7 +1009,8 @@ async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, con
     const catalog = await backend.integrationsCatalog(cfg)
     const list: any[] = backend.catalogEntries(catalog)
     const found = list.find((c) => String(c?.id) === integrationId)
-    keys = (found?.tools ?? []).map((t: any) => t?.key).filter((k: unknown): k is string => typeof k === "string")
+    if (!found) throw new Error(`the workspace catalog has no entry for ${PROVIDER_NAMES[id]}, so the connection was not attached to workspace "${first.name}"`)
+    keys = (found.tools ?? []).map((t: any) => t?.key).filter((k: unknown): k is string => typeof k === "string")
   }
   // The backend replaces the whole list, so it is read again right before writing and only this entry changes.
   const datamate = await backend.getDatamate(cfg, datamateId)

@@ -2,6 +2,8 @@ import { afterAll, afterEach, describe, expect, spyOn, test, beforeEach } from "
 import fs from "node:fs"
 import os from "node:os"
 import childProcess from "node:child_process"
+import { EventEmitter } from "node:events"
+import { PassThrough } from "node:stream"
 import path from "node:path"
 import { IntegrationsCore as core } from "../../src/altimate/integrations/core"
 import { skipsSynced, clean } from "../../src/cli/cmd/integrations"
@@ -221,19 +223,38 @@ describe("keychain", () => {
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!
   const calls: { cmd: string; args: string[]; input?: string }[] = []
   let spawn: ReturnType<typeof spyOn> | undefined
+  let hold: Promise<void> | undefined
   const on = (status = 0, stdout = "") => {
+    hold = undefined
     spawn?.mockRestore()
     delete process.env.ALTIMATE_INTEGRATIONS_DIR
     Object.defineProperty(process, "platform", { value: "darwin" })
     calls.length = 0
-    spawn = spyOn(childProcess, "spawnSync").mockImplementation(((cmd: string, args: string[], opts: any) => {
-      calls.push({ cmd, args, input: opts?.input })
-      return { status, stdout, stderr: "" }
+    spawn = spyOn(childProcess, "spawn").mockImplementation(((cmd: string, args: string[]) => {
+      const child: any = new EventEmitter()
+      const chunks: string[] = []
+      child.stdout = new PassThrough()
+      child.stderr = new PassThrough()
+      child.stdin = new PassThrough()
+      child.stdin.on("data", (d: Buffer) => chunks.push(d.toString()))
+      child.kill = () => true
+      const entry: { cmd: string; args: string[]; input?: string } = { cmd, args }
+      calls.push(entry)
+      const finish = () => {
+        if (chunks.length) entry.input = chunks.join("")
+        child.stdout.end(stdout)
+        child.stderr.end("")
+        child.emit("close", status)
+      }
+      if (hold) hold.then(() => setTimeout(finish, 0))
+      else setTimeout(finish, 0)
+      return child
     }) as any)
   }
   afterEach(() => {
     spawn?.mockRestore()
     spawn = undefined
+    hold = undefined
     process.env.ALTIMATE_INTEGRATIONS_DIR = realDir
     Object.defineProperty(process, "platform", platform)
   })
@@ -249,12 +270,32 @@ describe("keychain", () => {
 
   test("read and delete use the keychain by account", async () => {
     on(0, "stored-value\n")
-    expect(core.readSecret("cred:github:github_token")).toBe("stored-value")
+    expect(await core.readSecret("cred:github:github_token")).toBe("stored-value")
     await core.deleteSecret("cred:github:github_token")
     expect(calls.map((c) => [c.cmd, ...c.args])).toEqual([
       ["security", "find-generic-password", "-s", "altimate-code-integrations", "-a", "cred:github:github_token", "-w"],
       ["security", "delete-generic-password", "-s", "altimate-code-integrations", "-a", "cred:github:github_token"],
     ])
+  })
+
+  test("a slow keychain call does not block the event loop", async () => {
+    on(0, "v\n")
+    let release!: () => void
+    hold = new Promise<void>((r) => (release = r))
+    let ticked = false
+    const read = core.readSecret("cred:github:github_token")
+    const store = core.storeSecret("cred:github:github_token", "x")
+    await new Promise<void>((r) =>
+      setTimeout(() => {
+        ticked = true
+        r()
+      }, 20),
+    )
+    expect(ticked).toBe(true)
+    expect(calls).toHaveLength(2)
+    release()
+    expect(await read).toBe("v")
+    await store
   })
 
   test("a failed keychain delete is an error unless the item was already absent", async () => {
@@ -301,10 +342,22 @@ describe("state file", () => {
   })
 })
 
+describe("state files that are not objects", () => {
+  test("an array, null or scalar root is an error and is left as it was", async () => {
+    const file = path.join(tmp, "integrations-secrets.json")
+    for (const text of ["[]", "null", "3", '"x"']) {
+      fs.writeFileSync(file, text)
+      await expect(core.storeSecret("cred:github:github_token", "x")).rejects.toThrow("expected a JSON object")
+      expect(fs.readFileSync(file, "utf8")).toBe(text)
+    }
+    fs.rmSync(file)
+  })
+})
+
 describe("secret storage", () => {
   test("a value with a line break is refused as not a token", async () => {
     await expect(core.storeSecret("github", "abc\ndef")).rejects.toThrow("not a token")
-    expect(core.readSecret("github")).toBeUndefined()
+    expect(await core.readSecret("github")).toBeUndefined()
   })
 })
 
@@ -428,7 +481,7 @@ describe("workspace connections", () => {
     expect((await core.statusRemote()).providers[0]).toMatchObject({ state: "connected", sync: "synced" })
     api.state.rows.find((r) => r.name === `GitHub (from ${HOST})`)!.is_valid = false
     const shown = (await core.statusRemote()).providers[0]
-    expect([shown.state, shown.managed]).toEqual(["connected", undefined])
+    expect([shown.state, shown.managed]).toEqual(["rejected", undefined])
     api.state.rows.find((r) => r.name === `GitHub (from ${HOST})`)!.deleted = true
     const gone = (await core.statusRemote()).providers[0]
     expect([gone.state, gone.sync, gone.managed]).toEqual(["connected", "synced", false])
@@ -449,18 +502,27 @@ describe("workspace connections", () => {
     expect([gone.state, gone.note]).toEqual(["not_found", "The workspace connection was removed. Add the credentials again."])
   })
 
-  test("a saved record shows the newest validated connection, a newer hand-made one included", () => {
+  test("a synced record reports the managed connection's validity, whichever connection is shown", () => {
     const now = Date.parse("2030-01-01T00:00:00Z")
-    const mine = { id: 3, user_id: 1, name: `Linear (from ${HOST})`, integration_id: "linear", is_valid: true, last_validated_at: "2029-01-01T00:00:00Z" } as any
-    const hand = { id: 4, user_id: 1, name: "Linear", integration_id: "linear", is_valid: false, last_validated_at: "2029-06-01T00:00:00Z" } as any
+    const mine = { id: 3, user_id: 1, name: `Linear (from ${HOST})`, integration_id: "linear", is_valid: false, last_validated_at: "2029-01-01T00:00:00Z" } as any
+    const hand = { id: 4, user_id: 1, name: "Linear", integration_id: "linear", is_valid: true, last_validated_at: "2029-06-01T00:00:00Z" } as any
     const remote = core.deriveRemote([mine, hand])
     expect([remote[0].connection_id, remote[0].managedId]).toEqual([4, 3])
     const rec = { registered: true, synced: true, account: "me", source: { kind: "cli", label: "test" }, updatedAt: new Date(now).toISOString() } as core.StoredProvider
     const store = { blocked: {}, providers: { linear: rec } } as core.Store
-    const shown = core.mergeRemote(core.buildStatus(store, [], now), remote, now).providers.find((p) => p.id === "linear")!
-    expect(shown.state).toBe("rejected")
-    const valid = core.deriveRemote([mine, { ...hand, is_valid: true }])
-    expect(core.mergeRemote(core.buildStatus(store, [], now), valid, now).providers.find((p) => p.id === "linear")!.state).toBe("connected")
+    const state = (rows: any[]) => core.mergeRemote(core.buildStatus(store, [], now), core.deriveRemote(rows), now).providers.find((p) => p.id === "linear")!.state
+    expect(state([mine, hand])).toBe("rejected")
+    expect(state([{ ...mine, is_valid: true }, { ...hand, is_valid: false }])).toBe("connected")
+  })
+
+  test("a synced record's expiry comes from the managed connection, not the one shown", () => {
+    const now = Date.parse("2030-01-01T00:00:00Z")
+    const mine = { id: 3, user_id: 1, name: `Linear (from ${HOST})`, integration_id: "linear", is_valid: true, last_validated_at: "2029-01-01T00:00:00Z", config: { expires_at: "2029-12-31T00:00:00Z" } } as any
+    const hand = { id: 4, user_id: 1, name: "Linear", integration_id: "linear", is_valid: true, last_validated_at: "2029-06-01T00:00:00Z", config: { expires_at: "2031-01-01T00:00:00Z" } } as any
+    const rec = { registered: true, synced: true, account: "me", source: { kind: "cli", label: "test" }, updatedAt: new Date(now).toISOString() } as core.StoredProvider
+    const store = { blocked: {}, providers: { linear: rec } } as core.Store
+    const p = core.mergeRemote(core.buildStatus(store, [], now), core.deriveRemote([mine, hand]), now).providers.find((x) => x.id === "linear")!
+    expect([p.state, p.expiresAt]).toEqual(["expired", "2029-12-31T00:00:00Z"])
   })
 
   test("sync <provider> --keep-synced takes the attach-only path that sync --all takes", async () => {
@@ -570,9 +632,9 @@ describe("workspace connections", () => {
     core.saveStore(store)
     expect((await core.syncProvider("github")).result).toBe("synced")
     expect(writes()[0].body.config).toEqual({ github_token: "gh_local_tok", expires_at: "2031-01-02T03:04:05.000Z" })
-    expect(core.readSecret(core.secretKey("cred", "github", "github_token"))).toBeUndefined()
-    expect(core.readSecret("github")).toBeUndefined()
-    expect(core.readSecret("github")).toBeUndefined()
+    expect(await core.readSecret(core.secretKey("cred", "github", "github_token"))).toBeUndefined()
+    expect(await core.readSecret("github")).toBeUndefined()
+    expect(await core.readSecret("github")).toBeUndefined()
   })
 
   test("a sync that lost the race to Keep local uploads nothing", async () => {
@@ -876,16 +938,16 @@ describe("workspace connections", () => {
     await core.storeSecret(core.secretKey("cred", "jira", "jiraApiToken"), "cloud-token")
     await core.storeSecret(core.secretKey("cred", "jira", "jiraPatToken"), "server-token")
     await core.purgeCredentialSecrets("jira", { registered: true, secretFields: ["jiraPatToken"] } as any, false)
-    expect(core.readSecret(core.secretKey("cred", "jira", "jiraApiToken"))).toBeFalsy()
-    expect(core.readSecret(core.secretKey("cred", "jira", "jiraPatToken"))).toBeFalsy()
+    expect(await core.readSecret(core.secretKey("cred", "jira", "jiraApiToken"))).toBeFalsy()
+    expect(await core.readSecret(core.secretKey("cred", "jira", "jiraPatToken"))).toBeFalsy()
   })
 
   test("purging a provider's secrets keeps the fields just written", async () => {
     await core.storeSecret(core.secretKey("cred", "jira", "jiraApiToken"), "new-token")
     await core.storeSecret(core.secretKey("cred", "jira", "jiraPatToken"), "old-token")
     await core.purgeCredentialSecrets("jira", undefined, false, new Set(["jiraApiToken"]))
-    expect(core.readSecret(core.secretKey("cred", "jira", "jiraApiToken"))).toBe("new-token")
-    expect(core.readSecret(core.secretKey("cred", "jira", "jiraPatToken"))).toBeFalsy()
+    expect(await core.readSecret(core.secretKey("cred", "jira", "jiraApiToken"))).toBe("new-token")
+    expect(await core.readSecret(core.secretKey("cred", "jira", "jiraPatToken"))).toBeFalsy()
   })
 
   test("a refused new connection that cannot be removed still reports the refusal", async () => {
@@ -928,11 +990,11 @@ describe("workspace connections", () => {
     api.state.fail = { status: 500, body: { detail: "boom" } }
     await expect(core.disconnect("linear")).rejects.toThrow()
     expect(core.status().providers.find((p) => p.id === "linear")!.state).toBe("connected")
-    expect(core.readSecret("linear")).toBe("tok_linear")
+    expect(await core.readSecret("linear")).toBe("tok_linear")
     api.state.fail = null
     expect(await core.disconnect("linear")).toEqual({ removedLocal: true, removedRemote: 1, detached: true })
     expect(core.status().providers.find((p) => p.id === "linear")!.state).toBe("not_found")
-    expect(core.readSecret("linear")).toBeUndefined()
+    expect(await core.readSecret("linear")).toBeUndefined()
   })
 
   test("upsertManaged reports when the project is not linked to a workspace", async () => {
@@ -1071,6 +1133,9 @@ describe("workspace connections", () => {
       expect(await core.disconnect("github")).toMatchObject({ removedLocal: true, removedRemote: 0, detached: true })
       await connected("linear", null, { synced: true, connectionId: 3 })
       await expect(core.disconnect("linear")).rejects.toThrow("Could not read your Altimate login")
+      const st = await core.statusRemote()
+      expect(st.workspaceUnchecked).toContain("Could not read your Altimate login")
+      expect(st.providers.find((p) => p.id === "linear")?.state).toBe("connected")
       expect(core.loadStore().providers.linear?.registered).toBe(true)
     } finally {
       login.mockRestore()
@@ -1123,11 +1188,12 @@ describe("backend answers that are not what they should be", () => {
     expect(await answer({ connections: [] }, backend.listOwnConnections)).toEqual([])
   })
 
-  test("a workspace answer that is not a record is an error, one with no integrations is an empty list", async () => {
+  test("a workspace answer that is not a record, or has no integrations list, is an error", async () => {
     await expect(answer(null, (cfg) => backend.getDatamate(cfg, "7"))).rejects.toThrow("without the workspace record")
     await expect(answer({ ok: true }, (cfg) => backend.getDatamate(cfg, "7"))).rejects.toThrow("without the workspace record")
-    expect(await answer({ id: 7, integrations: null }, (cfg) => backend.getDatamate(cfg, "7"))).toMatchObject({ id: "7", integrations: [] })
-    expect(await answer({ datamate: { id: 7, name: "W" } }, (cfg) => backend.getDatamate(cfg, "7"))).toMatchObject({ id: "7", name: "W", integrations: [] })
+    await expect(answer({ id: 7, integrations: null }, (cfg) => backend.getDatamate(cfg, "7"))).rejects.toThrow("not a list")
+    await expect(answer({ datamate: { id: 7, name: "W" } }, (cfg) => backend.getDatamate(cfg, "7"))).rejects.toThrow("not a list")
+    expect(await answer({ id: 7, name: "W", integrations: [] }, (cfg) => backend.getDatamate(cfg, "7"))).toMatchObject({ id: "7", name: "W", integrations: [] })
     for (const integrations of [{ unexpected: true }, "github", 3])
       await expect(answer({ datamate: { id: 7, name: "W", integrations } }, (cfg) => backend.getDatamate(cfg, "7"))).rejects.toThrow("not a list")
   })
@@ -1385,7 +1451,7 @@ describe("credentials flow", () => {
       const r = await creds.setSecretDraft("github", "github_token", { kind: "clipboard" }, clip(`  ghp_abcdefgh_${GOOD}\n`))
       expect(r).toEqual({ provider: "github", field: "github_token", masked: "••••a1b2" })
       expect(JSON.stringify(r)).not.toContain("abcdefgh")
-      expect(core.readSecret(core.secretKey("draft", "github", "github_token"))).toBe(`ghp_abcdefgh_${GOOD}`)
+      expect(await core.readSecret(core.secretKey("draft", "github", "github_token"))).toBe(`ghp_abcdefgh_${GOOD}`)
       expect(fs.existsSync(path.join(tmp, "integrations.json")) ? fs.readFileSync(path.join(tmp, "integrations.json"), "utf8") : "").not.toContain("abcdefgh")
     })
 
@@ -1393,7 +1459,7 @@ describe("credentials flow", () => {
       for (const bad of [undefined, "", "   \n", "two words", "line1\nline2", "short"])
         await expect(creds.setSecretDraft("github", "github_token", { kind: "clipboard" }, clip(bad))).rejects.toThrow("Clipboard doesn't contain a token")
       await expect(creds.setSecretDraft("github", "github_token", { kind: "clipboard" }, clip("a b")).catch((e) => e.message)).resolves.not.toContain("a b")
-      expect(core.readSecret(core.secretKey("draft", "github", "github_token"))).toBeUndefined()
+      expect(await core.readSecret(core.secretKey("draft", "github", "github_token"))).toBeUndefined()
       await expect(creds.setSecretDraft("jira", "jiraEmail", { kind: "clipboard" }, clip("x"))).rejects.toThrow("not a secret")
     })
 
@@ -1527,7 +1593,7 @@ describe("credentials flow", () => {
         await token("github", "github_token")
         const c = await creds.connectCredentials({ id: "github" })
         expect(c.status).toBe("failed")
-        expect(core.readSecret(core.secretKey("draft", "github", "github_token"))).toBe(GOOD)
+        expect(await core.readSecret(core.secretKey("draft", "github", "github_token"))).toBe(GOOD)
       } finally {
         process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = base()
         limited.stop(true)
@@ -1570,15 +1636,15 @@ describe("credentials flow", () => {
       expect(r).toMatchObject({ provider: "github", status: "connected", sync: "local", account: "octo", expiresAt: "2031-01-02T03:04:05.000Z" })
       expect(calls.slice(before).map((c) => c.path)).toEqual(["/user", "/connections/"])
       expect(synced()).toEqual([])
-      expect(core.readSecret(core.secretKey("cred", "github", "github_token"))).toBe(GOOD)
-      expect(core.readSecret("github")).toBe(GOOD)
-      expect(core.readSecret(core.secretKey("draft", "github", "github_token"))).toBeUndefined()
+      expect(await core.readSecret(core.secretKey("cred", "github", "github_token"))).toBe(GOOD)
+      expect(await core.readSecret("github")).toBe(GOOD)
+      expect(await core.readSecret(core.secretKey("draft", "github", "github_token"))).toBeUndefined()
       const rec = core.loadStore().providers.github!
       expect([rec.registered, rec.synced, rec.rejected, rec.account, typeof rec.validatedAt]).toEqual([true, false, false, "octo", "string"])
       expect(JSON.stringify(rec)).not.toContain(GOOD)
       const p = core.status().providers[0]
       expect([p.state, p.sync, p.account, p.expiresAt]).toEqual(["connected", "blocked", "octo", "2031-01-02T03:04:05.000Z"])
-      expect(core.readSecret("github")).toBeTruthy()
+      expect(await core.readSecret("github")).toBeTruthy()
     })
 
     test("a 2xx without an account is not accepted as a valid credential", async () => {
@@ -1638,8 +1704,8 @@ describe("credentials flow", () => {
       expect([r.status, r.sync]).toEqual(["rejected", "local"])
       expect(r.message).toContain("GitHub rejected the token (401)")
       expect(core.loadStore().providers.github?.registered).toBeUndefined()
-      expect(core.readSecret("github")).toBeUndefined()
-      expect(core.readSecret(core.secretKey("draft", "github", "github_token"))).toBeUndefined()
+      expect(await core.readSecret("github")).toBeUndefined()
+      expect(await core.readSecret(core.secretKey("draft", "github", "github_token"))).toBeUndefined()
       expect(core.status().providers[0].state).toBe("not_found")
     })
 
@@ -1698,7 +1764,7 @@ describe("credentials flow", () => {
         const r = await creds.connectCredentials({ id: "github", localOnly: true })
         expect([r.status, r.sync, core.isBlocked("github")]).toEqual(["failed", "synced", true])
         expect(r.message).toContain("could not be removed from the workspace")
-        expect(core.readSecret("github")).toBeTruthy()
+        expect(await core.readSecret("github")).toBeTruthy()
       } finally {
         failing.mockRestore()
       }
@@ -1792,7 +1858,7 @@ describe("credentials flow", () => {
       } finally {
         store.mockRestore()
       }
-      expect(core.readSecret(core.secretKey("cred", "jira", "jiraApiToken"))).toBe("old-token")
+      expect(await core.readSecret(core.secretKey("cred", "jira", "jiraApiToken"))).toBe("old-token")
     })
 
     test("a catalog that omits the secret flags still treats the built-in secret fields as secret", () => {
@@ -1831,7 +1897,7 @@ describe("credentials flow", () => {
         expect(r.message).toContain("not verified yet")
         const p = core.status().providers[0]
         expect([p.state, p.note]).toEqual(["connected", "not verified yet, the provider could not be reached"])
-        expect(core.readSecret("github")).toBeTruthy()
+        expect(await core.readSecret("github")).toBeTruthy()
       } finally {
         down.stop(true)
         process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = base()
@@ -1850,7 +1916,7 @@ describe("credentials flow", () => {
         const r = await creds.connectCredentials({ id: "github", localOnly })
         expect([r.status, r.message]).toEqual(["failed", "The connection changed while it was being checked, run it again."])
         expect(synced()).toEqual([])
-        expect(core.readSecret(core.secretKey("cred", "github", "github_token"))).toBeUndefined()
+        expect(await core.readSecret(core.secretKey("cred", "github", "github_token"))).toBeUndefined()
         expect(calls.slice(before).some((c) => c.method !== "GET" && c.path.startsWith("/connections"))).toBe(false)
         onUser = null
         core.saveStore({ blocked: {}, providers: {} })
@@ -1884,7 +1950,7 @@ describe("credentials flow", () => {
         expect([r.status, r.sync]).toEqual(["connected", "local"])
         expect(r.message).toContain("The previous credential could not be removed from this machine: keychain locked")
         expect(core.loadStore().providers.github?.registered).toBe(true)
-        expect(core.readSecret(core.secretKey("cred", "github", "github_token"))).toBe(GOOD)
+        expect(await core.readSecret(core.secretKey("cred", "github", "github_token"))).toBe(GOOD)
       } finally {
         purge.mockRestore()
       }
@@ -1901,6 +1967,7 @@ describe("credentials flow", () => {
       try {
         const same = await creds.connectCredentials({ id: "github", localOnly: true })
         expect(same.message).toContain("not verified yet")
+        expect(same.expiresAt).toBe(known)
         expect(core.loadStore().providers.github?.expiresAt).toBe(known)
         await token("github", "github_token", "another_token_c3d4")
         await creds.connectCredentials({ id: "github", localOnly: true })
@@ -1966,9 +2033,9 @@ describe("credentials flow", () => {
       await core.storeSecret(core.secretKey("draft", "jira", "customSecret"), "pasted_for_custom_field")
       await creds.discardDrafts("github")
       await creds.discardDrafts("jira")
-      expect(core.readSecret(core.secretKey("draft", "jira", "customSecret"))).toBeUndefined()
-      expect(core.readSecret(core.secretKey("draft", "github", "github_token"))).toBeUndefined()
-      expect(core.readSecret(core.secretKey("draft", "jira", "jiraApiToken"))).toBeUndefined()
+      expect(await core.readSecret(core.secretKey("draft", "jira", "customSecret"))).toBeUndefined()
+      expect(await core.readSecret(core.secretKey("draft", "github", "github_token"))).toBeUndefined()
+      expect(await core.readSecret(core.secretKey("draft", "jira", "jiraApiToken"))).toBeUndefined()
       expect(core.loadStore().providers.jira?.drafts).toBeUndefined()
     })
 
@@ -1983,7 +2050,7 @@ describe("credentials flow", () => {
       expect(sent).toHaveLength(1)
       expect(sent[0]).toMatchObject({ method: "POST", path: "/connections/" })
       expect(sent[0].body).toEqual({ name: `Jira (from ${os.hostname()})`, integration_id: "jira", config: { jiraDomain: "acme", jiraEmail: "me@acme.com", jiraApiToken: GOOD } })
-      expect(core.readSecret("jira")).toBeUndefined()
+      expect(await core.readSecret("jira")).toBeUndefined()
       expect(core.loadStore().providers.jira).toMatchObject({ registered: true, synced: true, connectionId: 21 })
     })
 
@@ -2006,8 +2073,8 @@ describe("credentials flow", () => {
       expect(synced().map((c) => c.method)).toEqual(["POST", "DELETE"])
       expect(api.state.rows.filter((x) => !x.deleted)).toHaveLength(0)
       expect(core.loadStore().providers.linear?.registered).toBeUndefined()
-      expect(core.readSecret(core.secretKey("draft", "linear", "linearApiKey"))).toBeUndefined()
-      expect(core.readSecret(core.secretKey("cred", "linear", "linearApiKey"))).toBeUndefined()
+      expect(await core.readSecret(core.secretKey("draft", "linear", "linearApiKey"))).toBeUndefined()
+      expect(await core.readSecret(core.secretKey("cred", "linear", "linearApiKey"))).toBeUndefined()
       expect(core.status().providers[2].state).not.toBe("connected")
     })
 
@@ -2021,7 +2088,7 @@ describe("credentials flow", () => {
       expect([bad.status, bad.sync]).toEqual(["rejected", "synced"])
       expect(bad.message).toContain("marked it invalid")
       expect(api.state.rows.filter((x) => !x.deleted)).toHaveLength(1)
-      expect(core.readSecret(core.secretKey("draft", "linear", "linearApiKey"))).toBeUndefined()
+      expect(await core.readSecret(core.secretKey("draft", "linear", "linearApiKey"))).toBeUndefined()
       expect(core.status().providers[2].state).toBe("rejected")
       api.state.valid = true
       await token("linear", "linearApiKey")
@@ -2104,10 +2171,10 @@ describe("credentials flow", () => {
       const r = await creds.connectCredentials({ id: "github", localOnly: true })
       expect([r.status, r.sync]).toEqual(["connected", "local"])
       expect(api.state.rows.filter((x) => !x.deleted)).toHaveLength(0)
-      expect(core.readSecret(core.secretKey("cred", "github", "github_token"))).toBe(GOOD)
+      expect(await core.readSecret(core.secretKey("cred", "github", "github_token"))).toBe(GOOD)
       const s = await core.statusRemote()
       expect([s.providers[0].state, s.providers[0].sync]).toEqual(["connected", "blocked"])
-      expect(core.readSecret("github")).toBeTruthy()
+      expect(await core.readSecret("github")).toBeTruthy()
     })
 
     test("keeping a synced connection local while signed out changes nothing", async () => {
@@ -2162,7 +2229,7 @@ describe("credentials flow", () => {
       expect([r.status, r.sync]).toEqual(["connected", "local"])
       expect(api.state.rows.filter((x) => !x.deleted)).toHaveLength(0)
       expect(core.isBlocked("github")).toBe(true)
-      expect(core.readSecret("github")).toBeTruthy()
+      expect(await core.readSecret("github")).toBeTruthy()
     })
 
     test("Keep local on a local record finds a workspace copy uploaded after it was recorded", async () => {
@@ -2187,7 +2254,7 @@ describe("credentials flow", () => {
       const r = await creds.connectCredentials({ id: "jira" })
       expect(r.status).toBe("rejected")
       expect(core.loadStore().providers.jira?.drafts).toEqual({ jiraDomain: "acme", jiraEmail: "me@acme.com" })
-      expect(core.readSecret(core.secretKey("draft", "jira", "jiraApiToken"))).toBeUndefined()
+      expect(await core.readSecret(core.secretKey("draft", "jira", "jiraApiToken"))).toBeUndefined()
     })
 
     test("a clipboard URL is not taken as a token", async () => {
@@ -2202,7 +2269,7 @@ describe("credentials flow", () => {
       api.state.fail = { status: 500, body: { detail: "boom" } }
       const o = await core.syncProvider("github")
       expect(o.result).toBe("failed")
-      expect(core.readSecret("github")).toBeTruthy()
+      expect(await core.readSecret("github")).toBeTruthy()
     })
 
     test("a hand-made connection cannot be updated from here", async () => {
@@ -2234,8 +2301,8 @@ describe("credentials flow", () => {
       await token("github", "github_token")
       await creds.connectCredentials({ id: "github", localOnly: true })
       await core.disconnect("github")
-      expect(core.readSecret(core.secretKey("cred", "github", "github_token"))).toBeUndefined()
-      expect(core.readSecret("github")).toBeUndefined()
+      expect(await core.readSecret(core.secretKey("cred", "github", "github_token"))).toBeUndefined()
+      expect(await core.readSecret("github")).toBeUndefined()
     })
   })
 
@@ -2246,8 +2313,8 @@ describe("credentials flow", () => {
       await token("github", "github_token", "bad_token_0000")
       expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("rejected")
       expect(core.status().providers[0].state).toBe("connected")
-      expect(core.readSecret("github")).toBeTruthy()
-      expect(core.readSecret(core.secretKey("draft", "github", "github_token"))).toBeUndefined()
+      expect(await core.readSecret("github")).toBeTruthy()
+      expect(await core.readSecret(core.secretKey("draft", "github", "github_token"))).toBeUndefined()
     })
 
     test("a stored credential the provider now refuses is rejected until it is updated", async () => {
@@ -2382,6 +2449,22 @@ describe("attach keeps another connection", () => {
       for (const sp of spies) sp.mockRestore()
     }
   })
+  test("attach is an error when the workspace catalog has no entry for the provider", async () => {
+    const spies = [
+      spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS" } } as any),
+      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, integrations: [] } as any),
+      spyOn(backend, "integrationsCatalog").mockResolvedValue([{ id: "somethingelse", tools: [] }] as any),
+      spyOn(backend, "listVisibleConnections").mockResolvedValue([] as any),
+    ]
+    const update = spyOn(backend, "updateDatamateIntegrations").mockResolvedValue(undefined as any)
+    try {
+      const cfg = { url: "http://x", tenant: "t", token: "k" } as any
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toEqual({ error: expect.stringContaining("no entry for Jira") })
+      expect(update).not.toHaveBeenCalled()
+    } finally {
+      for (const sp of [...spies, update]) sp.mockRestore()
+    }
+  })
   test("attach reports when the workspace kept its own connection", async () => {
     const spies = [
       spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS" } } as any),
@@ -2399,6 +2482,23 @@ describe("attach keeps another connection", () => {
   test("detach leaves an entry on another connection alone", () => {
     const out = core.detachFromIntegrations([{ id: "jira", tools: [], connection_id: "3" }], 9)
     expect(out[0].connection_id).toBe("3")
+  })
+})
+
+describe("collectConfig", () => {
+  test("an optional secret with no stored value is left out; a required one is needed", async () => {
+    const catalog = spyOn(creds, "loadCatalog").mockResolvedValue([
+      { id: "v", label: "V", fields: [{ name: "plain", label: "P", secret: false, required: true }, { name: "must", label: "M", secret: true, required: true }, { name: "extra", label: "E", secret: true, required: false }] },
+    ] as any)
+    try {
+      const rec = { registered: true, variant: "v", values: { plain: "p" }, secretFields: ["must", "extra"] } as any
+      await core.storeSecret(core.secretKey("cred", "github", "must"), "m1")
+      expect(await core.collectConfig("github", rec)).toEqual({ config: { plain: "p", must: "m1" } })
+      await core.deleteSecret(core.secretKey("cred", "github", "must"))
+      expect(await core.collectConfig("github", rec)).toEqual({ reason: "no local credential to upload" })
+    } finally {
+      catalog.mockRestore()
+    }
   })
 })
 

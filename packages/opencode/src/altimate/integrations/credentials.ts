@@ -261,13 +261,13 @@ export async function resolve(id: ProviderId, variantId?: string, offline = fals
   const foundFrom: Record<string, Source> = {}
   const notes: Record<string, string> = {}
   for (const f of def.fields) {
-    const draft = detectedOnly ? undefined : f.secret ? core.readSecret(core.secretKey("draft", id, f.name)) : rec?.drafts?.[f.name]
+    const draft = detectedOnly ? undefined : f.secret ? await core.readSecret(core.secretKey("draft", id, f.name)) : rec?.drafts?.[f.name]
     if (draft) {
       values[f.name] = f.name === "jiraDomain" ? core.normaliseJiraDomain(draft) : draft
       origin[f.name] = "draft"
       continue
     }
-    const stored = detectedOnly ? undefined : f.secret ? core.readSecret(core.secretKey("cred", id, f.name)) : rec?.values?.[f.name]
+    const stored = detectedOnly ? undefined : f.secret ? await core.readSecret(core.secretKey("cred", id, f.name)) : rec?.values?.[f.name]
     if (stored) {
       values[f.name] = f.name === "jiraDomain" ? core.normaliseJiraDomain(stored) : stored
       origin[f.name] = "stored"
@@ -679,7 +679,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       const written = new Set<string>()
       const undo: [string, string | undefined][] = []
       const put = async (key: string, value: string) => {
-        undo.push([key, core.readSecret(key)])
+        undo.push([key, await core.readSecret(key)])
         await core.storeSecret(key, value)
       }
       try {
@@ -725,7 +725,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         detachNote ? `Could not detach it from the linked workspace: ${detachNote}` : null,
       ].filter(Boolean)
       // A workspace copy that could not be removed means the move is not done: it is reported as failed, and connecting again with --local-only retries the removal.
-      return { ...base, provider: id, status: removeFailure ? "failed" : "connected", sync: removeFailure ? "synced" : "local", account: check.account, expiresAt: check.expiresAt, message: notes.length ? notes.join(" ") : null }
+      return { ...base, provider: id, status: removeFailure ? "failed" : "connected", sync: removeFailure ? "synced" : "local", account: check.account, expiresAt: common.expiresAt ?? null, message: notes.length ? notes.join(" ") : null }
     })
   }
 
@@ -740,7 +740,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       if (core.isBlocked(id)) return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: "Sync is blocked for this provider, kept local." })
       const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config))
       if (!res.isValid) {
-        const rejected = (sync: "synced" | "local"): CredentialResult => ({ ...base, provider: id, status: "rejected", sync, account: check.account, expiresAt: check.expiresAt, message: core.rejectionMessage(res) })
+        const rejected = (sync: "synced" | "local"): CredentialResult => ({ ...base, provider: id, status: "rejected", sync, account: check.account, expiresAt: common.expiresAt ?? null, message: core.rejectionMessage(res) })
         // An existing connection was updated in place and cannot be reverted, so it stays marked rejected for update to fix; the local copy of a local credential is untouched.
         if (!res.created && !(rec?.registered && !rec.synced)) {
           await finish(true, { connectionId: res.connectionId, rejected: true })
@@ -764,7 +764,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       try {
         await record(true, { connectionId: res.connectionId })
       } catch (e) {
-        return { ...base, provider: id, status: "failed", sync: "synced", account: check.account, expiresAt: check.expiresAt, message: core.RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Connect again") }
+        return { ...base, provider: id, status: "failed", sync: "synced", account: check.account, expiresAt: common.expiresAt ?? null, message: core.RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Connect again") }
       }
       let leftover: string | null = null
       try {
@@ -775,7 +775,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}`
       }
       const message = [workspaceNote(res.workspace), leftover].filter(Boolean).join(" ") || null
-      return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: check.expiresAt, message }
+      return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: common.expiresAt ?? null, message }
     })
   } catch (e) {
     return local({ status: "failed", sync: "local", message: e instanceof Error ? e.message : String(e) })

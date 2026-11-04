@@ -182,9 +182,9 @@ export async function getDatamate(cfg: BackendConfig, id: string): Promise<Datam
   }
   // An answer that is not a workspace record is an error: building the next list from it could drop the workspace's integrations.
   if (!isObject(d) || (d.id == null && d.name == null && !("integrations" in d))) throw new BackendError("The Altimate API answered without the workspace record", 200, null)
-  // Null or absent means none; any other non-list is not read as empty, since the list is written back whole.
-  if (d.integrations != null && !Array.isArray(d.integrations)) throw new BackendError("The Altimate API answered with workspace integrations that are not a list", 200, null)
-  return { ...d, id: String(d.id ?? id), name: d.name ?? "", integrations: Array.isArray(d.integrations) ? d.integrations : [] }
+  // The list is required in the workspace record and written back whole, so a missing or null one is as malformed as a non-list.
+  if (!Array.isArray(d.integrations)) throw new BackendError("The Altimate API answered with workspace integrations that are not a list", 200, null)
+  return { ...d, id: String(d.id ?? id), name: d.name ?? "", integrations: d.integrations }
 }
 /** Replaces the workspace's whole integrations list. */
 export const updateDatamateIntegrations = (cfg: BackendConfig, id: string, integrations: DatamateIntegrationEntry[]) =>
