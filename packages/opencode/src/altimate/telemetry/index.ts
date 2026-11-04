@@ -2465,7 +2465,7 @@ export namespace Telemetry {
       // (previously only wired in test fixtures, silent no-op in product).
       if (Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")) {
         buffer = []
-        void recordOptOut("env")
+        optOutSend = recordOptOut("env")
         return
       }
       // Config.get() may throw outside Instance context (e.g. CLI middleware
@@ -2478,14 +2478,14 @@ export namespace Telemetry {
         const userConfig = (await Config.get()) as any
         if (userConfig.telemetry?.disabled) {
           buffer = []
-          void recordOptOut("config")
+          optOutSend = recordOptOut("config")
           return
         }
       } catch {
         const state = await TelemetryConfig.disabledState(configDirectory)
         if (state === "disabled") {
           buffer = []
-          void recordOptOut("config")
+          optOutSend = recordOptOut("config")
           return
         }
         configUnreadable = state === "unreadable"
@@ -2646,6 +2646,9 @@ export namespace Telemetry {
   // again next time; after the marker, nothing is sent until telemetry is re-enabled. Not awaited:
   // an opted-out launch must not wait on the network.
   const OPT_OUT_TIMEOUT_MS = 3_000
+  // The launch does not wait for the send, but shutdown does (bounded), so a short command such as
+  // `tool run` records the marker instead of sending the event again on every later launch.
+  let optOutSend: Promise<void> | undefined
   let optOutUnderTestRunner = false
   /** Test seam: let a suite that redirects the home directory exercise recordOptOut(). */
   export function allowOptOutUnderTestRunner(on: boolean) {
@@ -3048,6 +3051,15 @@ export namespace Telemetry {
         // init failed — nothing to flush
       }
     }
+    // altimate_change start — let an opted-out launch's final event finish before the process exits
+    if (optOutSend) {
+      const send = optOutSend
+      optOutSend = undefined
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([send, new Promise<void>((resolve) => (timer = setTimeout(resolve, Math.min(timeoutMs ?? OPT_OUT_TIMEOUT_MS, OPT_OUT_TIMEOUT_MS))))])
+      if (timer) clearTimeout(timer)
+    }
+    // altimate_change end
     // altimate_change — first-run health: stop the stall monitor only once init has settled, so a
     // shutdown that overlaps init cannot be undone by doInit() starting the monitor afterwards.
     stopLoopMonitor()
