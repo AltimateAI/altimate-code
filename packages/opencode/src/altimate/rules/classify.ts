@@ -17,8 +17,9 @@ export type Kind = "rule" | "memory" | "ambiguous"
 const ASKED_RULE = /\bas\s+a\s+(?:team\s+)?rule\b/i
 // Only the named forms: a bare "for me" opens ordinary requests ("fix this model for me"), and "in memory" describes
 // data ("never load the fact table in memory"). "Just for me" always names a personal scope; "remember … for me" only
-// within one clause, so a later "for me" does not turn a team instruction into a memory.
-const ASKED_MEMORY = /\bas\s+a\s+memory\b|\bin\s+my\s+memory\b|\bjust\s+for\s+me\b|\bremember\b[^.!?\n,;:]*\bfor\s+me\b/i
+// within one clause, so a later "for me" does not turn a team instruction into a memory. The clause scan is bounded:
+// unbounded, every "remember" rescans to the clause end, and a long text takes seconds.
+const ASKED_MEMORY = /\bas\s+a\s+memory\b|\bin\s+my\s+memory\b|\bjust\s+for\s+me\b|\bremember\b[^.!?\n,;:]{0,300}\bfor\s+me\b/i
 
 // "I want …" / "I like …" open many ordinary requests ("I want staging models in models/staging"): on its own
 // that is not enough to file a team convention as a personal memory, so it only makes the text ambiguous.
@@ -27,9 +28,9 @@ const WEAK_MEMORY = /\bi\s+(?:like|want)\b/i
 const MEMORY_CUES: readonly [RegExp, string][] = [
   [/\bi\s+(?:prefer|usually|tend to)\b/i, "a personal preference"],
   [/\bmy\s+(?:preference|style|default|setup|machine|laptop)\b/i, "a personal preference"],
-  [/\bremember\s+(?:that|our|the)\b(?!.*\b(?:always|never|must)\b)/i, "a fact to remember"],
+  [/\bremember\s+(?:that|our|the)\b(?!.{0,2000}\b(?:always|never|must)\b)/i, "a fact to remember"],
   [/\b(?:our|the)\s+(?:warehouse|database|account|cluster|stack|region|team|company|org)\s+(?:is|uses|runs|lives)\b/i, "a fact about the environment"],
-  [/\b[A-Z]{2,}\s+(?:means|stands for|is short for)\b|\bmeans\b.*\b(?:revenue|users?|customers?|metric)\b/, "a glossary term"],
+  [/\b[A-Z]{2,}\s+(?:means|stands for|is short for)\b|\bmeans\b.{0,500}\b(?:revenue|users?|customers?|metric)\b/, "a glossary term"],
 ]
 
 const RULE_CUES: readonly [RegExp, string][] = [
