@@ -218,7 +218,7 @@ export const SqlExecuteTool = Tool.define(
             const warehouse = args.warehouse || Registry.list().warehouses[0]?.name
             // An omitted warehouse tries dbt before the registry fallback, so the SQL is read in
             // every dialect it can reach; it counts as a write, or blocked, if any of them says so.
-            const target = args.warehouse ? undefined : await defaultTarget()
+            const target = args.warehouse ? undefined : await defaultTarget(ctx.extra?.forceReadOnly === true)
             const dialects = args.warehouse
               ? [Registry.canonicalType(Registry.getConfig(args.warehouse)?.type) ?? undefined]
               : target!.dialects
@@ -267,7 +267,12 @@ export const SqlExecuteTool = Tool.define(
                 permission: "sql_execute_write",
                 patterns: [sql.slice(0, 200)],
                 always: ["*"],
-                metadata: { queryType, warehouse: args.warehouse || target?.warehouse, ...(parseError && { parseError }) },
+                metadata: {
+                  queryType,
+                  warehouse: args.warehouse || target?.warehouse,
+                  hardDenyChecked: true,
+                  ...(parseError && { parseError }),
+                },
               })
             }
             // altimate_change end
@@ -660,20 +665,31 @@ function resolveStepRefs(
   })
 }
 
-/** Where a call without `warehouse` can run: a dbt project's adapter, or the registry's first
- * warehouse (also dbt's fallback). Its SQL is read in every dialect that can apply: always the
- * generic lexing (a dbt adapter's type may be unknown), the registry warehouse's, and the dbt
- * manifest's adapter type. Read without starting dbt or loading the handlers. The registry
- * warehouse's name is returned when no dbt project can take the call. */
-async function defaultTarget(): Promise<{ dialects: (string | undefined)[]; warehouse?: string }> {
+/** Where a call without `warehouse` can run, and so the dialects its SQL is read in: the registry's
+ * first warehouse, and dbt first when it can take the call (a dbt project, and not a forced
+ * read-only call, which sql.execute never sends to dbt). dbt's dialects are its manifest's adapter
+ * type and every target of the project's profile; when the profile's targets cannot be read, or one
+ * is an adapter with no supported dialect, every supported dialect and the generic lexing count.
+ * Read without starting dbt or loading the handlers. The registry warehouse is named for the ask. */
+async function defaultTarget(forceReadOnly: boolean): Promise<{ dialects: (string | undefined)[]; warehouse?: string }> {
   const fallback = Registry.list().warehouses[0] // before any await, as the call resolves it now
-  const { dbtProjectAdapterType } = await import("../native/connections/dbt-adapter-type")
-  const dbt = await dbtProjectAdapterType()
-  const dialects = [
-    ...new Set([undefined, ...[fallback?.type, dbt.type].map((type) => (type ? (Registry.canonicalType(type) ?? undefined) : undefined))]),
-  ]
-  return { dialects, ...(!dbt.project && fallback && { warehouse: fallback.name }) }
+  const dialectOf = (type?: string) => (type ? (Registry.canonicalType(type) ?? undefined) : undefined)
+  const dialects: (string | undefined)[] = fallback ? [dialectOf(fallback.type)] : []
+  if (!forceReadOnly) {
+    const { dbtProjectAdapterType } = await import("../native/connections/dbt-adapter-type")
+    const dbt = await dbtProjectAdapterType()
+    if (dbt.project) {
+      const types = [dbt.type, ...dbt.targetTypes].filter((type): type is string => Boolean(type))
+      const known = types.map(dialectOf)
+      dialects.push(...known.filter(Boolean))
+      // An unreadable profile, or an adapter with no supported dialect (synapse, materialize...).
+      if (!dbt.targetTypes.length || known.includes(undefined)) dialects.push(...EVERY_DIALECT, undefined)
+    }
+  }
+  return { dialects: dialects.length ? [...new Set(dialects)] : [undefined], ...(fallback && { warehouse: fallback.name }) }
 }
+
+const EVERY_DIALECT = ["postgres", "redshift", "duckdb", "snowflake", "bigquery", "mysql", "sqlserver", "databricks", "clickhouse", "oracle", "trino", "sqlite"]
 
 /** The classification under every dialect: a write if any reads it as one, blocked if any blocks it. */
 function classifyEvery(sql: string, dialects: (string | undefined)[]) {

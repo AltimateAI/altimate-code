@@ -6,6 +6,7 @@ import path from "node:path"
 import { Delivery } from "../../../src/altimate/learn/delivery"
 import { canonical, type Lesson } from "../../../src/altimate/learn/lesson"
 import * as Store from "../../../src/altimate/learn/store"
+import { Telemetry } from "../../../src/altimate/telemetry"
 
 let root: string
 const NAME = "team-playbook"
@@ -481,4 +482,110 @@ test("resuming a synthetic continuation restores the section without preparing a
   expect(await resumed.section("session")).toBe(first.section)
   expect(resumed.active).toBe(true)
   expect(await log()).toHaveLength(2)
+})
+
+test("rules added to a session are reported by tier, as counts only; a cached answer adds nothing", async () => {
+  await approve()
+  const events: Telemetry.Event[] = []
+  const spy = spyOn(Telemetry, "track").mockImplementation((event: Telemetry.Event) => void events.push(event))
+  try {
+    const delivery = new Delivery(root, limits)
+    await delivery.prepare("session", "first", "billing")
+    await delivery.prepare("session", "second", "shipping")
+    await delivery.prepare("session", "second", "shipping")
+  } finally {
+    spy.mockRestore()
+  }
+  const delivered = events.filter((e): e is Extract<Telemetry.Event, { type: "rules_delivered" }> => e.type === "rules_delivered")
+  expect(delivered.map((e) => [e.tier, e.rules, e.team_rules, e.session_rules, e.budget_tokens])).toEqual([
+    ["start", 2, 0, 2, 500],
+    ["request", 1, 0, 3, 500],
+  ])
+  expect(delivered[1].chars).toBe("Use the `shipping` route for parcel tracking.".length)
+  expect(JSON.stringify(events)).not.toContain("shipping")
+})
+
+test("a resumed session keeps a team rule only while it is still in the mirror; an edit keeps its frozen wording", async () => {
+  await approve([lesson("L-0301", "Keep the project rules explicit.", { pinned: true })])
+  await approve([lesson("L-0302", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
+  const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+  try {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    const first = await new Delivery(root, { ...limits, core_lessons: 2 }).prepare("kept", "first", "staging")
+    expect(first.section).toContain("Name staging models stg_<source>.")
+    // An approved edit keeps the rule's id: the session keeps the wording it was shown.
+    await approve([lesson("L-0302", "Name staging models stg_<source>__<entity>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
+    expect(await new Delivery(root, { ...limits, core_lessons: 2 }).section("kept")).toBe(first.section)
+    // Signed out, unlinked or another workspace: the mirror no longer holds it, so the cached section is not served.
+    await approve([], Store.WORKSPACE_RULES_STORE)
+    const gone = new Delivery(root, { ...limits, core_lessons: 2 })
+    expect(await gone.section("kept")).not.toContain("Name staging models")
+    expect((await gone.prepare("kept", "first", "staging")).section).not.toContain("Name staging models")
+  } finally {
+    if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+  }
+})
+
+test("a mirror that cannot be read keeps a resumed session's cached team rules", async () => {
+  await approve([lesson("L-0401", "Keep the project rules explicit.", { pinned: true })])
+  await approve([lesson("L-0402", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
+  const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+  try {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    const first = await new Delivery(root, { ...limits, core_lessons: 2 }).prepare("unreadable", "first", "staging")
+    expect(first.section).toContain("Name staging models")
+    await fs.writeFile(Store.paths(root, Store.WORKSPACE_RULES_STORE).approved, "{ not json")
+    expect(await new Delivery(root, { ...limits, core_lessons: 2 }).section("unreadable")).toBe(first.section)
+  } finally {
+    if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+  }
+})
+
+test("a resumed session shown team rules drops them while workspaces are off", async () => {
+  await approve([lesson("L-0201", "Keep the project rules explicit.", { pinned: true })])
+  await approve([lesson("L-0202", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
+  const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+  try {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    const on = await new Delivery(root, { ...limits, core_lessons: 2 }).prepare("resumed", "first", "staging")
+    expect(on.section).toContain("Name staging models")
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    const off = new Delivery(root, { ...limits, core_lessons: 2 })
+    // The cached section is not served; the next request rebuilds it without the team rule.
+    expect(await off.section("resumed")).not.toContain("Name staging models")
+    const again = await off.prepare("resumed", "first", "staging")
+    expect(again.section).not.toContain("Name staging models")
+    expect(again.section).toContain("Keep the project rules explicit")
+  } finally {
+    if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+  }
+})
+
+test("rules from the workspace-rules store are counted as team rules, and are not delivered with workspaces off", async () => {
+  await approve([lesson("L-0101", "Keep the project rules explicit.", { pinned: true })])
+  await approve([lesson("L-0102", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
+  const delivered = async (session: string) => {
+    const events: Telemetry.Event[] = []
+    const spy = spyOn(Telemetry, "track").mockImplementation((event: Telemetry.Event) => void events.push(event))
+    try {
+      await new Delivery(root, { ...limits, core_lessons: 2 }).prepare(session, "first", "staging")
+    } finally {
+      spy.mockRestore()
+    }
+    return events.find((e): e is Extract<Telemetry.Event, { type: "rules_delivered" }> => e.type === "rules_delivered")
+  }
+  const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+  try {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    expect(await delivered("on")).toMatchObject({ tier: "start", rules: 2, team_rules: 1 })
+    // The last pulled team rules are not delivered while workspaces are turned off; the person's own rules are.
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    expect(await delivered("off")).toMatchObject({ tier: "start", rules: 1, team_rules: 0 })
+  } finally {
+    if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+  }
 })

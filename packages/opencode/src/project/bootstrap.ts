@@ -146,6 +146,12 @@ const runBootstrap = Effect.gen(function* () {
     }
   }
   // altimate_change end
+  // altimate_change start — workspace rules: sync approved rules, gate capture on the workspace's
+  // "Learn from sessions", and propose rules from corrections (fail-safe, never throws)
+  yield* Effect.promise(() =>
+    Instance.restore(ctx, () => import("../altimate/rules/service").then((m) => m.start(ctx))),
+  ).pipe(Effect.catchCause((cause) => Effect.logWarning("rules service startup failed", cause)))
+  // altimate_change end
 
   const projectID = ctx.project.id
   yield* Stream.runForEach(events.subscribe(Command.Event.Executed), (payload) =>

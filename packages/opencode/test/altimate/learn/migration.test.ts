@@ -206,7 +206,7 @@ test("a rebuilt journal is durable before legacy quarantine begins", async () =>
   expect(files.filter((file) => file.startsWith("candidate.md.malformed-"))).toHaveLength(1)
 })
 
-test("long imported approved and candidate lessons are grandfathered, edits must shorten them", async () => {
+test("long imported approved and candidate rules are grandfathered, edits must shorten them", async () => {
   await using tmp = await tmpdir()
   const long = "Use the exact identifier `created_at` for event timestamps and preserve its source timezone when transforming records for reporting purposes. Always document units."
   expect(long.length).toBeGreaterThan(140)
