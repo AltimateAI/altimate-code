@@ -42,6 +42,7 @@ const SYNC_LABEL: Record<ProviderStatus["sync"], string> = {
 function printStatus(result: StatusResult, title: string) {
   out()
   out(`${S.TEXT_HIGHLIGHT_BOLD}◆ ${title}${S.TEXT_NORMAL}  ${S.TEXT_DIM}${result.workspace.linked ? `workspace ${clean(result.workspace.name)}` : "workspace not linked"}${result.workspace.tenant ? ` (${clean(result.workspace.tenant)})` : ""}${S.TEXT_NORMAL}`)
+  if (result.workspaceUnchecked) out(`  ${S.TEXT_WARNING}Could not check the workspace, so these states come from this machine and may be out of date: ${clean(result.workspaceUnchecked)}${S.TEXT_NORMAL}`)
   out()
   for (const p of result.providers) {
     const v = STATE_VIEW[p.state]
@@ -184,11 +185,12 @@ const DisconnectCommand = cmd({
   handler: async (args) => {
     try {
       const id = parseProviders(args.provider, false)[0]
-      const { removedLocal, removedRemote, detached, detachMessage } = await core.disconnect(id)
+      const { removedLocal, removedRemote, detached, detachMessage, workspaceUnchecked } = await core.disconnect(id)
       const removed = removedLocal || removedRemote > 0
-      if (args.json) return json({ provider: id, status: "disconnected", removed, removedFromWorkspace: removedRemote, detached, ...(detachMessage ? { message: `Could not detach it from the linked workspace: ${detachMessage}` } : {}) })
+      if (args.json) return json({ provider: id, status: "disconnected", removed, removedFromWorkspace: removedRemote, detached, ...(workspaceUnchecked ? { workspaceChecked: false, workspaceNote: `The workspace was not checked for a copy of this connection: ${workspaceUnchecked}` } : {}), ...(detachMessage ? { message: `Could not detach it from the linked workspace: ${detachMessage}` } : {}) })
       out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${core.PROVIDER_NAMES[id]} disconnected${removed ? "" : S.TEXT_DIM + " (nothing was stored)" + S.TEXT_NORMAL}`)
-      if (!detached) out(`  ${S.TEXT_WARNING}Could not detach it from the linked workspace: ${detachMessage}. Check the workspace's integrations.${S.TEXT_NORMAL}`)
+      if (workspaceUnchecked) out(`  ${S.TEXT_WARNING}The workspace was not checked for a copy of this connection (${clean(workspaceUnchecked)}). Sign in and disconnect again to remove it.${S.TEXT_NORMAL}`)
+      if (!detached) out(`  ${S.TEXT_WARNING}Could not detach it from the linked workspace: ${clean(detachMessage)}. Check the workspace's integrations.${S.TEXT_NORMAL}`)
     } catch (e) {
       fail(e, args.json)
     }
@@ -302,7 +304,7 @@ const SetSecretCommand = cmd({
       const source: creds.SecretSource = args["from-clipboard"] ? { kind: "clipboard" } : args["from-env"] ? { kind: "env", name: args["from-env"] } : { kind: "stdin" }
       const r = await creds.setSecretDraft(id, String(args.field), source)
       if (args.json) return json(r)
-      out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${core.PROVIDER_NAMES[id]} ${r.field} saved ${S.TEXT_DIM}${r.masked}${S.TEXT_NORMAL}`)
+      out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${core.PROVIDER_NAMES[id]} ${r.field} saved ${S.TEXT_DIM}${clean(r.masked)}${S.TEXT_NORMAL}`)
     } catch (e) {
       fail(e, args.json)
     }

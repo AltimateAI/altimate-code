@@ -129,14 +129,17 @@ async function call<T>(cfg: BackendConfig, method: string, path: string, body?: 
 
 /** Every connection the caller can see, their own and those shared with them. */
 export async function listVisibleConnections(cfg: BackendConfig): Promise<Connection[]> {
-  const res = await call<{ connections?: Connection[] }>(cfg, "GET", "/connections/?include_shared=true")
-  return res?.connections ?? []
+  return connectionList(await call<{ connections?: Connection[] }>(cfg, "GET", "/connections/?include_shared=true"))
+}
+/** The list in a connections answer. An answer without one is an error: an empty list would read as "no connections". */
+function connectionList(res: { connections?: Connection[] } | null): Connection[] {
+  if (!Array.isArray(res?.connections)) throw new BackendError("The Altimate API answered without a list of connections", 200, null)
+  return res.connections
 }
 /** The caller's own connections only: nothing shared with them. */
 export const ownConnections = (all: Connection[]): Connection[] => all.filter((c) => c.is_owner !== false)
 export async function listOwnConnections(cfg: BackendConfig): Promise<Connection[]> {
-  const res = await call<{ connections?: Connection[] }>(cfg, "GET", "/connections/?include_shared=false")
-  return ownConnections(res?.connections ?? [])
+  return ownConnections(connectionList(await call<{ connections?: Connection[] }>(cfg, "GET", "/connections/?include_shared=false")))
 }
 export const createConnection = (cfg: BackendConfig, body: { name: string; integration_id: string; config: Record<string, unknown> }) =>
   call<Connection>(cfg, "POST", "/connections/", body)
@@ -164,9 +167,24 @@ export interface DatamateRecord {
 
 /** A workspace with its integrations list. */
 export async function getDatamate(cfg: BackendConfig, id: string): Promise<DatamateRecord> {
-  const res = await call<any>(cfg, "GET", `/datamates/${encodeURIComponent(id)}/summary`)
-  const d = res?.datamate ?? res
-  return { ...d, id: String(d?.id ?? id), name: d?.name ?? "", integrations: Array.isArray(d?.integrations) ? d.integrations : [] }
+  let d: any
+  try {
+    const res = await call<any>(cfg, "GET", `/datamates/${encodeURIComponent(id)}/summary`)
+    d = res?.datamate ?? res
+  } catch (e) {
+    if (!(e instanceof BackendError) || e.status !== 404) throw e
+    // A backend without the summary route still lists its workspaces. The integrations list is replaced whole, so a listed workspace without one is not trusted.
+    const res = await call<any>(cfg, "GET", "/datamates/")
+    const all = Array.isArray(res) ? res : (res?.datamates ?? res?.data ?? [])
+    d = Array.isArray(all) ? all.find((x: any) => String(x?.id) === id) : undefined
+    if (!d) throw e
+    if (!Array.isArray(d.integrations)) throw new BackendError("The Altimate API listed the workspace without its integrations", 200, null)
+  }
+  // An answer that is not a workspace record is an error: building the next list from it could drop the workspace's integrations.
+  if (!isObject(d) || (d.id == null && d.name == null && !("integrations" in d))) throw new BackendError("The Altimate API answered without the workspace record", 200, null)
+  // Null or absent means none; any other non-list is not read as empty, since the list is written back whole.
+  if (d.integrations != null && !Array.isArray(d.integrations)) throw new BackendError("The Altimate API answered with workspace integrations that are not a list", 200, null)
+  return { ...d, id: String(d.id ?? id), name: d.name ?? "", integrations: Array.isArray(d.integrations) ? d.integrations : [] }
 }
 /** Replaces the workspace's whole integrations list. */
 export const updateDatamateIntegrations = (cfg: BackendConfig, id: string, integrations: DatamateIntegrationEntry[]) =>

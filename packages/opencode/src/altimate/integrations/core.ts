@@ -57,6 +57,8 @@ export interface ProviderStatus {
 export interface StatusResult {
   workspace: WorkspaceInfo
   providers: ProviderStatus[]
+  /** Why the workspace could not be read; the states shown then come from this machine and may be out of date. */
+  workspaceUnchecked?: string
 }
 
 export interface StoredProvider {
@@ -78,6 +80,8 @@ export interface StoredProvider {
   secretFields?: string[]
   variant?: string
   validatedAt?: string
+  /** Changes whenever the credential is saved, so a step prepared from an older save can tell it was replaced. */
+  credentialStamp?: string
   /** The last validation was refused by the provider. */
   rejected?: boolean
   /** Kept on this machine while the provider could not be reached to check it. */
@@ -123,6 +127,21 @@ export function readJson<T>(file: string, fallback: T): T {
     return fallback
   }
 }
+/** Like readJson, but only a missing file gives the fallback. A file that exists and cannot be read or parsed is an error: the next write would otherwise replace it with an empty one and lose the policy or secrets it held. */
+export function readJsonStrict<T>(file: string, fallback: T): T {
+  let text: string
+  try {
+    text = fs.readFileSync(file, "utf8")
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return fallback
+    throw new Error(`Could not read ${file} (${e instanceof Error ? e.message : String(e)}). Fix or remove it, then run the command again.`)
+  }
+  try {
+    return JSON.parse(text) as T
+  } catch (e) {
+    throw new Error(`Could not read ${file} (${e instanceof Error ? e.message : String(e)}). Fix or remove it, then run the command again.`)
+  }
+}
 /** Writes through a temp file in the same directory and renames it over the target, so a reader or a crash never sees half a file. The mode is set when the file is created; the temp file never outlives a failed write. */
 export function writeJson(file: string, value: unknown, mode = 0o666) {
   fs.mkdirSync(path.dirname(file), { recursive: true })
@@ -162,7 +181,7 @@ export function updateStore<T>(fn: (store: Store) => T): Promise<T> {
 }
 
 export function loadStore(): Store {
-  const raw = readJson<Partial<Store>>(statePath(), {})
+  const raw = readJsonStrict<Partial<Store>>(statePath(), {})
   return { blocked: raw.blocked ?? {}, providers: raw.providers ?? {} }
 }
 export function saveStore(store: Store) {
@@ -198,7 +217,7 @@ export async function storeSecret(id: string, secret: string) {
     return
   }
   await withLock(() => {
-    const all = readJson<Record<string, string>>(secretsPath(), {})
+    const all = readJsonStrict<Record<string, string>>(secretsPath(), {})
     all[id] = secret
     writeJson(secretsPath(), all, 0o600)
   })
@@ -212,7 +231,7 @@ export function readSecret(id: string): string | undefined {
     })
     if (r.status === 0) return r.stdout.trim()
   }
-  return readJson<Record<string, string>>(secretsPath(), {})[id]
+  return readJsonStrict<Record<string, string>>(secretsPath(), {})[id]
 }
 /** `security` exits with this when the item does not exist. */
 const KEYCHAIN_ITEM_NOT_FOUND = 44
@@ -227,7 +246,7 @@ export async function deleteSecret(id: string) {
     if (r.status !== 0 && !notFound) throw new Error(`Could not remove a stored credential from the macOS keychain${r.error ? `: ${r.error.message}` : r.status != null ? ` (exit ${r.status})` : ""}`)
   }
   await withLock(() => {
-    const all = readJson<Record<string, string>>(secretsPath(), {})
+    const all = readJsonStrict<Record<string, string>>(secretsPath(), {})
     if (id in all) {
       delete all[id]
       writeJson(secretsPath(), all, 0o600)
@@ -624,8 +643,9 @@ export async function statusRemote(): Promise<StatusResult> {
     const remote = deriveRemote(await backend.listOwnConnections(cfg))
     const detections = Object.values(loadStore().providers).flatMap((rec) => (rec?.detection ? [rec.detection] : []))
     return { ...mergeRemote(local, remote, Date.now(), detections), workspace: await liveWorkspaceInfo() }
-  } catch {
-    return { ...local, workspace: await liveWorkspaceInfo() }
+  } catch (e) {
+    // The workspace could not be read, so what is shown comes from this machine alone.
+    return { ...local, workspace: await liveWorkspaceInfo(), workspaceUnchecked: e instanceof Error ? e.message : String(e) }
   }
 }
 
@@ -774,15 +794,19 @@ export async function syncProvider(id: ProviderId, onStep?: (label: string, done
     steps.push({ label, ok: true })
     onStep?.(label, true)
   }
-  await withLock(() => {
+  // The block is read again under the lock that records the sync: one set while the steps ran stops it.
+  const blockedMeanwhile = await withLock(async () => {
+    if (loadStore().blocked[id]) return true
     const remote = readJson<Record<string, unknown>>(remotePath(), {})
     remote[id] = { ...request, enabled: true, workspace: workspaceInfo().name, recordedAt: new Date().toISOString() }
     writeJson(remotePath(), remote)
+    await updateStore((next) => {
+      const cur = next.providers[id] ?? {}
+      next.providers[id] = { ...cur, registered: true, account, source: cur.source ?? det?.source, synced: true, updatedAt: new Date().toISOString() }
+    })
+    return false
   })
-  await updateStore((next) => {
-    const cur = next.providers[id] ?? {}
-    next.providers[id] = { ...cur, registered: true, account, source: cur.source ?? det?.source, synced: true, updatedAt: new Date().toISOString() }
-  })
+  if (blockedMeanwhile) return { id, result: "kept_local", reason: "blocked by policy", steps: [] }
   return { id, result: "synced", steps, request }
 }
 
@@ -792,7 +816,7 @@ export function normaliseJiraDomain(value: string): string {
     .trim()
     .replace(/^[a-z]+:\/\//i, "")
     .replace(/[/?#].*$/, "")
-    .replace(/\.atlassian\.net$/i, "")
+    .replace(/\.atlassian\.net(:\d+)?$/i, "")
 }
 
 /** Adds the variant key the backend needs to pick the Jira Server field set. Catalog fields only otherwise. */
@@ -822,7 +846,10 @@ export const sameRecord = (cur: StoredProvider | undefined, rec: StoredProvider 
   Boolean(cur?.synced) === Boolean(rec?.synced) &&
   cur?.variant === rec?.variant &&
   (cur?.connectionId ?? null) === (rec?.connectionId ?? null) &&
-  cur?.validatedAt === rec?.validatedAt
+  cur?.validatedAt === rec?.validatedAt &&
+  cur?.credentialStamp === rec?.credentialStamp &&
+  JSON.stringify(cur?.secretFields ?? []) === JSON.stringify(rec?.secretFields ?? []) &&
+  JSON.stringify(Object.entries(cur?.values ?? {}).sort()) === JSON.stringify(Object.entries(rec?.values ?? {}).sort())
 
 export interface UpsertResult {
   connectionId: number
@@ -868,10 +895,11 @@ export async function attachToBoundWorkspace(cfg: backend.BackendConfig, id: Pro
   try {
     const outcome = await resolveBindingOutcome(process.cwd())
     if (outcome.status === "unbound") return { notLinked: true }
-    if (outcome.status === "unknown") {
+    // A link remembered from earlier may have been moved since: nothing is written to a workspace that cannot be confirmed.
+    if (outcome.status === "unknown" || (outcome.status === "bound" && outcome.stale)) {
       // Without an Altimate login (only the integrations backend variables are set) there is nothing to look a link up with.
       if (!(await AltimateApi.isConfigured())) return { notLinked: true }
-      return { error: "could not tell whether this directory is linked to a workspace, so the connection was not attached to one" }
+      return { error: `${outcome.status === "unknown" ? "could not tell whether this directory is linked to a workspace" : "could not confirm which workspace this directory is linked to"}, so the connection was not attached to one` }
     }
     const binding = outcome.binding
     const kept = await attachToWorkspace(cfg, id, connectionId, String(binding.datamateId), live)
@@ -953,6 +981,7 @@ async function detachFromBoundWorkspace(cfg: backend.BackendConfig, connectionId
     const outcome = await resolveBindingOutcome(process.cwd())
     if (outcome.status === "unbound") return null
     if (outcome.status === "unknown") return "could not tell whether this directory is linked to a workspace, so the connection was not detached from one"
+    if (outcome.stale) return "could not confirm which workspace this directory is linked to, so the connection was not detached from one"
     const binding = outcome.binding
     const datamateId = String(binding.datamateId)
     const datamate = await backend.getDatamate(cfg, datamateId)
@@ -1092,18 +1121,28 @@ export interface DisconnectResult {
   /** False when a connection could not be taken out of the linked workspace's list before it was deleted. */
   detached: boolean
   detachMessage?: string
+  /** Set when the login could not be read, so the workspace was not checked for copies of this connection. */
+  workspaceUnchecked?: string
 }
 
 /** Removes the workspace copies first and the local credential only once that worked, so a failure can be retried. */
 export function disconnect(id: ProviderId): Promise<DisconnectResult> {
   // One locked step, so an upload cannot land between the workspace delete and the local purge.
   return withLock(async () => {
-    if (isSynced(id) && !(await realConfig()) && !mockMode())
+    // An unreadable login only matters for a credential saved in the workspace; a local one is removed without it.
+    const synced = isSynced(id)
+    let workspaceUnchecked: string | undefined
+    const login = await realConfig().catch((e) => {
+      if (synced) throw e
+      workspaceUnchecked = e instanceof Error ? e.message : String(e)
+      return null
+    })
+    if (synced && !login && !mockMode())
       throw new Error(`${PROVIDER_NAMES[id]} is saved in your workspace. Sign in to Altimate to remove it, then disconnect again.`)
-    const { removed, detachError } = await removeManaged(id, await realConfig())
+    const { removed, detachError } = await removeManaged(id, login)
     const removedLocal = await disconnectLocal(id)
     await creds.discardDraftSecrets(id)
-    return { removedLocal, removedRemote: removed, detached: detachError == null, ...(detachError ? { detachMessage: detachError } : {}) }
+    return { removedLocal, removedRemote: removed, detached: detachError == null, ...(detachError ? { detachMessage: detachError } : {}), ...(workspaceUnchecked ? { workspaceUnchecked } : {}) }
   })
 }
 

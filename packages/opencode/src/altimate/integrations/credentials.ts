@@ -6,7 +6,7 @@
 // the workspace. A secret is never returned, printed or logged: callers only ever see a masked tail.
 import fs from "node:fs"
 import path from "node:path"
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { spawnSync } from "node:child_process"
 import { IntegrationsCore as core } from "./core"
 import { IntegrationsBackend as backend } from "./backend"
@@ -115,7 +115,8 @@ export function parseCatalog(data: unknown): Catalog {
 
 /** The catalog to use: the workspace's when signed in (the last one saved for that login if it cannot be reached), else the built-in table. */
 export async function loadCatalog(id: ProviderId, offline = false): Promise<VariantDef[]> {
-  const cfg = await core.realConfig()
+  // The form fields need no login: one that cannot be read leaves the built-in catalog.
+  const cfg = await core.realConfig().catch(() => null)
   if (!cfg) return BUILTIN_CATALOG[id]
   // Keeping a credential local does not need a fresh catalog, so only the saved one is used then.
   if (!offline)
@@ -250,7 +251,7 @@ export async function resolve(id: ProviderId, variantId?: string, offline = fals
     want = jiraVariantFor(site)
   }
   const key = want?.toLowerCase()
-  const match = key ? variants.find((v) => v.id.toLowerCase().includes(key) || v.label.toLowerCase().includes(key)) : undefined
+  const match = key ? (variants.find((v) => v.id.toLowerCase() === key || v.label.toLowerCase() === key) ?? variants.find((v) => v.id.toLowerCase().includes(key) || v.label.toLowerCase().includes(key))) : undefined
   // A variant that was asked for and does not exist is an error: falling back to the first one would test and save a different credential type.
   if (variantId && !match) throw new Error(`${core.PROVIDER_NAMES[id]} has no variant "${variantId}". Variants: ${variants.map((v) => v.id).join(", ")}.`)
   const def = match || variants[0]
@@ -313,7 +314,10 @@ export async function detectedConfig(id: ProviderId): Promise<{ config: Record<s
   return { config: core.withVariant(id, r.variant, config) }
 }
 
-export const maskTail = (secret: string) => (secret.length <= 8 ? "••••" : `••••${secret.slice(-4)}`)
+// eslint-disable-next-line no-control-regex
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/
+/** The last four characters of a secret, or nothing when they hold a control or direction character that must not reach a terminal. */
+export const maskTail = (secret: string) => (secret.length <= 8 || UNPRINTABLE.test(secret.slice(-4)) ? "••••" : `••••${secret.slice(-4)}`)
 
 export interface FieldView {
   name: string
@@ -574,6 +578,7 @@ export interface CredentialOptions {
 }
 
 const MANUAL_SOURCE: Source = { kind: "cli", label: "Claude Code" }
+const CHANGED_WHILE_CONNECTING = "The connection changed while it was being checked, run it again."
 
 export async function connectCredentials(opts: CredentialOptions): Promise<CredentialResult> {
   const { id } = opts
@@ -625,6 +630,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   const detectedSource = r.detected[0]
   const plain = Object.fromEntries(r.def.fields.filter((f) => !f.secret).map((f) => [f.name, r.values[f.name]]).filter(([, v]) => v))
   const stamp = new Date().toISOString()
+  const sameCredential = Boolean(rec?.registered) && secretFields.length > 0 && r.variant === rec?.variant && secretFields.every((f) => !r.values[f] || r.origin[f] === "stored")
   const common = {
     registered: true,
     account: check.ok ? check.account : (rec?.account ?? null),
@@ -632,9 +638,11 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
     values: plain,
     secretFields,
     validatedAt: check.ok ? stamp : undefined,
+    credentialStamp: randomUUID(),
     unverified: !check.ok,
     rejected: false,
-    expiresAt: check.expiresAt,
+    // An offline check learns no expiry; the one already known stays only when the very same credential is being kept.
+    expiresAt: check.ok ? check.expiresAt : sameCredential ? rec?.expiresAt : undefined,
     drafts: undefined,
   }
   const record = (synced: boolean, extra: Partial<StoredProvider> = {}) =>
@@ -649,6 +657,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   if (!cfg) {
     // Keeping a connection local moves it: the whole decision and move happen in one locked step with the uploads, so no workspace copy can appear after it was looked for.
     return await core.withLock(async (): Promise<CredentialResult> => {
+      // The checks above ran outside the lock: a record that was changed since is not the one this was checked against.
+      if (!core.sameRecord(core.loadStore().providers[id], rec)) return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: CHANGED_WHILE_CONNECTING })
       let detachNote: string | null = null
       let removeFailure: string | null = null
       const wasBlocked = core.isBlocked(id)
@@ -689,7 +699,13 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: e instanceof Error ? e.message : String(e) })
       }
       // Switching variant must not leave the other variant's stored secret behind; only the old fields not just written are purged.
-      await core.purgeCredentialSecrets(id, rec, false, written)
+      // A failed purge only leaves the old variant's secrets behind, so the record is still saved and the leftover is reported.
+      let purgeNote: string | null = null
+      try {
+        await core.purgeCredentialSecrets(id, rec, false, written)
+      } catch (e) {
+        purgeNote = `The previous credential could not be removed from this machine: ${e instanceof Error ? e.message : String(e)}`
+      }
       await finish(false, { connectionId: null })
       if (signedIn && hadCopy) {
         try {
@@ -702,6 +718,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       const notSignedIn = wantSync && !blocked
       const notes = [
         removeFailure ? "The credential is kept on this machine, but the workspace copy is still there." : null,
+        purgeNote,
         unverified ? `${check.message} (kept on this machine, not verified yet)` : null,
         notSignedIn ? core.NOT_SIGNED_IN : blocked && wantSync ? "Sync is blocked for this provider, kept local." : null,
         removeFailure ? core.REMOVE_FAILED_WARNING(removeFailure).trim() : null,
@@ -719,6 +736,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   try {
     // The blocked check and the upload share one lock with Keep local, so a move to this machine cannot interleave with an upload.
     return await core.withLock(async (): Promise<CredentialResult> => {
+      if (!core.sameRecord(core.loadStore().providers[id], rec)) return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: CHANGED_WHILE_CONNECTING })
       if (core.isBlocked(id)) return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: "Sync is blocked for this provider, kept local." })
       const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config))
       if (!res.isValid) {

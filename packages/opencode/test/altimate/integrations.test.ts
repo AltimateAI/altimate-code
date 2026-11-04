@@ -15,7 +15,15 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "integrations-test-"))
 process.env.ALTIMATE_INTEGRATIONS_DIR = tmp
 process.env.ALTIMATE_INTEGRATIONS_MOCK = "1"
 
+const extraDirs: string[] = []
+const osTmp = (prefix: string) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  extraDirs.push(dir)
+  return dir
+}
+
 afterAll(() => {
+  for (const dir of extraDirs) fs.rmSync(dir, { recursive: true, force: true })
   for (const k of Object.keys(process.env)) if (!(k in envBefore)) delete process.env[k]
   for (const [k, v] of Object.entries(envBefore)) if (v !== undefined) process.env[k] = v
   fs.rmSync(tmp, { recursive: true, force: true })
@@ -24,6 +32,17 @@ afterAll(() => {
 beforeEach(() => {
   for (const f of fs.readdirSync(tmp)) fs.rmSync(path.join(tmp, f), { recursive: true, force: true })
   delete process.env.ALTIMATE_INTEGRATIONS_DEMO
+})
+
+describe("sameRecord", () => {
+  const base = { registered: true, synced: false, variant: "v", connectionId: null, validatedAt: "t", credentialStamp: "a", secretFields: ["token"], values: { url: "x" } }
+  test("a credential saved again, or changed in any field, is a different record", () => {
+    expect(core.sameRecord(base, { ...base })).toBe(true)
+    expect(core.sameRecord({ ...base, values: { url: "x" } }, { ...base, updatedAt: "later" })).toBe(true)
+    expect(core.sameRecord({ ...base, credentialStamp: "b" }, base)).toBe(false)
+    expect(core.sameRecord({ ...base, values: { url: "y" } }, base)).toBe(false)
+    expect(core.sameRecord({ ...base, secretFields: ["other"] }, base)).toBe(false)
+  })
 })
 
 describe("detection parsing", () => {
@@ -111,6 +130,19 @@ describe("block policy and sync", () => {
     expect((await core.syncProvider("linear")).result).toBe("skipped")
     await core.disconnect("github")
     expect(core.status().providers[0].state).toBe("detected")
+  })
+})
+
+describe("a block set while a mock sync runs", () => {
+  test("stops the sync from being recorded", async () => {
+    process.env.ALTIMATE_INTEGRATIONS_DEMO = "1"
+    await core.recordDetections(core.scan())
+    const o = await core.syncProvider("github", (label, done) => {
+      if (done && label === "Enable on workspace") core.saveStore({ ...core.loadStore(), blocked: { github: true } })
+    })
+    expect([o.result, o.reason]).toEqual(["kept_local", "blocked by policy"])
+    expect(core.loadStore().providers.github?.synced).toBeFalsy()
+    expect(fs.existsSync(path.join(tmp, "integrations-remote-mock.json"))).toBe(false)
   })
 })
 
@@ -983,6 +1015,67 @@ describe("workspace connections", () => {
   test("without a signed-in backend nothing is removed", async () => {
     expect(await core.disconnectRemote("linear", null)).toEqual(0)
   })
+
+  test("status says so when the workspace could not be read, instead of showing local states as current", async () => {
+    await connected("github", null, { synced: true, connectionId: 21 }, null)
+    expect((await core.statusRemote()).workspaceUnchecked).toBeUndefined()
+    api.state.listFails = true
+    const r = await core.statusRemote()
+    expect(r.workspaceUnchecked).toContain("unavailable")
+    expect(r.providers.find((p) => p.id === "github")?.state).toBe("connected")
+  })
+
+  test("a link remembered from earlier is not attached to or detached from", async () => {
+    const outcome = workspaceState.resolveBindingOutcome as any
+    outcome.mockResolvedValue({ status: "bound", stale: true, binding: { datamateId: "9", datamateName: "Old" } })
+    const login = spyOn(AltimateApi, "isConfigured").mockResolvedValue(true)
+    try {
+      const cfg = (await backend.backendConfig())!
+      const attached = await core.attachToBoundWorkspace(cfg, "github", 21)
+      expect(attached).toEqual({ error: expect.stringContaining("could not confirm which workspace") })
+      api.seed({ name: `Linear (from ${HOST})`, integration_id: "linear" })
+      const gone = await core.disconnect("linear")
+      expect([gone.removedRemote, gone.detached, gone.detachMessage]).toEqual([1, false, expect.stringContaining("could not confirm which workspace")])
+      expect(calls.some((c) => c.path.startsWith("/datamates"))).toBe(false)
+      expect(api.state.rows.filter((x) => !x.deleted)).toHaveLength(0)
+      login.mockResolvedValue(false)
+      expect(await core.attachToBoundWorkspace(cfg, "github", 21)).toEqual({ notLinked: true })
+    } finally {
+      login.mockRestore()
+    }
+  })
+
+  test("a state file that cannot be parsed is an error and is not replaced by an empty one", async () => {
+    const file = path.join(tmp, "integrations.json")
+    fs.writeFileSync(file, "{not json")
+    expect(() => core.loadStore()).toThrow(/Could not read .*integrations\.json/)
+    await expect(core.setBlocked(["github"], true)).rejects.toThrow("Could not read")
+    expect(fs.readFileSync(file, "utf8")).toBe("{not json")
+    fs.rmSync(file)
+    expect(core.loadStore()).toEqual({ blocked: {}, providers: {} })
+  })
+
+  test("a secrets file that cannot be parsed is not replaced when another secret is stored", async () => {
+    const file = path.join(tmp, "integrations-secrets.json")
+    fs.writeFileSync(file, "[oops")
+    await expect(core.storeSecret("cred:github:github_token", "x")).rejects.toThrow("Could not read")
+    expect(fs.readFileSync(file, "utf8")).toBe("[oops")
+  })
+
+  test("an unreadable Altimate login does not stop the local paths, but does stop removing a workspace copy", async () => {
+    const login = spyOn(AltimateApi, "getCredentials").mockRejectedValue(new SyntaxError("Unexpected token n in JSON"))
+    for (const k of ["ALTIMATE_INTEGRATIONS_API_URL", "ALTIMATE_INTEGRATIONS_TENANT", "ALTIMATE_INTEGRATIONS_TOKEN"]) delete process.env[k]
+    try {
+      expect((await creds.loadCatalog("github", true))[0].fields.map((f) => f.name)).toContain("github_token")
+      await connected("github", null, { synced: false })
+      expect(await core.disconnect("github")).toMatchObject({ removedLocal: true, removedRemote: 0, detached: true })
+      await connected("linear", null, { synced: true, connectionId: 3 })
+      await expect(core.disconnect("linear")).rejects.toThrow("Could not read your Altimate login")
+      expect(core.loadStore().providers.linear?.registered).toBe(true)
+    } finally {
+      login.mockRestore()
+    }
+  })
 })
 
 describe("failure descriptions", () => {
@@ -1012,9 +1105,56 @@ describe("failure descriptions", () => {
   })
 })
 
+describe("backend answers that are not what they should be", () => {
+  const answer = async (body: unknown, run: (cfg: backend.BackendConfig) => Promise<unknown>, status = 200) => {
+    const odd = Bun.serve({ port: 0, fetch: () => (body === null ? new Response("", { status }) : Response.json(body, { status })) })
+    try {
+      return await run({ apiUrl: `http://127.0.0.1:${odd.port}`, tenant: "acme", token: "t" })
+    } finally {
+      odd.stop(true)
+    }
+  }
+
+  test("an empty answer or one without a connections list is an error, not no connections", async () => {
+    for (const body of [null, {}, { connections: null }]) {
+      await expect(answer(body, backend.listOwnConnections)).rejects.toThrow("without a list of connections")
+      await expect(answer(body, backend.listVisibleConnections)).rejects.toThrow("without a list of connections")
+    }
+    expect(await answer({ connections: [] }, backend.listOwnConnections)).toEqual([])
+  })
+
+  test("a workspace answer that is not a record is an error, one with no integrations is an empty list", async () => {
+    await expect(answer(null, (cfg) => backend.getDatamate(cfg, "7"))).rejects.toThrow("without the workspace record")
+    await expect(answer({ ok: true }, (cfg) => backend.getDatamate(cfg, "7"))).rejects.toThrow("without the workspace record")
+    expect(await answer({ id: 7, integrations: null }, (cfg) => backend.getDatamate(cfg, "7"))).toMatchObject({ id: "7", integrations: [] })
+    expect(await answer({ datamate: { id: 7, name: "W" } }, (cfg) => backend.getDatamate(cfg, "7"))).toMatchObject({ id: "7", name: "W", integrations: [] })
+    for (const integrations of [{ unexpected: true }, "github", 3])
+      await expect(answer({ datamate: { id: 7, name: "W", integrations } }, (cfg) => backend.getDatamate(cfg, "7"))).rejects.toThrow("not a list")
+  })
+
+  test("a backend without the summary route is read from the workspace list, and only when the list carries the integrations", async () => {
+    const routes = (list: unknown) =>
+      Bun.serve({ port: 0, fetch: (req) => (new URL(req.url).pathname === "/datamates/" ? Response.json(list) : Response.json({ detail: "nope" }, { status: 404 })) })
+    for (const [list, expected] of [
+      [[{ id: 7, name: "W", integrations: [{ id: "github", tools: [] }] }], { id: "7", integrations: [{ id: "github", tools: [] }] }],
+      [[{ id: 7, name: "W" }], null],
+      [[{ id: 8, name: "Other", integrations: [] }], null],
+    ] as const) {
+      const srv = routes(list)
+      try {
+        const run = backend.getDatamate({ apiUrl: `http://127.0.0.1:${srv.port}`, tenant: "acme", token: "t" }, "7")
+        if (expected) expect(await run).toMatchObject(expected)
+        else await expect(run).rejects.toThrow()
+      } finally {
+        srv.stop(true)
+      }
+    }
+  })
+})
+
 describe("jira domain and cli flags", () => {
   test("normaliseJiraDomain sends the subdomain only", () => {
-    for (const v of ["acme.atlassian.net", "https://acme.atlassian.net", "https://acme.atlassian.net/jira/", " acme.atlassian.net ", "acme"])
+    for (const v of ["acme.atlassian.net", "https://acme.atlassian.net", "https://acme.atlassian.net/jira/", " acme.atlassian.net ", "acme", "https://acme.atlassian.net:443/", "acme.atlassian.net:8443"])
       expect(core.normaliseJiraDomain(v)).toBe("acme")
   })
 
@@ -1035,15 +1175,16 @@ describe("credentials flow", () => {
   let server: ReturnType<typeof Bun.serve>
   const api = connectionsStub()
   let catalog: unknown = []
+  let onUser: (() => void) | null = null
   const saved = { ...process.env }
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "integ-home-"))
-  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "integ-bin-"))
+  const home = osTmp("integ-home-")
+  const bin = osTmp("integ-bin-")
   const basic = (u: string, t: string) => `Basic ${Buffer.from(`${u}:${t}`).toString("base64")}`
   const GOOD = "good_token_a1b2"
   // The detectors spawn these binaries with short timeouts, and a freshly written executable can be
   // slow on its first run (macOS scans it). Each stub is written and run once; a test only swaps the
   // body it sources and links the stub in or out of PATH.
-  const stubs = fs.mkdtempSync(path.join(os.tmpdir(), "integ-stubs-"))
+  const stubs = osTmp("integ-stubs-")
   for (const name of ["gh", "git"]) {
     const stub = path.join(stubs, name)
     fs.writeFileSync(stub, `#!/bin/sh\n[ -f "${stub}.body" ] && . "${stub}.body"\n`, { mode: 0o755 })
@@ -1079,6 +1220,7 @@ describe("credentials flow", () => {
     api.state.fail = null
     api.state.listFails = false
     catalog = []
+    onUser = null
     fs.rmSync(home, { recursive: true, force: true })
     fs.mkdirSync(home)
     fake("gh", null)
@@ -1098,6 +1240,7 @@ describe("credentials flow", () => {
         const body = req.method === "POST" || req.method === "PATCH" ? await req.json().catch(() => null) : null
         calls.push({ method: req.method, path: url.pathname, query: url.search, auth, body })
         const deny = () => Response.json({ message: "Bad credentials" }, { status: 401 })
+        if (url.pathname === "/user") onUser?.()
         if (url.pathname === "/user")
           return auth === `Bearer ${GOOD}` ? Response.json({ login: "octo" }, { headers: { "github-authentication-token-expiration": "2031-01-02 03:04:05 UTC" } }) : deny()
         if (url.pathname === "/rest/api/3/myself") return auth === basic("me@acme.com", GOOD) ? Response.json({ emailAddress: "me@acme.com" }) : deny()
@@ -1265,7 +1408,7 @@ describe("credentials flow", () => {
 
   describe("where Jira values may come from", () => {
     const JIRA_ENV = ["JIRA_PAT_TOKEN", "JIRA_PERSONAL_TOKEN", "JIRA_PAT", "JIRA_BASE_URL", "JIRA_URL", "JIRA_API_TOKEN", "ATLASSIAN_API_TOKEN"]
-    const project = fs.mkdtempSync(path.join(os.tmpdir(), "integ-project-"))
+    const project = osTmp("integ-project-")
     let cwd: ReturnType<typeof spyOn> | undefined
     const plant = (env: Record<string, string>) => {
       fs.writeFileSync(path.join(project, ".mcp.json"), JSON.stringify({ mcpServers: { jira: { command: "npx", args: ["mcp-jira"], env } } }))
@@ -1696,6 +1839,91 @@ describe("credentials flow", () => {
       await token("github", "github_token")
       expect((await creds.connectCredentials({ id: "github", update: true })).status).toBe("connected")
       expect(core.loadStore().providers.github?.unverified).toBe(false)
+    })
+
+    test("a connect whose record changed while the credential was being checked stores nothing", async () => {
+      real()
+      for (const localOnly of [true, false]) {
+        await token("github", "github_token")
+        onUser = () => core.saveStore({ blocked: {}, providers: { github: { registered: true, synced: false, variant: "token", validatedAt: "2030-01-01T00:00:00Z" } } })
+        const before = calls.length
+        const r = await creds.connectCredentials({ id: "github", localOnly })
+        expect([r.status, r.message]).toEqual(["failed", "The connection changed while it was being checked, run it again."])
+        expect(synced()).toEqual([])
+        expect(core.readSecret(core.secretKey("cred", "github", "github_token"))).toBeUndefined()
+        expect(calls.slice(before).some((c) => c.method !== "GET" && c.path.startsWith("/connections"))).toBe(false)
+        onUser = null
+        core.saveStore({ blocked: {}, providers: {} })
+        await creds.discardDrafts("github")
+      }
+    })
+
+    test("a connect prepared from an earlier credential is refused when the credential was saved again meanwhile", async () => {
+      real()
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github", localOnly: true })).status).toBe("connected")
+      const first = core.loadStore().providers.github!
+      await token("github", "github_token")
+      onUser = () => core.updateStore((st) => void (st.providers.github = { ...st.providers.github, credentialStamp: "saved-elsewhere" }))
+      const r = await creds.connectCredentials({ id: "github", localOnly: true })
+      onUser = null
+      expect(r.status).toBe("failed")
+      expect(r.message).toBe("The connection changed while it was being checked, run it again.")
+      expect(core.loadStore().providers.github!.credentialStamp).toBe("saved-elsewhere")
+      expect(first.credentialStamp).toBeDefined()
+      core.saveStore({ blocked: {}, providers: {} })
+      await creds.discardDrafts("github")
+    })
+
+    test("a local save whose old secrets cannot be purged is still saved, and says what is left", async () => {
+      real()
+      await token("github", "github_token")
+      const purge = spyOn(core, "purgeCredentialSecrets").mockRejectedValue(new Error("keychain locked"))
+      try {
+        const r = await creds.connectCredentials({ id: "github", localOnly: true })
+        expect([r.status, r.sync]).toEqual(["connected", "local"])
+        expect(r.message).toContain("The previous credential could not be removed from this machine: keychain locked")
+        expect(core.loadStore().providers.github?.registered).toBe(true)
+        expect(core.readSecret(core.secretKey("cred", "github", "github_token"))).toBe(GOOD)
+      } finally {
+        purge.mockRestore()
+      }
+    })
+
+    test("an offline re-save of the same stored token keeps its known expiry; a new token does not inherit it", async () => {
+      real()
+      await token("github", "github_token")
+      await creds.connectCredentials({ id: "github", localOnly: true })
+      const known = "2031-01-02T03:04:05.000Z"
+      expect(core.loadStore().providers.github?.expiresAt).toBe(known)
+      const down = Bun.serve({ port: 0, fetch: () => new Response("down", { status: 503 }) })
+      process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = `http://127.0.0.1:${down.port}`
+      try {
+        const same = await creds.connectCredentials({ id: "github", localOnly: true })
+        expect(same.message).toContain("not verified yet")
+        expect(core.loadStore().providers.github?.expiresAt).toBe(known)
+        await token("github", "github_token", "another_token_c3d4")
+        await creds.connectCredentials({ id: "github", localOnly: true })
+        expect(core.loadStore().providers.github?.expiresAt ?? null).toBeNull()
+      } finally {
+        down.stop(true)
+        process.env.ALTIMATE_INTEGRATIONS_GITHUB_API = base()
+      }
+    })
+
+    test("a variant asked for by its exact id wins over one whose name contains it", async () => {
+      catalog = [
+        {
+          id: "jira",
+          config: [{ name: "jiraDomain", label: "Site", required: true }],
+          additionalConfigVariants: [
+            { id: "server-oauth-less", label: "Server extra", config: [{ name: "jiraBaseUrl", label: "URL", required: true }] },
+            { id: "server", label: "Server", config: [{ name: "jiraBaseUrl", label: "URL", required: true }, { name: "jiraPatToken", label: "PAT", encrypted: true, required: true }] },
+          ],
+        },
+      ]
+      real()
+      expect((await creds.resolve("jira", "server")).def.id).toBe("server")
     })
 
     test("a rejected input is not stored unverified", async () => {
@@ -2187,6 +2415,12 @@ describe("printed text and catalog shape", () => {
     expect(clean("a\u001b[31mred\u001b[0m\nb\r\u0007c\u202ed")).toBe("ared b c d")
     expect(clean("\u001b]0;title\u0007ok")).toBe("ok")
     expect(clean(null)).toBe("")
+  })
+
+  test("the masked tail is dropped when it holds a control or direction character", () => {
+    expect(creds.maskTail("abcdefghij1234")).toBe("••••1234")
+    expect(creds.maskTail("abc")).toBe("••••")
+    for (const tail of ["12\u001b[3", "12\u202e34", "1\u00852\u0007", "12\u200f4", "12\u20283"]) expect(creds.maskTail(`abcdefghij${tail}`)).toBe("••••")
   })
 
   test("catalogEntries unwraps a list, items, integrations and data alike", () => {
