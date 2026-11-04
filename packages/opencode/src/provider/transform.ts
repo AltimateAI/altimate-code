@@ -137,8 +137,18 @@ export namespace ProviderTransform {
             }
             // altimate_change start — preserve signed empty reasoning blocks returned by Anthropic/Bedrock
             if (part.type === "reasoning") {
-              const providerKey = model.api.npm === "@ai-sdk/amazon-bedrock" ? "bedrock" : "anthropic"
-              const opts = (part.providerOptions as any)?.[providerKey]
+              // altimate_change start — upstream_fix: drop unreplayable Bedrock reasoning before caching (anomalyco/opencode#45769)
+              // The Bedrock SDK only replays signed or redacted reasoning. Unsigned reasoning must go
+              // before cache points are assigned, or it can leave an empty or cache-point-only message.
+              if (model.api.npm === "@ai-sdk/amazon-bedrock") {
+                const options = part.providerOptions as Record<string, any> | undefined
+                const metadata = options?.[model.providerID] ?? options?.bedrock
+                return (
+                  metadata?.signature != null || metadata?.redactedContent != null || metadata?.redactedData != null
+                )
+              }
+              // altimate_change end
+              const opts = (part.providerOptions as any)?.anthropic
               return part.text.trim().length > 0 || opts?.signature != null || opts?.redactedData != null
             }
             // altimate_change end
