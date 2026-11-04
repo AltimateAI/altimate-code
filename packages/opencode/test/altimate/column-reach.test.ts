@@ -367,6 +367,20 @@ describe("columnReach where the engine's schema falls short", () => {
     const reach = columnReach(manifestFile(value), "fct_orders", "net.amount")
     expect(reach.models.find((m) => m.name === "rpt_net")?.columns).toEqual(["net"])
   })
+
+  test('a column name with a quote, written "a""b", is never a silent zero', () => {
+    const value = manifest()
+    value.nodes["model.shop.fct_orders"].columns = { 'a"b': column('a"b') }
+    value.nodes["model.shop.rpt_quoted"] = model(
+      "rpt_quoted",
+      ["model.shop.fct_orders"],
+      'select "a""b" as copied, order_id from fct_orders',
+      ["copied", "order_id"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", 'a"b')
+    const ids = [...reach.models, ...reach.uncertain].map((m) => m.unique_id)
+    expect(ids).toContain("model.shop.rpt_quoted")
+  })
 })
 
 describe("selectsStar", () => {
@@ -530,6 +544,25 @@ describe("columnReach with an empty column_lineage", () => {
       expect(reach.models.find((m) => m.name === "fct_daily")?.columns).toEqual(["revenue"])
     } finally {
       spy.mockRestore()
+    }
+  })
+  test("a doubled delimiter inside a backtick or bracket name is one character of the name", () => {
+    for (const [spelling, source] of [
+      ["a`b", "`shop`.`main`.`fct_orders`.`a``b`"],
+      ["a]b", "[shop].[main].[fct_orders].[a]]b]"],
+    ]) {
+      const value = manifest()
+      value.nodes["model.shop.fct_orders"].columns = { [spelling!]: column(spelling!) }
+      const spy = spyOn(core, "columnLineage").mockImplementation((() => ({
+        column_lineage: [{ source, target: "copied", lineage_type: "direct" }],
+        column_dict: {},
+      })) as any)
+      try {
+        const reach = columnReach(manifestFile(value), "fct_orders", spelling!)
+        expect(reach.models.find((m) => m.name === "fct_daily")?.columns).toEqual(["copied"])
+      } finally {
+        spy.mockRestore()
+      }
     }
   })
 })

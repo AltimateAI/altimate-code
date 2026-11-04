@@ -37,7 +37,7 @@ export type ModelLineage = {
 
 export const DbtLineageTool = Tool.define("dbt_lineage", {
   description:
-    "Column-level lineage for a dbt model: its upstream models, seeds and sources, its downstream models, their columns, and the column edges between them across every hop. Pass `column` to trace one column. Uses the project's dbt integration (compiles on demand, no `dbt compile` needed) and returns the result as structured content; without it, reads the compiled SQL in the manifest.",
+    "Column-level lineage for a dbt model: its upstream models, seeds and sources, its downstream models, their columns, and the column edges between them across every hop. Pass `column` to trace one column. Where writes are allowed, uses the project's dbt integration (compiles on demand, no `dbt compile` needed) and returns the result as structured content; a read-only call, or one without the integration, reads the compiled SQL in the manifest.",
   parameters: z.object({
     model: z
       .string()
@@ -47,7 +47,7 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
       .string()
       .optional()
       .describe(
-        "manifest.json for the manifest-only fallback, read only when the dbt integration isn't available, and for the graph (default: the dbt project's target/manifest.json)",
+        "manifest.json for the manifest answer, read on a read-only call or when the dbt integration isn't available, and for the graph (default: the dbt project's target/manifest.json)",
       ),
     dialect: z.string().optional().describe("SQL dialect override for the manifest-only fallback"),
     include_graph: z
@@ -56,7 +56,10 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
       .describe("Also return the model's graph from the manifest (everything upstream and downstream, up to 500 nodes each side; the exposures and tests are those of the model and its downstream, upstream tests are not included; graph.upTruncated / graph.truncated are set when a side is cut) in the metadata; for lineage viewers. Over MCP the graph is left out of the structured result: read it with `altimate tool run dbt_lineage --json`"),
   }),
   async execute(args, ctx) {
-    let viaAdapter = await fromAdapter(args.model, args.column, ctx.abort)
+    // A call without write permission (MCP, `tool run`) and a plan-mode session's own calls are read-only;
+    // a subagent plan mode starts runs under its own agent's permissions.
+    const readOnly = ctx.extra?.forceReadOnly === true || ctx.agent === "plan"
+    let viaAdapter = await fromAdapter(args.model, args.column, ctx.abort, readOnly)
     // The adapter answers for the project it found; a manifest named outside that project's folder
     // wins, so its graph and its lineage are never mixed with this one's.
     if (viaAdapter.result && args.manifest_path) {
@@ -198,25 +201,24 @@ function manifestGraph(manifestPath: string, uniqueId: string): { graph?: Return
 }
 
 /**
- * The lineage from the project's dbt adapter, which the tool starts in read-only mode too: it
- * compiles and reads column metadata, and runs no user SQL. `reason` says why it wasn't used.
+ * The lineage from the project's dbt adapter, used only where writes are allowed: starting it runs
+ * dbt deps and writes target/, and it compiles and reads column metadata. A read-only call never
+ * starts or uses it. `reason` says why it wasn't used.
  */
 async function fromAdapter(
   model: string,
   column: string | undefined,
   signal: AbortSignal,
+  readOnly: boolean,
 ): Promise<{ result?: ModelLineage; reason?: string }> {
   try {
-    const [{ getDbtAdapter }, { isReadOnlyCall }] = await Promise.all([
-      import("../native/connections/register"),
-      import("../mcp-server/read-only-calls"),
-    ])
-    // The imports yield: a call cancelled meanwhile starts nothing.
+    const { getDbtAdapter, getDbtProjectRoot } = await import("../native/connections/register")
+    // The import yields: a call cancelled meanwhile starts nothing.
     signal.throwIfAborted()
-    // A read-only call never starts or uses the dbt adapter (the doc comment above predates this):
-    // starting it runs dbt deps and writes target/, and compiling renders Jinja, which can run SQL.
+    // A read-only call never starts or uses the dbt adapter: starting it runs dbt deps and writes
+    // target/, and compiling renders Jinja, which can run SQL.
     // It answers from the manifest as main does, with no note: there's nothing for the user to fix.
-    if (isReadOnlyCall(signal)) return {}
+    if (readOnly) return {}
     // Starting the adapter can take a while (dbt deps, a parse): a cancel doesn't wait for it, and
     // past the deadline the manifest answers. The start goes on, for the next call.
     let stop = () => {}
@@ -234,7 +236,12 @@ async function fromAdapter(
       signal.removeEventListener("abort", stop)
       clearTimeout(timer)
     })
-    if (!adapter) return { reason: "no dbt project here" }
+    if (!adapter) {
+      // No adapter also when the project exists but the adapter failed to start: say which.
+      const root = await getDbtProjectRoot()
+      const found = !!root && fs.existsSync(path.join(root, "dbt_project.yml"))
+      return { reason: found ? "the dbt adapter didn't start" : "no dbt project here" }
+    }
     if (adapter.isInitialized?.() === false) return { reason: "the dbt adapter didn't load the project" }
     if (typeof adapter.getModelLineage !== "function") return { reason: "dbt-integration has no getModelLineage" }
     const params = { model, ...(column ? { column } : {}), upstreamDepth: LINEAGE_DEPTH, downstreamDepth: LINEAGE_DEPTH }
@@ -274,11 +281,34 @@ export function isModelLineage(value: unknown): value is ModelLineage {
     typeof v.focus?.uniqueId === "string" &&
     typeof v.focus?.name === "string" &&
     Array.isArray(v.nodes) &&
-    v.nodes.every((n) => typeof n?.uniqueId === "string" && Array.isArray(n.columns)) &&
+    v.nodes.every(
+      (n) =>
+        typeof n?.uniqueId === "string" &&
+        typeof n.name === "string" &&
+        typeof n.type === "string" &&
+        (n.direction === "focus" || n.direction === "upstream" || n.direction === "downstream") &&
+        typeof n.depth === "number" &&
+        Array.isArray(n.columns) &&
+        n.columns.every((c) => typeof c?.name === "string"),
+    ) &&
     Array.isArray(v.columnLineage) &&
-    v.columnLineage.every((e) => Array.isArray(e?.source) && Array.isArray(e?.target) && Array.isArray(e?.viewsCode)) &&
-    Array.isArray(v.errors)
+    v.columnLineage.every(
+      (e) =>
+        isPair(e?.source) &&
+        isPair(e?.target) &&
+        typeof e.type === "string" &&
+        typeof e.viewsType === "string" &&
+        Array.isArray(e.viewsCode) &&
+        e.viewsCode.every((code) => typeof code === "string"),
+    ) &&
+    Array.isArray(v.errors) &&
+    v.errors.every((error) => typeof error === "string")
   )
+}
+
+/** A [node id, column] pair, as the lineage's edges name each end. */
+function isPair(value: unknown): value is [string, string] {
+  return Array.isArray(value) && value.length === 2 && value.every((part) => typeof part === "string")
 }
 
 /** target/manifest.json in the project the dbt adapter finds, which may be above the working directory. */

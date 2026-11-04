@@ -47,7 +47,7 @@ export async function serverInstructions(): Promise<string> {
 // Lineage tools also return their metadata as structured content, so a client that draws lineage
 // (the Claude Code plugin's lineage pane) reads edges and downstream lists without parsing text.
 // Claude Code shows structured content to the model in place of the text, so `report` carries the
-// (already truncated) text (dbt_lineage: its header, its mappings travel as data), only the lineage
+// text (for dbt_lineage only its header: the mappings and edges travel as data), only the lineage
 // fields are passed, and the whole is capped.
 const STRUCTURED_FIELDS: Record<string, readonly string[]> = {
   dbt_lineage: ["model_name", "model_unique_id", "confidence", "confidence_factors", "upstream", "columns", "edges", "error"],
@@ -274,9 +274,13 @@ export async function serveStdio(options: ServeOptions = {}): Promise<void> {
   const onclose = server.onclose
   server.onclose = async () => {
     try {
-      await onclose?.()
-      await Registry.closeAll()
-      await (await import("../native/connections/register")).disposeDbtAdapter()
+      try {
+        await onclose?.()
+        await Registry.closeAll()
+      } finally {
+        // The dbt adapter's Python bridge is stopped even when closing the rest fails.
+        await (await import("../native/connections/register")).disposeDbtAdapter()
+      }
       closed.resolve()
     } catch (error) {
       closed.reject(error)

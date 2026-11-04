@@ -60,8 +60,10 @@ function splitSource(source: unknown): { parts: string[]; column: string; exact:
     typeof source === "string" ? source : typeof (source as any)?.source === "string" ? (source as any).source : null
   if (!text) return null
   // Split on dots outside quotes: "a"."net.amount" is table a, column net.amount.
-  const raw = [...text.matchAll(/"([^"]*)"|`([^`]*)`|\[([^\]]*)\]|([^."`\[\]]+)/g)].map(
-    (m) => m[1] ?? m[2] ?? m[3] ?? m[4] ?? "",
+  // A doubled closing delimiter inside a quoted name is one character ("a""b" is a"b, [a]]b] is a]b).
+  const raw = [...text.matchAll(/"((?:[^"]|"")*)"|`((?:[^`]|``)*)`|\[((?:[^\]]|\]\])*)\]|([^."`\[\]]+)/g)].map(
+    (m) =>
+      m[1]?.replaceAll('""', '"') ?? m[2]?.replaceAll("``", "`") ?? m[3]?.replaceAll("]]", "]") ?? m[4] ?? "",
   )
   if (raw.length < 2) return null
   // `exact` keeps the column's case, for parents that document two columns differing only by case.
@@ -157,7 +159,9 @@ export function selectsStar(sql: string): boolean {
 function namesColumn(sql: string, column: string): boolean {
   const code = stripSql(sql)
   const name = escapeRegExp(column)
-  const ident = new RegExp(`(^|[^A-Za-z0-9_$])("${name}"|${name})(?![A-Za-z0-9_$])`, "gi")
+  // Quoted, a quote in the name is written doubled: a"b is "a""b".
+  const quoted = escapeRegExp(column.replaceAll('"', '""'))
+  const ident = new RegExp(`(^|[^A-Za-z0-9_$])("${quoted}"|${name})(?![A-Za-z0-9_$])`, "gi")
   for (const match of code.matchAll(ident)) {
     const before = code.slice(0, match.index! + match[1]!.length)
     if (/\bas\s*`?$/i.test(before)) continue

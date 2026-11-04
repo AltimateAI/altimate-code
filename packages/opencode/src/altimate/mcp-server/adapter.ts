@@ -18,9 +18,6 @@ import { EXPOSED, MCP_OPEN_WRITE_TOOLS, WRITE_TOOLS } from "../tool-cli/allow-li
 import { askFor, denied } from "../tool-cli/permissions"
 // altimate_change end
 import { closeScratch } from "../native/connections/scratch"
-// altimate_change start — read-only calls are known by their signal
-import { markReadOnlyCall } from "./read-only-calls"
-// altimate_change end
 import type { SessionID, MessageID } from "@/session/schema"
 
 export const descriptions: Record<string, string> = {
@@ -464,9 +461,6 @@ export async function createAdapter(options: AdapterOptions = {}) {
       const retry = options.cli ? "Re-run" : "Restart"
       signal = AbortSignal.any([signal, shutdown.signal])
       signal.throwIfAborted()
-      // altimate_change start — a helper that has only the signal can tell a read-only call
-      if (!allowWrite) markReadOnlyCall(signal)
-      // altimate_change end
       const tool = advertised.get(name)
       if (!tool) throw new Error(`Unknown tool: ${name}`)
       if (WRITE_TOOLS.has(name) && (options.cli || !MCP_OPEN_WRITE_TOOLS.has(name)) && !allowWrite) throw denied(name, retry)

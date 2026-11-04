@@ -21,8 +21,8 @@ import {
   resetDbtAdapter,
 } from "@/altimate/native/connections/register"
 import { DbtLineageTool, dbtLineageInternals, type ModelLineage } from "@/altimate/tools/dbt-lineage"
-import { markReadOnlyCall } from "@/altimate/mcp-server/read-only-calls"
-import { createServer } from "@/altimate/mcp-server/server"
+import { createServer, serveStdio } from "@/altimate/mcp-server/server"
+import * as Registry from "@/altimate/native/connections/registry"
 import { initTool } from "./tool-fixture"
 
 const ctx: Tool.Context = {
@@ -77,11 +77,8 @@ const manifestOnly = () =>
     return { model_name: "customers", raw_lineage: {}, confidence: "low", confidence_factors: [] }
   }) as any)
 
-const readOnly = () => {
-  const signal = new AbortController().signal
-  markReadOnlyCall(signal)
-  return { ...ctx, abort: signal }
-}
+/** A call made without write permission, as the MCP server and `tool run` make it. */
+const readOnly = () => ({ ...ctx, extra: { ...ctx.extra, forceReadOnly: true } })
 
 beforeAll(async () => {
   project = await mkdtemp(path.join(os.tmpdir(), "dbt-lineage-adapter-"))
@@ -130,6 +127,18 @@ describe("dbt_lineage in a read-only call", () => {
       expect(created).toEqual([])
       expect(call.mock.calls.map(([method]) => method)).toEqual(["dbt.lineage"])
       expect(result.metadata.structuredContent).toBeUndefined()
+      expect(result.output).not.toContain("dbt integration not used")
+    } finally {
+      call.mockRestore()
+    }
+  })
+
+  test("in plan mode, answers from the manifest and never creates the dbt adapter", async () => {
+    const call = manifestOnly()
+    try {
+      const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, { ...ctx, agent: "plan" })
+      expect(created).toEqual([])
+      expect(call.mock.calls.map(([method]) => method)).toEqual(["dbt.lineage"])
       expect(result.output).not.toContain("dbt integration not used")
     } finally {
       call.mockRestore()
@@ -255,10 +264,44 @@ describe("dbt_lineage's wait for the dbt adapter", () => {
     }
   })
 
+  test("says the adapter didn't start, not that there is no project, when its creation fails", async () => {
+    useConfig()
+    dbtAdapterInternals.create = async () => {
+      throw new Error("Cannot access invalid private field")
+    }
+    const call = manifestOnly()
+    try {
+      const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
+      expect(result.output).toContain("dbt integration not used: the dbt adapter didn't start\n")
+      expect(result.output).not.toContain("no dbt project here")
+      expect(call).toHaveBeenCalled()
+    } finally {
+      call.mockRestore()
+    }
+  })
+
   test("falls back when the adapter returns a lineage it can't read", async () => {
     useConfig()
     const { confidence: _c, stats: _s, ...partial } = TRACE
-    for (const unreadable of [{ version: 1, nodes: "?" }, partial, { ...TRACE, version: 2 }]) {
+    const node = TRACE.nodes[0]!
+    const edge = {
+      source: [node.uniqueId, "id"],
+      target: [node.uniqueId, "id"],
+      type: "direct",
+      viewsType: "Transformation",
+      viewsCode: ["id"],
+    }
+    const nested = [
+      { ...TRACE, nodes: [{ ...node, columns: [null] }] },
+      { ...TRACE, nodes: [{ ...node, name: undefined }] },
+      { ...TRACE, nodes: [{ ...node, depth: "1" }] },
+      { ...TRACE, nodes: [{ ...node, direction: "sideways" }] },
+      { ...TRACE, columnLineage: [{ ...edge, source: [] }] },
+      { ...TRACE, columnLineage: [{ ...edge, target: [null, null] }] },
+      { ...TRACE, columnLineage: [{ ...edge, viewsCode: [1] }] },
+      { ...TRACE, errors: [null] },
+    ]
+    for (const unreadable of [{ version: 1, nodes: "?" }, partial, { ...TRACE, version: 2 }, ...nested]) {
       resetDbtAdapter()
       dbtAdapterInternals.create = async () => fakeAdapter(true, async () => unreadable)
       const call = manifestOnly()
@@ -312,5 +355,30 @@ describe("the dbt adapter sql_execute uses", () => {
     await starting
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(disposed).toBe(2)
+  })
+
+  test("is disposed when the stdio server closes, even if closing the warehouses fails", async () => {
+    useConfig()
+    let disposed = 0
+    dbtAdapterInternals.create = async () => ({ ...fakeAdapter(true), dispose: async () => void (disposed += 1) })
+    await getDbtAdapter()
+    const closeAll = spyOn(Registry, "closeAll").mockImplementation(async () => {
+      throw new Error("close failed")
+    })
+    const consoleMethods = { log: console.log, info: console.info, debug: console.debug }
+    try {
+      // Settled into a value at once: the server may close before this test ends stdin itself.
+      const serving = serveStdio().then(
+        () => undefined,
+        (error: unknown) => error,
+      )
+      await new Promise((resolve) => setTimeout(resolve, 50))
+      process.stdin.emit("end")
+      expect(((await serving) as Error | undefined)?.message).toBe("close failed")
+      expect(disposed).toBe(1)
+    } finally {
+      closeAll.mockRestore()
+      Object.assign(console, consoleMethods)
+    }
   })
 })
