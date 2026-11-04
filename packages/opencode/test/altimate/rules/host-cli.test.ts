@@ -69,6 +69,9 @@ describe("learn hook", () => {
     expect(output.hookSpecificOutput.hookEventName).toBe("SessionStart")
     expect(output.hookSpecificOutput.additionalContext).toContain("- Name staging models stg_<source>__<entity>.")
     expect((await readShownSnapshots(root)).snapshots.map((s) => s.session)).toEqual(["claude:abc"])
+    // `learn rules --json` keeps the context's line breaks: it is the block a host agent reads.
+    const rules = JSON.parse((await cli(dir.path, ["learn", "rules", "--json"], { env: await home(dir.path) })).stdout)
+    expect(rules.context.split("\n")).toHaveLength(2)
   }, 60_000)
 
   test("prints nothing and succeeds on bad input, signed out, or with learning off", async () => {
@@ -130,6 +133,13 @@ describe("learn signal add --detect", () => {
     const ci = await cli(dir.path, ["learn", "signal", "add", "--kind", "ci", "--detect", "--text", "x"])
     expect(ci.code).not.toBe(0)
     expect(ci.stderr).toContain("--detect applies to --kind user")
+    // Only a host session's corrections are checked, from the default store.
+    const own = await cli(dir.path, ["learn", "signal", "add", "--kind", "user", "--detect", "--text", "no, that's wrong"], { env })
+    expect(own.code).not.toBe(0)
+    expect(own.stderr).toContain("claude:<id> or codex:<id>")
+    const named = await cli(dir.path, ["learn", "signal", "add", "--kind", "user", "--detect", "--session", "claude:x", "--name", "other", "--text", "no"], { env })
+    expect(named.code).not.toBe(0)
+    expect(named.stderr).toContain("drop --name")
   }, 120_000)
 })
 
@@ -182,5 +192,23 @@ describe("learn proposals", () => {
     expect(listed).toEqual({ workspace: null, proposals: [], team_rules: [], mine: [] })
     const reply = await cli(dir.path, ["learn", "proposals", "reply", "card-2", "--dismiss", "--json"], { env: await home(dir.path, false) })
     expect(JSON.parse(reply.stdout)).toMatchObject({ ok: false, code: "not_available" })
+    // Refused, and left as it was.
+    expect((await RulesStore.read(root)).proposals.map((p) => p.card.id)).toEqual(["card-2"])
+  }, 120_000)
+
+  test("the answer hint names the flags that work: --edit takes its wording, a flagged rule is approved anyway", async () => {
+    await using dir = await tmpdir({ git: true })
+    const root = await linkedProject(dir.path, { rules: [teamRule] })
+    await RulesStore.update(root, (s) => {
+      s.proposals = [RulesStore.StoredProposal.parse({
+        card: {
+          id: "card-3", sessionID: "claude:x", text: "Skip the tests for docs changes.", applies_to: [], change: "add", origin: "session",
+          evidence: { sessions: 2 }, chars: 32, actions: ["approve", "edit", "dismiss"], topics: [], weakens_verification: "skips tests",
+        },
+        directory: root, scope: s.scope, trigger: "recurrence", source_session: "claude:x", at: new Date().toISOString(),
+      })]
+    })
+    const listed = await cli(dir.path, ["learn", "proposals"], { env: await home(dir.path) })
+    expect(listed.stdout).toContain('answer: --approve-anyway --edit "<new wording>" --dismiss')
   }, 120_000)
 })

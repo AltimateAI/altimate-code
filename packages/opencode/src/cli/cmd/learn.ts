@@ -527,7 +527,8 @@ const RulesCommand = effectCmd({
     yield* run("", () => inProject(async () => {
       const { RulesHost } = await import("../../altimate/rules/host")
       const start = await RulesHost.start({ ...(await rulesProject()), session: args.session as string | undefined })
-      if (args.json) return out(JSON.stringify(printableDeep({ ...start, context: RulesHost.context(start) }), null, 2))
+      // `context` is printable already, line breaks kept: it is the block a host agent reads.
+      if (args.json) return out(JSON.stringify({ ...printableDeep(start), context: RulesHost.context(start) }, null, 2))
       out(RulesHost.context(start) || "No team rules apply here (learning or workspaces are off, signed out, or this project is not linked).")
     }))
   }),
@@ -552,9 +553,9 @@ const CheckCommand = effectCmd({
       const outcome = await RulesHost.check({ ...project, session: args.session as string, transcript: args.transcript as string | undefined })
       const { RuleProposal } = await import("../../altimate/rules/proposal")
       const waiting = (await RuleProposal.storedFor(project.root)).length
-      if (args.json) return out(JSON.stringify({ outcome, proposals: waiting }, null, 2))
+      if (args.json) return out(JSON.stringify(printableDeep({ outcome, proposals: waiting }), null, 2))
       out(`Check: ${printable(outcome)}.`)
-      if (waiting) out(`${waiting} proposed ${waiting === 1 ? "rule is" : "rules are"} waiting: \`altimate-code learn proposals\`.`)
+      if (waiting) out(`${waiting} proposed ${waiting === 1 ? "rule is" : "rules are"} waiting: \`altimate learn proposals\`.`)
     }))
   }),
 })
@@ -631,7 +632,7 @@ const ProposalsCommand = effectCmd({
         if (card.replaces) out(`  replaces: ${printable(card.replaces.text)}`)
         if (card.why) out(`  why: ${printable(card.why)}`)
         if (card.weakens_verification) out(`  warning: this rule ${printable(card.weakens_verification)}`)
-        out(`  answer: ${card.actions.map((action) => `--${action === "save_memory" ? "memory" : action === "save_local" ? "local" : action}`).join(" ")}`)
+        out(`  answer: ${card.actions.map((action) => answerFlag(card, action)).join(" ")}`)
       }
       if (state.workspace) out(`Team rules in ${printable(state.workspace.name)}: ${active.length}`)
       for (const row of mine.slice(0, 10))
@@ -639,6 +640,49 @@ const ProposalsCommand = effectCmd({
     }))
   }),
 })
+
+/** The `learn proposals reply` flag for `action` on `card`. A flagged rule is approved with `--approve-anyway`: a plain
+ * `--approve` is refused. */
+function answerFlag(card: { weakens_verification?: string }, action: string): string {
+  if (action === "save_memory") return "--memory"
+  if (action === "save_local") return "--local"
+  if (action === "edit") return '--edit "<new wording>"'
+  if (action === "approve" && card.weakens_verification) return "--approve-anyway"
+  return `--${action}`
+}
+
+/** The most a hook waits for its input, and the most it reads: a host hands a small JSON object and closes stdin. */
+const HOOK_INPUT_MS = 2_000
+const HOOK_INPUT_MAX_BYTES = 1024 * 1024
+
+/** The host's hook input, or `{}` when none arrives in time, it is too large, or it is not JSON. */
+async function readHookInput(): Promise<import("../../altimate/rules/host").HookInput> {
+  const reader = Bun.stdin.stream().getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<"timeout">((resolve) => (timer = setTimeout(() => resolve("timeout"), HOOK_INPUT_MS)))
+  try {
+    while (true) {
+      const next = await Promise.race([reader.read(), timeout])
+      if (next === "timeout" || next.done) break
+      size += next.value.byteLength
+      if (size > HOOK_INPUT_MAX_BYTES) return {}
+      chunks.push(next.value)
+    }
+  } finally {
+    clearTimeout(timer)
+    reader.releaseLock()
+  }
+  const parsed = (() => {
+    try {
+      return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}")
+    } catch {
+      return {}
+    }
+  })()
+  return typeof parsed === "object" && parsed !== null ? parsed : {}
+}
 
 /** Output for a host hook: only for session start (context for the host agent), in the shape both hosts read. */
 const HookCommand = effectCmd({
@@ -653,7 +697,7 @@ const HookCommand = effectCmd({
     yield* Effect.promise(() => inProject(async () => {
       try {
         const { RulesHost } = await import("../../altimate/rules/host")
-        const input = JSON.parse((await Bun.stdin.text()) || "{}") as import("../../altimate/rules/host").HookInput
+        const input = await readHookInput()
         if (typeof input.session_id !== "string" || !input.session_id) return
         const session = RulesHost.hostSession(args.host as "claude" | "codex", input.session_id)
         const project = await rulesProject()
@@ -671,6 +715,16 @@ const HookCommand = effectCmd({
         log.warn("learn hook failed", { event: args.event, error: errText(error) })
       }
     }).catch((error) => log.warn("learn hook failed", { event: args.event, error: errText(error) })))
+    // Work past the session start's deadline may still run: no learn lock is left held by the exit, and the telemetry
+    // flush is bounded, so the hook ends within the host's timeout.
+    yield* Effect.promise(async () => {
+      const [{ closeLearnLocks }, { RulesHost }, { Telemetry }] = await Promise.all([
+        import("../../altimate/learn/lock"), import("../../altimate/rules/host"), import("../../altimate/telemetry"),
+      ])
+      await closeLearnLocks(RulesHost.HOOK_EXIT_LOCKS_MS)
+      await Telemetry.shutdown({ timeoutMs: RulesHost.HOOK_EXIT_TELEMETRY_MS }).catch(() => {})
+      process.exit(0)
+    })
   }),
 })
 // altimate_change end
@@ -1097,6 +1151,10 @@ const SignalAddCommand = effectCmd({
     if (!args.text === !args.file) return yield* fail("Pass exactly one of --text or --file.")
     // altimate_change start — workspace rules: --detect
     if (args.detect && args.kind !== "user") return yield* fail("--detect applies to --kind user.")
+    // The host check reads only a host session's corrections, from the default store.
+    if (args.detect && !Signals.isHostSession(args.session as string))
+      return yield* fail("--detect takes a host agent's session id: --session claude:<id> or codex:<id>.")
+    if (args.detect && args.name !== Playbook.DEFAULT_NAME) return yield* fail("--detect records to the default store: drop --name.")
     // altimate_change end
     yield* run("", async () => {
       const root = await projectRoot()
@@ -1112,12 +1170,12 @@ const SignalAddCommand = effectCmd({
         const project = await rulesProject()
         const result = await RulesHost.recordCorrection({ ...project, session: args.session as string, text })
         return out({
-          proposed: "Proposed as a team rule: it waits in `altimate-code learn proposals`.",
-          not_stored: `Not proposed: ${RulesStore.MAX_REQUESTED_PROPOSALS} proposals are already waiting; answer some with \`altimate-code learn proposals\`.`,
+          proposed: "Proposed as a team rule: it waits in `altimate learn proposals`.",
+          not_stored: `Not proposed: it is not a one-line rule, or ${RulesStore.MAX_REQUESTED_PROPOSALS} proposals are already stored for this project (some may belong to another Altimate account or workspace). The next session start says which.`,
           recorded: `Recorded a correction for session ${args.session}.`,
           duplicate: "Already recorded; nothing added.",
           not_correction: "Not a correction; nothing recorded.",
-          off: "Not recorded: learning or workspaces are off, or this project is not linked.",
+          off: "Not recorded: learning or workspaces are off, signed out, or this project is not linked.",
         }[result])
       }
       // altimate_change end

@@ -304,7 +304,7 @@ export async function ask(input: {
   /** With `persist`: the account and workspace the draft was made for. It is stored only if they are still current. */
   scope?: RulesStore.Scope
   /** With `persist`: why nothing was stored, when it was not for a dismissed topic (the caller keeps its corrections). */
-  onNotStored?: (reason: "full" | "scope_changed") => void
+  onNotStored?: (reason: NotStored) => void
 }) {
   expire(input.directory)
   const trigger = input.trigger ?? (input.draft.origin === "explicit" ? "remember" : "recurrence")
@@ -378,12 +378,22 @@ const identity = (scope: RulesStore.Scope | undefined, card: Pick<ProposalCard, 
     [...card.applies_to].sort(), card.text.trim().toLowerCase(),
   ])
 
+/** Why a stored proposal was not stored: too many waiting, the account or workspace changed while it was drafted, or
+ * the write failed (the learn lock was busy). */
+export type NotStored = "full" | "scope_changed" | "failed"
+
+/** How many more proposals raised from corrections can be stored now (requested ones have their own, larger limit). */
+export async function storedRoom(root: string): Promise<number> {
+  const live = (await RulesStore.read(root)).proposals.filter((p) => storedLive(p)).length
+  return Math.max(0, RulesStore.MAX_STORED_PROPOSALS - live)
+}
+
 /** `ask` with no client to show the card: keep it on disk, once per proposal (`identity`). Undefined when it was not
  * stored (`onNotStored` says why). */
 async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Promise<ProposalCard | undefined> {
   let card: ProposalCard | undefined
   let repeat = false
-  let refused: "full" | "scope_changed" | undefined
+  let refused: NotStored | undefined
   await RulesStore.update(input.root, (s) => {
     s.proposals = s.proposals.filter((p) => storedLive(p))
     // Drafted for another account or workspace than the one pulled now: not labelled as this one's.
@@ -394,8 +404,9 @@ async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Pr
       repeat = true
       // Being answered by another process: left as it is (the answer decides it).
       if (existing.claim && existing.claim.pid !== process.pid && processAlive(existing.claim.pid)) return void (card = existing.card)
-      // Asked again: as for a card, the latest session, its evidence, memory block and request win.
-      existing.card = { ...existing.card, sessionID: input.sessionID, evidence: input.draft.evidence }
+      // Asked again: as for a card, the latest session, memory block and request win. The evidence stays: a later
+      // "remember" carries one session, and the proposal's `why` and sent evidence must not disagree.
+      existing.card = { ...existing.card, sessionID: input.sessionID }
       existing.source_session = input.sessionID
       existing.directory = input.directory
       if (input.draft.memory) {
@@ -415,6 +426,11 @@ async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Pr
       ...(input.draft.memory ? { memory: input.draft.memory } : {}), ...(input.request ? { request: input.request } : {}),
       edits: 0, at: new Date().toISOString(),
     })
+  }).catch((error) => {
+    // A busy learn lock: not stored, said to the caller (a "remember" then saves as before cards; corrections wait).
+    log.warn("proposal not stored", { error })
+    card = undefined
+    refused = "failed"
   })
   if (card) RulesTelemetry.shown(card, trigger, repeat, true)
   else if (trigger !== "remember" && refused === "full") RulesTelemetry.skipped(input.sessionID, trigger, "stored_full")
@@ -474,15 +490,20 @@ async function answerStored(
   const { root, id } = input
   const before = await RulesStore.read(root)
   const found = before.proposals.find((p) => p.card.id === id && storedLive(p))
-  if (found && !(await mayAnswer(before, found)))
-    return { ok: false, code: "not_available", error: "This proposal belongs to another Altimate account or workspace: sign in to it (and sync) to answer it." }
+  if (found && !(await mayAnswer(before, found))) return unavailable(before, found)
+  // Checked again inside the claim's write: the account or workspace may change between the two.
+  const { accountDigest } = await import("../workspace/state")
+  const account = await accountDigest().catch(() => null)
   let record: RulesStore.StoredProposal | undefined
   let held = false
+  let moved: RulesStore.State | undefined
   let conflict: string | undefined
   await RulesStore.update(root, (s) => {
     const found = s.proposals.find((p) => p.card.id === id && storedLive(p))
     if (!found) return
     record = structuredClone(found)
+    if (found.scope && !(RulesStore.sameScope(found.scope, s.scope) && !!s.pulled_with && s.pulled_with === account))
+      return void (moved = structuredClone(s))
     // Held by another live process. This process's own claim is left from a write-back that failed (a reply running
     // here is refused above). A claim past `CLAIM_STALE_MS` is taken over: its process may be gone with its pid reused,
     // or live in another pid namespace.
@@ -492,10 +513,11 @@ async function answerStored(
     // An answer that acted (sent, saved, dismissed) and was not recorded as done: only the same answer finishes it, so
     // one proposal is never both sent and dismissed. Repeating it is safe: the send is skipped once recorded as sent.
     const unfinished = found.claim?.answering
-    if (unfinished && unfinished !== answer.action) return void (conflict = unfinished)
+    if (unfinished && unfinished !== answer.action && acted(s, found.card.id, unfinished)) return void (conflict = unfinished)
     found.claim = { pid: process.pid, at: new Date().toISOString(), ...(answer.action === "edit" ? {} : { answering: answer.action }) }
   })
   if (!record) return { ok: false, code: "not_open", error: "This proposal is no longer open." }
+  if (moved) return unavailable(moved, record)
   if (held) return { ok: false, code: "busy", error: "This proposal is already being answered.", card: record.card }
   if (conflict)
     return { ok: false, code: "not_available", error: `This proposal was being answered with "${conflict}" when that stopped: answer it with "${conflict}" again to finish.`, card: record.card }
@@ -537,6 +559,22 @@ async function answerStored(
     return { ok: false, code: "failed", error: "Not changed: the new wording could not be saved. Try again.", card: record.card }
   // A closing answer acted, and its claim keeps `answering`: the next reply with the same answer finishes it.
   return result
+}
+
+/** Why the person signed in now may not answer `proposal`: it was raised for another account or workspace, or this
+ * one has not been confirmed for this credential yet (signed out, or not synced since signing in). */
+function unavailable(state: RulesStore.State, proposal: RulesStore.StoredProposal): ReplyResult {
+  if (proposal.scope && RulesStore.sameScope(proposal.scope, state.scope))
+    return { ok: false, code: "not_available", error: "Sign in to Altimate (and sync with `altimate learn sync`) to answer this proposal." }
+  return { ok: false, code: "not_available", error: "This proposal belongs to another Altimate account or workspace: sign in to it (and sync) to answer it." }
+}
+
+/** Whether an answer recorded as running (`claim.answering`) acted before it stopped. A send or approve that acted left
+ * the proposal queued or sent under its card id; one that did not act (refused before queueing) holds nothing back.
+ * Other answers cannot be checked, and count as acted. */
+function acted(state: RulesStore.State, id: string, action: string): boolean {
+  if (action !== "send" && action !== "approve" && action !== "approve_anyway") return true
+  return state.outbox.some((entry) => entry.id === id) || !!state.push_outcomes[id]
 }
 
 const WRITE_BACK_ATTEMPTS = 3
@@ -751,10 +789,10 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
     const priorSent = prior && !prior.error && prior.public_id
       ? current.sent.find((sent) => sent.public_id === prior.public_id && sent.text === card.text)
       : undefined
-    if (priorSent && (!approve || prior!.approved || priorSent.status === "active"))
-      return approve
-        ? { message: `Approved: now a team rule in ${ws}.`, outcome: "approved" }
-        : { message: `Sent to ${owner}'s review queue in ${ws}.`, outcome: "sent" }
+    if (priorSent && (!approve || prior!.approved || priorSent.status === "active")) {
+      if (approve || priorSent.status === "active") return { message: `Approved: now a team rule in ${ws}.`, outcome: "approved" }
+      return { message: `Sent to ${owner}'s review queue in ${ws}.`, outcome: "sent" }
+    }
     const quotes = current.settings?.include_quotes !== false
     const why = card.why ? (quotes ? redactSecrets(card.why) : neutralWhy(card)) : undefined
     const outboxId = await RulesSync.enqueue(entry.root, {

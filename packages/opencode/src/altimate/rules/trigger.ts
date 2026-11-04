@@ -151,6 +151,13 @@ async function draft(input: {
 
 const running = new Set<string>()
 
+/** A check's outcome when its proposal could not be stored. "failed" counts as a failed check (retried later). */
+const NOT_STORED: Record<RuleProposal.NotStored, string> = {
+  full: "not stored: too many proposals are waiting; corrections kept for a later check",
+  scope_changed: "not stored: the account or workspace changed while it was drafted; corrections kept for a later check",
+  failed: "failed: the proposal could not be stored; corrections kept for a later check",
+}
+
 /** Check the session's new corrections and show at most one card. Never throws; returns what the check decided. With
  * `persist` (a host session through the plugin, `learn check`): no client shows cards, so the proposal is kept on disk
  * for `learn proposals` instead. */
@@ -185,12 +192,15 @@ export async function afterTurn(input: {
       outcome = "no client that shows cards is attached; corrections kept for a later check"
       return RulesTelemetry.skipped(input.sessionID, undefined, "no_renderer")
     }
-    // One card at a time per session: an explicit "remember" may already have shown one for this turn.
-    const open = input.persist
-      ? (await RuleProposal.stored(input.root)).filter((card) => card.sessionID === input.sessionID)
-      : RuleProposal.list(input.directory, input.sessionID)
-    if (open.length)
+    // One card at a time per session: an explicit "remember" may already have shown one for this turn. A stored proposal
+    // takes no place on a screen, so it does not hold the session's later corrections back.
+    if (!input.persist && RuleProposal.list(input.directory, input.sessionID).length)
       return RulesTelemetry.skipped(input.sessionID, undefined, "card_open")
+    // No room for another stored proposal: no drafting call that could not be kept. The corrections wait for room.
+    if (input.persist && !(await RuleProposal.storedRoom(input.root))) {
+      outcome = "not stored: too many proposals are waiting; corrections kept for a later check"
+      return RulesTelemetry.skipped(input.sessionID, undefined, "stored_full")
+    }
     // Marked processed once the check completes; a failed check is retried after the next turn.
     checked = fresh.map((signal) => signal.id)
     // The model call takes a while: if the client that shows cards went away meanwhile, the card would not be seen,
@@ -202,16 +212,14 @@ export async function afterTurn(input: {
       RulesTelemetry.skipped(input.sessionID, trigger, "no_renderer")
       return false
     }
-    // A stored proposal that could not be stored (too many waiting, or the account or workspace changed while it was
-    // drafted) leaves its corrections unchecked, so they are proposed once that clears.
-    let notStored: "full" | "scope_changed" | undefined
-    const keepIfNotStored = { scope: state.scope, onNotStored: (reason: "full" | "scope_changed") => void (notStored = reason) }
+    // A stored proposal that could not be stored (too many waiting, the account or workspace changed while it was
+    // drafted, or the write failed) leaves its corrections unchecked, so they are proposed once that clears.
+    let notStored: RuleProposal.NotStored | undefined
+    const keepIfNotStored = { scope: state.scope, onNotStored: (reason: RuleProposal.NotStored) => void (notStored = reason) }
     const unstored = () => {
       if (!notStored) return false
       checked = []
-      outcome = notStored === "full"
-        ? "not stored: too many proposals are waiting; corrections kept for a later check"
-        : "not stored: the account or workspace changed while it was drafted; corrections kept for a later check"
+      outcome = NOT_STORED[notStored]
       return true
     }
     const newest = fresh[fresh.length - 1]
@@ -251,9 +259,9 @@ export async function afterTurn(input: {
           },
         })
         if (unstored()) return
-        outcome = card
-          ? `${input.persist ? "stored" : "showed"} a ${drafted.change} ${input.persist ? "proposal" : "card"} for a shown team rule`
-          : input.persist ? "the proposal for this team rule was not stored (dismissed, or too many waiting)" : "the proposal for this team rule was dismissed"
+        if (!card) outcome = "the proposal for this team rule was dismissed"
+        else if (input.persist) outcome = `stored a ${drafted.change} proposal for a shown team rule`
+        else outcome = `showed a ${drafted.change} card for a shown team rule`
         return
       }
       // At most one drafting call per turn: the drafter found nothing to propose about the shown rule's subject.
@@ -288,9 +296,8 @@ export async function afterTurn(input: {
       },
     })
     if (unstored()) return
-    outcome = card
-      ? `${input.persist ? "stored an add proposal" : "showed an add card"} for topic ${topic.identifier}`
-      : input.persist ? `topic ${topic.identifier} was not stored (dismissed, or too many waiting)` : `topic ${topic.identifier} was dismissed`
+    if (!card) outcome = `topic ${topic.identifier} was dismissed`
+    else outcome = `${input.persist ? "stored an add proposal" : "showed an add card"} for topic ${topic.identifier}`
     })()
   } catch (error) {
     checked = []
@@ -332,12 +339,17 @@ export async function explicit(input: {
   request?: import("./proposal").RequestRecord
   /** No client shows cards: store the proposal for `learn proposals` (`RuleProposal.ask`). */
   persist?: boolean
+  /** With `persist`: why nothing was stored (`RuleProposal.ask`). */
+  onNotStored?: (reason: RuleProposal.NotStored) => void
 }): Promise<
   | { status: "shown"; card: Awaited<ReturnType<typeof RuleProposal.ask>>; choose: boolean }
   | { status: "invalid"; reason: string; kind: "rule" | "ambiguous" }
   | { status: "memory"; cue: string }
 > {
   const text = input.text.replace(/\s+/g, " ").trim()
+  // The account and workspace this is asked in: a stored request is labelled only for them, even if they change before
+  // it is written.
+  const scope = input.persist ? (await RulesStore.read(input.root)).scope : undefined
   const own = input.said ? RuleClassify.classify(input.said) : { kind: "ambiguous" as const }
   const { kind, cue } = own.kind === "ambiguous" ? RuleClassify.classify(text) : own
   if (kind === "memory") return { status: "memory", cue: cue ?? "a fact or preference" }
@@ -354,7 +366,7 @@ export async function explicit(input: {
   // drafter decides whether the shown rule is the subject.
   const card = await RuleProposal.ask({
     sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, unanswered: input.unanswered, request: input.request,
-    persist: input.persist,
+    persist: input.persist, ...(input.persist ? { scope, onNotStored: input.onNotStored } : {}),
     draft: {
       text,
       applies_to: appliesTo([text, ...(last ? [last.text] : [])]),

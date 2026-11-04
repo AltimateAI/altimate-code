@@ -262,11 +262,7 @@ export async function proposeFor(input: {
   // No proposal: too many are stored already, or a card's request could not be kept on disk (the limit was reached
   // meanwhile, or the write failed). Saved as before cards instead, so nothing the person asked for is lost.
   if (result.status === "shown" && !result.card) return void RulesTelemetry.routed(sessionID, via, stored ? "no_renderer" : "requests_full")
-  RulesTelemetry.routed(
-    sessionID,
-    via,
-    result.status === "shown" ? (stored ? (result.choose ? "choose_stored" : "stored") : (result.choose ? "choose_card" : "card")) : result.status,
-  )
+  RulesTelemetry.routed(sessionID, via, routedOutcome(result, stored))
   const metadata = { action: "proposed" as string, kind: "rule", name: "", scope: "project" }
   // From the memory tool, a memory is simply saved as asked; so is a long note that did not ask to be a rule. A
   // requested rule that is not one line is sent back to be restated: saved as project memory, it would reach
@@ -293,34 +289,45 @@ export async function proposeFor(input: {
       output: `Not proposed: a team rule must be one line of at most 140 characters with no commands, links or secrets (${result.reason}). Restate it as one short line and save it again.`,
     }
   const owner = state.workspace.is_owner ? "you (the workspace owner)" : (state.workspace.owner_name ?? "the workspace owner")
-  if (stored)
+  const answer = state.workspace.is_owner ? "approve it now" : `send it to ${owner} for review`
+  if (stored) {
+    const what = result.choose
+      ? `Kept for the person to decide: save this as a memory (just for them) or as a team rule for ${state.workspace.name} (goes to ${owner} for review), or skip it.`
+      : `Proposed as a team rule for ${state.workspace.name}. The person can ${answer}, edit the wording, or decline.`
     return {
       title: result.choose ? `Team rule or memory: "${content.slice(0, 60)}"` : `Team rule proposed: "${content.slice(0, 60)}"`,
       metadata: { ...metadata, action: "stored" },
       output: [
-        result.choose
-          ? `Kept for the person to decide: save this as a memory (just for them) or as a team rule for ${state.workspace.name} (goes to ${owner} for review), or skip it.`
-          : `Proposed as a team rule for ${state.workspace.name}. ` +
-            (state.workspace.is_owner ? "The person can approve it now" : `The person can send it to ${owner} for review`) + ", edit the wording, or decline.",
-        "It is waiting for them: tell them to run /altimate-code:rules (Claude Code or Codex plugin) or `altimate-code learn proposals`. Nothing was saved yet, and it stays waiting until they answer.",
+        what,
+        "It is waiting for them: tell them to run /altimate-code:rules (Claude Code or Codex plugin) or `altimate learn proposals`. Nothing was saved yet, and it stays waiting until they answer.",
         via === "memory"
           ? "Do not save it again with altimate_memory_write or training_save; follow it for the rest of this session."
           : "Follow the rule for the rest of this session. Do not save it again, and do not say it is already a team rule: it applies to teammates only after approval.",
       ].join("\n"),
     }
+  }
   return {
     title: result.choose ? `Team rule or memory: "${content.slice(0, 60)}"` : `Team rule proposed: "${content.slice(0, 60)}"`,
     metadata,
     output: [
       result.choose
         ? `The person sees a card asking whether to save this as a memory (just for them, applies now) or as a team rule for ${state.workspace.name} (goes to ${owner} for review), or to skip it.`
-        : `Proposed as a team rule for ${state.workspace.name}. The person sees a card to ` +
-          (state.workspace.is_owner ? "approve it now" : `send it to ${owner} for review`) + ", edit the wording, or decline.",
+        : `Proposed as a team rule for ${state.workspace.name}. The person sees a card to ${answer}, edit the wording, or decline.`,
       via === "memory"
         ? "Nothing was saved yet: the person chooses on the card (if they never answer, it is saved to this project's memory when the card closes). Do not save it again with altimate_memory_write or training_save; follow it for the rest of this session."
         : "Follow the rule for the rest of this session. Do not save it again, and do not say it is already a team rule: it applies to teammates only after approval (if the card is never answered, it is saved as a rule for this project when it closes).",
     ].join("\n"),
   }
+}
+
+/** The `rule_remember_routed` outcome of an explicit request that was asked (`stored`: kept for `learn proposals`). */
+function routedOutcome(
+  result: Awaited<ReturnType<typeof import("./trigger").RuleTrigger.explicit>>,
+  stored: boolean,
+): "card" | "choose_card" | "stored" | "choose_stored" | "memory" | "invalid" {
+  if (result.status !== "shown") return result.status
+  if (stored) return result.choose ? "choose_stored" : "stored"
+  return result.choose ? "choose_card" : "card"
 }
 
 export * as RulesRemember from "./remember"

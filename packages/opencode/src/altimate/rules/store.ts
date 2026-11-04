@@ -33,6 +33,13 @@ export const WORKSPACE_RULES_STORE = Store.WORKSPACE_RULES_STORE
 const log = Log.create({ service: "rules.store" })
 const LOCK = { timeoutMs: 5_000 }
 const MAX_NOTICES = 50
+/** Unstored host requests kept until the next host session start reports them. */
+const MAX_HOST_UNSTORED = 10
+
+/** The key a host session start marks a review notice reported under (`host_notices_seen`). */
+export const hostNoticeKey = (notice: Pick<Notice, "public_id" | "status">) => `${notice.public_id}|${notice.status}`
+/** The key a host session start marks a failed check reported under (`host_notices_seen`). */
+export const hostCheckKey = (check: { at: string }) => `check|${check.at}`
 const MAX_SENT = 200
 /** Safety cap for the signal id list; `processed_signals` is also pruned to live signals. */
 const MAX_TRACKED = 5000
@@ -220,6 +227,17 @@ export const State = z.object({
   host_retry: z.record(z.string(), z.string()).default({}),
   /** When the last pull without a sync run failed: a host session start does not wait on another one for `REFRESH_MS`. */
   pull_failed_at: z.string().optional(),
+  /** The credential (`accountDigest`) that pull failed with: signed in as someone else since, the next start pulls. */
+  pull_failed_with: z.string().optional(),
+  /** "Remember … as a team rule" requests from a host prompt that were not stored: said at the next host session start,
+   * then dropped (the prompt hook runs in the background and cannot answer). */
+  host_unstored: z.array(z.object({
+    at: z.string(),
+    text: z.string(),
+    /** `full`: too many proposals waiting; `invalid`: not a one-line rule (`detail` says why); `failed`: not written. */
+    reason: z.enum(["full", "invalid", "failed"]),
+    detail: z.string().optional(),
+  })).default([]),
   /** The after-turn check running for a host session, per session: one at a time across processes. */
   host_checks: z.record(z.string(), z.object({
     pid: z.number().int(),
@@ -355,7 +373,15 @@ export async function update(root: string, change: (state: State) => State | voi
     next.notices = next.notices.slice(-MAX_NOTICES)
     next.sent = capSent(next.sent)
     next.processed_signals = next.processed_signals.slice(-MAX_TRACKED)
-    next.host_notices_seen = next.host_notices_seen.slice(-MAX_NOTICES)
+    // Keys of notices still listed are never trimmed (they would be reported again): only keys of notices gone, and of
+    // failed checks reported before the last one, make room.
+    if (next.host_notices_seen.length > MAX_NOTICES) {
+      const live = new Set([...next.notices.map(hostNoticeKey), ...(next.last_check ? [hostCheckKey(next.last_check)] : [])])
+      const gone = next.host_notices_seen.filter((key) => !live.has(key))
+      const drop = new Set(gone.slice(0, next.host_notices_seen.length - MAX_NOTICES))
+      next.host_notices_seen = next.host_notices_seen.filter((key) => !drop.has(key))
+    }
+    next.host_unstored = next.host_unstored.slice(-MAX_HOST_UNSTORED)
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
     if (next.scope_drop && !scopeDropShown(next.scope_drop, now)) delete next.scope_drop
@@ -448,6 +474,7 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
     host_checks: state.host_checks,
     host_pending: state.host_pending,
     host_retry: state.host_retry,
+    host_unstored: state.host_unstored,
   }
 }
 

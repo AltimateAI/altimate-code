@@ -22,6 +22,28 @@ interface Owner {
 
 const owners = new AsyncLocalStorage<Map<string, Owner>>()
 
+/** Aborted by `closeLearnLocks`: a lock not acquired yet is no longer waited for. */
+const closing = new AbortController()
+/** Learn locks this process holds now. */
+let held = 0
+const released: (() => void)[] = []
+
+/**
+ * For a process about to exit with work still running (a host hook past its deadline): no learn lock is taken from now
+ * on (a waiting or later `withLearnLock` rejects), and the locks already held are waited for, at most `timeoutMs`. An
+ * exit inside a held lock would leave it to go stale, blocking every learn write in the project meanwhile.
+ */
+export async function closeLearnLocks(timeoutMs: number): Promise<void> {
+  closing.abort(new Error("learn locks closed: the process is exiting"))
+  if (!held) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  await Promise.race([
+    new Promise<void>((resolve) => released.push(resolve)),
+    new Promise<void>((resolve) => (timer = setTimeout(resolve, timeoutMs))),
+  ])
+  clearTimeout(timer)
+}
+
 async function readToken(metadata: string): Promise<string> {
   const parsed = JSON.parse(await fs.readFile(metadata, "utf8"))
   if (typeof parsed?.token !== "string" || !parsed.token) throw new Error("Invalid learn lock metadata")
@@ -51,49 +73,15 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
   let failure: unknown
   try {
     return await Flock.withLock("learn-state", async () => {
-      // Flock does not expose its token, so read its metadata while entering the acquired lease.
-      const metadata = path.join(lock, "meta.json")
-      const owner: Owner = { active: true, metadata, token: await readToken(metadata) }
-      const context = new Map(owners.getStore())
-      context.set(key, owner)
+      held++
       try {
-        return await owners.run(context, async () => {
-          // Every learn writer enters here after Flock creates the directory. Share approved
-          // lessons with the team while keeping operational state local; preserve user edits.
-          const file = path.join(dir, ".gitignore")
-          // The text, comment included, is how an installed block is recognised: changing it would append it again.
-          const rules = "# Share approved lessons; keep signals and other local learning state out of Git.\n*\n!/*/\n!/*/approved.json\n!/.gitignore\n"
-          await assertLearnLock(key)
-          await SafeFS.open(key, file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL).then(async (handle) => {
-            try { await handle.writeFile(rules) } finally { await handle.close() }
-          }).catch(async (error: NodeJS.ErrnoException) => {
-            // An existing read-only file can already contain the required rules.
-            if (error.code !== "EEXIST" && error.code !== "EACCES") throw error
-            const reader = await SafeFS.open(key, file, constants.O_RDONLY)
-            try {
-              if (!(await reader.stat()).isFile()) throw new Error("Learn .gitignore must be a regular file")
-              if ((await reader.readFile("utf8")).includes(rules)) return
-            } finally { await reader.close() }
-            const handle = await SafeFS.open(key, file, constants.O_RDWR | constants.O_APPEND)
-            try {
-              if (!(await handle.stat()).isFile()) throw new Error("Learn .gitignore must be a regular file")
-              const current = await handle.readFile("utf8")
-              if (current.includes(rules)) return
-              await assertLearnLock(key)
-              await handle.appendFile((current && !current.endsWith("\n") ? "\n" : "") + rules)
-            } finally { await handle.close() }
-          })
-          return task()
-        })
-      } catch (error) {
-        failure = error
-        throw error
+        return await locked()
       } finally {
-        // Detached work inheriting this context must acquire its own lock after the transaction ends.
-        owner.active = false
+        if (--held === 0) released.splice(0).forEach((resolve) => resolve())
       }
     }, {
       dir,
+      signal: closing.signal,
       // Laptop sleep and long event-loop pauses should not evict a live learning transaction quickly.
       // PID liveness cannot shorten this floor: same-host containers may use different PID namespaces.
       // Token checks catch observed lease loss but cannot fence every takeover race.
@@ -104,5 +92,49 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
   } catch (error) {
     // A displaced Flock also rejects release; keep the transaction's original failure visible.
     throw failure ?? error
+  }
+
+  async function locked() {
+    // Flock does not expose its token, so read its metadata while entering the acquired lease.
+    const metadata = path.join(lock, "meta.json")
+    const owner: Owner = { active: true, metadata, token: await readToken(metadata) }
+    const context = new Map(owners.getStore())
+    context.set(key, owner)
+    try {
+      return await owners.run(context, async () => {
+        // Every learn writer enters here after Flock creates the directory. Share approved
+        // lessons with the team while keeping operational state local; preserve user edits.
+        const file = path.join(dir, ".gitignore")
+        // The text, comment included, is how an installed block is recognised: changing it would append it again.
+        const rules = "# Share approved lessons; keep signals and other local learning state out of Git.\n*\n!/*/\n!/*/approved.json\n!/.gitignore\n"
+        await assertLearnLock(key)
+        await SafeFS.open(key, file, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL).then(async (handle) => {
+          try { await handle.writeFile(rules) } finally { await handle.close() }
+        }).catch(async (error: NodeJS.ErrnoException) => {
+          // An existing read-only file can already contain the required rules.
+          if (error.code !== "EEXIST" && error.code !== "EACCES") throw error
+          const reader = await SafeFS.open(key, file, constants.O_RDONLY)
+          try {
+            if (!(await reader.stat()).isFile()) throw new Error("Learn .gitignore must be a regular file")
+            if ((await reader.readFile("utf8")).includes(rules)) return
+          } finally { await reader.close() }
+          const handle = await SafeFS.open(key, file, constants.O_RDWR | constants.O_APPEND)
+          try {
+            if (!(await handle.stat()).isFile()) throw new Error("Learn .gitignore must be a regular file")
+            const current = await handle.readFile("utf8")
+            if (current.includes(rules)) return
+            await assertLearnLock(key)
+            await handle.appendFile((current && !current.endsWith("\n") ? "\n" : "") + rules)
+          } finally { await handle.close() }
+        })
+        return task()
+      })
+    } catch (error) {
+      failure = error
+      throw error
+    } finally {
+      // Detached work inheriting this context must acquire its own lock after the transaction ends.
+      owner.active = false
+    }
   }
 }

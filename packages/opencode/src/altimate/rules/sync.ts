@@ -141,8 +141,8 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
     })
     const fresh: State["notices"] = []
     let applied = true
-    // Stamped only while the credential that pulled is still the one signed in: another process may have signed in as
-    // someone else while this pull ran.
+    // Another process may have signed in with another key of the same account while this pull ran: then the state does
+    // not say it was pulled with this one, or `verified` would fail for the credential signed in now.
     const { accountDigest } = await import("../workspace/state")
     const current = (await accountDigest().catch(() => null)) === pulledWith
     const state = await RulesStore.update(root, (state) => {
@@ -159,7 +159,6 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.pending_count = response.pending_count
       state.pulled_at = new Date().toISOString()
       if (current) state.pulled_with = pulledWith
-      else delete state.pulled_with
       state.last_error = response.skipped
         ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code, or did not pass the rule lint (one line, no commands, links or secrets), and ${response.skipped === 1 ? "is" : "are"} not delivered`
         : undefined
@@ -830,12 +829,22 @@ export async function pullOnly(root: string, directory: string, learn: LearnConf
     const report = ctx.status === "ready" ? { context: ctx, pull: await pull(root, ctx) } : await unready(root, key, ctx)
     if (report.pull?.ok) failedAt.delete(key)
     else if (report.pull) failedAt.set(key, Date.now())
-    // Each host hook is a new process, so `failedAt` does not outlive it: a failure is kept on disk too, and the next
-    // session start does not wait on another pull for `REFRESH_MS`. A project that turned out unlinked is not marked.
-    const failed = report.pull ? !report.pull.ok : !(report.context.status === "skipped" && report.context.unlinked)
+    // Each host hook is a new process, so `failedAt` does not outlive it: a failure is kept on disk too, with the
+    // credential it failed under, and the next session start does not wait on another pull for `REFRESH_MS`. Only a pull
+    // that ran and failed, or a link or account the server could not confirm: signed out, unlinked or no remote is not
+    // a failure to back off from (signing in pulls at once).
+    const failed = report.pull ? !report.pull.ok : TRANSIENT.has(report.context.status === "skipped" ? report.context.code : "")
+    const { accountDigest } = await import("../workspace/state")
+    const account = failed ? await accountDigest().catch(() => null) : null
     await RulesStore.update(root, (s) => {
-      if (failed) s.pull_failed_at = new Date().toISOString()
-      else delete s.pull_failed_at
+      if (failed) {
+        s.pull_failed_at = new Date().toISOString()
+        if (account) s.pull_failed_with = account
+        else delete s.pull_failed_with
+      } else {
+        delete s.pull_failed_at
+        delete s.pull_failed_with
+      }
     }).catch((error) => log.warn("rules pull outcome not recorded", { error: errorText(error) }))
     RulesTelemetry.synced(trigger, report, startedAt)
     return report
@@ -845,9 +854,15 @@ export async function pullOnly(root: string, directory: string, learn: LearnConf
   }
 }
 
-/** A pull without a sync run failed within `REFRESH_MS` (`pullOnly`): not worth waiting on again yet. */
-export function pullFailedRecently(state: State, now = Date.now()): boolean {
-  return !!state.pull_failed_at && now - Date.parse(state.pull_failed_at) < REFRESH_MS
+/** Context skips that are a failure to reach or confirm the workspace, not the person's setup. */
+const TRANSIENT = new Set<string>(["link_unconfirmed", "account_unconfirmed"])
+
+/** A pull without a sync run failed within `REFRESH_MS` (`pullOnly`), under the credential signed in now: not worth
+ * waiting on again yet. Signed in as someone else since, it is. */
+export async function pullFailedRecently(state: State, now = Date.now()): Promise<boolean> {
+  if (!state.pull_failed_at || !(now - Date.parse(state.pull_failed_at) < REFRESH_MS)) return false
+  const { accountDigest } = await import("../workspace/state")
+  return (state.pull_failed_with ?? null) === (await accountDigest().catch(() => null))
 }
 
 /** `pullOnly`, waited for at most `waitMs`; never throws. */

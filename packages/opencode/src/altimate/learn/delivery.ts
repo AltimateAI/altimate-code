@@ -422,10 +422,13 @@ export class Delivery {
    * it like an altimate-code session. Returns the rules given, as they are approved now: a session started again (resumed,
    * cleared, compacted) gets the current rules, not the ones it was given before (a retired or edited rule is not
    * repeated). A rule sync no longer vouches for leaves its record too, as in any session (`Delivery` rebuilds the
-   * snapshot); one still current stays recorded, for attribution.
+   * snapshot); one still current stays recorded, for attribution. Only rules recorded as shown are given: past
+   * `session_max_lessons`, as in any session, the rest are not.
    */
   async recordStart(session: string, name: string): Promise<Lesson[]> {
     if (!await this.exists()) return []
+    // Nothing to give: the learn lock is not taken.
+    if (!(await this.approved()).some((entry) => entry.name === name)) return []
     return Store.transaction(this.root, async () => {
       const existing = await this.state(session)
       const approved = (await this.approved()).filter((entry) => entry.name === name)
@@ -437,11 +440,12 @@ export class Delivery {
         shown: [], requests: [], requestParts: [], compactions: [], counted: [],
       }
       const before = state.shown.length
-      // A rule edited since the session was shown it: the shown entry takes the current wording, so usage and "corrected
-      // again" count the version the session now has.
+      // A rule edited since the session was shown it, and given again now: the shown entry takes the current wording, so
+      // usage and "corrected again" count the version the session now has. One the budget left out keeps its record.
+      const given = new Set(rendered.lessons.map((lesson) => lesson.id))
       let edited = false
       for (const entry of state.shown) {
-        if (entry.name !== name) continue
+        if (entry.name !== name || !given.has(identity(name, entry.lesson.id))) continue
         const now = approved.find((candidate) => candidate.lesson.id === entry.lesson.id)?.lesson
         if (now && now.text !== entry.lesson.text) {
           entry.lesson = now
@@ -455,9 +459,11 @@ export class Delivery {
         this.delivered(state, before, "start")
         await this.log(state)
       }
-      // Every rule within the budget is given, recorded or not (past `session_max_lessons` it is given without
-      // attribution): delivery never waits on bookkeeping.
-      return rendered.lessons.map((lesson) => approved.find((entry) => identity(entry.name, entry.lesson.id) === lesson.id)!.lesson)
+      // The rules within the budget that the session has on record: the snapshot matches what it was given.
+      const recorded = new Set(state.shown.filter((entry) => entry.name === name).map((entry) => entry.lesson.id))
+      return rendered.lessons
+        .map((lesson) => approved.find((entry) => identity(entry.name, entry.lesson.id) === lesson.id)!.lesson)
+        .filter((lesson) => recorded.has(lesson.id))
     }, LOCK_OPTIONS)
   }
   // altimate_change end

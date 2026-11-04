@@ -60,9 +60,15 @@ export async function linked(root: string, directory: string): Promise<boolean> 
   if ((await RulesStore.read(root).catch(() => undefined))?.scope) return true
   const { readLocalBinding } = await import("../workspace/state")
   const path = await import("node:path")
+  const top = path.resolve(root)
+  // Inside `root` by path segments: `/work/repo-sibling` is not inside `/work/repo`.
+  const inside = (dir: string) => {
+    const relative = path.relative(top, dir)
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
+  }
   for (let dir = path.resolve(directory); ; dir = path.dirname(dir)) {
     if (await readLocalBinding(dir).catch(() => null)) return true
-    if (dir === path.resolve(root) || path.dirname(dir) === dir || !dir.startsWith(path.resolve(root))) return false
+    if (dir === top || path.dirname(dir) === dir || !inside(path.dirname(dir))) return false
   }
 }
 
