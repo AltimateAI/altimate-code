@@ -118,4 +118,10 @@ test("once dbt's adapter is resolved, its project is the one read; a saved confi
   mkdirSync(path.dirname(configPath()), { recursive: true })
   writeFileSync(configPath(), "null")
   expect((await dbtProjectAdapterType()).project).toBe(false)
+  writeFileSync(configPath(), JSON.stringify({ projectRoot: 42 }))
+  expect((await dbtProjectAdapterType()).project).toBe(false)
+  // An adapter already created keeps running after its dbt_project.yml is removed.
+  rmSync(path.join(other, "dbt_project.yml"))
+  dbtRoute.root = other
+  expect((await dbtProjectAdapterType()).project).toBe(true)
 })

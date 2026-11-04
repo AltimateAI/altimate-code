@@ -233,3 +233,50 @@ test("omitted SQL warehouse cannot assume the registry dialect before dbt execut
     dbt.mockRestore()
   }
 })
+
+test("on the dbt route, Jinja in a comment or literal is a write, and a hard-denied run_query is blocked", async () => {
+  Registry.setConfigs({ fallback: { type: "postgres" } })
+  const dbt = spyOn(DbtAdapterType, "dbtProjectAdapterType").mockResolvedValue({ project: true, type: "postgres", targetTypes: ["postgres"] })
+  const dispatch = spyOn(Dispatcher, "call").mockResolvedValue({ columns: ["x"], rows: [[1]], row_count: 1, truncated: false } as never)
+  const run = async (query: string) => {
+    const asked: string[] = []
+    const tool = await initTool(SqlExecuteTool)
+    const result = tool.execute(
+      { query, limit: 10 },
+      {
+        sessionID: SessionID.make("ses_dbt_jinja"),
+        messageID: MessageID.make("msg_dbt_jinja"),
+        callID: "",
+        agent: "analyst",
+        abort: AbortSignal.any([]),
+        messages: [],
+        metadata: () => {},
+        ask: async (request: { permission: string }) => {
+          asked.push(request.permission)
+          throw new Error("write permission denied")
+        },
+      },
+    )
+    return { result, asked }
+  }
+  try {
+    const write = await run("SELECT 1 AS x /* {% do run_query('DELETE FROM t') %} */")
+    await expect(write.result).rejects.toThrow("write permission denied")
+    expect(write.asked).toEqual(["sql_execute_write"])
+    const drop = await run("SELECT 1 AS x -- {% do run_query('DROP SCHEMA prod CASCADE') %}")
+    await expect(drop.result).rejects.toThrow("blocked for safety")
+    // A Jinja comment removes text, which can expose a statement the SQL lexing reads as a literal.
+    const hidden = await run("SELECT 'x' /* {# */ || ' #} */) AS q ; DROP SCHEMA s CASCADE ; SELECT 1 -- '")
+    await expect(hidden.result).rejects.toThrow("blocked for safety")
+    // A Mongo default's command goes to dbt first as well.
+    Registry.setConfigs({ fallback: { type: "mongodb" } })
+    const mongo = await run(`{"command":"find","collection":"c","filter":{"x":"{% do run_query('DELETE FROM t') %}"}}`)
+    await expect(mongo.result).rejects.toThrow("write permission denied")
+    expect(mongo.asked).toEqual(["sql_execute_write"])
+    expect(dispatch).not.toHaveBeenCalled()
+  } finally {
+    dispatch.mockRestore()
+    dbt.mockRestore()
+    Registry.reset()
+  }
+})
