@@ -38,7 +38,7 @@ export type ModelLineage = {
 
 export const DbtLineageTool = Tool.define("dbt_lineage", {
   description:
-    "Column-level lineage for a dbt model: its upstream models, seeds and sources, its downstream models, their columns, and the column edges between them across every hop. Pass `column` to trace one column. Where writes are allowed, uses the project's dbt integration (compiles on demand, no `dbt compile` needed) and returns the result as structured content; a read-only call, or one without the integration, reads the compiled SQL in the manifest.",
+    "Column-level lineage for a dbt model: its upstream models, seeds and sources, its downstream models, their columns, and the column edges between them. Pass `column` to trace one column. Where writes are allowed, uses the project's dbt integration (compiles on demand, no `dbt compile` needed; up to 3 hops each way) and returns the result as structured content; a read-only call, or one without the integration, reads the compiled SQL in the manifest and traces the model's own SQL.",
   parameters: z.object({
     model: z
       .string()
@@ -57,8 +57,8 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
       .describe("Also return the model's graph from the manifest (everything upstream and downstream, up to 500 nodes each side; the exposures and tests are those of the model and its downstream, upstream tests are not included; graph.upTruncated / graph.truncated are set when a side is cut) in the metadata; for lineage viewers. Over MCP the graph is left out of the structured result: read it with `altimate tool run dbt_lineage --json`"),
   }),
   async execute(args, ctx) {
-    // A call without write permission (MCP, `tool run`) and a plan-mode session's own calls are read-only;
-    // a subagent plan mode starts runs under its own agent's permissions.
+    // A call without write permission (MCP, `tool run`) and a plan-mode call are read-only. A subagent
+    // started from plan mode runs under its own agent's permissions.
     const readOnly = ctx.extra?.forceReadOnly === true || ctx.agent === "plan"
     // Read once per call, and only when needed: it reads the dbt config.
     let project: ReturnType<typeof sessionProject> | undefined
@@ -207,8 +207,8 @@ function manifestGraph(manifestPath: string, uniqueId: string): { graph?: Return
 /**
  * The lineage from the project's dbt adapter, used only where writes are allowed: starting it runs
  * dbt deps and writes target/, and it compiles and reads column metadata. A read-only call never
- * starts or uses it, nor does a session in another dbt project than the adapter's. `reason` says why
- * it wasn't used.
+ * starts or uses it, nor does a session in a dbt project the adapter isn't set up for (another
+ * project's, or none). `reason` says why it wasn't used.
  */
 async function fromAdapter(
   model: string,
@@ -223,11 +223,17 @@ async function fromAdapter(
     signal.throwIfAborted()
     // A read-only call never starts or uses the dbt adapter: starting it runs dbt deps and writes
     // target/, and compiling renders Jinja, which can run SQL.
-    // It answers from the manifest as main does, with no note: there's nothing for the user to fix.
+    // It answers from the manifest with no note: there's nothing for the user to fix.
     if (readOnly) return {}
     const project = await session()
-    if (project?.other && project.root) {
-      return { reason: `the dbt adapter is set up for ${project.root}, not ${project.other}` }
+    // Reading the dbt config yields too.
+    signal.throwIfAborted()
+    if (project?.other) {
+      return {
+        reason: project.root
+          ? `the dbt adapter is set up for ${project.root}, not ${project.other}`
+          : `the dbt adapter isn't set up for ${project.other}`,
+      }
     }
     // Starting the adapter can take a while (dbt deps, a parse): a cancel doesn't wait for it, and
     // past the deadline the manifest answers. The start goes on, for the next call.
@@ -289,7 +295,7 @@ export function isModelLineage(value: unknown): value is ModelLineage {
     typeof v.stats === "object" &&
     v.stats !== null &&
     !Array.isArray(v.stats) &&
-    Object.values(v.stats).every((n) => typeof n === "number") &&
+    Object.values(v.stats).every((n) => Number.isFinite(n)) &&
     typeof v.focus?.uniqueId === "string" &&
     typeof v.focus?.name === "string" &&
     optional(v.focus.column, "string") &&
@@ -301,7 +307,10 @@ export function isModelLineage(value: unknown): value is ModelLineage {
         typeof n.type === "string" &&
         optional(n.materialization, "string") &&
         (n.direction === "focus" || n.direction === "upstream" || n.direction === "downstream") &&
-        typeof n.depth === "number" &&
+        // Hops from the focus: at most what was asked for.
+        Number.isInteger(n.depth) &&
+        n.depth >= 0 &&
+        n.depth <= LINEAGE_DEPTH &&
         Array.isArray(n.parents) &&
         n.parents.every((p) => typeof p === "string") &&
         Array.isArray(n.columns) &&

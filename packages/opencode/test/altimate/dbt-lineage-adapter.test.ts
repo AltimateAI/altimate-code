@@ -6,6 +6,7 @@
 // no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
 import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { realpathSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
@@ -24,6 +25,8 @@ import { DbtLineageTool, dbtLineageInternals, type ModelLineage } from "@/altima
 import { createServer, serveStdio } from "@/altimate/mcp-server/server"
 import * as Registry from "@/altimate/native/connections/registry"
 import { initTool } from "./tool-fixture"
+import { Instance } from "@/project/instance"
+import { disposeInstance } from "@/effect/instance-registry"
 
 const ctx: Tool.Context = {
   sessionID: SessionID.make("ses_dbt_lineage_adapter"),
@@ -230,6 +233,47 @@ describe("dbt_lineage's wait for the dbt adapter", () => {
     }
   })
 
+  test("a call cancelled while it reads which project the session is in starts nothing", async () => {
+    const controller = new AbortController()
+    dbtAdapterInternals.readConfig = async () => {
+      controller.abort()
+      return { projectRoot: project, pythonPath: "python3", dbtIntegration: "corecommand", queryLimit: 500 }
+    }
+    let created = 0
+    dbtAdapterInternals.create = async () => {
+      created += 1
+      return fakeAdapter(true, async () => TRACE)
+    }
+    const call = manifestOnly()
+    try {
+      const running = Instance.provide({
+        directory: project,
+        fn: async () => (await initTool(DbtLineageTool)).execute({ model: "customers" }, { ...ctx, abort: controller.signal }),
+      })
+      await expect(running).rejects.toThrow()
+      expect(created).toBe(0)
+      expect(call).not.toHaveBeenCalled()
+    } finally {
+      call.mockRestore()
+      await disposeInstance(project)
+    }
+  })
+
+  test("a session in a dbt project the adapter finds none for says so, not 'no dbt project here'", async () => {
+    dbtAdapterInternals.readConfig = async () => null
+    const call = manifestOnly()
+    try {
+      const result = await Instance.provide({
+        directory: project,
+        fn: async () => (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx),
+      })
+      expect(result.output).toContain(`dbt integration not used: the dbt adapter isn't set up for ${realpathSync(project)}`)
+    } finally {
+      call.mockRestore()
+      await disposeInstance(project)
+    }
+  })
+
   test("doesn't answer with a lookup that finishes after the call was cancelled", async () => {
     useConfig()
     const controller = new AbortController()
@@ -280,6 +324,15 @@ describe("dbt_lineage's wait for the dbt adapter", () => {
     }
   })
 
+  test("relays a lineage whose nodes reach the 3 hops it asked for", async () => {
+    useConfig()
+    const far = { ...TRACE.nodes[0]!, uniqueId: "model.jaffle_shop.far", name: "far", direction: "upstream" as const, depth: 3 }
+    const lineage = { ...TRACE, nodes: [...TRACE.nodes, far] }
+    dbtAdapterInternals.create = async () => fakeAdapter(true, async () => lineage)
+    const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
+    expect(result.metadata.structuredContent).toEqual(lineage)
+  })
+
   test("falls back when the adapter returns a lineage it can't read", async () => {
     useConfig()
     const { confidence: _c, stats: _s, ...partial } = TRACE
@@ -308,6 +361,11 @@ describe("dbt_lineage's wait for the dbt adapter", () => {
       { ...TRACE, nodes: [{ ...node, columns: [{ name: "id", isDocumentedOnly: "yes" }] }] },
       { ...TRACE, stats: [] },
       { ...TRACE, stats: { nodes: "3" } },
+      { ...TRACE, stats: { nodes: Number.NaN } },
+      { ...TRACE, nodes: [{ ...node, depth: Number.POSITIVE_INFINITY }] },
+      { ...TRACE, nodes: [{ ...node, depth: 1e9 }] },
+      { ...TRACE, nodes: [{ ...node, depth: -1 }] },
+      { ...TRACE, nodes: [{ ...node, depth: 1.5 }] },
     ]
     for (const unreadable of [{ version: 1, nodes: "?" }, partial, { ...TRACE, version: 2 }, ...nested]) {
       resetDbtAdapter()
