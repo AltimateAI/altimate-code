@@ -6,7 +6,14 @@
 
 import * as core from "@altimateai/altimate-core"
 import type { DbtLineageParams, DbtLineageResult } from "../types"
-import { loadRawManifest, findModel, getUniqueId, detectDialect, buildSchemaContext } from "./helpers"
+import { loadRawManifest, findModel, detectDialect, buildSchemaContext } from "./helpers"
+import { lineageGraph } from "./graph"
+
+function unparsed(lineage: Record<string, unknown>): boolean {
+  const errors = Array.isArray(lineage.errors) ? lineage.errors : []
+  const edges = Array.isArray(lineage.column_lineage) ? lineage.column_lineage : []
+  return errors.length > 0 && edges.length === 0
+}
 
 /**
  * Compute column-level lineage for a dbt model.
@@ -35,16 +42,48 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
   const nodes = manifest.nodes || {}
   const sources = manifest.sources || {}
 
-  // Find target model by name or unique_id
-  const modelNode = findModel(nodes, params.model)
+  // A model by name or unique_id; a snapshot by unique_id; either by its project-relative file path.
+  // `./models/x.sql` and `models\\x.sql` are the manifest's `models/x.sql`.
+  const filePath = (p: unknown) =>
+    String(p ?? "")
+      .replace(/\\/g, "/")
+      .replace(/^(?:\.\/)+/, "")
+  // An empty request (`./`) is no model's path.
+  const wanted = filePath(params.model)
+  const byPath = () =>
+    wanted
+      ? Object.values<any>(nodes).find(
+          (node) => ["model", "snapshot"].includes(node?.resource_type) && filePath(node.original_file_path) === wanted,
+        )
+      : undefined
+  const modelNode =
+    findModel(nodes, params.model) ??
+    (nodes[params.model]?.resource_type === "snapshot" ? nodes[params.model] : null) ??
+    byPath() ??
+    Object.values<any>(nodes).find((node) => node?.resource_type === "snapshot" && node.name === params.model) ??
+    null
   if (!modelNode) {
     return emptyResult([`Model '${params.model}' not found in manifest`])
   }
+  // The id of the node that was selected, not of whatever else in the manifest the request string spells.
+  const uniqueId =
+    (typeof modelNode.unique_id === "string" && nodes[modelNode.unique_id] === modelNode
+      ? modelNode.unique_id
+      : undefined) ??
+    Object.keys(nodes).find((id) => nodes[id] === modelNode) ??
+    params.model
+  const graph = params.include_graph && uniqueId ? { graph: lineageGraph(manifest, uniqueId) } : {}
 
   // Extract compiled SQL
   const sql = modelNode.compiled_code || modelNode.compiled_sql || ""
   if (!sql) {
-    return emptyResult(["No compiled SQL found — run `dbt compile` first"])
+    return {
+      ...emptyResult(["No compiled SQL found — run `dbt compile` first"]),
+      model_name: modelNode.name || params.model,
+      model_unique_id: uniqueId,
+      upstream: modelNode.depends_on?.nodes ?? [],
+      ...graph,
+    }
   }
 
   // Detect dialect
@@ -66,10 +105,17 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
 
   return {
     model_name: modelNode.name || params.model,
-    model_unique_id: getUniqueId(nodes, params.model),
+    model_unique_id: uniqueId,
     compiled_sql: sql,
     raw_lineage: rawLineage,
-    confidence: rawLineage.error ? "low" : "high",
-    confidence_factors: rawLineage.error ? [String(rawLineage.error)] : [],
+    // The engine reports SQL it cannot parse in `errors` with no edges, rather than throwing.
+    confidence: rawLineage.error || unparsed(rawLineage) ? "low" : "high",
+    confidence_factors: rawLineage.error
+      ? [String(rawLineage.error)]
+      : unparsed(rawLineage)
+        ? [String((rawLineage.errors as unknown[])[0])]
+        : [],
+    upstream: upstreamIds,
+    ...graph,
   }
 }

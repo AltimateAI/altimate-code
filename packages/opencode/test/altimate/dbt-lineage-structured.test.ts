@@ -4,7 +4,7 @@
 // adapter is up, and the manifest's lineage otherwise. The dbt adapter is replaced
 // through `dbtAdapterInternals`, so these tests need no Python or dbt.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
@@ -94,9 +94,9 @@ function fakeAdapter(initialized: boolean, lineage?: (params: { model: string; c
   }
 }
 
-function useConfig(autoDiscovered: boolean, dbtIntegration = "corecommand") {
+function useConfig(autoDiscovered: boolean, dbtIntegration = "corecommand", projectRoot = project) {
   dbtAdapterInternals.readConfig = async () => ({
-    projectRoot: project,
+    projectRoot,
     pythonPath: "python3",
     dbtIntegration,
     queryLimit: 500,
@@ -152,6 +152,107 @@ describe("dbt_lineage with the project's dbt adapter", () => {
     expect(at).toEqual([...at].sort((a, b) => a - b))
   })
 
+  test("a manifest named outside the adapter's project wins over the adapter", async () => {
+    const dir = await mkdtemp(path.join(os.tmpdir(), "dbt-lineage-project-"))
+    const mine = path.join(dir, "mine")
+    const other = path.join(dir, "other")
+    await Promise.all([mine, other].map((d) => mkdir(path.join(d, "target"), { recursive: true })))
+    const empty = JSON.stringify({ metadata: { adapter_type: "duckdb" }, nodes: {}, sources: {} })
+    await writeFile(path.join(mine, "dbt_project.yml"), "name: mine\n")
+    await writeFile(path.join(mine, "target", "manifest.json"), empty)
+    await writeFile(path.join(other, "target", "manifest.json"), empty)
+    // The adapter itself is configured with `mine`, so the tool reads the root the adapter cached.
+    resetDbtAdapter()
+    useConfig(false, "corecommand", mine)
+    try {
+      const tool = await initTool(DbtLineageTool)
+      const fallback = await tool.execute({ model: "customers", manifest_path: path.join(other, "target", "manifest.json") }, ctx)
+      expect(fallback.metadata.structuredContent).toBeUndefined()
+      expect(fallback.output).toContain(`is not in the dbt project at ${mine}`)
+      const kept = await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "manifest.json") }, ctx)
+      expect(kept.metadata.structuredContent).toEqual(TRACE)
+      // A dbt project nested in this one's folder is another project.
+      const nested = path.join(mine, "subproject")
+      await mkdir(path.join(nested, "target"), { recursive: true })
+      await writeFile(path.join(nested, "dbt_project.yml"), "name: sub\n")
+      await writeFile(path.join(nested, "target", "manifest.json"), empty)
+      const inner = await tool.execute({ model: "customers", manifest_path: path.join(nested, "target", "manifest.json") }, ctx)
+      expect(inner.metadata.structuredContent).toBeUndefined()
+      expect(inner.output).toContain("belongs to the dbt project at")
+      // A folder whose name starts with `..` is still inside the project.
+      const dotted = path.join(mine, "..data")
+      await mkdir(path.join(dotted, "target"), { recursive: true })
+      await writeFile(path.join(dotted, "target", "manifest.json"), empty)
+      const own = await tool.execute({ model: "customers", manifest_path: path.join(dotted, "target", "manifest.json") }, ctx)
+      expect(own.metadata.structuredContent).toEqual(TRACE)
+      // A sibling whose name only starts with this project's is outside it.
+      const sibling = `${mine}-2`
+      await mkdir(path.join(sibling, "target"), { recursive: true })
+      await writeFile(path.join(sibling, "target", "manifest.json"), empty)
+      const next = await tool.execute({ model: "customers", manifest_path: path.join(sibling, "target", "manifest.json") }, ctx)
+      expect(next.metadata.structuredContent).toBeUndefined()
+      // An uncompiled project's own default manifest, not written yet, keeps the adapter's answer.
+      const uncompiled = path.join(mine, "fresh", "target", "manifest.json")
+      const unwritten = await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "nope", "manifest.json") }, ctx)
+      expect(unwritten.metadata.structuredContent).toEqual(TRACE)
+      expect((await tool.execute({ model: "customers", manifest_path: uncompiled }, ctx)).metadata.structuredContent).toEqual(TRACE)
+      // One not written yet in a folder no dbt project is above (a default path resolved against
+      // another folder) names no other project: the adapter answers.
+      const stray = await tool.execute({ model: "customers", manifest_path: path.join(other, "missing", "manifest.json") }, ctx)
+      expect(stray.metadata.structuredContent).toEqual(TRACE)
+      // One not written yet in another dbt project is that project's.
+      await writeFile(path.join(other, "dbt_project.yml"), "name: other\n")
+      const elsewhere = await tool.execute({ model: "customers", manifest_path: path.join(other, "missing", "manifest.json") }, ctx)
+      expect(elsewhere.metadata.structuredContent).toBeUndefined()
+      // A link to a manifest not written yet is placed where it points: in another project, that one's;
+      // in this one, the adapter answers.
+      await symlink(path.join(other, "target", "gone.json"), path.join(mine, "target", "linked.json"))
+      const linked = await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "linked.json") }, ctx)
+      expect(linked.metadata.structuredContent).toBeUndefined()
+      await symlink(path.join(mine, "target", "real.json"), path.join(mine, "target", "own.json"))
+      const own2 = await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "own.json") }, ctx)
+      expect(own2.metadata.structuredContent).toEqual(TRACE)
+      // A relative link climbs from its real folder: through a linked folder, `..` leaves this project.
+      const realOther = path.join(dir, "real")
+      await mkdir(path.join(realOther, "proj", "target"), { recursive: true })
+      await mkdir(path.join(realOther, "otherproj"), { recursive: true })
+      await writeFile(path.join(realOther, "otherproj", "dbt_project.yml"), "name: o\n")
+      await symlink(path.join(realOther, "proj", "target"), path.join(mine, "linked_target"))
+      await symlink("../../otherproj/target/manifest.json", path.join(realOther, "proj", "target", "manifest.json"))
+      const climbed = await tool.execute({ model: "customers", manifest_path: path.join(mine, "linked_target", "manifest.json") }, ctx)
+      expect(climbed.metadata.structuredContent).toBeUndefined()
+      // `..` after a link is collapsed first, as the manifest reader opens it: `<mine>/out/..` is read
+      // as this project's manifest, so the adapter answers, matching the graph include_graph reads.
+      await mkdir(path.join(other, "deep"), { recursive: true })
+      await symlink(path.join(other, "deep"), path.join(mine, "out"))
+      // The other project's manifest is made unreadable: a graph read from it would fail to parse.
+      await writeFile(path.join(other, "target", "manifest.json"), "{ not json")
+      const viaDots = await tool.execute({ model: "customers", manifest_path: `${mine}/out/../target/manifest.json`, include_graph: true }, ctx)
+      expect(viaDots.metadata.structuredContent).toEqual(TRACE)
+      expect(String(viaDots.metadata.graph_error ?? "")).not.toMatch(/json|parse/i)
+      // Many folders not written yet below the project are climbed, not counted as links.
+      const deep = path.join(mine, ...Array.from({ length: 80 }, (_, i) => `d${i}`), "manifest.json")
+      expect((await tool.execute({ model: "customers", manifest_path: deep }, ctx)).metadata.structuredContent).toEqual(TRACE)
+      // A link loop cannot be placed.
+      await symlink(path.join(mine, "target", "loop-b"), path.join(mine, "target", "loop-a"))
+      await symlink(path.join(mine, "target", "loop-a"), path.join(mine, "target", "loop-b"))
+      expect((await tool.execute({ model: "customers", manifest_path: path.join(mine, "target", "loop-a") }, ctx)).metadata.structuredContent).toBeUndefined()
+      // A path through a file is not a folder: it is placed, not thrown on.
+      const through = await tool.execute({ model: "customers", manifest_path: path.join(mine, "dbt_project.yml", "manifest.json") }, ctx)
+      expect(through.metadata.structuredContent).toEqual(TRACE)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test("include_graph with no manifest to read says so in graph_error", async () => {
+    const tool = await initTool(DbtLineageTool)
+    const result = await tool.execute({ model: "customers", include_graph: true }, ctx)
+    expect(result.metadata.structuredContent).toEqual(TRACE)
+    expect(result.metadata.graph).toBeUndefined()
+    expect(result.metadata.graph_error).toBe(`no manifest at ${path.join(project, "target", "manifest.json")}`)
+  })
+
   test("is handed to an MCP client as structuredContent", async () => {
     const server = await createServer({ allowWrite: true })
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
@@ -164,7 +265,8 @@ describe("dbt_lineage with the project's dbt adapter", () => {
         arguments: { model: "customers", column: "customer_lifetime_value" },
       })
       expect(answer.isError).toBe(false)
-      expect(answer.structuredContent).toEqual(TRACE)
+      // The MCP server adds the text report beside the trace (clients may show structured content in place of the text).
+      expect(answer.structuredContent).toEqual({ ...TRACE, report: expect.any(String) })
       expect((answer.content as { text: string }[])[0].text).toContain("Trace of customers.customer_lifetime_value")
     } finally {
       await client.close()

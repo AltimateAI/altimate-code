@@ -1,8 +1,11 @@
 import z from "zod"
+import fs from "fs"
 import path from "path"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { DbtLineageResult } from "../native/types"
+import { loadRawManifest } from "../native/dbt/helpers"
+import { lineageGraph } from "../native/dbt/graph"
 
 /** The structured result of dbt-integration's `getModelLineage` (version 1), relayed as is. */
 export type ModelLineage = {
@@ -36,27 +39,44 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
   description:
     "Column-level lineage for a dbt model: its upstream models, seeds and sources, its downstream models, their columns, and the column edges between them across every hop. Pass `column` to trace one column. Uses the project's dbt integration (compiles on demand, no `dbt compile` needed) and returns the result as structured content; without it, reads the compiled SQL in the manifest.",
   parameters: z.object({
-    model: z.string().describe("Model name or unique_id (e.g. 'my_model' or 'model.project.my_model')"),
+    model: z
+      .string()
+      .describe("Model name, unique_id or project-relative SQL path (e.g. 'my_model', 'model.project.my_model', 'models/my_model.sql'); a snapshot by name, unique_id or path"),
     column: z.string().optional().describe("Trace only this column of the model, upstream and downstream"),
     manifest_path: z
       .string()
       .optional()
       .describe(
-        "manifest.json for the manifest-only fallback, read only when the dbt integration isn't available (default: the dbt project's target/manifest.json)",
+        "manifest.json for the manifest-only fallback, read only when the dbt integration isn't available, and for the graph (default: the dbt project's target/manifest.json)",
       ),
     dialect: z.string().optional().describe("SQL dialect override for the manifest-only fallback"),
+    include_graph: z
+      .boolean()
+      .optional()
+      .describe("Also return the model's graph from the manifest (everything upstream and downstream, up to 500 nodes each side; the exposures and tests are those of the model and its downstream, upstream tests are not included; graph.upTruncated / graph.truncated are set when a side is cut) in the metadata; for lineage viewers. Over MCP the graph is left out of the structured result: read it with `altimate tool run dbt_lineage --json`"),
   }),
   async execute(args, ctx) {
-    const viaAdapter = await fromAdapter(args.model, args.column, ctx.abort)
+    let viaAdapter = await fromAdapter(args.model, args.column, ctx.abort)
+    // The adapter answers for the project it found; a manifest named outside that project's folder
+    // wins, so its graph and its lineage are never mixed with this one's.
+    if (viaAdapter.result && args.manifest_path) {
+      const outside = await manifestOutsideAdapterProject(args.manifest_path)
+      if (outside) viaAdapter = { reason: outside }
+    }
     if (viaAdapter.result) {
       const result = viaAdapter.result
       const what = result.focus.column ? `${result.focus.name}.${result.focus.column}` : result.focus.name
+      // A lineage viewer also wants the manifest's graph: exposures and tests sit there, not here.
+      const graph = args.include_graph ? manifestGraph(args.manifest_path ?? (await defaultManifestPath()), result.focus.uniqueId) : undefined
       return {
         title: `dbt Lineage: ${what} [${result.confidence}]`,
         metadata: {
           model_name: result.focus.name,
+          model_unique_id: result.focus.uniqueId,
           confidence: result.confidence,
           structuredContent: result,
+          ...(graph?.graph && { graph: graph.graph }),
+          ...(graph?.error && { graph_error: graph.error }),
         },
         output: formatModelLineage(result),
       }
@@ -69,16 +89,26 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
         manifest_path: manifestPath,
         model: args.model,
         dialect: args.dialect,
+        include_graph: args.include_graph,
       })
       if (notUsed) result.confidence_factors.push(notUsed)
       if (args.column) {
         result.confidence_factors.push(`tracing ${args.column} needs the dbt integration; this is the whole model's lineage`)
       }
+      const lineage = result.raw_lineage as { column_dict?: Record<string, unknown>; column_lineage?: unknown[] }
       return {
         title: `dbt Lineage: ${result.model_name} [${result.confidence}]`,
+        // The same lineage as the text, as data: callers (the MCP server's structured result, the
+        // Claude Code plugin's lineage pane) read it here instead of parsing the text.
         metadata: {
           model_name: result.model_name,
+          model_unique_id: result.model_unique_id ?? null,
           confidence: result.confidence,
+          confidence_factors: result.confidence_factors,
+          upstream: result.upstream ?? [],
+          columns: lineage?.column_dict ?? {},
+          edges: Array.isArray(lineage?.column_lineage) ? lineage.column_lineage : [],
+          ...(result.graph && { graph: result.graph }),
         },
         output: formatDbtLineage(result),
       }
@@ -92,6 +122,80 @@ export const DbtLineageTool = Tool.define("dbt_lineage", {
     }
   },
 })
+
+/**
+ * Why a named manifest is not the adapter's project's, or undefined when it is: it must lie in that
+ * project's folder (links resolved) with no other dbt_project.yml between (a nested project or an
+ * installed package is another project). A manifest not written yet (an uncompiled project) is placed
+ * by its path, its nearest existing folder's links resolved, so the project's own default path keeps
+ * the adapter's answer; one with no dbt project above it at all (a default path resolved against
+ * another folder) names no other project either. A link to a manifest not written yet is placed where
+ * it points.
+ */
+async function manifestOutsideAdapterProject(manifestPath: string): Promise<string | undefined> {
+  const { getDbtProjectRoot } = await import("../native/connections/register")
+  const root = await getDbtProjectRoot()
+  if (!root) return "the dbt adapter has no project root"
+  // The path with its links resolved, the parts not written yet appended; a link to a missing file is
+  // followed to where it points. `..` is collapsed first, as the manifest reader (loadRawManifest's
+  // realpathSync) does, so this places the file that reader opens. Undefined past 64 links (a loop);
+  // climbing to the nearest existing folder is not counted.
+  const real = (p: string) => {
+    const rest: string[] = []
+    let at = path.resolve(p)
+    for (let links = 0; links < 64; ) {
+      try {
+        return path.join(fs.realpathSync(at), ...rest)
+      } catch {}
+      let link: string | undefined
+      try {
+        if (fs.lstatSync(at).isSymbolicLink()) link = fs.readlinkSync(at)
+      } catch {}
+      if (link !== undefined) {
+        links++
+        // From the link's real folder, as the system resolves it: `..` climbs from there.
+        at = path.resolve(fs.realpathSync(path.dirname(at)), link)
+        continue
+      }
+      if (path.dirname(at) === at) return undefined
+      rest.unshift(path.basename(at))
+      at = path.dirname(at)
+    }
+    return undefined
+  }
+  const projectDir = real(root)
+  const manifest = real(manifestPath)
+  if (!projectDir || !manifest) return `the manifest ${manifestPath} cannot be placed`
+  const inside = path.relative(projectDir, manifest)
+  // Outside the project: the relative path climbs out (`..` as a whole segment, so `..data/` is inside).
+  if (!inside || inside === ".." || inside.startsWith(`..${path.sep}`) || path.isAbsolute(inside)) {
+    if (!fs.existsSync(manifest) && !projectAbove(manifest)) return undefined
+    return `the manifest ${manifestPath} is not in the dbt project at ${root}`
+  }
+  // The manifest is inside, so walking up from it reaches the project folder itself.
+  for (let dir = path.dirname(manifest); dir !== projectDir && dir !== path.dirname(dir); dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, "dbt_project.yml"))) return `the manifest ${manifestPath} belongs to the dbt project at ${dir}`
+  }
+  return undefined
+}
+
+/** Whether a dbt_project.yml sits in any folder above a path. */
+function projectAbove(file: string): boolean {
+  for (let dir = path.dirname(file); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, "dbt_project.yml"))) return true
+    if (path.dirname(dir) === dir) return false
+  }
+}
+
+/** The model's graph from the compiled manifest, or why there is none. */
+function manifestGraph(manifestPath: string, uniqueId: string): { graph?: ReturnType<typeof lineageGraph>; error?: string } {
+  try {
+    const manifest = loadRawManifest(manifestPath)
+    return manifest ? { graph: lineageGraph(manifest, uniqueId) } : { error: `no manifest at ${manifestPath}` }
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) }
+  }
+}
 
 /**
  * The lineage from the project's dbt adapter, which the tool starts in read-only mode too: it

@@ -107,6 +107,18 @@ describe("impact_analysis: DAG traversal", () => {
     expect(result.output).toContain("BREAKING")
   })
 
+  test("the structured downstream entries carry no path", async () => {
+    mockDispatcher({ "dbt.manifest": linearDAG })
+    const tool = await initTool(ImpactAnalysisTool)
+    const result = await tool.execute(
+      { model: "stg_orders", change_type: "remove", manifest_path: "target/manifest.json", dialect: "snowflake" },
+      ctx,
+    )
+    const downstream = result.metadata.downstream as Record<string, unknown>[]
+    expect(downstream.map((d) => d.name)).toEqual(["int_orders", "fct_orders", "rpt_daily"])
+    expect(downstream.every((d) => !("path" in d))).toBe(true)
+  })
+
   test("SAFE severity when no downstream models exist", async () => {
     mockDispatcher({ "dbt.manifest": linearDAG })
     const tool = await initTool(ImpactAnalysisTool)
