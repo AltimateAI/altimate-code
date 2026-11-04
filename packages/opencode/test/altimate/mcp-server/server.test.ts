@@ -1657,3 +1657,57 @@ mcpTest("startup skips a local catalog over the table gate with a short note", a
   expect(executed[0]!.sql).toContain("LIMIT 41")
 })
 // altimate_change end
+
+// altimate_change start — lineage tools return structured content beside the text
+mcpTest("dbt_lineage and impact_analysis declare an output schema and return their metadata as structured content", async () => {
+  const { client, call } = await fixture()
+  const tools = (await client.listTools()).tools
+  for (const name of ["dbt_lineage", "impact_analysis"]) expect(tools.find((tool) => tool.name === name)?.outputSchema).toBeDefined()
+  expect(tools.find((tool) => tool.name === "sql_execute")?.outputSchema).toBeUndefined()
+
+  const dir = await mkdtemp(path.join(os.tmpdir(), "mcp-lineage-test-"))
+  cleanups.push(() => rm(dir, { recursive: true, force: true }))
+  const columns = (...names: string[]) => Object.fromEntries(names.map((name) => [name, { name, data_type: "double" }]))
+  const node = (name: string, deps: string[], sql: string, cols: string[]) => ({
+    resource_type: "model", unique_id: `model.shop.${name}`, name, alias: name, original_file_path: `models/${name}.sql`,
+    depends_on: { nodes: deps }, compiled_code: sql, columns: columns(...cols),
+  })
+  const manifestPath = path.join(dir, "manifest.json")
+  await Bun.write(manifestPath, JSON.stringify({
+    metadata: { adapter_type: "duckdb" },
+    sources: {},
+    nodes: {
+      "model.shop.fct_orders": node("fct_orders", [], "select order_id, revenue from raw.orders", ["order_id", "revenue"]),
+      "model.shop.fct_daily": node("fct_daily", ["model.shop.fct_orders"], "select sum(revenue) as revenue from fct_orders", ["revenue"]),
+    },
+    exposures: { "exposure.shop.exec": { name: "exec", label: "Exec Revenue", type: "dashboard", depends_on: { nodes: ["model.shop.fct_daily"] } } },
+  }))
+
+  const lineage = await call("dbt_lineage", { manifest_path: manifestPath, model: "fct_daily" })
+  const structured = lineage.structuredContent as Record<string, any>
+  // The structured report keeps the text's header; the mappings and edges travel as data.
+  const text = (lineage.content as { text: string }[])[0]!.text
+  expect(structured.report).toBe(text.split("\nColumn Mappings:")[0]!.trim())
+  expect(text).toContain("Column Mappings:")
+  expect(structured.upstream).toEqual(["model.shop.fct_orders"])
+  expect(structured.columns.revenue[0]).toContain("revenue")
+  expect(structured.edges[0].target).toBe("revenue")
+
+  const impact = await call("impact_analysis", { manifest_path: manifestPath, model: "fct_orders", column: "revenue", change_type: "modify", dialect: "duckdb" })
+  const reach = impact.structuredContent as Record<string, any>
+  expect(reach.downstream.map((d: { name: string }) => d.name)).toEqual(["fct_daily"])
+  expect(reach.column_reach.models.map((m: { name: string }) => m.name)).toEqual(["fct_daily"])
+  expect(reach.exposures).toEqual([{ unique_id: "exposure.shop.exec", name: "exec", label: "Exec Revenue", type: "dashboard" }])
+})
+// altimate_change end
+
+// altimate_change start — a failing lineage call still answers with structured content its schema accepts
+mcpTest("dbt_lineage and impact_analysis errors still return a structured report", async () => {
+  const { call } = await fixture()
+  for (const name of ["dbt_lineage", "impact_analysis"]) {
+    const result = await call(name, {})
+    expect(result.isError).toBe(true)
+    expect(typeof (result.structuredContent as { report?: unknown } | undefined)?.report).toBe("string")
+  }
+})
+// altimate_change end

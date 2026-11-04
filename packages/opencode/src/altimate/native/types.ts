@@ -1076,6 +1076,8 @@ export interface DbtLineageParams {
   manifest_path: string
   model: string
   dialect?: string
+  /** Also return the model's lineage graph (everything upstream and downstream, up to 500 nodes each side). */
+  include_graph?: boolean
 }
 
 export interface DbtLineageResult {
@@ -1085,6 +1087,10 @@ export interface DbtLineageResult {
   raw_lineage: Record<string, unknown>
   confidence: string
   confidence_factors: string[]
+  /** unique_ids the model depends on (`depends_on.nodes`). */
+  upstream?: string[]
+  /** With include_graph: the graph a lineage viewer draws for the model. */
+  graph?: import("./dbt/graph").LineageGraph
 }
 
 // --- dbt Profile Discovery ---
