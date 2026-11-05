@@ -55,11 +55,15 @@ let dbtAdapter: any | null | undefined = undefined
 // permanent negative cache (`dbtAdapter === null`) is unchanged — a project that
 // becomes valid mid-session is still not retried.
 let dbtAdapterInflight: Promise<any | null> | undefined
+/** The project root the cached attempt read from the dbt config; null when it found none. */
+let dbtProjectRoot: string | null = null
 
 /** Test seams for the single-flight. Production leaves `readConfig` unset. */
 export const dbtAdapterInternals: {
   /** Replaces the dbt config read, so a test can hold an attempt open. */
   readConfig?: () => Promise<unknown>
+  /** Replaces dbt-tools' adapter creation, so a test can see which integration modes were tried. */
+  create?: (config: any) => Promise<any>
   /** Adapter creation attempts since the last reset — what single-flight bounds. */
   attempts: number
   /** Cache writes since the last reset: only the attempt that owns the slot writes. */
@@ -101,6 +105,9 @@ async function ensureDbtAdapter(): Promise<any | null> {
       const dbtConfig = dbtAdapterInternals.readConfig
         ? ((await dbtAdapterInternals.readConfig()) as Awaited<ReturnType<typeof readDbtConfig>>)
         : await readDbtConfig()
+      if (dbtAdapterInflight === mine) {
+        dbtProjectRoot = typeof dbtConfig?.projectRoot === "string" ? dbtConfig.projectRoot : null
+      }
       if (!dbtConfig) return publish(null)
 
       // Check if dbt_project.yml exists
@@ -113,7 +120,7 @@ async function ensureDbtAdapter(): Promise<any | null> {
       }
 
       // Create the adapter
-      const { create } = await import("../../../../../dbt-tools/src/adapter")
+      const create = dbtAdapterInternals.create ?? (await import("../../../../../dbt-tools/src/adapter")).create
       return publish(await create(dbtConfig), dbtConfig.projectRoot)
     } catch {
       // dbt-tools not available or config invalid — fall back to native
@@ -261,6 +268,38 @@ async function tryExecuteViaDbt(
   }
 }
 
+/** The project's dbt adapter, created on first use; null when there is no usable dbt project. */
+export function getDbtAdapter(): Promise<any | null> {
+  return ensureDbtAdapter()
+}
+
+/**
+ * Stops the cached dbt adapter (its Python bridge and file watchers), for a server that is shutting
+ * down. An attempt still starting is stopped once it settles.
+ */
+export async function disposeDbtAdapter(): Promise<void> {
+  const settled = dbtAdapter
+  const inflight = dbtAdapterInflight
+  resetDbtAdapter()
+  void inflight?.then((adapter) => adapter?.dispose?.()).catch(() => {})
+  await settled?.dispose?.().catch(() => {})
+}
+
+/** The dbt project's root as the adapter finds it: a dbt.json, or a walk up from the working directory. */
+export async function getDbtProjectRoot(): Promise<string | undefined> {
+  // Once an adapter attempt has settled, reuse the root it read rather than reading the config again.
+  if (dbtAdapter !== undefined) return dbtProjectRoot ?? undefined
+  try {
+    const config = dbtAdapterInternals.readConfig
+      ? await dbtAdapterInternals.readConfig()
+      : await (await import("../../../../../dbt-tools/src/config")).read()
+    const root = (config as { projectRoot?: unknown } | null)?.projectRoot
+    return typeof root === "string" ? root : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Reset dbt adapter (for testing). */
 export function resetDbtAdapter(): void {
   dbtAdapter = undefined
@@ -270,6 +309,7 @@ export function resetDbtAdapter(): void {
   dbtAdapterInflight = undefined
   dbtAdapterInternals.attempts = 0
   dbtAdapterInternals.writes = 0
+  dbtProjectRoot = null
 }
 
 // ---------------------------------------------------------------------------
