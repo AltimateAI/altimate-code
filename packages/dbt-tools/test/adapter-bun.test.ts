@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { dirname, join } from "path"
 import { $ } from "bun"
-import { standInPython } from "./stand-in-python"
+import { BRIDGE_OUTPUT, standInPython } from "./stand-in-python"
 
 const pkg = join(import.meta.dir, "..")
 
@@ -43,6 +43,10 @@ describe.skipIf(process.platform === "win32")("the adapter under Bun", () => {
 
       expect({ exitCode: cli.exitCode, output: cli.stdout.toString() }).toMatchObject(expected)
       expect(runs()).toContain(script)
+      // The bridge's output goes to the adapter's terminal, never to the host's own streams:
+      // the TUI and `run --format json` write there.
+      expect(cli.stdout.toString()).not.toContain(BRIDGE_OUTPUT)
+      expect(cli.stderr.toString()).not.toContain(BRIDGE_OUTPUT)
     } finally {
       rmSync(root, { recursive: true, force: true })
     }

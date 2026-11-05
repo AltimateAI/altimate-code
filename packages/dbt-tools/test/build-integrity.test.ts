@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "os"
 import { dirname, join } from "path"
 import { $ } from "bun"
-import { standInPython } from "./stand-in-python"
+import { BRIDGE_OUTPUT, standInPython } from "./stand-in-python"
 
 const pkg = join(import.meta.dir, "..")
 const dist = join(pkg, "dist")
@@ -96,7 +96,13 @@ describe("build integrity", () => {
 
     // Node loads the bundle by its real path; on macOS `tmpdir()` is under the `/var` symlink.
     const script = join(realpathSync(installed), "dist", "node_python_bridge.py")
-    return { script, runs: runs(), exitCode: cli.exitCode, output: cli.stdout.toString() }
+    return {
+      script,
+      runs: runs(),
+      exitCode: cli.exitCode,
+      output: cli.stdout.toString(),
+      stderr: cli.stderr.toString(),
+    }
   }
 
   // The stand-in `python` is a `#!/bin/sh` script.
@@ -109,11 +115,13 @@ describe("build integrity", () => {
     async () => {
       const root = mkdtempSync(join(tmpdir(), "dbt-tools-cloud-"))
       try {
-        const { script, runs, exitCode, output } = await startPublished(root, "cloud")
+        const { script, runs, exitCode, output, stderr } = await startPublished(root, "cloud")
         // `info` answers from the project once the engine's bridge has failed. A failure
         // before the spawn exits 1, and the comparison shows the CLI's message.
         expect({ exitCode, output }).toMatchObject({ exitCode: 0 })
         expect(runs).toContain(script)
+        expect(output).not.toContain(BRIDGE_OUTPUT)
+        expect(stderr).not.toContain(BRIDGE_OUTPUT)
       } finally {
         rmSync(root, { recursive: true, force: true })
       }
@@ -125,7 +133,7 @@ describe("build integrity", () => {
     async () => {
       const root = mkdtempSync(join(tmpdir(), "dbt-tools-published-"))
       try {
-        const { script, runs, exitCode, output } = await startPublished(root, "corecommand")
+        const { script, runs, exitCode, output, stderr } = await startPublished(root, "corecommand")
         // The CLI fails on the stand-in's exit, so after the spawn.
         expect({ exitCode, output }).toMatchObject({
           exitCode: 1,
@@ -133,6 +141,9 @@ describe("build integrity", () => {
         })
         expect(runs).toContain(script)
         expect(existsSync(script)).toBe(true)
+        // The bridge's output reaches the adapter's terminal, not the host's streams.
+        expect(output).not.toContain(BRIDGE_OUTPUT)
+        expect(stderr).not.toContain(BRIDGE_OUTPUT)
       } finally {
         rmSync(root, { recursive: true, force: true })
       }
