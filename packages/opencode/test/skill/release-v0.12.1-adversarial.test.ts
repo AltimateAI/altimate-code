@@ -208,13 +208,12 @@ describe("v0.12.1 adversarial: identity copy across pin × stale × unbound", ()
 
   test("every bound combination names the id and states the right subject", () => {
     const cases: Array<[BindingOutcome, RegExp, RegExp]> = [
-      // Stale and fresh render the same subject: the copy sits in the cached prefix.
-      [{ status: "bound", binding: binding(false) }, /^This project is linked to Altimate Workspace id 237;/m, /pinned/],
-      [{ status: "bound", binding: binding(false), stale: true }, /^This project is linked to Altimate Workspace id 237;/m, /pinned/],
-      [{ status: "bound", binding: binding(true) }, /^This session is pinned by the IDE extension to Altimate Workspace id 237;/m, /This project is linked/],
+      [{ status: "bound", binding: binding(false) }, /^This project is linked to Altimate Workspace id 237;/m, /last known|pinned/],
+      [{ status: "bound", binding: binding(false), stale: true }, /^This project was last known to be linked to Altimate Workspace id 237;/m, /pinned/],
+      [{ status: "bound", binding: binding(true) }, /^This session is pinned by the IDE extension to Altimate Workspace id 237;/m, /last known|This project is linked/],
       [
         { status: "bound", binding: binding(true), stale: true },
-        /^This session is pinned by the IDE extension to Altimate Workspace id 237;/m,
+        /^This session was last known to be pinned by the IDE extension to Altimate Workspace id 237;/m,
         /This project is linked/,
       ],
     ]
