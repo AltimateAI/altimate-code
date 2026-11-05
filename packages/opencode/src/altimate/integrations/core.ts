@@ -1142,7 +1142,7 @@ async function syncReal(
       if (now.blocked[id]) return { id, result: "kept_local", reason: "blocked by policy", steps: [] }
       const cur = now.providers[id]
       if (!sameRecord(cur, rec))
-        return { id, result: "skipped", reason: "the connection changed while syncing, run sync again", steps: [] }
+        return { id, result: "failed", reason: "the connection changed while syncing, run sync again", steps: [] }
       const res = await upsertManaged(cfg, id, upload, share)
       if (!res.isValid) {
         // A workspace that refuses a new connection keeps nothing of it; the local copy stays.
@@ -1159,19 +1159,19 @@ async function syncReal(
       step(res.created ? "Created connection" : "Updated connection")
       try {
         await updateStore((next) => {
-        next.providers[id] = {
-          ...next.providers[id],
-          registered: true,
-          account: check.account ?? account,
-          validatedAt: new Date().toISOString(),
-          source: next.providers[id]?.source ?? det?.source,
-          synced: true,
-          rejected: false,
-          unverified: false,
-          connectionId: res.connectionId,
-          expiresAt,
-          updatedAt: new Date().toISOString(),
-        }
+          next.providers[id] = {
+            ...next.providers[id],
+            registered: true,
+            account: check.account ?? account,
+            validatedAt: new Date().toISOString(),
+            source: next.providers[id]?.source ?? det?.source,
+            synced: true,
+            rejected: false,
+            unverified: false,
+            connectionId: res.connectionId,
+            expiresAt,
+            updatedAt: new Date().toISOString(),
+          }
         })
       } catch (e) {
         return { id, result: "failed", reason: RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Run sync again"), steps }

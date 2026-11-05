@@ -902,7 +902,7 @@ describe("workspace connections", () => {
     })
     try {
       const out = await core.syncProvider("github")
-      expect(out.result).toBe("skipped")
+      expect(out.result).toBe("failed")
       expect(writes()).toEqual([])
     } finally {
       spy.mockRestore()
@@ -920,7 +920,7 @@ describe("workspace connections", () => {
     })
     try {
       const out = await core.syncProvider("github")
-      expect(out.result).toBe("skipped")
+      expect(out.result).toBe("failed")
       expect(writes()).toEqual([])
     } finally {
       spy.mockRestore()
@@ -1792,7 +1792,7 @@ describe("credentials flow", () => {
       expect(core.isBlocked("github")).toBe(true)
     })
 
-    test("sync is held before the workspace copy is removed, and released again if the removal fails", async () => {
+    test("sync is held before the workspace copy is removed, and stays held when the removal fails", async () => {
       real()
       await token("github", "github_token")
       await creds.connectCredentials({ id: "github" })
@@ -1820,6 +1820,26 @@ describe("credentials flow", () => {
         expect(await core.readSecret("github")).toBeTruthy()
       } finally {
         failing.mockRestore()
+      }
+    })
+
+    test("a draft that cannot be cleared on Keep local still removes the workspace copy, and says so", async () => {
+      real()
+      await token("github", "github_token")
+      await creds.connectCredentials({ id: "github" })
+      await token("github", "github_token")
+      const original = core.deleteSecret
+      const spy = spyOn(core, "deleteSecret").mockImplementation(async (key: string) => {
+        if (key.startsWith("draft")) throw new Error("exit 51")
+        return original(key)
+      })
+      try {
+        const r = await creds.connectCredentials({ id: "github", localOnly: true })
+        expect([r.status, r.sync, core.loadStore().providers.github?.synced]).toEqual(["connected", "local", false])
+        expect(r.message).toContain("What was entered could not be cleared from this machine: exit 51")
+        expect(api.state.rows.filter((row: any) => !row.deleted)).toEqual([])
+      } finally {
+        spy.mockRestore()
       }
     })
 
@@ -2581,7 +2601,7 @@ describe("collectConfig", () => {
     try {
       const rec = { registered: true, variant: "v", values: { plain: "p" }, secretFields: ["must", "extra"] } as any
       await core.storeSecret(core.secretKey("cred", "github", "must"), "m1")
-      expect(await core.collectConfig("github", rec)).toEqual({ config: { plain: "p", must: "m1" } })
+      expect(await core.collectConfig("github", rec)).toEqual({ config: { plain: "p", must: "m1" }, saved: true })
       await core.deleteSecret(core.secretKey("cred", "github", "must"))
       expect(await core.collectConfig("github", rec)).toEqual({ reason: "no local credential to upload" })
     } finally {

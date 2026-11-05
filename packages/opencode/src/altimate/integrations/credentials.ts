@@ -653,9 +653,14 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
     core.updateStore((store) => {
       store.providers[id] = { ...store.providers[id], ...common, source: handDone || !detectedSource ? MANUAL_SOURCE : detectedSource, synced, updatedAt: stamp, ...extra }
     })
-  const finish = async (synced: boolean, extra: Partial<StoredProvider> = {}) => {
-    await record(synced, extra)
-    await discardDraftSecrets(id)
+  /** Clears what was entered in the form. What it follows has already happened, so a failure comes back as a note instead of stopping the rest. */
+  const clearDrafts = async (): Promise<string | null> => {
+    try {
+      await discardDraftSecrets(id)
+      return null
+    } catch (e) {
+      return `What was entered could not be cleared from this machine: ${e instanceof Error ? e.message : String(e)}`
+    }
   }
 
   if (!cfg) {
@@ -710,7 +715,9 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       } catch (e) {
         purgeNote = `The previous credential could not be removed from this machine: ${e instanceof Error ? e.message : String(e)}`
       }
-      await finish(false, { connectionId: null })
+      await record(false, { connectionId: null })
+      // A draft left behind does not stop the move: the workspace copy is still removed below.
+      const draftNote = await clearDrafts()
       if (signedIn && hadCopy) {
         try {
           detachNote = (await core.removeManaged(id, signedIn)).detachError
@@ -723,13 +730,14 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       const notes = [
         removeFailure ? "The credential is kept on this machine, but the workspace copy is still there." : null,
         purgeNote,
+        draftNote,
         unverified ? `${check.message} (kept on this machine, not verified yet)` : null,
         notSignedIn ? core.NOT_SIGNED_IN : blocked && wantSync ? "Sync is blocked for this provider, kept local." : null,
         removeFailure ? core.REMOVE_FAILED_WARNING(removeFailure).trim() : null,
         detachNote ? `Could not detach it from the linked workspace: ${detachNote}` : null,
       ].filter(Boolean)
       // A workspace copy that could not be removed means the move is not done: it is reported as failed, and connecting again with --local-only retries the removal.
-      return { ...base, provider: id, status: removeFailure ? "failed" : "connected", sync: removeFailure ? "synced" : "local", account: check.account, expiresAt: common.expiresAt ?? null, message: notes.length ? notes.join(" ") : null }
+      return { ...base, provider: id, status: removeFailure ? "failed" : "connected", sync: removeFailure ? "synced" : "local", account: common.account ?? null, expiresAt: common.expiresAt ?? null, message: notes.length ? notes.join(" ") : null }
     })
   }
 
@@ -747,8 +755,10 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         const rejected = (sync: "synced" | "local"): CredentialResult => ({ ...base, provider: id, status: "rejected", sync, account: check.account, expiresAt: common.expiresAt ?? null, message: core.rejectionMessage(res) })
         // An existing connection was updated in place and cannot be reverted, so it stays marked rejected for update to fix; the local copy of a local credential is untouched.
         if (!res.created && !(rec?.registered && !rec.synced)) {
-          await finish(true, { connectionId: res.connectionId, rejected: true })
-          return rejected("synced")
+          await record(true, { connectionId: res.connectionId, rejected: true })
+          const draftNote = await clearDrafts()
+          const refusal = rejected("synced")
+          return draftNote ? { ...refusal, message: `${refusal.message} ${draftNote}` } : refusal
         }
         // A new connection the workspace refuses is removed again and nothing is stored.
         let warning = ""
@@ -759,9 +769,9 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
             warning = core.REMOVE_FAILED_WARNING(e instanceof Error ? e.message : String(e))
           }
         }
-        await discardDraftSecrets(id)
+        const draftNote = await clearDrafts()
         const refusal = rejected(rec?.synced ? "synced" : "local")
-        return warning ? { ...refusal, message: (refusal.message ?? "") + warning } : refusal
+        return { ...refusal, message: [(refusal.message ?? "") + warning, draftNote].filter(Boolean).join(" ") }
       }
       // The connection lives in the workspace and was accepted; no secret is kept on this machine.
       // The record is saved first: the workspace has the connection, so a cleanup that fails afterwards is reported, not turned into a failed connect.
