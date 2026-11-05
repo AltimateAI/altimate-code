@@ -123,9 +123,10 @@ export async function start(input: {
   if (!RulesSync.rulesEnabled(input.learn) || !(await within(RulesService.linked(input.root, input.directory), false))) return none
   const before = await RulesStore.read(input.root)
   // The folder's link as cached now (no network): relinked to another workspace, the last pull's rules are not its own.
-  const bound = await within(RulesService.localBinding(input.root, input.directory), null)
+  // A link cache that cannot be read may hide a relink, so it is taken as one.
+  const bound = await within(RulesService.localBinding(input.root, input.directory, { strict: true }).catch(() => "unreadable" as const), null)
   const relinked = (state: RulesStore.State) =>
-    !!bound && !!state.scope && bound.datamateId !== state.scope.datamateId
+    !!bound && !!state.scope && (bound === "unreadable" || bound.datamateId !== state.scope.datamateId)
   if (!(await RulesSync.pullFailedRecently(before)) && (relinked(before) || !(await RulesStore.verified(before)) || (await RulesSync.due(input.root))))
     await RulesSync.pullWithin(input.root, input.directory, input.learn, Math.min(left(), input.waitMs ?? (before.scope ? START_WAIT_MS : FIRST_PULL_WAIT_MS)))
   const state = await RulesStore.read(input.root)

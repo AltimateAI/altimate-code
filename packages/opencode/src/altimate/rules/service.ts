@@ -61,9 +61,13 @@ export async function linked(root: string, directory: string): Promise<boolean> 
   return !!(await localBinding(root, directory))
 }
 
-/** The cached workspace link of `directory` or the nearest folder above it, up to `root`: no network. */
-export async function localBinding(root: string, directory: string) {
-  const { readLocalBinding } = await import("../workspace/state")
+/** The cached workspace link of `directory` or the nearest folder above it, up to `root`: no network. With `strict`, a
+ * link cache that is present but cannot be read throws instead of reading as no link. */
+export async function localBinding(root: string, directory: string, options: { strict?: boolean } = {}) {
+  const { readLocalBinding, readLocalBindingScopedStrict } = await import("../workspace/state")
+  const read = options.strict
+    ? async (dir: string) => (await readLocalBindingScopedStrict(dir)).binding
+    : (dir: string) => readLocalBinding(dir).catch(() => null)
   const path = await import("node:path")
   const top = path.resolve(root)
   // Inside `root` by path segments: `/work/repo-sibling` is not inside `/work/repo`.
@@ -72,7 +76,7 @@ export async function localBinding(root: string, directory: string) {
     return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
   }
   for (let dir = path.resolve(directory); ; dir = path.dirname(dir)) {
-    const binding = await readLocalBinding(dir).catch(() => null)
+    const binding = await read(dir)
     if (binding) return binding
     if (dir === top || path.dirname(dir) === dir || !inside(path.dirname(dir))) return null
   }

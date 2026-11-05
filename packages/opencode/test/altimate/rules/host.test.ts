@@ -1097,6 +1097,9 @@ describe("host session: requests, capacity and attribution", () => {
       bound.mockResolvedValue(binding(2))
       expect((await RulesHost.start({ root, directory: root, learn })).rules).toEqual([])
       expect(pull).toHaveBeenCalledTimes(1)
+      // A link cache that cannot be read may hide a relink: no rules either.
+      bound.mockRejectedValue(new SyntaxError("Unexpected end of JSON input"))
+      expect((await RulesHost.start({ root, directory: root, learn })).rules).toEqual([])
     } finally {
       bound.mockRestore()
       pull.mockRestore()
