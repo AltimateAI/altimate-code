@@ -751,6 +751,35 @@ export async function resolvePinnedBindingForRouting(
   return resolvePinnedBinding(directory, pin)
 }
 
+/** How long a turn waits for the pin's verdict before its rows go without a workspace. Past the
+ * validation TTL the verdict is a round trip, and the routing read later in the same turn joins that
+ * request, so giving up here costs routing nothing. Waiting out the request instead would make a
+ * failed validation run twice, once here and once for routing. */
+export const TURN_PIN_WAIT_MS = 3_000
+
+/** The workspace a turn's telemetry rows name: the pin when there is one, else the project's link
+ * from the local cache.
+ *
+ * The pin's verdict comes from `resolvePinnedBindingForRouting`, so a row and the turn's routing
+ * cannot disagree. Unpinned turns stay on the cache read, with no credentials and no network. A pin
+ * that cannot be honoured in time names nothing, for the reason routing fails closed: falling
+ * through would credit the turn to a workspace the user did not pick. */
+export async function resolveTurnBinding(
+  directory: string,
+  waitMs = TURN_PIN_WAIT_MS,
+): Promise<CachedBinding | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<BindingOutcome>((done) => {
+    timer = setTimeout(() => done({ status: "unknown" }), waitMs)
+    timer.unref?.()
+  })
+  const pinned = await Promise.race([resolvePinnedBindingForRouting(directory), deadline]).finally(() =>
+    clearTimeout(timer),
+  )
+  if (pinned) return pinned.status === "bound" ? pinned.binding : null
+  return readLocalBinding(directory)
+}
+
 export async function resolveBindingOutcome(directory: string): Promise<BindingOutcome> {
   // altimate_change — the IDE extension's selection outranks whatever binding this project carries.
   // Checked before the local cache and before any server lookup: the whole point is that the panel,
