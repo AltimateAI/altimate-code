@@ -373,7 +373,7 @@ describe("workspaceLabel budget boundary", () => {
 
 // This section sits in the cached system prefix and renders on every step. Any
 // wording that depends on memo freshness flips the prefix on a timer and re-creates it at
-// full input rate, so fresh and stale outcomes for the same state must render identically.
+// full input rate, so a memoised and a fresh answer for the same state must render identically.
 describe("cache stability — memo freshness never changes the text", () => {
   const binding = (pinned: boolean) => ({
     datamateId: 4821,
@@ -388,13 +388,17 @@ describe("cache stability — memo freshness never changes the text", () => {
     expect(render({ status: "unbound", stale: true })).toBe(render({ status: "unbound" }))
   })
 
+  // A stale bound outcome is a link the server could not confirm (only the resolver marks one
+  // stale). That state already drops contents and the memory line, so byte equality buys nothing
+  // there; the copy keeps the hedge rather than stating an unconfirmed link as fact.
   for (const pinned of [false, true]) {
-    for (const teamMemory of [false, true]) {
-      test(`bound (pinned=${pinned}, teamMemory=${teamMemory}): stale renders byte-identical to fresh`, () => {
-        const fresh = render({ status: "bound", binding: binding(pinned) }, undefined, { teamMemory })
-        const stale = render({ status: "bound", binding: binding(pinned), stale: true }, undefined, { teamMemory })
-        expect(stale).toBe(fresh)
-      })
-    }
+    test(`bound (pinned=${pinned}): an unconfirmed link is hedged, not stated as fact`, () => {
+      const fresh = render({ status: "bound", binding: binding(pinned) })
+      const stale = render({ status: "bound", binding: binding(pinned), stale: true })
+      expect(stale).not.toBe(fresh)
+      expect(stale).toContain(pinned ? "This session was last known to be pinned" : "This project was last known to be linked")
+      expect(stale).toContain(`The ${pinned ? "pin" : "link"} could not be re-verified just now, so it may since have changed.`)
+      expect(fresh).not.toContain("last known")
+    })
   }
 })
