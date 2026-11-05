@@ -60,7 +60,17 @@ it.instance(
 )
 
 it.instance(
-  "configured external_directory: allow or ask leaves the guard off",
+  "configured external_directory: allow leaves the guard off",
+  () =>
+    Effect.gen(function* () {
+      const builder = yield* Agent.Service.use((svc) => svc.get("builder"))
+      expect(externalDirectoryDenied(builder!.permission)).toBe(false)
+    }),
+  { config: { permission: { external_directory: "allow" } } },
+)
+
+it.instance(
+  "configured external_directory: ask with a narrower deny leaves the guard off",
   () =>
     Effect.gen(function* () {
       const builder = yield* Agent.Service.use((svc) => svc.get("builder"))
