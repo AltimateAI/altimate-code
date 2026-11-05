@@ -10,6 +10,7 @@ import { readSignals } from "../../../src/altimate/learn/signals"
 import { readShownSnapshots } from "../../../src/altimate/learn/delivery"
 import { tmpdir } from "../../fixture/fixture"
 import { credentialDigest } from "../../../src/altimate/workspace/state"
+import { Global } from "../../../src/global"
 
 const entry = path.resolve(import.meta.dir, "../../../src/index.ts")
 
@@ -27,8 +28,9 @@ async function home(dir: string, signed = true): Promise<Record<string, string>>
 
 async function cli(cwd: string, args: string[], options: { stdin?: string; env?: Record<string, string> } = {}) {
   const env: Record<string, string | undefined> = {
+    // The test process's state directory: the rules state the tests write is there, outside the project.
     ...process.env, ALTIMATE_DISABLE_TELEMETRY: "1", OPENCODE_DISABLE_AUTOUPDATE: "1", NO_COLOR: "1",
-    OPENCODE_TEST_STATE_HOME: path.join(cwd, "state"), ...options.env,
+    OPENCODE_TEST_STATE_HOME: Global.Path.state, ...options.env,
   }
   // The test preload turns workspaces off; these tests need them on.
   if (!options.env?.ALTIMATE_DISABLE_WORKSPACE) delete env.ALTIMATE_DISABLE_WORKSPACE

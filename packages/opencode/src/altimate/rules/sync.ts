@@ -141,8 +141,8 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
     })
     const fresh: State["notices"] = []
     let applied = true
-    // Another process may have signed in with another key of the same account while this pull ran: then the state does
-    // not say it was pulled with this one, or `verified` would fail for the credential signed in now.
+    // Stamped only while the credential that pulled is still the one signed in: another process may have signed in as
+    // someone else while this pull ran.
     const { accountDigest } = await import("../workspace/state")
     const current = (await accountDigest().catch(() => null)) === pulledWith
     const state = await RulesStore.update(root, (state) => {
@@ -159,6 +159,7 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.pending_count = response.pending_count
       state.pulled_at = new Date().toISOString()
       if (current) state.pulled_with = pulledWith
+      else delete state.pulled_with
       state.last_error = response.skipped
         ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code, or did not pass the rule lint (one line, no commands, links or secrets), and ${response.skipped === 1 ? "is" : "are"} not delivered`
         : undefined
