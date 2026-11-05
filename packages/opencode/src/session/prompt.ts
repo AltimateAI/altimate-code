@@ -141,6 +141,7 @@ function workspaceUseFields(sessionID: string, turn: number) {
 // altimate_change end
 import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
+import * as WorkspaceFirstEvents from "@/altimate/workspace/first-events" // altimate_change — a workspace's first prompt and job
 // altimate_change start — keyless public Zen predicate (flat module)
 import { isPublicZen } from "@/provider/public-zen"
 // altimate_change end
@@ -1942,26 +1943,20 @@ export namespace SessionPrompt {
         //   - `step === 1` (the enclosing block) is NOT "first message of the session". `step`
         //     is declared inside loop() and loop() runs once per user turn, so this block runs
         //     on every turn. `claimFirstPrompt` is what makes this once-per-session.
-        //   - `isOnboardingSession` scopes it to the funnel. Without it, an onboarding-taxonomy
-        //     event would fire for every session in the product — TUI, `run`, GitHub, API.
+        //   - `promptSent` scopes it to an onboarding session or a workspace not yet counted on this
+        //     machine. Without that, the row would fire for every session in the product.
         //   - `consumeCommandSubmission` excludes slash commands, because the scan gate submits
         //     a hidden `/onboard-connect` as an ordinary user message: it would otherwise be
         //     recorded as the user's first typed prompt in every fresh onboarding.
         //   - a real text part, because a message carrying only attachments (a dragged-in file,
         //     a pasted image) reached this block too and was recorded as the user's first typed
         //     prompt before they had typed anything. Same filter as the intent classifier above.
-        const fromCommand = OnboardingTelemetry.consumeCommandSubmission(sessionID)
+        const fromCommand =
+          OnboardingTelemetry.consumeCommandSubmission(sessionID) || OnboardingTelemetry.consumeUntrackedCommand(sessionID)
         const hasUserText = !!userMsg?.parts.some(
           (p) => p.type === "text" && !p.ignored && !p.synthetic && p.text.trim().length > 0,
         )
-        if (
-          !fromCommand &&
-          hasUserText &&
-          OnboardingTelemetry.isOnboardingSession(sessionID) &&
-          OnboardingTelemetry.claimFirstPrompt(sessionID)
-        ) {
-          void OnboardingTelemetry.emit({ type: "first_prompt_sent", ...turnWorkspace }, sessionID)
-        }
+        if (!fromCommand && hasUserText) await WorkspaceFirstEvents.promptSent(sessionID, boundWorkspace?.datamateId)
         // altimate_change end
         // altimate_change end — session start telemetry
       }
@@ -2625,6 +2620,9 @@ export namespace SessionPrompt {
           ? "abandoned"
           : "completed"
     // altimate_change start — emit quality signal, tool chain, and error fingerprint events
+    if (outcome === "completed" && toolCallCount > toolErrorCount) {
+      await WorkspaceFirstEvents.jobCompleted(sessionID, boundWorkspace?.datamateId)
+    }
     Telemetry.track({
       type: "task_outcome_signal",
       ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
