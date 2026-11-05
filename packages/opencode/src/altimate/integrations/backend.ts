@@ -163,6 +163,8 @@ export interface DatamateRecord {
   integrations: DatamateIntegrationEntry[]
   /** False when the caller is not the workspace's owner: only the owner can change its integrations. */
   is_owner?: boolean
+  /** "private" keeps an attached connection to its owner; any other value lets the workspace's members use it. */
+  privacy?: string
 }
 
 /** A workspace with its integrations list. */

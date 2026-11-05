@@ -23,6 +23,7 @@ const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066
 export const clean = (value: unknown) => String(value ?? "").replace(ANSI, "").replace(UNSAFE, " ").replace(/ {2,}/g, " ").trim()
 const json = (value: unknown) => console.log(JSON.stringify(value, null, 2))
 const jsonOption = { describe: "print machine-readable JSON", type: "boolean", default: false } as const
+const shareOption = { describe: "attach to a linked workspace that is not private, letting its members use this connection", type: "boolean", default: false } as const
 
 const STATE_VIEW: Record<ProviderStatus["state"], { icon: string; color: string; label: string }> = {
   connected: { icon: "●", color: S.TEXT_SUCCESS, label: "connected" },
@@ -102,11 +103,11 @@ function renderSync(o: core.SyncOutcome) {
   if (o.result === "kept_local") return out(`  ${S.TEXT_WARNING}⊘${S.TEXT_NORMAL} ${name}: kept local (${clean(o.reason)})`)
   if (o.result === "failed") return out(`  ${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: sync failed (${clean(o.reason)})`)
   if (o.result === "skipped") return out(`  ${S.TEXT_DIM}- ${name}: skipped (${clean(o.reason)})${S.TEXT_NORMAL}`)
-  out(`  ${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} synced to workspace (private)`)
+  out(`  ${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} synced to workspace${o.shared ? ", shared with its members" : " (private)"}`)
   for (const st of o.steps) if (!st.ok && st.label.startsWith(core.LOCAL_CLEANUP_FAILED_PREFIX)) out(`  ${S.TEXT_WARNING}!${S.TEXT_NORMAL} ${clean(st.label)}`)
 }
 
-async function runSync(ids: ProviderId[], asJson: boolean, skipSynced = false) {
+async function runSync(ids: ProviderId[], asJson: boolean, skipSynced = false, share = false) {
   const outcomes: core.SyncOutcome[] = []
   for (const id of ids) {
     if (!asJson && !core.isBlocked(id)) out(`\n${S.TEXT_NORMAL_BOLD}${core.PROVIDER_NAMES[id]}${S.TEXT_NORMAL}`)
@@ -115,6 +116,7 @@ async function runSync(ids: ProviderId[], asJson: boolean, skipSynced = false) {
       asJson ? undefined : (label, done) => done && out(`  ${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${label}`),
       asJson ? 0 : 250,
       skipSynced,
+      share,
     )
     outcomes.push(o)
     if (!asJson) renderSync(o)
@@ -135,10 +137,11 @@ const SyncCommand = cmd({
       .positional("provider", { type: "string", choices: core.PROVIDER_IDS })
       .option("all", { describe: "sync every provider", type: "boolean", default: false })
       .option("keep-synced", { describe: "attach a connection already saved to the workspace instead of overwriting it, as sync --all does", type: "boolean", default: false })
+      .option("share", shareOption)
       .option("json", jsonOption),
   handler: async (args) => {
     try {
-      const outcomes = await runSync(args.provider || args.all ? parseProviders(args.provider, args.all) : core.PROVIDER_IDS, args.json, skipsSynced(args))
+      const outcomes = await runSync(args.provider || args.all ? parseProviders(args.provider, args.all) : core.PROVIDER_IDS, args.json, skipsSynced(args), args.share)
       if (outcomes.some((o) => o.result === "failed")) process.exitCode = 1
     } catch (e) {
       fail(e, args.json)
@@ -208,6 +211,7 @@ async function runCredentials(args: any, update: boolean) {
       update,
       localOnly: args["local-only"],
       variant: args.variant,
+      share: args.share,
       onStep: args.json ? undefined : (label) => out(`  ${S.TEXT_DIM}${label}${S.TEXT_NORMAL}`),
     })
     if (r.status !== "connected") process.exitCode = 1
@@ -226,6 +230,7 @@ const credentialOptions = (yargs: Argv) =>
     .positional("provider", { type: "string", choices: core.PROVIDER_IDS, demandOption: true })
     .option("json", jsonOption)
     .option("variant", variantOption)
+    .option("share", shareOption)
 
 const ConnectCommand = cmd({
   command: "connect <provider>",

@@ -539,12 +539,31 @@ describe("workspace connections", () => {
     expect((await core.syncProvider("github", undefined, 0, true)).result).toBe("kept_local")
   })
 
+  test("sync to a shared workspace attaches nothing without --share and reports why; with it the outcome is marked shared", async () => {
+    await core.syncProvider("github")
+    const spies = [
+      spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS" } } as any),
+      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "github", tools: [], connection_id: null }] } as any),
+    ]
+    const update = spyOn(backend, "updateDatamateIntegrations").mockResolvedValue(undefined as any)
+    try {
+      const refused = await core.syncProvider("github", undefined, 0, true)
+      expect([refused.result, refused.reason]).toEqual(["failed", core.ATTACH_FAILED_PREFIX + core.SHARED_WORKSPACE_REFUSAL("WS")])
+      expect(update).not.toHaveBeenCalled()
+      const shared = await core.syncProvider("github", undefined, 0, true, true)
+      expect([shared.result, shared.shared]).toEqual(["synced", true])
+      expect(update).toHaveBeenCalledTimes(1)
+    } finally {
+      for (const sp of [...spies, update]) sp.mockRestore()
+    }
+  })
+
   test("attach-only runs under the lock and names the kept workspace inert, with its id", async () => {
     await core.syncProvider("github")
     const events: string[] = []
     const spies = [
       spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS\nx" } } as any),
-      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, integrations: [{ id: "github", tools: [], connection_id: "999" }] } as any),
+      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "private", integrations: [{ id: "github", tools: [], connection_id: "999" }] } as any),
       spyOn(backend, "updateDatamateIntegrations").mockImplementation((async () => void events.push("patch")) as any),
     ]
     api.seed({ name: "Teammate's", integration_id: "github", is_owner: false })
@@ -2431,7 +2450,7 @@ describe("attach keeps another connection", () => {
     const updates: any[] = []
     const spies = [
       spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS" } } as any),
-      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, integrations: [entry] } as any),
+      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "private", integrations: [entry] } as any),
       spyOn(backend, "updateDatamateIntegrations").mockImplementation((async (_c: any, _id: any, list: any) => void updates.push(list)) as any),
     ]
     const listing = (ids: Array<[number, boolean]>) => spyOn(backend, "listVisibleConnections").mockResolvedValue(ids.map(([id, own]) => ({ id, is_owner: own })) as any)
@@ -2452,7 +2471,7 @@ describe("attach keeps another connection", () => {
   test("attach is an error when the workspace catalog has no entry for the provider", async () => {
     const spies = [
       spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS" } } as any),
-      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, integrations: [] } as any),
+      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "private", integrations: [] } as any),
       spyOn(backend, "integrationsCatalog").mockResolvedValue([{ id: "somethingelse", tools: [] }] as any),
       spyOn(backend, "listVisibleConnections").mockResolvedValue([] as any),
     ]
@@ -2468,7 +2487,7 @@ describe("attach keeps another connection", () => {
   test("attach reports when the workspace kept its own connection", async () => {
     const spies = [
       spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS" } } as any),
-      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, integrations: [{ id: "jira", tools: [], connection_id: "3" }] } as any),
+      spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "private", integrations: [{ id: "jira", tools: [], connection_id: "3" }] } as any),
       spyOn(backend, "updateDatamateIntegrations").mockResolvedValue(undefined as any),
     ]
     try {
@@ -2477,6 +2496,31 @@ describe("attach keeps another connection", () => {
       expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9])).toEqual({ attached: "WS", workspaceId: "5" })
     } finally {
       for (const sp of spies) sp.mockRestore()
+    }
+  })
+  test("a workspace that is not private gets the connection only with --share, and says its members can use it", async () => {
+    const getDatamate = spyOn(backend, "getDatamate")
+    const spies = [
+      spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS" } } as any),
+      spyOn(backend, "listVisibleConnections").mockResolvedValue([] as any),
+      getDatamate,
+    ]
+    const update = spyOn(backend, "updateDatamateIntegrations").mockResolvedValue(undefined as any)
+    try {
+      const cfg = { url: "http://x", tenant: "t", token: "k" } as any
+      // A missing privacy is treated as shared: nothing is widened on a guess.
+      for (const privacy of ["public", "restricted", undefined]) {
+        getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy, integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
+        expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toEqual({ error: core.SHARED_WORKSPACE_REFUSAL("WS") })
+        expect(update).not.toHaveBeenCalled()
+      }
+      getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9, undefined, true)).toEqual({ attached: "WS", workspaceId: "5", shared: true })
+      expect(update).toHaveBeenCalledTimes(1)
+      getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "private", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toEqual({ attached: "WS", workspaceId: "5" })
+    } finally {
+      for (const sp of [...spies, update]) sp.mockRestore()
     }
   })
   test("detach leaves an entry on another connection alone", () => {

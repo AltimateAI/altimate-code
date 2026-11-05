@@ -760,6 +760,8 @@ export interface SyncOutcome {
   result: "synced" | "kept_local" | "skipped" | "failed"
   reason?: string
   steps: SyncStep[]
+  /** Attached to a workspace that is not private, so its members can use the connection. */
+  shared?: true
   request?: { method: "POST"; path: "/connections"; body: { name: string; integration_id: string; config: Record<string, unknown> }; privacy: "private" }
 }
 
@@ -783,7 +785,7 @@ const ALREADY_IN_WORKSPACE = "already in the workspace"
 const INVALID_IN_WORKSPACE = "the workspace connection is marked invalid; run update"
 
 /** Attaches this tool's workspace connection for a provider that has nothing to upload from this machine; `fallback` is the outcome when there is none to attach. */
-async function attachWithoutLocal(id: ProviderId, rec: StoredProvider | undefined, fallback: SyncOutcome, onStep?: (label: string, done: boolean) => void): Promise<SyncOutcome> {
+async function attachWithoutLocal(id: ProviderId, rec: StoredProvider | undefined, fallback: SyncOutcome, onStep: ((label: string, done: boolean) => void) | undefined, share: boolean): Promise<SyncOutcome> {
   const signedIn = await realConfig()
   if (!signedIn) return fallback
   try {
@@ -791,11 +793,11 @@ async function attachWithoutLocal(id: ProviderId, rec: StoredProvider | undefine
   } catch (e) {
     return { id, result: "failed", reason: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}`, steps: [] }
   }
-  return syncReal(id, signedIn, undefined, rec, null, onStep, true)
+  return syncReal(id, signedIn, undefined, rec, null, onStep, true, share)
 }
 
-/** `skipSynced` leaves a connection this tool already saved to the workspace as it is (it is only attached to the linked workspace), for runs that cover every provider. */
-export async function syncProvider(id: ProviderId, onStep?: (label: string, done: boolean) => void, pace = 0, skipSynced = false): Promise<SyncOutcome> {
+/** `skipSynced` leaves a connection this tool already saved to the workspace as it is (it is only attached to the linked workspace), for runs that cover every provider. `share` allows attaching to a workspace that is not private. */
+export async function syncProvider(id: ProviderId, onStep?: (label: string, done: boolean) => void, pace = 0, skipSynced = false, share = false): Promise<SyncOutcome> {
   const store = loadStore()
   const rec = store.providers[id]
   // A sync before any detect still finds what is on this machine.
@@ -804,7 +806,7 @@ export async function syncProvider(id: ProviderId, onStep?: (label: string, done
     const nothing: SyncOutcome = { id, result: "skipped", reason: "nothing detected or connected", steps: [] }
     // A run over every provider still attaches a workspace connection this tool made, when nothing for the provider is on this machine.
     if (!skipSynced || store.blocked[id]) return nothing
-    return attachWithoutLocal(id, rec, nothing, onStep)
+    return attachWithoutLocal(id, rec, nothing, onStep, share)
   }
   if (store.blocked[id]) {
     // Blocked means the credential never leaves the machine; nothing is registered here without one.
@@ -813,7 +815,7 @@ export async function syncProvider(id: ProviderId, onStep?: (label: string, done
   if (!rec?.registered && det && !det.syncable) {
     const notSyncable: SyncOutcome = { id, result: "skipped", reason: det.note ?? "not syncable", steps: [] }
     // What was found here cannot be uploaded, but a workspace connection this tool made is still attached by a run over every provider.
-    return skipSynced ? attachWithoutLocal(id, rec, notSyncable, onStep) : notSyncable
+    return skipSynced ? attachWithoutLocal(id, rec, notSyncable, onStep, share) : notSyncable
   }
   const account = rec?.account ?? det?.account ?? null
   const cfg = await realConfig()
@@ -828,7 +830,7 @@ export async function syncProvider(id: ProviderId, onStep?: (label: string, done
         return { id, result: "failed", reason: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}`, steps: [] }
       }
     }
-    return syncReal(id, cfg, det, rec, account, onStep, attachOnly)
+    return syncReal(id, cfg, det, rec, account, onStep, attachOnly, share)
   }
   if (!mockMode()) return { id, result: "skipped", reason: NOT_SIGNED_IN, steps: [] }
   if (alreadySynced) return { id, result: "skipped", reason: "already in the workspace", steps: [] }
@@ -913,7 +915,7 @@ export interface UpsertResult {
   isValid: boolean
   message: string | null
   /** What happened to the workspace attach; absent when the connection was saved invalid. */
-  workspace?: { attached: string; workspaceId?: string; kept?: true } | { notLinked: true } | { error: string }
+  workspace?: { attached: string; workspaceId?: string; kept?: true; shared?: true } | { notLinked: true } | { error: string }
 }
 
 export const NOT_LINKED_LABEL = "Not linked to a workspace: run altimate link"
@@ -934,7 +936,7 @@ export const rejectionMessage = (res: Pick<UpsertResult, "created">) => (res.cre
  * Saves the credential as this tool's own connection: updated in place when it exists (matched on
  * integration and name among the caller's own connections), created otherwise.
  */
-export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, config: Record<string, unknown>): Promise<UpsertResult> {
+export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, config: Record<string, unknown>, share = false): Promise<UpsertResult> {
   const visible = await backend.listVisibleConnections(cfg)
   const existing = findManaged(backend.ownConnections(visible), id)
   const saved = existing
@@ -943,11 +945,11 @@ export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, 
   const isValid = saved.is_valid !== false
   const result: UpsertResult = { connectionId: saved.id, created: !existing, isValid, message: isValid ? null : rejectionMessage({ created: !existing }) }
   if (!isValid) return result
-  return { ...result, workspace: await attachToBoundWorkspace(cfg, id, saved.id, visible.map((c) => c.id)) }
+  return { ...result, workspace: await attachToBoundWorkspace(cfg, id, saved.id, visible.map((c) => c.id), share) }
 }
 
-/** Attaches the connection to the workspace this directory is linked to, reporting instead of throwing. */
-export async function attachToBoundWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number, live?: (number | string)[]): Promise<NonNullable<UpsertResult["workspace"]>> {
+/** Attaches the connection to the workspace this directory is linked to, reporting instead of throwing. `share` allows a workspace that is not private. */
+export async function attachToBoundWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number, live?: (number | string)[], share = false): Promise<NonNullable<UpsertResult["workspace"]>> {
   try {
     const outcome = await resolveBindingOutcome(process.cwd())
     if (outcome.status === "unbound") return { notLinked: true }
@@ -958,9 +960,8 @@ export async function attachToBoundWorkspace(cfg: backend.BackendConfig, id: Pro
       return { error: `${outcome.status === "unknown" ? "could not tell whether this directory is linked to a workspace" : "could not confirm which workspace this directory is linked to"}, so the connection was not attached to one` }
     }
     const binding = outcome.binding
-    const kept = await attachToWorkspace(cfg, id, connectionId, String(binding.datamateId), live)
-    const workspaceId = String(binding.datamateId)
-    return kept ? { attached: binding.datamateName, workspaceId, kept: true } : { attached: binding.datamateName, workspaceId }
+    const { kept, shared } = await attachToWorkspace(cfg, id, connectionId, String(binding.datamateId), live, share)
+    return { attached: binding.datamateName, workspaceId: String(binding.datamateId), ...(kept ? { kept: true as const } : {}), ...(shared ? { shared: true as const } : {}) }
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) }
   }
@@ -998,12 +999,18 @@ export function attachToIntegrations(
   })
 }
 
-/** Resolves true when the workspace's entry kept a different live connection instead of taking this one. */
-async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number, datamateId: string, liveIds?: (number | string)[]): Promise<boolean> {
+export const SHARED_WORKSPACE_REFUSAL = (name: string) =>
+  `workspace "${name}" is shared, so attaching would let its members use this connection; it stays saved to your account only. Run again with --share to attach it`
+
+/** `kept` when the workspace's entry kept a different live connection instead of taking this one; `shared` when the workspace is not private. */
+async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number, datamateId: string, liveIds: (number | string)[] | undefined, share: boolean): Promise<{ kept: boolean; shared: boolean }> {
   const integrationId = INTEGRATION_IDS[id]
   const first = await backend.getDatamate(cfg, datamateId)
   if (first.is_owner === false)
     throw new Error(`only the owner of workspace "${first.name}" can attach connections to it; your connection is saved to your account. Link a workspace you own, or sign in as its owner`)
+  // Attaching widens the connection to the workspace's audience, so only a workspace that says it is private takes it unasked.
+  const shared = first.privacy !== "private"
+  if (shared && !share) throw new Error(SHARED_WORKSPACE_REFUSAL(first.name))
   let keys: string[] = []
   if (!first.integrations.some((e) => String(e.id) === integrationId)) {
     const catalog = await backend.integrationsCatalog(cfg)
@@ -1018,7 +1025,7 @@ async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, con
   const next = attachToIntegrations(datamate.integrations, integrationId, connectionId, keys, live)
   await backend.updateDatamateIntegrations(cfg, datamateId, next)
   const entry = next.find((e) => String(e.id) === integrationId)
-  return entry?.connection_id != null && String(entry.connection_id) !== String(connectionId)
+  return { kept: entry?.connection_id != null && String(entry.connection_id) !== String(connectionId), shared }
 }
 
 /** The integrations list without references to the connection; other entries pass through untouched. */
@@ -1060,6 +1067,7 @@ async function syncReal(
   account: string | null,
   onStep?: (label: string, done: boolean) => void,
   attachOnly = false,
+  share = false,
 ): Promise<SyncOutcome> {
   const collected = attachOnly ? { reason: ALREADY_IN_WORKSPACE } : await collectConfig(id, rec)
   const steps: SyncStep[] = []
@@ -1074,7 +1082,7 @@ async function syncReal(
       steps.push({ label: NOT_LINKED_LABEL, ok: false })
       onStep?.(NOT_LINKED_LABEL, false)
     }
-    return { id, result: "synced", steps }
+    return { id, result: "synced", steps, ...("attached" in w && w.shared ? { shared: true as const } : {}) }
   }
   if ("reason" in collected) {
     // Nothing local to upload, but a connection already in the workspace may still need attaching to it: the one this machine saved, or one it has no record of.
@@ -1096,7 +1104,7 @@ async function syncReal(
         if (!found) return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
         if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
         step("Connection already in the workspace")
-        return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id)))
+        return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id), share))
       })
     } catch (e) {
       return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
@@ -1124,7 +1132,7 @@ async function syncReal(
       const cur = now.providers[id]
       if (!sameRecord(cur, rec))
         return { id, result: "skipped", reason: "the connection changed while syncing, run sync again", steps: [] }
-      const res = await upsertManaged(cfg, id, upload)
+      const res = await upsertManaged(cfg, id, upload, share)
       if (!res.isValid) {
         // A workspace that refuses a new connection keeps nothing of it; the local copy stays.
         let warning = ""

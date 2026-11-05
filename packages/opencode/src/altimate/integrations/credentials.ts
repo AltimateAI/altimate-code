@@ -574,6 +574,8 @@ export interface CredentialOptions {
   /** Requires an existing connection and keeps its sync mode. */
   update?: boolean
   variant?: string
+  /** Allows attaching to a linked workspace that is not private, whose members can then use the connection. */
+  share?: boolean
   onStep?: (label: string) => void
 }
 
@@ -738,7 +740,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
     return await core.withLock(async (): Promise<CredentialResult> => {
       if (!core.sameRecord(core.loadStore().providers[id], rec)) return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: CHANGED_WHILE_CONNECTING })
       if (core.isBlocked(id)) return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: "Sync is blocked for this provider, kept local." })
-      const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config))
+      const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config), opts.share === true)
       if (!res.isValid) {
         const rejected = (sync: "synced" | "local"): CredentialResult => ({ ...base, provider: id, status: "rejected", sync, account: check.account, expiresAt: common.expiresAt ?? null, message: core.rejectionMessage(res) })
         // An existing connection was updated in place and cannot be reverted, so it stays marked rejected for update to fix; the local copy of a local credential is untouched.
@@ -786,7 +788,9 @@ function workspaceNote(w: core.UpsertResult["workspace"]): string | null {
   if (!w) return null
   if ("error" in w) return core.ATTACH_FAILED_PREFIX + w.error
   if ("notLinked" in w) return core.NOT_LINKED_LABEL
-  return w.kept ? `Kept the workspace's existing connection in ${workspaceLabel(w.attached, w.workspaceId)}` : `Attached to ${workspaceLabel(w.attached, w.workspaceId)}`
+  const where = workspaceLabel(w.attached, w.workspaceId)
+  const audience = w.shared ? `, shared with the members of ${where}` : ""
+  return w.kept ? `Kept the workspace's existing connection in ${where}` : `Attached to ${where}${audience}`
 }
 
 export * as IntegrationsCredentials from "./credentials"
