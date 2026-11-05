@@ -590,11 +590,13 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   const local = (r: Omit<CredentialResult, "provider" | "account" | "expiresAt"> & Partial<CredentialResult>): CredentialResult => ({ ...base, ...r })
   // A connection that exists only in the workspace can be updated or moved local too.
   let remoteManaged = false
+  // A failed call changes nothing, so it reports where the credential already is: in the workspace, or only here.
+  const syncState = (): "synced" | "local" => (rec?.synced || remoteManaged ? "synced" : "local")
   if (!rec?.registered && opts.update) {
     try {
       remoteManaged = await core.managedInWorkspace(id)
     } catch (e) {
-      return local({ status: "failed", sync: "local", message: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}` })
+      return local({ status: "failed", sync: syncState(), message: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}` })
     }
   }
   if (opts.update && !rec?.registered && !remoteManaged)
@@ -604,7 +606,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   const r = await resolve(id, opts.variant ?? (opts.update ? rec?.variant : undefined), Boolean(opts.localOnly) || blocked)
   const missing = r.def.fields.filter((f) => f.required && !r.values[f.name])
   if (missing.length)
-    return local({ status: "missing_fields", sync: "local", message: [`Missing: ${missing.map((f) => f.label).join(", ")}`, ...missing.map((f) => r.notes[f.name]).filter(Boolean)].join(". "), code: "missing_fields", missing: missing.map((f) => f.name) })
+    return local({ status: "missing_fields", sync: syncState(), message: [`Missing: ${missing.map((f) => f.label).join(", ")}`, ...missing.map((f) => r.notes[f.name]).filter(Boolean)].join(". "), code: "missing_fields", missing: missing.map((f) => f.name) })
 
   opts.onStep?.("Testing connection…")
   const check = await validate(id, r.variant, r.values)
@@ -623,7 +625,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         })
       }
     }
-    return local({ status: check.rejected ? "rejected" : "failed", sync: rec?.synced ? "synced" : "local", message: check.message ?? "Could not validate the credentials" })
+    return local({ status: check.rejected ? "rejected" : "failed", sync: syncState(), message: check.message ?? "Could not validate the credentials" })
   }
 
   const wantSync = opts.localOnly ? false : opts.update ? Boolean(rec?.synced) || remoteManaged : true
@@ -660,7 +662,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
     // Keeping a connection local moves it: the whole decision and move happen in one locked step with the uploads, so no workspace copy can appear after it was looked for.
     return await core.withLock(async (): Promise<CredentialResult> => {
       // The checks above ran outside the lock: a record that was changed since is not the one this was checked against.
-      if (!core.sameRecord(core.loadStore().providers[id], rec)) return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: CHANGED_WHILE_CONNECTING })
+      if (!core.sameRecord(core.loadStore().providers[id], rec)) return local({ status: "failed", sync: syncState(), message: CHANGED_WHILE_CONNECTING })
       let detachNote: string | null = null
       let removeFailure: string | null = null
       const wasBlocked = core.isBlocked(id)
@@ -670,7 +672,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         try {
           hadCopy = await core.managedInWorkspace(id)
         } catch (e) {
-          return local({ status: "failed", sync: "local", message: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}` })
+          return local({ status: "failed", sync: syncState(), message: `Could not check your workspace for an existing connection: ${e instanceof Error ? e.message : String(e)}` })
         }
       }
       if (hadCopy && !signedIn && !core.mockMode())
@@ -698,7 +700,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
           } catch {}
         }
         if (opts.localOnly && !wasBlocked) await core.setBlocked([id], false)
-        return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: e instanceof Error ? e.message : String(e) })
+        return local({ status: "failed", sync: hadCopy ? "synced" : "local", message: e instanceof Error ? e.message : String(e) })
       }
       // Switching variant must not leave the other variant's stored secret behind; only the old fields not just written are purged.
       // A failed purge only leaves the old variant's secrets behind, so the record is still saved and the leftover is reported.
@@ -738,8 +740,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   try {
     // The blocked check and the upload share one lock with Keep local, so a move to this machine cannot interleave with an upload.
     return await core.withLock(async (): Promise<CredentialResult> => {
-      if (!core.sameRecord(core.loadStore().providers[id], rec)) return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: CHANGED_WHILE_CONNECTING })
-      if (core.isBlocked(id)) return local({ status: "failed", sync: rec?.synced ? "synced" : "local", message: "Sync is blocked for this provider, kept local." })
+      if (!core.sameRecord(core.loadStore().providers[id], rec)) return local({ status: "failed", sync: syncState(), message: CHANGED_WHILE_CONNECTING })
+      if (core.isBlocked(id)) return local({ status: "failed", sync: syncState(), message: "Sync is blocked for this provider, kept local." })
       const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config), opts.share === true)
       if (!res.isValid) {
         const rejected = (sync: "synced" | "local"): CredentialResult => ({ ...base, provider: id, status: "rejected", sync, account: check.account, expiresAt: common.expiresAt ?? null, message: core.rejectionMessage(res) })
@@ -780,7 +782,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: common.expiresAt ?? null, message }
     })
   } catch (e) {
-    return local({ status: "failed", sync: "local", message: e instanceof Error ? e.message : String(e) })
+    return local({ status: "failed", sync: syncState(), message: e instanceof Error ? e.message : String(e) })
   }
 }
 

@@ -323,6 +323,29 @@ describe("keychain", () => {
     })
   })
 
+  test("a keychain read is empty only when the item is missing; any other failure is an error", async () => {
+    const read = () => core.readSecret("cred:github:github_token")
+    on(44)
+    expect(await read()).toBeUndefined()
+    on(36)
+    await expect(read()).rejects.toThrow("Could not read a stored credential from the macOS keychain (exit 36)")
+    expect(calls.map((c) => c.args[0])).toEqual(["find-generic-password"])
+  })
+
+  test("a keychain call that never answers is killed and reported, for reads and writes", async () => {
+    const limit = core.keychainLimits.timeoutMs
+    core.keychainLimits.timeoutMs = 20
+    try {
+      on(0, "never")
+      hold = new Promise<void>(() => {})
+      await expect(core.readSecret("cred:github:github_token")).rejects.toThrow("timed out")
+      await expect(core.storeSecret("cred:github:github_token", "x")).rejects.toThrow("Could not save the credential to the macOS keychain")
+      expect(calls).toHaveLength(2)
+    } finally {
+      core.keychainLimits.timeoutMs = limit
+    }
+  })
+
   test("a failed keychain write is an error", async () => {
     on(1)
     await expect(core.storeSecret("cred:github:github_token", "x")).rejects.toThrow("macOS keychain")
@@ -381,8 +404,11 @@ describe("workspace connections", () => {
         const url = new URL(req.url)
         const body = req.method === "POST" || req.method === "PATCH" ? await req.json().catch(() => null) : null
         if (url.pathname === "/user") {
-          const bad = req.headers.get("authorization") === "Bearer gh_bad"
-          return bad ? Response.json({ message: "Bad credentials" }, { status: 401 }) : Response.json({ login: "octo" }, { headers: { "github-authentication-token-expiration": "2031-01-02 03:04:05 UTC" } })
+          const auth = req.headers.get("authorization")
+          if (auth === "Bearer gh_bad") return Response.json({ message: "Bad credentials" }, { status: 401 })
+          // A token without an expiry is answered without the expiration header.
+          if (auth === "Bearer gh_no_expiry") return Response.json({ login: "octo" })
+          return Response.json({ login: "octo" }, { headers: { "github-authentication-token-expiration": "2031-01-02 03:04:05 UTC" } })
         }
         calls.push({ method: req.method, path: url.pathname, query: url.search, auth: req.headers.get("authorization"), tenant: req.headers.get("x-tenant"), body })
         return api.handle(req, url, body) ?? new Response("no", { status: 404 })
@@ -410,6 +436,14 @@ describe("workspace connections", () => {
     else process.env.GITHUB_TOKEN = saved.GITHUB_TOKEN
   })
   const writes = () => calls.filter((c) => c.method !== "GET")
+
+  test("sync of a replaced detected token does not carry over the old token's expiry", async () => {
+    expect((await core.syncProvider("github")).result).toBe("synced")
+    expect(core.loadStore().providers.github?.expiresAt).toBe("2031-01-02T03:04:05.000Z")
+    process.env.GITHUB_TOKEN = "gh_no_expiry"
+    expect((await core.syncProvider("github")).result).toBe("synced")
+    expect(writes()[1].body).toEqual({ config: { github_token: "gh_no_expiry" } })
+  })
 
   test("sync creates the managed connection, then updates it in place", async () => {
     const first = await core.syncProvider("github")
@@ -2289,6 +2323,16 @@ describe("credentials flow", () => {
       const o = await core.syncProvider("github")
       expect(o.result).toBe("failed")
       expect(await core.readSecret("github")).toBeTruthy()
+    })
+
+    test("a failed update of a credential the workspace holds says it is still synced", async () => {
+      real()
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github" })).sync).toBe("synced")
+      await token("github", "github_token")
+      api.state.fail = { status: 500, body: { detail: "boom" } }
+      const r = await creds.connectCredentials({ id: "github", update: true })
+      expect([r.status, r.sync, core.loadStore().providers.github?.synced]).toEqual(["failed", "synced", true])
     })
 
     test("a hand-made connection cannot be updated from here", async () => {

@@ -203,7 +203,8 @@ export const BUILTIN_SECRET_FIELDS: Record<ProviderId, string[]> = {
   linear: ["linearApiKey"],
 }
 
-const KEYCHAIN_TIMEOUT_MS = 10_000
+/** How long one `security` call may take; tests shorten it. */
+export const keychainLimits = { timeoutMs: 10_000 }
 
 interface SecurityResult {
   status: number | null
@@ -235,7 +236,7 @@ function runSecurity(args: string[], opts: { input?: string; stdout?: boolean; s
     const timer = setTimeout(() => {
       child.kill("SIGKILL")
       done({ status: null, stdout: out, stderr: err, error: new Error("timed out") })
-    }, KEYCHAIN_TIMEOUT_MS)
+    }, keychainLimits.timeoutMs)
     child.stdout?.setEncoding("utf8")
     child.stdout?.on("data", (d: string) => (out += d))
     child.stderr?.setEncoding("utf8")
@@ -266,20 +267,24 @@ export async function storeSecret(id: string, secret: string) {
     writeJson(secretsPath(), all, 0o600)
   })
 }
+/** `security` exits with this when the item does not exist. */
+const KEYCHAIN_ITEM_NOT_FOUND = 44
+const keychainItemMissing = (r: SecurityResult) => r.status === KEYCHAIN_ITEM_NOT_FOUND || /could not be found/i.test(r.stderr)
+const keychainDetail = (r: SecurityResult) => (r.error ? `: ${r.error.message}` : r.status != null ? ` (exit ${r.status})` : "")
+
 export async function readSecret(id: string): Promise<string | undefined> {
   if (useKeychain()) {
-    const r = await runSecurity(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id, "-w"], { stdout: true })
+    const r = await runSecurity(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id, "-w"], { stdout: true, stderr: true })
     if (r.status === 0) return r.stdout.trim()
+    // Only a missing item means no secret: a locked, failing or timed-out keychain must not read as empty, or the caller would replace or delete what is stored.
+    if (!keychainItemMissing(r)) throw new Error(`Could not read a stored credential from the macOS keychain${keychainDetail(r)}. Unlock the keychain and try again.`)
   }
   return readJsonStrict<Record<string, string>>(secretsPath(), {})[id]
 }
-/** `security` exits with this when the item does not exist. */
-const KEYCHAIN_ITEM_NOT_FOUND = 44
 export async function deleteSecret(id: string) {
   if (useKeychain()) {
     const r = await runSecurity(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], { stderr: true })
-    const notFound = r.status === KEYCHAIN_ITEM_NOT_FOUND || /could not be found/i.test(r.stderr)
-    if (r.status !== 0 && !notFound) throw new Error(`Could not remove a stored credential from the macOS keychain${r.error ? `: ${r.error.message}` : r.status != null ? ` (exit ${r.status})` : ""}`)
+    if (r.status !== 0 && !keychainItemMissing(r)) throw new Error(`Could not remove a stored credential from the macOS keychain${keychainDetail(r)}`)
   }
   await withLock(() => {
     const all = readJsonStrict<Record<string, string>>(secretsPath(), {})
@@ -880,7 +885,8 @@ export function withVariant(id: ProviderId, variant: string | undefined, config:
 export const isJiraServer = (variant: string | undefined) => /server/i.test(variant ?? "")
 
 /** The connection config to upload for a provider: the saved credential when it was connected here, else what connect would read from this machine. Never printed. */
-export async function collectConfig(id: ProviderId, rec: StoredProvider | undefined): Promise<{ config: Record<string, unknown> } | { reason: string }> {
+/** `saved` when the config is the credential saved here rather than one detected on this machine. */
+export async function collectConfig(id: ProviderId, rec: StoredProvider | undefined): Promise<{ config: Record<string, unknown>; saved?: true } | { reason: string }> {
   if (rec?.registered && rec.variant) {
     const config: Record<string, unknown> = { ...rec.values }
     // Only a required secret has to be there; an optional one that was never filled in is simply left out.
@@ -893,7 +899,7 @@ export async function collectConfig(id: ProviderId, rec: StoredProvider | undefi
       }
       config[field] = value
     }
-    return { config: withVariant(id, rec.variant, config) }
+    return { config: withVariant(id, rec.variant, config), saved: true }
   }
   return creds.detectedConfig(id)
 }
@@ -1069,7 +1075,11 @@ async function syncReal(
   attachOnly = false,
   share = false,
 ): Promise<SyncOutcome> {
-  const collected = attachOnly ? { reason: ALREADY_IN_WORKSPACE } : await collectConfig(id, rec)
+  // A keychain that cannot be read fails this provider only; it is not taken as having nothing to upload.
+  const collected = attachOnly
+    ? { reason: ALREADY_IN_WORKSPACE }
+    : await collectConfig(id, rec).catch((e: unknown) => ({ unreadable: e instanceof Error ? e.message : String(e) }))
+  if ("unreadable" in collected) return { id, result: "failed", reason: collected.unreadable, steps: [] }
   const steps: SyncStep[] = []
   const step = (l: string) => {
     steps.push({ label: l, ok: true })
@@ -1122,7 +1132,8 @@ async function syncReal(
     }
     return { id, result: "failed", reason: check.message ?? "Could not validate the credentials", steps }
   }
-  const expiresAt = check.expiresAt ?? rec?.expiresAt ?? null
+  // A known expiry carries over only for the saved credential; a detected token may have been replaced since it was recorded.
+  const expiresAt = check.expiresAt ?? (collected.saved ? rec?.expiresAt : null) ?? null
   const upload = expiresAt ? { ...collected.config, expires_at: expiresAt } : collected.config
   try {
     // The blocked check, the record check and the upload share one lock with Keep local and Disconnect. The config was prepared before the lock, so the record is compared again here.
