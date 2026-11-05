@@ -58,6 +58,11 @@ async function learnConfig(ctx: InstanceContext): Promise<LearnConfig> {
  * up to `root` (a session started in a subdirectory of the linked folder). No network. */
 export async function linked(root: string, directory: string): Promise<boolean> {
   if ((await RulesStore.read(root).catch(() => undefined))?.scope) return true
+  return !!(await localBinding(root, directory))
+}
+
+/** The cached workspace link of `directory` or the nearest folder above it, up to `root`: no network. */
+export async function localBinding(root: string, directory: string) {
   const { readLocalBinding } = await import("../workspace/state")
   const path = await import("node:path")
   const top = path.resolve(root)
@@ -67,8 +72,9 @@ export async function linked(root: string, directory: string): Promise<boolean> 
     return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
   }
   for (let dir = path.resolve(directory); ; dir = path.dirname(dir)) {
-    if (await readLocalBinding(dir).catch(() => null)) return true
-    if (dir === top || path.dirname(dir) === dir || !inside(path.dirname(dir))) return false
+    const binding = await readLocalBinding(dir).catch(() => null)
+    if (binding) return binding
+    if (dir === top || path.dirname(dir) === dir || !inside(path.dirname(dir))) return null
   }
 }
 

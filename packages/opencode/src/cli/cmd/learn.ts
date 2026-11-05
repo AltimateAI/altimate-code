@@ -537,7 +537,7 @@ const RulesCommand = effectCmd({
 const CheckCommand = effectCmd({
   instance: false,
   command: "check",
-  describe: "check a host agent's session for corrections that make a proposed rule (at most one model call)",
+  describe: "check a host agent's session for corrections that make a proposed rule (one model call per check round)",
   builder: (yargs: Argv) =>
     yargs
       .option("session", { type: "string", demandOption: true, describe: "the session whose new corrections are checked" })
@@ -697,13 +697,16 @@ const HookCommand = effectCmd({
   handler: Effect.fn("Cli.learn.hook")(function* (args) {
     yield* Effect.promise(() => inProject(async () => {
       try {
+        // The session start deadline counts from here: the hook's timeout includes the wait for its input.
+        const began = Date.now()
         const { RulesHost } = await import("../../altimate/rules/host")
         const input = await readHookInput()
         if (typeof input.session_id !== "string" || !input.session_id) return
         const session = RulesHost.hostSession(args.host as "claude" | "codex", input.session_id)
         const project = await rulesProject()
         if (args.event === "session-start") {
-          const context = RulesHost.context(await RulesHost.start({ ...project, session }))
+          const deadlineMs = Math.max(0, RulesHost.START_DEADLINE_MS - (Date.now() - began))
+          const context = RulesHost.context(await RulesHost.start({ ...project, session, deadlineMs }))
           if (context) out(JSON.stringify({ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: context } }))
         } else if (args.event === "user-prompt-submit") {
           if (typeof input.prompt === "string" && input.prompt.trim())

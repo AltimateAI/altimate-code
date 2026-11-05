@@ -766,7 +766,7 @@ describe("host session", () => {
   })
 })
 
-describe("host session, review round 2", () => {
+describe("host session: checks, transcripts and stored answers", () => {
   const addDeps = (text: string): RuleTrigger.TriggerDeps => ({
     source: async () => ({ prompts: ["fix it"], calls: [] }),
     generate: async () => async () => ({ deltas: [{ op: "ADD", text, reason: "corrected in two sessions" }] }),
@@ -1016,7 +1016,7 @@ describe("host transcripts", () => {
   })
 })
 
-describe("host session, review round 3", () => {
+describe("host session: requests, capacity and attribution", () => {
   const correct = async (root: string, session: string, text: string) =>
     appendSignal(root, { kind: "user_correction", sessionID: session, text, reason: "correction" })
 
@@ -1053,10 +1053,57 @@ describe("host session, review round 3", () => {
   })
 
   test("a host correction starts its turn, so a rule shown at session start counts as corrected again", async () => {
-    const root = await linkedRoot()
-    await RulesHost.recordCorrection({ root, directory: root, learn, session: "claude:t", text: "no, the column is shipped_at" })
-    const [signal] = await readSignals(root)
-    expect(signal.turnStartedAt).toBe(signal.correctedAt)
+    const root = await linkedRoot({ rules: [rule("Name order timestamp columns order_date in staging models.")] })
+    await RulesHost.start({ root, directory: root, learn, session: "claude:t" })
+    await Bun.sleep(5)
+    expect(await RulesHost.recordCorrection({ root, directory: root, learn, session: "claude:t", text: "no, order timestamp columns in staging models are ordered_at" })).toBe("recorded")
+    const { analyzeRecurrence } = await import("../../../src/altimate/learn/recurrence")
+    const row = (await analyzeRecurrence(root)).lessons.find((l) => l.name === RulesStore.WORKSPACE_RULES_STORE)
+    expect(row).toMatchObject({ id: "L-0123456789ab", recurred: 1, unknown: 0 })
+  })
+
+  test("relinked to another workspace within the refresh interval, a session start pulls and gives no rules of the old one", async () => {
+    const root = await linkedRoot({ rules: [rule("Name staging models stg_<source>.")] })
+    const binding = (datamateId: number) => ({ datamateId, datamateName: "W", repoRemote: "https://github.com/acme/demo", projectPath: null, linkedAt: 0 }) as Awaited<ReturnType<typeof RulesService.localBinding>>
+    const bound = spyOn(RulesService, "localBinding").mockResolvedValue(binding(1))
+    const pull = spyOn(RulesSync, "pullWithin").mockResolvedValue()
+    try {
+      // Still linked to the workspace pulled for: the last pull is used, and no pull is due.
+      expect((await RulesHost.start({ root, directory: root, learn })).rules.map((r) => r.text)).toEqual(["Name staging models stg_<source>."])
+      expect(pull).not.toHaveBeenCalled()
+      // Relinked to workspace 2; the pull that would adopt it does not answer in time.
+      bound.mockResolvedValue(binding(2))
+      expect((await RulesHost.start({ root, directory: root, learn })).rules).toEqual([])
+      expect(pull).toHaveBeenCalledTimes(1)
+    } finally {
+      bound.mockRestore()
+      pull.mockRestore()
+    }
+  })
+
+  test("a stored retire of a rule longer than today's limit can be sent; one whose rule changed since is closed", async () => {
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    try {
+      const long = `Name staging models stg_<source>__<entity> ${"and keep their columns in source order ".repeat(12)}.`
+      const pulled = rule(long)
+      const root = await linkedRoot({ rules: [pulled] })
+      const retire = (sessionID: string) => RuleProposal.ask({
+        sessionID, root, directory: root, learn, persist: true,
+        draft: draft(long, { change: "retire", replaces: { public_id: pulled.public_id, text: long, version: 1 } }),
+      })
+      const card = (await retire("claude:r"))!
+      expect(card.actions).toEqual(["send", "dismiss"])
+      expect(await RuleProposal.replyStored({ root, directory: root, learn, id: card.id }, { action: "send" })).toMatchObject({ ok: true, closed: true })
+      expect((await RulesStore.read(root)).outbox.map((o) => o.item.text)).toEqual([long])
+      // The owner edited the rule after this one was proposed: it is closed, and nothing is queued.
+      const again = (await retire("claude:r2"))!
+      await RulesStore.update(root, (s) => { s.outbox = []; s.rules = [{ ...pulled, version: 2, text: "Name staging models stg_<source>." }] })
+      expect(await RuleProposal.replyStored({ root, directory: root, learn, id: again.id }, { action: "send" })).toMatchObject({ ok: false, code: "not_open" })
+      const after = await RulesStore.read(root)
+      expect([after.proposals, after.outbox]).toEqual([[], []])
+    } finally {
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    }
   })
 
   test("with the stored proposals full, repeated Stops make no drafting call", async () => {

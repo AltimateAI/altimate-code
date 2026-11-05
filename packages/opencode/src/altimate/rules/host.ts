@@ -63,10 +63,10 @@ export interface Start {
 export const START_WAIT_MS = 3_000
 /** A project with no pulled rules yet waits longer: without them, nothing else here runs. */
 export const FIRST_PULL_WAIT_MS = 8_000
-/** The whole session start, pull included, ends within this: the plugin's hook timeout is 15s, the CLI takes about a
- * second to start, and the hook's exit waits up to `HOOK_EXIT_LOCKS_MS` for a learn lock it holds and
- * `HOOK_EXIT_TELEMETRY_MS` for telemetry. Recording the rules as shown and marking notices seen are best effort within
- * what is left. */
+/** The whole session start, reading the hook's input and the pull included, ends within this: the plugin's hook timeout
+ * is 15s, the CLI takes about a second to start, and the hook's exit waits up to `HOOK_EXIT_LOCKS_MS` for a learn lock it
+ * holds and `HOOK_EXIT_TELEMETRY_MS` for telemetry. Recording the rules as shown and marking notices seen are best effort
+ * within what is left. */
 export const START_DEADLINE_MS = 10_000
 /** How long a hook's exit waits for learn locks it still holds (work past the deadline): an exit inside one would leave
  * the project's learn lock to go stale. */
@@ -110,7 +110,7 @@ export async function start(input: {
   learn: LearnConfig
   session?: string
   waitMs?: number
-  /** Overrides `START_DEADLINE_MS` (tests). */
+  /** What is left of `START_DEADLINE_MS` (the hook spent some reading its input); tests set their own. */
   deadlineMs?: number
 }): Promise<Start> {
   const none: Start = { rules: [], proposals: 0, notices: [] }
@@ -122,10 +122,14 @@ export async function start(input: {
   const { RulesService } = await import("./service")
   if (!RulesSync.rulesEnabled(input.learn) || !(await within(RulesService.linked(input.root, input.directory), false))) return none
   const before = await RulesStore.read(input.root)
-  if (!(await RulesSync.pullFailedRecently(before)) && (!(await RulesStore.verified(before)) || (await RulesSync.due(input.root))))
+  // The folder's link as cached now (no network): relinked to another workspace, the last pull's rules are not its own.
+  const bound = await within(RulesService.localBinding(input.root, input.directory), null)
+  const relinked = (state: RulesStore.State) =>
+    !!bound && !!state.scope && bound.datamateId !== state.scope.datamateId
+  if (!(await RulesSync.pullFailedRecently(before)) && (relinked(before) || !(await RulesStore.verified(before)) || (await RulesSync.due(input.root))))
     await RulesSync.pullWithin(input.root, input.directory, input.learn, Math.min(left(), input.waitMs ?? (before.scope ? START_WAIT_MS : FIRST_PULL_WAIT_MS)))
   const state = await RulesStore.read(input.root)
-  if (!(await delivering(input.root, input.learn, state))) return none
+  if (relinked(state) || !(await delivering(input.root, input.learn, state))) return none
   // The same selection either way: pinned first, within the start budget.
   const { renderSection, resolveLimits } = await import("../learn/select")
   const all = state.rules.map(RulesStore.toLesson).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned))
@@ -262,15 +266,16 @@ export async function recordCorrection(input: {
   const reason = correctionReason(input.text)
   if (!reason) return "not_correction"
   // The prompt starts the turn it corrects: a rule shown at session start, before it, was shown to that turn
-  // ("corrected again").
-  const at = new Date().toISOString()
+  // ("corrected again"). Attribution needs the turn to start strictly before its correction.
+  const now = Date.now()
+  const at = new Date(now).toISOString()
   const signal = await appendSignal(input.root, {
     kind: "user_correction",
     sessionID: input.session,
     text: input.text,
     reason,
     correctedAt: at,
-    turnStartedAt: at,
+    turnStartedAt: new Date(now - 1).toISOString(),
   })
   if (!signal) return "duplicate"
   // A check of this session already running took its corrections before this one: it checks again before it ends.
@@ -395,7 +400,8 @@ async function runRounds(
   transcript: DigestSource | undefined,
   reread: () => Promise<DigestSource | undefined>,
 ): Promise<string> {
-  let outcome = "no new corrections"
+  const NONE = "no new corrections"
+  let outcome = NONE
   try {
     outcome = await checkSession(input, session, transcript)
     for (let round = 1; await releaseCheck(input.root, session); round++) {
@@ -405,7 +411,9 @@ async function runRounds(
         })
         break
       }
-      outcome = await checkSession(input, session, await reread())
+      // A later round with nothing new does not hide what an earlier one did.
+      const next = await checkSession(input, session, await reread())
+      if (next !== NONE) outcome = next
     }
   } finally {
     await RulesStore.update(input.root, (s) => {

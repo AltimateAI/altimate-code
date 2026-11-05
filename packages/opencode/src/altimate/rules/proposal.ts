@@ -534,6 +534,7 @@ async function answerStored(
   let moved: RulesStore.State | undefined
   let conflict: string | undefined
   let invalid: string | undefined
+  let stale = false
   await RulesStore.update(root, (s) => {
     const found = s.proposals.find((p) => p.card.id === id && storedLive(p))
     if (!found) return
@@ -542,8 +543,18 @@ async function answerStored(
     if (found.scope ? !(RulesStore.sameScope(found.scope, s.scope) && verified) : !!s.scope && !verified)
       return void (moved = structuredClone(s))
     record.card = recomputed(record, s.workspace)
-    // Wording that does not pass the rule lint is not acted on: it can be edited or dismissed.
-    const problem = answer.action === "edit" || answer.action === "dismiss" ? undefined : editProblem(record.card.text)
+    // A change to a team rule is answered only while that rule is as it was proposed against, and a retire only for the
+    // rule's own wording. Otherwise it is closed: the rule was changed or removed since.
+    const target = record.card.replaces
+    if (target && (!s.rules.some((r) => r.public_id === target.public_id && r.version === target.version && r.text === target.text) ||
+      (record.card.change === "retire" && record.card.text !== target.text))) {
+      s.proposals = s.proposals.filter((p) => p !== found)
+      return void (stale = true)
+    }
+    // Wording that does not pass the rule lint is not acted on: it can be edited or dismissed. A retire removes a rule as
+    // pulled, whose wording the server accepted (a grandfathered rule may not pass today's lint).
+    const problem = answer.action === "edit" || answer.action === "dismiss" || record.card.change === "retire"
+      ? undefined : editProblem(record.card.text)
     if (problem) return void (invalid = problem)
     // Held by another live process. This process's own claim is left from a write-back that failed (a reply running
     // here is refused above). A claim past `CLAIM_STALE_MS` is taken over: its process may be gone with its pid reused,
@@ -559,10 +570,14 @@ async function answerStored(
   })
   if (!record) return { ok: false, code: "not_open", error: "This proposal is no longer open." }
   if (moved) return unavailable(moved, record)
+  if (stale) return { ok: false, code: "not_open", error: "The team rule this proposal changes was changed or removed since: it is closed." }
   if (held) return { ok: false, code: "busy", error: "This proposal is already being answered.", card: record.card }
   if (conflict)
     return { ok: false, code: "not_available", error: `This proposal was being answered with "${conflict}" when that stopped: answer it with "${conflict}" again to finish.`, card: record.card }
-  if (invalid) return { ok: false, code: "invalid_text", error: `Not sent: the rule ${invalid}. Edit it first.`, card: record.card }
+  if (invalid) {
+    const next = record.card.actions.includes("edit") ? "Edit it first." : "Dismiss it."
+    return { ok: false, code: "invalid_text", error: `Not sent: the rule ${invalid}. ${next}`, card: record.card }
+  }
   const request = record.request
   const entry: Pending = {
     card: record.card, root, directory: input.directory, learn: input.learn, at: Date.parse(record.at), trigger: record.trigger,
