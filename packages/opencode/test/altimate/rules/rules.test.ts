@@ -8,6 +8,7 @@ import { RuleProposal } from "../../../src/altimate/rules/proposal"
 import { RulesStore } from "../../../src/altimate/rules/store"
 import { RulesSummary } from "../../../src/altimate/rules/summary"
 import { RulesSync } from "../../../src/altimate/rules/sync"
+import { rulesNotSyncedLine } from "../../../src/cli/cmd/learn"
 import { appliesTo, learningDecision, learningEnabled } from "../../../src/altimate/rules/trigger"
 import { Config } from "../../../src/config/config"
 import { WorkspaceApi } from "../../../src/altimate/workspace/api-client"
@@ -2334,5 +2335,36 @@ describe("cards across the feature's edges", () => {
     await fs.writeFile(file, JSON.stringify([{ ...RulesStore.toLesson(rule("Stale team rule.")) }]))
     await RulesStore.update(root, (s) => { s.personal_learning = false })
     expect(parse(await fs.readFile(file, "utf8"))).toEqual([])
+  })
+})
+
+describe("learn status before the first sync", () => {
+  test("a project linked by path says rules need a git remote, not 'not linked'", async () => {
+    const root = await tmp()
+    const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    const spies = [
+      spyOn(WorkspaceApi, "captureCredentials").mockResolvedValue({ url: "http://x/", instance: "t", apiKey: "k" }),
+      spyOn(WorkspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 1, repoRemote: null, projectPath: root } } as never),
+    ]
+    try {
+      const gate = await RulesSync.context(root, { enabled: true })
+      expect(gate).toMatchObject({ status: "skipped", code: "no_remote" })
+      const line = rulesNotSyncedLine(gate)
+      expect(line).not.toContain("not linked")
+      expect(line).toContain("need a git remote")
+      expect(line).toContain("altimate-code link")
+    } finally {
+      for (const spy of spies) spy.mockRestore()
+      if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+    }
+  })
+
+  test("the other gate outcomes", () => {
+    expect(rulesNotSyncedLine({ status: "skipped", code: "not_linked", reason: "x", unlinked: true })).toBe("Workspace rules: not linked (run `altimate-code link`)")
+    expect(rulesNotSyncedLine({ status: "ready" } as never)).toContain("not synced yet (run `altimate-code learn sync`)")
+    expect(rulesNotSyncedLine({ status: "skipped", code: "not_signed_in", reason: "not signed in to Altimate" })).toBe("Workspace rules: off — not signed in to Altimate")
+    expect(rulesNotSyncedLine(undefined)).toContain("not synced yet")
   })
 })

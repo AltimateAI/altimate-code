@@ -25,6 +25,8 @@ import {
   NotConfiguredError,
   NotFoundError,
   PreconditionFailedError,
+  ADDING_REMOTE_MESSAGE,
+  addsRemoteToLink,
   type ActAs,
   type Binding,
   type DatamateRef,
@@ -436,6 +438,11 @@ export const LinkCommand = cmd({
     }
 
     const targetId = Number(pick)
+    if (targetId === currentId && existing && addsRemoteToLink(identifier, existing)) {
+      prompts.log.info(ADDING_REMOTE_MESSAGE)
+      await bindOrRebind(identifier, targetId, null, true, args.directory, actAs)
+      return
+    }
     if (targetId === currentId) {
       prompts.outro(`Kept "${currentName}" — nothing changed.`)
       return
@@ -1114,6 +1121,11 @@ export async function linkHeadless(
   // An explicit `link` for the workspace the service already has: record the user's approval here (a fresh clone
   // only knows the link as discovered, which `workspace sync` refuses), without a redundant server rebind.
   const alreadyLinked = async (lookup: ProjectBindingLookup): Promise<void> => {
+    if (addsRemoteToLink(identifier, lookup)) {
+      deps.print(ADDING_REMOTE_MESSAGE)
+      await deps.bindOrRebind(identifier, lookup.datamate.id, null, actAs)
+      return
+    }
     let recorded: boolean
     try {
       recorded = await deps.approve(identifier, lookup, actAs)
