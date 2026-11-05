@@ -89,6 +89,12 @@ function env(cfg: Config): RuntimePythonEnvironment {
   }
 }
 
+/** Whether this dbt-integration answers a model's lineage, for a caller deciding whether to `create`. */
+export function hasModelLineage(): boolean {
+  const prototype = DBTProjectIntegrationAdapter.prototype as { getModelLineage?: unknown }
+  return typeof prototype.getModelLineage === "function"
+}
+
 export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter> {
   const config = configuration(cfg)
   const term = terminal()

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test"
 import { DBTProjectIntegrationAdapter, DBTProjectIntegrationAdapterEvents } from "@altimateai/dbt-integration"
 import type { ParsedManifest } from "@altimateai/dbt-integration"
-import { create } from "../src/adapter"
+import { create, hasModelLineage } from "../src/adapter"
 import { children, parents } from "../src/commands/graph"
 import { schemaVerify } from "../src/commands/schema-verify"
 import { recordManifest, staleManifestNote } from "../src/stale-manifest"
@@ -104,5 +104,22 @@ describe("create", () => {
     } finally {
       initialize.mockRestore()
     }
+  })
+})
+
+describe("hasModelLineage", () => {
+  const prototype = DBTProjectIntegrationAdapter.prototype as { getModelLineage?: unknown }
+  const installed = Object.getOwnPropertyDescriptor(prototype, "getModelLineage")
+
+  afterEach(() => {
+    delete prototype.getModelLineage
+    if (installed) Object.defineProperty(prototype, "getModelLineage", installed)
+  })
+
+  test("follows what the dbt-integration in use provides", () => {
+    delete prototype.getModelLineage
+    expect(hasModelLineage()).toBe(false)
+    prototype.getModelLineage = () => {}
+    expect(hasModelLineage()).toBe(true)
   })
 })

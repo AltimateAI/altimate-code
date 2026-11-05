@@ -64,6 +64,8 @@ export const dbtAdapterInternals: {
   readConfig?: () => Promise<unknown>
   /** Replaces dbt-tools' adapter creation, so a test can see which integration modes were tried. */
   create?: (config: any) => Promise<any>
+  /** Replaces the check for dbt-integration's lineage, which a test's fake adapter provides itself. */
+  hasModelLineage?: () => boolean
   /** Adapter creation attempts since the last reset — what single-flight bounds. */
   attempts: number
   /** Cache writes since the last reset: only the attempt that owns the slot writes. */
@@ -271,6 +273,17 @@ async function tryExecuteViaDbt(
 /** The project's dbt adapter, created on first use; null when there is no usable dbt project. */
 export function getDbtAdapter(): Promise<any | null> {
   return ensureDbtAdapter()
+}
+
+/** Whether the dbt-integration in use answers a model's lineage. Asking starts nothing. */
+export async function dbtAdapterHasLineage(): Promise<boolean> {
+  if (dbtAdapterInternals.hasModelLineage) return dbtAdapterInternals.hasModelLineage()
+  try {
+    return (await import("../../../../../dbt-tools/src/adapter")).hasModelLineage()
+  } catch {
+    // dbt-tools not available
+    return false
+  }
 }
 
 /**
