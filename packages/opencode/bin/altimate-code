@@ -27,6 +27,20 @@ function findAllNodeModules(startDir) {
   return paths
 }
 
+function hasControllingTerminal() {
+  // A controlling terminal delivers Ctrl-C (SIGINT) and hangup (SIGHUP) to the
+  // whole foreground process group, so the child already has them. Opening
+  // /dev/tty is the portable test for one; it fails in CI, under harnesses,
+  // and after setsid, where the wrapper is the only process that was signalled.
+  if (process.platform === "win32") return true
+  try {
+    fs.closeSync(fs.openSync("/dev/tty", "r"))
+    return true
+  } catch {
+    return false
+  }
+}
+
 function run(target) {
   // Resolve NODE_PATH so the compiled Bun binary can find external packages
   // installed alongside the wrapper (e.g. @altimateai/altimate-core NAPI module).
@@ -54,37 +68,58 @@ function run(target) {
     }
   } catch {
     // realpathSync failed (e.g. target doesn't exist) — continue without
-    // NODE_PATH; spawnSync will report the missing binary via result.error.
+    // NODE_PATH; spawn will report the missing binary via the "error" event.
   }
 
-  const result = childProcess.spawnSync(target, process.argv.slice(2), {
+  // Asynchronous spawn so this process can forward termination signals: with
+  // spawnSync a `kill <wrapper pid>` ended the wrapper alone and left the
+  // binary running as an orphan (observed: a run kept going past its budget).
+  const child = childProcess.spawn(target, process.argv.slice(2), {
     stdio: "inherit",
     env,
   })
-  if (result.error) {
-    console.error(result.error.message)
+  const forward = (signal) => {
+    try {
+      child.kill(signal)
+    } catch {
+      // The child already exited; its "exit" handler below decides the status.
+    }
+  }
+  // SIGTERM is never terminal-generated, so it is always ours to deliver.
+  process.on("SIGTERM", () => forward("SIGTERM"))
+  // SIGINT and SIGHUP reach the child directly from a controlling terminal;
+  // forwarding them again would deliver a second signal, which `run` treats as
+  // "exit now" and skips its shutdown flush. Keep waiting for the child either
+  // way so its exit status is the wrapper's.
+  const terminal = hasControllingTerminal()
+  process.on("SIGINT", () => {
+    if (!terminal) forward("SIGINT")
+  })
+  process.on("SIGHUP", () => {
+    if (!terminal) forward("SIGHUP")
+  })
+  child.on("error", (error) => {
+    console.error(error.message)
     process.exit(1)
-  }
-  // A child killed by a signal (e.g. the kernel OOM killer) has no exit status; report it the way
-  // a shell would (128 + signal number) instead of exiting 0 as if the run had succeeded.
-  if (result.signal) {
-    console.error(`altimate-code terminated by ${result.signal}`)
-    process.exit(128 + (os.constants.signals[result.signal] ?? 1))
-  }
-  const code = typeof result.status === "number" ? result.status : 1
-  process.exit(code)
+  })
+  child.on("exit", (status, signal) => {
+    // A child killed by a signal (e.g. the kernel OOM killer) has no exit status; report it the way
+    // a shell would (128 + signal number) instead of exiting 0 as if the run had succeeded.
+    if (signal) {
+      console.error(`altimate-code terminated by ${signal}`)
+      process.exit(128 + (os.constants.signals[signal] ?? 1))
+    }
+    const code = typeof status === "number" ? status : 1
+    process.exit(code)
+  })
 }
 
+// run() returns while the child is still running, so every branch below must
+// be the only one taken: the first match wins, and the fallback search runs
+// only when neither override is present.
 const envPath = process.env.ALTIMATE_CODE_BIN_PATH
-if (envPath) {
-  run(envPath)
-}
-
-//
 const cached = path.join(scriptDir, ".altimate-code")
-if (fs.existsSync(cached)) {
-  run(cached)
-}
+const override = envPath || (fs.existsSync(cached) ? cached : undefined)
 
 const platformMap = {
   darwin: "darwin",
@@ -222,7 +257,7 @@ function findBinary(startDir) {
   }
 }
 
-const resolved = findBinary(scriptDir)
+const resolved = override ?? findBinary(scriptDir)
 if (!resolved) {
   console.error(
     "It seems that your package manager failed to install the right version of the altimate-code CLI for your platform. You can try manually installing " +

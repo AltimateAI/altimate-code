@@ -370,6 +370,9 @@ export const layer = Layer.effect(
       // altimate_change start — validate opencode-local lesson settings with the shared config
       const data = ConfigParse.schema(LocalInfo, normalizeLoadedConfig(parsed), source)
       // altimate_change end
+      // altimate_change start — name the agent keys the schema folded into options (see config/agent.ts)
+      ConfigAgent.warnUnknownKeysInConfig(parsed, source)
+      // altimate_change end
       if (!("path" in options)) return data
 
       yield* Effect.promise(() => resolveLoadedPlugins(data, options.path))
