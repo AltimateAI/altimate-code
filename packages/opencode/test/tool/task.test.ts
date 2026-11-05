@@ -3,7 +3,7 @@ import { SessionV1 } from "@opencode-ai/core/v1/session"
 import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { Database } from "@opencode-ai/core/database/database"
 // altimate_change start — upstream_fix: background subagent tests assert error text and budget binding.
-import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
+import { Cause, ConfigProvider, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { RunBudget } from "@/altimate/run-budget"
 // altimate_change end
 import { Agent } from "../../src/agent/agent"
@@ -20,7 +20,12 @@ import { SessionRunState } from "@/session/run-state"
 import { SessionStatus } from "@/session/status"
 import { interruptedTaskOutput } from "@/session/task-output"
 
-import { TaskTool, type TaskPromptOps } from "../../src/tool/task"
+import {
+  MAX_RUNNING_BACKGROUND_TASKS,
+  TaskTool,
+  backgroundSubagentsEnabled,
+  type TaskPromptOps,
+} from "../../src/tool/task"
 import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
@@ -928,7 +933,9 @@ describe("tool.task", () => {
         disposeDeadline()
         expect(joined.metadata.sessionId).toBe(taskID)
         expect(joined.metadata.background).toBeUndefined()
-        expect(joined.output).toContain(`task_id: ${taskID} (for resuming to continue this task if needed)`)
+        expect(joined.output).toContain(
+          `task_id: ${taskID} (background task: calling task with this task_id returns this same result)`,
+        )
         expect(joined.output).toContain("<task_result>\nbackground done\n</task_result>")
         expect(prompts).toBe(1)
         expect(RunBudget.queryDeadline(taskID)).toBeUndefined()
@@ -988,6 +995,133 @@ describe("tool.task", () => {
         expect(id).toBe(launched.metadata.sessionId)
       }),
     ),
+  )
+
+  const backgroundContext = (
+    chat: { id: SessionID },
+    assistant: { id: MessageID },
+    promptOps: TaskPromptOps,
+    abort: AbortSignal = new AbortController().signal,
+  ) => ({
+    sessionID: chat.id,
+    messageID: assistant.id,
+    agent: "build",
+    abort,
+    extra: { promptOps },
+    messages: [],
+    metadata: () => Effect.void,
+    ask: () => Effect.void,
+  })
+  const launchInput = {
+    description: "inspect bug",
+    prompt: "look into the cache key path",
+    subagent_type: "general",
+    background: true,
+  }
+  const blockingOps = (started: { resolve: () => void }, release: Promise<void>): TaskPromptOps => ({
+    ...stubOps(),
+    prompt: (input) =>
+      Effect.promise(async () => {
+        started.resolve()
+        await release
+        return reply(input, "background done")
+      }),
+  })
+
+  background.instance("a launch on an already-aborted signal fails instead of reporting a running task", () =>
+    withBackgroundEnv(
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const def = yield* (yield* TaskTool).init()
+        let prompts = 0
+        const controller = new AbortController()
+        controller.abort()
+        const exit = yield* def
+          .execute(
+            launchInput,
+            backgroundContext(chat, assistant, stubOps({ onPrompt: () => prompts++ }), controller.signal),
+          )
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        expect(prompts).toBe(0)
+      }),
+    ),
+  )
+
+  background.instance("background: true with the task_id of a running child returns its status at once", () =>
+    withBackgroundEnv(
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const def = yield* (yield* TaskTool).init()
+        const started = defer<void>()
+        const release = defer<void>()
+        const context = backgroundContext(chat, assistant, blockingOps(started, release.promise))
+        const launched = yield* def.execute(launchInput, context)
+        const taskID = launched.metadata.sessionId
+        yield* Effect.promise(() => started.promise).pipe(Effect.timeout("2 seconds"))
+
+        const status = yield* def.execute({ ...launchInput, task_id: taskID }, context).pipe(Effect.timeout("1 second"))
+        expect(status.metadata.background).toBe(true)
+        expect(status.output).toContain("still running")
+        expect(status.output).toContain(`task_id=${taskID}`)
+        release.resolve()
+      }),
+    ),
+  )
+
+  background.instance("a parent cannot run more background children than the cap", () =>
+    withBackgroundEnv(
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const def = yield* (yield* TaskTool).init()
+        const release = defer<void>()
+        const context = backgroundContext(chat, assistant, blockingOps({ resolve: () => {} }, release.promise))
+        for (let index = 0; index < MAX_RUNNING_BACKGROUND_TASKS; index++) yield* def.execute(launchInput, context)
+        const exit = yield* def.execute(launchInput, context).pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) expect(String(Cause.squash(exit.cause))).toContain("background tasks running")
+        release.resolve()
+      }),
+    ),
+  )
+
+  it.instance("the execution flag check parses the variable exactly as RuntimeFlags does", () =>
+    Effect.gen(function* () {
+      const previous = { flag: process.env[BACKGROUND_FLAG], experimental: process.env["OPENCODE_EXPERIMENTAL"] }
+      delete process.env["OPENCODE_EXPERIMENTAL"]
+      try {
+        // RuntimeFlags (Effect `Config.boolean`) is what publishes the `background` field. Run it on its
+        // own runtime: the test runtime has already memoized the flags it built at startup.
+        const runtimeFlag = () =>
+          Effect.gen(function* () {
+            return (yield* RuntimeFlags.Service).experimentalBackgroundSubagents
+          }).pipe(
+            Effect.provide(
+              RuntimeFlags.defaultLayer.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv()))),
+            ),
+          )
+        const cases = {
+          on: true,
+          y: true,
+          "1": true,
+          yes: true,
+          true: true,
+          TRUE: false,
+          false: false,
+          "0": false,
+          off: false,
+        }
+        for (const [value, expected] of Object.entries(cases)) {
+          process.env[BACKGROUND_FLAG] = value
+          expect({ value, runtime: Effect.runSync(runtimeFlag()) }).toEqual({ value, runtime: expected })
+          expect({ value, enabled: backgroundSubagentsEnabled() }).toEqual({ value, enabled: expected })
+        }
+      } finally {
+        if (previous.flag === undefined) delete process.env[BACKGROUND_FLAG]
+        else process.env[BACKGROUND_FLAG] = previous.flag
+        if (previous.experimental !== undefined) process.env["OPENCODE_EXPERIMENTAL"] = previous.experimental
+      }
+    }),
   )
   // altimate_change end
 
