@@ -236,6 +236,25 @@ describe("workspace summary", () => {
     expect(spy).toHaveBeenCalledTimes(2)
   })
 
+  // The summary renders into the cached system prefix on every step. A refresh at the TTL that
+  // fails must keep the good answer it was refreshing, or the Integrations, memory and knowledge
+  // lines vanish for that step and the whole prefix is re-created.
+  test("a failed refresh past the TTL keeps the cached answer, and the next step retries", async () => {
+    const good = summary({ integrations: [{ id: "github" }], memory_enabled: true })
+    const spy = spyOn(AltimateApi, "getDatamate")
+      .mockResolvedValueOnce(good)
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce(summary({ integrations: [{ id: "snowflake" }], memory_enabled: true }))
+    const t0 = Date.now()
+    const expected = { integrations: ["github"], memoryEnabled: true, knowledge: null }
+    expect(await Contents.workspaceSummary(39, t0)).toEqual(expected)
+    const late = t0 + 5 * 60_000 + 1
+    expect(await Contents.workspaceSummary(39, late)).toEqual(expected)
+    // Still the good answer, and not cached as fresh: the next step asks again.
+    expect(await Contents.workspaceSummary(39, late)).toEqual({ integrations: ["snowflake"], memoryEnabled: true, knowledge: null })
+    expect(spy).toHaveBeenCalledTimes(3)
+  })
+
   test("a slow service does not hold the step past its wait; the answer arrives on a later step", async () => {
     let release!: (v: any) => void
     const spy = spyOn(AltimateApi, "getDatamate").mockImplementation(() => new Promise((r) => (release = r)) as any)
