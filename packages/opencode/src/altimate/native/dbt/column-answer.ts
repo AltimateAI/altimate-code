@@ -90,6 +90,8 @@ export interface ColumnAnswer {
   also_reads: { model: number; columns: string[]; downstream: number }[]
   unresolved: { model: number; reason: string; downstream?: number }[]
   flags: { model: number; flag: ShapeFlag }[]
+  /** Model-level downstream (upstream: ancestors) in none of the tiers, by name. Not in `nodes`. */
+  cleared: { id: string; name: string }[]
   truncated: boolean
   next: null
 }
@@ -624,8 +626,10 @@ export function columnAnswer(
     for (const d of beyond(id)) mayCarry.add(d)
   }
   for (const id of [...valueModels, focus]) mayCarry.delete(id)
-  let cleared = 0
-  for (const id of modelLevel) if (!valueModels.has(id) && !mayCarry.has(id)) cleared++
+  const cleared = [...modelLevel]
+    .filter((id) => !valueModels.has(id) && !mayCarry.has(id))
+    .map((id) => ({ id, name: String(p.node(id)?.name ?? id) }))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 
   const alsoReads = [...also].map(([id, cols]) => ({
     model: nodeIdx(id),
@@ -661,7 +665,7 @@ export function columnAnswer(
       contracts: [...valueModels].filter((id) => !!p.node(id)?.config?.contract?.enforced).length,
       ends: columns.filter((c) => c.end).length,
       may_carry_models: mayCarry.size,
-      cleared_models: cleared,
+      cleared_models: cleared.length,
       model_level: modelLevel.size,
     },
     nodes,
@@ -670,6 +674,7 @@ export function columnAnswer(
     also_reads: alsoReads,
     unresolved: unresolvedOut,
     flags,
+    cleared,
     truncated,
     next: null,
   }

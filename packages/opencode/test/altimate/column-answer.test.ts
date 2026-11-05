@@ -175,6 +175,8 @@ describe("column answer: downstream", () => {
     expect(a.unresolved.map((u) => [named(a, u.model), u.downstream])).toEqual([["rpt_nested", 1]])
     // value 3 + may carry 4 (rpt_big_orders, rpt_big_child, rpt_nested, rpt_nested_child) + cleared 1 (rpt_counts)
     expect(a.counts).toMatchObject({ may_carry_models: 4, cleared_models: 1, model_level: 8 })
+    expect(a.cleared).toEqual([{ id: "model.shop.rpt_counts", name: "rpt_counts" }])
+    expect(a.nodes.map((n) => n.name)).not.toContain("rpt_counts")
   })
 
   test("a WITH nested inside a CTE is unresolved with the reason, never cleared, and flagged", () => {
@@ -256,6 +258,28 @@ describe("column answer: upstream", () => {
     // Everything above it may carry the value: fct_orders, stg_orders and the source.
     expect(a.counts).toMatchObject({ may_carry_models: 3, cleared_models: 0, model_level: 4 })
   })
+
+  test("ancestors in none of the tiers are listed as cleared, by name, outside nodes", () => {
+    const m: any = shop()
+    m.sources["source.shop.raw.customers"] = source("customers", ["customer_id", "name"])
+    m.nodes["model.shop.stg_customers"] = model(
+      "stg_customers",
+      ["source.shop.raw.customers"],
+      "select customer_id, name from shop.raw.customers",
+    )
+    m.nodes["model.shop.fct_mix"] = model(
+      "fct_mix",
+      ["fct_orders", "stg_customers"],
+      `select o.revenue from ${T("fct_orders")} o join ${T("stg_customers")} c on o.customer_id = c.customer_id`,
+    )
+    const a = columnAnswer(write(m), "fct_mix", "revenue", "upstream")
+    expect(a.cleared).toEqual([
+      { id: "source.shop.raw.customers", name: "customers" },
+      { id: "model.shop.stg_customers", name: "stg_customers" },
+    ])
+    expect(a.counts).toMatchObject({ models: 3, cleared_models: 2, model_level: 5 })
+    expect(a.nodes.map((n) => n.name)).not.toContain("stg_customers")
+  })
 })
 
 describe("column answer: how", () => {
@@ -318,6 +342,7 @@ describe("column answer: contract", () => {
       "also_reads",
       "unresolved",
       "flags",
+      "cleared",
       "truncated",
       "next",
     ])
