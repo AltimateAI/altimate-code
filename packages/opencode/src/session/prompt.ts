@@ -2065,8 +2065,6 @@ export namespace SessionPrompt {
         // altimate_change start — persisted plain-text section has a stable position
         ...(teamRules ? [teamRules] : []),
         // altimate_change end
-        // altimate_change start — hoisted reminders go in `environment` below, not here
-        // altimate_change end
       ]
       // altimate_change start — run-mode-only completion instruction. This text
       // used to sit in builder.txt, but builder is a PRIMARY agent, so it also
