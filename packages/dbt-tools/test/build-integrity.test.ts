@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "os"
 import { dirname, join } from "path"
 import { $ } from "bun"
-import { BRIDGE_OUTPUT, standInPython } from "./stand-in-python"
+import { BRIDGE_STDERR, BRIDGE_STDOUT, standInPython } from "./stand-in-python"
 
 const pkg = join(import.meta.dir, "..")
 const dist = join(pkg, "dist")
@@ -120,8 +120,10 @@ describe("build integrity", () => {
         // before the spawn exits 1, and the comparison shows the CLI's message.
         expect({ exitCode, output }).toMatchObject({ exitCode: 0 })
         expect(runs).toContain(script)
-        expect(output).not.toContain(BRIDGE_OUTPUT)
-        expect(stderr).not.toContain(BRIDGE_OUTPUT)
+        expect(output).not.toContain(BRIDGE_STDOUT)
+        expect(output).not.toContain(BRIDGE_STDERR)
+        expect(stderr).not.toContain(BRIDGE_STDOUT)
+        expect(stderr).not.toContain(BRIDGE_STDERR)
       } finally {
         rmSync(root, { recursive: true, force: true })
       }
@@ -141,9 +143,12 @@ describe("build integrity", () => {
         })
         expect(runs).toContain(script)
         expect(existsSync(script)).toBe(true)
-        // The bridge's output reaches the adapter's terminal, not the host's streams.
-        expect(output).not.toContain(BRIDGE_OUTPUT)
-        expect(stderr).not.toContain(BRIDGE_OUTPUT)
+        // The bridge's output reaches the adapter's terminal, not the host's streams. What it
+        // said on stderr comes back only in the failed CLI's answer.
+        expect(output).not.toContain(BRIDGE_STDOUT)
+        expect(stderr).not.toContain(BRIDGE_STDOUT)
+        expect(stderr).not.toContain(BRIDGE_STDERR)
+        expect(JSON.parse(output).logs).toContain(`[dbt:stderr] ${BRIDGE_STDERR}`)
       } finally {
         rmSync(root, { recursive: true, force: true })
       }

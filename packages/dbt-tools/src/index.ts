@@ -71,6 +71,7 @@ function output(result: unknown) {
     if ("error" in obj) {
       console.error(String(obj.error))
       if ("fix" in obj) console.error(String(obj.fix))
+      if (Array.isArray(obj.logs)) console.error(obj.logs.join("\n"))
       process.exit(1)
     }
     if ("sql" in obj) {
@@ -86,7 +87,7 @@ function output(result: unknown) {
   if (result && typeof result === "object" && "error" in result) process.exit(1)
 }
 
-function bail(err: unknown): never {
+function failure(err: unknown) {
   const result: Record<string, unknown> = diagnose(err instanceof Error ? err : new Error(String(err)))
   // Include buffered dbt logs for diagnostics (see #249 — logs are buffered
   // in-memory instead of written to stderr to avoid TUI corruption).
@@ -99,7 +100,11 @@ function bail(err: unknown): never {
   } catch {
     // log-buffer might not have been loaded yet
   }
-  console.log(JSON.stringify(result, null, 2))
+  return result
+}
+
+function bail(err: unknown): never {
+  console.log(JSON.stringify(failure(err), null, 2))
   process.exit(1)
 }
 
@@ -142,7 +147,7 @@ async function main() {
     const { create } = await import("./adapter")
     adapter = await create(cfg)
   } catch (err) {
-    return diagnose(err instanceof Error ? err : new Error(String(err)))
+    return failure(err)
   }
 
   let result: unknown

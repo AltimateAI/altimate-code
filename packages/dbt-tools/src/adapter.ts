@@ -1,8 +1,10 @@
 import type { Config } from "./config"
 import { bufferLog } from "./log-buffer"
+import { recordManifest } from "./stale-manifest"
 export { getRecentDbtLogs, clearDbtLogs } from "./log-buffer"
 import {
   DBTProjectIntegrationAdapter,
+  DBTProjectIntegrationAdapterEvents,
   DEFAULT_CONFIGURATION_VALUES,
   DBTCommandFactory,
   DBTCommandExecutionInfrastructure,
@@ -65,7 +67,10 @@ function terminal(): DBTTerminal {
     show: async () => {},
     log: (msg: string) => bufferLog(`[dbt] ${msg}`),
     trace: () => {},
-    debug: () => {},
+    // A crash at bridge startup is told only on the bridge's stderr, which the library logs here.
+    debug: (name: string, msg: string) => {
+      if (name === "PythonBridgeStderr") bufferLog(`[dbt:stderr] ${msg}`)
+    },
     info: (_name: string, msg: string) => bufferLog(`[dbt] ${msg}`),
     warn: (_name: string, msg: string) => bufferLog(`[dbt:warn] ${msg}`),
     error: (_name: string, msg: string, e: unknown) => {
@@ -201,6 +206,8 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
     new SemanticModelParser(term),
   )
 
+  // Before `initialize`, whose parse is the one the commands answer from.
+  adapter.on(DBTProjectIntegrationAdapterEvents.MANIFEST_PARSED, recordManifest)
   try {
     await adapter.initialize()
   } catch (e) {
