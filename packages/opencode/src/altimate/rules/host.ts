@@ -221,7 +221,7 @@ function noticeLines(start: Start, ws: string): string[] {
 /** "Remember this as a team rule: X", "save as a rule - X", "don't forget, team rule: X": a request that names a team rule,
  * and what it is. Only explicit wording: "remember to run the tests" or "do you remember …?" is the conversation, not a
  * rule. The cue words are the ones `RulesRemember` treats as asking to remember. The rule may start on the next line. */
-const REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note|save|from now on)\b,?(?:[ \t]+(?:this|that|it))?[ \t]+(?:as[ \t]+)?(?:an?[ \t]+)?(?:team[ \t]+)?rule\b[ \t]*[:,-]\s*(.+)/i
+const REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note|save|from now on)\b,?(?:\s+(?:this|that|it))?\s+(?:as\s+)?(?:an?\s+)?(?:team\s+)?rule\b[ \t]*[:,-]\s*(.+)/i
 /** Shorter than this after the cue is not a rule ("remember?", "remember this"). */
 const MIN_REMEMBERED = 8
 
@@ -231,8 +231,9 @@ export function rememberedRule(prompt: string): string | undefined {
   const rest = REMEMBER.exec(prompt)?.[1]
   if (!rest) return undefined
   const line = rest.split(/\r?\n/)[0]
-  // A sentence end, not an abbreviation ("e.g.", "i.e.", "etc.", "vs.").
-  const end = /(?<!\b(?:e\.g|i\.e|etc|vs|cf))[.!?](?=\s|$)/i.exec(line)
+  // A sentence end. An abbreviation's dot ("e.g.", "i.e.", "etc.", "vs.", "cf.") ends it only when no lowercase word
+  // follows: "etc. Then rerun the build." is two sentences, "e.g. in staging models" one.
+  const end = /(?<!\b(?:[Ee]\.g|[Ii]\.e|[Ee]tc|[Vv]s|[Cc]f))[.!?](?=\s|$)|(?<=\b(?:[Ee]\.g|[Ii]\.e|[Ee]tc|[Vv]s|[Cc]f))\.(?=\s*$|\s+[^\s\p{Ll}])/u.exec(line)
   const rule = (end ? line.slice(0, end.index + 1) : line).trim()
   return rule.length >= MIN_REMEMBERED ? rule : undefined
 }
@@ -345,7 +346,14 @@ async function releaseCheck(root: string, session: string): Promise<boolean> {
  * usage are sent when due. One drafting call per check round at most. Returns what this session's check decided.
  */
 export async function check(input: { root: string; directory: string; learn: LearnConfig; session: string; transcript?: string }): Promise<string> {
-  if (!(await on(input.root, input.learn))) return "learning or workspaces are off, signed out, or this project is not linked"
+  const state = await RulesStore.read(input.root)
+  if (!(await delivering(input.root, input.learn, state))) return "learning or workspaces are off, signed out, or this project is not linked"
+  if (!RuleTrigger.learningEnabled(input.learn, state)) {
+    // Nothing is captured or drafted, but replies the person queued (`learn proposals reply` in a sandbox without
+    // network) are theirs to send: only the workspace, sign-in and link gates apply to them.
+    await syncAfterCheck(input)
+    return "learning from sessions is off"
+  }
   if (input.transcript && !(await regularFile(input.transcript))) input = { ...input, transcript: undefined }
   // This turn's prompt hook may not have recorded its correction yet: the transcript's last prompt is recorded here too
   // (signals are deduplicated by text).

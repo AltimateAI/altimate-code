@@ -71,15 +71,11 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
   for (const file of [dir, lock, lock + ".breaker", path.join(lock, "meta.json"), path.join(lock, "heartbeat")])
     await SafeFS.assertSafePath(key, file)
   let failure: unknown
+  // Counted until Flock has settled, lease released (the lock directory removed) or the wait aborted: an exit only
+  // after that leaves no lock behind.
+  held++
   try {
-    return await Flock.withLock("learn-state", async () => {
-      held++
-      try {
-        return await locked()
-      } finally {
-        if (--held === 0) released.splice(0).forEach((resolve) => resolve())
-      }
-    }, {
+    return await Flock.withLock("learn-state", locked, {
       dir,
       signal: closing.signal,
       // Laptop sleep and long event-loop pauses should not evict a live learning transaction quickly.
@@ -92,6 +88,8 @@ export async function withLearnLock<T>(root: string, task: () => Promise<T>, opt
   } catch (error) {
     // A displaced Flock also rejects release; keep the transaction's original failure visible.
     throw failure ?? error
+  } finally {
+    if (--held === 0) released.splice(0).forEach((resolve) => resolve())
   }
 
   async function locked() {

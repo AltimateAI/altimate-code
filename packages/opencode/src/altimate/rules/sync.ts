@@ -833,6 +833,8 @@ export async function pullOnly(root: string, directory: string, learn: LearnConf
     RulesTelemetry.synced(trigger, report, startedAt)
     return report
   } catch (error) {
+    // A pull that threw (the learn lock timed out): the next session start does not wait on it again.
+    await recordPullOutcome(root, undefined)
     RulesTelemetry.syncThrew(trigger, startedAt)
     throw error
   }
@@ -849,9 +851,13 @@ const TRANSIENT = new Set<string>(["link_unconfirmed", "account_unconfirmed"])
  */
 export async function recordPullOutcome(root: string, report: RunReport | undefined): Promise<void> {
   const failed = !report || (report.pull ? !report.pull.ok : TRANSIENT.has(report.context.status === "skipped" ? report.context.code : ""))
-  const { accountDigest } = await import("../workspace/state")
-  const account = failed ? await accountDigest().catch(() => null) : null
+  const { accountDigest, credentialDigest } = await import("../workspace/state")
+  // Stamped with the credential the pull ran with, when it got that far: whoever signed in since gets a pull of their own.
+  const ctx = report?.context.status === "ready" ? report.context : undefined
+  const account = !failed ? null : ctx ? credentialDigest(ctx.actAs.url, ctx.actAs.instance, ctx.actAs.apiKey) : await accountDigest().catch(() => null)
   await RulesStore.update(root, (s) => {
+    // Not written into a state another account or workspace has adopted meanwhile.
+    if (ctx && !ownedBy(s, ctx)) return
     if (failed) {
       s.pull_failed_at = new Date().toISOString()
       if (account) s.pull_failed_with = account

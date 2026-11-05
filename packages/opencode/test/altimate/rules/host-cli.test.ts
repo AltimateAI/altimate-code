@@ -200,6 +200,8 @@ describe("learn proposals", () => {
     await using dir = await tmpdir({ git: true })
     const root = await linkedProject(dir.path, { rules: [teamRule] })
     await RulesStore.update(root, (s) => {
+      // The owner: approving is offered (what a card offers is computed from the workspace, not read from the file).
+      s.workspace = { ...s.workspace!, is_owner: true }
       s.proposals = [RulesStore.StoredProposal.parse({
         card: {
           id: "card-3", sessionID: "claude:x", text: "Skip the tests for docs changes.", applies_to: [], change: "add", origin: "session",

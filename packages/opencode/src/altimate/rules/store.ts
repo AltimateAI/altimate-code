@@ -474,7 +474,9 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
     host_checks: state.host_checks,
     host_pending: state.host_pending,
     host_retry: state.host_retry,
-    host_unstored: state.host_unstored,
+    // A refused request's text is the person's: not shown to another account or workspace (`keepOutbox` is the same
+    // scope, gone for now).
+    host_unstored: options.keepOutbox ? state.host_unstored : [],
   }
 }
 

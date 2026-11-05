@@ -255,16 +255,21 @@ async function publish<T extends (typeof RuleEvents.Event)[keyof typeof RuleEven
   await Bus.publish(def, properties).catch((error) => log.warn("rule event not published", { type: def.type, error }))
 }
 
+/** What a card offers, from its change and the workspace it is for (none: saved for this project only). */
+function actionsFor(change: Draft["change"], choose: boolean | undefined, workspace: RulesStore.State["workspace"]): ProposalCard["actions"] {
+  const team: ProposalCard["actions"] = workspace ? [workspace.is_owner ? "approve" : "send"] : ["save_local"]
+  return choose
+    ? ["save_memory", ...team, "dismiss"]
+    : [...team, ...(change === "retire" ? [] : (["edit"] as const)), "dismiss"]
+}
+
+/** Retiring removes the rule as it stands: there is no wording to edit, and removing a rule weakens nothing. */
+const flagOf = (change: Draft["change"], text: string) => (change === "retire" ? undefined : verificationWarning(text))
+
 function build(id: string, sessionID: string, draft: Draft, state: RulesStore.State): ProposalCard {
   const linked = !!state.scope && !!state.workspace
-  // Retiring removes the rule as it stands: there is no wording to edit, and removing a rule weakens nothing.
-  const flag = draft.change === "retire" ? undefined : verificationWarning(draft.text)
-  const team: ProposalCard["actions"] = linked
-    ? [state.workspace!.is_owner ? "approve" : "send"]
-    : ["save_local"]
-  const actions: ProposalCard["actions"] = draft.choose
-    ? ["save_memory", ...team, "dismiss"]
-    : [...team, ...(draft.change === "retire" ? [] : (["edit"] as const)), "dismiss"]
+  const flag = flagOf(draft.change, draft.text)
+  const actions = actionsFor(draft.change, draft.choose, linked ? state.workspace : undefined)
   return {
     id,
     sessionID,
@@ -382,10 +387,21 @@ const identity = (scope: RulesStore.Scope | undefined, card: Pick<ProposalCard, 
  * the write failed (the learn lock was busy). */
 export type NotStored = "full" | "scope_changed" | "failed"
 
-/** How many more proposals raised from corrections can be stored now (requested ones have their own, larger limit). */
+/** Raised for the account and workspace pulled now (unlinked: for none). Proposals another account left on disk do not
+ * use up this one's room for proposals from corrections. */
+const ownScope = (state: RulesStore.State, proposal: RulesStore.StoredProposal) =>
+  proposal.scope ? RulesStore.sameScope(proposal.scope, state.scope) : !state.scope
+
+/** How many more proposals raised from corrections can be stored now: `MAX_STORED_PROPOSALS` of this scope's, within
+ * the cap on all of them (requested ones have their own, larger limit). */
+function room(state: RulesStore.State, live: RulesStore.StoredProposal[]): number {
+  const own = live.filter((p) => ownScope(state, p)).length
+  return Math.max(0, Math.min(RulesStore.MAX_STORED_PROPOSALS - own, RulesStore.MAX_REQUESTED_PROPOSALS - live.length))
+}
+
 export async function storedRoom(root: string): Promise<number> {
-  const live = (await RulesStore.read(root)).proposals.filter((p) => storedLive(p)).length
-  return Math.max(0, RulesStore.MAX_STORED_PROPOSALS - live)
+  const state = await RulesStore.read(root)
+  return room(state, state.proposals.filter((p) => storedLive(p)))
 }
 
 /** `ask` with no client to show the card: keep it on disk, once per proposal (`identity`). Undefined when it was not
@@ -418,8 +434,8 @@ async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Pr
       return
     }
     // A request the person made is kept past the limit (it is never dropped); one raised from corrections waits.
-    const limit = input.request ? RulesStore.MAX_REQUESTED_PROPOSALS : RulesStore.MAX_STORED_PROPOSALS
-    if (s.proposals.length >= limit) return void (refused = "full")
+    const full = input.request ? s.proposals.length >= RulesStore.MAX_REQUESTED_PROPOSALS : !room(s, s.proposals)
+    if (full) return void (refused = "full")
     card = build(randomUUID(), input.sessionID, input.draft, s)
     s.proposals.push({
       card, directory: input.directory, ...(s.scope ? { scope: s.scope } : {}), trigger, source_session: input.sessionID,
@@ -446,18 +462,37 @@ export async function stored(root: string): Promise<ProposalCard[]> {
   return (await RulesStore.read(root)).proposals.filter((p) => storedLive(p)).map((p) => p.card)
 }
 
-/** Whether the person signed in now may see and answer `proposal`: one raised for no workspace (an unlinked project),
- * or for the workspace and account the rules were last pulled for, with the credential they were pulled with. */
+/** Whether the person signed in now may see and answer `proposal`: one raised for the workspace and account the rules
+ * were last pulled for, with the credential they were pulled with. One raised for no workspace (an unlinked project)
+ * only offers saving it locally; once the project is linked, only the person the rules were pulled for answers it. */
 async function mayAnswer(state: RulesStore.State, proposal: RulesStore.StoredProposal): Promise<boolean> {
-  if (!proposal.scope) return true
+  if (!proposal.scope) return !state.scope || (await RulesStore.verified(state))
   return RulesStore.sameScope(proposal.scope, state.scope) && (await RulesStore.verified(state))
+}
+
+/** A stored card as it may be answered: what it offers and whether it weakens verification are computed again from its
+ * wording and the workspace now, not taken from the file. */
+function recomputed(proposal: RulesStore.StoredProposal, workspace: RulesStore.State["workspace"]): ProposalCard {
+  const { card } = proposal
+  const next: ProposalCard = {
+    ...card,
+    chars: card.text.length,
+    actions: actionsFor(card.change, card.choose, proposal.scope ? workspace : undefined),
+    ...(card.choose ? { memory_scope: memoryScopeOf(card.text, proposal.memory) } : {}),
+  }
+  const flag = flagOf(card.change, card.text)
+  if (flag) next.weakens_verification = flag
+  else delete next.weakens_verification
+  if (!proposal.scope) delete next.workspace
+  return next
 }
 
 /** The stored proposals the person signed in now may see (`mayAnswer`). Others stay on disk for when they sign back in. */
 export async function storedFor(root: string): Promise<ProposalCard[]> {
   const state = await RulesStore.read(root)
   const visible: ProposalCard[] = []
-  for (const proposal of state.proposals) if (storedLive(proposal) && (await mayAnswer(state, proposal))) visible.push(proposal.card)
+  for (const proposal of state.proposals)
+    if (storedLive(proposal) && (await mayAnswer(state, proposal))) visible.push(recomputed(proposal, state.workspace))
   return visible
 }
 
@@ -498,12 +533,18 @@ async function answerStored(
   let held = false
   let moved: RulesStore.State | undefined
   let conflict: string | undefined
+  let invalid: string | undefined
   await RulesStore.update(root, (s) => {
     const found = s.proposals.find((p) => p.card.id === id && storedLive(p))
     if (!found) return
     record = structuredClone(found)
-    if (found.scope && !(RulesStore.sameScope(found.scope, s.scope) && !!s.pulled_with && s.pulled_with === account))
+    const verified = !!s.pulled_with && s.pulled_with === account
+    if (found.scope ? !(RulesStore.sameScope(found.scope, s.scope) && verified) : !!s.scope && !verified)
       return void (moved = structuredClone(s))
+    record.card = recomputed(record, s.workspace)
+    // Wording that does not pass the rule lint is not acted on: it can be edited or dismissed.
+    const problem = answer.action === "edit" || answer.action === "dismiss" ? undefined : editProblem(record.card.text)
+    if (problem) return void (invalid = problem)
     // Held by another live process. This process's own claim is left from a write-back that failed (a reply running
     // here is refused above). A claim past `CLAIM_STALE_MS` is taken over: its process may be gone with its pid reused,
     // or live in another pid namespace.
@@ -521,6 +562,7 @@ async function answerStored(
   if (held) return { ok: false, code: "busy", error: "This proposal is already being answered.", card: record.card }
   if (conflict)
     return { ok: false, code: "not_available", error: `This proposal was being answered with "${conflict}" when that stopped: answer it with "${conflict}" again to finish.`, card: record.card }
+  if (invalid) return { ok: false, code: "invalid_text", error: `Not sent: the rule ${invalid}. Edit it first.`, card: record.card }
   const request = record.request
   const entry: Pending = {
     card: record.card, root, directory: input.directory, learn: input.learn, at: Date.parse(record.at), trigger: record.trigger,

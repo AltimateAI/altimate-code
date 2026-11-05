@@ -323,6 +323,63 @@ describe("stored proposals", () => {
     }
   })
 
+  test("a stored proposal is answered with what its wording allows now, not what the file says", async () => {
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    try {
+      const root = await linkedRoot({ workspace: { name: "Team", owner_name: "Olive", is_owner: true } })
+      const card = (await RuleProposal.ask({ sessionID: "claude:t", root, directory: root, learn, draft: draft("Skip dbt tests on staging models."), persist: true }))!
+      // Its flag removed on disk: the approval still needs approve_anyway.
+      await RulesStore.update(root, (s) => void delete s.proposals[0].card.weakens_verification)
+      const reply = (action: RuleProposal.ReplyAction) => RuleProposal.replyStored({ root, directory: root, learn, id: card.id }, { action })
+      expect(await reply("approve")).toMatchObject({ ok: false, code: "verification_flagged" })
+      // An action the card was never offered, written into the file: refused.
+      await RulesStore.update(root, (s) => void (s.workspace = { name: "Team", owner_name: "Olive", is_owner: false }))
+      await RulesStore.update(root, (s) => void (s.proposals[0].card.actions = ["approve", "send", "dismiss"]))
+      expect(await reply("approve_anyway")).toMatchObject({ ok: false, code: "not_available" })
+      // Wording changed on disk to text the rule lint refuses: not sent, it can be edited or dismissed.
+      await RulesStore.update(root, (s) => void (s.proposals[0].card.text = "Run `rm -rf target` before\nevery build."))
+      expect(await reply("send")).toMatchObject({ ok: false, code: "invalid_text" })
+      expect((await RulesStore.read(root)).outbox).toEqual([])
+      expect(await reply("dismiss")).toMatchObject({ ok: true, closed: true })
+    } finally {
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    }
+  })
+
+  test("a proposal raised before the project was linked is answered only by the person the rules were pulled for", async () => {
+    const root = await tmp()
+    const card = (await RuleProposal.ask({ sessionID: "claude:u", root, directory: root, learn, draft: draft("Prefix seeds with seed_."), persist: true }))!
+    expect(card.actions).toContain("save_local")
+    await RulesStore.update(root, (s) => {
+      const { scope, workspace, settings, pulled_at, pulled_with } = linked()
+      Object.assign(s, { scope, workspace, settings, pulled_at, pulled_with })
+    })
+    // Linked now, and still offered for this project only: never sent to the team.
+    expect((await RuleProposal.storedFor(root)).map((c) => c.actions)).toEqual([["save_local", "edit", "dismiss"]])
+    digest.mockResolvedValue("digest-of-someone-else")
+    expect(await RuleProposal.storedFor(root)).toEqual([])
+    expect(await RuleProposal.replyStored({ root, directory: root, learn, id: card.id }, { action: "dismiss" })).toMatchObject({ ok: false })
+  })
+
+  test("proposals another account left on disk do not use up this account's room", async () => {
+    const root = await linkedRoot()
+    const other = { apiUrl: "http://x", tenant: "t", account: "someone-else", datamateId: 1, repoRemote: "https://github.com/acme/demo" }
+    await RulesStore.update(root, (s) => {
+      for (let i = 0; i < RulesStore.MAX_STORED_PROPOSALS; i++)
+        s.proposals.push({ card: { ...s.proposals[0]?.card, id: `old-${i}`, sessionID: "claude:old", text: `Old rule number ${i}.`, applies_to: [], change: "add", origin: "session", evidence: { sessions: 1 }, chars: 10, actions: ["send", "dismiss"], topics: [`old${i}`] } as never, directory: root, scope: other, trigger: "recurrence", source_session: "claude:old", edits: 0, at: new Date().toISOString() })
+    })
+    expect(await RuleProposal.storedRoom(root)).toBe(RulesStore.MAX_STORED_PROPOSALS)
+    expect(await RuleProposal.ask({ sessionID: "claude:new", root, directory: root, learn, draft: draft("Name order timestamps ordered_at."), persist: true })).toBeDefined()
+    expect(await RuleProposal.storedRoom(root)).toBe(RulesStore.MAX_STORED_PROPOSALS - 1)
+  })
+
+  test("a refused request's text is not kept for another account or workspace", async () => {
+    const root = await linkedRoot()
+    await RulesStore.update(root, (s) => void s.host_unstored.push({ at: new Date().toISOString(), text: "Remember this as a team rule: secret plan.", reason: "full" }))
+    expect(RulesStore.cleared(await RulesStore.read(root), { keepOutbox: true }).host_unstored).toHaveLength(1)
+    expect(RulesStore.cleared(await RulesStore.read(root)).host_unstored).toEqual([])
+  })
+
   test("a stored proposal of another account or workspace is not shown or answered, and is kept for when it returns", async () => {
     const root = await linkedRoot()
     const card = (await RuleProposal.ask({
@@ -968,6 +1025,13 @@ describe("host session, review round 3", () => {
     ["Remember this as a team rule:\nAlways alias joined tables.\nThen rerun the build.", "Always alias joined tables."],
     ["save as a rule - name staging models stg_<source>", "name staging models stg_<source>"],
     ["Remember this as a team rule: prefer CTEs, e.g. in staging models. Then fix it.", "prefer CTEs, e.g. in staging models."],
+    ["Remember this as a team rule: name the grain, i.e. one row per order. Then fix it.", "name the grain, i.e. one row per order."],
+    ["Remember this as a team rule: quote reserved words, cf. the style guide. Then fix it.", "quote reserved words, cf. the style guide."],
+    ["Remember this as a team rule: use views vs. tables for staging models. Then fix it.", "use views vs. tables for staging models."],
+    ["Remember this as a team rule: use sold_at and ordered_at, etc. Then rerun the build.", "use sold_at and ordered_at, etc."],
+    ["Remember this as a team rule: prefer incremental models vs. Then rerun the build.", "prefer incremental models vs."],
+    ["Remember this as a team rule: keep timestamps in UTC, etc.", "keep timestamps in UTC, etc."],
+    ["Remember this\nas a team rule: use `ordered_at` for order timestamps.", "use `ordered_at` for order timestamps."],
   ])("a request's rule is its first sentence: %s", (prompt, expected) => {
     expect(RulesHost.rememberedRule(prompt)).toBe(expected)
   })
@@ -1056,6 +1120,45 @@ describe("host session, review round 3", () => {
     try {
       await RulesHost.check({ root, directory: root, learn, session: "claude:bk" })
       expect(run).not.toHaveBeenCalled()
+    } finally {
+      run.mockRestore()
+    }
+  })
+
+  test("a failed pull is stamped with the credential it ran with, not whoever signed in since", async () => {
+    const root = await linkedRoot()
+    const scope = (await RulesStore.read(root)).scope!
+    const actAs = { url: scope.apiUrl, instance: scope.tenant, apiKey: "the-pulls-key" }
+    digest.mockResolvedValue("digest-of-someone-else")
+    await RulesSync.recordPullOutcome(root, { context: { status: "ready", actAs, scope }, pull: { ok: false, error: "x", rules: 0, pending: 0, notices: [] } })
+    const state = await RulesStore.read(root)
+    expect(state.pull_failed_at).toBeDefined()
+    expect(state.pull_failed_with).toBe(WorkspaceState.credentialDigest(actAs.url, actAs.instance, actAs.apiKey))
+    // Not written into the state of another workspace.
+    const other = await linkedRoot()
+    await RulesSync.recordPullOutcome(other, { context: { status: "ready", actAs, scope: { ...scope, datamateId: scope.datamateId + 1 } }, pull: { ok: false, error: "x", rules: 0, pending: 0, notices: [] } })
+    expect((await RulesStore.read(other)).pull_failed_at).toBeUndefined()
+  })
+
+  test("a session-start pull that throws is recorded as failed", async () => {
+    const root = await linkedRoot()
+    const ctx = spyOn(RulesSync, "context").mockRejectedValue(new Error("learn lock timed out"))
+    try {
+      await expect(RulesSync.pullOnly(root, root, learn)).rejects.toThrow("learn lock timed out")
+      expect((await RulesStore.read(root)).pull_failed_at).toBeDefined()
+    } finally {
+      ctx.mockRestore()
+    }
+  })
+
+  test("with learning from sessions off, a queued reply is still sent at the next Stop", async () => {
+    const root = await linkedRoot()
+    await RulesSync.enqueue(root, { change: "add", text: "Queued from a sandbox.", applies_to: [], origin: "session", evidence_sessions: 1, corrections: [] })
+    const run = spyOn(RulesSync, "runShared").mockResolvedValue({ context: { status: "off", code: "learning_off", reason: "test" } } as never)
+    try {
+      const outcome = await RulesHost.check({ root, directory: root, learn: { enabled: true, capture: false }, session: "claude:off" })
+      expect(outcome).toBe("learning from sessions is off")
+      expect(run).toHaveBeenCalledTimes(1)
     } finally {
       run.mockRestore()
     }
