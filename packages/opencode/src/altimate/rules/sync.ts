@@ -69,7 +69,7 @@ export async function context(directory: string, learn: LearnConfig): Promise<Co
   const outcome = await resolveBindingOutcome(directory).catch(() => ({ status: "unknown" as const }))
   if (outcome.status === "unbound") return { status: "skipped", code: "not_linked", reason: "this project is not linked to a workspace", unlinked: true }
   if (outcome.status !== "bound") return { status: "skipped", code: "link_unconfirmed", reason: "the workspace link could not be confirmed" }
-  if (!outcome.binding.repoRemote) return { status: "skipped", code: "no_remote", reason: "this project has no git remote" }
+  if (!outcome.binding.repoRemote) return { status: "skipped", code: "no_remote", reason: "this project is linked by its path, and workspace rules need a git remote on the link (add a remote if the project has none, then run `altimate-code link`)" }
   const digest = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
   // The binding was resolved with the ambient credential: it must still be the captured one.
   if ((await accountDigest()) !== digest) return { status: "skipped", code: "account_changed", reason: "the Altimate account changed" }

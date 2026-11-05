@@ -24,6 +24,7 @@ import { effectCmd, fail } from "../effect-cmd"
 import { Flag } from "@opencode-ai/core/flag/flag"
 import { RulesTelemetry } from "../../altimate/rules/telemetry"
 import { printable } from "../../altimate/rules/printable"
+import type { Context as RulesSyncContext } from "../../altimate/rules/sync"
 import * as Playbook from "../../altimate/learn/playbook"
 import * as Store from "../../altimate/learn/store"
 import { MAX_TEXT, summarize, describeApplied, describeRejected } from "../../altimate/learn/curator"
@@ -426,8 +427,12 @@ const StatusCommand = effectCmd({
       out(`Limits: ${Object.entries(status.limits).map(([key, value]) => `${key}=${value}`).join(", ")}`)
       // altimate_change start — workspace rules
       const rules = status.rules
-      if (!rules.linked) out("Workspace rules: not linked (run `altimate-code link`)")
-      else {
+      if (!rules.linked) {
+        // Nothing synced yet: the rules gate says why (not linked, linked by path only, signed out, ...).
+        const [{ RulesSync }, { Instance }] = await Promise.all([import("../../altimate/rules/sync"), import("@/project/instance")])
+        const gate = await RulesSync.context(Instance.directory, learn).catch(() => undefined)
+        out(rulesNotSyncedLine(gate))
+      } else {
         const { RulesSummary } = await import("../../altimate/rules/summary")
         out(`Workspace rules: ${printable(rules.workspace?.name ?? "workspace")} — ${RulesSummary.sidebarLine(rules)}${rules.pulled_at ? `; last sync ${rules.pulled_at}` : ""}${rules.last_error ? `; last error: ${printable(rules.last_error)}` : ""}`)
         if (rules.last_check) out(`Last proposal check: ${rules.last_check.at} — ${printable(rules.last_check.outcome)}`)
@@ -439,6 +444,14 @@ const StatusCommand = effectCmd({
 })
 
 // altimate_change start — workspace rules: send queued proposals, pull approved rules, report usage
+/** The `learn status` rules line before any sync, from the rules gate. Undefined: the gate could not be read. */
+export function rulesNotSyncedLine(gate: RulesSyncContext | undefined): string {
+  if (!gate) return "Workspace rules: not synced yet (run `altimate-code learn sync`)"
+  if (gate.status === "ready") return "Workspace rules: linked, not synced yet (run `altimate-code learn sync`)"
+  if (gate.status === "skipped" && gate.code === "not_linked") return "Workspace rules: not linked (run `altimate-code link`)"
+  return `Workspace rules: off — ${printable(gate.reason)}`
+}
+
 function noticeLine(notice: { status: string; text: string; reviewer?: string; reason?: string }) {
   const status = notice.status === "active" ? "approved" : printable(notice.status)
   return `  ${status}${notice.reviewer ? ` by ${printable(notice.reviewer)}` : ""}: "${printable(notice.text)}"${notice.reason ? ` — ${printable(notice.reason)}` : ""}`

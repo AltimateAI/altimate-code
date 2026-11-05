@@ -189,6 +189,8 @@ Delivery waits at most about 5 seconds for the learn lock; if another process st
 
 In a project linked to an Altimate workspace (`altimate-code link`), what you teach the agent can become a **team rule**: a one-line instruction every teammate's sessions in the workspace's repositories follow once the workspace owner approves it.
 
+**Rules need a git remote.** Team rules are kept per repository, keyed by its git remote. A project with no remote can be linked by its path, but rules stay off there: `learn status` and `learn sync` say so. Add a remote and run `altimate-code link` again, picking the same workspace: the link keeps its workspace and gains the remote, and rules sync from then on.
+
 **When a rule is proposed.** A card appears above the input when:
 
 - you correct the agent on the same topic in 2 or more sessions (also before the workspace has any rule);

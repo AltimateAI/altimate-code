@@ -994,11 +994,11 @@ describe("link dialogs: a workspace that already has this project's name", () =>
     expect(dialog.current).toBe(opensOn)
   })
 
-  async function picker(list: { id: number; name: string; ownerId?: number }[]) {
+  async function picker(list: { id: number; name: string; ownerId?: number }[], linked: Record<string, unknown> = {}) {
     stubWorkspaces(list)
     stubCreds("acme", "https://api.acme.example.com")
     const { tui, h } = harness()
-    render(() => linkDialogInternals.OnDemandPickerDialog({ api: tui, identifier, defaultName: "analytics" }))
+    render(() => linkDialogInternals.OnDemandPickerDialog({ api: tui, identifier, defaultName: "analytics", ...linked }))
     await settle()
     return { h, dialog: h.selects[0]! }
   }
@@ -1052,6 +1052,24 @@ describe("link dialogs: a workspace that already has this project's name", () =>
     expect(calls.listAs).toEqual(["acme"])
     expect(calls.bind).toEqual([2])
     expect(calls.bindAs).toEqual(["acme"])
+  })
+
+  test("picker: the linked workspace, linked by path only, is bound again so the link gains the remote", async () => {
+    const linked = { currentlyLinkedDatamateId: 2, currentlyLinkedDatamateName: "analytics", matchedBy: "path", addsRemote: true }
+    const { h, dialog } = await picker([{ id: 2, name: "analytics", ownerId: ME }], linked)
+    dialog.onSelect({ value: 2 })
+    await settle()
+    expect(calls.bind).toEqual([2])
+    expect(h.toasts.some((m) => m.includes("Adding its git remote"))).toBe(true)
+  })
+
+  test("picker: the linked workspace with nothing to add changes nothing", async () => {
+    const linked = { currentlyLinkedDatamateId: 2, currentlyLinkedDatamateName: "analytics", matchedBy: "remote" }
+    const { h, dialog } = await picker([{ id: 2, name: "analytics", ownerId: ME }], linked)
+    dialog.onSelect({ value: 2 })
+    await settle()
+    expect(calls.bind).toEqual([])
+    expect(h.toasts.some((m) => m.includes("nothing changed"))).toBe(true)
   })
 
   test("setup dialog: the namesake is bound as the credential it was listed under", async () => {
