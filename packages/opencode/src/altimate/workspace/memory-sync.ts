@@ -280,6 +280,34 @@ export function memoryEnabledCached(binding: CachedBinding): "enabled" | "disabl
   return "unknown"
 }
 
+/** The last answer any enablement check gave, per account and workspace, with no expiry on
+ * read. For the system prompt's team-memory line, which renders on every step into the cached
+ * prefix: reading the 60 s positive TTL there dropped the line a minute after each check and
+ * re-created the prefix. Keyed by tenant and API URL as well as id (ids are tenant-local).
+ * A failed or inconclusive check keeps the previous answer; a definite one replaces it. */
+const memoryVerdict = new Map<string, "enabled" | "disabled">()
+
+function verdictKey(tenant: string, apiUrl: string, datamateId: number): string {
+  return `${tenant}|${apiUrl}|${datamateId}`
+}
+
+async function verdictKeyFor(binding: CachedBinding): Promise<string | undefined> {
+  const creds = await AltimateApi.getCredentials().catch(() => undefined)
+  if (!creds?.altimateInstanceName || !creds.altimateUrl) return undefined
+  return verdictKey(creds.altimateInstanceName, creds.altimateUrl, binding.datamateId)
+}
+
+/** The workspace's memory setting for a per-step reader: a check inside the positive or
+ * negative TTL first, else the last answer recorded for this account. Never the network. */
+export function memoryEnabledLastKnown(
+  binding: CachedBinding,
+  account: { tenant: string; apiUrl: string },
+): "enabled" | "disabled" | "unknown" {
+  const cached = memoryEnabledCached(binding)
+  if (cached !== "unknown") return cached
+  return memoryVerdict.get(verdictKey(account.tenant, account.apiUrl, binding.datamateId)) ?? "unknown"
+}
+
 /** Test seam: both memos are process-global, and an earlier case's answer
  * would otherwise leak into a later one. */
 /** Test seam: record the workspace's "memory off" answer without a request. */
@@ -290,6 +318,7 @@ export function noteMemoryDisabledForTests(datamateId: number): void {
 export function resetEnablementMemoForTests(): void {
   memoryEnabledCache.clear()
   memoryDisabledMemo.clear()
+  memoryVerdict.clear()
 }
 
 /** Warn once per workspace, not once per write. */
@@ -337,6 +366,8 @@ async function memoryStatus(
 ): Promise<MemoryStatusOutcome> {
   const cached = opts.fresh ? undefined : memoryEnabledCache.get(binding.datamateId)
   if (cached && Date.now() - cached.checkedAt < MEMORY_ENABLED_TTL_MS) return "enabled"
+  // Read before the request, so the answer is filed under the account that asked.
+  const verdictAt = await verdictKeyFor(binding)
   try {
     const workspaces = await WorkspaceApi.listDatamates()
     const match = workspaces.find((w) => w.id === binding.datamateId)
@@ -362,6 +393,7 @@ async function memoryStatus(
       })
     }
     const value = match.memoryEnabled === true
+    if (verdictAt) memoryVerdict.set(verdictAt, value ? "enabled" : "disabled")
     if (value) {
       memoryEnabledCache.set(binding.datamateId, { checkedAt: Date.now() })
       memoryDisabledMemo.delete(binding.datamateId)
@@ -1259,6 +1291,7 @@ export function resetPollMemoForTests(): void {
   pollInFlight.clear()
   memoryEnabledCache.clear()
   memoryDisabledMemo.clear()
+  memoryVerdict.clear()
 }
 
 /** Split blocks into those the workspace still needs and those already there at

@@ -4,7 +4,8 @@
 // call `prompt.ts` makes on every step — renders for a real binding cache, a real
 // instance context, and the pilot flag in each position. The pure `render()` is
 // covered in identity.test.ts; this file is about the gate and the plumbing.
-import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
+import { afterAll, afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test"
+import { createHash } from "node:crypto"
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import path from "node:path"
 import os from "node:os"
@@ -111,7 +112,7 @@ describe("systemSection", () => {
     expect(out).toContain("## Altimate Workspace")
     expect(out).toContain("This project is linked to Altimate Workspace id 42")
     expect(out).toContain('is "Growth"')
-    expect(out).not.toContain("last known")
+    expect(out).toContain("re-checked every few minutes")
     expect(out).toContain("never substitute")
   })
 
@@ -294,8 +295,7 @@ describe("systemSection", () => {
         status: 404,
         headers: { "content-type": "application/json" },
       })) as unknown as typeof fetch
-    // The unlink path memoises the miss in the resolver, so the wording is the
-    // "as of the last check" one; what matters is that "analytics" is gone.
+    // The unlink path memoises the miss in the resolver; what matters is that "analytics" is gone.
     const after = await inProject(systemSection)
     expect(after).toContain("No Altimate Workspace")
     expect(after).not.toContain('is "analytics"')
@@ -364,7 +364,7 @@ describe("systemSection", () => {
     }
   })
 
-  test("a cached binding the server cannot re-verify is stated as last known, not as fact", async () => {
+  test("a cached binding the server cannot re-verify is named as last known, without contents or memory", async () => {
     await recordApprovedBinding(projectDir, {
       datamateId: 9,
       datamateName: "Finance",
@@ -383,10 +383,10 @@ describe("systemSection", () => {
     memoryEnabledCache.set(9, { checkedAt: Date.now() })
     try {
       const out = await inProject(systemSection)
-      expect(out).toContain("was last known to be linked to Altimate Workspace id 9")
+      // An unconfirmed link is hedged, not stated as fact.
+      expect(out).toContain("This project was last known to be linked to Altimate Workspace id 9")
       expect(out).toContain('is "Finance"')
       expect(out).toContain("could not be re-verified just now")
-      expect(out).not.toContain("This project is linked to Altimate Workspace id 9")
       // A link that may have changed must not be followed by that workspace's contents as if current.
       expect(out).not.toContain("What this Altimate Workspace provides")
       expect(out).not.toContain("Team memory:")
@@ -436,7 +436,35 @@ describe("systemSection", () => {
     ).toBe(true)
   })
 
-  test("a slow re-verification of a cached binding renders it as last known, not as a stall", async () => {
+  // The section sits in the cached system prefix. A re-check that outlasts the
+  // deadline is still in flight, not failed, so the step must render exactly what the
+  // previous step did; dropping the memory line here re-created the prefix at full rate.
+  test("a verified link whose re-check outlasts the deadline renders byte-identical to the previous step", async () => {
+    await recordApprovedBinding(projectDir, {
+      datamateId: 33,
+      datamateName: "Steady",
+      repoRemote: null,
+      projectPath: projectDir,
+      linkedAt: Date.now(),
+    }, { awaitBackfill: true })
+    const { memoryEnabledCache, resetEnablementMemoForTests } = await import("../../../src/altimate/workspace/memory-sync")
+    memoryEnabledCache.set(33, { checkedAt: Date.now() })
+    try {
+      let t = 7_000_000
+      setClockForTests(() => t)
+      const first = await inProject(systemSection)
+      expect(first).toContain("Team memory:")
+      t += OUTCOME_MEMO_MS + 1
+      const { expireValidationForTests } = await import("../../../src/altimate/workspace/state")
+      expireValidationForTests(projectDir)
+      globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
+      expect(await inProject(systemSection)).toBe(first)
+    } finally {
+      resetEnablementMemoForTests()
+    }
+  })
+
+  test("a slow re-verification of a cached binding renders it from the cache, not as a stall", async () => {
     await recordApprovedBinding(projectDir, {
       datamateId: 5,
       datamateName: "Ops",
@@ -450,15 +478,15 @@ describe("systemSection", () => {
     globalThis.fetch = (async () => {
       throw new Error("offline")
     }) as unknown as typeof fetch
-    expect(await inProject(systemSection)).toContain("last known")
+    expect(await inProject(systemSection)).toContain("This project was last known to be linked to Altimate Workspace id 5")
     resetOutcomeMemoForTests()
     // Now a server that never answers: the deadline renders the binding the local
-    // cache holds, as last known — not the unknown copy, and not a stall.
+    // cache holds — not the unknown copy, and not a stall.
     globalThis.fetch = (() => new Promise(() => {})) as unknown as typeof fetch
     const started = Date.now()
     const out = await inProject(systemSection)
     expect(Date.now() - started).toBeLessThan(RESOLVE_DEADLINE_MS + 500)
-    expect(out).toContain("was last known to be linked to Altimate Workspace id 5")
+    expect(out).toContain("This project was last known to be linked to Altimate Workspace id 5")
     expect(out).toContain('is "Ops"')
     expect(out).not.toContain("could not be verified just now")
   })
@@ -616,22 +644,19 @@ describe("systemSection", () => {
     }
   })
 
-  test("a memoised miss is stated as of the last check, not as fact", async () => {
+  test("a memoised miss renders byte-identical to the server's own answer", async () => {
     globalThis.fetch = (async () =>
       new Response(JSON.stringify({ detail: "not found" }), {
         status: 404,
         headers: { "content-type": "application/json" },
       })) as unknown as typeof fetch
-    // First ask: the server itself answered — definitive.
-    expect(await inProject(systemSection)).toContain("No Altimate Workspace is linked to this project.")
-    // Past the 30 s memo but inside the resolver's 5-minute miss memo: the
-    // answer comes from that memo, and the copy says so.
+    // First ask: the server itself answered.
+    const first = await inProject(systemSection)
+    expect(first).toContain("No Altimate Workspace is linked to this project as of the last check.")
+    // Past the 30 s memo but inside the resolver's 5-minute miss memo: the answer comes
+    // from that memo. The text must not change, or the cached prefix is re-created.
     resetOutcomeMemoForTests()
-    const out = await inProject(systemSection)
-    expect(out).toContain("as of the last check, up to five minutes ago")
-    expect(out).not.toContain("No Altimate Workspace is linked to this project.")
-    expect(out).toContain("say that none was linked as of the last check")
-    expect(out).not.toContain("say plainly that none is linked yet")
+    expect(await inProject(systemSection)).toBe(first)
   })
 
   test("the deadline fallback never surfaces another account's cached binding", async () => {
@@ -933,5 +958,85 @@ describe("systemSection", () => {
     // `Instance.directory` throws outside a context; prompt assembly must not.
     const out = await systemSection()
     expect(out).toContain("could not be verified")
+  })
+})
+
+// The section is part of the cached system prefix, so it must hash the same on every step of a
+// session whatever the clocks do: the identity memo (30 s), the enablement check (60 s), the
+// resolver's validation window and miss memo (5 min), and a re-check slower than the deadline.
+// `setSystemTime` moves `Date.now` for every module at once; timers stay real.
+describe("prefix hash over steps with a stepped clock", () => {
+  const sha = (text: string) => createHash("sha256").update(text).digest("hex")
+  const notFound = (async () =>
+    new Response(JSON.stringify({ detail: "not found" }), {
+      status: 404,
+      headers: { "content-type": "application/json" },
+    })) as unknown as typeof fetch
+  const hanging = (() => new Promise(() => {})) as unknown as typeof fetch
+
+  afterEach(() => {
+    setSystemTime()
+  })
+
+  test("an unlinked project: one hash across steps, including a re-check slower than the deadline", async () => {
+    const t0 = Date.now()
+    globalThis.fetch = notFound
+    const hashes: string[] = []
+    const step = async (at: number, f: typeof fetch) => {
+      setSystemTime(new Date(t0 + at))
+      globalThis.fetch = f
+      hashes.push(sha(await inProject(systemSection)))
+    }
+    await step(0, notFound)
+    await step(31_000, notFound)
+    await step(4 * 60_000, notFound)
+    // Both the outcome memo and the miss memo have expired: the step asks the server, which hangs.
+    await step(5 * 60_000 + 1_000, hanging)
+    await step(5 * 60_000 + 40_000, notFound)
+    await step(11 * 60_000, notFound)
+    expect(new Set(hashes).size).toBe(1)
+    expect(hashes).toHaveLength(6)
+  })
+
+  test("a linked project with memory on: one hash across steps, the team-memory line never drops", async () => {
+    const { memoryEnabledForPoller, resetEnablementMemoForTests, resetPollMemoForTests } = await import(
+      "../../../src/altimate/workspace/memory-sync"
+    )
+    const t0 = Date.now()
+    const serving = (async (input: any) =>
+      new Response(
+        JSON.stringify(
+          String(input).includes("/datamates/") ? { datamates: [{ id: 64, name: "Team", memory_enabled: true }] } : {},
+        ),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as unknown as typeof fetch
+    globalThis.fetch = serving
+    const binding = { datamateId: 64, datamateName: "Team", repoRemote: null, projectPath: projectDir, linkedAt: t0 }
+    await recordApprovedBinding(projectDir, binding, { awaitBackfill: true })
+    resetEnablementMemoForTests()
+    resetPollMemoForTests()
+    try {
+      // The enablement check the TUI poll (or a mirror, or the backfill) runs.
+      expect(await memoryEnabledForPoller(binding as never)).toBe("enabled")
+      const outs: string[] = []
+      const step = async (at: number, f: typeof fetch) => {
+        setSystemTime(new Date(t0 + at))
+        globalThis.fetch = f
+        outs.push(await inProject(systemSection))
+      }
+      await step(0, serving)
+      await step(30_000, serving)
+      // Past the 60 s enablement TTL with no new check.
+      await step(61_000, serving)
+      await step(2 * 60_000, serving)
+      // Past the resolver's validation window and the summary TTL: the re-check hangs.
+      await step(5 * 60_000 + 1_000, hanging)
+      await step(5 * 60_000 + 20_000, hanging)
+      for (const out of outs) expect(out).toContain("Team memory:")
+      expect(new Set(outs.map(sha)).size).toBe(1)
+    } finally {
+      resetEnablementMemoForTests()
+      resetPollMemoForTests()
+    }
   })
 })
