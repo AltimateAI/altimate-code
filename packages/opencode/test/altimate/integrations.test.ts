@@ -224,7 +224,7 @@ describe("keychain", () => {
   const calls: { cmd: string; args: string[]; input?: string }[] = []
   let spawn: ReturnType<typeof spyOn> | undefined
   let hold: Promise<void> | undefined
-  const on = (status = 0, stdout = "") => {
+  const on = (status = 0, stdout = "", stderr = "") => {
     hold = undefined
     spawn?.mockRestore()
     delete process.env.ALTIMATE_INTEGRATIONS_DIR
@@ -243,7 +243,7 @@ describe("keychain", () => {
       const finish = () => {
         if (chunks.length) entry.input = chunks.join("")
         child.stdout.end(stdout)
-        child.stderr.end("")
+        child.stderr.end(stderr)
         child.emit("close", status)
       }
       if (hold) hold.then(() => setTimeout(finish, 0))
@@ -330,6 +330,11 @@ describe("keychain", () => {
     on(36)
     await expect(read()).rejects.toThrow("Could not read a stored credential from the macOS keychain (exit 36)")
     expect(calls.map((c) => c.args[0])).toEqual(["find-generic-password"])
+    // A missing keychain prints "could not be found" too, but it is not a missing item.
+    on(50, "", "security: SecKeychainSearchCopyNext: The specified keychain could not be found.")
+    await expect(read()).rejects.toThrow("exit 50")
+    on(50, "", "The specified keychain could not be found.")
+    await expect(core.deleteSecret("cred:github:github_token")).rejects.toThrow("exit 50")
   })
 
   test("a keychain call that never answers is killed and reported, for reads and writes", async () => {
@@ -573,6 +578,19 @@ describe("workspace connections", () => {
     expect((await core.syncProvider("github", undefined, 0, true)).result).toBe("kept_local")
   })
 
+  test("a saved credential that cannot be read fails that provider's sync with the reason, instead of stopping the run", async () => {
+    await connected("github", null, { variant: "token", values: {}, secretFields: ["github_token"] })
+    const unreadable = "Could not read a stored credential from the macOS keychain (exit 36). Unlock the keychain and try again."
+    const catalog = spyOn(creds, "loadCatalog").mockRejectedValue(new Error(unreadable))
+    try {
+      const o = await core.syncProvider("github")
+      expect([o.result, o.reason]).toEqual(["failed", unreadable])
+      expect(writes()).toEqual([])
+    } finally {
+      catalog.mockRestore()
+    }
+  })
+
   test("sync to a shared workspace attaches nothing without --share and reports why; with it the outcome is marked shared", async () => {
     await core.syncProvider("github")
     const spies = [
@@ -582,7 +600,7 @@ describe("workspace connections", () => {
     const update = spyOn(backend, "updateDatamateIntegrations").mockResolvedValue(undefined as any)
     try {
       const refused = await core.syncProvider("github", undefined, 0, true)
-      expect([refused.result, refused.reason]).toEqual(["failed", core.ATTACH_FAILED_PREFIX + core.SHARED_WORKSPACE_REFUSAL("WS")])
+      expect([refused.result, refused.reason]).toEqual(["failed", core.ATTACH_FAILED_PREFIX + core.SHARED_WORKSPACE_REFUSAL("WS", "github")])
       expect(update).not.toHaveBeenCalled()
       const shared = await core.syncProvider("github", undefined, 0, true, true)
       expect([shared.result, shared.shared]).toEqual(["synced", true])
@@ -2355,6 +2373,37 @@ describe("credentials flow", () => {
       expect([r.status, r.sync, core.loadStore().providers.github?.synced]).toEqual(["failed", "synced", true])
     })
 
+    test("connect to a shared workspace attaches only with --share, and an update of an attached connection says it is shared", async () => {
+      real()
+      const getDatamate = spyOn(backend, "getDatamate").mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [] } as any)
+      const spies = [
+        spyOn(workspaceState, "resolveBindingOutcome").mockResolvedValue({ status: "bound", binding: { datamateId: 5, datamateName: "WS" } } as any),
+        spyOn(backend, "integrationsCatalog").mockResolvedValue([{ id: "github", tools: [] }] as any),
+        getDatamate,
+      ]
+      const update = spyOn(backend, "updateDatamateIntegrations").mockResolvedValue(undefined as any)
+      try {
+        await token("github", "github_token")
+        const refused = await creds.connectCredentials({ id: "github" })
+        expect([refused.status, refused.sync, refused.shared, refused.message]).toEqual(["connected", "synced", undefined, core.ATTACH_FAILED_PREFIX + core.SHARED_WORKSPACE_REFUSAL("WS", "github")])
+        expect(update).not.toHaveBeenCalled()
+        await token("github", "github_token")
+        const shared = await creds.connectCredentials({ id: "github", update: true, share: true })
+        expect([shared.status, shared.shared]).toEqual(["connected", true])
+        expect(shared.message).toContain("its members can use this connection")
+        expect(update).toHaveBeenCalledTimes(1)
+        // Once the workspace uses the connection, an update without --share keeps it attached and says it is shared.
+        const id = core.loadStore().providers.github!.connectionId
+        getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "github", tools: [], connection_id: String(id) }] } as any)
+        await token("github", "github_token")
+        const again = await creds.connectCredentials({ id: "github", update: true })
+        expect([again.status, again.shared]).toEqual(["connected", true])
+        expect(again.message).toContain("its members can use this connection")
+      } finally {
+        for (const sp of [...spies, update]) sp.mockRestore()
+      }
+    })
+
     test("a hand-made connection cannot be updated from here", async () => {
       real()
       api.seed({ name: "Hand made", integration_id: "github", is_valid: false })
@@ -2575,7 +2624,7 @@ describe("attach keeps another connection", () => {
       // A missing privacy is treated as shared: nothing is widened on a guess.
       for (const privacy of ["public", "restricted", undefined]) {
         getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy, integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
-        expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toEqual({ error: core.SHARED_WORKSPACE_REFUSAL("WS") })
+        expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toEqual({ error: core.SHARED_WORKSPACE_REFUSAL("WS", "jira") })
         expect(update).not.toHaveBeenCalled()
       }
       getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
@@ -2583,6 +2632,11 @@ describe("attach keeps another connection", () => {
       expect(update).toHaveBeenCalledTimes(1)
       getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "private", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
       expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toEqual({ attached: "WS", workspaceId: "5" })
+      // A workspace made shared between the first read and the one right before writing gets nothing.
+      getDatamate.mockResolvedValueOnce({ id: "5", name: "WS", is_owner: true, privacy: "private", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
+      getDatamate.mockResolvedValueOnce({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toEqual({ error: core.SHARED_WORKSPACE_REFUSAL("WS", "jira") })
+      expect(update).toHaveBeenCalledTimes(2)
     } finally {
       for (const sp of [...spies, update]) sp.mockRestore()
     }

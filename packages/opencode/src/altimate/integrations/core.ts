@@ -269,12 +269,13 @@ export async function storeSecret(id: string, secret: string) {
 }
 /** `security` exits with this when the item does not exist. */
 const KEYCHAIN_ITEM_NOT_FOUND = 44
-const keychainItemMissing = (r: SecurityResult) => r.status === KEYCHAIN_ITEM_NOT_FOUND || /could not be found/i.test(r.stderr)
+// Only the exit code is trusted: other failures (a missing keychain, exit 50) print similar "could not be found" text.
+const keychainItemMissing = (r: SecurityResult) => r.status === KEYCHAIN_ITEM_NOT_FOUND
 const keychainDetail = (r: SecurityResult) => (r.error ? `: ${r.error.message}` : r.status != null ? ` (exit ${r.status})` : "")
 
 export async function readSecret(id: string): Promise<string | undefined> {
   if (useKeychain()) {
-    const r = await runSecurity(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id, "-w"], { stdout: true, stderr: true })
+    const r = await runSecurity(["find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id, "-w"], { stdout: true })
     if (r.status === 0) return r.stdout.trim()
     // Only a missing item means no secret: a locked, failing or timed-out keychain must not read as empty, or the caller would replace or delete what is stored.
     if (!keychainItemMissing(r)) throw new Error(`Could not read a stored credential from the macOS keychain${keychainDetail(r)}. Unlock the keychain and try again.`)
@@ -1005,8 +1006,8 @@ export function attachToIntegrations(
   })
 }
 
-export const SHARED_WORKSPACE_REFUSAL = (name: string) =>
-  `workspace "${name}" is shared, so attaching would let its members use this connection; it stays saved to your account only. Run again with --share to attach it`
+export const SHARED_WORKSPACE_REFUSAL = (name: string, id: ProviderId) =>
+  `workspace "${name}" is shared, so attaching would let its members use this connection; it stays saved to your account only. Run altimate integrations sync ${id} --share to attach it`
 
 /** `kept` when the workspace's entry kept a different live connection instead of taking this one; `shared` when the workspace is not private. */
 async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, connectionId: number, datamateId: string, liveIds: (number | string)[] | undefined, share: boolean): Promise<{ kept: boolean; shared: boolean }> {
@@ -1015,8 +1016,17 @@ async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, con
   if (first.is_owner === false)
     throw new Error(`only the owner of workspace "${first.name}" can attach connections to it; your connection is saved to your account. Link a workspace you own, or sign in as its owner`)
   // Attaching widens the connection to the workspace's audience, so only a workspace that says it is private takes it unasked.
-  const shared = first.privacy !== "private"
-  if (shared && !share) throw new Error(SHARED_WORKSPACE_REFUSAL(first.name))
+  // A connection the workspace already uses was shared before; keeping it attached widens nothing.
+  const conn = String(connectionId)
+  const allowed = (d: backend.DatamateRecord) => {
+    const shared = d.privacy !== "private"
+    const attached = d.integrations.some(
+      (e) => String(e.id) === integrationId && (String(e.connection_id ?? "") === conn || (Array.isArray(e.connection_ids) && e.connection_ids.map(String).includes(conn))),
+    )
+    if (shared && !share && !attached) throw new Error(SHARED_WORKSPACE_REFUSAL(d.name, id))
+    return shared
+  }
+  allowed(first)
   let keys: string[] = []
   if (!first.integrations.some((e) => String(e.id) === integrationId)) {
     const catalog = await backend.integrationsCatalog(cfg)
@@ -1025,8 +1035,9 @@ async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, con
     if (!found) throw new Error(`the workspace catalog has no entry for ${PROVIDER_NAMES[id]}, so the connection was not attached to workspace "${first.name}"`)
     keys = (found.tools ?? []).map((t: any) => t?.key).filter((k: unknown): k is string => typeof k === "string")
   }
-  // The backend replaces the whole list, so it is read again right before writing and only this entry changes.
+  // The backend replaces the whole list, so it is read again right before writing and only this entry changes. Its privacy is checked again: it may have changed since.
   const datamate = await backend.getDatamate(cfg, datamateId)
+  const shared = allowed(datamate)
   const live = liveIds ?? (await backend.listVisibleConnections(cfg)).map((c) => c.id)
   const next = attachToIntegrations(datamate.integrations, integrationId, connectionId, keys, live)
   await backend.updateDatamateIntegrations(cfg, datamateId, next)

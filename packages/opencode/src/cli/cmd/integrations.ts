@@ -215,7 +215,7 @@ async function runCredentials(args: any, update: boolean) {
       onStep: args.json ? undefined : (label) => out(`  ${S.TEXT_DIM}${label}${S.TEXT_NORMAL}`),
     })
     if (r.status !== "connected") process.exitCode = 1
-    if (args.json) return json({ provider: r.provider, status: r.status, sync: r.sync, account: r.account, expiresAt: r.expiresAt, message: r.message, ...(r.code ? { code: r.code } : {}), ...(r.missing ? { missing: r.missing } : {}) })
+    if (args.json) return json({ provider: r.provider, status: r.status, sync: r.sync, account: r.account, expiresAt: r.expiresAt, message: r.message, ...(r.code ? { code: r.code } : {}), ...(r.missing ? { missing: r.missing } : {}), ...(r.shared ? { shared: true } : {}) })
     if (r.status === "connected") {
       out(`${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} ${update ? "updated" : "connected"}${r.account ? ` as ${S.TEXT_NORMAL_BOLD}${clean(r.account)}${S.TEXT_NORMAL}` : ""}`)
       out(`  ${S.TEXT_DIM}${r.sync === "synced" ? `synced to your workspace from ${clean(os.hostname())}` : "kept local, not synced"}${r.expiresAt ? ` · expires ${clean(r.expiresAt)}` : ""}${r.message ? ` · ${clean(r.message)}` : ""}${S.TEXT_NORMAL}`)
@@ -230,19 +230,19 @@ const credentialOptions = (yargs: Argv) =>
     .positional("provider", { type: "string", choices: core.PROVIDER_IDS, demandOption: true })
     .option("json", jsonOption)
     .option("variant", variantOption)
-    .option("share", shareOption)
 
 const ConnectCommand = cmd({
   command: "connect <provider>",
   describe: "connect a provider with its own credentials",
-  builder: (yargs: Argv) => credentialOptions(yargs).option("local-only", { describe: "keep the credential on this machine", type: "boolean", default: false }),
+  builder: (yargs: Argv) =>
+    credentialOptions(yargs).option("share", shareOption).option("local-only", { describe: "keep the credential on this machine", type: "boolean", default: false }),
   handler: async (args) => runCredentials(args, false),
 })
 
 const UpdateCommand = cmd({
   command: "update <provider>",
   describe: "re-check and save new credentials for a connected provider, keeping its sync mode",
-  builder: (yargs: Argv) => credentialOptions(yargs),
+  builder: (yargs: Argv) => credentialOptions(yargs).option("share", shareOption),
   handler: async (args) => runCredentials(args, true),
 })
 

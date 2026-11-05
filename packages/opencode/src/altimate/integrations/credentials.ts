@@ -566,6 +566,8 @@ export interface CredentialResult {
   message: string | null
   code?: string
   missing?: string[]
+  /** Attached to a workspace that is not private, so its members can use the connection. */
+  shared?: true
 }
 
 export interface CredentialOptions {
@@ -789,7 +791,8 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
         leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}`
       }
       const message = [workspaceNote(res.workspace), leftover].filter(Boolean).join(" ") || null
-      return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: common.expiresAt ?? null, message }
+      const shared = res.workspace && "attached" in res.workspace && res.workspace.shared ? { shared: true as const } : {}
+      return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: common.expiresAt ?? null, message, ...shared }
     })
   } catch (e) {
     return local({ status: "failed", sync: syncState(), message: e instanceof Error ? e.message : String(e) })
@@ -801,8 +804,8 @@ function workspaceNote(w: core.UpsertResult["workspace"]): string | null {
   if ("error" in w) return core.ATTACH_FAILED_PREFIX + w.error
   if ("notLinked" in w) return core.NOT_LINKED_LABEL
   const where = workspaceLabel(w.attached, w.workspaceId)
-  const audience = w.shared ? `, shared with the members of ${where}` : ""
-  return w.kept ? `Kept the workspace's existing connection in ${where}` : `Attached to ${where}${audience}`
+  const audience = w.shared ? `; its members can use this connection` : ""
+  return `${w.kept ? `Kept the workspace's existing connection in ${where}` : `Attached to ${where}`}${audience}`
 }
 
 export * as IntegrationsCredentials from "./credentials"
