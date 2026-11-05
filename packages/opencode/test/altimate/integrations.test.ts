@@ -2387,11 +2387,15 @@ describe("credentials flow", () => {
         const refused = await creds.connectCredentials({ id: "github" })
         expect([refused.status, refused.sync, refused.shared, refused.message]).toEqual(["connected", "synced", undefined, core.ATTACH_FAILED_PREFIX + core.SHARED_WORKSPACE_REFUSAL("WS", "github")])
         expect(update).not.toHaveBeenCalled()
+        // The command the refusal names attaches the connection already saved to the account.
+        const viaSync = await core.syncProvider("github", undefined, 0, true, true)
+        expect([viaSync.result, viaSync.shared]).toEqual(["synced", true])
+        expect(update).toHaveBeenCalledTimes(1)
         await token("github", "github_token")
         const shared = await creds.connectCredentials({ id: "github", update: true, share: true })
         expect([shared.status, shared.shared]).toEqual(["connected", true])
         expect(shared.message).toContain("its members can use this connection")
-        expect(update).toHaveBeenCalledTimes(1)
+        expect(update).toHaveBeenCalledTimes(2)
         // Once the workspace uses the connection, an update without --share keeps it attached and says it is shared.
         const id = core.loadStore().providers.github!.connectionId
         getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "github", tools: [], connection_id: String(id) }] } as any)
@@ -2629,14 +2633,18 @@ describe("attach keeps another connection", () => {
       }
       getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
       expect(await core.attachToBoundWorkspace(cfg, "jira", 9, undefined, true)).toEqual({ attached: "WS", workspaceId: "5", shared: true })
-      expect(update).toHaveBeenCalledTimes(1)
+      // An entry that keeps another live connection does not take this one, so this one is not shared.
+      getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "jira", tools: [], connection_id: "3" }] } as any)
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9, 3], true)).toEqual({ attached: "WS", workspaceId: "5", kept: true })
+      expect(update).toHaveBeenCalledTimes(2)
       getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "private", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
       expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toEqual({ attached: "WS", workspaceId: "5" })
+      update.mockClear()
       // A workspace made shared between the first read and the one right before writing gets nothing.
       getDatamate.mockResolvedValueOnce({ id: "5", name: "WS", is_owner: true, privacy: "private", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
       getDatamate.mockResolvedValueOnce({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
       expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toEqual({ error: core.SHARED_WORKSPACE_REFUSAL("WS", "jira") })
-      expect(update).toHaveBeenCalledTimes(2)
+      expect(update).not.toHaveBeenCalled()
     } finally {
       for (const sp of [...spies, update]) sp.mockRestore()
     }

@@ -284,7 +284,7 @@ export async function readSecret(id: string): Promise<string | undefined> {
 }
 export async function deleteSecret(id: string) {
   if (useKeychain()) {
-    const r = await runSecurity(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id], { stderr: true })
+    const r = await runSecurity(["delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", id])
     if (r.status !== 0 && !keychainItemMissing(r)) throw new Error(`Could not remove a stored credential from the macOS keychain${keychainDetail(r)}`)
   }
   await withLock(() => {
@@ -1042,7 +1042,9 @@ async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, con
   const next = attachToIntegrations(datamate.integrations, integrationId, connectionId, keys, live)
   await backend.updateDatamateIntegrations(cfg, datamateId, next)
   const entry = next.find((e) => String(e.id) === integrationId)
-  return { kept: entry?.connection_id != null && String(entry.connection_id) !== String(connectionId), shared }
+  const usesThis = String(entry?.connection_id ?? "") === conn || (Array.isArray(entry?.connection_ids) && entry.connection_ids.map(String).includes(conn))
+  // Members can use this connection only when the entry now names it; a kept entry on another connection widens nothing.
+  return { kept: entry?.connection_id != null && String(entry.connection_id) !== conn, shared: shared && usesThis }
 }
 
 /** The integrations list without references to the connection; other entries pass through untouched. */
