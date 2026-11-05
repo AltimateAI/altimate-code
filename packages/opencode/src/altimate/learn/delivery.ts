@@ -218,7 +218,7 @@ export class Delivery {
     // valid snapshots retain their byte-identical prefix across resume and approved edits.
     const grandfathered = new Map<string, Pick<Lesson, "id" | "text">[]>()
     // Read once per check.
-    let vouched: Promise<Map<string, string>> | undefined
+    let vouched: Promise<Map<string, Lesson>> | undefined
     for (const { name, lesson } of state.shown) {
       // altimate_change start — workspace rules: a session's cached section and notes keep a team rule only while sync
       // still vouches for it: workspaces on, and the rule still in the person's rules state (an edit keeps its id, so its
@@ -239,16 +239,16 @@ export class Delivery {
     return state
   }
 
-  // altimate_change start — workspace rules: the team rules the person's own rules state holds now (lesson id → text),
-  // outside the project. The `workspace-rules` copy in the project is only delivered where it matches: a file in the
-  // working tree can come from anyone (a branch, a merge). Unreadable, it vouches for none.
-  private async vouched(): Promise<Map<string, string>> {
+  // altimate_change start — workspace rules: the team rules the person's own rules state holds now, by lesson id,
+  // outside the project. They are delivered from that state, never from the `workspace-rules` copy in the project: a file
+  // in the working tree can come from anyone (a branch, a merge). Unreadable, it vouches for none.
+  private async vouched(): Promise<Map<string, Lesson>> {
     try {
       const { RulesStore } = await import("../rules/store")
       return await RulesStore.vouched(this.root)
     } catch (error) {
       log.warn("workspace rules state unreadable; team rules not delivered", { error })
-      return new Map<string, string>()
+      return new Map<string, Lesson>()
     }
   }
   // altimate_change end
@@ -273,12 +273,8 @@ export class Delivery {
         if (raw === undefined) continue
         await SafeFS.assertSafePath(this.root, Store.paths(this.root, name).usage)
         await SafeFS.assertSafePath(this.root, path.join(Store.paths(this.root, name).learnDir, "shown.jsonl"))
-        let parsed = parse(raw)
-        // altimate_change start — workspace rules: only the team rules the person's rules state holds, word for word
-        if (name === Store.WORKSPACE_RULES_STORE) {
-          const vouched = await this.vouched()
-          parsed = parsed.filter((lesson) => vouched.get(lesson.id) === lesson.text)
-        }
+        // altimate_change start — workspace rules: the team rules come from the person's rules state, not the project's copy
+        const parsed = name === Store.WORKSPACE_RULES_STORE ? [...(await this.vouched()).values()] : parse(raw)
         // altimate_change end
         const lessons = await Store.mergeUsage(this.root, name, parsed)
         const grandfathered = lessons.some((lesson) => lesson.text.length > MAX_TEXT)

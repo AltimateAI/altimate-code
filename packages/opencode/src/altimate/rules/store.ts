@@ -11,8 +11,8 @@
 //   this repository, as lessons of the read-only `workspace-rules` store (a name reserved for it; the person's own
 //   stores, `team` included, are separate). Delivery, recurrence and `learn show` read it like any other store, so team
 //   rules reach the prompt ("Team rules"), their exposure is recorded, and "corrected again" falls out of recurrence.
-//   Only a pull writes it; reflection and promotion never target this store. Delivery gives a rule from it only while
-//   the state holds the same rule (`vouched`): a copy in the project is never trusted on its own.
+//   Only a pull writes it; reflection and promotion never target this store. Delivery gives team rules from the state
+//   (`vouched`), never from this copy: a copy in the project is never trusted on its own.
 //
 // Writes take the learn lock (delivery reads the same directory) and are atomic.
 import { constants } from "node:fs"
@@ -224,18 +224,17 @@ async function writePrivate(file: string, data: string): Promise<void> {
   }
 }
 
-/** The team rules delivery may give from the project's `workspace-rules` copy: lesson id → text, as the state holds
- * them. None while the project is not linked (unlinked and lost access clear the state's workspace), and none unless
- * the credential signed in now is the one they were pulled with: a sign-out or another account stops them at once,
- * not at the next sync. No network. */
-export async function vouched(root: string): Promise<Map<string, string>> {
+/** The team rules delivery may give, by lesson id, built from the state: nothing of the project's `workspace-rules`
+ * copy (wording, pin, tags, paths) is used. None while the project is not linked (unlinked and lost access clear the
+ * state's workspace), and none unless the credential signed in now is the one they were pulled with: a sign-out or
+ * another account stops them at once, not at the next sync. No network. */
+export async function vouched(root: string): Promise<Map<string, Lesson>> {
   const state = await read(root)
   if (!state.workspace || !state.pulled_with) return new Map()
   const { accountDigest } = await import("../workspace/state")
   if ((await accountDigest().catch(() => null)) !== state.pulled_with) return new Map()
-  return new Map(state.rules.map((rule) => [lessonId(rule.rule_key), rule.text]))
+  return new Map(state.rules.map((rule) => [lessonId(rule.rule_key), toLesson(rule)]))
 }
-
 
 function parse(raw: string | undefined): State | undefined {
   if (!raw) return structuredClone(EMPTY)
@@ -273,9 +272,8 @@ export function toLesson(rule: RuleOut): Lesson {
 
 const IGNORE = "*\n"
 
-/** Under the learn lock. The parent learn ignore already keeps `rules.json` out of Git but shares each store's
- * `approved.json`, so the mirror needs this one too (whatever an older file said). Written with the mirror only,
- * so a project without a workspace never gets it. */
+/** Under the learn lock. The parent learn ignore shares each store's `approved.json`, so the mirror needs this one
+ * (whatever an older file said). Written with the mirror only, so a project without a workspace never gets it. */
 async function ensureIgnore(root: string) {
   const ignore = path.join(dir(root), ".gitignore")
   const current = await SafeFS.open(root, ignore, constants.O_RDONLY)

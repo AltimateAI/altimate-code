@@ -173,7 +173,7 @@ const boundDirectories = (): ReadonlySet<string> => {
     return new Set()
   }
 }
-const mayHaveWorkspaceRules = (root: string, directory: string) => {
+export const mayHaveWorkspaceRules = (root: string, directory: string) => {
   if (existsSync(stateFileOf(canonicalDirectory(root)))) return true
   const dirs = boundDirectories()
   return dirs.size > 0 && dirs.has(canonicalDirectory(directory))

@@ -698,7 +698,7 @@ describe("the workspace API, by path", () => {
     try {
       answer = () => Response.json(syncBody([rule("bbbbbbbbbbbb", "Name staging models stg_<source>.")]))
       await RulesSync.pull(root, ready())
-      expect([...(await RulesStore.vouched(root)).values()]).toEqual(["Name staging models stg_<source>."])
+      expect([...(await RulesStore.vouched(root)).values()].map((l) => l.text)).toEqual(["Name staging models stg_<source>."])
       signedIn.mockResolvedValue(WorkspaceState.credentialDigest(url, "t", "another-key"))
       expect((await RulesStore.vouched(root)).size).toBe(0)
       signedIn.mockResolvedValue(null)

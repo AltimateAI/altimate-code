@@ -568,6 +568,44 @@ test("a team-rules copy in the project that the person's rules state does not ho
   }
 })
 
+test("a team-rules copy that keeps an approved rule's wording but changes its pin or paths is delivered as the state holds it", async () => {
+  await approve([lesson("L-0801", "Keep the project rules explicit.", { pinned: true })])
+  const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+  try {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    // Approved for staging models only.
+    await pulled([lesson("L-0802", "Name staging models stg_<source>.", { trigger: { paths: ["models/staging/**"] } })])
+    const scoped = (await new Delivery(root, { ...limits, core_lessons: 2 }).prepare("scoped", "first", "invoices")).section
+    expect(scoped).toContain("[applies to: models/staging/**] Name staging models")
+    // A branch rewrites the copy: same id and wording, now pinned and with no paths.
+    await fs.writeFile(Store.paths(root, Store.WORKSPACE_RULES_STORE).approved, canonical([lesson("L-000000000802", "Name staging models stg_<source>.", { pinned: true })]))
+    const planted = new Delivery(root, { ...limits, core_lessons: 2 })
+    expect((await planted.prepare("planted", "first", "invoices")).section).toBe(scoped)
+  } finally {
+    if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+  }
+})
+
+test("a resumed session drops its cached team rules while the person's rules state cannot be read", async () => {
+  await approve([lesson("L-0901", "Keep the project rules explicit.", { pinned: true })])
+  await approve([lesson("L-0902", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
+  const env = process.env.ALTIMATE_DISABLE_WORKSPACE
+  const file = await RulesStore.stateFile(root)
+  try {
+    delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    expect((await new Delivery(root, { ...limits, core_lessons: 2 }).prepare("locked", "first", "staging")).section).toContain("Name staging models")
+    await fs.chmod(file, 0o000)
+    const unreadable = new Delivery(root, { ...limits, core_lessons: 2 })
+    expect(await unreadable.section("locked")).not.toContain("Name staging models")
+    expect((await unreadable.prepare("locked", "first", "staging")).section).not.toContain("Name staging models")
+  } finally {
+    await fs.chmod(file, 0o600)
+    if (env === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = env
+  }
+})
+
 test("team rules stop at once when the person signs out or signs in as someone else", async () => {
   await approve([lesson("L-0701", "Keep the project rules explicit.", { pinned: true })])
   await approve([lesson("L-0702", "Name staging models stg_<source>.", { pinned: true })], Store.WORKSPACE_RULES_STORE)
