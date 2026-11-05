@@ -26,7 +26,8 @@ import { RunBudget } from "@/altimate/run-budget"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect } from "effect"
 // altimate_change start — upstream_fix: recover committed child findings when cancellation interrupts a task.
-import { interruptedTaskOutput } from "../session/task-output"
+import { interruptedTaskOutput, runModeTaskReport } from "../session/task-output"
+import { Flag } from "../flag/flag"
 // altimate_change end
 const log = Log.create({ service: "tool.task" })
 
@@ -252,7 +253,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       })
       if (ctx.abort.aborted) partialOutput ??= await interruptedTaskOutput(session.id, messageID)
 
-      const text = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
+      const lastText = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
+      // Run mode: the child's completion token is a harness signal, not part of its report,
+      // and a bare-token acknowledgement must not replace the report it confirms.
+      const text = Flag.ALTIMATE_RUN_MODE ? await runModeTaskReport(session.id, lastText, messageID) : lastText
 
       const output = partialOutput ?? [
         `task_id: ${session.id} (for resuming to continue this task if needed)`,

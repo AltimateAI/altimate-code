@@ -1766,15 +1766,17 @@ When constructing the summary, try to stick to this template:
         // altimate_change end
         // altimate_change start — completion-aware termination path:
         // (b) the run-mode continue message carries the completion-aware nudge
-        //     (continue / assert DONE — no clarification option, since nobody can
-        //     answer in a headless run), giving a finished session a termination path. Delivered via the NudgeArbiter (Global
+        //     (continue / assert DONE / report BLOCKED — no clarification option,
+        //     since nobody can answer in a headless run), giving a finished or
+        //     blocked session a termination path. Delivered via the NudgeArbiter (Global
         //     rule 5): this injection point registers its candidate and takes the
         //     single winner, so pending lower-precedence directives (starvation
         //     breaker, budget reminder) are consumed here and the injected turn
         //     never carries two system-authored directive blocks. The termination
         //     nudge has top precedence, so it always wins at this site.
         // (d) the overflow notice is mechanism-accurate — the old text falsely
-        //     blamed "large media attachments" (see SessionTermination.OVERFLOW_NOTICE).
+        //     blamed "large media attachments" (see SessionTermination.OVERFLOW_NOTICE);
+        //     in run mode it does not ask the absent user to re-supply anything.
         let continuation =
           "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
         if (Flag.ALTIMATE_RUN_MODE) {
@@ -1791,7 +1793,9 @@ When constructing the summary, try to stick to this template:
             NudgeArbiter.take(input.sessionID, input.nudgeGeneration)?.text ?? SessionTermination.COMPLETION_NUDGE
         }
         const text =
-          (input.overflow ? SessionTermination.OVERFLOW_NOTICE + "\n\n" : "") +
+          (input.overflow
+            ? SessionTermination.overflowNotice({ runMode: Flag.ALTIMATE_RUN_MODE }) + "\n\n"
+            : "") +
           continuation +
           // altimate_change end
           // altimate_change start — state ledger
