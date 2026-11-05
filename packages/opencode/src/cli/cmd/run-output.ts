@@ -6,7 +6,7 @@
 // Everything is still kept so a run that ended without a final reply (silent turn,
 // error line) writes what it has instead of the placeholder.
 
-import { DONE_TOKEN } from "../../session/termination"
+import { DONE_TOKEN, stripCompletionToken } from "../../session/termination"
 
 export const NO_TEXT_OUTPUT = "(no text output — tool-only response)"
 
@@ -17,6 +17,9 @@ const ACKNOWLEDGEMENT = new RegExp(`^${DONE_TOKEN}\\.?$`, "i")
 type CollectedText = { text: string; partID?: string }
 
 export class OutputCollector {
+  // In run mode the completion token is a signal to the harness, not part of the answer.
+  constructor(private readonly options: { stripCompletionToken?: boolean } = {}) {}
+
   private all: CollectedText[] = []
   private final: CollectedText[] = []
   private previous: CollectedText[] = []
@@ -30,7 +33,12 @@ export class OutputCollector {
 
   /** Completed assistant text. Synthetic/compaction text is kept for the fallback only. */
   text(text: string, opts: { synthetic?: boolean; compaction?: boolean; partID?: string } = {}) {
-    const trimmed = text.trim()
+    const trimmed = (this.options.stripCompletionToken ? stripCompletionToken(text) : text).trim()
+    if (!trimmed && text.trim() && !opts.synthetic && !opts.compaction && this.final.length === 0) {
+      // A bare completion token acknowledges the reply it confirms.
+      this.final = this.previous
+      return
+    }
     if (!trimmed) return
     const part = { text: trimmed, partID: opts.partID }
     this.all.push(part)

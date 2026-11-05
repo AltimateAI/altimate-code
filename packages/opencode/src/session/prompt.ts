@@ -2124,11 +2124,13 @@ export namespace SessionPrompt {
       // used to sit in builder.txt, but builder is a PRIMARY agent, so it also
       // reached interactive chat, where nothing interprets or strips the token
       // and the user saw a literal DONE on every final answer. Scoped to run
-      // mode, where it reaches every agent — including custom agents and task
-      // subagents, whose child sessions are prompted through this same loop.
-      const completionInstruction = SessionTermination.completionInstruction({
-        runMode: Flag.ALTIMATE_RUN_MODE,
-      })
+      // mode, where it reaches every agent but plan — including custom agents and
+      // task subagents, whose child sessions are prompted through this same loop.
+      // A structured-output turn ends by capturing the schema result instead.
+      const completionInstruction =
+        lastUser.format?.type === "json_schema"
+          ? undefined
+          : SessionTermination.completionInstruction({ runMode: Flag.ALTIMATE_RUN_MODE, agent: agent.name })
       if (completionInstruction) system.push(completionInstruction)
       // altimate_change end
       const format = lastUser.format ?? { type: "text" }

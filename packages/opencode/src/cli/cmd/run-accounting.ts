@@ -23,7 +23,10 @@ export type WhyHarnessStopped = "budget-exhausted" | "timeout" | "error" | "idle
 // idle-done confirm challenge (idle_heuristic). "none" = the session ended
 // without any completion assertion — bare finishReason "stop" is NEVER
 // reported as done.
-export type DoneReason = "explicit_done" | "idle_heuristic" | "none"
+// altimate_change start — "blocked" = the model ended on a `BLOCKED: <reason>`
+// line: it reported that it cannot proceed, so the task did not happen.
+export type DoneReason = "explicit_done" | "idle_heuristic" | "blocked" | "none"
+// altimate_change end
 export type Termination = {
   why_model_stopped: WhyModelStopped
   why_harness_stopped: WhyHarnessStopped
@@ -107,6 +110,9 @@ export function create() {
   let lastTextMessageID: string | undefined
   // altimate_change end
   let lastTextExplicitDone = false
+  // altimate_change start — run-mode blocked ending
+  let lastTextBlocked = false
+  // altimate_change end
   let lastTextFromChallenge = false
   let budgetExhausted = false
   // altimate_change start — an answered time-budget finalization recovers the exit status only
@@ -187,6 +193,9 @@ export function create() {
       if (isCompactionStep(messageID)) return
       if (synthetic) return
       lastTextExplicitDone = SessionTermination.isExplicitDone(text)
+      // altimate_change start — run-mode blocked ending
+      lastTextBlocked = !lastTextExplicitDone && SessionTermination.isBlocked(text)
+      // altimate_change end
       lastTextMessageID = messageID
       lastTextFromChallenge = lastTextExplicitDone && challengeReplyActive
     },
@@ -333,6 +342,15 @@ export function create() {
       // the idle-done confirm challenge, it is honestly attributed to the
       // heuristic, not to unprompted model completion.
       const done: DoneReason = (() => {
+        // altimate_change start — a blocked ending on the finish message is reported, never as done
+        if (
+          lastFinishReason === "stop" &&
+          lastTextBlocked &&
+          lastTextMessageID !== undefined &&
+          lastTextMessageID === lastFinishMessageID
+        )
+          return "blocked"
+        // altimate_change end
         if (lastFinishReason !== "stop" || !explicitDoneOnFinishMessage) return "none"
         return lastTextFromChallenge ? "idle_heuristic" : "explicit_done"
       })()

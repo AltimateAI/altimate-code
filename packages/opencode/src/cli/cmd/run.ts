@@ -651,8 +651,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
 - "Query Duration" not "total_elapsed_time" — "Data Processed" not "bytes_scanned" — "Monthly Cost" not "credits_used * 3.00"`
 
     async function execute(sdk: OpencodeClient) {
-      // altimate_change start — collect completed assistant text for run output
-      const outputParts = new OutputCollector()
+      // altimate_change start — collect completed assistant text for run output; in run mode the
+      // completion token is stripped at every output boundary
+      const stripDone = Flag.ALTIMATE_RUN_MODE
+      const outputParts = new OutputCollector({ stripCompletionToken: stripDone })
       // altimate_change end
       // altimate_change start — a turn must end with text (#1334). Track whether
       // the assistant said anything at all, and the last tool failure, so a
@@ -1224,15 +1226,18 @@ You are speaking to a non-technical business executive. Follow these rules stric
               }
               // altimate_change end
               // altimate_change start — upstream_fix: --output collects text in JSON mode too
-              const text = part.text.trim()
-              if (args.output && text) {
-                outputParts.text(text, {
+              if (args.output && part.text.trim()) {
+                outputParts.text(part.text, {
                   partID: part.id,
                   synthetic: part.synthetic === true,
                   compaction: accounting.isCompactionStep(part.messageID),
                 })
               }
-              if (emit("text", { part })) continue
+              // Run mode: stdout and JSON text events carry the answer without the
+              // completion token; done_reason still records it.
+              const shown = stripDone ? SessionTermination.stripCompletionToken(part.text) : part.text
+              if (emit("text", { part: shown === part.text ? part : { ...part, text: shown } })) continue
+              const text = shown.trim()
               if (!text) continue
               // altimate_change end
               if (!process.stdout.isTTY) {
@@ -2006,7 +2011,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
         // branch with a normal text-only stop. That has already returned from
         // SessionPrompt.loop, so enqueue one explicit continuation turn instead
         // of silently finalizing the run at rc 0 with done_reason=none.
-        if (!accounting.fatal && !challengeConfirmed) {
+        // altimate_change start — a blocked reply to the challenge is a final report, not a decline
+        const challengeBlocked = accounting.termination().done_reason === "blocked"
+        if (!accounting.fatal && !challengeConfirmed && !challengeBlocked) {
+        // altimate_change end
           NudgeArbiter.register(sessionID, {
             source: "termination_challenge",
             kind: "continue_after_decline",
@@ -2231,6 +2239,15 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // (budget exhaustion or an unrecovered session error). Uses process.exitCode
       // (not process.exit) so pending stdout/trace writes still flush.
       if (accounting.fatal) process.exitCode = 1
+      // altimate_change end
+      // altimate_change start — a blocked run did not do its task: exit nonzero and say why
+      // (done_reason=blocked is also in the termination record/JSON event).
+      if (!accounting.fatal && termination.done_reason === "blocked") {
+        process.exitCode = 1
+        if (args.format !== "json") {
+          process.stderr.write("\n! run blocked: the model reported it cannot proceed (done_reason=blocked)\n")
+        }
+      }
       // altimate_change end
     }
 

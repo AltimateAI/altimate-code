@@ -1898,6 +1898,53 @@ for (const runMode of [true, false]) {
     }),
   )
 }
+
+// altimate_change start — a custom PRIMARY agent gets the contract in run mode; plan never does
+for (const agentName of ["auditor", "plan"]) {
+  it.instance(`a run-mode ${agentName === "plan" ? "plan agent's prompt omits" : "custom primary agent's prompt carries"} the completion contract`, () =>
+    Effect.gen(function* () {
+      const previous = process.env.ALTIMATE_RUN_MODE
+      process.env.ALTIMATE_RUN_MODE = "1"
+      try {
+        const { llm } = yield* useServerConfig((url) => ({
+          ...providerCfg(url),
+          agent: { auditor: { mode: "primary", description: "Audits a change.", prompt: "You audit changes." } },
+        }))
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const chat = yield* sessions.create({ title: "Primary" })
+        yield* llm.text("Audited.\nDONE")
+        const msg = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: chat.id,
+          agent: agentName,
+          model: ref,
+          time: { created: Date.now() },
+        })
+        yield* sessions.updatePart({ id: PartID.ascending(), messageID: msg.id, sessionID: chat.id, type: "text", text: "audit it" })
+
+        yield* prompt.loop({ sessionID: chat.id })
+
+        const inputs = yield* llm.inputs
+        expect(inputs.length).toBeGreaterThanOrEqual(1)
+        const system = requestMessages(inputs[0]!)
+          .filter((message) => message.role === "system")
+          .map((message) => requestText(message.content))
+          .join("\n")
+        if (agentName === "plan") expect(system).not.toContain(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION)
+        else {
+          expect(system).toContain("You audit changes.")
+          expect(system).toContain(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION)
+        }
+      } finally {
+        if (previous === undefined) delete process.env.ALTIMATE_RUN_MODE
+        else process.env.ALTIMATE_RUN_MODE = previous
+      }
+    }),
+  )
+}
+// altimate_change end
 // altimate_change end
 
 noLLMServer.instance("prompt tools replace previous prompt tool rules", () =>
