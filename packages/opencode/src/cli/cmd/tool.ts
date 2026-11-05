@@ -185,6 +185,9 @@ const ToolSchemaCommand = cmd({
   },
 })
 
+// The messages an argument problem produces: invalid JSON, a non-object, a schema mismatch (built-in or workspace tool).
+const ARGUMENT_ERROR = /^(?:Tool arguments |The \S+ tool was called with invalid arguments|Arguments do not match the workspace operation schema|A workspace skill name is required|A SQL query in \S+ is required)/
+
 const ToolRunCommand = cmd({
   command: "run <name>",
   describe: "run one data tool without a model and print its result",
@@ -194,7 +197,7 @@ const ToolRunCommand = cmd({
       .option("args", { describe: "tool arguments as a JSON object, or - to read them from stdin", type: "string" })
       .option("args-file", { describe: "read the tool arguments (JSON) from a file", type: "string" })
       .option("allow-write", {
-        describe: "allow writes (DROP DATABASE, DROP SCHEMA and TRUNCATE stay blocked)",
+        describe: "allow writes: DML, DDL and statements read as writes, such as SET, ATTACH, COPY ... TO and INSTALL (DROP DATABASE, DROP SCHEMA and TRUNCATE stay blocked)",
         type: "boolean",
         default: false,
       })
@@ -226,7 +229,8 @@ const ToolRunCommand = cmd({
     } catch (error) {
       result = { status: "error", title: "Tool run failed", output: error instanceof Error ? error.message : String(error), metadata: {} }
     }
-    if (result.status === "error" && !result.output.startsWith("Unknown tool"))
+    // Point to the schema only when the arguments were the problem, not for SQL, connection or permission errors.
+    if (result.status === "error" && ARGUMENT_ERROR.test(result.output))
       result = { ...result, output: `${result.output}\nInput schema: altimate-code tool schema ${name}` }
     if (args.json) {
       console.log(JSON.stringify({ status: result.status, title: result.title, output: result.output, metadata: result.metadata }))

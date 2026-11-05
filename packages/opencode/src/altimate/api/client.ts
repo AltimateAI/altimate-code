@@ -188,6 +188,7 @@ export namespace AltimateApi {
   export async function signOut(projectDir: string): Promise<Array<{ name: string; path: string }>> {
     if (!(await isConfigured())) {
       await withdrawClaudeSkills(projectDir)
+      await forgetTelemetryIdentity()
       return []
     }
     let key: string
@@ -213,6 +214,7 @@ export namespace AltimateApi {
     }
     await clearCredentials()
     await withdrawClaudeSkills(projectDir)
+    await forgetTelemetryIdentity()
     return removed
   }
 
@@ -222,6 +224,11 @@ export namespace AltimateApi {
     await import("../workspace/claude-skill-mirror")
       .then((mirror) => mirror.mirrorClaudeSkills(projectDir, { withdraw: true }))
       .catch(() => {})
+  }
+
+  /** The cached telemetry identity names the account signing out. Imported here: identity imports this module. */
+  async function forgetTelemetryIdentity(): Promise<void> {
+    await import("../telemetry/identity").then((identity) => identity.clear()).catch(() => {})
   }
 
   const VALID_TENANT_REGEX = /^[a-z_][a-z0-9_-]*$/
