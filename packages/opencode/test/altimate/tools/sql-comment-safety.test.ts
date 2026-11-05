@@ -6,6 +6,7 @@ import * as Registry from "../../../src/altimate/native/connections/registry"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
 import { MessageID, SessionID } from "../../../src/session/schema"
 import { initTool } from "../tool-fixture"
+import * as DbtAdapterType from "../../../src/altimate/native/connections/dbt-adapter-type"
 
 afterEach(() => Registry.reset())
 
@@ -196,6 +197,8 @@ test("omitted SQL warehouse cannot assume the registry dialect before dbt execut
   Registry.setConfigs({ fallback: { type: "postgres" } })
   // The dispatcher tries dbt first when warehouse is omitted, so this query may
   // reach MySQL even though the fallback connection uses PostgreSQL comments.
+  // A dbt project whose adapter type is unknown is present.
+  const dbt = spyOn(DbtAdapterType, "dbtProjectAdapterType").mockResolvedValue({ project: true, targetTypes: [] })
   const dispatch = spyOn(Dispatcher, "call").mockResolvedValue({
     columns: ["value"],
     rows: [[1]],
@@ -227,5 +230,6 @@ test("omitted SQL warehouse cannot assume the registry dialect before dbt execut
     expect(dispatch).not.toHaveBeenCalled()
   } finally {
     dispatch.mockRestore()
+    dbt.mockRestore()
   }
 })
