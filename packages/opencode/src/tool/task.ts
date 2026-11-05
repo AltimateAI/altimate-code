@@ -24,9 +24,12 @@ import { RunBudget } from "@/altimate/run-budget"
 // altimate_change end
 // re-brand core (ModelV2/ProviderV2) IDs to the provider/schema brands SessionPrompt expects
 import { ModelID, ProviderID } from "@/provider/schema"
-import { Effect } from "effect"
+import { ConfigProvider, Effect, Layer } from "effect"
 // altimate_change start — upstream_fix: recover committed child findings when cancellation interrupts a task.
 import { interruptedTaskOutput } from "../session/task-output"
+// altimate_change end
+// altimate_change start — upstream_fix: background subagents follow the experiment flag at execution time.
+import { RuntimeFlags } from "@/effect/runtime-flags"
 // altimate_change end
 const log = Log.create({ service: "tool.task" })
 
@@ -54,7 +57,12 @@ const parameters = z.object({
     .optional(),
   command: z.string().describe("The command that triggered this task").optional(),
   // altimate_change start — upstream_fix: keep accepting legacy/manual background calls internally.
-  background: z.boolean().optional(),
+  background: z
+    .boolean()
+    .describe(
+      "Run the subagent in the background and return immediately with a task_id. Call task again with that task_id (same subagent_type) to wait for and collect its result. A background task you have not collected is cancelled when your turn ends.",
+    )
+    .optional(),
   // altimate_change end
 })
 
@@ -72,6 +80,159 @@ const taskJsonSchema = (() => {
     ...(Array.isArray(schema.required) ? { required: schema.required.filter((field) => field !== "background") } : {}),
   }
 })()
+// altimate_change end
+
+// altimate_change start — upstream_fix: background subagents run without blocking the parent turn.
+/** The `background` property the registry adds to the task schema when the experiment is on. */
+export const taskBackgroundJsonSchema = (zodToJsonSchema(parameters).properties as Record<string, unknown>).background
+
+/**
+ * Whether background subagents are on, read from the environment exactly as RuntimeFlags reads it.
+ * The registry passes its own RuntimeFlags decision to execution (`extra.backgroundSubagents`), so
+ * the schema gate and the execution gate always agree; this is the fallback when nothing is passed.
+ */
+export function backgroundSubagentsEnabled() {
+  return Effect.runSync(
+    Effect.gen(function* () {
+      return (yield* RuntimeFlags.Service).experimentalBackgroundSubagents
+    }).pipe(
+      // A fresh env provider: the default one is a snapshot taken on first use.
+      Effect.provide(RuntimeFlags.defaultLayer.pipe(Layer.provide(ConfigProvider.layer(ConfigProvider.fromEnv())))),
+    ),
+  )
+}
+
+const NOTIFY_SENTENCE = "For background tasks, you will be notified automatically when the result is ready."
+const COLLECT_SENTENCE =
+  "A background task (background: true) sends no notification: collect its result by calling task again with its task_id. Collect every background task before you end your turn; ending your turn cancels any background task you have not collected. Calling task with a background task's task_id always returns that task's recorded result and never sends it new work."
+
+/** The task description with the background experiment on: no notification exists, the parent collects. */
+export function backgroundTaskDescription(description: string) {
+  return description.replace(NOTIFY_SENTENCE, COLLECT_SENTENCE)
+}
+
+/** Running background children one parent session may have at once. */
+export const MAX_RUNNING_BACKGROUND_TASKS = 4
+/** Recorded background tasks kept per parent session; the oldest settled records go first. */
+const MAX_BACKGROUND_RECORDS = 100
+
+type TaskResult = {
+  title: string
+  metadata: {
+    sessionId: SessionID
+    model: { modelID: string; providerID: string }
+    interrupted?: boolean
+    background?: boolean
+  }
+  output: string
+}
+
+type BackgroundTask = {
+  parentSessionID: string
+  messageID: MessageID
+  model: { modelID: string; providerID: string }
+  result: Promise<TaskResult>
+  settled: boolean
+  collected: boolean
+  joins: number
+}
+
+/**
+ * Background children keyed by child session id, with their outcome once settled. A child is bound
+ * to the abort signal of the parent tool call that started it: `ctx.abort` is that request's
+ * `AbortSignal.any` over the loop generation's signal. The generation signal is aborted on cancel,
+ * on a run-budget hard deadline and in the loop's cleanup when the parent's turn ends, so a child
+ * still running then is cancelled. A soft run-budget interrupt aborts only the request it targets,
+ * so it reaches a child launched in that request and not one launched in an earlier step.
+ *
+ * The record outlives the child: every later call with its task_id returns the recorded result
+ * (or, for a cancelled child, its partial findings marked interrupted) and never re-prompts it.
+ */
+const backgroundTasks = new Map<string, BackgroundTask>()
+
+function runningBackgroundTasks(parentSessionID: string) {
+  let count = 0
+  for (const task of backgroundTasks.values()) if (task.parentSessionID === parentSessionID && !task.settled) count++
+  return count
+}
+
+function evictBackgroundRecords(parentSessionID: string) {
+  const settled = [...backgroundTasks].filter(([, task]) => task.parentSessionID === parentSessionID && task.settled)
+  const total = [...backgroundTasks.values()].filter((task) => task.parentSessionID === parentSessionID).length
+  for (const [id] of settled.slice(0, Math.max(0, total - MAX_BACKGROUND_RECORDS))) backgroundTasks.delete(id)
+}
+
+const resumeHeader = (id: string) => `task_id: ${id} (for resuming to continue this task if needed)`
+const recordedHeader = (id: string) =>
+  `task_id: ${id} (background task: calling task with this task_id returns this same result)`
+
+/** Points a background task's result at its record, since a task_id call collects rather than resumes. */
+function recordedResult(id: string, result: TaskResult): TaskResult {
+  return { ...result, output: result.output.replace(resumeHeader(id), recordedHeader(id)) }
+}
+
+/** The tool part of one call in a message, or undefined when the message or part is not stored. */
+function toolPart(sessionID: SessionID, messageID: MessageID, callID: string) {
+  try {
+    return MessageV2.get({ sessionID, messageID }).parts.find(
+      (item): item is MessageV2.ToolPart => item.type === "tool" && item.callID === callID,
+    )
+  } catch {
+    return undefined
+  }
+}
+
+const PART_RUNNING_WAIT_MS = 2_000
+const PART_RUNNING_POLL_MS = 10
+
+/**
+ * Waits until the loop has marked this call's tool part running. The loop records `ctx.metadata` only
+ * on a running part, and a collect reaches its metadata call before the loop has finished that write.
+ */
+async function untilToolPartRunning(ctx: {
+  sessionID: SessionID
+  messageID: MessageID
+  callID?: string
+  abort: AbortSignal
+}) {
+  if (!ctx.callID) return
+  const until = Date.now() + PART_RUNNING_WAIT_MS
+  while (Date.now() < until && !ctx.abort.aborted) {
+    const part = toolPart(ctx.sessionID, ctx.messageID, ctx.callID)
+    if (!part || part.state.status !== "pending") return
+    await new Promise((resolve) => setTimeout(resolve, PART_RUNNING_POLL_MS))
+  }
+}
+
+/** Appends the cancellation to the launch tool part, so the turn's record shows what was lost. */
+async function recordCancellation(input: {
+  sessionID: SessionID
+  messageID: MessageID
+  callID?: string
+  childID: string
+  output: string
+}) {
+  if (!input.callID) return
+  try {
+    const part = toolPart(input.sessionID, input.messageID, input.callID)
+    if (!part || part.state.status !== "completed") return
+    await Session.updatePart({
+      ...part,
+      state: {
+        ...part.state,
+        output: [
+          part.state.output,
+          "",
+          `Background task ${input.childID} was cancelled at the end of the turn, before its result was collected. Its partial findings:`,
+          input.output,
+        ].join("\n"),
+        metadata: { ...part.state.metadata, interrupted: true },
+      },
+    })
+  } catch (error) {
+    log.warn("failed to record background task cancellation", { sessionID: input.sessionID, error })
+  }
+}
 // altimate_change end
 
 export const TaskTool = Tool.define("task", async (ctx) => {
@@ -97,9 +258,50 @@ export const TaskTool = Tool.define("task", async (ctx) => {
     // altimate_change end
     async execute(params: z.infer<typeof parameters>, ctx) {
       const config = await Config.get()
-      if (params.background === true) {
+      // altimate_change start — upstream_fix: honour background only behind the experiment flag; a
+      // task_id naming a running background child of this session joins it instead of re-prompting.
+      const background = params.background === true
+      const enabled =
+        typeof ctx.extra?.backgroundSubagents === "boolean"
+          ? ctx.extra.backgroundSubagents
+          : background && backgroundSubagentsEnabled()
+      if (background && !enabled) {
         throw new Error("Background subagents require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true")
       }
+      const recorded = params.task_id ? backgroundTasks.get(params.task_id) : undefined
+      if (params.task_id && recorded?.parentSessionID === ctx.sessionID) {
+        const taskID = params.task_id
+        if (background && !recorded.settled) {
+          return {
+            title: params.description,
+            metadata: { sessionId: SessionID.make(taskID), model: recorded.model, background: true },
+            output: [
+              `task_id: ${taskID}`,
+              `Task is still running in the background. Its result is collected by calling task again with task_id=${taskID} (without background); it is cancelled if your turn ends before you collect it.`,
+            ].join("\n"),
+          }
+        }
+        // Publish the child's identity first, so a cancel during the wait recovers its partial findings.
+        await untilToolPartRunning(ctx)
+        await ctx.metadata({
+          title: params.description,
+          metadata: { sessionId: taskID, messageID: recorded.messageID, model: recorded.model },
+        })
+        recorded.joins++
+        try {
+          const result = await recorded.result
+          recorded.collected = true
+          return result
+        } finally {
+          recorded.joins--
+        }
+      }
+      if (background && runningBackgroundTasks(ctx.sessionID) >= MAX_RUNNING_BACKGROUND_TASKS) {
+        throw new Error(
+          `Too many background tasks running for this session (limit ${MAX_RUNNING_BACKGROUND_TASKS}). Collect a running task's result by calling task with its task_id before launching another.`,
+        )
+      }
+      // altimate_change end
 
       // Skip permission check when user explicitly invoked via @ or command subtask
       if (!ctx.extra?.bypassAgentCheck) {
@@ -214,67 +416,128 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         })
         // altimate_change end
       }
-      ctx.abort.addEventListener("abort", cancel)
-      using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
-      const promptParts = promptOps
-        ? await Effect.runPromise(promptOps.resolvePromptParts(params.prompt))
-        : await SessionPrompt.resolvePromptParts(params.prompt)
-      // altimate_change start — upstream_fix: cancellation during task preparation must not start new child work.
-      ctx.abort.throwIfAborted()
-      // altimate_change end
+      // altimate_change start — upstream_fix: the child run is a unit a background task can detach.
+      const run = async (): Promise<TaskResult> => {
+        ctx.abort.addEventListener("abort", cancel)
+        using _ = defer(() => ctx.abort.removeEventListener("abort", cancel))
+        const promptParts = promptOps
+          ? await Effect.runPromise(promptOps.resolvePromptParts(params.prompt))
+          : await SessionPrompt.resolvePromptParts(params.prompt)
+        // altimate_change start — upstream_fix: cancellation during task preparation must not start new child work.
+        ctx.abort.throwIfAborted()
+        // altimate_change end
 
-      const promptInput: SessionPrompt.PromptInput = {
-        messageID,
-        sessionID: session.id,
-        model: {
-          // altimate_change start — re-brand to provider/schema ModelID/ProviderID
-          // (identity at runtime); agent.model carries the core ModelV2/ProviderV2 brands.
-          modelID: ModelID.make(model.modelID),
-          providerID: ProviderID.make(model.providerID),
-          // altimate_change end
-        },
-        agent: agent.name,
-        parts: promptParts,
+        const promptInput: SessionPrompt.PromptInput = {
+          messageID,
+          sessionID: session.id,
+          model: {
+            // altimate_change start — re-brand to provider/schema ModelID/ProviderID
+            // (identity at runtime); agent.model carries the core ModelV2/ProviderV2 brands.
+            modelID: ModelID.make(model.modelID),
+            providerID: ProviderID.make(model.providerID),
+            // altimate_change end
+          },
+          agent: agent.name,
+          parts: promptParts,
+        }
+        // altimate_change start — keep the inherited query cutoff scoped to this child prompt
+        using queryBudget = defer(RunBudget.registerQueryDeadline(session.id, RunBudget.queryDeadline(ctx.sessionID)))
+        // altimate_change end
+        // altimate_change start — upstream_fix: return partial child findings after cancellation, even if its last turn is empty.
+        let partialOutput: string | undefined
+        const result = await (promptOps
+          ? Effect.runPromise(promptOps.prompt(promptInput))
+          : SessionPrompt.prompt(promptInput)
+        ).catch(async (error) => {
+          if (!ctx.abort.aborted) throw error
+          partialOutput = await interruptedTaskOutput(session.id, messageID)
+          if (!partialOutput) throw error
+          return undefined
+        })
+        if (ctx.abort.aborted) partialOutput ??= await interruptedTaskOutput(session.id, messageID)
+
+        const text = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
+
+        const output = partialOutput ?? [
+          `task_id: ${session.id} (for resuming to continue this task if needed)`,
+          "",
+          "<task_result>",
+          ...(ctx.abort.aborted ? ["Task interrupted. Findings may be incomplete."] : []),
+          text,
+          "</task_result>",
+        ].join("\n")
+        // altimate_change end
+
+        return {
+          title: params.description,
+          metadata: {
+            sessionId: session.id,
+            model,
+            // altimate_change start — upstream_fix: distinguish partial task findings from completed work.
+            ...(ctx.abort.aborted ? { interrupted: true } : {}),
+            // altimate_change end
+          },
+          output,
+        }
       }
-      // altimate_change start — keep the inherited query cutoff scoped to this child prompt
-      using queryBudget = defer(RunBudget.registerQueryDeadline(session.id, RunBudget.queryDeadline(ctx.sessionID)))
-      // altimate_change end
-      // altimate_change start — upstream_fix: return partial child findings after cancellation, even if its last turn is empty.
-      let partialOutput: string | undefined
-      const result = await (promptOps
-        ? Effect.runPromise(promptOps.prompt(promptInput))
-        : SessionPrompt.prompt(promptInput)
-      ).catch(async (error) => {
-        if (!ctx.abort.aborted) throw error
-        partialOutput = await interruptedTaskOutput(session.id, messageID)
-        if (!partialOutput) throw error
-        return undefined
-      })
-      if (ctx.abort.aborted) partialOutput ??= await interruptedTaskOutput(session.id, messageID)
+      if (!background) return await run()
 
-      const text = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
-
-      const output = partialOutput ?? [
-        `task_id: ${session.id} (for resuming to continue this task if needed)`,
-        "",
-        "<task_result>",
-        ...(ctx.abort.aborted ? ["Task interrupted. Findings may be incomplete."] : []),
-        text,
-        "</task_result>",
-      ].join("\n")
-      // altimate_change end
-
+      // The abort listener and query budget registered inside run() stay in place until the child
+      // settles, so a background child remains bound to the parent's abort signal and run budget.
+      ctx.abort.throwIfAborted()
+      const result = run()
+        .catch((error): TaskResult => {
+          if (!ctx.abort.aborted) throw error
+          return {
+            title: params.description,
+            metadata: { sessionId: session.id, model, interrupted: true },
+            output: [
+              resumeHeader(session.id),
+              "",
+              "<task_result>",
+              "Task cancelled before it returned any findings.",
+              "</task_result>",
+            ].join("\n"),
+          }
+        })
+        .then((settled) => recordedResult(session.id, settled))
+      const record: BackgroundTask = {
+        parentSessionID: ctx.sessionID,
+        messageID,
+        model,
+        result,
+        settled: false,
+        collected: false,
+        joins: 0,
+      }
+      result.then(
+        async (settled) => {
+          record.settled = true
+          if (!settled.metadata.interrupted || record.collected || record.joins > 0) return
+          await recordCancellation({
+            sessionID: ctx.sessionID,
+            messageID: ctx.messageID,
+            callID: ctx.callID,
+            childID: session.id,
+            output: settled.output,
+          })
+        },
+        (err) => {
+          record.settled = true
+          log.warn("background task failed", { sessionID: session.id, err })
+        },
+      )
+      backgroundTasks.set(session.id, record)
+      evictBackgroundRecords(ctx.sessionID)
       return {
         title: params.description,
-        metadata: {
-          sessionId: session.id,
-          model,
-          // altimate_change start — upstream_fix: distinguish partial task findings from completed work.
-          ...(ctx.abort.aborted ? { interrupted: true } : {}),
-          // altimate_change end
-        },
-        output,
+        metadata: { sessionId: session.id, model, background: true },
+        output: [
+          `task_id: ${session.id}`,
+          `Task is running in the background. Its result is collected by calling task again with task_id=${session.id}; it is cancelled if your turn ends before you collect it.`,
+        ].join("\n"),
       }
+      // altimate_change end
     },
   }
 })
