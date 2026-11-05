@@ -12,7 +12,7 @@ import {
 import { tmpdir } from "os"
 import { dirname, join } from "path"
 import { $ } from "bun"
-import { BRIDGE_STDERR, BRIDGE_STDOUT, standInPython } from "./stand-in-python"
+import { BRIDGE_STDERR, BRIDGE_STDOUT, pathWithDbtCloudCli, standInPython } from "./stand-in-python"
 
 const pkg = join(import.meta.dir, "..")
 const dist = join(pkg, "dist")
@@ -90,7 +90,7 @@ describe("build integrity", () => {
 
     const cli = await $`node ${join(installed, "bin/altimate-dbt")} info`
       .cwd(root)
-      .env({ ...process.env, HOME: home })
+      .env({ ...process.env, HOME: home, PATH: pathWithDbtCloudCli(root) })
       .quiet()
       .nothrow()
 
