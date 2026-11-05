@@ -463,7 +463,7 @@ describe("session.compaction summarizer integrity (/ item 3)", () => {
 // ─── Harness reliability (b)+(d) (item 1): completion-aware continue nudge via the
 // nudge arbiter, and the mechanism-accurate overflow notice ──────────────────────
 describe("session.compaction continue-nudge termination path (/d)", () => {
-  test("continue message carries the three-option completion-aware nudge", async () => {
+  test("continue message carries the run-mode completion-aware nudge", async () => {
     const sessionID = freshSessionID()
     const { messages, markerID } = history(sessionID)
     processBehaviors = [writeSummary("a real summary")]
@@ -474,7 +474,9 @@ describe("session.compaction continue-nudge termination path (/d)", () => {
     const continuePart = store.parts.find((p) => p.type === "text" && p.synthetic)
     expect(continuePart?.text).toContain(SessionTermination.COMPLETION_NUDGE)
     expect(continuePart?.text).toContain("reply with DONE")
-    expect(continuePart?.text).toContain("ask for clarification")
+    // altimate_change start — the run-mode nudge offers no clarification stop
+    expect(continuePart?.text).not.toContain("clarification")
+    // altimate_change end
   })
 
   test("interactive compaction retains the ordinary continuation and never injects run-only DONE instructions", async () => {
@@ -487,7 +489,11 @@ describe("session.compaction continue-nudge termination path (/d)", () => {
 
     expect(result).toBe("continue")
     const continuePart = store.parts.find((p) => p.type === "text" && p.synthetic)
-    expect(continuePart?.text).toContain("Continue if you have next steps")
+    // altimate_change start — byte-for-byte pin of the interactive continuation
+    expect(continuePart?.text).toContain(
+      "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
+    )
+    // altimate_change end
     expect(continuePart?.text).not.toContain(SessionTermination.COMPLETION_NUDGE)
   })
 
@@ -530,10 +536,38 @@ describe("session.compaction continue-nudge termination path (/d)", () => {
 
     expect(result).toBe("continue")
     const continuePart = store.parts.find((p) => p.type === "text" && p.synthetic)
-    expect(continuePart?.text).toContain(SessionTermination.OVERFLOW_NOTICE)
+    // altimate_change start — run mode: the overflow notice does not ask the absent user
+    expect(continuePart?.text).toContain(SessionTermination.RUN_MODE_OVERFLOW_NOTICE)
+    expect(continuePart?.text).not.toContain("ask the user")
+    // altimate_change end
     expect(continuePart?.text).not.toContain("large media attachments")
     expect(continuePart?.text).toContain("context limit")
     // The completion nudge still follows the notice.
     expect(continuePart?.text).toContain("reply with DONE")
   })
+
+  // altimate_change start — interactive overflow compaction keeps the notice byte-for-byte
+  test("interactive overflow compaction keeps the original overflow notice", async () => {
+    process.env.ALTIMATE_RUN_MODE = "0"
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    processBehaviors = [writeSummary("a real summary")]
+
+    const result = await SessionCompaction.process({
+      sessionID,
+      messages,
+      parentID: markerID,
+      abort: new AbortController().signal,
+      auto: true,
+      overflow: true,
+    })
+
+    expect(result).toBe("continue")
+    const continuePart = store.parts.find((p) => p.type === "text" && p.synthetic)
+    expect(continuePart?.text).toContain(
+      SessionTermination.OVERFLOW_NOTICE +
+        "\n\nContinue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
+    )
+  })
+  // altimate_change end
 })

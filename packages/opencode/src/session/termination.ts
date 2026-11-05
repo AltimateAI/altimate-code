@@ -21,6 +21,10 @@
 
 /** The literal completion token the nudge/challenge instruct the model to emit. */
 export const DONE_TOKEN = "DONE"
+// altimate_change start — run-mode blocked ending
+/** Prefix of the final line a run-mode model writes when it cannot proceed. */
+export const BLOCKED_PREFIX = "BLOCKED:"
+// altimate_change end
 
 // Standalone final plaintext line only. The earlier trailing-token regex
 // accepted code-fenced, inline-code, indented, and quoted text whose content
@@ -99,8 +103,36 @@ function isInsideHtmlBlock(lines: string[]): boolean {
   return close !== undefined
 }
 
+// altimate_change start — the final-line checks are shared by the DONE and BLOCKED detectors
 /** True when the text ends with an explicit completion assertion (see module header). */
 export function isExplicitDone(text: string): boolean {
+  return finalAssertionLine(text, (last) => last === DONE_TOKEN)
+}
+
+/**
+ * True when the final plaintext line reports a blocker: `BLOCKED: <reason>`, unindented,
+ * outside code fences and HTML blocks, with a non-empty reason. Same placement rules as
+ * `isExplicitDone`, so quoted or demonstration text never counts.
+ */
+export function isBlocked(text: string): boolean {
+  return finalAssertionLine(
+    text,
+    (last) => last.startsWith(BLOCKED_PREFIX) && last.slice(BLOCKED_PREFIX.length).trim().length > 0,
+  )
+}
+
+/**
+ * The text a reader sees: a trailing completion token is a signal to the harness, not
+ * part of the answer, so it is removed together with the blank lines before it. Text
+ * whose final line is not a completion assertion is returned unchanged.
+ */
+export function stripCompletionToken(text: string): string {
+  if (!isExplicitDone(text)) return text
+  const lines = text.replace(/\r\n?/g, "\n").replace(/\s+$/, "").split("\n")
+  return lines.slice(0, -1).join("\n").trimEnd()
+}
+
+function finalAssertionLine(text: string, matches: (last: string) => boolean): boolean {
   // Normalize line endings FIRST. On CRLF input the interior lines keep a
   // trailing `\r`, which fails the closing fence's whitespace-only check and
   // leaves every fence permanently open (a genuine DONE is then rejected);
@@ -111,7 +143,7 @@ export function isExplicitDone(text: string): boolean {
   // Require an unindented token. CommonMark permits up to three leading
   // spaces in several block constructs; accepting them lets a nested list
   // demonstration (`- Expected marker:` then `  DONE`) terminate the run.
-  if (last !== DONE_TOKEN) return false
+  if (!matches(last)) return false
   // Reject a final line inside an unclosed code fence — the block's content is
   // quoted material, not an assertion. Fence state follows CommonMark: a fence
   // opens with a run of >= 3 backticks or tildes (an info string, e.g. an
@@ -150,6 +182,7 @@ export function isExplicitDone(text: string): boolean {
   if (open) return false
   return !isInsideHtmlBlock(outsideFence)
 }
+// altimate_change end
 
 /**
  * Stop-path decision: should a turn that would otherwise trigger
@@ -173,47 +206,67 @@ export function explicitDoneStop(input: {
   return isExplicitDone(lastText.text)
 }
 
+// altimate_change start — run-mode completion contract for every agent but plan
 /**
- * Run-mode completion instruction for builder.
+ * Run-mode completion instruction.
  *
  * This wording lived in `builder.txt`, but builder is a PRIMARY agent, so a
  * static instruction there also governs interactive chat — where nothing
  * interprets or strips the token and the user saw a literal `DONE` on every
  * final answer, including mid-conversation on follow-ups. `isExplicitDone()`
- * is only consumed by the run-mode accounting path.
+ * is only consumed by the run-mode accounting path, and the `run` output
+ * boundaries strip the token before a reader sees the text.
  *
- * Injected only in run mode, and only for the agents named in
- * COMPLETION_CONTRACT_AGENTS below (builder). Byte-identical to builder's
- * original run-mode behaviour, from when this text was still static in
- * `builder.txt`. Prompt-visible text — changes need extra review.
+ * Injected only in run mode. It names the three ways a run-mode turn may end:
+ * the token after the assigned task is done, a `BLOCKED:` line when the task
+ * cannot proceed, or no ending at all while work remains. Prompt-visible text —
+ * changes need extra review.
  */
 export const RUN_MODE_COMPLETION_INSTRUCTION =
-  "**Signal completion explicitly**: only after every requirement above is satisfied, end your final " +
-  `response with the literal token \`${DONE_TOKEN}\` on its own final line. Do not emit \`${DONE_TOKEN}\` ` +
-  "while work or verification remains."
+  "**Signal completion explicitly**: no one can answer questions during this run, so do not end your turn with a " +
+  "question. Only when the assigned task is fully completed and verified, end your final response with the literal " +
+  `token \`${DONE_TOKEN}\` on its own final line. Do not emit \`${DONE_TOKEN}\` while work or verification remains. ` +
+  "If you cannot proceed because something you cannot obtain is missing, or the only way forward is a destructive " +
+  "or irreversible action on a guess, state what was completed, end with a final line " +
+  `\`${BLOCKED_PREFIX} <what blocked you>\`, and stop without \`${DONE_TOKEN}\`.`
+
+/** Agents whose own prompt defines how a turn ends; the contract would contradict it. */
+const CONTRACT_EXCLUDED_AGENTS = new Set(["plan"])
 
 /**
- * Agents that receive the run-mode completion-token contract. builder is the
- * historical (and currently sole) carrier.
+ * The sole gate for injecting the completion-token contract into a prompt.
+ * In run mode it applies to builder, custom agents and subagents started by the
+ * task tool, so each has a defined way to finish or report a blocker. The plan
+ * agent is excluded: its prompt ends a turn with a question or `plan_exit`.
+ * Interactive sessions never receive it.
  */
-const COMPLETION_CONTRACT_AGENTS = new Set(["builder"])
-
-/** The sole gate for injecting the completion-token contract into a prompt. */
 export function completionInstruction(input: { runMode: boolean; agent: string }): string | undefined {
-  return input.runMode && COMPLETION_CONTRACT_AGENTS.has(input.agent) ? RUN_MODE_COMPLETION_INSTRUCTION : undefined
+  if (!input.runMode || CONTRACT_EXCLUDED_AGENTS.has(input.agent)) return undefined
+  return RUN_MODE_COMPLETION_INSTRUCTION
 }
+// altimate_change end
 
+// altimate_change start — run-mode post-compaction nudge without a clarification option
 /**
- * Three-option completion-aware post-compaction nudge. Replaces the
- * two-option "Continue … or stop and ask for clarification" text, which gave a
- * finished session no way to terminate. Prompt-visible text — changes need
- * extra review.
+ * Completion-aware post-compaction nudge, sent only in run mode (interactive
+ * compaction keeps its ordinary continuation in compaction.ts). Replaces the
+ * "Continue … or stop and ask for clarification" text, which gave a finished
+ * session no way to terminate. It offers no "ask for clarification" option:
+ * nobody can answer in a headless run, and that option is how runs ended on a
+ * question instead of finishing. A blocked run gets its own exit (3), so the
+ * model is not pushed into a false `DONE` or a destructive guess. Prompt-visible
+ * text — changes need extra review.
  */
 export const COMPLETION_NUDGE =
-  "Context was compacted; the summary above is the record of the work so far. Choose exactly one: " +
-  "(1) if concrete next steps remain toward the original task, continue with them; " +
-  "(2) if you are blocked or unsure how to proceed, stop and ask for clarification; " +
-  `(3) if the deliverable is complete and verified, reply with ${DONE_TOKEN} alone on the final line and stop.`
+  "Context was compacted; the summary above is the record of the work so far. " +
+  "No one can answer questions during this run, so do not end your turn with a question. Choose exactly one: " +
+  "(1) if concrete next steps remain toward the original task, continue with them; if you are unsure between " +
+  "safe, reversible choices, pick the most reasonable interpretation, state your assumption, and continue; " +
+  `(2) if the deliverable is complete and verified, reply with ${DONE_TOKEN} alone on the final line and stop; ` +
+  "(3) if you cannot proceed because something you cannot obtain is missing, or the only way forward is a " +
+  "destructive or irreversible action on a guess, state what was completed, end with a final line " +
+  `${BLOCKED_PREFIX} <what blocked you>, and stop without ${DONE_TOKEN}.`
+// altimate_change end
 
 /**
  * One-shot confirm-DONE challenge injected by the run-mode
@@ -285,5 +338,18 @@ export const OVERFLOW_NOTICE =
   "messages were compacted into the summary above, and oversized content (large tool outputs or file " +
   "attachments) may have been dropped from context. If information you need is missing from the summary, " +
   "re-read the relevant files or ask the user to re-supply it."
+
+// altimate_change start — run mode has no user to re-supply anything
+/** Run-mode overflow notice: same mechanism text, without asking the absent user. */
+export const RUN_MODE_OVERFLOW_NOTICE =
+  "The previous request exceeded the model's context limit before a response could be generated. Older " +
+  "messages were compacted into the summary above, and oversized content (large tool outputs or file " +
+  "attachments) may have been dropped from context. If information you need is missing from the summary, " +
+  "re-read the relevant files; no one can re-supply it during this run."
+
+export function overflowNotice(input: { runMode: boolean }): string {
+  return input.runMode ? RUN_MODE_OVERFLOW_NOTICE : OVERFLOW_NOTICE
+}
+// altimate_change end
 
 export * as SessionTermination from "./termination"

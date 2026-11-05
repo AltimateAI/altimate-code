@@ -159,14 +159,30 @@ describe("SessionTermination.explicitDoneStop (stop-path decision)", () => {
 })
 
 describe("SessionTermination directive texts (/c/d wording contracts)", () => {
-  test("the completion nudge offers all three options and instructs the DONE token", () => {
+  // altimate_change start — the run-mode nudge: continue, DONE, or report a blocker; never a question
+  test("the run-mode completion nudge offers continue, DONE or BLOCKED, never a clarification stop", () => {
     const nudge = SessionTermination.COMPLETION_NUDGE
     expect(nudge).toContain("(1)")
     expect(nudge).toContain("(2)")
     expect(nudge).toContain("(3)")
-    expect(nudge).toContain("ask for clarification")
+    expect(nudge).not.toContain("clarification")
+    expect(nudge).toContain("do not end your turn with a question")
     expect(nudge).toContain(`reply with ${SessionTermination.DONE_TOKEN}`)
+    // The guess clause is limited to safe, reversible choices; a blocker gets its own exit.
+    expect(nudge).toContain("safe, reversible")
+    expect(nudge).toContain(`${SessionTermination.BLOCKED_PREFIX} <what blocked you>`)
+    expect(nudge).toContain(`without ${SessionTermination.DONE_TOKEN}`)
   })
+
+  test("the interactive compaction continuation is unchanged and stays out of the run-mode nudge", async () => {
+    const compaction = await Bun.file(new URL("../../src/session/compaction.ts", import.meta.url).pathname).text()
+    // Byte-for-byte pin of the interactive continuation text.
+    expect(compaction).toContain(
+      '"Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."',
+    )
+    expect(compaction).toMatch(/if \(Flag\.ALTIMATE_RUN_MODE\) \{\s*NudgeArbiter\.register\(/)
+  })
+  // altimate_change end
 
   test("the confirm challenge asks for DONE or what remains — outcome-neutral", () => {
     const challenge = SessionTermination.CONFIRM_DONE_CHALLENGE
@@ -186,12 +202,28 @@ describe("SessionTermination directive texts (/c/d wording contracts)", () => {
     expect(SessionTermination.OVERFLOW_NOTICE).toContain("context limit")
   })
 
+  // altimate_change start — the run-mode overflow notice never asks the user; the interactive one is unchanged
+  test("the run-mode overflow notice does not ask the user to re-supply anything", () => {
+    expect(SessionTermination.RUN_MODE_OVERFLOW_NOTICE).not.toContain("ask the user")
+    expect(SessionTermination.RUN_MODE_OVERFLOW_NOTICE).toContain("context limit")
+    expect(SessionTermination.overflowNotice({ runMode: true })).toBe(SessionTermination.RUN_MODE_OVERFLOW_NOTICE)
+    expect(SessionTermination.overflowNotice({ runMode: false })).toBe(
+      "The previous request exceeded the model's context limit before a response could be generated. Older " +
+        "messages were compacted into the summary above, and oversized content (large tool outputs or file " +
+        "attachments) may have been dropped from context. If information you need is missing from the summary, " +
+        "re-read the relevant files or ask the user to re-supply it.",
+    )
+  })
+  // altimate_change end
+
   test("no vertical/product tokens in any directive text (leak-lens hard requirement)", () => {
     for (const text of [
       SessionTermination.COMPLETION_NUDGE,
       SessionTermination.CONFIRM_DONE_CHALLENGE,
       SessionTermination.CONTINUE_AFTER_DECLINED_CHALLENGE,
       SessionTermination.OVERFLOW_NOTICE,
+      SessionTermination.RUN_MODE_OVERFLOW_NOTICE,
+      SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION,
     ]) {
       expect(text.toLowerCase()).not.toContain("dbt")
       expect(text.toLowerCase()).not.toContain("warehouse")
@@ -253,26 +285,32 @@ describe("SessionTermination.isExplicitDone — fence-state conformance", () => 
     expect(SessionTermination.isExplicitDone(["```html", "<!--", "<div>", "```", "DONE"].join("\n"))).toBe(true)
   })
 })
-describe("builder completion contract", () => {
-  // The instruction still reaches an ordinary non-compacted RUN — the wording is
-  // unchanged, it simply moved out of the static prompt file so that it is
-  // injected per-run rather than shipped to every surface.
-  test("only a run-mode builder receives the trailing DONE contract", () => {
+describe("run-mode completion contract", () => {
+  // The instruction is injected per run rather than shipped in a static prompt file,
+  // so interactive surfaces never see it.
+  // altimate_change start — run mode gives every agent except plan the contract; interactive gives none
+  test("run mode receives the trailing DONE contract; interactive never does", () => {
     const instruction = SessionTermination.completionInstruction({ runMode: true, agent: "builder" })
+    expect(instruction).toBe(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION)
     expect(instruction).toContain("literal token `DONE` on its own")
     expect(instruction).toContain("Do not emit `DONE` while work or verification remains")
+    expect(SessionTermination.completionInstruction({ runMode: true, agent: "reviewer" })).toBe(instruction)
     expect(SessionTermination.completionInstruction({ runMode: false, agent: "builder" })).toBeUndefined()
+  })
+
+  test("the plan agent keeps its own stop rule and gets no contract", () => {
     expect(SessionTermination.completionInstruction({ runMode: true, agent: "plan" })).toBeUndefined()
   })
 
-  test("prompt assembly wires the contract to the run-mode flag", async () => {
-    const prompt = await Bun.file(new URL("../../src/session/prompt.ts", import.meta.url).pathname).text()
-    expect(prompt).toMatch(
-      /SessionTermination\.completionInstruction\(\{\s*runMode: Flag\.ALTIMATE_RUN_MODE,\s*agent: agent\.name,\s*\}\)/,
-    )
-    expect(prompt).toMatch(/if \(completionInstruction\) system\.push\(completionInstruction\)/)
-    expect(prompt).not.toMatch(/ALTIMATE_CODE_HEADLESS[^\n]*RUN_MODE_COMPLETION_INSTRUCTION/)
+  test("the contract refers to the assigned task, rules out questions and gives a blocked exit", () => {
+    const instruction = SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION
+    expect(instruction).toContain("when the assigned task is fully completed and verified")
+    expect(instruction).not.toContain("every requirement above")
+    expect(instruction).toContain("do not end your turn with a question")
+    expect(instruction).toContain(`${SessionTermination.BLOCKED_PREFIX} <what blocked you>`)
+    expect(SessionTermination.isBlocked(`Done so far.\n${SessionTermination.BLOCKED_PREFIX} no credential`)).toBe(true)
   })
+  // altimate_change end
 
   // builder is a PRIMARY agent, so anything in its prompt file also governs
   // interactive chat — where nothing interprets or strips the token and the user
@@ -293,3 +331,39 @@ describe("builder completion contract", () => {
     expect(SessionTermination.isExplicitDone(SessionTermination.DONE_TOKEN)).toBe(true)
   })
 })
+
+// altimate_change start — blocked detector and output-boundary token stripping
+describe("SessionTermination.isBlocked", () => {
+  test("a final unindented BLOCKED: line with a reason is a blocked ending", () => {
+    expect(SessionTermination.isBlocked("Read the config.\nBLOCKED: the password is missing")).toBe(true)
+    expect(SessionTermination.isBlocked("BLOCKED: no access\n\n")).toBe(true)
+  })
+
+  test("a reasonless, indented, quoted, fenced or non-final BLOCKED line is not", () => {
+    expect(SessionTermination.isBlocked("BLOCKED:")).toBe(false)
+    expect(SessionTermination.isBlocked("BLOCKED:   ")).toBe(false)
+    expect(SessionTermination.isBlocked("    BLOCKED: x")).toBe(false)
+    expect(SessionTermination.isBlocked("> BLOCKED: x")).toBe(false)
+    expect(SessionTermination.isBlocked("```\nBLOCKED: x")).toBe(false)
+    expect(SessionTermination.isBlocked("BLOCKED: x\nthen continued")).toBe(false)
+    expect(SessionTermination.isBlocked("blocked: x")).toBe(false)
+  })
+})
+
+describe("SessionTermination.stripCompletionToken", () => {
+  test("drops a trailing DONE line and the blank lines before it", () => {
+    expect(SessionTermination.stripCompletionToken('{"title":"x"}\n\nDONE')).toBe('{"title":"x"}')
+    expect(SessionTermination.stripCompletionToken("2700\r\n\r\nDONE\n")).toBe("2700")
+  })
+
+  test("a bare DONE strips to empty", () => {
+    expect(SessionTermination.stripCompletionToken("DONE")).toBe("")
+  })
+
+  test("leaves text without a completion assertion unchanged", () => {
+    expect(SessionTermination.stripCompletionToken("Example:\n```\nDONE")).toBe("Example:\n```\nDONE")
+    expect(SessionTermination.stripCompletionToken("All done.")).toBe("All done.")
+    expect(SessionTermination.stripCompletionToken("Read it.\nBLOCKED: no access")).toBe("Read it.\nBLOCKED: no access")
+  })
+})
+// altimate_change end
