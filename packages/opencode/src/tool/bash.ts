@@ -21,6 +21,10 @@ import { Plugin } from "@/plugin"
 import { Global } from "@/global"
 // altimate_change start — upstream_fix: resolve literal shell paths for permission matching
 import type { Node } from "web-tree-sitter"
+import type { PermissionV1 } from "@opencode-ai/core/v1/permission"
+import { Wildcard } from "@opencode-ai/core/util/wildcard"
+import { PermissionEvaluate } from "@/permission/evaluate"
+import { userInfo } from "os"
 
 function shellWords(node: Node, includeNumbers = false) {
   const types = ["command_name", "word", "string", "raw_string", "concatenation"]
@@ -73,12 +77,17 @@ const CD_FLAGS = ["-L", "-P", "-e", "-@"]
 // or sit behind `||`, a conditional or a background marker, so the previous directories
 // stay possible. An unresolvable target (`cd $VAR`, `cd -`) adds nothing: the extra
 // directories only ever add aliases, which can tighten a decision but never relax it.
-function afterCd(cwds: string[], words: Node[]): string[] {
+// The literal directory `cd` moves to: home without an operand, undefined when not literal.
+function cdTarget(words: Node[]): string | undefined {
   const args = words.slice(1).map(literalWord)
   let i = 0
   while (i < args.length && args[i] !== undefined && CD_FLAGS.includes(args[i]!)) i++
   if (args[i] === "--") i++
-  const target = i < args.length ? args[i] : homedir()
+  return i < args.length ? args[i] : homedir()
+}
+
+function afterCd(cwds: string[], words: Node[]): string[] {
+  const target = cdTarget(words)
   if (target === undefined || target === "-") return cwds
   // Newly reachable directories come first so the cap drops the oldest speculative
   // branches, never the directory a straight-line script actually enters.
@@ -163,6 +172,417 @@ function quoteLike(word: Node, text: string) {
   if (word.type === "string") return `"${text}"`
   if (word.type === "raw_string") return `'${text}'`
   return text
+}
+// altimate_change end
+
+// altimate_change start — apply a configured `external_directory: deny` to every path a command names
+// The operand check above only covers a fixed list of file commands. When the effective
+// external_directory rule for "*" is deny, every literal path the command text names is checked
+// as well: arguments (including `--opt=value`, `key=value` and `-oVALUE` values), a command run by
+// path, redirection targets, assignment values, `for`/`[[ ]]`/`case` words, the directories commands
+// run in, and literal `sh -c`/`eval` strings. Each is resolved against the directory its command
+// runs in and through symlinks. Under the default ("ask") and "allow" nothing changes.
+// This is a guard rail over literal command text, not an OS sandbox.
+
+// Character devices that are not files in any directory.
+const DEVICE_PATHS = new Set([
+  "/dev/null",
+  "/dev/stdin",
+  "/dev/stdout",
+  "/dev/stderr",
+  "/dev/tty",
+  "/dev/zero",
+  "/dev/random",
+  "/dev/urandom",
+])
+// Running a system binary by its full path (`/usr/bin/env python`) is not a project escape.
+const SYSTEM_BIN_DIRS = new Set([
+  "/bin",
+  "/sbin",
+  "/usr/bin",
+  "/usr/sbin",
+  "/usr/local/bin",
+  "/usr/local/sbin",
+  "/opt/homebrew/bin",
+])
+// Programs that run the program named in their arguments.
+const WRAPPERS = new Set(["env", "nohup", "command", "time", "xargs", "exec", "nice", "stdbuf", "timeout", "sudo"])
+// Shells whose `-c` string is parsed with the same parser.
+const SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh"])
+// Programs whose first operand (or `-e` value) is a program or pattern, not a path.
+const PATTERN_PROGRAMS = new Set(["awk", "gawk", "mawk", "nawk", "sed", "gsed", "grep", "egrep", "fgrep", "rg"])
+const PATTERN_OPTIONS = ["-e", "--expression", "--regexp", "-f", "--file"]
+const PATTERN_VALUE_OPTIONS = ["-F", "-v", "-A", "-B", "-C", "-m", "--max-count", "-l", "-s"]
+const MAX_SHELL_DEPTH = 3
+// Bounds the realpath/stat work one command can cause.
+const MAX_GUARD_CANDIDATES = 2000
+
+export function externalDirectoryDenied(rules: PermissionV1.Ruleset | undefined) {
+  const rule = rules?.findLast((item) => Wildcard.match("external_directory", item.permission) && item.pattern === "*")
+  return rule?.action === "deny"
+}
+
+function isDevice(target: string) {
+  return DEVICE_PATHS.has(target) || /^\/dev\/fd\/\d+$/.test(target)
+}
+
+// The top-level entry a path starts with (`/etc` for `/etc/hosts`, `C:\Users` for `C:\Users\x`).
+export function firstSegmentPath(real: string, p: path.PlatformPath = path) {
+  const root = p.parse(real).root
+  const first = real.slice(root.length).split(p.sep).filter(Boolean)[0]
+  return first ? p.join(root, first) : undefined
+}
+
+const GUARD_WORD_TYPES = ["command_name", "word", "string", "raw_string", "concatenation", "number", "ansi_c_string"]
+
+function guardWords(node: Node) {
+  return node.namedChildren.filter((child): child is Node => child !== null && GUARD_WORD_TYPES.includes(child.type))
+}
+
+type Literal = { text: string } | { refuse: string } | undefined
+
+// A word's literal value, also covering `$'…'` without escapes and `~user`.
+function guardLiteral(node: Node | null): Literal {
+  if (!node) return
+  if (node.type === "ansi_c_string") return node.text.includes("\\") ? undefined : { text: node.text.slice(2, -1) }
+  if (node.type === "concatenation" || node.type === "command_name") {
+    const parts = node.namedChildren.map(guardLiteral)
+    if (parts.some((part) => part && "refuse" in part)) return { refuse: node.text }
+    if (parts.every((part) => part !== undefined)) return { text: parts.map((part) => (part as { text: string }).text).join("") }
+    return
+  }
+  const user = node.type === "word" ? /^~([A-Za-z_][\w.-]*)(?=\/|$)/.exec(node.text) : null
+  if (user) {
+    // `~name` is another user's home unless it names the current user.
+    if (user[1] !== currentUser()) return { refuse: node.text }
+    const rest = node.text.slice(user[0].length)
+    if (/[~$*?{\[]/.test(rest.replace(/\\./gs, ""))) return
+    return { text: homedir() + rest.replace(/\\(.)/gs, "$1") }
+  }
+  const text = literalWord(node)
+  return text === undefined ? undefined : { text }
+}
+
+function currentUser() {
+  try {
+    return userInfo().username
+  } catch {
+    return undefined
+  }
+}
+
+function expandHome(text: string) {
+  return text === "~" || text.startsWith("~/") ? homedir() + text.slice(1) : text
+}
+
+// The path-like values one argument carries: the word itself, the value of `--x=v` / `key=v`,
+// or the attached value of a short option (`-o/path`).
+function argumentValues(arg: string) {
+  if (arg.startsWith("--")) {
+    const eq = arg.indexOf("=")
+    return eq > 0 ? [arg.slice(eq + 1)] : []
+  }
+  if (arg.startsWith("-")) {
+    const attached = arg.slice(2)
+    return /^-[A-Za-z]/.test(arg) && /^(~|\.\.|.*\/)/.test(attached) ? [attached] : []
+  }
+  const assignment = /^[A-Za-z_][\w.-]*=(.*)$/s.exec(arg)
+  return assignment ? [arg, assignment[1]] : [arg]
+}
+
+// Literal pieces of an assignment value; `PATH`-style values are split on `:`.
+function assignmentValues(value: Node | null): string[] {
+  if (!value) return []
+  const literal = guardLiteral(value)
+  let text = literal && "text" in literal ? literal.text : value.text
+  if (!literal && value.type === "string") text = text.slice(1, -1)
+  return text
+    .split(":")
+    .filter((piece) => piece && !/[$`*?[]/.test(piece.replace(/\\./gs, "")))
+    .map((piece) => expandHome(piece.replace(/\\(.)/gs, "$1")))
+}
+
+interface GuardScan {
+  candidates: Set<string>
+  refusals: Set<string>
+  stack: string[][]
+  depth: number
+  parse: (text: string) => Node | undefined
+}
+interface Cwds {
+  // directories after the node when it succeeded, and in any outcome
+  ok: string[]
+  any: string[]
+}
+
+const union = (...lists: string[][]) => [...new Set(lists.flat())].slice(0, MAX_TRACKED_DIRECTORIES)
+const same = (cwds: string[]): Cwds => ({ ok: cwds, any: cwds })
+
+function addCandidate(scan: GuardScan, cwds: string[], value: string) {
+  const target = expandHome(value)
+  for (const cwd of cwds) scan.candidates.add(path.resolve(cwd, target))
+}
+
+// Walk the script in execution order, tracking the directories each command can run in.
+// `cd x && y` runs y only in x; `cd x; y` and `cd x || y` keep the earlier directory possible.
+function scanNode(node: Node | null, cwds: string[], scan: GuardScan): Cwds {
+  if (!node) return same(cwds)
+  switch (node.type) {
+    case "command":
+      return scanCommand(node, cwds, scan)
+    case "variable_assignment":
+      for (const value of assignmentValues(node.childForFieldName("value"))) addCandidate(scan, cwds, value)
+      scanChildren(node, cwds, scan)
+      return same(cwds)
+    case "file_redirect":
+      // `destination` holds several words when arguments follow the target (`cat > out /x`).
+      for (const child of node.namedChildren) {
+        if (!child || child.type === "file_descriptor") continue
+        const literal = guardLiteral(child)
+        if (literal && "refuse" in literal) scan.refusals.add(literal.refuse)
+        else if (literal) addCandidate(scan, cwds, literal.text)
+      }
+      scanChildren(node, cwds, scan)
+      return same(cwds)
+    case "redirected_statement": {
+      const body = node.childForFieldName("body")
+      const redirects = node.namedChildren.filter((child): child is Node => !!child && child.id !== body?.id)
+      return scanRedirected(body, redirects, cwds, scan)
+    }
+    case "list": {
+      const [left, right] = node.namedChildren
+      const or = node.children.some((child) => child?.type === "||")
+      const l = scanNode(left, cwds, scan)
+      const r = scanNode(right, or ? l.any : l.ok, scan)
+      return { ok: or ? union(l.ok, r.ok) : r.ok, any: union(l.any, r.any) }
+    }
+    case "pipeline":
+    case "subshell":
+    case "command_substitution":
+    case "process_substitution":
+    case "function_definition": {
+      // Pipeline stages, subshells and function bodies keep their directory changes local.
+      if (node.type === "pipeline") scanChildren(node, cwds, scan)
+      else scanSequence(node, cwds, scan)
+      return same(cwds)
+    }
+    case "for_statement":
+      for (const value of node.childrenForFieldName("value")) addWord(scan, cwds, value)
+      return same(scanSequence(node, cwds, scan))
+    case "case_statement":
+      addWord(scan, cwds, node.childForFieldName("value"))
+      return same(scanSequence(node, cwds, scan))
+    case "test_command": {
+      const stack = [...node.namedChildren]
+      while (stack.length) {
+        const child = stack.pop()
+        if (!child) continue
+        if (GUARD_WORD_TYPES.includes(child.type)) addWord(scan, cwds, child)
+        else stack.push(...child.namedChildren)
+      }
+      scanChildren(node, cwds, scan)
+      return same(cwds)
+    }
+    default:
+      return same(scanSequence(node, cwds, scan))
+  }
+}
+
+// Children in order, each starting where the previous may have left off.
+function scanSequence(node: Node, cwds: string[], scan: GuardScan) {
+  let next = cwds
+  for (const child of node.namedChildren) next = scanNode(child, next, scan).any
+  return next
+}
+
+// Children that cannot change the directory (substitutions inside words, pipeline stages).
+function scanChildren(node: Node, cwds: string[], scan: GuardScan) {
+  for (const child of node.namedChildren) scanNode(child, cwds, scan)
+}
+
+// The parser attaches `a && b > f` and `a | b > f` to the whole list; the shell applies the
+// redirection to the last command only, in that command's directory.
+function scanRedirected(body: Node | null, redirects: Node[], cwds: string[], scan: GuardScan): Cwds {
+  if (body?.type === "list") {
+    const [left, right] = body.namedChildren
+    const or = body.children.some((child) => child?.type === "||")
+    const l = scanNode(left, cwds, scan)
+    const r = scanRedirected(right, redirects, or ? l.any : l.ok, scan)
+    return { ok: or ? union(l.ok, r.ok) : r.ok, any: union(l.any, r.any) }
+  }
+  if (body?.type === "pipeline") {
+    const stages = body.namedChildren.filter((child): child is Node => !!child)
+    for (const stage of stages.slice(0, -1)) scanNode(stage, cwds, scan)
+    scanRedirected(stages.at(-1) ?? null, redirects, cwds, scan)
+    return same(cwds)
+  }
+  for (const redirect of redirects) scanNode(redirect, cwds, scan)
+  return scanNode(body, cwds, scan)
+}
+
+function addWord(scan: GuardScan, cwds: string[], word: Node | null) {
+  const literal = guardLiteral(word)
+  if (!literal) return
+  if ("refuse" in literal) return void scan.refusals.add(literal.refuse)
+  for (const value of argumentValues(literal.text)) addCandidate(scan, cwds, value)
+}
+
+function scanNested(script: string, cwds: string[], scan: GuardScan): Cwds {
+  if (scan.depth >= MAX_SHELL_DEPTH) {
+    scan.refusals.add(`shell commands nested more than ${MAX_SHELL_DEPTH} levels deep`)
+    return same(cwds)
+  }
+  const root = scan.parse(script)
+  if (!root) return same(cwds)
+  scan.depth++
+  try {
+    return scanNode(root, cwds, scan)
+  } finally {
+    scan.depth--
+  }
+}
+
+function scanCommand(node: Node, cwds: string[], scan: GuardScan): Cwds {
+  // Every directory a command may run in; substitutions and assignments inside it.
+  for (const cwd of cwds) scan.candidates.add(cwd)
+  scanChildren(node, cwds, scan)
+  const words = guardWords(node)
+  const literals = words.map(guardLiteral)
+  const text = (i: number) => {
+    const literal = literals[i]
+    return literal && "text" in literal ? literal.text : undefined
+  }
+  // Wrappers (`env FOO=1 nohup python …`) are followed, through their options, to the program they run.
+  const programs: number[] = []
+  for (let i = 0; i < words.length && text(i) !== undefined; ) {
+    programs.push(i)
+    if (!WRAPPERS.has(path.basename(text(i)!))) break
+    i++
+    while (i < words.length && /^(-|[A-Za-z_]\w*=|\d+[smhd]?$)/.test(text(i) ?? "")) i++
+  }
+  const program = programs.at(-1) ?? 0
+  for (const index of programs) {
+    const name = text(index)!
+    if (!name.includes("/")) continue
+    for (const cwd of cwds) {
+      const target = path.resolve(cwd, expandHome(name))
+      if (!SYSTEM_BIN_DIRS.has(path.dirname(target))) scan.candidates.add(target)
+    }
+  }
+  const name = text(program)
+  const base = name === undefined ? undefined : path.basename(name)
+  const start = program + 1
+
+  if (base === "cd" || base === "pushd") {
+    const target = base === "pushd" && start >= words.length ? undefined : cdTarget(words.slice(program))
+    if (target === undefined || target === "-" || /^[+-]\d+$/.test(target)) return same(cwds)
+    const fresh = [...new Set(cwds.map((cwd) => path.resolve(cwd, target)))]
+    if (base === "pushd") scan.stack.push(cwds)
+    for (const dir of fresh) scan.candidates.add(dir)
+    return { ok: fresh, any: union(fresh, cwds) }
+  }
+  if (base === "popd") {
+    const previous = scan.stack.pop()
+    return previous ? { ok: previous, any: union(previous, cwds) } : same(cwds)
+  }
+  const literalArgs = words.slice(start).map((_, i) => text(start + i))
+  if (base && SHELLS.has(base)) {
+    // `bash -c 'script'` / `bash -lc 'script'`: the first operand after the options is the script.
+    let i = 0
+    let command = false
+    while (i < literalArgs.length && literalArgs[i]?.startsWith("-")) {
+      if (/^-[A-Za-z]*c[A-Za-z]*$/.test(literalArgs[i]!)) command = true
+      i++
+    }
+    const script = literalArgs[i]
+    if (command && script !== undefined) scanNested(script, cwds, scan)
+  }
+  if (base === "eval" && literalArgs.every((arg) => arg !== undefined)) {
+    // `eval` runs in this shell, so its directory changes carry on.
+    return scanNested(literalArgs.join(" "), cwds, scan)
+  }
+
+  // The program or pattern operand of awk/sed/grep is not a path.
+  const skip = new Set<number>(programs)
+  if (base && PATTERN_PROGRAMS.has(base)) {
+    let explicit = false
+    for (let i = start; i < words.length; i++) {
+      const arg = text(i)
+      if (arg === undefined) break
+      if (arg === "--") {
+        if (!explicit) skip.add(i + 1)
+        break
+      }
+      if (PATTERN_OPTIONS.includes(arg)) {
+        explicit = true
+        // `-e PROGRAM` holds a program; `-f FILE` names a file and stays checked.
+        if (arg !== "-f" && arg !== "--file") skip.add(i + 1)
+        i++
+        continue
+      }
+      if (PATTERN_VALUE_OPTIONS.includes(arg)) {
+        i++
+        continue
+      }
+      if (arg.startsWith("-")) continue
+      if (!explicit) skip.add(i)
+      break
+    }
+  }
+  const wrapped = programs.length > 1 || (base !== undefined && WRAPPERS.has(base))
+  for (let i = 1; i < words.length; i++) {
+    if (skip.has(i)) continue
+    const literal = literals[i]
+    if (!literal) continue
+    if ("refuse" in literal) {
+      scan.refusals.add(literal.refuse)
+      continue
+    }
+    for (const value of argumentValues(literal.text)) {
+      // A wrapper's system-binary argument (`nohup /usr/bin/true`) is not an escape.
+      if (wrapped && path.isAbsolute(value) && SYSTEM_BIN_DIRS.has(path.dirname(value))) continue
+      addCandidate(scan, cwds, value)
+    }
+  }
+  return same(cwds)
+}
+
+// Literal path candidates a command names, resolved against the directory each part runs in.
+export function commandPathCandidates(root: Node, cwd: string, parse: (text: string) => Node | undefined) {
+  const scan: GuardScan = { candidates: new Set(), refusals: new Set(), stack: [], depth: 0, parse }
+  scanNode(root, [cwd], scan)
+  return {
+    candidates: [...scan.candidates].filter((target) => !isDevice(target)),
+    refusals: [...scan.refusals],
+  }
+}
+
+// Out-of-project locations a command names, with whether each exists yet.
+async function externalCommandPaths(candidates: string[], abort: AbortSignal) {
+  if (candidates.length > MAX_GUARD_CANDIDATES)
+    throw new Error(
+      `external_directory is denied: this command names more than ${MAX_GUARD_CANDIDATES} paths to check. Split it into smaller commands.`,
+    )
+  const found: { path: string; dir: string; exists: boolean }[] = []
+  for (const target of candidates) {
+    abort.throwIfAborted()
+    const real = await realpathThroughParents(target)
+    if (!real || isDevice(real)) continue
+    // Text whose first segment does not exist (an awk or sed program such as `/x/ {print}`)
+    // names no real location.
+    const first = firstSegmentPath(real)
+    if (first && !(await fs.stat(first).catch(() => undefined))) continue
+    if (Instance.containsPath(real)) continue
+    const stat = await fs.stat(real).catch(() => undefined)
+    found.push({ path: real, dir: stat?.isDirectory() ? real : path.dirname(real), exists: !!stat })
+  }
+  return found
+}
+
+function directoryGlob(dir: string) {
+  // Preserve POSIX-looking paths with /s, even on Windows
+  if (dir.startsWith("/")) return `${dir.replace(/[\\/]+$/, "")}/*`
+  return path.join(dir, "*")
 }
 // altimate_change end
 
@@ -417,17 +837,53 @@ export const BashTool = Tool.define("bash", async () => {
         }
       }
 
+      // altimate_change start — apply a configured `external_directory: deny` to every path a command names
+      const guarded = externalDirectoryDenied(ctx.permissions)
+      const externalPaths = new Set<string>()
+      if (guarded) {
+        // The guard judges every path itself, each in the directory its command runs in, so the
+        // operand check's directories (which keep pre-`cd` directories as aliases) are replaced.
+        directories.clear()
+        const p = await parser()
+        const { candidates, refusals } = commandPathCandidates(
+          tree.rootNode,
+          cwd,
+          (text) => p.parse(text)?.rootNode ?? undefined,
+        )
+        const denied = new Set<string>(refusals)
+        for (const item of await externalCommandPaths(candidates, ctx.abort)) {
+          externalPaths.add(item.path)
+          // Paths here are symlink-resolved, so rules are matched with their resolved spelling too.
+          // A directory that does not exist yet is also matched as itself (`ls <allowed-dir>`).
+          const dirs = item.exists ? [item.dir] : [item.dir, item.path]
+          const allowed = dirs.find(
+            (dir) =>
+              PermissionEvaluate.evaluateResolved("external_directory", directoryGlob(dir), ctx.permissions!).action !==
+              "deny",
+          )
+          if (allowed === undefined) denied.add(item.path)
+          else directories.add(allowed)
+        }
+        if (denied.size > 0) {
+          throw new Error(
+            `external_directory is denied: this command touches ${denied.size === 1 ? "a path" : "paths"} outside the project (${Instance.worktree === "/" ? Instance.directory : Instance.worktree}): ${[...denied].join(", ")}. ` +
+              "Use paths inside the project instead.",
+          )
+        }
+      }
+      // altimate_change end
+
       if (directories.size > 0) {
-        const globs = Array.from(directories).map((dir) => {
-          // Preserve POSIX-looking paths with /s, even on Windows
-          if (dir.startsWith("/")) return `${dir.replace(/[\\/]+$/, "")}/*`
-          return path.join(dir, "*")
-        })
+        // altimate_change start — one directory-to-glob rule for the guard and the request
+        const globs = Array.from(directories).map(directoryGlob)
+        // altimate_change end
         await ctx.ask({
           permission: "external_directory",
           patterns: globs,
           always: globs,
-          metadata: {},
+          // altimate_change start — under `external_directory: deny` the globs are symlink-resolved paths
+          metadata: guarded ? { resolvedPatterns: globs } : {},
+          // altimate_change end
         })
       }
 
@@ -662,6 +1118,9 @@ export const BashTool = Tool.define("bash", async () => {
           // Ordinary non-zero exits (for example, grep no-match) retain their
           // exit status without declaring an execution failure to the wrapper.
           ...(failureKind && { failure_kind: failureKind }),
+          // altimate_change end
+          // altimate_change start — out-of-project paths permitted under `external_directory: deny`
+          ...(externalPaths.size > 0 && { external_paths: [...externalPaths] }),
           // altimate_change end
         },
         output,
