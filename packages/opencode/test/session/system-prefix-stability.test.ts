@@ -1,155 +1,160 @@
-// The marked system prefix must be byte-identical across the requests of a
-// session. Text that appears on some steps only (the post-compaction task pin, the plan
-// switch reminder) is hoisted out of the user turn on non-Anthropic models; it has to land
-// after the cache breakpoint, or every first request after a compaction re-creates the
-// whole prefix at full input rate.
-import { describe, expect, spyOn, test } from "bun:test"
-import fs from "node:fs/promises"
-import path from "node:path"
-import { MockLanguageModelV3 } from "ai/test"
-import { jsonSchema, simulateReadableStream, tool } from "ai"
-import { Auth } from "../../src/auth"
-import { Config } from "../../src/config/config"
-import { Plugin } from "../../src/plugin"
-import { Instance } from "../../src/project/instance"
-import { ProjectID } from "../../src/project/schema"
-import { Provider } from "../../src/provider/provider"
-import { ProviderTransform } from "../../src/provider/transform"
-import { ModelID, ProviderID } from "../../src/provider/schema"
-import { LLM } from "../../src/session/llm"
+// The marked system prefix (the first system message, which carries the cache breakpoint) must be
+// byte-identical across the requests of a session. Text that appears on some steps only is hoisted
+// out of the user turn on models that are not Anthropic-like, which includes the Altimate gateway's
+// OpenAI-compatible model. It must ride after the breakpoint, or that request re-creates the whole
+// prefix at full input rate. Driven through the real prompt loop against a mock OpenAI-compatible
+// server, so a change to how `prompt.ts` assembles the request is what this test sees.
+import { expect } from "bun:test"
+import { Effect, Layer } from "effect"
+import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+import { Session } from "@/session/session"
 import { SessionPrompt } from "../../src/session/prompt"
-import { MessageID, SessionID } from "../../src/session/schema"
-import { SystemPrompt } from "../../src/session/system"
-import { tmpdir } from "../fixture/fixture"
+import { SessionSummary } from "../../src/session/summary"
+import { MessageID } from "../../src/session/schema"
+import { Database } from "@opencode-ai/core/database/database"
+import { SessionProjector } from "@opencode-ai/core/session/projector"
+import { testEffect } from "../lib/effect"
+import { TestLLMServer } from "../lib/llm-server"
+import { provideTmpdirServerLegacy } from "./legacy-instance"
+import { LSP } from "@/lsp/lsp"
+import { MCP } from "../../src/mcp"
+import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
+import { RuntimeFlags } from "@/effect/runtime-flags"
 
-const PIN =
-  "<system-reminder>\nOriginal task — authoritative over any summary. Optimise the marts.\n</system-reminder>"
+const mcp = Layer.succeed(
+  MCP.Service,
+  MCP.Service.of({
+    status: () => Effect.succeed({}),
+    clients: () => Effect.succeed({}),
+    tools: () => Effect.succeed({}),
+    prompts: () => Effect.succeed({}),
+    resources: () => Effect.succeed({}),
+    add: () => Effect.succeed({ status: { status: "disabled" as const } }),
+    connect: () => Effect.void,
+    disconnect: () => Effect.void,
+    remove: () => Effect.void,
+    getPrompt: () => Effect.succeed(undefined),
+    readResource: () => Effect.succeed(undefined),
+    startAuth: () => Effect.die("unexpected MCP auth"),
+    authenticate: () => Effect.die("unexpected MCP auth"),
+    finishAuth: () => Effect.die("unexpected MCP auth"),
+    removeAuth: () => Effect.void,
+    supportsOAuth: () => Effect.succeed(false),
+    hasStoredTokens: () => Effect.succeed(false),
+    getAuthStatus: () => Effect.succeed("not_authenticated" as const),
+    entry: () => Effect.succeed(undefined),
+    listMeta: () => Effect.succeed(undefined),
+    snapshot: () => Effect.succeed({ tools: {}, meta: undefined }),
+  }),
+)
 
-const gatewayModel: Provider.Model = {
-  id: ModelID.make("altimate-default"),
-  providerID: ProviderID.make("altimate-backend"),
-  api: { id: "altimate-default", url: "https://example.invalid", npm: "@ai-sdk/openai-compatible" },
-  name: "Altimate LLM Gateway",
-  family: "openai",
-  capabilities: {
-    temperature: true,
-    reasoning: false,
-    attachment: false,
-    toolcall: true,
-    input: { text: true, audio: false, image: false, video: false, pdf: false },
-    output: { text: true, audio: false, image: false, video: false, pdf: false },
-    interleaved: false,
+const lsp = Layer.succeed(
+  LSP.Service,
+  LSP.Service.of({
+    init: () => Effect.void,
+    status: () => Effect.succeed([]),
+    hasClients: () => Effect.succeed(false),
+    touchFile: () => Effect.void,
+    diagnostics: () => Effect.succeed({}),
+    hover: () => Effect.succeed(undefined),
+    definition: () => Effect.succeed([]),
+    references: () => Effect.succeed([]),
+    implementation: () => Effect.succeed([]),
+    documentSymbol: () => Effect.succeed([]),
+    workspaceSymbol: () => Effect.succeed([]),
+    prepareCallHierarchy: () => Effect.succeed([]),
+    incomingCalls: () => Effect.succeed([]),
+    outgoingCalls: () => Effect.succeed([]),
+  }),
+)
+
+const root = LayerNode.group([
+  SessionPrompt.node,
+  Session.node,
+  SessionProjector.node,
+  SessionSummary.node,
+  Database.node,
+  CrossSpawnSpawner.node,
+  LayerNode.make(TestLLMServer.layer, []),
+])
+const it = testEffect(
+  LayerNode.buildLayer(root, {
+    replacements: [
+      LayerNode.replace(MCP.node, mcp),
+      LayerNode.replace(LSP.node, lsp),
+      LayerNode.replace(RuntimeFlags.node, RuntimeFlags.layer({ experimentalEventSystem: true })),
+    ],
+  }),
+)
+
+// Declared under an Altimate provider id: only those receive the trace.
+const providerCfg = (url: string) => ({
+  provider: {
+    "altimate-backend": {
+      name: "Altimate (test)",
+      id: "altimate-backend",
+      env: [],
+      npm: "@ai-sdk/openai-compatible",
+      models: {
+        "test-model": {
+          id: "test-model",
+          name: "Test Model",
+          attachment: false,
+          reasoning: false,
+          temperature: false,
+          tool_call: true,
+          release_date: "2025-01-01",
+          limit: { context: 100000, output: 10000 },
+          cost: { input: 0, output: 0 },
+          options: {},
+        },
+      },
+      options: { apiKey: "test-key", baseURL: url },
+    },
   },
-  cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
-  limit: { context: 200_000, output: 4096 },
-  status: "active",
-  options: {},
-  headers: {},
-  release_date: "2026-01-01",
-}
-
-describe("system prefix stability", () => {
-  test("precondition: the gateway model hoists reminders and uses explicit cache breakpoints", () => {
-    expect(SessionPrompt.isAnthropicLikeModel(gatewayModel)).toBe(false)
-    expect(ProviderTransform.usesExplicitCacheBreakpoints(gatewayModel)).toBe(true)
-  })
-
-  test("a hoisted task pin rides in the trailing system message; the marked prefix is unchanged", async () => {
-    const language = new MockLanguageModelV3({
-      provider: "altimate-backend",
-      modelId: gatewayModel.api.id,
-      doStream: async () => ({
-        stream: simulateReadableStream({
-          chunks: [
-            {
-              type: "finish" as const,
-              finishReason: { unified: "stop" as const, raw: "stop" },
-              usage: {
-                inputTokens: { total: 1, noCache: 1, cacheRead: 0, cacheWrite: 0 },
-                outputTokens: { total: 0, text: 0, reasoning: 0 },
-              },
-            },
-          ],
-          initialDelayInMs: null,
-          chunkDelayInMs: null,
-        }),
-      }),
-    })
-    const mocks = [
-      spyOn(Provider, "getLanguage").mockResolvedValue(language),
-      spyOn(Provider, "getProvider").mockResolvedValue({
-        id: gatewayModel.providerID,
-        name: "Altimate AI",
-        source: "custom",
-        env: [],
-        options: {},
-        models: {},
-      }),
-      spyOn(Config, "get").mockResolvedValue({}),
-      spyOn(Auth, "get").mockResolvedValue(undefined),
-      spyOn(Plugin, "trigger").mockImplementation(async (_name, _input, output) => output),
-    ]
-    try {
-      await using dir = await tmpdir()
-      await Instance.restore(
-        {
-          directory: dir.path,
-          worktree: dir.path,
-          project: { id: ProjectID.global, worktree: dir.path, time: { created: 0, updated: 0 }, sandboxes: [] },
-        },
-        async () => {
-          const sessionID = SessionID.make("ses_prefix_stability")
-          const environment = await SystemPrompt.environment(gatewayModel)
-          // Before compaction: no reminder. After: the loop passes the pin with the environment.
-          for (const [index, hoisted] of [[], [PIN]].entries()) {
-            const result = await LLM.stream({
-              sessionID,
-              model: gatewayModel,
-              agent: { name: "test", mode: "primary", options: {}, permission: [] },
-              user: {
-                id: MessageID.make(`msg_prefix_${index}`),
-                sessionID,
-                role: "user",
-                agent: "test",
-                model: { providerID: gatewayModel.providerID, modelID: gatewayModel.id },
-                time: { created: 0 },
-              },
-              system: ["Agent instructions.", "Skill catalogue."],
-              environment: [...environment, ...hoisted],
-              messages: [{ role: "user", content: "Continue." }],
-              tools: {
-                inspect: tool({ description: "Inspect the project", inputSchema: jsonSchema({ type: "object" }) }),
-              },
-              abort: new AbortController().signal,
-            })
-            await result.consumeStream({
-              onError: (error) => {
-                throw error
-              },
-            })
-          }
-        },
-      )
-
-      expect(language.doStreamCalls).toHaveLength(2)
-      const systems = language.doStreamCalls.map((call) => call.prompt.filter((message) => message.role === "system"))
-      for (const system of systems) expect(system).toHaveLength(2)
-      // The marked prefix (first system message) is byte-identical, cache marker included.
-      expect(JSON.stringify(systems[1][0])).toBe(JSON.stringify(systems[0][0]))
-      expect(JSON.stringify(systems[0][0].providerOptions)).toContain("ephemeral")
-      expect(String(systems[1][0].content)).not.toContain("Original task")
-      // The pin is in the trailing message only.
-      expect(String(systems[0][1].content)).not.toContain("Original task")
-      expect(String(systems[1][1].content)).toContain("Original task")
-    } finally {
-      for (const mock of mocks) mock.mockRestore()
-    }
-  })
-
-  test("the loop passes hoisted reminders with the environment, never inside the system array", async () => {
-    const src = await fs.readFile(path.join(__dirname, "../../src/session/prompt.ts"), "utf-8")
-    const systemArray = src.slice(src.indexOf("const system = ["), src.indexOf("const completionInstruction"))
-    expect(systemArray).not.toContain("...hoistedReminders")
-    expect(src).toMatch(/environment: \[\.\.\.\(await SystemPrompt\.environment\(model\)\), \.\.\.hoistedReminders\]/)
-  })
+  model: "altimate-backend/test-model",
 })
+
+const SWITCH_MARK = "Your operational mode has changed from plan to build."
+
+type ChatMessage = { role: string; content: unknown }
+const chatMessages = (body: Record<string, unknown>) => (Array.isArray(body.messages) ? (body.messages as ChatMessage[]) : [])
+const text = (content: unknown) => (typeof content === "string" ? content : JSON.stringify(content))
+
+it.live("a hoisted reminder rides after the breakpoint: the first system message is unchanged", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "prefix stability",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const turn = Effect.fnUntraced(function* (agent: string, said: string) {
+        yield* llm.textMatch((hit) => JSON.stringify(hit.body).includes(said), "ok")
+        yield* prompt.prompt({ sessionID: session.id, agent, parts: [{ type: "text", text: said }] })
+      })
+      // builder, then plan, then builder again: the third turn carries the hoisted
+      // plan-to-build switch reminder; the first carries no reminder at all.
+      yield* turn("builder", "first builder turn")
+      yield* turn("plan", "plan turn")
+      yield* turn("builder", "second builder turn")
+
+      const hits = (yield* llm.hits).filter((hit) => !JSON.stringify(hit.body).includes("Generate a title"))
+      const of = (said: string) => hits.find((hit) => JSON.stringify(hit.body).includes(said))!
+      const before = chatMessages(of("first builder turn").body)
+      const after = chatMessages(of("second builder turn").body)
+      const systems = (messages: ChatMessage[]) => messages.filter((m) => m.role === "system").map((m) => text(m.content))
+      // Precondition: the reminder was sent on the later turn, as system text.
+      expect(systems(after).some((s) => s.includes(SWITCH_MARK))).toBe(true)
+      expect(systems(before).some((s) => s.includes(SWITCH_MARK))).toBe(false)
+      // The marked prefix is byte-identical; the reminder is not in it.
+      expect(before[0].role).toBe("system")
+      expect(after[0].role).toBe("system")
+      expect(text(after[0].content)).toBe(text(before[0].content))
+      expect(text(after[0].content)).not.toContain(SWITCH_MARK)
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
