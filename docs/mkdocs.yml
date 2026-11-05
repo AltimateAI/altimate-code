@@ -104,6 +104,7 @@ nav:
     - TUI: usage/tui.md
     - CLI: usage/cli.md
     - SQL Check: usage/check.md
+    - Tool CLI: usage/tool.md
     - Web UI: usage/web.md
     - CI: usage/ci-headless.md
     - IDE: usage/ide.md
@@ -186,6 +187,7 @@ nav:
     - TUI: usage/tui.md
     - CLI: usage/cli.md
     - SQL Check: usage/check.md
+    - Tool CLI: usage/tool.md
     - Web UI: usage/web.md
     - CI: usage/ci-headless.md
     - IDE: usage/ide.md

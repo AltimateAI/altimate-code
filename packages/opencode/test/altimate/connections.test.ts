@@ -1,4 +1,7 @@
 import { describe, expect, test, beforeEach, afterEach, beforeAll, afterAll, mock, spyOn } from "bun:test"
+import fs from "node:fs"
+import os from "node:os"
+import path from "node:path"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 
 // Disable telemetry via env var instead of mock.module
@@ -101,6 +104,26 @@ describe("ConnectionRegistry", () => {
     Registry.setConfigs({})
     const result = Registry.list()
     expect(result.warehouses).toEqual([])
+  })
+
+  test("releaseFileConnections closes file databases and keeps in-memory ones", async () => {
+    const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "release-files-"))
+    try {
+      Registry.setConfigs({
+        file: { type: "duckdb", path: path.join(dir, "w.duckdb"), create: true },
+        memory: { type: "duckdb", path: ":memory:" },
+      })
+      const memory = await Registry.get("memory")
+      await memory.execute("CREATE TABLE kept AS SELECT 1 AS id")
+      const file = await Registry.get("file")
+      await Registry.releaseFileConnections()
+      expect(await Registry.get("memory")).toBe(memory)
+      expect(await Registry.get("file")).not.toBe(file)
+      expect((await memory.execute("SELECT id FROM kept")).rows).toEqual([[1]])
+    } finally {
+      Registry.reset()
+      await fs.promises.rm(dir, { recursive: true, force: true })
+    }
   })
 
   test("list returns configured warehouses", () => {
@@ -218,6 +241,38 @@ describe("ConnectionRegistry", () => {
     expect(Registry.getConfig("a")).toBeUndefined()
   })
 })
+
+// altimate_change start — a bad `--connections` edit must not tear down the running registry before it is rejected
+describe("loadFile rejects an invalid file before closing anything", () => {
+  afterEach(() => Registry.reset())
+
+  test("malformed JSON leaves existing connectors in place", async () => {
+    Registry.setConfigs({ memory: { type: "duckdb", path: ":memory:" } })
+    const before = await Registry.get("memory")
+    const bad = path.join(os.tmpdir(), `bad-connections-${Date.now()}-a.json`)
+    await fs.promises.writeFile(bad, "not json")
+    try {
+      await expect(Registry.loadFile(bad)).rejects.toThrow()
+      expect(await Registry.get("memory")).toBe(before)
+    } finally {
+      await fs.promises.rm(bad, { force: true })
+    }
+  })
+
+  test("a connection missing \"type\" leaves existing connectors in place", async () => {
+    Registry.setConfigs({ memory: { type: "duckdb", path: ":memory:" } })
+    const before = await Registry.get("memory")
+    const bad = path.join(os.tmpdir(), `bad-connections-${Date.now()}-b.json`)
+    await fs.promises.writeFile(bad, JSON.stringify({ broken: { host: "x" } }))
+    try {
+      await expect(Registry.loadFile(bad)).rejects.toThrow("Invalid connection: broken")
+      expect(await Registry.get("memory")).toBe(before)
+    } finally {
+      await fs.promises.rm(bad, { force: true })
+    }
+  })
+})
+// altimate_change end
 
 // ---------------------------------------------------------------------------
 // loadFromEnv — env-var-based connection config loading

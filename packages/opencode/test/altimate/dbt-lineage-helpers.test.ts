@@ -316,6 +316,24 @@ describe("dbtLineage: error handling", () => {
     expect(result.confidence_factors).toContain("No compiled SQL found — run `dbt compile` first")
   })
 
+  test("reports the model's name, not the path used to find it, when there is no compiled SQL", () => {
+    const dir = makeTmpDir()
+    const manifest = {
+      nodes: {
+        "model.proj.uncompiled": {
+          resource_type: "model",
+          name: "uncompiled",
+          original_file_path: "models/uncompiled.sql",
+          depends_on: { nodes: [] },
+          columns: {},
+        },
+      },
+      sources: {},
+    }
+    const result = dbtLineage({ manifest_path: writeManifest(dir, manifest), model: "models/uncompiled.sql" })
+    expect(result.model_name).toBe("uncompiled")
+  })
+
   test("handles manifest with no nodes key at all", () => {
     const dir = makeTmpDir()
     const manifestPath = writeManifest(dir, { metadata: {} })

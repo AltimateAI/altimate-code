@@ -341,3 +341,7 @@ The skill list the agent sees marks each skill with where it was found:
 When more than one skill fits a task, the agent is told to load the one from the highest source in that order, and to fall back to a lower source only when nothing higher covers the task. So a skill your team added to the workspace is preferred over a similar skill another team left in the repository. The label comes from the skill's location, not from anything written in the skill.
 
 One exception: a project skill with exactly the same name as a workspace skill replaces it, and is listed as `project`. That keeps a skill you are editing in the repository, and may later publish, from being shadowed by the workspace's older copy.
+
+### Copies for Claude Code
+
+In a linked project that has a `.claude` directory, each workspace sync can also write the workspace skills into `.claude/skills/` so Claude Code finds them. Copies are written only when `ALTIMATE_CLAUDE_SKILL_SYNC=1` is set; the Altimate Code plugin for Claude Code sets it when it refreshes the workspace. The copies are marked as owned by Altimate Code and git-ignored, and they are withdrawn when you unlink the project or sign out (withdrawal runs whether or not the variable is set).

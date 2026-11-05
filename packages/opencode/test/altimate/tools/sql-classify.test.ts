@@ -370,3 +370,128 @@ test("a quoted remote-execute function name is still classified as a write", () 
 test("duckdb line comments end at CR so a following DROP is blocked", () => {
   expect(classifyAndCheck("SELECT 1 -- x\r; DROP SCHEMA s", "duckdb").blocked).toBe(true)
 })
+
+describe("literal and comment lexing where the dialect decides", () => {
+  test("BigQuery and Redshift backslash escapes keep a quote inside the literal", () => {
+    expect(classifyAndCheck("SELECT 'it\\'s' AS v", "bigquery")).toEqual({ queryType: "read", blocked: false })
+    expect(classifyAndCheck("SELECT \"a\\\"b\" AS v", "bigquery")).toEqual({ queryType: "read", blocked: false })
+    expect(classifyAndCheck("SELECT REGEXP_CONTAINS(x, r'\\d+') FROM t", "bigquery")).toEqual({ queryType: "read", blocked: false })
+    expect(classifyAndCheck("SELECT 'a\\\\b' AS v", "redshift")).toEqual({ queryType: "read", blocked: false })
+    expect(classifyAndCheck("SELECT 'x\\'' ; DROP SCHEMA s; -- '", "bigquery").blocked).toBe(true)
+    expect(classifyAndCheck("SELECT 'x\\'' ; DROP SCHEMA s; -- '", "redshift").blocked).toBe(true)
+  })
+
+  test("without a dialect, an escapable quote or # makes the SQL a write and keeps the hard block", () => {
+    expect(classifyAndCheck("SELECT 'x\\'' ; DROP SCHEMA s; -- '").blocked).toBe(true)
+    expect(classifyAndCheck("# x\nDROP SCHEMA s").blocked).toBe(true)
+    expect(classifyAndCheck("SELECT 'x\\'' AS v").queryType).toBe("write")
+    // An even run of backslashes ends the literal the same way in every dialect; # inside a literal is text.
+    expect(classifyAndCheck("SELECT 'a\\\\' AS v")).toEqual({ queryType: "read", blocked: false })
+    expect(classifyAndCheck("SELECT '#tag' AS v")).toEqual({ queryType: "read", blocked: false })
+    // Uncertain SQL is blocked on the words anywhere, however comments split it; TRUNCATE() is a function.
+    const commented = `SELECT 'x\\'' = "x'"; /* a ; b */ DROP SCHEMA ds CASCADE; -- '`
+    for (const dialect of [undefined, "databricks", "spark", "bigquery"]) expect(classifyAndCheck(commented, dialect).blocked).toBe(true)
+    expect(classifyAndCheck("SELECT TRUNCATE(amount, 2), 'a\\'b' FROM t", "mysql").blocked).toBe(false)
+    // Nothing is stripped first: in BigQuery the DROP below runs, though a naive reading sees a comment.
+    for (const dialect of ["bigquery", "databricks", undefined]) {
+      expect(classifyAndCheck("SELECT 'a\\' /* ' ; DROP SCHEMA s; -- */", dialect).blocked).toBe(true)
+      expect(classifyAndCheck("SELECT 'a\\' /* ' ; DROP /* x */ SCHEMA s; -- */", dialect).blocked).toBe(true)
+    }
+    // Linear on repeated unterminated comments.
+    const started = performance.now()
+    classifyAndCheck("DROP /* ".repeat(32_768), "bigquery")
+    expect(performance.now() - started).toBeLessThan(2_000)
+    expect(classifyAndCheck("SELECT 'x\\'' ; DROP -- c\n SCHEMA s").blocked).toBe(true)
+    // A dialect the lexer does not model gets the same guards as none.
+    for (const dialect of ["generic", "unknown"])
+      expect(classifyAndCheck("SELECT 'x\\'' ; DROP SCHEMA s; -- '", dialect).blocked).toBe(true)
+    // Oracle, Trino and Fabric neither escape quotes with a backslash nor comment with #.
+    for (const dialect of ["oracle", "trino", "fabric"]) {
+      expect(classifyAndCheck("SELECT * FROM t WHERE c LIKE '%\\_%' ESCAPE '\\'", dialect)).toEqual({ queryType: "read", blocked: false })
+      expect(classifyAndCheck("SELECT 'C:\\reports\\' AS p FROM t", dialect)).toEqual({ queryType: "read", blocked: false })
+    }
+    expect(classifyAndCheck("SELECT order# FROM orders", "oracle").queryType).toBe("read")
+    // TRUNCATE directly before ( is the function, even in SQL that cannot be read fully.
+    expect(classifyAndCheck("SELECT TRUNCATE (amount, 2), 'a\\'b' AS v FROM t", "mysql").blocked).toBe(false)
+    // Complete SQL keeps its literals: hard-deny text inside a string is not a statement.
+    expect(classifyAndCheck("SELECT '; DROP SCHEMA x' AS v", "postgres")).toEqual({ queryType: "read", blocked: false })
+  })
+})
+
+describe("each engine's own literal and statement rules", () => {
+  const cases: [string, string | undefined, "read" | "write", boolean][] = [
+    // BigQuery: a backslash keeps the next character in backticks and raw strings too.
+    ["SELECT 1 AS `a\\`b`; TRUNCATE TABLE t; -- `", "bigquery", "write", true],
+    ["SELECT 1 AS `a\\`` ; DELETE FROM ds.t WHERE TRUE; --`", "bigquery", "write", false],
+    ["SELECT r'\\'' ; DROP SCHEMA ds CASCADE; --'", "bigquery", "write", true],
+    ["SELECT r'\\d+' AS p, 'it\\'s' AS q", "bigquery", "read", false],
+    ["ASSERT ''' ' ''' IS NOT NULL; DROP SCHEMA ds CASCADE; SELECT ''' ' '''", "bigquery", "write", true],
+    ["SELECT ''' ' ''' AS a", "bigquery", "read", false],
+    // T-SQL: no E'' strings, statements need no separator.
+    ["SELECT * FROM dbo.t WHERE x = E'\\' DROP DATABASE prod --'", "sqlserver", "write", true],
+    ["SELECT * FROM dbo.t WHERE x = E'\\' DELETE FROM dbo.t --'", "fabric", "write", false],
+    ["SELECT 1 CHECKPOINT", "sqlserver", "write", false],
+    ["SELECT 1 DROP DATABASE prod", "sqlserver", "write", true],
+    ["SELECT open, close, [add], [end], updated_at FROM prices", "sqlserver", "read", false],
+    ["SELECT CASE WHEN a = 1 THEN 2 END AS x FROM #temp", "sqlserver", "read", false],
+    ["SELECT * FROM t ORDER BY id OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY", "sqlserver", "read", false],
+    ["SELECT open, close FROM prices ORDER BY close DESC", "sqlserver", "read", false],
+    ["SELECT * FROM t OPTION (USE HINT('DISABLE_OPTIMIZED_NESTED_LOOP'))", "sqlserver", "read", false],
+    ["SELECT 1 USE master", "sqlserver", "write", false],
+    ["SELECT enable, disable, rename, throw FROM t", "sqlserver", "read", false],
+    ["SELECT 1 THROW 50000, 'x', 1", "sqlserver", "write", false],
+    // Spark continues a -- comment past a backslash before the line end.
+    ["-- x\\\nSELECT '\nDELETE FROM t -- '", "databricks", "write", false],
+    ["-- x\\\nSELECT '\nDROP SCHEMA s CASCADE -- '", "spark", "write", true],
+    // Where a comment ends is uncertain, so a comment before ( does not make TRUNCATE the function.
+    ["SELECT 1 /* /* */ ' */ ; TRUNCATE /* /* */ ( */ t; -- '", "redshift", "write", true],
+    ["SELECT 'a\\'' ; TRUNCATE /* /* */ ( */ t; -- '", "postgres", "write", true],
+    // Dynamic SQL runs its string: a hard-denied statement in the literal is blocked.
+    ["EXEC('DROP DATABASE [victim]')", "sqlserver", "write", true],
+    ["EXEC(N'TRUNCATE TABLE dbo.t')", "sqlserver", "write", true],
+    ["EXECUTE IMMEDIATE 'DROP DATABASE victim'", "snowflake", "write", true],
+    ["EXECUTE IMMEDIATE \"DROP SCHEMA ds CASCADE\"", "bigquery", "write", true],
+    ["DO $$BEGIN EXECUTE 'DROP SCHEMA s CASCADE'; END$$", "postgres", "write", true],
+    ["PREPARE s FROM 'DROP DATABASE prod'", "mysql", "write", true],
+    ["EXEC dbo.refresh @note = 'nightly'", "sqlserver", "write", false],
+    // Sequence advances are writes in every dialect.
+    ["SELECT NEXT VALUE FOR dbo.s", "sqlserver", "write", false],
+    ["SELECT s.NEXTVAL FROM dual", "oracle", "write", false],
+    ["SELECT s.nextval", "snowflake", "write", false],
+    // Where comment nesting is not known (Redshift, Snowflake...), a /* inside a comment is uncertain.
+    ["SELECT 1 /* /* */ AS x, ' */ ; DROP SCHEMA s; -- ' AS y", "redshift", "write", true],
+    ["SELECT 1 /* /* */ ; DROP SCHEMA s; -- */", "snowflake", "write", true],
+    // MySQL: -- is a comment only before ASCII whitespace; U+00A0 starts an identifier.
+    ["SELECT 1 --\u00a0 FROM (SELECT 1 AS `\u00a0`) d INTO OUTFILE '/tmp/x'", "mysql", "write", false],
+    // PostgreSQL: non-ASCII characters belong to identifiers and dollar tags.
+    ["SELECT 1 AS \u00e9$$; DROP SCHEMA s CASCADE; SELECT 1 AS \u00e9$$", "postgres", "write", true],
+    ["SELECT $\u00e9$'$\u00e9$ ; DROP SCHEMA s; -- '", "postgres", "write", true],
+    // PostgreSQL with standard_conforming_strings off reads \' as an escaped quote.
+    ["SELECT '\\' -- '; DROP SCHEMA s; --", "postgres", "write", true],
+    ["SELECT 'a\\b' AS v, E'it\\'s' AS w", "postgres", "read", false],
+    // Spark/Databricks/Hive: only a quote after an odd run of backslashes is uncertain.
+    ["SELECT regexp_extract(s, '(\\\\d+)', 1), r'\\d+' FROM t", "databricks", "read", false],
+    ["SELECT 'a\\nb' AS v", "hive", "read", false],
+    // Snowflake: // comments; only $$ dollar quotes.
+    ["SELECT 1 // c\n, 2", "snowflake", "read", false],
+    ["SELECT $a$ AS v", "snowflake", "read", false],
+    // The hard deny is DROP DATABASE/SCHEMA and TRUNCATE, not other drops near a SCHEMA.
+    ["DROP TABLE IF EXISTS s.t; CREATE SCHEMA IF NOT EXISTS s2", "postgres", "write", false],
+    ["ALTER TABLE t DROP COLUMN c; GRANT USAGE ON SCHEMA s TO r", "postgres", "write", false],
+    ["SELECT 1; DROP/**/SCHEMA s", "postgres", "write", true],
+  ]
+  for (const [sql, dialect, queryType, blocked] of cases)
+    test(`${dialect}: ${sql.replace(/\n/g, "\\n")}`, () => {
+      const result = classifyAndCheck(sql, dialect)
+      expect(result.queryType).toBe(queryType)
+      expect(result.blocked).toBe(blocked)
+    })
+
+  test("stays linear on repeated TRUNCATE inside a long comment", () => {
+    const started = performance.now()
+    classifyAndCheck("TRUNCATE /* ".repeat(40_000) + "*/ ( '", "mysql")
+    // Every TRUNCATE reaching the same comment close and whitespace after it.
+    classifyAndCheck("SELECT " + "TRUNCATE /*".repeat(40_000) + "*/" + " ".repeat(400_000) + "(", "postgres")
+    expect(performance.now() - started).toBeLessThan(2_000)
+  })
+})

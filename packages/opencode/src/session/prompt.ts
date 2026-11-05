@@ -13,6 +13,8 @@ import { MessageV2, isEchoTransportError } from "./message-v2"
 import { emptyRecordPath } from "../altimate/workspace/empty-record-path"
 // altimate_change — workspace rules: the prompt path skips them in a project that cannot have any
 import { Global } from "../global"
+// altimate_change — workspace rules: their state lives in the person's state directory, not the project
+import { stateFileOf } from "../altimate/rules/state-path"
 import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "."
@@ -171,8 +173,8 @@ const boundDirectories = (): ReadonlySet<string> => {
     return new Set()
   }
 }
-const mayHaveWorkspaceRules = (root: string, directory: string) => {
-  if (existsSync(path.join(root, ".altimate-code", "learn", "workspace-rules", "rules.json"))) return true
+export const mayHaveWorkspaceRules = (root: string, directory: string) => {
+  if (existsSync(stateFileOf(canonicalDirectory(root)))) return true
   const dirs = boundDirectories()
   return dirs.size > 0 && dirs.has(canonicalDirectory(directory))
 }

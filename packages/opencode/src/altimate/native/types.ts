@@ -106,6 +106,25 @@ export interface SqlOptimizeResult {
 
 // --- Schema ---
 
+export interface SchemaListParams {
+  schema_name?: string
+  warehouse?: string
+}
+
+export interface SchemaListResult {
+  warehouse: string
+  tables: Array<{
+    schema: string
+    name: string
+    type: string
+    row_count?: number
+    row_count_estimated?: boolean
+  }>
+  schemas?: Array<{ name: string; table_count?: number }>
+  fallback?: boolean
+  truncated: boolean
+}
+
 export interface SchemaInspectParams {
   table: string
   schema_name?: string
@@ -1057,6 +1076,8 @@ export interface DbtLineageParams {
   manifest_path: string
   model: string
   dialect?: string
+  /** Also return the model's lineage graph (everything upstream and downstream, up to 500 nodes each side). */
+  include_graph?: boolean
 }
 
 export interface DbtLineageResult {
@@ -1066,6 +1087,10 @@ export interface DbtLineageResult {
   raw_lineage: Record<string, unknown>
   confidence: string
   confidence_factors: string[]
+  /** unique_ids the model depends on (`depends_on.nodes`). */
+  upstream?: string[]
+  /** With include_graph: the graph a lineage viewer draws for the model. */
+  graph?: import("./dbt/graph").LineageGraph
 }
 
 // --- dbt Profile Discovery ---
@@ -1208,6 +1233,7 @@ export const BridgeMethods = {
   "sql.format": {} as { params: SqlFormatParams; result: SqlFormatResult },
   "sql.fix": {} as { params: SqlFixParams; result: SqlFixResult },
   "sql.autocomplete": {} as { params: SqlAutocompleteParams; result: SqlAutocompleteResult },
+  "schema.list": {} as { params: SchemaListParams; result: SchemaListResult },
   "schema.inspect": {} as { params: SchemaInspectParams; result: SchemaInspectResult },
   "schema.index": {} as { params: SchemaIndexParams; result: SchemaIndexResult },
   "schema.search": {} as { params: SchemaSearchParams; result: SchemaSearchResult },

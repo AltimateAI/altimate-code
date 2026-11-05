@@ -1,6 +1,8 @@
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
+import * as Registry from "../native/connections/registry"
+import { classifyAndCheck } from "./sql-classify"
 
 export const DataDiffTool = Tool.define("data_diff", {
   description: [
@@ -85,13 +87,31 @@ export const DataDiffTool = Tool.define("data_diff", {
       .describe("For numeric partition columns: size of each bucket. E.g. 100000 splits l_orderkey into ranges of 100K. Omit for date or categorical columns."),
   }),
   async execute(args, ctx) {
-    // Require read permission — data diff executes SELECT queries
-    await ctx.ask({
-      permission: "sql_execute_read",
-      patterns: [args.source.slice(0, 120), args.target.slice(0, 120)],
-      always: ["*"],
-      metadata: {},
-    })
+    // Require read permission — data diff executes SELECT queries. Each side is checked in its own
+    // warehouse's dialect; one ask covers both when they run on the same warehouse. An omitted or
+    // empty source is the registry's first warehouse, as the diff engine resolves it.
+    const sourceWarehouse = args.source_warehouse || Registry.list().warehouses[0]?.name
+    const targetWarehouse = args.target_warehouse || sourceWarehouse
+    const sides =
+      targetWarehouse === sourceWarehouse
+        ? [{ patterns: [args.source.slice(0, 120), args.target.slice(0, 120)], warehouse: sourceWarehouse }]
+        : [
+            { patterns: [args.source.slice(0, 120)], warehouse: sourceWarehouse },
+            { patterns: [args.target.slice(0, 120)], warehouse: targetWarehouse },
+          ]
+    // The hard deny is checked on the whole SQL here; the ask's patterns are 120-character previews,
+    // which a cut inside a literal would make read differently.
+    const dialectOf = (warehouse?: string) => Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? undefined
+    for (const [sql, warehouse] of [[args.source, sourceWarehouse], [args.target, targetWarehouse]] as const)
+      if (classifyAndCheck(sql, dialectOf(warehouse)).blocked)
+        throw new Error("DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety. This cannot be overridden.")
+    for (const side of sides)
+      await ctx.ask({
+        permission: "sql_execute_read",
+        patterns: side.patterns,
+        always: ["*"],
+        metadata: { warehouse: side.warehouse, hardDenyChecked: true },
+      })
 
     try {
       const result = await Dispatcher.call("data.diff", {
@@ -113,7 +133,7 @@ export const DataDiffTool = Tool.define("data_diff", {
       if (!result.success) {
         return {
           title: "Data diff: ERROR",
-          metadata: { success: false, steps: result.steps },
+          metadata: { success: false, steps: result.steps, error: result.error },
           output: `Data diff failed: ${result.error}`,
         }
       }
