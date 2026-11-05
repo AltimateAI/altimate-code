@@ -243,11 +243,13 @@ export class Delivery {
   // outside the project. The `workspace-rules` copy in the project is only delivered where it matches: a file in the
   // working tree can come from anyone (a branch, a merge). Unreadable, it vouches for none.
   private async vouched(): Promise<Map<string, string>> {
-    const { RulesStore } = await import("../rules/store")
-    return RulesStore.vouched(this.root).catch((error) => {
+    try {
+      const { RulesStore } = await import("../rules/store")
+      return await RulesStore.vouched(this.root)
+    } catch (error) {
       log.warn("workspace rules state unreadable; team rules not delivered", { error })
       return new Map<string, string>()
-    })
+    }
   }
   // altimate_change end
 

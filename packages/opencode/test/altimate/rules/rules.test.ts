@@ -691,6 +691,26 @@ describe("the workspace API, by path", () => {
     expect((await RulesStore.read(root)).outbox).toEqual([])
   })
 
+  test("pulled rules are vouched for only while the credential that pulled them is signed in", async () => {
+    const root = await tmp()
+    const url = `http://127.0.0.1:${server.port}`
+    const signedIn = spyOn(WorkspaceState, "accountDigest").mockResolvedValue(WorkspaceState.credentialDigest(url, "t", "secret-key"))
+    try {
+      answer = () => Response.json(syncBody([rule("bbbbbbbbbbbb", "Name staging models stg_<source>.")]))
+      await RulesSync.pull(root, ready())
+      expect([...(await RulesStore.vouched(root)).values()]).toEqual(["Name staging models stg_<source>."])
+      signedIn.mockResolvedValue(WorkspaceState.credentialDigest(url, "t", "another-key"))
+      expect((await RulesStore.vouched(root)).size).toBe(0)
+      signedIn.mockResolvedValue(null)
+      expect((await RulesStore.vouched(root)).size).toBe(0)
+      // A pull that finished after someone else signed in is not stamped with its credential.
+      await RulesSync.pull(root, ready())
+      expect((await RulesStore.read(root)).pulled_with).toBeUndefined()
+    } finally {
+      signedIn.mockRestore()
+    }
+  })
+
   test("a dropped usage batch marks its sessions reported, so the same batch is not rebuilt", async () => {
     const root = await tmp()
     answer = () => Response.json(syncBody([rule("aaaaaaaaaaaa", "Name staging models stg_<source>.")]))

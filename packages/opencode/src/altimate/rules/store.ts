@@ -134,6 +134,9 @@ export const State = z.object({
   cursor: z.string().optional(),
   pending_count: z.number().int().default(0),
   pulled_at: z.string().optional(),
+  /** The credential (`credentialDigest`) the last successful pull was made with: its rules are delivered only while the
+   * same credential is signed in. */
+  pulled_with: z.string().optional(),
   last_error: z.string().optional(),
   /** Queued proposals dropped because the account or workspace changed. Its own field: a later pull's error (or its
    * success) does not erase it. Shown for `SCOPE_DROP_NOTICE_MS`. */
@@ -222,10 +225,14 @@ async function writePrivate(file: string, data: string): Promise<void> {
 }
 
 /** The team rules delivery may give from the project's `workspace-rules` copy: lesson id → text, as the state holds
- * them. None while the project is not linked (unlinked, signed out and lost access clear the state's workspace). */
+ * them. None while the project is not linked (unlinked and lost access clear the state's workspace), and none unless
+ * the credential signed in now is the one they were pulled with: a sign-out or another account stops them at once,
+ * not at the next sync. No network. */
 export async function vouched(root: string): Promise<Map<string, string>> {
   const state = await read(root)
-  if (!state.workspace) return new Map()
+  if (!state.workspace || !state.pulled_with) return new Map()
+  const { accountDigest } = await import("../workspace/state")
+  if ((await accountDigest().catch(() => null)) !== state.pulled_with) return new Map()
   return new Map(state.rules.map((rule) => [lessonId(rule.rule_key), rule.text]))
 }
 
