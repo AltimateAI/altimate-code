@@ -37,15 +37,22 @@ async function fakeMongo(
                 return { databases: Object.keys(collections).map((name) => ({ name })) }
               },
             }),
-            listCollections: (filter: { name?: string }, options: unknown) => ({
-              toArray: async () => {
+            // altimate_change start — model listCollections as a cursor, including bounded consumption
+            listCollections: (filter: { name?: string }, options: unknown) => {
+              const rows = () => {
                 collectionLists.push({ database, options })
                 if (metadata.error) throw metadata.error
                 return (collections[database] ?? [])
                   .filter((name) => !filter.name || name === filter.name)
                   .map((name) => ({ name, type: "collection" }))
-              },
-            }),
+              }
+              return {
+                toArray: async () => rows(),
+                async *[Symbol.asyncIterator]() { yield* rows() },
+                async close() {},
+              }
+            },
+            // altimate_change end
             createCollection: async (name: string) => {
               collections[database] ??= []
               collections[database].push(name)
@@ -136,6 +143,14 @@ describe("MongoDB read namespace validation", () => {
       'MongoDB database "missing" does not exist or is not accessible. Available databases: archive, test',
     )
     expect(finds).toEqual([])
+  })
+
+  test("listCollections on a missing database reports the available databases", async () => {
+    const { connector } = await fakeMongo()
+    await expect(connector.execute(JSON.stringify({ listCollections: 1, database: "missing" }))).rejects.toThrow(
+      'MongoDB database "missing" does not exist or is not accessible. Available databases: archive, test',
+    )
+    expect(await connector.execute(JSON.stringify({ listCollections: 1, database: "archive" }))).toMatchObject({ rows: [], truncated: false })
   })
 
   test("wrong collection lists available collections before opening a cursor", async () => {

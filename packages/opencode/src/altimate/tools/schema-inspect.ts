@@ -11,15 +11,18 @@ import { profileValues } from "./schema-values"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
 import { isRecord, normalizeError } from "./response-normalization"
 import { validateTableName, validateWarehouseName } from "./input-validation"
+import { firstTime } from "./session-hints"
 // altimate_change start — workspace precedence
 import * as Precedence from "../workspace/precedence"
 // altimate_change end
 
 export const SchemaInspectTool = Tool.define("schema_inspect", {
-  description: "Inspect database schema — list columns, types, and constraints for a table.",
+  description:
+    "List schemas with table/collection counts when table and schema_name are omitted; list up to 500 tables/collections with available catalog row estimates (no table scans) when schema_name is given; otherwise inspect columns, types, and constraints for one table.",
   parameters: z.object({
     table: z
       .string()
+      .optional()
       .describe(
         "Table name (optionally schema-qualified, e.g. public.orders); a warehouse qualifier such as scratch.orders resolves to that warehouse's default schema when no such schema exists",
       ),
@@ -36,7 +39,8 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
     // Pre-flight validation outranks the redirect, as it does for `sql_explain`: bad
     // input is answered here rather than forwarded to the engine tool, and an empty
     // warehouse string is never read as "the default" by the routing decision.
-    const inputError = validateTableName(args.table) ?? validateWarehouseName(args.warehouse)
+    const inputError =
+      (args.table?.trim() ? validateTableName(args.table) : null) ?? validateWarehouseName(args.warehouse)
     if (inputError) {
       return {
         title: "Schema: INVALID INPUT",
@@ -61,6 +65,76 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       // Strict-schema callers send schema_name: "" for "not specified"; a blank qualifier
       // must mean the engine default, not a schema literally named "".
       const schemaName = args.schema_name?.trim() || undefined
+      if (!args.table?.trim()) {
+        precedence = await Precedence.check(ctx.sessionID, "schema_inspect", args.warehouse)
+        if (precedence.redirect) return precedence.redirect
+        await ctx.ask({
+          permission: "schema_inspect",
+          patterns: [args.warehouse ?? "*"],
+          always: ["*"],
+          metadata: { warehouse: args.warehouse, schema_name: schemaName },
+        })
+        const result = await Dispatcher.call(
+          "schema.list",
+          { warehouse: args.warehouse, schema_name: schemaName },
+          { signal: ctx.abort, sessionID: ctx.sessionID, forceReadOnly: true },
+        )
+        const schemas = result.schemas
+        // altimate_change start — MCP: compact tables, usage hints once per session
+        const mcp = ctx.extra?.mcpClient === true
+        const rule = (text: string) => (mcp ? [] : [text])
+        const hint = (key: string, text: string) => (!mcp || firstTime(ctx.sessionID, key) ? ["", text] : [])
+        const lines = schemas
+          ? [
+              `Schemas on warehouse "${result.warehouse}":`,
+              "",
+              "Schema | Tables/collections",
+              ...rule("-------|-------------------"),
+              ...schemas.map((schema) => `${schema.name} | ${schema.table_count ?? "unavailable"}`),
+            ]
+          : [
+              `Tables on warehouse "${result.warehouse}":`,
+              "",
+              "Schema | Name | Type | Rows",
+              ...rule("-------|------|------|-----"),
+              ...result.tables.map(
+                (table) =>
+                  `${table.schema} | ${table.name} | ${table.type} | ${table.row_count === undefined ? "" : `${table.row_count}${table.row_count_estimated ? " (estimate)" : ""}`}`,
+              ),
+            ]
+        if (schemas ? !schemas.length : !result.tables.length)
+          lines.push(schemas ? "No schemas found." : "No tables or collections found.")
+        if (result.truncated)
+          lines.push(
+            "",
+            schemas
+              ? "Showing first 200 schemas of ≥201; pass schema_name to narrow the listing."
+              : "Showing first 500 of ≥501 — pass a narrower schema or inspect a table by name.",
+          )
+        if (result.fallback) lines.push("", "Driver fallback: table list may be truncated by the driver.")
+        if (schemas)
+          lines.push(
+            ...hint("list-tables", `List tables with schema_inspect(warehouse="${result.warehouse}", schema_name="<schema>").`),
+          )
+        lines.push(
+          ...hint(
+            "inspect-table",
+            `Inspect one table with schema_inspect(warehouse="${result.warehouse}", schema_name="<schema>", table="<name>").`,
+          ),
+        )
+        // altimate_change end
+        return Precedence.annotate(precedence, {
+          title: `${schemas ? "Schemas" : "Tables"}: ${result.warehouse}`,
+          metadata: {
+            success: true,
+            columnCount: 0,
+            rowCount: undefined,
+            ...(schemas ? { schemaCount: schemas.length } : { tableCount: result.tables.length }),
+            truncated: result.truncated,
+          },
+          output: lines.join("\n"),
+        })
+      }
       const target = await resolveInspectionTarget({
         table: args.table,
         schema_name: schemaName,
@@ -115,7 +189,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
       }
 
       // altimate_change start — progressive disclosure suggestions
-      let output = formatSchema(schemaResult)
+      let output = formatSchema(schemaResult, ctx.extra?.mcpClient !== true)
       if (schemaResult.resolution) output = `${schemaResult.resolution}\n\n${output}`
       if (CoreFlag.ALTIMATE_DISABLE_SCHEMA_VALUES) {
         // Says why, so the model does not retry with values:true.
@@ -140,7 +214,7 @@ export const SchemaInspectTool = Tool.define("schema_inspect", {
         )
         if (profile) output += "\n\n" + profile
       }
-      const suggestion = PostConnectSuggestions.getProgressiveSuggestion("schema_inspect")
+      const suggestion = ctx.extra?.mcpClient ? null : PostConnectSuggestions.getProgressiveSuggestion("schema_inspect")
       if (suggestion) {
         output += "\n\n" + suggestion
         PostConnectSuggestions.trackSuggestions({
@@ -173,7 +247,7 @@ function schemaError(msg: string) {
   }
 }
 
-function formatSchema(result: Partial<SchemaInspectResult>): string {
+function formatSchema(result: Partial<SchemaInspectResult>, rule = true): string {
   const lines: string[] = []
   const table = result.table ?? "unknown"
   const qualified = result.schema_name ? `${result.schema_name}.${table}` : table
@@ -183,7 +257,7 @@ function formatSchema(result: Partial<SchemaInspectResult>): string {
   }
   lines.push("")
   lines.push("Column | Type | Nullable | PK")
-  lines.push("-------|------|----------|---")
+  if (rule) lines.push("-------|------|----------|---")
   for (const col of result.columns ?? []) {
     lines.push(
       `${col.name} | ${col.data_type ?? "unknown"} | ${col.nullable ? "YES" : "NO"} | ${col.primary_key ? "YES" : ""}`,

@@ -25,6 +25,8 @@ import {
   NotConfiguredError,
   NotFoundError,
   PreconditionFailedError,
+  ADDING_REMOTE_MESSAGE,
+  addsRemoteToLink,
   type ActAs,
   type Binding,
   type DatamateRef,
@@ -208,6 +210,11 @@ export const LinkCommand = cmd({
         describe: "Create a workspace with this name (defaults to the repo name) and link to it without prompting",
         type: "string",
       })
+      .option("claude-md", {
+        describe: "Also write the CLI routing block into the project's CLAUDE.md, for clients that do not use the altimate-code MCP server",
+        type: "boolean",
+        default: false,
+      })
       .option("yes", {
         alias: "y",
         describe: "Allow replacing an existing link when --workspace or --create is used",
@@ -221,6 +228,9 @@ export const LinkCommand = cmd({
       }),
   // altimate_change end
   handler: async (args) => {
+    // altimate_change start — routing block for Claude Code
+    writeClaudeMd = args["claude-md"] === true
+    // altimate_change end
     // altimate_change start — non-interactive link
     if (args.workspace !== undefined || args.create !== undefined) {
       await linkHeadless({
@@ -428,6 +438,11 @@ export const LinkCommand = cmd({
     }
 
     const targetId = Number(pick)
+    if (targetId === currentId && existing && addsRemoteToLink(identifier, existing)) {
+      prompts.log.info(ADDING_REMOTE_MESSAGE)
+      await bindOrRebind(identifier, targetId, null, true, args.directory, actAs)
+      return
+    }
     if (targetId === currentId) {
       prompts.outro(`Kept "${currentName}" — nothing changed.`)
       return
@@ -909,10 +924,23 @@ async function bindOrRebind(
 }
 
 // altimate_change start — the workspace starter, shown once a link succeeds
+let writeClaudeMd = false
+
+/** Adds the routing block to the project's CLAUDE.md after a successful link; never fails the link. */
+async function writeRoutingBlockIfEnabled(directory: string): Promise<void> {
+  if (!writeClaudeMd) return
+  try {
+    const { writeRoutingBlock } = await import("@/altimate/tool-cli/claude-md")
+    if (await writeRoutingBlock(directory)) UI.println("Updated CLAUDE.md with altimate-code CLI routing guidance.")
+  } catch {
+    // the link itself is done
+  }
+}
 /** What the linked workspace provides and a few prompts to start with. Best-effort: a link that
  * succeeded is reported as such even when this cannot be shown. A terminal gets a framed note;
  * a log (headless, CI) gets plain lines. */
 async function printStarter(directory: string, binding: { datamateId: number; datamateName: string }): Promise<void> {
+  await writeRoutingBlockIfEnabled(directory)
   try {
     const { starterFor, wrapStarter } = await import("@/altimate/workspace/starter")
     const starter = await starterFor(directory, binding)
@@ -1093,6 +1121,11 @@ export async function linkHeadless(
   // An explicit `link` for the workspace the service already has: record the user's approval here (a fresh clone
   // only knows the link as discovered, which `workspace sync` refuses), without a redundant server rebind.
   const alreadyLinked = async (lookup: ProjectBindingLookup): Promise<void> => {
+    if (addsRemoteToLink(identifier, lookup)) {
+      deps.print(ADDING_REMOTE_MESSAGE)
+      await deps.bindOrRebind(identifier, lookup.datamate.id, null, actAs)
+      return
+    }
     let recorded: boolean
     try {
       recorded = await deps.approve(identifier, lookup, actAs)

@@ -91,7 +91,7 @@ export async function prepareReflection(root: string, name: string, applyPaths?:
     const raw = (await Store.readCandidate(root, name)) ?? (await Store.readPromoted(root, name))
     if (raw !== undefined) {
       const bad = Store.validateCandidate(name, raw, { allowOverlap: true, grandfathered: await Store.grandfathered(root, name) })
-      if (bad) throw new Error(`Unsafe lesson store: ${bad}. Repair it or run \`learn reject\` before reflecting.`)
+      if (bad) throw new Error(`Unsafe rule store: ${bad}. Repair it or run \`learn reject\` before reflecting.`)
     }
     const pb = await Store.loadCandidate(root, name, { applyPaths })
     await Store.readHarmfulFrom(root, name)

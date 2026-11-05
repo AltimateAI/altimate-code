@@ -1,6 +1,7 @@
 // altimate_change - new file
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test"
-import { SessionPrompt } from "../../src/session/prompt"
+import { SessionPrompt, mayHaveWorkspaceRules } from "../../src/session/prompt"
+import { RulesStore } from "../../src/altimate/rules/store"
 import { MessageV2 } from "../../src/session/message-v2"
 import { MessageID, PartID, SessionID } from "../../src/session/schema"
 import { ModelID, ProviderID } from "../../src/provider/schema"
@@ -208,4 +209,16 @@ describe("approved team rules attached to a user turn", () => {
       expect(JSON.stringify(await MessageV2.toModelMessages(messages, provider))).toBe(firstBytes)
     })
   }
+})
+
+describe("whether a project may have workspace rules", () => {
+  test("only a rules state in the person's own state directory counts, never a rules file in the project", async () => {
+    await using project = await tmpdir()
+    // The state's old place in the project: a branch can commit it, and it is never read.
+    await Bun.write(path.join(project.path, ".altimate-code/learn/workspace-rules/rules.json"), JSON.stringify({ version: 1 }))
+    expect(mayHaveWorkspaceRules(project.path, project.path)).toBe(false)
+    // A state written for this project, with no workspace binding for its directory.
+    await RulesStore.update(project.path, (s) => { s.personal_learning = false })
+    expect(mayHaveWorkspaceRules(project.path, project.path)).toBe(true)
+  })
 })

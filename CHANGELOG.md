@@ -5,6 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.9] - 2026-11-04
+
+**Claude Code and other coding agents can call altimate-code's data tools directly.** `altimate-code mcp serve` and the new model-free `altimate-code tool` CLI run the same tools without a second model: reads by default, writes only with `--allow-write` (over MCP, `warehouse_add` can save a connection without it). In projects linked to a workspace, what people teach the agent can become a team rule: they confirm it on a card, the workspace owner reviews it, and approved rules reach every teammate's sessions. `dbt_lineage` and `impact_analysis` now return structured lineage, and column impact traces each downstream model's compiled SQL. Also in this release: `auth logout` removes the saved Altimate gateway key, the analyst stays read-only whatever config grants, and the home screen suggests the Claude Code and Codex plugins.
+
+**Heads-up for support:**
+- **MCP and `tool run` requests are read-only unless `--allow-write`.** The database enforces read-only on PostgreSQL, SQLite and DuckDB; on other warehouses it rests on SQL classification, so stored functions with side effects are not blocked. `DROP DATABASE`, `DROP SCHEMA` and `TRUNCATE` are refused even with `--allow-write`, but that block also reads the SQL text and is best effort. Use a read-only database user for a hard guarantee. `--allow-write` is all or nothing, and statements such as `SET`, `ATTACH`, `COPY ... TO`, `INSTALL` and DuckDB `SUMMARIZE` count as writes.
+- **`mcp serve` allows `warehouse_add` without `--allow-write`**, so a calling agent can save a connection; `tool run` needs `--allow-write` for it. Tool results, including query rows and sample values, go to the calling agent's model provider. Large results are spilled to private local files.
+- **`tool run` starts a per-project background process** that keeps connections warm and exits after 10 idle minutes. `--no-daemon` runs a call in its own process, and `ALTIMATE_TOOL_DAEMON=0` turns the background process off.
+- **Workspace skill syncs can write copies into `<project>/.claude/skills/`** when `ALTIMATE_CLAUDE_SKILL_SYNC=1` is set, which the Claude Code plugin does. Skills you wrote with the same name are never touched; unlinking or signing out removes the copies.
+- **`schema_inspect` without a table** lists schemas, or up to 500 tables with catalog row estimates, instead of scanning.
+- **`learn status` prints `Learning from sessions: on|off (source)`** where it printed `Capture:`, and learn messages say "rule" where they said "lesson". The JSON output only gains a `rules` block.
+- **In a linked project, `training_save` with `kind: "rule"` shows a proposal card** instead of writing training, and `learn bootstrap` / `learn import-reviews` send what they find for review.
+- **Telemetry carries the signed-in user ID and tenant** when the machine is signed in to Altimate, so those events are not anonymous; no email address, hashed or not, is sent. One `GET /users/me` lookup per credential finds them, and none is made while telemetry is off. Rows from machines that are not signed in keep the machine id. Turning telemetry off sends one final `telemetry_opted_out` event (machine id and opt-out source only), then nothing.
+- **The analyst's built-in write tools stay off whatever config grants**, including `"*": "allow"`: file edits, SQL writes, memory saves, shell and delegation. Configs that relied on a grant to give the analyst more power will see those tools denied. `task` from the analyst is limited to `data-explorer`; MCP and custom tools still follow config.
+- **A symlink inside an allowed external folder that points elsewhere now asks** for the folder it points to, for every agent.
+- **`auth logout` removes the saved gateway key**, `~/.altimate/altimate.json`, MCP server entries that carry that key (add the datamate again after signing in), and the cached telemetry identity.
+- **Ctrl+C during browser sign-in exits with status 130**, not 0.
+- **The Altimate LLM Gateway free-token allowance is 1M tokens.**
+- **Read-only `dbt_lineage` calls never start the dbt adapter**, which runs `dbt deps`, writes `target/` and can run macro SQL: MCP and `tool run` calls without `--allow-write`, and plan-mode calls, answer from the manifest. With writes allowed it asks the adapter when the installed dbt integration has `getModelLineage`, and otherwise answers from the manifest and says why.
+- **`impact_analysis` with a column can report models as `uncertain` or `untraced`** instead of a confident answer, for example a `select *` from a parent whose schema.yml doesn't list the column, a NATURAL JOIN, or a model with no compiled SQL. A parent's whole row passed as a value (`to_json(o)`) is not caught yet.
+
+### Added
+
+- **`altimate-code tool` CLI and expanded `mcp serve`.** `tool list`, `schema`, `run`, `context` and `daemon` call the same tools as `mcp serve` through one adapter, one allow-list and one permission layer. Default MCP tools now include `impact_analysis`, `dbt_lineage`, `altimate_core_column_lineage`, `schema_detect_pii`, `data_diff`, `altimate_core_equivalence` and `sql_translate`; `--all-tools` exposes the full list. Workspace tools are on for `tool` commands in linked projects (`--no-workspace-tools` turns them off) and opt-in for `mcp serve` (`--workspace-tools`). `link --claude-md` writes routing guidance into `CLAUDE.md`. (#1609)
+- **Workspace rules.** A proposal card in the TUI (`ctrl+x p`), owner review with approve, edit and "Not a rule", `/rules` and a sidebar `rules:` line, `learn sync`, and approved rules delivered into every session with their `applies_to` paths. See "Workspace rules" in the learn docs. (#1605)
+- **Plugin tips on the home screen** for Claude Code and Codex, and a README section on using altimate-code from them. (#1625)
+- **Workspace telemetry** for linking, usage, the engine and the starter. The telemetry reference lists every new event. (#1513)
+- **Signed-in identity on telemetry and a final opt-out event.** (#1501)
+- **Structured `dbt_lineage`.** It returns the model's nodes, columns and column edges (3 hops each way) as structured content when the dbt integration answers, and its own lineage fields from the manifest otherwise. It finds a model by name, unique_id or project-relative SQL path. `include_graph` adds the whole graph, up to 500 nodes each side; over MCP the graph is left out. (#1637, #1635)
+- **Column reach in `impact_analysis`.** With a column, it traces each downstream model's and snapshot's compiled SQL in dependency order, following renames, and returns `column_reach`: certain readers with the output columns they feed, `uncertain` and `untraced` models, and the exposures on each. It also returns `downstream` and `exposures`. Over MCP both tools declare an output schema and return structured content capped at 60 KB. (#1635)
+
+### Changed
+
+- **The analyst stays read-only.** After config, it denies again every built-in tool that changes state, so a wildcard or explicit grant cannot turn them back on, and it can read the files that ship with global skills. (#1597)
+- **External-directory checks follow symlinks**, so a link in an allowed folder cannot reach a folder that is not allowed. (#1597)
+- **The analyst asks for high reasoning effort** on adaptive-thinking models unless the user or agent config sets one. (#1609)
+
+### Fixed
+
+- **`auth logout` removes the saved Altimate gateway key** and the MCP entries that carry it. Sign-out now also removes the cached telemetry identity, as the telemetry reference says. (#1606)
+- **Ctrl+C during browser sign-in exits 130** instead of reporting success. (#1624)
+- **Docs and the TUI show the 1M free-token allowance.** (#1611)
+
 ## [0.12.8] - 2026-10-23
 
 **Claude Code can work through your Altimate workspace.** With the Altimate Code plugin installed and the project linked, tasks Claude hands to altimate-code run with the workspace's skills, knowledge and shared memory, and a headless `run` no longer hangs waiting on a stdin nobody writes to. Also in this release: the curl and PowerShell installers add an `altimate-code` command, the analyst can read workspace memory, `learn status` shows whether a lesson keeps being corrected, `schema_inspect` shows what column values look like, and SQL policy checks fail closed on statements they cannot analyze.

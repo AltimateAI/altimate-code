@@ -73,6 +73,18 @@ export interface ProjectBindingLookup extends GetBindingResponse {
   matchedBy: MatchedIdentifier
 }
 
+/**
+ * True when the link was found by path, has no remote, and the project has one now (a remote added after linking).
+ * Binding the same workspace again (`POST /bind`) stores the remote on the existing link; workspace rules are scoped
+ * by remote and stay off until it has one. A link with a different remote is not changed here: that is a re-link.
+ */
+export function addsRemoteToLink(identifier: ProjectIdentifier, existing: ProjectBindingLookup): boolean {
+  return existing.matchedBy === "path" && !!identifier.repoRemote && !existing.binding.repo_remote
+}
+
+/** What a link prints or shows when it adds the project's remote to a path link. */
+export const ADDING_REMOTE_MESSAGE = "This project is linked by its path. Adding its git remote to the link, so workspace rules can sync."
+
 export interface ConflictDetail {
   message: string
   existing_datamate_id?: number
@@ -136,15 +148,23 @@ export class PreconditionFailedError extends Error {
   }
 }
 
+/** `detail` is the response's `detail` value when it was an object (`{"code": ...}`). A route that
+ * does not exist answers FastAPI's bare string, so callers can tell the two 404s apart. */
 export class NotFoundError extends Error {
-  constructor(msg = "Not found") {
+  constructor(
+    msg = "Not found",
+    public readonly detail?: Record<string, unknown>,
+  ) {
     super(msg)
     this.name = "NotFoundError"
   }
 }
 
 export class ForbiddenError extends Error {
-  constructor(msg = "Forbidden") {
+  constructor(
+    msg = "Forbidden",
+    public readonly detail?: Record<string, unknown>,
+  ) {
     super(msg)
     this.name = "ForbiddenError"
   }
@@ -157,6 +177,8 @@ export class WorkspaceApiError extends Error {
     /** Where it failed: on the wire before any answer, or in an answer the server gave (its
      * status, when known, is `status`). A statusless error is transport unless said otherwise. */
     public readonly failure: "transport" | "response" = status === undefined ? "transport" : "response",
+    // altimate_change — workspace rules: a coded `detail` object, read by `rules/api.ts` `classify`
+    public readonly detail?: Record<string, unknown>,
   ) {
     super(msg)
     this.name = "WorkspaceApiError"
@@ -467,6 +489,7 @@ async function req<T>(
     }
   }
   const detail = (json as { detail?: unknown } | undefined)?.detail
+  const coded = typeof detail === "object" && detail !== null && !Array.isArray(detail) ? (detail as Record<string, unknown>) : undefined
   if (!res.ok && !opts.expectedStatuses?.includes(res.status)) {
     reportApiError({
       endpoint,
@@ -475,8 +498,8 @@ async function req<T>(
       workspaceId: bodyWorkspaceId,
     })
   }
-  if (res.status === 404) throw new NotFoundError(typeof detail === "string" ? detail : "Not found")
-  if (res.status === 403) throw new ForbiddenError(typeof detail === "string" ? detail : "Forbidden")
+  if (res.status === 404) throw new NotFoundError(typeof detail === "string" ? detail : "Not found", coded)
+  if (res.status === 403) throw new ForbiddenError(typeof detail === "string" ? detail : "Forbidden", coded)
   if (res.status === 409) {
     const d =
       typeof detail === "object" && detail !== null
@@ -495,6 +518,8 @@ async function req<T>(
     throw new WorkspaceApiError(
       typeof detail === "string" ? detail : `Request failed with status ${res.status}`,
       res.status,
+      "response",
+      coded,
     )
   }
   // A 2xx with an empty (or unparseable) body is not the same as a resource.

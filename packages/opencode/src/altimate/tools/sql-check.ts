@@ -1,12 +1,10 @@
+import { readSql } from "./read-only-sql"
+export { readSql } from "./read-only-sql"
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { zodToJsonSchema } from "../tool-zod-compat"
 import * as Precedence from "../workspace/precedence"
 import * as Registry from "../native/connections/registry"
-import { classifyAndCheck, isSingleQuery } from "./sql-classify"
-import { maskSql, tokenizeSql } from "./sql-tokenize"
-import { sqlFunctionCalls } from "./sql-functions"
-import { hasSideEffectFunction } from "./sql-function-policy"
 import { executeQuery, type QueryContext } from "../native/query-execution"
 
 const column = z
@@ -115,47 +113,6 @@ function required<T>(value: T | undefined, name: string): T {
   return value
 }
 
-/** Ignore quoted content while checking structure; preserve the original SELECT and its LIMIT. */
-export function readSql(sql: string, dialect?: string): string {
-  const { queryType, blocked } = classifyAndCheck(sql, dialect)
-  // Independently reject write CTEs, SELECT INTO and statement/CTE escapes before
-  // embedding user SQL, even when the parser reports a query category.
-  const { tokens, complete } = tokenizeSql(sql, dialect)
-  const masked = maskSql(tokens)
-  // Keep sql_check's existing stricter ban on dynamic query(), even when the
-  // classifier can prove a literal body read-only. All calls use real code '(' tokens.
-  const unsafeFunction = sqlFunctionCalls(sql, dialect).some(
-    (call) => call.escaped || call.name === "query" || hasSideEffectFunction(call.name),
-  )
-  const body = masked.trim().replace(/;$/, "").trim()
-  let depth = 0
-  let balanced = true
-  for (const char of body) {
-    if (char === "(") depth++
-    if (char === ")" && --depth < 0) balanced = false
-  }
-  if (
-    blocked ||
-    queryType !== "read" ||
-    !isSingleQuery(sql, dialect) ||
-    !complete ||
-    unsafeFunction ||
-    !balanced ||
-    depth !== 0 ||
-    !/^(SELECT|WITH)\b/i.test(body) ||
-    body.includes(";") ||
-    /\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|COPY|ATTACH|DETACH|PRAGMA|VACUUM|CALL|DO|INTO|INSTALL|LOAD|EXPORT|IMPORT|GRANT|REVOKE)\b/i.test(
-      body,
-    ) ||
-    /\bREPLACE\b(?!\s*\()/i.test(body)
-  ) {
-    throw new Error(
-      "sql_check only accepts a single read-only SELECT (or WITH ... SELECT); it never writes or fixes data.",
-    )
-  }
-  const semicolon = masked.indexOf(";")
-  return semicolon < 0 ? sql : sql.slice(0, semicolon) + sql.slice(semicolon + 1)
-}
 
 function result(check: string, metadata: Row, lines: string[]): { title: string; metadata: Row; output: string } {
   return { title: `SQL check: ${check}`, metadata: { check, ...metadata }, output: lines.join("\n") }

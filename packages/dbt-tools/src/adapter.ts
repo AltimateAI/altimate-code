@@ -207,6 +207,12 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
     new ModelDepthParser(term, client, config),
   )
 
-  await adapter.initialize()
+  try {
+    await adapter.initialize()
+  } catch (e) {
+    // initialize() can fail after the integration started a Python bridge; stop it.
+    await adapter.dispose().catch(() => {})
+    throw e
+  }
   return adapter
 }

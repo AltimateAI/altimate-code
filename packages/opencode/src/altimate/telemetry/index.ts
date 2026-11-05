@@ -761,6 +761,142 @@ export namespace Telemetry {
         /** Blocks that came from the bound workspace's cloud memory (overlay). */
         workspace_blocks?: number
       }
+    // altimate_change start — workspace rules (learn): the proposed-rule card, its answers, sync, delivery.
+    // No rule text, quotes, paths or globs: enums, counts and the card's random id. The answering client is
+    // the envelope's process-level `source` (`cli` for the TUI, `datamates` for the VS Code extension).
+    | {
+        /** A proposed-rule card was shown, or shown again for the same wording (`repeat`). */
+        type: "rule_proposal_shown"
+        timestamp: number
+        session_id: string
+        card_id: string
+        /** `remember`: the person asked; `shown_rule`: corrected a team rule shown in the session;
+         *  `recurrence`: the same topic corrected in 2+ sessions. */
+        trigger: "remember" | "shown_rule" | "recurrence"
+        change: "add" | "edit" | "retire"
+        /** "Save as: Memory · Team rule · Skip" (the wording said neither). */
+        choose: boolean
+        linked: boolean
+        is_owner: boolean
+        actions: ("send" | "approve" | "edit" | "dismiss" | "save_local" | "save_memory")[]
+        weakens_verification: boolean
+        evidence_sessions: number
+        from_correction: boolean
+        applies_to_count: number
+        chars: number
+        repeat: boolean
+      }
+    | {
+        /** A card was answered, or closed without an answer (`expired`, `closed`). */
+        type: "rule_proposal_answered"
+        timestamp: number
+        session_id: string
+        card_id: string
+        trigger: "remember" | "shown_rule" | "recurrence"
+        action: "send" | "approve" | "approve_anyway" | "edit" | "dismiss" | "save_local" | "save_memory" | "expired" | "closed"
+        /** `ok`, or why the reply did not go through (the card stays open). */
+        status: "ok" | "busy" | "not_available" | "verification_flagged" | "invalid_text" | "refused" | "failed"
+        /** For `ok` on a closing action: what happened. */
+        outcome?:
+          | "sent"
+          | "queued"
+          | "approved"
+          | "approve_failed"
+          | "approve_retry"
+          | "target_changed"
+          | "exists"
+          | "dismissed"
+          | "saved_memory_project"
+          | "saved_memory_global"
+          | "saved_local"
+          | "saved_unanswered"
+        /** Wording edits accepted on this card so far. */
+        edits: number
+        ms_since_shown: number
+      }
+    | {
+        /** One model call that drafted a proposal after a turn (it runs in the background, so its cost is reported here). */
+        type: "rule_drafted"
+        timestamp: number
+        session_id: string
+        trigger: "shown_rule" | "recurrence"
+        status: "ok" | "failed"
+        input_tokens: number
+        output_tokens: number
+        estimated_cost: number
+        duration_ms: number
+      }
+    | {
+        /** Corrections were checked after a turn and no card was shown. */
+        type: "rule_proposal_skipped"
+        timestamp: number
+        session_id: string
+        /** Absent when the check stopped before choosing a path (a card already open, a failure). */
+        trigger?: "shown_rule" | "recurrence"
+        reason: "card_open" | "no_renderer" | "covered" | "no_draft" | "topic_dismissed" | "no_topic" | "failed"
+      }
+    | {
+        /** The agent saved something the person asked to remember (`training_save` kind rule, or the memory tool
+         *  with "remember …"): where it went. */
+        type: "rule_remember_routed"
+        timestamp: number
+        session_id: string
+        via: "training" | "memory"
+        /** `no_renderer`: no client that shows cards is attached, so the tool saved as before cards. */
+        outcome: "card" | "choose_card" | "memory" | "invalid" | "learning_off" | "not_linked" | "no_renderer" | "requests_full"
+      }
+    | {
+        /** One rules sync (push queued proposals, pull rules and reviews, report usage). */
+        type: "rules_sync"
+        timestamp: number
+        session_id: string
+        trigger: "refresh" | "session_start" | "manual" | "card" | "cli" | "import"
+        status: "off" | "skipped" | "ok" | "failed"
+        /** For `off` / `skipped`. */
+        reason?: string
+        duration_ms: number
+        rules?: number
+        pending?: number
+        sent?: number
+        refused?: number
+        queued?: number
+        notices?: number
+        usage_items?: number
+        push_failed?: boolean
+        /** A retried "Approve now" failed this run (reported apart from the proposals themselves). */
+        approval_failed?: boolean
+        usage_failed?: boolean
+      }
+    | {
+        /** Rules added to a session's context: at the start, for a request, or for a file the agent touched. */
+        type: "rules_delivered"
+        timestamp: number
+        session_id: string
+        tier: "start" | "request" | "file"
+        rules: number
+        team_rules: number
+        chars: number
+        session_rules: number
+        budget_tokens: number
+      }
+    | {
+        /** The person's own learning choice for a project (`/rules` learning on / off / follow the workspace). */
+        type: "rules_learning_changed"
+        timestamp: number
+        session_id: string
+        choice: "on" | "off" | "workspace"
+        learning: boolean
+        /** Who decides learning now. Not `source`: that is the envelope's client attribution. */
+        decided_by: "organization" | "you" | "workspace" | "default"
+      }
+    | {
+        /** A rules command: `/rules` opened in a client, or a `learn` CLI subcommand. */
+        type: "rules_command"
+        timestamp: number
+        session_id: string
+        command: string
+      }
+    // altimate_change end
     | {
         // Sent before connecting, so an attempt that hangs or ends the process is still counted.
         type: "warehouse_connect_started"
@@ -2329,7 +2465,7 @@ export namespace Telemetry {
       // (previously only wired in test fixtures, silent no-op in product).
       if (Flag.truthyEnv("ALTIMATE_TELEMETRY_DISABLED") || Flag.truthyEnv("OPENCODE_DISABLE_TELEMETRY")) {
         buffer = []
-        void recordOptOut("env")
+        optOutSend = recordOptOut("env")
         return
       }
       // Config.get() may throw outside Instance context (e.g. CLI middleware
@@ -2342,14 +2478,14 @@ export namespace Telemetry {
         const userConfig = (await Config.get()) as any
         if (userConfig.telemetry?.disabled) {
           buffer = []
-          void recordOptOut("config")
+          optOutSend = recordOptOut("config")
           return
         }
       } catch {
         const state = await TelemetryConfig.disabledState(configDirectory)
         if (state === "disabled") {
           buffer = []
-          void recordOptOut("config")
+          optOutSend = recordOptOut("config")
           return
         }
         configUnreadable = state === "unreadable"
@@ -2510,6 +2646,9 @@ export namespace Telemetry {
   // again next time; after the marker, nothing is sent until telemetry is re-enabled. Not awaited:
   // an opted-out launch must not wait on the network.
   const OPT_OUT_TIMEOUT_MS = 3_000
+  // The launch does not wait for the send, but shutdown does (bounded), so a short command such as
+  // `tool run` records the marker instead of sending the event again on every later launch.
+  let optOutSend: Promise<void> | undefined
   let optOutUnderTestRunner = false
   /** Test seam: let a suite that redirects the home directory exercise recordOptOut(). */
   export function allowOptOutUnderTestRunner(on: boolean) {
@@ -2912,6 +3051,15 @@ export namespace Telemetry {
         // init failed — nothing to flush
       }
     }
+    // altimate_change start — let an opted-out launch's final event finish before the process exits
+    if (optOutSend) {
+      const send = optOutSend
+      optOutSend = undefined
+      let timer: ReturnType<typeof setTimeout> | undefined
+      await Promise.race([send, new Promise<void>((resolve) => (timer = setTimeout(resolve, Math.min(timeoutMs ?? OPT_OUT_TIMEOUT_MS, OPT_OUT_TIMEOUT_MS))))])
+      if (timer) clearTimeout(timer)
+    }
+    // altimate_change end
     // altimate_change — first-run health: stop the stall monitor only once init has settled, so a
     // shutdown that overlaps init cannot be undone by doInit() starting the monitor afterwards.
     stopLoopMonitor()
