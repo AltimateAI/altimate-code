@@ -64,14 +64,18 @@ function diagnose(err: Error): { error: string; fix?: string } {
   return { error: msg, fix: "Run: altimate-dbt doctor" }
 }
 
+function printFailure(failed: Record<string, unknown>) {
+  console.error(String(failed.error))
+  if ("fix" in failed) console.error(String(failed.fix))
+  if (Array.isArray(failed.logs)) console.error(failed.logs.join("\n"))
+}
+
 function output(result: unknown) {
   const fmt = rest.includes("--format") && rest[rest.indexOf("--format") + 1] === "text"
   if (fmt && typeof result === "object" && result !== null) {
     const obj = result as Record<string, unknown>
     if ("error" in obj) {
-      console.error(String(obj.error))
-      if ("fix" in obj) console.error(String(obj.fix))
-      if (Array.isArray(obj.logs)) console.error(obj.logs.join("\n"))
+      printFailure(obj)
       process.exit(1)
     }
     if ("sql" in obj) {
