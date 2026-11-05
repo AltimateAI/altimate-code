@@ -2,7 +2,7 @@ import { afterEach, describe, expect } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
 import { fileURLToPath, pathToFileURL } from "url"
-import { Effect, Layer, Result, Schema } from "effect"
+import { Cause, Effect, Exit, Layer, Result, Schema } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ToolRegistry } from "@/tool/registry"
 import { Tool } from "@/tool/tool"
@@ -128,6 +128,71 @@ describe("tool.registry", () => {
       const properties = task?.jsonSchema?.properties as Record<string, { type?: string }> | undefined
       expect(properties?.background?.type).toBe("boolean")
       expect(properties?.task_id).toBeDefined()
+    }),
+  )
+
+  const taskFrom = Effect.gen(function* () {
+    const registry = yield* ToolRegistry.Service
+    const build = yield* (yield* Agent.Service).get("build")
+    if (!build) throw new Error("build agent not found")
+    return (yield* registry.tools({
+      providerID: ProviderID.opencode,
+      modelID: ModelID.make("test"),
+      agent: build,
+    })).find((tool) => tool.id === "task")!
+  })
+
+  it.instance("keeps the task description when experimental background subagents are off", () =>
+    Effect.gen(function* () {
+      const task = yield* taskFrom
+      expect(task.description).toContain("For background tasks, you will be notified automatically")
+    }),
+  )
+
+  withBackground.instance("tells the model to collect background tasks before its turn ends", () =>
+    Effect.gen(function* () {
+      const task = yield* taskFrom
+      expect(task.description).not.toContain("notified automatically")
+      expect(task.description).toContain("calling task again with its task_id")
+      expect(task.description).toContain("ending your turn cancels")
+    }),
+  )
+
+  withBackground.instance("execution follows the same flag that published the background field", () =>
+    Effect.gen(function* () {
+      const previous = {
+        flag: process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS,
+        all: process.env.OPENCODE_EXPERIMENTAL,
+      }
+      delete process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS
+      delete process.env.OPENCODE_EXPERIMENTAL
+      try {
+        const task = yield* taskFrom
+        const controller = new AbortController()
+        controller.abort()
+        const exit = yield* task
+          .execute(
+            { description: "x", prompt: "x", subagent_type: "general", background: true },
+            {
+              sessionID: SessionID.make("ses_missing"),
+              messageID: MessageID.ascending(),
+              agent: "build",
+              abort: controller.signal,
+              extra: { bypassAgentCheck: true },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(String(Cause.squash(exit.cause))).not.toContain("require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS")
+        }
+      } finally {
+        if (previous.flag !== undefined) process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = previous.flag
+        if (previous.all !== undefined) process.env.OPENCODE_EXPERIMENTAL = previous.all
+      }
     }),
   )
   // altimate_change end
