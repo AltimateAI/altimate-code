@@ -1,14 +1,18 @@
 // altimate_change - new file
 //
-// Local state for workspace rules, under `.altimate-code/learn/workspace-rules/` (git-ignored):
+// Local state for workspace rules:
 //
-// - `approved.json`: the workspace's approved rules for this repository, as lessons of the read-only
-//   `workspace-rules` store (a name reserved for it; the person's own stores, `team` included, are separate). Delivery, recurrence and `learn show` read it like any other store, so team rules reach the
-//   prompt ("Team rules"), their exposure is recorded, and "corrected again" falls out of recurrence.
-//   Only a pull writes it; reflection and promotion never target this store.
-// - `rules.json`: everything else this client keeps: the scope it was pulled for, workspace and owner,
-//   settings, revision and review cursor, the outbox of proposals not yet sent, the person's sent
-//   proposals and review notices, dismissed topics, and what usage has been reported.
+// - The state, in the person's own state directory (`<state>/workspace-rules/<sha256 of the project's real path>.json`,
+//   private to them), never in the project: the scope it was pulled for, workspace and owner, settings, revision and
+//   review cursor, the outbox of proposals not yet sent, the person's sent proposals and review notices, dismissed
+//   topics, and what usage has been reported. It is acted on with the person's credential (the outbox is sent, approvals
+//   replayed), and a file in the working tree can come from anyone: a branch, a merge or a pull can put one there.
+// - `.altimate-code/learn/workspace-rules/approved.json` (git-ignored): a copy of the workspace's approved rules for
+//   this repository, as lessons of the read-only `workspace-rules` store (a name reserved for it; the person's own
+//   stores, `team` included, are separate). Delivery, recurrence and `learn show` read it like any other store, so team
+//   rules reach the prompt ("Team rules"), their exposure is recorded, and "corrected again" falls out of recurrence.
+//   Only a pull writes it; reflection and promotion never target this store. Delivery gives a rule from it only while
+//   the state holds the same rule (`vouched`): a copy in the project is never trusted on its own.
 //
 // Writes take the learn lock (delivery reads the same directory) and are atomic.
 import { constants } from "node:fs"
@@ -188,14 +192,41 @@ const EMPTY: State = State.parse({ version: 1 })
 export function dir(root: string) {
   return Store.paths(root, WORKSPACE_RULES_STORE).learnDir
 }
-const stateFile = (root: string) => path.join(dir(root), "rules.json")
+/** The state file of the project at `root`: in the person's own state directory, keyed by the project's real path, so
+ * nothing in the working tree is ever read as this state. */
+export async function stateFile(root: string): Promise<string> {
+  // Loaded when used: `@/global` at import time would load the learn store before this module is ready.
+  const { stateFileOf } = await import("./state-path")
+  return stateFileOf(await fs.realpath(root).catch(() => path.resolve(root)))
+}
 
 /** The state file's text, or undefined when there is none. Other read errors propagate. */
 async function readRaw(root: string): Promise<string | undefined> {
-  return fs.readFile(stateFile(root), "utf8").catch((error: NodeJS.ErrnoException) => {
+  return fs.readFile(await stateFile(root), "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined
     throw error
   })
+}
+
+/** Write `file` in the state directory atomically, private to the person (the project's writer is confined to it). */
+async function writePrivate(file: string, data: string): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    await fs.writeFile(tmp, data, { mode: 0o600, flag: "wx" })
+    await fs.rename(tmp, file)
+  } catch (error) {
+    await fs.rm(tmp, { force: true }).catch(() => {})
+    throw error
+  }
+}
+
+/** The team rules delivery may give from the project's `workspace-rules` copy: lesson id → text, as the state holds
+ * them. None while the project is not linked (unlinked, signed out and lost access clear the state's workspace). */
+export async function vouched(root: string): Promise<Map<string, string>> {
+  const state = await read(root)
+  if (!state.workspace) return new Map()
+  return new Map(state.rules.map((rule) => [lessonId(rule.rule_key), rule.text]))
 }
 
 
@@ -257,11 +288,12 @@ function capSent(sent: Sent[]): Sent[] {
 export async function update(root: string, change: (state: State) => State | void): Promise<State> {
   return withLearnLock(root, async () => {
     await SafeFS.mkdir(root, dir(root))
+    const file = await stateFile(root)
     const raw = await readRaw(root)
     let current = parse(raw)
     if (!current) {
       // Written by another version or damaged: keep it for inspection rather than overwrite it.
-      await Store.writeAtomic(root, `${stateFile(root)}.unreadable-${Date.now()}`, raw!, 0o600)
+      await writePrivate(`${file}.unreadable-${Date.now()}`, raw!)
       current = structuredClone(EMPTY)
     }
     const rulesBefore = JSON.stringify(current.rules)
@@ -272,7 +304,7 @@ export async function update(root: string, change: (state: State) => State | voi
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
     if (next.scope_drop && !scopeDropShown(next.scope_drop, now)) delete next.scope_drop
-    await Store.writeAtomic(root, stateFile(root), JSON.stringify(next, null, 2) + "\n")
+    await writePrivate(file, JSON.stringify(next, null, 2) + "\n")
     // Only a linked project (or one whose rules just changed, e.g. a reset) has a mirror to write: in a project with no
     // workspace, only the state file is written (a dismissal, a learning choice), never an `approved.json` that delivery
     // would read. A mirror left behind by a write that failed after the state was saved (or by an unreadable state set

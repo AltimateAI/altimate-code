@@ -217,13 +217,13 @@ export class Delivery {
     // Older versions froze unchecked content. Rebuild unsafe snapshots on the next prepare;
     // valid snapshots retain their byte-identical prefix across resume and approved edits.
     const grandfathered = new Map<string, Pick<Lesson, "id" | "text">[]>()
-    // Read once per check, an unreadable mirror (null) included.
-    let mirrored: Promise<Set<string> | null> | undefined
+    // Read once per check.
+    let vouched: Promise<Map<string, string>> | undefined
     for (const { name, lesson } of state.shown) {
       // altimate_change start — workspace rules: a session's cached section and notes keep a team rule only while sync
-      // still vouches for it: workspaces on, and the rule still in the mirror (an edit keeps its id, so its frozen
-      // wording stays). Otherwise (workspaces off, signed out, unlinked, another workspace, retired) it is rebuilt.
-      if (name === Store.WORKSPACE_RULES_STORE && (!workspacesOn() || (await (mirrored ??= this.mirroredIds()))?.has(lesson.id) === false)) {
+      // still vouches for it: workspaces on, and the rule still in the person's rules state (an edit keeps its id, so its
+      // frozen wording stays). Otherwise (workspaces off, signed out, unlinked, another workspace, retired) it is rebuilt.
+      if (name === Store.WORKSPACE_RULES_STORE && (!workspacesOn() || !(await (vouched ??= this.vouched())).has(lesson.id))) {
         log.info("learn session snapshot rebuilt without team rules", { session })
         return undefined
       }
@@ -239,17 +239,15 @@ export class Delivery {
     return state
   }
 
-  // altimate_change start — workspace rules: the ids the team-rules mirror holds now; a missing mirror holds none, and
-  // one that cannot be read is unknown (null): the snapshot is kept rather than rebuilt on a passing read error
-  private async mirroredIds(): Promise<Set<string> | null> {
-    const raw = await read(this.root, Store.paths(this.root, Store.WORKSPACE_RULES_STORE).approved).catch(() => null)
-    if (raw === null) return null
-    if (raw === undefined) return new Set()
-    try {
-      return new Set(parse(raw).map((lesson) => lesson.id))
-    } catch {
-      return null
-    }
+  // altimate_change start — workspace rules: the team rules the person's own rules state holds now (lesson id → text),
+  // outside the project. The `workspace-rules` copy in the project is only delivered where it matches: a file in the
+  // working tree can come from anyone (a branch, a merge). Unreadable, it vouches for none.
+  private async vouched(): Promise<Map<string, string>> {
+    const { RulesStore } = await import("../rules/store")
+    return RulesStore.vouched(this.root).catch((error) => {
+      log.warn("workspace rules state unreadable; team rules not delivered", { error })
+      return new Map<string, string>()
+    })
   }
   // altimate_change end
 
@@ -273,7 +271,14 @@ export class Delivery {
         if (raw === undefined) continue
         await SafeFS.assertSafePath(this.root, Store.paths(this.root, name).usage)
         await SafeFS.assertSafePath(this.root, path.join(Store.paths(this.root, name).learnDir, "shown.jsonl"))
-        const lessons = await Store.mergeUsage(this.root, name, parse(raw))
+        let parsed = parse(raw)
+        // altimate_change start — workspace rules: only the team rules the person's rules state holds, word for word
+        if (name === Store.WORKSPACE_RULES_STORE) {
+          const vouched = await this.vouched()
+          parsed = parsed.filter((lesson) => vouched.get(lesson.id) === lesson.text)
+        }
+        // altimate_change end
+        const lessons = await Store.mergeUsage(this.root, name, parsed)
         const grandfathered = lessons.some((lesson) => lesson.text.length > MAX_TEXT)
           ? await Store.grandfathered(this.root, name, { migrate: false }) : []
         for (const lesson of lessons) {
