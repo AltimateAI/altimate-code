@@ -30,6 +30,8 @@ The agent for asking questions about your data. Truly read-only mode for safe da
 - **Schema/warehouse/finops**: All inspection tools available
 - **Workspace knowledge**: Loads workspace and project skills; reads workspace memory and views this checkout's memory audit log. Can read files bundled with skills, including global skills stored outside the project. Reloading memory syncs the local copy with the workspace, which can remove a local copy of a block the workspace archived. Saving memory is done with `builder`.
 - **Config overrides**: A permission config such as `"*": "allow"` cannot turn file edits, SQL writes (including data diffs of arbitrary queries), shell, memory saves, warehouse connection or MCP config changes, training imports, sample project setup, feedback submission, batch tool calls or delegation beyond `data-explorer` back on. A global `"*": "allow"` does turn on MCP and custom tools for analyst, including ones that write (for example a SQL MCP server); to keep them from analyst, put the `"*": "allow"` under `agent.builder` instead of the global config, or deny those tools under `agent.analyst.permission`.
+- **Reasoning effort**: On adaptive-thinking models the analyst requests `high` effort unless the agent or model options already choose one. Set `ALTIMATE_ANALYST_EFFORT` (`low`, `medium`, `high`, `xhigh`, `max`, or `off` to send none) to change it.
+- **Final answers**: `answer_commit` asks the interactive analyst once per turn to re-check any number that did not appear in tool output before the answer is committed.
 
 !!! tip
     Use `analyst` when exploring data to ensure no accidental writes. Switch to `builder` when you're ready to create or modify models.

@@ -69,7 +69,7 @@ export async function context(directory: string, learn: LearnConfig): Promise<Co
   const outcome = await resolveBindingOutcome(directory).catch(() => ({ status: "unknown" as const }))
   if (outcome.status === "unbound") return { status: "skipped", code: "not_linked", reason: "this project is not linked to a workspace", unlinked: true }
   if (outcome.status !== "bound") return { status: "skipped", code: "link_unconfirmed", reason: "the workspace link could not be confirmed" }
-  if (!outcome.binding.repoRemote) return { status: "skipped", code: "no_remote", reason: "this project has no git remote" }
+  if (!outcome.binding.repoRemote) return { status: "skipped", code: "no_remote", reason: "this project is linked by its path, and workspace rules need a git remote on the link (add a remote if the project has none, then run `altimate-code link`)" }
   const digest = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
   // The binding was resolved with the ambient credential: it must still be the captured one.
   if ((await accountDigest()) !== digest) return { status: "skipped", code: "account_changed", reason: "the Altimate account changed" }
@@ -139,6 +139,11 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
     })
     const fresh: State["notices"] = []
     let applied = true
+    // Stamped only while the credential that pulled is still the one signed in: another process may have signed in as
+    // someone else while this pull ran.
+    const { accountDigest, credentialDigest } = await import("../workspace/state")
+    const pulledWith = credentialDigest(ctx.actAs.url, ctx.actAs.instance, ctx.actAs.apiKey)
+    const current = (await accountDigest().catch(() => null)) === pulledWith
     const state = await RulesStore.update(root, (state) => {
       // Applied only to the state it was asked for: another process may have adopted another account or workspace, or
       // pulled a newer revision, while this answer was on its way.
@@ -152,6 +157,8 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.cursor = response.cursor
       state.pending_count = response.pending_count
       state.pulled_at = new Date().toISOString()
+      if (current) state.pulled_with = pulledWith
+      else delete state.pulled_with
       state.last_error = response.skipped
         ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code, or did not pass the rule lint (one line, no commands, links or secrets), and ${response.skipped === 1 ? "is" : "are"} not delivered`
         : undefined

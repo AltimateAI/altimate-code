@@ -12,6 +12,7 @@ import {
   decideForTarget,
   trackedSessionCount,
   announcedSessionCount,
+  releaseLocalSession,
   describeEngineTool,
   describeNativeTool,
   forSession,
@@ -275,6 +276,18 @@ describe("the per-session caches are bounded", () => {
     await tick()
     expect(said).toHaveLength(1)
     expect(announcedSessionCount()).toBeLessThanOrEqual(MAX_TRACKED_SESSIONS)
+  })
+
+  test("releasing a local session drops its published-line record", async () => {
+    precedenceInternals.announce = async () => {}
+    await refresh("ses_released", SNOWFLAKE_TOOLS)
+    await tick()
+    expect(announcedSessionCount()).toBe(1)
+
+    releaseLocalSession("ses_released")
+
+    expect(announcedSessionCount()).toBe(0)
+    expect(forSession("ses_released")).toBeUndefined()
   })
 
   test("two refreshes sharing one in-flight delivery record it once, not never", async () => {

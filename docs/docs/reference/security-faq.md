@@ -144,7 +144,7 @@ export ALTIMATE_CLI_MODELS_PATH=/path/to/models.json
 
 ## What telemetry is collected?
 
-Anonymous usage telemetry, including event names, token counts, timing, and error types. **Never** code, queries, credentials, file paths, or prompt content. See the full [Telemetry reference](telemetry.md) for the complete event list.
+Usage telemetry, including event names, token counts, timing, and error types. **Never** code, queries, credentials, file paths, or prompt content. See the full [Telemetry reference](telemetry.md) for the complete event list.
 
 Disable telemetry entirely:
 
@@ -164,8 +164,8 @@ export ALTIMATE_TELEMETRY_DISABLED=true
 
 ### How does Altimate Code identify users for analytics?
 
-- **Logged-in users:** Your email is SHA-256 hashed before sending. We never see your raw email.
-- **Anonymous users:** A random UUID (`crypto.randomUUID()`) is generated on first run and stored at `~/.altimate/machine-id`. This is NOT tied to your hardware, OS, or identity — it's purely random.
+- **Signed-in users:** Events carry your Altimate user ID and tenant, so they are not anonymous. No email address, hashed or not, is sent. See [User identification](telemetry.md) for how the ID is looked up and cached.
+- **Users who are not signed in:** A random UUID (`crypto.randomUUID()`) is generated on first run and stored at `~/.altimate/machine-id`. This is NOT tied to your hardware, OS, or identity — it's purely random.
 - **Both identifiers** are only sent when telemetry is enabled. Disable with `ALTIMATE_TELEMETRY_DISABLED=true` or the `telemetry.disabled` config option.
 - **No fingerprinting:** We do not use browser fingerprinting, hardware IDs, MAC addresses, or IP-based tracking.
 - **CLI auth flow:** When you sign in via `altimate auth login`, the anonymous machine ID is included in the authorization URL and associated with your account in product analytics for funnel analysis. This is suppressed when you disable telemetry — via `ALTIMATE_TELEMETRY_DISABLED=true` or the `telemetry.disabled` config option — and the machine ID is omitted from the URL entirely.
@@ -184,7 +184,7 @@ No code, queries, file paths, or personal information is included. This event he
 The install scripts (`altimate.sh/install`, `install.ps1`), the npm postinstall, and the VS Code extension's installer send nothing themselves and contact no telemetry endpoint. They only record the version and installer name to a local file that the CLI reads on its next run, so the opt-out above decides whether anything is ever transmitted.
 
 !!! warning "One caveat on the config-file opt-out"
-    The environment variables (`ALTIMATE_TELEMETRY_DISABLED`, `OPENCODE_DISABLE_TELEMETRY`) are always honoured. The `telemetry.disabled` **config key** is read during telemetry startup, which can run before the CLI's config is resolvable — and in that case startup currently proceeds with telemetry enabled. A user who has opted out via the config key alone may therefore still have this event transmitted. Use an environment variable if you need a guarantee.
+    The environment variables (`ALTIMATE_TELEMETRY_DISABLED`, `OPENCODE_DISABLE_TELEMETRY`) are always honoured. The `telemetry.disabled` **config key** is read from the config files at telemetry startup. If a config file cannot be read or parsed at that point, startup proceeds with telemetry enabled, so this event may still be transmitted. Use an environment variable if you need a guarantee.
 
 ## What happens when I authenticate via a well-known URL?
 

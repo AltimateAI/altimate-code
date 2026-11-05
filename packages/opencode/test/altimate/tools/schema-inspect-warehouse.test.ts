@@ -168,11 +168,12 @@ describe("schema_inspect warehouse qualifiers", () => {
     expect(result.output).toContain("warehouse=reporting, schema_name=main")
   })
 
-  test("requires table and does not expose a table_name alias", async () => {
+  test("allows table discovery and does not expose a table_name alias", async () => {
     const tool = await initTool(SchemaInspectTool)
-    expect(tool.jsonSchema?.required).toContain("table")
+    expect(tool.jsonSchema?.required ?? []).not.toContain("table")
     expect(tool.jsonSchema?.properties).not.toHaveProperty("table_name")
-    await expect(inspect({ table_name: "t" })).rejects.toThrow("table")
+    expect((await inspect({ warehouse: "primary" })).output).toContain("main | 1")
+    expect((await inspect({ warehouse: "primary", schema_name: "main" })).output).toContain("main | t | table | 1 (estimate)")
   })
 })
 // altimate_change end

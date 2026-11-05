@@ -2,6 +2,40 @@ import { describe, test, expect } from "bun:test"
 import { findDownstream, formatImpactReport } from "../../../src/altimate/tools/impact-analysis"
 import type { DownstreamModel } from "../../../src/altimate/tools/impact-analysis"
 
+describe("findDownstream: depth", () => {
+  test("a direct dependent also reachable through another dependent stays direct", () => {
+    const models = [
+      { name: "y", depends_on: ["model.p.t"] },
+      { name: "x", depends_on: ["model.p.y", "model.p.t"] },
+    ]
+    const result = findDownstream("t", models)
+    expect(result.find((d) => d.name === "x")!.depth).toBe(1)
+    expect(result.find((d) => d.name === "x")!.path).toEqual(["t", "x"])
+  })
+})
+
+describe("formatImpactReport: exposures", () => {
+  const base = { model: "m", changeType: "remove", direct: [], transitive: [], affectedTestCount: 0, totalModels: 1 }
+  test("says when exposures could not be read", () => {
+    expect(formatImpactReport({ ...base, exposuresError: "bad json" })).toContain("Exposures: not read (bad json)")
+  })
+  test("keeps a multi-line read error on one line", () => {
+    expect(formatImpactReport({ ...base, exposuresError: "a\nb" })).toContain("Exposures: not read (a b)")
+  })
+  test("lists a dashboard once when column reach already printed it", () => {
+    const dash = { unique_id: "exposure.p.d", name: "d", label: "Dash", type: "dashboard" }
+    const out = formatImpactReport({
+      ...base,
+      column: "c",
+      exposures: [dash, { unique_id: "exposure.q.d", name: "d", label: "Other", type: "dashboard" }],
+      columnReach: { models: [], uncertain: [], untraced: [], exposures: [dash], uncertain_exposures: [], truncated: false },
+    })
+    expect(out.match(/Dash \[dashboard\]/g)).toHaveLength(1)
+    expect(out).toContain("Other exposures (1)")
+    expect(out).toContain("Other [dashboard]")
+  })
+})
+
 describe("findDownstream: DAG traversal", () => {
   test("returns empty for leaf model with no dependents", () => {
     const models = [
@@ -114,7 +148,6 @@ describe("formatImpactReport", () => {
       direct: [],
       transitive: [],
       affectedTestCount: 0,
-      columnImpact: [],
       totalModels: 10,
     })
     expect(report).toContain("REMOVE stg_temp")
@@ -130,7 +163,6 @@ describe("formatImpactReport", () => {
       direct: [{ name: "fct_orders", depth: 1, path: ["stg_orders", "fct_orders"] }],
       transitive: [],
       affectedTestCount: 0,
-      columnImpact: [],
       totalModels: 20,
     })
     expect(report).toContain("WARNING: This is a BREAKING change")
@@ -146,7 +178,6 @@ describe("formatImpactReport", () => {
       direct: [{ name: "fct_orders", depth: 1, path: ["stg_orders", "fct_orders"] }],
       transitive: [],
       affectedTestCount: 5,
-      columnImpact: [],
       totalModels: 10,
     })
     expect(report).toContain("WARNING: Rename requires updating all downstream references.")
@@ -154,7 +185,7 @@ describe("formatImpactReport", () => {
     expect(report).toContain("Affected tests: 5")
   })
 
-  test("column-level impact shows affected columns", () => {
+  test("column-level impact names the column and the change", () => {
     const report = formatImpactReport({
       model: "stg_orders",
       column: "order_id",
@@ -162,14 +193,45 @@ describe("formatImpactReport", () => {
       direct: [{ name: "fct_orders", depth: 1, path: ["stg_orders", "fct_orders"] }],
       transitive: [],
       affectedTestCount: 0,
-      columnImpact: ["total_amount", "order_count"],
       totalModels: 10,
     })
     expect(report).toContain("RETYPE stg_orders.order_id")
     expect(report).toContain("CAUTION: Type change may cause implicit casts")
-    expect(report).toContain("Affected Output Columns (2)")
-    expect(report).toContain("total_amount")
-    expect(report).toContain("order_count")
+  })
+
+  test("column reach lists certain readers, possible readers, untraced models and exposures", () => {
+    const report = formatImpactReport({
+      model: "fct_orders",
+      column: "revenue",
+      changeType: "modify",
+      direct: [{ name: "fct_daily", depth: 1, path: ["fct_orders", "fct_daily"] }],
+      transitive: [],
+      affectedTestCount: 0,
+      totalModels: 5,
+      exposures: [
+        { unique_id: "exposure.p.exec", name: "exec", label: "Exec Revenue", type: "dashboard" },
+        { unique_id: "exposure.p.far", name: "far", label: "Far Board", type: "dashboard" },
+      ],
+      columnReach: {
+        models: [{ name: "fct_daily", unique_id: "model.p.fct_daily", columns: ["revenue"] }],
+        uncertain: [{ name: "rpt_big", unique_id: "model.p.rpt_big", reason: "names it only outside its select list (WHERE, JOIN, GROUP BY or HAVING)" }],
+        untraced: [{ name: "mart_ltv", unique_id: "model.p.mart_ltv", reason: "No compiled SQL found — run `dbt compile` first" }],
+        exposures: [{ unique_id: "exposure.p.exec", name: "exec", label: "Exec Revenue", type: "dashboard" }],
+        uncertain_exposures: [{ unique_id: "exposure.p.ops", name: "ops", label: "Ops", type: "dashboard" }],
+        truncated: true,
+      },
+    })
+    expect(report).toContain(
+      "Column Reach: fct_orders.revenue is read by at least 1 model and at least 1 exposure; at least 1 more may read it; at least 1 could not be traced (stopped early)",
+    )
+    expect(report).toContain("  fct_daily → revenue")
+    expect(report).toContain("  ◆ Exec Revenue [dashboard]")
+    expect(report).toContain("  ? rpt_big: names it only outside its select list (WHERE, JOIN, GROUP BY or HAVING)")
+    expect(report).toContain("  ! mart_ltv not traced: No compiled SQL found — run `dbt compile` first")
+    expect(report).toContain("  ? ◆ Ops [dashboard] on a model that may read it")
+    expect(report).not.toContain("Exposures (")
+    // Stopped early: the other exposures are not claimed as non-readers.
+    expect(report).toContain("Other exposures (1): column reach stopped early, so some of these may not have been checked")
   })
 
   test("percentage calculation with 0 total models does not produce NaN or Infinity", () => {
@@ -179,7 +241,6 @@ describe("formatImpactReport", () => {
       direct: [],
       transitive: [],
       affectedTestCount: 0,
-      columnImpact: [],
       totalModels: 0,
     })
     expect(report).not.toContain("NaN")
@@ -194,12 +255,32 @@ describe("formatImpactReport", () => {
       direct: [{ name: "fct_orders", depth: 1, path: ["stg_orders", "fct_orders"] }],
       transitive: [{ name: "report", depth: 2, materialized: "table", path: ["stg_orders", "fct_orders", "report"] }],
       affectedTestCount: 0,
-      columnImpact: [],
       totalModels: 50,
     })
     expect(report).toContain("Direct Dependents (1)")
     expect(report).toContain("Transitive Dependents (1)")
     expect(report).toContain("report [table] (via: stg_orders \u2192 fct_orders \u2192 report)")
     expect(report).toContain("Blast radius: 2/50 models (4.0%)")
+  })
+})
+
+describe("findDownstream with versioned models", () => {
+  test("a versioned parent is matched by unique_id, whose last segment is the version", () => {
+    const models = [
+      { name: "orders", unique_id: "model.p.orders.v2", depends_on: [] },
+      { name: "rpt", unique_id: "model.p.rpt", depends_on: ["model.p.orders.v2"] },
+    ]
+    expect(findDownstream("orders", models, "model.p.orders.v2").map((d) => [d.name, d.unique_id])).toEqual([["rpt", "model.p.rpt"]])
+    expect(findDownstream("orders", models)).toEqual([])
+  })
+
+  test("with an exact id, another package's model of the same name is not matched", () => {
+    const models = [
+      { name: "orders", unique_id: "model.a.orders", depends_on: [] },
+      { name: "orders", unique_id: "model.b.orders", depends_on: [] },
+      { name: "b_only", unique_id: "model.b.b_only", depends_on: ["model.b.orders"] },
+    ]
+    expect(findDownstream("orders", models, "model.a.orders")).toEqual([])
+    expect(findDownstream("orders", models, "model.b.orders").map((d) => d.name)).toEqual(["b_only"])
   })
 })

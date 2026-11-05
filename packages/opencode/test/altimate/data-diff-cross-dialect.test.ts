@@ -233,7 +233,7 @@ describe("joindiff + cross-warehouse guard", () => {
 
 describe("data.diff read-only warehouse probes", () => {
   test.each(["postgres", "postgresql", "sqlite"])(
-    "partition discovery protects PostgreSQL reads and preserves other connector options (%s)",
+    "partition discovery enforces read-only execution and preserves other connector options (%s)",
     async (type) => {
       Registry.setConfigs({ probe: { type } })
       const execute = mock(async () => ({ columns: ["partition_value"], rows: [], row_count: 0, truncated: false }))
@@ -254,8 +254,7 @@ describe("data.diff read-only warehouse probes", () => {
           expect(limit).toBeUndefined()
           expect(binds).toBeUndefined()
           expect(options.noLimit).toBe(true)
-          if (type === "sqlite") expect(options).not.toHaveProperty("readOnly")
-          else expect(options.readOnly).toBe(true)
+          expect(options.readOnly).toBe(true)
         }
       } finally {
         get.mockRestore()
