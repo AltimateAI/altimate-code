@@ -885,8 +885,7 @@ export function withVariant(id: ProviderId, variant: string | undefined, config:
 /** The workspace catalog may name the Server / Data Center variant differently; any id naming "server" is it. */
 export const isJiraServer = (variant: string | undefined) => /server/i.test(variant ?? "")
 
-/** The connection config to upload for a provider: the saved credential when it was connected here, else what connect would read from this machine. Never printed. */
-/** `saved` when the config is the credential saved here rather than one detected on this machine. */
+/** The connection config to upload for a provider: the saved credential when it was connected here (`saved`), else what connect would read from this machine. Never printed. */
 export async function collectConfig(id: ProviderId, rec: StoredProvider | undefined): Promise<{ config: Record<string, unknown>; saved?: true } | { reason: string }> {
   if (rec?.registered && rec.variant) {
     const config: Record<string, unknown> = { ...rec.values }
@@ -1015,18 +1014,9 @@ async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, con
   const first = await backend.getDatamate(cfg, datamateId)
   if (first.is_owner === false)
     throw new Error(`only the owner of workspace "${first.name}" can attach connections to it; your connection is saved to your account. Link a workspace you own, or sign in as its owner`)
-  // Attaching widens the connection to the workspace's audience, so only a workspace that says it is private takes it unasked.
-  // A connection the workspace already uses was shared before; keeping it attached widens nothing.
   const conn = String(connectionId)
-  const allowed = (d: backend.DatamateRecord) => {
-    const shared = d.privacy !== "private"
-    const attached = d.integrations.some(
-      (e) => String(e.id) === integrationId && (String(e.connection_id ?? "") === conn || (Array.isArray(e.connection_ids) && e.connection_ids.map(String).includes(conn))),
-    )
-    if (shared && !share && !attached) throw new Error(SHARED_WORKSPACE_REFUSAL(d.name, id))
-    return shared
-  }
-  allowed(first)
+  const usesThis = (entries: backend.DatamateIntegrationEntry[]) =>
+    entries.some((e) => String(e.id) === integrationId && (String(e.connection_id ?? "") === conn || (Array.isArray(e.connection_ids) && e.connection_ids.map(String).includes(conn))))
   let keys: string[] = []
   if (!first.integrations.some((e) => String(e.id) === integrationId)) {
     const catalog = await backend.integrationsCatalog(cfg)
@@ -1035,16 +1025,17 @@ async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, con
     if (!found) throw new Error(`the workspace catalog has no entry for ${PROVIDER_NAMES[id]}, so the connection was not attached to workspace "${first.name}"`)
     keys = (found.tools ?? []).map((t: any) => t?.key).filter((k: unknown): k is string => typeof k === "string")
   }
-  // The backend replaces the whole list, so it is read again right before writing and only this entry changes. Its privacy is checked again: it may have changed since.
+  // The backend replaces the whole list, so it is read again right before writing and only this entry changes.
   const datamate = await backend.getDatamate(cfg, datamateId)
-  const shared = allowed(datamate)
   const live = liveIds ?? (await backend.listVisibleConnections(cfg)).map((c) => c.id)
   const next = attachToIntegrations(datamate.integrations, integrationId, connectionId, keys, live)
+  // Attaching widens the connection to the workspace's audience, so a workspace that does not say it is private (in this latest read) only gets it
+  // when asked. Members can use it only when the entry ends up naming it: a connection already there widens nothing more, and neither does an entry kept on another one.
+  const shared = datamate.privacy !== "private" && usesThis(next)
+  if (shared && !share && !usesThis(datamate.integrations)) throw new Error(SHARED_WORKSPACE_REFUSAL(datamate.name, id))
   await backend.updateDatamateIntegrations(cfg, datamateId, next)
   const entry = next.find((e) => String(e.id) === integrationId)
-  const usesThis = String(entry?.connection_id ?? "") === conn || (Array.isArray(entry?.connection_ids) && entry.connection_ids.map(String).includes(conn))
-  // Members can use this connection only when the entry now names it; a kept entry on another connection widens nothing.
-  return { kept: entry?.connection_id != null && String(entry.connection_id) !== conn, shared: shared && usesThis }
+  return { kept: entry?.connection_id != null && String(entry.connection_id) !== conn, shared }
 }
 
 /** The integrations list without references to the connection; other entries pass through untouched. */

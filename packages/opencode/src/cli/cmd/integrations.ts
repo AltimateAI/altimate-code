@@ -98,12 +98,15 @@ const DetectCommand = cmd({
   },
 })
 
+/** Who can use a synced connection: only the user, unless it was attached to a workspace that is not private. */
+export const syncedTo = (o: Pick<core.SyncOutcome, "shared">) => `synced to workspace${o.shared ? ", shared with its members" : " (private)"}`
+
 function renderSync(o: core.SyncOutcome) {
   const name = core.PROVIDER_NAMES[o.id]
   if (o.result === "kept_local") return out(`  ${S.TEXT_WARNING}⊘${S.TEXT_NORMAL} ${name}: kept local (${clean(o.reason)})`)
   if (o.result === "failed") return out(`  ${S.TEXT_DANGER}✗${S.TEXT_NORMAL} ${name}: sync failed (${clean(o.reason)})`)
   if (o.result === "skipped") return out(`  ${S.TEXT_DIM}- ${name}: skipped (${clean(o.reason)})${S.TEXT_NORMAL}`)
-  out(`  ${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} synced to workspace${o.shared ? ", shared with its members" : " (private)"}`)
+  out(`  ${S.TEXT_SUCCESS}✓${S.TEXT_NORMAL} ${name} ${syncedTo(o)}`)
   for (const st of o.steps) if (!st.ok && st.label.startsWith(core.LOCAL_CLEANUP_FAILED_PREFIX)) out(`  ${S.TEXT_WARNING}!${S.TEXT_NORMAL} ${clean(st.label)}`)
 }
 

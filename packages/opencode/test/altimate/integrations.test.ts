@@ -6,7 +6,7 @@ import { EventEmitter } from "node:events"
 import { PassThrough } from "node:stream"
 import path from "node:path"
 import { IntegrationsCore as core } from "../../src/altimate/integrations/core"
-import { skipsSynced, clean } from "../../src/cli/cmd/integrations"
+import { skipsSynced, clean, syncedTo } from "../../src/cli/cmd/integrations"
 import { IntegrationsBackend as backend } from "../../src/altimate/integrations/backend"
 import { IntegrationsCredentials as creds } from "../../src/altimate/integrations/credentials"
 import { AltimateApi } from "../../src/altimate/api/client"
@@ -222,6 +222,7 @@ describe("keychain", () => {
   const realDir = process.env.ALTIMATE_INTEGRATIONS_DIR
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!
   const calls: { cmd: string; args: string[]; input?: string }[] = []
+  const kills: string[] = []
   let spawn: ReturnType<typeof spyOn> | undefined
   let hold: Promise<void> | undefined
   const on = (status = 0, stdout = "", stderr = "") => {
@@ -230,6 +231,7 @@ describe("keychain", () => {
     delete process.env.ALTIMATE_INTEGRATIONS_DIR
     Object.defineProperty(process, "platform", { value: "darwin" })
     calls.length = 0
+    kills.length = 0
     spawn = spyOn(childProcess, "spawn").mockImplementation(((cmd: string, args: string[]) => {
       const child: any = new EventEmitter()
       const chunks: string[] = []
@@ -237,7 +239,7 @@ describe("keychain", () => {
       child.stderr = new PassThrough()
       child.stdin = new PassThrough()
       child.stdin.on("data", (d: Buffer) => chunks.push(d.toString()))
-      child.kill = () => true
+      child.kill = (signal: string) => kills.push(signal) > 0
       const entry: { cmd: string; args: string[]; input?: string } = { cmd, args }
       calls.push(entry)
       const finish = () => {
@@ -346,6 +348,7 @@ describe("keychain", () => {
       await expect(core.readSecret("cred:github:github_token")).rejects.toThrow("timed out")
       await expect(core.storeSecret("cred:github:github_token", "x")).rejects.toThrow("Could not save the credential to the macOS keychain")
       expect(calls).toHaveLength(2)
+      expect(kills).toEqual(["SIGKILL", "SIGKILL"])
     } finally {
       core.keychainLimits.timeoutMs = limit
     }
@@ -578,7 +581,7 @@ describe("workspace connections", () => {
     expect((await core.syncProvider("github", undefined, 0, true)).result).toBe("kept_local")
   })
 
-  test("a saved credential that cannot be read fails that provider's sync with the reason, instead of stopping the run", async () => {
+  test("a saved credential whose config cannot be collected fails that provider's sync with the reason, instead of stopping the run", async () => {
     await connected("github", null, { variant: "token", values: {}, secretFields: ["github_token"] })
     const unreadable = "Could not read a stored credential from the macOS keychain (exit 36). Unlock the keychain and try again."
     const catalog = spyOn(creds, "loadCatalog").mockRejectedValue(new Error(unreadable))
@@ -604,6 +607,7 @@ describe("workspace connections", () => {
       expect(update).not.toHaveBeenCalled()
       const shared = await core.syncProvider("github", undefined, 0, true, true)
       expect([shared.result, shared.shared]).toEqual(["synced", true])
+      expect([syncedTo(shared), syncedTo(refused)]).toEqual(["synced to workspace, shared with its members", "synced to workspace (private)"])
       expect(update).toHaveBeenCalledTimes(1)
     } finally {
       for (const sp of [...spies, update]) sp.mockRestore()
@@ -2637,6 +2641,9 @@ describe("attach keeps another connection", () => {
       getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "jira", tools: [], connection_id: "3" }] } as any)
       expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9, 3], true)).toEqual({ attached: "WS", workspaceId: "5", kept: true })
       expect(update).toHaveBeenCalledTimes(2)
+      // Without --share that kept entry is not refused either: the write changes nothing members can use.
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9, 3])).toEqual({ attached: "WS", workspaceId: "5", kept: true })
+      expect(update).toHaveBeenCalledTimes(3)
       getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "private", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
       expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toEqual({ attached: "WS", workspaceId: "5" })
       update.mockClear()
