@@ -63,6 +63,8 @@ const STRUCTURED_FIELDS: Record<string, readonly string[]> = {
     "exposures",
     "column_reach",
     "column_reach_error",
+    "column_answer",
+    "column_answer_error",
     "exposures_error",
     "error",
   ],

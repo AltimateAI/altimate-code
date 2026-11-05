@@ -1,0 +1,376 @@
+import { afterEach, describe, expect, test } from "bun:test"
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import {
+  ENGINE,
+  MAX_ANSWER_COLUMNS,
+  clearColumnAnswerCache,
+  columnAnswer,
+  hasNestedWith,
+  howOf,
+  shapeFlags,
+  stripAggFilter,
+  type ColumnAnswer,
+} from "../../src/altimate/native/dbt/column-answer"
+
+const dirs: string[] = []
+afterEach(() => {
+  for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  clearColumnAnswerCache()
+})
+
+const model = (
+  name: string,
+  deps: string[],
+  sql: string,
+  columns: string[] = [],
+  extra: Record<string, unknown> = {},
+) => ({
+  resource_type: "model",
+  unique_id: `model.shop.${name}`,
+  name,
+  alias: name,
+  database: "shop",
+  schema: "main",
+  original_file_path: `models/marts/${name}.sql`,
+  depends_on: { nodes: deps.map((d) => (d.includes(".") ? d : `model.shop.${d}`)) },
+  config: { materialized: "table" },
+  compiled_code: sql,
+  columns: Object.fromEntries(columns.map((c) => [c, { name: c, data_type: "double" }])),
+  ...extra,
+})
+
+const source = (name: string, columns: string[]) => ({
+  resource_type: "source",
+  unique_id: `source.shop.raw.${name}`,
+  name,
+  identifier: name,
+  database: "shop",
+  schema: "raw",
+  columns: Object.fromEntries(columns.map((c) => [c, { name: c }])),
+})
+
+const T = (name: string) => `shop.main.${name}`
+
+// fct_orders.revenue (renamed from stg_orders.amount) is:
+// - summed under a FILTER into fct_daily.paid_revenue,
+// - renamed and calculated by mart_ltv (an enforced contract), then passed through a CTE by rpt_ltv,
+// - only filtered on by rpt_big_orders (whose child may carry it),
+// - read by rpt_nested through a WITH inside a CTE (unresolved; its child may carry it),
+// - never read by rpt_counts (cleared).
+function shop() {
+  const nodes: Record<string, any> = {
+    "model.shop.stg_orders": model(
+      "stg_orders",
+      ["source.shop.raw.orders"],
+      "select order_id, customer_id, amount, status from shop.raw.orders",
+    ),
+    "model.shop.fct_orders": model(
+      "fct_orders",
+      ["stg_orders"],
+      `select order_id, customer_id, amount as revenue, status from ${T("stg_orders")}`,
+      ["order_id", "revenue"],
+    ),
+    "model.shop.fct_daily": model(
+      "fct_daily",
+      ["fct_orders"],
+      `select customer_id, sum(revenue) filter (where status = 'paid') as paid_revenue, count(*) as orders from ${T("fct_orders")} group by customer_id`,
+    ),
+    "model.shop.mart_ltv": model(
+      "mart_ltv",
+      ["fct_orders"],
+      `select order_id, revenue as ltv, revenue * 2 as double_rev from ${T("fct_orders")}`,
+      [],
+      { config: { materialized: "table", contract: { enforced: true } } },
+    ),
+    "model.shop.rpt_ltv": model(
+      "rpt_ltv",
+      ["mart_ltv"],
+      `with x as (select order_id, ltv from ${T("mart_ltv")}) select order_id, ltv from x`,
+    ),
+    "model.shop.rpt_big_orders": model(
+      "rpt_big_orders",
+      ["fct_orders"],
+      `select order_id from ${T("fct_orders")} where revenue > 100`,
+    ),
+    "model.shop.rpt_big_child": model(
+      "rpt_big_child",
+      ["rpt_big_orders"],
+      `select order_id from ${T("rpt_big_orders")}`,
+    ),
+    "model.shop.rpt_counts": model(
+      "rpt_counts",
+      ["fct_orders"],
+      `select count(order_id) as orders from ${T("fct_orders")}`,
+    ),
+    "model.shop.rpt_nested": model(
+      "rpt_nested",
+      ["fct_orders"],
+      `with a as (with b as (select order_id, revenue from ${T("fct_orders")}) select order_id, revenue from b) select order_id, revenue from a`,
+    ),
+    "model.shop.rpt_nested_child": model(
+      "rpt_nested_child",
+      ["rpt_nested"],
+      `select order_id, revenue from ${T("rpt_nested")}`,
+    ),
+    "test.shop.not_null_fct_orders_revenue": {
+      resource_type: "test",
+      depends_on: { nodes: ["model.shop.fct_orders"] },
+    },
+  }
+  return {
+    metadata: { adapter_type: "duckdb", generated_at: "2026-01-01T00:00:00Z" },
+    nodes,
+    sources: { "source.shop.raw.orders": source("orders", ["order_id", "customer_id", "amount", "status"]) },
+    exposures: {
+      "exposure.shop.ltv_board": {
+        name: "ltv_board",
+        label: "LTV board",
+        depends_on: { nodes: ["model.shop.rpt_ltv"] },
+      },
+    },
+  }
+}
+
+function write(manifest: unknown): string {
+  const dir = mkdtempSync(join(tmpdir(), "column-answer-"))
+  dirs.push(dir)
+  mkdirSync(join(dir, "target"))
+  const file = join(dir, "target", "manifest.json")
+  writeFileSync(file, JSON.stringify(manifest))
+  return file
+}
+
+const at = (a: ColumnAnswer, model: string, column: string) =>
+  a.columns.findIndex((c) => a.nodes[c.model]!.name === model && c.column === column)
+const col = (a: ColumnAnswer, model: string, column: string) => a.columns[at(a, model, column)]
+const named = (a: ColumnAnswer, idx: number) => a.nodes[idx]!.name
+
+describe("column answer: downstream", () => {
+  test("follows the value through a rename, a calculation, an aggregate FILTER and a CTE", () => {
+    const a = columnAnswer(write(shop()), "fct_orders", "revenue")
+    const reached = a.columns
+      .slice(1)
+      .map((c) => `${a.nodes[c.model]!.name}.${c.column}`)
+      .sort()
+    expect(reached).toEqual(["fct_daily.paid_revenue", "mart_ltv.double_rev", "mart_ltv.ltv", "rpt_ltv.ltv"])
+    expect(a.counts).toMatchObject({ columns: 4, models: 3, hops: 2, contracts: 1, ends: 3 })
+  })
+
+  test("an aggregate FILTER clause no longer hides the aggregate, and is flagged", () => {
+    const a = columnAnswer(write(shop()), "fct_orders", "revenue")
+    expect(at(a, "fct_daily", "paid_revenue")).toBeGreaterThan(0)
+    expect(a.flags).toContainEqual({
+      model: a.nodes.findIndex((n) => n.name === "fct_daily"),
+      flag: "filter_rewritten",
+    })
+  })
+
+  test("tiers: also reads, unresolved and what sits past them may carry it; the rest is cleared", () => {
+    const a = columnAnswer(write(shop()), "fct_orders", "revenue")
+    expect(
+      a.also_reads.map((r) => ({ name: named(a, r.model), columns: r.columns, downstream: r.downstream })),
+    ).toEqual([{ name: "rpt_big_orders", columns: ["revenue"], downstream: 1 }])
+    expect(a.unresolved.map((u) => [named(a, u.model), u.downstream])).toEqual([["rpt_nested", 1]])
+    // value 3 + may carry 4 (rpt_big_orders, rpt_big_child, rpt_nested, rpt_nested_child) + cleared 1 (rpt_counts)
+    expect(a.counts).toMatchObject({ may_carry_models: 4, cleared_models: 1, model_level: 8 })
+  })
+
+  test("a WITH nested inside a CTE is unresolved with the reason, never cleared, and flagged", () => {
+    const a = columnAnswer(write(shop()), "fct_orders", "revenue")
+    const nested = a.unresolved.find((u) => named(a, u.model) === "rpt_nested")!
+    expect(nested.reason).toContain("WITH nested inside a CTE")
+    expect(a.flags).toContainEqual({ model: nested.model, flag: "nested_with" })
+    expect(at(a, "rpt_nested", "revenue")).toBe(-1)
+  })
+
+  test("a union all of select * over columns the engine can't see is unresolved, not cleared", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: { "source.shop.raw.a": source("a", []), "source.shop.raw.b": source("b", []) },
+      nodes: {
+        "model.shop.m_a": model("m_a", ["source.shop.raw.a"], "select * from shop.raw.a"),
+        "model.shop.m_b": model("m_b", ["source.shop.raw.b"], "select * from shop.raw.b"),
+        "model.shop.m_union": model(
+          "m_union",
+          ["m_a", "m_b"],
+          `select * from ${T("m_a")} union all select * from ${T("m_b")}`,
+        ),
+      },
+    }
+    const a = columnAnswer(write(m), "m_a", "id")
+    expect(a.unresolved.map((u) => named(a, u.model))).toEqual(["m_union"])
+    expect(a.unresolved[0]!.reason).toContain("traced no column")
+    expect(a.counts).toMatchObject({ columns: 0, may_carry_models: 1, cleared_models: 0, model_level: 1 })
+  })
+
+  test("a reader through an ephemeral model is reached", () => {
+    const m = shop()
+    m.nodes["model.shop.eph"] = model("eph", ["fct_orders"], `select order_id, revenue from ${T("fct_orders")}`, [], {
+      config: { materialized: "ephemeral" },
+    })
+    m.nodes["model.shop.rpt_eph"] = model(
+      "rpt_eph",
+      ["eph"],
+      `with __dbt__cte__eph as (select order_id, revenue from ${T("fct_orders")}) select revenue as eph_revenue from __dbt__cte__eph`,
+    )
+    const a = columnAnswer(write(m), "fct_orders", "revenue")
+    expect(at(a, "rpt_eph", "eph_revenue")).toBeGreaterThan(0)
+  })
+
+  test("stops at the column limit and says so", () => {
+    const wide = Array.from({ length: MAX_ANSWER_COLUMNS + 5 }, (_, i) => `revenue as c${i}`).join(", ")
+    const m = shop()
+    m.nodes["model.shop.rpt_wide"] = model("rpt_wide", ["fct_orders"], `select ${wide} from ${T("fct_orders")}`)
+    const a = columnAnswer(write(m), "fct_orders", "revenue")
+    expect(a.columns).toHaveLength(MAX_ANSWER_COLUMNS)
+    expect(a.truncated).toBe(true)
+  })
+})
+
+describe("column answer: upstream", () => {
+  test("traces a column back to the source through a CTE, a rename and a staging model", () => {
+    const a = columnAnswer(write(shop()), "rpt_ltv", "ltv", "upstream")
+    expect(a.direction).toBe("upstream")
+    const reached = a.columns.slice(1).map((c) => [`${a.nodes[c.model]!.name}.${c.column}`, c.hop])
+    expect(reached).toEqual([
+      ["mart_ltv.ltv", 1],
+      ["fct_orders.revenue", 2],
+      ["stg_orders.amount", 3],
+      ["orders.amount", 4],
+    ])
+    expect(a.counts).toMatchObject({ columns: 4, models: 4, hops: 4, ends: 1 })
+    expect(col(a, "orders", "amount")!.end).toBe(true)
+    // Edges point from the source column to the column it feeds.
+    expect(a.edges).toContainEqual([at(a, "fct_orders", "revenue"), at(a, "mart_ltv", "ltv"), "~"])
+  })
+
+  test("an unresolved model on the way is reported, and what's above it may carry", () => {
+    const a = columnAnswer(write(shop()), "rpt_nested_child", "revenue", "upstream")
+    // rpt_nested's SELECT list names revenue, so it is reached; its own SQL is unresolved.
+    expect(a.columns.slice(1).map((c) => `${named(a, c.model)}.${c.column}`)).toEqual(["rpt_nested.revenue"])
+    expect(
+      a.unresolved.map((u) => [named(a, u.model), u.reason.includes("nested inside a CTE"), u.downstream]),
+    ).toEqual([["rpt_nested", true, 3]])
+    // Everything above it may carry the value: fct_orders, stg_orders and the source.
+    expect(a.counts).toMatchObject({ may_carry_models: 3, cleared_models: 0, model_level: 4 })
+  })
+})
+
+describe("column answer: how", () => {
+  test("uses the engine's label, and marks a name match as inferred", () => {
+    const a = columnAnswer(write(shop()), "fct_orders", "revenue")
+    const edge = (m: string, c: string) => a.edges.find((e) => e[1] === at(a, m, c))
+    expect(edge("mart_ltv", "ltv")).toEqual([0, at(a, "mart_ltv", "ltv"), "~"])
+    expect(edge("mart_ltv", "double_rev")![2]).toBe("ƒ")
+    // Through a CTE the engine gives no label: "=" by matching names, never as certain.
+    expect(edge("rpt_ltv", "ltv")).toEqual([at(a, "mart_ltv", "ltv"), at(a, "rpt_ltv", "ltv"), "=", "name"])
+    expect(col(a, "rpt_ltv", "ltv")).toMatchObject({ how: "=", how_from: "name" })
+    expect(col(a, "mart_ltv", "ltv")).toMatchObject({ how: "~", how_from: "engine" })
+    expect(a.columns[0]).toMatchObject({ how: null, how_from: null, hop: 0, end: false })
+  })
+
+  test("maps each lens to a glyph", () => {
+    expect(howOf("Original", [], "a", "a")).toEqual({ how: "=", howFrom: "engine" })
+    expect(howOf("Alias", [], "a", "b")).toEqual({ how: "~", howFrom: "engine" })
+    expect(howOf("Transformation", [{ expression: "a * 2 AS b" }], "a", "b")).toEqual({ how: "ƒ", howFrom: "engine" })
+    expect(howOf("Transformation", [{ expression: "SUM(a) AS b" }], "a", "b")).toEqual({ how: "Σ", howFrom: "engine" })
+    expect(howOf("Not sure", [], "a", "a")).toEqual({ how: "=", howFrom: "name" })
+    expect(howOf("Not sure", [], "a", "b")).toEqual({ how: "?", howFrom: null })
+  })
+})
+
+describe("column answer: SQL rewrites and shapes", () => {
+  test("drops aggregate FILTER clauses, parentheses and quotes included", () => {
+    expect(stripAggFilter("select sum(x) filter (where (a) = ')') as s, count(*) FILTER(WHERE b) n from t")).toBe(
+      "select sum(x) as s, count(*) n from t",
+    )
+    expect(stripAggFilter("select x from t where y in (select 1)")).toBe("select x from t where y in (select 1)")
+  })
+
+  test("finds a WITH nested inside a CTE, not one in a comment", () => {
+    expect(hasNestedWith("with a as (with b as (select 1) select * from b) select * from a")).toBe(true)
+    expect(hasNestedWith("with a as (select 1), b as (select 2) select * from a, b")).toBe(false)
+    expect(hasNestedWith("with a as (select 1 -- (with b as (\n) select * from a")).toBe(false)
+  })
+
+  test("flags unnest, pivot and except", () => {
+    expect(shapeFlags("select v from t cross join unnest(t.arr) as u(v)")).toEqual(["unnest"])
+    expect(shapeFlags("select * from t pivot (sum(x) for k in ('a'))")).toEqual(["pivot"])
+    expect(shapeFlags("select a from t except select a from u")).toEqual(["except"])
+    expect(shapeFlags("select 'unnest(' as s -- pivot")).toEqual([])
+  })
+})
+
+describe("column answer: contract", () => {
+  test("has the fixed shape", () => {
+    const a = columnAnswer(write(shop()), "fct_orders", "revenue")
+    expect(Object.keys(a)).toEqual([
+      "version",
+      "focus",
+      "direction",
+      "inputs",
+      "counts",
+      "nodes",
+      "columns",
+      "edges",
+      "also_reads",
+      "unresolved",
+      "flags",
+      "truncated",
+      "next",
+    ])
+    expect(a.version).toBe(1)
+    expect(a.focus).toEqual({ model: "model.shop.fct_orders", column: "revenue" })
+    expect(a.direction).toBe("downstream")
+    expect(a.inputs).toMatchObject({
+      manifest: { generated_at: "2026-01-01T00:00:00Z", older_than_sql: false },
+      sql: "compiled_code",
+      catalog: null,
+      engine: ENGINE,
+    })
+    expect(a.inputs.workarounds).toContain("aggregate FILTER clause dropped before analysis")
+    expect(Object.keys(a.counts).sort()).toEqual(
+      ["cleared_models", "columns", "contracts", "ends", "hops", "may_carry_models", "model_level", "models"].sort(),
+    )
+    expect(a.nodes[0]).toEqual({
+      id: "model.shop.fct_orders",
+      name: "fct_orders",
+      folder: "marts",
+      materialized: "table",
+      contract: false,
+      tests: 1,
+      exposures: [],
+    })
+    expect(a.nodes.find((n) => n.name === "mart_ltv")!.contract).toBe(true)
+    expect(a.nodes.find((n) => n.name === "rpt_ltv")!.exposures).toEqual(["LTV board"])
+    expect(a.columns[0]).toMatchObject({ model: 0, column: "revenue", hop: 0, type: "double" })
+    for (const e of a.edges) {
+      expect(typeof e[0]).toBe("number")
+      expect(typeof e[1]).toBe("number")
+      expect(["=", "~", "ƒ", "Σ", "?"]).toContain(e[2])
+    }
+    expect(a.truncated).toBe(false)
+    expect(a.next).toBeNull()
+  })
+
+  test("the engine label matches the pinned altimate-core", () => {
+    const pkg = JSON.parse(readFileSync(join(import.meta.dir, "../../package.json"), "utf8"))
+    expect(ENGINE).toBe(`altimate-core ${pkg.dependencies["@altimateai/altimate-core"]}`)
+  })
+
+  test("says when a model file changed after the manifest was written", () => {
+    const file = write(shop())
+    const dir = join(file, "..", "..")
+    mkdirSync(join(dir, "models", "marts"), { recursive: true })
+    const later = new Date(Date.now() + 60_000)
+    writeFileSync(join(dir, "models", "marts", "mart_ltv.sql"), "select 1")
+    require("node:fs").utimesSync(join(dir, "models", "marts", "mart_ltv.sql"), later, later)
+    expect(columnAnswer(file, "fct_orders", "revenue").inputs.manifest.older_than_sql).toBe(true)
+  })
+
+  test("an unknown model throws", () => {
+    expect(() => columnAnswer(write(shop()), "nope", "x")).toThrow("not found")
+  })
+})

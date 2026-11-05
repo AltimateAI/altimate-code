@@ -7,6 +7,7 @@ import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { Telemetry } from "../telemetry"
 import { columnReach, exposuresOn, type ColumnReach, type ColumnReachExposure } from "../native/dbt/column-reach"
+import { columnAnswer, describeAnswer, type ColumnAnswer } from "../native/dbt/column-answer"
 
 export const ImpactAnalysisTool = Tool.define("impact_analysis", {
   description: [
@@ -18,6 +19,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
     "Examples:",
     '- impact_analysis({ model: "stg_orders", change_type: "remove" })',
     '- impact_analysis({ model: "stg_orders", column: "order_id", change_type: "rename" })',
+    '- impact_analysis({ model: "fct_orders", column: "revenue", change_type: "modify", direction: "upstream" })',
     '- impact_analysis({ manifest_path: "target/manifest.json", model: "dim_customers", change_type: "retype" })',
   ].join("\n"),
   parameters: z.object({
@@ -29,6 +31,13 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
     change_type: z.enum(["remove", "rename", "retype", "add", "modify"]).describe("Type of change being considered"),
     manifest_path: z.string().optional().default("target/manifest.json").describe("Path to dbt manifest.json file"),
     dialect: z.string().optional().describe("SQL dialect for column lineage (auto-detected from the manifest if omitted)"),
+    direction: z
+      .enum(["downstream", "upstream"])
+      .optional()
+      .default("downstream")
+      .describe(
+        "With a column: 'downstream' (default) answers where its value goes; 'upstream' traces where it comes from. Returned as metadata.column_answer.",
+      ),
   }),
   async execute(args, ctx) {
     try {
@@ -82,6 +91,8 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       let exposures: ColumnReachExposure[] = []
       let reach: ColumnReach | undefined
       let reachError: string | undefined
+      let answer: ColumnAnswer | undefined
+      let answerError: string | undefined
       let exposuresError: string | undefined
       try {
         exposures = exposuresOn(args.manifest_path, affectedModelIds)
@@ -96,10 +107,21 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
           // The model-level impact still stands; the reason is reported beside it.
           reachError = error instanceof Error ? error.message : String(error)
         }
+        try {
+          answer = columnAnswer(
+            args.manifest_path,
+            targetModel.unique_id ?? args.model,
+            args.column,
+            args.direction ?? "downstream",
+            args.dialect,
+          )
+        } catch (error) {
+          answerError = error instanceof Error ? error.message : String(error)
+        }
       }
 
       // Step 6: Format the impact report
-      const output = formatImpactReport({
+      const report = formatImpactReport({
         model: targetModel.name,
         column: args.column,
         changeType: args.change_type,
@@ -112,6 +134,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
         columnReach: reach,
         columnReachError: reachError,
       })
+      const output = answer ? `${report}\n${describeAnswer(answer)}` : report
 
       const totalAffected = downstream.length
       const severity =
@@ -146,6 +169,8 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
           exposures,
           ...(reach && { column_reach: reach }),
           ...(reachError && { column_reach_error: reachError }),
+          ...(answer && { column_answer: answer }),
+          ...(answerError && { column_answer_error: answerError }),
           ...(exposuresError && { exposures_error: exposuresError }),
           ...(findings.length > 0 && { findings }),
         },
