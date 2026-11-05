@@ -280,7 +280,7 @@ describe("SessionCompaction.renderLedger", () => {
     ])
 
   test("empty ledger renders empty string", () => {
-    expect(SessionCompaction.renderLedger({ writes: [], calls: [], sawBash: false })).toBe("")
+    expect(SessionCompaction.renderLedger({ writes: [], calls: [], sawBash: false, sawSnapshot: false })).toBe("")
   })
 
   test("a budget too small for even the header renders nothing, not a bare header", () => {
@@ -617,6 +617,7 @@ describe("SessionCompaction.corroborateCarry", () => {
       writes: [],
       calls: [{ tool: "bash", detail: "rm report.csv", exit: 0, errored: false }],
       sawBash: true,
+      sawSnapshot: false,
     }
     expect(SessionCompaction.corroborateCarry([{ text: "exported report.csv" }], destructive)[0]!.status).toBe(
       "claimed, unverified",
@@ -728,5 +729,247 @@ describe("leak guard", () => {
     const b = mk("qqq build --select orders".replace("build", "frobnicate"))
     // Same structure: swapping the command text is the ONLY difference (no classifier).
     expect(a.replace("dbt build --select orders", "CMD")).toBe(b.replace("qqq frobnicate --select orders", "CMD"))
+  })
+})
+
+// ─── Snapshot diffs: files changed by shell commands ─────────────────────────
+
+function patchPart(files: string[]): any {
+  partCounter++
+  return { id: `part-p-${partCounter}`, sessionID: "session-1", messageID: "m", type: "patch", hash: "h", files }
+}
+
+describe("SessionCompaction.buildLedger — snapshot diffs", () => {
+  const onDisk = (paths: string[]) => (file: string) => paths.includes(file)
+
+  test("a file written by a bash command is listed from the step's patch part", () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "echo hi >> notes.md" }, metadata: { exit: 0 }, end: 7000 }),
+        patchPart(["/repo/notes.md"]),
+      ]),
+    ]
+    const ledger = SessionCompaction.buildLedger(messages, undefined, onDisk(["/repo/notes.md"]))
+    expect(ledger.writes).toEqual([
+      { path: "/repo/notes.md", mtime: 7000, tool: "snapshot", step: 1, shell: true, toolWritten: false },
+    ])
+    expect(ledger.sawSnapshot).toBe(true)
+    const text = SessionCompaction.renderLedger(ledger)
+    expect(text).toContain("/repo/notes.md")
+    expect(text).toContain("via shell")
+    expect(text).not.toContain("Shell commands also ran this session")
+  })
+
+  test("a file written by a write tool in the same step keeps the tool attribution", () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "write", input: { filePath: "/repo/a.sql" }, end: 5000 }),
+        toolPart({ tool: "bash", input: { command: "python gen.py" }, metadata: { exit: 0 }, end: 6000 }),
+        patchPart(["/repo/a.sql", "/repo/out/report.md"]),
+      ]),
+    ]
+    const ledger = SessionCompaction.buildLedger(messages, undefined, onDisk(["/repo/a.sql", "/repo/out/report.md"]))
+    expect(ledger.writes).toEqual([
+      { path: "/repo/out/report.md", mtime: 6000, tool: "snapshot", step: 1, shell: true, toolWritten: false },
+      { path: "/repo/a.sql", mtime: 5000, tool: "write" },
+    ])
+  })
+
+  test("a later shell change updates an earlier write-tool entry", () => {
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/repo/a.sql" }, end: 5000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "sed -i s/x/y/ a.sql" }, metadata: { exit: 0 }, end: 8000 }),
+        patchPart(["/repo/a.sql"]),
+      ]),
+    ]
+    const ledger = SessionCompaction.buildLedger(messages, undefined, onDisk(["/repo/a.sql"]))
+    expect(ledger.writes).toEqual([
+      { path: "/repo/a.sql", mtime: 8000, tool: "snapshot", step: 1, shell: true, toolWritten: true },
+    ])
+  })
+
+  test("a listed file that no longer exists is dropped, including an earlier write", () => {
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/repo/tmp.txt" }, end: 5000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "rm tmp.txt" }, metadata: { exit: 0 }, end: 6000 }),
+        patchPart(["/repo/tmp.txt"]),
+      ]),
+    ]
+    const ledger = SessionCompaction.buildLedger(messages, undefined, onDisk([]))
+    expect(ledger.writes).toEqual([])
+  })
+
+  test("without patch parts the shell note stays unverified", () => {
+    const messages = [
+      assistantMsg([toolPart({ tool: "bash", input: { command: "echo hi >> notes.md" }, metadata: { exit: 0 } })]),
+    ]
+    const ledger = SessionCompaction.buildLedger(messages, undefined, onDisk(["/repo/notes.md"]))
+    expect(ledger.writes).toEqual([])
+    expect(ledger.sawSnapshot).toBe(false)
+    expect(SessionCompaction.renderLedger(ledger)).toContain("possible but unverified")
+  })
+})
+
+// ─── Snapshot diffs: review follow-ups ───────────────────────────────────────
+
+describe("SessionCompaction.renderLedger — snapshot entries cannot crowd out the ledger", () => {
+  test("120 shell-changed files keep the write-tool entry, the note, the advisory and the recent calls", () => {
+    const shellFiles = Array.from(
+      { length: 120 },
+      (_, i) => `/repo/models/staging/stg_model_${String(i).padStart(3, "0")}.sql`,
+    )
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/repo/reports/summary.md" }, end: 5000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "sqlfluff fix models" }, metadata: { exit: 0 }, end: 9000 }),
+        patchPart(shellFiles),
+      ]),
+    ]
+    const ledger = SessionCompaction.buildLedger(messages, "/repo", () => true)
+    const text = SessionCompaction.renderLedger(ledger, { maxTokens: 500 })
+    expect(Token.estimate(text)).toBeLessThanOrEqual(500)
+    expect(text).toContain("reports/summary.md")
+    expect(text).toContain("files outside the project directory")
+    expect(text).toContain("Advisory:")
+    expect(text).toContain("Recent tool calls")
+    expect(text).toContain("sqlfluff fix models")
+    expect(text).toMatch(/and 11\d more files changed during your step/)
+    // Write-tool entries come before snapshot entries.
+    expect(text.indexOf("reports/summary.md")).toBeLessThan(text.indexOf("stg_model_"))
+  })
+
+  test("snapshot entries across many steps are capped overall with a count of the rest", () => {
+    const messages = Array.from({ length: 30 }, (_, step) =>
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: `gen ${step}` }, metadata: { exit: 0 }, end: 1000 + step }),
+        patchPart([`/repo/out/a_${step}.sql`, `/repo/out/b_${step}.sql`]),
+      ]),
+    )
+    const ledger = SessionCompaction.buildLedger(messages, "/repo", () => true)
+    const text = SessionCompaction.renderLedger(ledger, { maxTokens: 2000 })
+    const listed = text.split("\n").filter((line) => line.startsWith("- out/"))
+    expect(listed.length).toBeLessThan(60)
+    expect(text).toMatch(/and \d+ more files changed during \d+ earlier steps/)
+  })
+
+  test("paths inside the project root render relative to it", () => {
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/repo/src/a.ts" }, end: 5000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "x" }, end: 6000 }),
+        patchPart(["/repo/src/b.ts", "/elsewhere/c.ts"]),
+      ]),
+    ]
+    const text = SessionCompaction.renderLedger(SessionCompaction.buildLedger(messages, "/repo", () => true))
+    expect(text).toContain("- src/a.ts — last written by you")
+    expect(text).toContain("- src/b.ts — changed during your step")
+    expect(text).toContain("- /elsewhere/c.ts — changed during your step")
+    expect(text).not.toMatch(/^- \/repo\/src\//m)
+  })
+})
+
+describe("SessionCompaction ledger — snapshot entry wording and lifecycle", () => {
+  test("a patch-only step without bash reads as changed during the step, not written by you via shell", () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "read", input: { filePath: "/r/x.md" }, end: 4000 }),
+        patchPart(["/r/secrets/acquisition.md"]),
+      ]),
+    ]
+    const text = SessionCompaction.renderLedger(SessionCompaction.buildLedger(messages, undefined, () => true))
+    const line = text.split("\n").find((l) => l.includes("acquisition.md"))!
+    expect(line).toContain("changed during your step at")
+    expect(line).toContain("(snapshot)")
+    expect(line).not.toContain("via shell")
+    expect(line).not.toContain("last written by you")
+  })
+
+  test("a step that ran bash says via shell", () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "python scan.py" }, end: 4000 }),
+        patchPart(["/r/out.md"]),
+      ]),
+    ]
+    const text = SessionCompaction.renderLedger(SessionCompaction.buildLedger(messages, undefined, () => true))
+    expect(text.split("\n").find((l) => l.includes("/r/out.md"))).toContain("(snapshot, via shell)")
+  })
+
+  test("the snapshot note names files outside the project directory and new files over 2 MB", () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "python scan.py > /tmp/scan.md" }, end: 4000 }),
+        patchPart(["/r/a.md"]),
+      ]),
+    ]
+    const text = SessionCompaction.renderLedger(SessionCompaction.buildLedger(messages, undefined, () => true))
+    expect(text).toContain("files outside the project directory")
+    expect(text).toContain("new files over 2 MB")
+    expect(text).toContain("steps without a snapshot diff")
+  })
+
+  test("a shell rename drops the old path the patch no longer lists", () => {
+    const messages = [
+      assistantMsg([toolPart({ tool: "write", input: { filePath: "/r/old.ts" }, end: 4000 })]),
+      assistantMsg([
+        toolPart({ tool: "bash", input: { command: "mv old.ts new.ts" }, end: 5000 }),
+        patchPart(["/r/new.ts"]),
+      ]),
+    ]
+    const ledger = SessionCompaction.buildLedger(messages, undefined, (f) => f === "/r/new.ts")
+    expect(ledger.writes.map((w) => w.path)).toEqual(["/r/new.ts"])
+  })
+
+  test("a file written and deleted in the same step is not listed", () => {
+    const messages = [
+      assistantMsg([
+        toolPart({ tool: "write", input: { filePath: "/r/tmp.txt" }, end: 4000 }),
+        toolPart({ tool: "bash", input: { command: "rm /r/tmp.txt" }, end: 5000 }),
+        patchPart(["/r/tmp.txt"]),
+      ]),
+    ]
+    const ledger = SessionCompaction.buildLedger(messages, undefined, () => false)
+    expect(ledger.writes).toEqual([])
+  })
+
+  test("a step with no completed tool uses the message completion time", () => {
+    const messages = [assistantMsg([patchPart(["/r/a.md"])], { time: { created: 1000, completed: 3000 } })]
+    const ledger = SessionCompaction.buildLedger(messages, undefined, () => true)
+    expect(ledger.writes[0]?.mtime).toBe(3000)
+  })
+})
+
+describe("SessionCompaction.corroborateCarry — snapshot entries", () => {
+  test("a patch-only entry does not promote a carried claim to verified", () => {
+    const ledger = SessionCompaction.buildLedger(
+      [
+        assistantMsg([
+          toolPart({ tool: "bash", input: { command: "x" }, end: 4000 }),
+          patchPart(["/r/secrets/acquisition.md"]),
+        ]),
+      ],
+      undefined,
+      () => true,
+    )
+    const [item] = SessionCompaction.corroborateCarry([{ text: "Wrote acquisition.md" }], ledger)
+    expect(item?.status).toBe("claimed, unverified")
+  })
+
+  test("a write-tool file later changed by shell still corroborates", () => {
+    const ledger = SessionCompaction.buildLedger(
+      [
+        assistantMsg([toolPart({ tool: "write", input: { filePath: "/r/report.md" }, end: 4000 })]),
+        assistantMsg([
+          toolPart({ tool: "bash", input: { command: "sed -i s/a/b/ report.md" }, end: 5000 }),
+          patchPart(["/r/report.md"]),
+        ]),
+      ],
+      undefined,
+      () => true,
+    )
+    const [item] = SessionCompaction.corroborateCarry([{ text: "Wrote report.md" }], ledger)
+    expect(item?.status).toBe("verified")
   })
 })
