@@ -71,10 +71,19 @@ function parse(tip: string): TipPart[] {
 const NO_MODELS_TIP = "Run {highlight}/connect{/highlight} to add an AI provider and start coding"
 const NO_MODELS_PARTS = parse(NO_MODELS_TIP)
 
+// altimate_change start — suggest the Altimate Code plugins for Claude Code and Codex
+const CLAUDE_PLUGIN_TIP =
+  "Using Claude Code? Run {highlight}claude plugin install altimate-code{/highlight} to hand dbt and warehouse work to Altimate Code"
+const CODEX_PLUGIN_TIP =
+  "Using Codex? Run {highlight}codex plugin marketplace add AltimateAI/altimate-codex-plugin{/highlight}, then install Altimate Code from {highlight}/plugins{/highlight}"
+// altimate_change end
+
 // altimate_change start — upstream_fix: restore first-run beginner tip pool
 const BEGINNER_TIPS: Tip[] = [
   "Run {highlight}/connect{/highlight} to add your API key and get started",
   "Run {highlight}/discover{/highlight} to auto-detect your dbt project and warehouse connections",
+  CLAUDE_PLUGIN_TIP,
+  CODEX_PLUGIN_TIP,
   "Press {highlight}Ctrl+P{/highlight} to see all available commands",
   "Press {highlight}Tab{/highlight} to cycle between Build and Plan agents",
   "Use {highlight}/cost-report{/highlight} to analyze warehouse spending",
@@ -320,6 +329,8 @@ const TIPS: Tip[] = [
   "Use {highlight}/ci-check{/highlight} to run pre-merge SQL validation on changed files",
   "Ask me to analyze a SQL query for anti-patterns — I'll detect 19+ issue types with zero false positives",
   "Ask me to trace column-level lineage for any SQL query across dialects",
+  CLAUDE_PLUGIN_TIP,
+  CODEX_PLUGIN_TIP,
   // altimate_change end
 ]
 

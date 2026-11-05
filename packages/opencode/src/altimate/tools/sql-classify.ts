@@ -5,7 +5,7 @@
 // Parser failures are never reads; lexical checks retain hard-deny protection.
 
 import { hasMongoWriteStage, normalizeMqlCommand } from "@altimateai/drivers"
-import { maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
+import { isModeledDialect, maskSql, statementsOf, tokenizeSql } from "./sql-tokenize"
 import { sqlFunctionCalls, sqlLiteral } from "./sql-functions"
 import { hasSideEffectFunction, isReadOnlyNestedFunction } from "./sql-function-policy"
 
@@ -187,7 +187,74 @@ function classifyFallback(sql: string, dialect?: string): { queryType: "read" | 
   for (const stmt of statements) {
     if (HARD_DENY_PATTERN.test(stmt)) blocked = true
   }
+  // When quoting or comments cannot be read with certainty, no reading of the literals or comments
+  // can be trusted to hide a hard deny (a misread literal can make a real statement look like a
+  // comment), so the words alone decide; the TRUNCATE() function does not count.
+  const lexical = tokenizeSql(sql, dialect)
+  if (!lexical.complete) {
+    if (mentionsHardDeny(sql)) blocked = true
+  } else {
+    // Read with certainty: the statement words in code (literals, identifiers and comments masked,
+    // so DROP/**/SCHEMA reads as DROP SCHEMA) decide too, since T-SQL runs `SELECT 1 DROP DATABASE x`
+    // as two statements with no ; and a parser may read a literal differently from the engine.
+    const masked = maskSql(lexical.tokens)
+    if (CODE_HARD_DENY.test(masked)) blocked = true
+    // Dynamic SQL (EXEC('...'), EXECUTE IMMEDIATE, PREPARE ... FROM, DO $$...$$) runs a string, so
+    // the words in its literals count too. A statement built by concatenation is not seen.
+    else if (DYNAMIC_SQL.test(masked) && mentionsHardDeny(sql)) blocked = true
+  }
   return { queryType: "write", blocked }
+}
+
+/** Where statements need no separator (T-SQL) or the dialect is not one the lexer models, a read
+ * must hold no statement keyword in its code (literals, identifiers and comments masked): the
+ * engine would run `SELECT ... DELETE FROM t` as two statements however a parser reads it. */
+function batchedStatement(masked: string, dialect?: string): boolean {
+  return (/^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "") || !isModeledDialect(dialect)) && BATCH_STATEMENT.test(masked)
+}
+
+// T-SQL statements that can follow a read in the same batch. Words that are also common column names
+// or clauses (USE, FETCH, OPEN, CLOSE, ENABLE, DISABLE, RENAME, THROW, ADD, MOVE, SEND, RECEIVE, END)
+// count only in their statement forms.
+const BATCH_STATEMENT = new RegExp(
+  "\\b(INSERT|UPDATE|DELETE|MERGE|DROP|ALTER|CREATE|TRUNCATE|EXEC|EXECUTE|GRANT|REVOKE|DENY|BACKUP|RESTORE|DBCC|KILL|SHUTDOWN|BULK|WAITFOR|DECLARE|SET|INTO|" +
+    "OPENROWSET|OPENQUERY|OPENDATASOURCE|OPENXML|CHECKPOINT|RECONFIGURE|RAISERROR|GOTO|BEGIN|COMMIT|ROLLBACK|SAVE|DEALLOCATE|" +
+    "READTEXT|UPDATETEXT|WRITETEXT|SETUSER|REVERT|PRINT)\\b" +
+    "|\\b(ENABLE|DISABLE)\\s+TRIGGER\\b|\\bRENAME\\s+(OBJECT|DATABASE)\\b|\\bTHROW\\s*($|;|[\\d@])" +
+    // USE except OPTION (USE HINT/PLAN) and USE INDEX; FETCH except OFFSET paging (FETCH NEXT 10 ROWS ONLY).
+    "|\\bUSE\\b(?!\\s+(HINT|PLAN|INDEX|KEY)\\b)|\\bFETCH\\b(?!\\s+(FIRST|NEXT)\\s+([\\w@().+-]+\\s+)?(PERCENT\\s+)?ROWS?\\b)" +
+    "|\\b(OPEN|CLOSE)\\s+(GLOBAL\\s+)?[\\w@#]+\\s*(;|\\b(SELECT|WITH)\\b)|\\bADD\\s+(SENSITIVITY|SIGNATURE|COUNTER)\\b" +
+    "|\\bMOVE\\s+CONVERSATION\\b|\\bSEND\\s+ON\\b|\\bRECEIVE\\s+(TOP\\b|\\*|\\w+\\s+FROM\\b)|\\bEND\\s+CONVERSATION\\b",
+  "i",
+)
+
+const CODE_HARD_DENY = /\bDROP\s+(DATABASE|SCHEMA)\b|\bTRUNCATE\b(?!\s*\()/i
+const DYNAMIC_SQL = /\bEXEC(UTE)?\b|(^|;)\s*(PREPARE|DO)\b/i
+// Sequence advances outside PostgreSQL's nextval(): NEXT VALUE FOR s (SQL Server, DB2), s.NEXTVAL
+// (Oracle, Snowflake).
+const SEQUENCE_ADVANCE = /\bNEXT\s+VALUE\s+FOR\b|\.\s*NEXTVAL\b/i
+
+/** The word DROP with DATABASE or SCHEMA anywhere after it, or TRUNCATE not directly followed by `(`
+ * (the TRUNCATE() function; a comment before the `(` does not count, since where a comment ends is
+ * part of what is uncertain). Only words count: quotes and comments are ignored, since how they read
+ * is what is uncertain, so no comment or quote placement can separate the words. One forward pass. */
+function mentionsHardDeny(sql: string): boolean {
+  let drop = false
+  let i = 0
+  while (i < sql.length) {
+    if (!/[A-Za-z_]/.test(sql[i])) {
+      i++
+      continue
+    }
+    let j = i + 1
+    while (j < sql.length && /\w/.test(sql[j])) j++
+    const word = sql.slice(i, j).toUpperCase()
+    if (word === "DROP") drop = true
+    else if (drop && (word === "DATABASE" || word === "SCHEMA")) return true
+    else if (word === "TRUNCATE" && !/^[ \t\r\n]*\(/.test(sql.slice(j, j + 64))) return true
+    i = j
+  }
+  return false
 }
 
 /** SQL wrapped in a subquery needs independent parser proof of exactly one query. */
@@ -258,7 +325,7 @@ function functionSafety(sql: string, dialect: string | undefined, depth: number,
       Object.hasOwn(SQL_ARGUMENTS, call.name) && call.qualifier === undefined && !hasSideEffectFunction(call.name)
     if (depth > 0 && !nestedExecutor && !isReadOnlyNestedFunction(call.name, call.qualifier)) write = true
     // SQL Server's XML .query() takes XQuery, not executable SQL.
-    if (call.name === "query" && /^(sqlserver|tsql|mssql)$/i.test(dialect ?? "")) continue
+    if (call.name === "query" && /^(sqlserver|tsql|mssql|fabric)$/i.test(dialect ?? "")) continue
     const argument = Object.hasOwn(SQL_ARGUMENTS, call.name) ? SQL_ARGUMENTS[call.name] : undefined
     if (!argument) continue
     const inner = sqlLiteral(call.args[argument.index], dialect)
@@ -291,7 +358,8 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
   parseError?: string
 } {
   if (!sql || typeof sql !== "string") return { queryType: "read", blocked: false }
-  if (!tokenizeSql(sql, dialect).complete) {
+  const lexical = tokenizeSql(sql, dialect)
+  if (!lexical.complete) {
     return { ...classifyFallback(sql, dialect), parseError: "SQL contains unterminated or unsupported quoted text or comments" }
   }
   if (!getStatementTypes) return { ...classifyFallback(sql, dialect), parseError: "SQL parser is unavailable" }
@@ -304,6 +372,7 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
     // A generic parser can treat MySQL arithmetic (--2) as a comment and omit
     // trailing statements. Keep dialect-aware lexical hard denies authoritative.
     const functions = functionSafety(sql, dialect, depth)
+    const masked = maskSql(lexical.tokens)
     const blocked =
       functions.blocked ||
       classifyFallback(sql, dialect).blocked ||
@@ -312,7 +381,14 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
       )
 
     return {
-      queryType: !functions.write && !blocked && otherIsReadOnly(sql, result.statements, dialect) ? "read" : "write",
+      queryType:
+        !functions.write &&
+        !blocked &&
+        !batchedStatement(masked, dialect) &&
+        !SEQUENCE_ADVANCE.test(masked) &&
+        otherIsReadOnly(sql, result.statements, dialect)
+          ? "read"
+          : "write",
       blocked,
     }
   } catch (error) {

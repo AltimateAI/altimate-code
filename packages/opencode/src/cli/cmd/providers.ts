@@ -41,6 +41,18 @@ const cliTry = <Value>(message: string, fn: () => PromiseLike<Value>) =>
     catch: (error) => new CliError({ message: message + errorMessage(error) }),
   })
 
+// altimate_change start — resolve a pending wait on Ctrl+C (SIGINT) instead of letting it run to timeout
+const SIGNIN_CANCELED = Symbol("signin-canceled")
+const untilSigint = <Value>(promise: Promise<Value>) => {
+  let onSigint = () => {}
+  const canceled = new Promise<typeof SIGNIN_CANCELED>((resolve) => {
+    onSigint = () => resolve(SIGNIN_CANCELED)
+    process.once("SIGINT", onSigint)
+  })
+  return Promise.race([promise, canceled]).finally(() => process.off("SIGINT", onSigint))
+}
+// altimate_change end
+
 const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
   plugin: { auth: PluginAuth },
   provider: string,
@@ -108,11 +120,14 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
       if (authorize.instructions) {
         yield* Prompt.log.info(authorize.instructions)
       }
-      const spinner = Prompt.spinner()
-      yield* spinner.start("Waiting for authorization...")
-      const result = yield* cliTry("Failed to authorize: ", () => authorize.callback())
+      // altimate_change start — no clack spinner here: its raw-mode stdin turns Ctrl+C into
+      // process.exit(0), so a canceled sign-in looked successful to `&&` chains and scripts.
+      yield* Prompt.log.info("Waiting for authorization... (Ctrl+C to cancel)")
+      const result = yield* cliTry("Failed to authorize: ", () => untilSigint(authorize.callback()))
+      if (result === SIGNIN_CANCELED) return yield* fail("Sign-in canceled.", 130)
+      // altimate_change end
       if (result.type === "failed") {
-        yield* spinner.stop("Failed to authorize", 1)
+        yield* Prompt.log.error("Failed to authorize")
       }
       if (result.type === "success") {
         const saveProvider = result.provider ?? provider
@@ -133,7 +148,7 @@ const handlePluginAuth = Effect.fn("Cli.providers.pluginAuth")(function* (
             ...(result.metadata ? { metadata: result.metadata } : {}),
           })
         }
-        yield* spinner.stop("Login successful")
+        yield* Prompt.log.success("Login successful")
       }
     }
 

@@ -81,6 +81,23 @@ altimate /discover
 
 > **Zero additional setup.** One command install.
 
+### Use it from Claude Code or Codex
+
+The Altimate Code plugins let Claude Code and Codex hand dbt and warehouse work to
+altimate. Install the CLI above first — the plugins run it, they do not install it.
+
+```bash
+# Claude Code
+claude plugin install altimate-code
+
+# Codex — add the marketplace, then open Codex, type /plugins and install "Altimate Code"
+codex plugin marketplace add AltimateAI/altimate-codex-plugin
+```
+
+See [Using with Claude Code](docs/docs/data-engineering/guides/using-with-claude-code.md) for
+the marketplace install, sign-in and the `/altimate-code:altimate` command, and the
+[Codex plugin README](https://github.com/AltimateAI/altimate-codex-plugin#install) for Codex.
+
 ## Why a specialized harness?
 
 General AI coding agents can edit SQL files. They cannot *understand* your data stack.

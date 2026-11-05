@@ -56,7 +56,7 @@ export function describeOutcome(
 ): string {
   const head = `learn: ${signals} signal${signals === 1 ? "" : "s"} -> ${summary}`
   if (promotion?.status === "promoted")
-    return `${head}; auto-promoted${promotion.archived ? ` (previous lessons archived as v${promotion.archived})` : ""}. Undo with \`altimate-code learn rollback\`` +
+    return `${head}; auto-promoted${promotion.archived ? ` (previous rules archived as v${promotion.archived})` : ""}. Undo with \`altimate-code learn rollback\`` +
       (promotion.warning ? ` (warning: ${promotion.warning})` : "")
   if (!candidate) return head
   if (promotion?.status === "held")

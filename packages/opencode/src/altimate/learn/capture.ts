@@ -247,6 +247,24 @@ export class Capture {
 
 // Keep every active capture drainable when more than one instance is open.
 const active = new Set<Capture>()
+/** Instance directories whose capture runs, whoever started it. */
+const running = new Set<string>()
+
+/** Whether capture runs for the instance at `directory`. */
+export function captureRunning(directory: string): boolean {
+  return running.has(directory)
+}
+
+// altimate_change start — workspace rules: a per-project gate the rules service sets from the full learning decision
+// (the person's /rules choice can turn learning off while config still has learn.capture on). No gate: record.
+const gates = new Map<string, () => Promise<boolean>>()
+
+/** Set (or clear, with undefined) whether corrections are recorded for the project at `directory`. */
+export function setCaptureGate(directory: string, gate: (() => Promise<boolean>) | undefined) {
+  if (gate) gates.set(directory, gate)
+  else gates.delete(directory)
+}
+// altimate_change end
 
 export async function flushCapture() {
   await Promise.all([...active].map((capture) => capture.flush()))
@@ -272,17 +290,36 @@ async function subscribeWhenReady<T>(subscribe: () => T): Promise<T> {
  * Starts capture for one instance when enabled. Called once from instance bootstrap inside the instance
  * context. Never throws.
  */
-export async function startCapture(ctx: { directory: string; worktree: string }): Promise<void> {
+// altimate_change start — returns a stop function once capture runs (workspace rules stop it when learning turns off)
+export async function startCapture(
+  ctx: { directory: string; worktree: string },
+  options: { force?: boolean } = {},
+): Promise<(() => Promise<void>) | undefined> {
+  // altimate_change end
   try {
     const root = ctx.worktree !== "/" ? ctx.worktree : ctx.directory
     const { Config } = await import("@/config/config")
-    if (!captureEnabled((await Config.get()).learn)) return
+    // altimate_change start — `force`: workspace rules turned learning on for this project (the person set nothing)
+    if (!options.force && !captureEnabled((await Config.get()).learn)) return
+    // altimate_change end
     const { Bus } = await import("@/bus")
     const { MessageV2 } = await import("../../session/message-v2")
     const { Session } = await import("../../session")
     const { SessionID } = await import("../../session/schema")
     const capture = new Capture({
-      record: (signal) => appendSignal(root, signal),
+      record: async (signal) => {
+        // Fails closed: a gate that cannot decide (unreadable rules state) must not record a correction the person
+        // may have turned off. It throws rather than returns, so the correction is not marked recorded and a later
+        // update of the message can try again; `track` logs it.
+        const gate = gates.get(ctx.directory)
+        if (gate) {
+          const on = await gate().catch((error: unknown) => {
+            throw new Error(`learning decision unavailable, correction not recorded: ${error instanceof Error ? error.message : String(error)}`)
+          })
+          if (!on) return
+        }
+        return appendSignal(root, signal)
+      },
       turnStart: async (sessionID, messageID) => {
         const messages = await Session.messages({ sessionID: SessionID.make(sessionID) })
         return correctedTurnStart(turnMessages(messages), messageID)
@@ -294,15 +331,25 @@ export async function startCapture(ctx: { directory: string; worktree: string })
       },
     })
     active.add(capture)
+    running.add(ctx.directory)
     const subscriptions: Array<() => void> = []
+    // altimate_change start — one stop path for disposal and for workspace rules
+    // One stop, shared: a second caller (the instance disposer overlapping a settings change) waits for the
+    // same flush instead of returning before the pending signal writes land.
+    let stopping: Promise<void> | undefined
+    const stopCapture = () =>
+      (stopping ??= (async () => {
+        for (const stop of subscriptions) stop()
+        await capture.flush()
+        await flushWrites()
+        active.delete(capture)
+        running.delete(ctx.directory)
+        unregister()
+      })())
     const unregister = registerDisposer(async (directory) => {
-      if (directory !== ctx.directory) return
-      for (const stop of subscriptions) stop()
-      await capture.flush()
-      await flushWrites()
-      active.delete(capture)
-      unregister()
+      if (directory === ctx.directory) await stopCapture()
     })
+    // altimate_change end
     subscriptions.push(
       await subscribeWhenReady(() => Bus.subscribe(MessageV2.Event.Updated, (evt) => capture.onMessage(evt.properties.info))),
     )
@@ -312,7 +359,9 @@ export async function startCapture(ctx: { directory: string; worktree: string })
       ),
     )
     log.info("learn capture started", { root })
+    return stopCapture
   } catch (e) {
     log.warn("learn capture not started", { error: e instanceof Error ? e.message : String(e) })
+    return undefined
   }
 }

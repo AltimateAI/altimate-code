@@ -145,6 +145,19 @@ describe("telemetry opt-out marker", () => {
     expect(optOuts()).toHaveLength(1)
   })
 
+  test("a short opted-out run that shuts down at once still writes the marker, so the next launch sends nothing", async () => {
+    writeMachineId()
+    holdTrack = new Promise<void>((r) => setTimeout(r, 100)) // the ingest endpoint answers after 100ms
+    process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
+    await Telemetry.shutdown()
+    await Telemetry.init()
+    await Telemetry.shutdown() // the command finished before the send did
+    expect(OptOutMarker.exists()).toBe(true)
+    await Telemetry.init()
+    await new Promise((r) => setTimeout(r, 100))
+    expect(optOuts()).toHaveLength(1)
+  })
+
   test("a machine that never sent telemetry sends nothing and gets no marker", async () => {
     process.env.ALTIMATE_TELEMETRY_DISABLED = "1"
     await Telemetry.shutdown()
