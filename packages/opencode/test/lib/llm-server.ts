@@ -686,16 +686,18 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
           // "E2E Title", so a test can make title generation fail. Kept apart from the main queue:
           // a title request carries the first user message, so body matchers would catch it too.
           const queued = titles.shift()
+          hits = [...hits, current]
+          yield* notify()
           if (queued) {
-            hits = [...hits, current]
-            yield* notify()
             if (queued.type !== "sse") return fail(queued)
             if (mode === "responses") return send(responses(queued, modelFrom(body)))
+            if (queued.reset) {
+              yield* reset(queued)
+              return HttpServerResponse.empty()
+            }
             return send(queued)
           }
           // altimate_change end
-          hits = [...hits, current]
-          yield* notify()
           const auto: Sse = { type: "sse", head: [role()], tail: [textLine("E2E Title"), finishLine("stop")] }
           if (mode === "responses") return send(responses(auto, modelFrom(body)))
           return send(auto)

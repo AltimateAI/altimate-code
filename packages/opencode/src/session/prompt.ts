@@ -5017,6 +5017,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     if (!cleaned) return
 
     const title = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
+    // altimate_change start — the user may have named the session while the request was in flight;
+    // a generated title only ever replaces the placeholder.
+    const current = await Session.get(input.session.id).catch(() => undefined)
+    if (current && !Session.isDefaultTitle(current.title)) return
+    // altimate_change end
     return Session.setTitle({ sessionID: input.session.id, title })
   }
 
