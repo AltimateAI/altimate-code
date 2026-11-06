@@ -5,3 +5,5 @@ bun.lock
 .gitignore
 package-lock.json
 references/
+!skills/data-vault/references/
+!skills/data-vault/references/**
