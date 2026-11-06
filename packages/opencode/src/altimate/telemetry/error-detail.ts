@@ -400,6 +400,20 @@ export function describeToolError(raw: string) {
   }
 }
 
+// Exact messages of PermissionNext/PermissionV1 RejectedError and CorrectedError and of
+// Question.RejectedError, optionally behind the "Name: " prefix that toString() adds.
+const USER_REJECTION =
+  /^(?:\w+: )?(?:The user rejected permission to use this specific tool call(?:\.$| with the following feedback: )|The user dismissed this question$)/
+
+/**
+ * True when a tool "error" is the user declining a permission prompt or dismissing a
+ * question. That is a user decision, not a tool failure, so it is kept out of tool error
+ * telemetry. Config-rule denials and every other permission failure still count.
+ */
+export function isUserRejection(raw: string): boolean {
+  return USER_REJECTION.test(raw)
+}
+
 export function buildErrorFingerprintEvent(
   sessionID: string,
   err: {
