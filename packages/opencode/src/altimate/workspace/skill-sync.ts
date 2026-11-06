@@ -47,16 +47,20 @@
 // The detail and every file read also pass the listed ``revision``: the server answers 409 ``revision_changed`` when the
 // version it serves has moved on since the list (an approval or rejection between two reads), so a bundle is never
 // assembled from two versions. Any such failure discards the skill's whole download and it is fetched again on the next
-// sync. A previous copy is carried over a failed download unless it names a revision other than the one the list now
-// names (a copy recorded without one is kept): a copy of a version the workspace no longer serves (a rejected pending
-// version, an edit since replaced) is withdrawn instead,
-// and the snapshot is published without it even when nothing else could be fetched.
+// sync. A previous copy is carried over a failed download only while it is the version the server last said it serves
+// (the list's revision, or the one a 409 names); a copy of any other version — a rejected pending version, an edit since
+// replaced — is withdrawn instead, as is a skill the list no longer names. Withdrawals hold even when nothing else could
+// be fetched or the run is abandoned, and like every swap they run under a cross-process lock and only remove a copy
+// still exactly the one this run judged obsolete.
 // altimate_change end
 import fs from "fs/promises"
 import { statSync } from "node:fs"
 import path from "path"
 import { emptyRecordPath } from "./empty-record-path"
 import { Flag as CoreFlag } from "@opencode-ai/core/flag/flag"
+// altimate_change start — workspace review: snapshot swaps and withdrawals are serialised across processes
+import { Flock } from "@opencode-ai/core/util/flock"
+// altimate_change end
 import { Log } from "@/altimate/util/log"
 import { AltimateApi } from "@/altimate/api/client"
 import {
@@ -1268,7 +1272,9 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
   let remoteRows: RemoteSummary[] | null = null
   const dropped = new Set<string>()
   // altimate_change start — workspace review: previous copies of a version the workspace no longer serves
-  const withdrawn = new Set<string>()
+  /** Copies on disk the server has said are no longer served, mapped to the entry this run saw, so a withdrawal never
+   * removes a copy another process has replaced since. */
+  const withdrawn = new Map<string, ManifestSkill>()
   // altimate_change end
   /** Skills kept at their previous copy, mapped to that copy's version. */
   const carriedVersions = new Map<string, string>()
@@ -1547,7 +1553,12 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           // A server that ignores the parameter but names the revision it answered for: it must be the listed one.
           const answered = detailRevision(detail)
           if (summary.revision && answered !== undefined && answered !== summary.revision)
-            throw new WorkspaceApiError(`revision changed for ${summary.publicId}: listed ${summary.revision}, served ${answered}`)
+            throw new WorkspaceApiError(
+              `revision changed for ${summary.publicId}: listed ${summary.revision}, served ${answered}`,
+              409,
+              "response",
+              { code: "revision_changed", revision: answered },
+            )
           // altimate_change end
           const files = parseDetailFiles(detail)
           if (!files) throw new WorkspaceApiError(`unrecognised detail for ${summary.publicId}`)
@@ -1619,10 +1630,16 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           const priorDir = path.join(root, summary.publicId)
           let carried = false
           // altimate_change start — workspace review: only the version the workspace still serves is carried over
-          // A copy recorded without a revision (by an older client, or from a server that sent none) cannot be told
-          // stale, so it is kept like any copy over a failed download; only one naming another revision is withdrawn.
-          const current = !!prior && (prior.revision === undefined || prior.revision === summary.revision)
-          if (prior && !current) withdrawn.add(summary.publicId)
+          // What the server last said it serves: the list's revision, unless a read since answered that it moved on
+          // (409 `revision_changed`, which names the revision it serves now). A copy of any other version is withdrawn,
+          // even though this download failed: a replaced or rejected version reaches nobody. A copy recorded without a
+          // revision (by an older client, or from a server that sent none) cannot be told stale over a plain failure
+          // and is kept; once the server says the version moved, it is withdrawn too.
+          const moved = revisionChangedTo(err)
+          const served = moved === undefined ? summary.revision : moved
+          const current =
+            !!prior && (prior.revision === undefined ? moved === undefined : prior.revision === served)
+          if (prior && !current) withdrawn.set(summary.publicId, prior)
           // altimate_change end
           if (prior && current) {
             try {
@@ -1655,7 +1672,16 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           })
         }
       }
-      // altimate_change start — workspace review: unless a copy on disk must be withdrawn, which keeping it would undo
+      // altimate_change start — workspace review: a copy synced from a review-aware server (it recorded a revision)
+      // that this successful list no longer names — rejected, replaced, detached — is withdrawn even when nothing else
+      // could be fetched, or the run is abandoned: the server has said it is not served. A copy recorded without a
+      // revision keeps the older rule, under which every skill failing keeps the whole previous snapshot.
+      if (manifest && !foreign) {
+        const listed = new Set(remote.map((r) => r.publicId))
+        for (const [id, entry] of Object.entries(manifest.skills))
+          if (!listed.has(id) && entry.revision !== undefined) withdrawn.set(id, entry)
+      }
+      // ...and unless a copy on disk must be withdrawn, which keeping everything would undo
       if (remote.length > 0 && Object.keys(next.skills).length === 0 && withdrawn.size === 0) {
         // altimate_change end
         // Nothing survived. That is indistinguishable from a broken server, and
@@ -1713,18 +1739,22 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       await fs.mkdir(path.dirname(root), { recursive: true })
       const retired = path.join(canon, STAGING_DIR, `retired-${process.pid}-${REALM_ID}`)
       await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
-      let hadPrevious = true
-      try {
-        await fs.rename(root, retired)
-      } catch {
-        hadPrevious = false // nothing published yet
-      }
-      try {
-        await fs.rename(staging, root)
-      } catch (err) {
-        if (hadPrevious) await fs.rename(retired, root).catch(() => {})
-        throw err
-      }
+      // altimate_change start — workspace review: one swap or withdrawal at a time per project, across processes
+      await Flock.withLock(snapshotLock(canon), async () => {
+        let hadPrevious = true
+        try {
+          await fs.rename(root, retired)
+        } catch {
+          hadPrevious = false // nothing published yet
+        }
+        try {
+          await fs.rename(staging, root)
+        } catch (err) {
+          if (hadPrevious) await fs.rename(retired, root).catch(() => {})
+          throw err
+        }
+      })
+      // altimate_change end
       await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
       await clearEmptyRecordFor(canon, currentEmptyKey)
       changed = true
@@ -1828,28 +1858,48 @@ function detailRevision(payload: unknown): string | undefined {
 }
 
 /** Take skills out of the live snapshot when a run is abandoned: their copies are of a version the workspace no longer
- * serves, and abandoning keeps the live tree. Only from a tree this client owns, for this account and workspace; each
- * skill folder goes first, then the manifest is rewritten without it (atomically), so discovery never reads a copy the
- * manifest would vouch for. */
-async function withdrawFromLive(canon: string, datamateId: number, ids: Set<string>): Promise<void> {
+ * serves, and abandoning keeps the live tree. Only from a tree this client owns, for this account and workspace, and
+ * only a copy still exactly the one this run judged obsolete — under the same cross-process lock as a swap, so another
+ * process that published a newer copy in the meantime keeps it. Each skill folder goes first, then the manifest is
+ * rewritten without it (atomically), so discovery never reads a copy the manifest would vouch for. */
+async function withdrawFromLive(canon: string, datamateId: number, obsolete: Map<string, ManifestSkill>): Promise<void> {
   try {
-    const manifest = await ownManifest(canon)
-    if (!manifest || manifest.datamateId !== datamateId) return
-    const root = managedRoot(canon)
-    for (const id of ids) {
-      if (!manifest.skills[id] || !safePathComponent(id)) continue
-      await fs.rm(path.join(root, id), { recursive: true, force: true })
-      delete manifest.skills[id]
-    }
-    const tmp = path.join(root, `${MANIFEST_NAME}.${process.pid}-${REALM_ID}.tmp`)
-    await fs.writeFile(tmp, JSON.stringify(manifest, null, 2))
-    await fs.rename(tmp, path.join(root, MANIFEST_NAME))
-    // The marker vouched for a clean sync of what was there.
-    await fs.rm(path.join(root, SYNCED_MARKER), { force: true })
-    log.info("withdrew workspace skills no longer served at their stored version", { skills: [...ids] })
+    await Flock.withLock(snapshotLock(canon), async () => {
+      const manifest = await ownManifest(canon)
+      if (!manifest || manifest.datamateId !== datamateId) return
+      const root = managedRoot(canon)
+      const removed: string[] = []
+      for (const [id, seen] of obsolete) {
+        const live = manifest.skills[id]
+        if (!live || !safePathComponent(id) || versionOf(live) !== versionOf(seen)) continue
+        await fs.rm(path.join(root, id), { recursive: true, force: true })
+        delete manifest.skills[id]
+        removed.push(id)
+      }
+      if (!removed.length) return
+      const tmp = path.join(root, `${MANIFEST_NAME}.${process.pid}-${REALM_ID}.tmp`)
+      await fs.writeFile(tmp, JSON.stringify(manifest, null, 2))
+      await fs.rename(tmp, path.join(root, MANIFEST_NAME))
+      // The marker vouched for a clean sync of what was there.
+      await fs.rm(path.join(root, SYNCED_MARKER), { force: true })
+      log.info("withdrew workspace skills no longer served at their stored version", { skills: removed })
+    })
   } catch (err) {
     log.warn("could not withdraw workspace skills no longer served", { err: String(err) })
   }
+}
+
+/** Cross-process lock for one project's live snapshot. */
+function snapshotLock(canon: string): string {
+  return `workspace-skill-snapshot:${canon}`
+}
+
+/** The revision a 409 `revision_changed` says the workspace serves now (`null`: none), or undefined for any other
+ * failure. */
+function revisionChangedTo(err: unknown): string | null | undefined {
+  const detail = (err as { detail?: { code?: unknown; revision?: unknown } } | null)?.detail
+  if (detail?.code !== "revision_changed") return undefined
+  return typeof detail.revision === "string" && detail.revision ? detail.revision : null
 }
 // altimate_change end
 

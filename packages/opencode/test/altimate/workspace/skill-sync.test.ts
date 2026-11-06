@@ -9,6 +9,7 @@
 // where discovery can load them.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   utimesSync,
@@ -3025,6 +3026,92 @@ describe("the served version", () => {
     expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("v1")
     expect(result.skipped[0].reason).toContain("kept the previous copy")
     expect(result.skipped[0].reason).not.toContain("no longer the version")
+  })
+
+  test("a skill the list no longer names is withdrawn even when every remaining download fails", async () => {
+    serveReviewed({ "pub-a": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending a" } })
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-a", "SKILL.md"))).toBe(true)
+    // pub-a was rejected (the list drops it); pub-b is new and its download fails.
+    serveReviewed({ "pub-b": { revision: "b1", updatedAt: "2026-01-01T00:00:00Z", body: "b" } })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/files/")) throw new TypeError("network down")
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-a", "SKILL.md"))).toBe(false)
+    expect(existsSync(skillFile("pub-b", "SKILL.md"))).toBe(false)
+  })
+
+  test("a 409 naming a newer revision withdraws a copy the list still named", async () => {
+    serveReviewed({
+      "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" },
+      "pub-2": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "two" },
+    })
+    await syncSkills(project)
+    // The list still names p1 for pub-1 (pub-2 changed, so the snapshot is fetched again); before pub-1's file is read,
+    // the owner approves a1 and the read is refused.
+    serveReviewed({
+      "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" },
+      "pub-2": { revision: "r2", updatedAt: "2026-01-02T00:00:00Z", body: "two v2" },
+    })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/skills/pub-1/files/"))
+        return new Response(JSON.stringify({ detail: { code: "revision_changed", message: "changed", revision: "a1" } }), {
+          status: 409,
+          headers: { "content-type": "application/json" },
+        })
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+    expect(readFileSync(skillFile("pub-2", "SKILL.md"), "utf8")).toBe("two v2")
+    expect(result.skipped[0].reason).toContain("no longer the version the workspace serves")
+  })
+
+  test("an abandoned run withdraws a stale copy, but never one another process has replaced since", async () => {
+    const manifestPath = path.join(project, MANAGED, ".manifest.json")
+    // The swap cannot happen (the parent of the live tree is read-only), so the run is abandoned after downloading.
+    const parent = path.dirname(path.join(project, MANAGED))
+    try {
+      for (const replacedMeanwhile of [false, true]) {
+        mkdirSync(parent, { recursive: true })
+        chmodSync(parent, 0o755)
+        rmSync(path.join(project, MANAGED), { recursive: true, force: true })
+        serveReviewed({ "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" } })
+        await syncSkills(project)
+        // pub-1 is now served at a1 and its download fails; pub-2 is new and downloads.
+        serveReviewed({
+          "pub-1": { revision: "a1", updatedAt: "2026-01-02T00:00:00Z", body: "approved" },
+          "pub-2": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "two" },
+        })
+        const ok = globalThis.fetch
+        globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+          const url = String(input)
+          if (url.includes("/skills/pub-1/files/")) throw new TypeError("network down")
+          if (url.includes("/skills/pub-2/files/")) {
+            if (replacedMeanwhile) {
+              // Another process published pub-1 at a1 in the meantime.
+              const m = JSON.parse(readFileSync(manifestPath, "utf8"))
+              m.skills["pub-1"].revision = "a1"
+              writeFileSync(manifestPath, JSON.stringify(m))
+              writeFileSync(skillFile("pub-1", "SKILL.md"), "approved")
+            }
+            chmodSync(parent, 0o555)
+          }
+          return ok(input as never, init as never)
+        }) as unknown as typeof fetch
+        await syncSkills(project)
+        chmodSync(parent, 0o755)
+        expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(false)
+        if (replacedMeanwhile) expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("approved")
+        else expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+      }
+    } finally {
+      if (existsSync(parent)) chmodSync(parent, 0o755)
+    }
   })
 
   test("a failed download keeps the previous copy when the list still names its revision, or names none (older servers)", async () => {
