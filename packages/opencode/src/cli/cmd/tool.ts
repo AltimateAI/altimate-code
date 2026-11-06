@@ -128,7 +128,7 @@ const ToolListCommand = cmd({
     const workspaceTools = await resolveWorkspaceTools(args["workspace-tools"], process.cwd())
     const tools = await withRunner(process.cwd(), args.connections, workspaceTools, (runner) => runner.list())
     if (args.json) {
-      console.log(JSON.stringify(tools, null, 2))
+      writeAll(JSON.stringify(tools, null, 2) + "\n")
       return
     }
     const width = Math.max(...tools.map((tool) => tool.id.length))
@@ -299,7 +299,8 @@ const ToolDaemonCommand = cmd({
 /**
  * All of a machine-read answer on stdout before returning. The CLI exits right after a command, and
  * console.log leaves what a pipe can't take yet in a buffer that exit throws away, which cuts off an
- * answer over the pipe's 64 KiB when its reader is slow. Only metadata gets that big: `output` is capped.
+ * answer over the pipe's 64 KiB when its reader is slow. `tool run`'s `output` is capped, so there only
+ * metadata gets that big.
  */
 function writeAll(text: string) {
   const bytes = Buffer.from(text)
@@ -307,7 +308,9 @@ function writeAll(text: string) {
     try {
       at += writeSync(1, bytes, at)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EAGAIN") throw error
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === "EPIPE") return // The reader left, so nobody is waiting for the rest.
+      if (code !== "EAGAIN") throw error
       Bun.sleepSync(2)
     }
   }
