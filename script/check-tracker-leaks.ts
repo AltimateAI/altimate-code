@@ -20,7 +20,7 @@
  * job of a pre-push guard.
  */
 
-import { $ } from "bun"
+import { readFileSync } from "fs"
 
 // altimate_change — #1052 D8 review-fix: drop the trailing word-boundary from
 // the Jira-key regex so the guard catches suffix-adjacent leaks (letter,
@@ -79,15 +79,15 @@ type Hit = {
 //   (b) `catch { return "" }` swallowed real errors (missing ref, corrupted
 //       repo). A failed git command would look identical to a clean scan.
 //
-// `git` is invoked directly via Bun.$ (no shell). Args are passed through the
-// tagged-template interpolation which quotes each interpolation as a single
-// argv element — no shell parsing anywhere. `.nothrow()` lets us inspect the
-// exit code instead of catching an exception. `exitOnFailure` distinguishes
-// "expected empty result" (mergeBase against a diverged history) from
-// "unexpected failure" (git binary missing, corrupt index) so the latter
-// fails loud rather than reporting the branch as clean.
+// `git` runs directly from an argv array (no shell), so a caller-supplied value
+// is never re-parsed. The exit code is inspected rather than thrown.
+// `failOnError` distinguishes "expected empty result" (mergeBase against a
+// diverged history) from "unexpected failure" (git binary missing, corrupt
+// index) so the latter fails loud rather than reporting the branch as clean.
+// The call is synchronous and git gets no stdin: see readPushedRefs for why
+// this script avoids waiting on the event loop.
 async function git(args: string[], opts: { failOnError?: boolean } = { failOnError: true }): Promise<string> {
-  const r = await $`git ${args}`.quiet().nothrow()
+  const r = Bun.spawnSync({ cmd: ["git", ...args], stdin: "ignore", stdout: "pipe", stderr: "pipe" })
   if (r.exitCode !== 0) {
     if (opts.failOnError) {
       process.stderr.write(
@@ -97,7 +97,7 @@ async function git(args: string[], opts: { failOnError?: boolean } = { failOnErr
     }
     return ""
   }
-  return r.text().trim()
+  return r.stdout.toString().trim()
 }
 
 function scanText(text: string, source: string, hits: Hit[]) {
@@ -185,7 +185,12 @@ async function readPushedRefs(): Promise<{
 }> {
   if (process.stdin.isTTY) return { hadInput: false, tips: [] }
   try {
-    const raw = await new Response(Bun.stdin.stream()).text()
+    // Blocking read of fd 0. Under `git push` over ssh (macOS) this script once
+    // sat for days with git waiting on the hook: bun idle in its event loop, no
+    // child process, and the stdin pipe's writer already closed. It was awaiting
+    // either the stdin stream or a `Bun.$` git call; the event loop missed the
+    // completion. Neither await is used now: stdin and git are synchronous.
+    const raw = readFileSync(0, "utf-8")
     const rows = raw
       .split("\n")
       .map((l) => l.trim())
