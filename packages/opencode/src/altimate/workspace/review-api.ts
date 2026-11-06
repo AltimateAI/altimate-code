@@ -90,8 +90,9 @@ export function summary(datamateId: number, actAs?: ActAs): Promise<Summary> {
   return call(Summary, "GET", datamateId, "/summary", { actAs })
 }
 
-/** Submit the caller's own skill or knowledge base to the workspace. The owner's is attached directly. */
-export function submit(datamateId: number, body: { kind: "skill" | "knowledge"; subject_id: string }, actAs?: ActAs): Promise<SubmitResult> {
+/** Submit the caller's own skill or knowledge base to the workspace. The owner's is attached directly. `source` is
+ * recorded in the request's audit events. */
+export function submit(datamateId: number, body: { kind: "skill" | "knowledge"; subject_id: string; source?: "cli" }, actAs?: ActAs): Promise<SubmitResult> {
   return call(SubmitResult, "POST", datamateId, "", { actAs, body })
 }
 

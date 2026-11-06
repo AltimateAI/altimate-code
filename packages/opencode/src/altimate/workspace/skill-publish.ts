@@ -696,16 +696,11 @@ function withPublishLock<T>(skillDir: string, task: () => Promise<T>): Promise<T
  * would silently detach the skill from every other workspace it was already on,
  * so the current set is read first and merged. */
 async function attachToWorkspace(publicId: string, datamateId: number): Promise<void> {
-  type Attached = { attached_datamate_ids?: unknown }
-  const detail = await altimateRequest<Attached & { skill?: Attached }>("GET", `/${encodeURIComponent(publicId)}`, {
-    base: SKILLS_BASE,
-  })
   // The server answers `{skill: {...}}` (`CustomSkillResponse`); a flat body
   // is tolerated the way `extractPublicId` tolerates both. Reading only the
   // top level found nothing, and the replace below then detached the skill
   // from every workspace it was already on.
-  const raw = detail?.skill?.attached_datamate_ids ?? detail?.attached_datamate_ids
-  const current = Array.isArray(raw) ? raw.filter((n): n is number => Number.isInteger(n)) : []
+  const current = await attachedWorkspaces(publicId)
   if (current.includes(datamateId)) return
   await altimateRequest<unknown>("PUT", `/${encodeURIComponent(publicId)}/datamates`, {
     base: SKILLS_BASE,
@@ -785,7 +780,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   const submit = async (publicId: string): Promise<PublishReview | undefined> => {
     if (!review) return undefined
     try {
-      const result = await ReviewApi.submit(binding.datamateId, { kind: "skill", subject_id: publicId })
+      const result = await ReviewApi.submit(binding.datamateId, { kind: "skill", subject_id: publicId, source: "cli" })
       // Remembered as pending, so the owner's decision is noticed even if it lands before the next poll.
       if (result.contribution)
         await ReviewNotices.recordSubmitted(
@@ -994,14 +989,20 @@ function isAfterUpload(err: unknown): boolean {
 }
 
 // altimate_change start — learn: find this user's skill by name for `--replace`
-/** The public id of this user's same-name skill attached to the linked workspace, or null unless unique. */
+/** The public id of this user's same-name skill, or null unless unique — and null when it is attached only to other
+ * workspaces, which an update from here would change too.
+ *
+ * Looked up among the user's own skills (`mine=true`), not the linked workspace's list: with review, a skill whose first
+ * submission was rejected (or is still pending for someone else's view) is attached nowhere, so the workspace list does
+ * not name it, and `--replace` must still find it. An older server that ignores `mine` lists more; `created_by` still
+ * picks this user's. */
 async function findOwnSkillByName(name: string, userId: number, datamateId: number): Promise<string | null> {
   const matches = new Set<string>()
   let expectedPages: number | undefined
   for (let page = 1; page <= 50; page++) {
     const body = await altimateRequest<{ items?: unknown[]; pages?: unknown }>("GET", "", {
       base: SKILLS_BASE,
-      query: { datamate_id: String(datamateId), page: String(page), size: "50" },
+      query: { mine: "true", page: String(page), size: "50" },
     })
     const pages = typeof body?.pages === "number" ? body.pages : 1
     if (expectedPages !== undefined && pages !== expectedPages)
@@ -1015,7 +1016,20 @@ async function findOwnSkillByName(name: string, userId: number, datamateId: numb
     }
     if (page >= pages || items.length === 0) break
   }
-  return matches.size === 1 ? [...matches][0] : null
+  if (matches.size !== 1) return null
+  const [publicId] = [...matches]
+  const attached = await attachedWorkspaces(publicId)
+  return attached.length === 0 || attached.includes(datamateId) ? publicId : null
+}
+
+/** The workspaces a skill is attached to, from its library detail (`{skill: {...}}`, or flat). */
+async function attachedWorkspaces(publicId: string): Promise<number[]> {
+  type Attached = { attached_datamate_ids?: unknown }
+  const detail = await altimateRequest<Attached & { skill?: Attached }>("GET", `/${encodeURIComponent(publicId)}`, {
+    base: SKILLS_BASE,
+  })
+  const raw = detail?.skill?.attached_datamate_ids ?? detail?.attached_datamate_ids
+  return Array.isArray(raw) ? raw.filter((n): n is number => Number.isInteger(n)) : []
 }
 // altimate_change end
 

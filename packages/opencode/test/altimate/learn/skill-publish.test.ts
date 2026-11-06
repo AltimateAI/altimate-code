@@ -146,12 +146,9 @@ test("replace refuses a same-name skill attached only to another workspace", () 
     if (url.pathname.endsWith("/datamates/"))
       return Response.json({ datamates: [{ id: 42, name: "Growth", user_id: 7, memory_enabled: false }] })
     if (method === "GET" && url.pathname.endsWith("/skills")) {
-      const workspace = url.searchParams.get("datamate_id")
-      lookups.push(workspace)
-      return Response.json({
-        items: workspace === "42" ? [] : [{ name: "team-playbook", public_id: "other-workspace", created_by: 7 }],
-        pages: 1,
-      })
+      // The user's own skills: the same-name one is attached only to workspace 77.
+      lookups.push(url.searchParams.get("mine"))
+      return Response.json({ items: [{ name: "team-playbook", public_id: "other-workspace", created_by: 7 }], pages: 1 })
     }
     if (method === "GET") return Response.json({ skill: { attached_datamate_ids: [77] } })
     writes.push(method)
@@ -169,7 +166,7 @@ test("replace refuses a same-name skill attached only to another workspace", () 
     await expect(publishSkill({
       projectDirectory: dir.path, skillDirectory, name: "team-playbook", description: "Team lessons", replace: true,
     })).rejects.toBeInstanceOf(SkillNameConflictError)
-    expect(lookups).toEqual(["42"])
+    expect(lookups).toEqual(["true"])
     expect(writes).toEqual(["POST"])
     expect(await fs.readFile(ledgerPathForTests(), "utf8").catch(() => undefined)).toBe(before)
   } finally {

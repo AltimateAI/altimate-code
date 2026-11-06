@@ -384,6 +384,28 @@ describe("publishSkill", () => {
       expect(requests.some((r) => r.method === "PATCH" && r.url.includes("pub-other-user"))).toBe(false)
     })
 
+    test("finds the skill among the user's own, so one attached nowhere (a rejected first submission) is updated", async () => {
+      statuses.POST = 409
+      attached = []
+      withList([{ name: "deploy", public_id: "pub-mine", created_by: 7 }])
+
+      const report = await publish({ replace: true })
+
+      expect(report.publicId).toBe("pub-mine")
+      const lookup = new URL(requests.find((r) => r.method === "GET" && /\/skills\?/.test(r.url))!.url)
+      expect(lookup.searchParams.get("mine")).toBe("true")
+      expect(lookup.searchParams.has("datamate_id")).toBe(false)
+    })
+
+    test("refuses a same-name skill attached only to other workspaces", async () => {
+      statuses.POST = 409
+      attached = [77]
+      withList([{ name: "deploy", public_id: "pub-mine", created_by: 7 }])
+
+      await expect(publish({ replace: true })).rejects.toBeInstanceOf(SkillNameConflictError)
+      expect(requests.some((r) => r.method === "PATCH")).toBe(false)
+    })
+
     test("still refuses without replace", async () => {
       statuses.POST = 409
       withList([{ name: "deploy", public_id: "pub-mine", created_by: 7 }])
@@ -1165,7 +1187,7 @@ describe("workspace review", () => {
       () => reply({ status: "pending", attached_directly: false, duplicate: false, contribution: contribution() }),
     )
     const report = await publish()
-    expect(posted().map((r) => r.body)).toEqual([{ kind: "skill", subject_id: "pub-1" }])
+    expect(posted().map((r) => r.body)).toEqual([{ kind: "skill", subject_id: "pub-1", source: "cli" }])
     expect(attaches()).toEqual([])
     expect(report.review).toMatchObject({ status: "pending", attachedDirectly: false, duplicate: false, ownerName: "Olive" })
     expect(describePublish(report)).toContain('Sent "deploy" for review to Olive')
