@@ -616,6 +616,8 @@ namespace TestLLMServer {
     readonly url: string
     readonly push: (...input: (Item | Reply)[]) => Effect.Effect<void>
     readonly pushMatch: (match: Match, ...input: (Item | Reply)[]) => Effect.Effect<void>
+    /** Answers for the next title requests, in order; the automatic "E2E Title" resumes after them. */
+    readonly title: (...input: (Item | Reply)[]) => Effect.Effect<void>
     readonly textMatch: (match: Match, value: string, opts?: { usage?: Usage }) => Effect.Effect<void>
     readonly toolMatch: (match: Match, name: string, input: unknown) => Effect.Effect<void>
     readonly text: (value: string, opts?: { usage?: Usage }) => Effect.Effect<void>
@@ -648,6 +650,7 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
 
       let hits: Hit[] = []
       let list: Queue[] = []
+      let titles: Item[] = [] // altimate_change — answers for title requests, see handle()
       let waits: Wait[] = []
       let misses: Hit[] = []
 
@@ -679,8 +682,22 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         const body = yield* req.json.pipe(Effect.orElseSucceed(() => ({})))
         const current = hit(req.originalUrl, body, { ...req.headers })
         if (isTitleRequest(body)) {
+          // altimate_change start — a queued title item answers the request instead of the automatic
+          // "E2E Title", so a test can make title generation fail. Kept apart from the main queue:
+          // a title request carries the first user message, so body matchers would catch it too.
+          const queued = titles.shift()
           hits = [...hits, current]
           yield* notify()
+          if (queued) {
+            if (queued.type !== "sse") return fail(queued)
+            if (mode === "responses") return send(responses(queued, modelFrom(body)))
+            if (queued.reset) {
+              yield* reset(queued)
+              return HttpServerResponse.empty()
+            }
+            return send(queued)
+          }
+          // altimate_change end
           const auto: Sse = { type: "sse", head: [role()], tail: [textLine("E2E Title"), finishLine("stop")] }
           if (mode === "responses") return send(responses(auto, modelFrom(body)))
           return send(auto)
@@ -720,6 +737,12 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         pushMatch: Effect.fn("TestLLMServer.pushMatch")(function* (match: Match, ...input: (Item | Reply)[]) {
           queueMatch(match, ...input)
         }),
+        // altimate_change start — answers for the next title requests, in order; the automatic
+        // "E2E Title" resumes once they are used up
+        title: Effect.fn("TestLLMServer.title")(function* (...input: (Item | Reply)[]) {
+          titles = [...titles, ...input.map((value) => item(value))]
+        }),
+        // altimate_change end
         textMatch: Effect.fn("TestLLMServer.textMatch")(function* (
           match: Match,
           value: string,
@@ -767,6 +790,7 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         reset: Effect.sync(() => {
           hits = []
           list = []
+          titles = [] // altimate_change
           waits = []
           misses = []
         }),
