@@ -400,6 +400,17 @@ export function describeToolError(raw: string) {
   }
 }
 
+const USER_REJECTION = /^(?:[\w.]*Error: )?The user rejected permission to use this specific tool call(?:\.|\s+with the following feedback: )/
+
+/**
+ * True when the tool error is the user declining a permission prompt (PermissionNext/PermissionV1
+ * RejectedError or CorrectedError). That is a user decision, not a tool failure. Config-rule
+ * denials and every other permission error still report.
+ */
+export function isUserRejection(raw: string): boolean {
+  return USER_REJECTION.test(raw)
+}
+
 export function buildErrorFingerprintEvent(
   sessionID: string,
   err: {
