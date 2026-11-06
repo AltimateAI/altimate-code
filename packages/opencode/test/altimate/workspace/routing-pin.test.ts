@@ -17,7 +17,7 @@ const SANDBOX = path.join(os.tmpdir(), `altimate-routing-pin-test-${process.pid}
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
 
-const { resolvePinnedBindingForRouting, recordApprovedBinding, __resetPinValidation, cachePath } =
+const { resolvePinnedBindingForRouting, resolveTurnBinding, recordApprovedBinding, __resetPinValidation, cachePath } =
   await import("../../../src/altimate/workspace/state")
 const { refresh, precedenceInternals } = await import("../../../src/altimate/workspace/precedence")
 const { Instance } = await import("../../../src/project/instance")
@@ -169,6 +169,47 @@ describe("resolvePinnedBindingForRouting", () => {
   test("refuses a pin for a directory outside the pinned root", async () => {
     setPin()
     expect((await resolvePinnedBindingForRouting(path.join(SANDBOX, "elsewhere")))?.status).toBe("unknown")
+  })
+})
+
+describe("resolveTurnBinding", () => {
+  test("the pin outranks the project's link", async () => {
+    await seedLocalLink(7, "project-link")
+    setPin()
+    expect((await resolveTurnBinding(ROOT))?.datamateId).toBe(42)
+  })
+
+  test("with no pin it is the project's link, and the account is not consulted", async () => {
+    await seedLocalLink(7, "project-link")
+    expect((await resolveTurnBinding(ROOT))?.datamateId).toBe(7)
+    expect(listCalls).toBe(0)
+  })
+
+  test("a malformed pin names nothing, not the project's link", async () => {
+    await seedLocalLink(7, "project-link")
+    setPin({ ALTIMATE_PINNED_WORKSPACE_ID: "not-a-number" })
+    expect(await resolveTurnBinding(ROOT)).toBeNull()
+  })
+
+  test("a directory outside the pinned root names nothing, not the project's link", async () => {
+    await seedLocalLink(7, "project-link")
+    setPin({ ALTIMATE_PINNED_WORKSPACE_ROOT: path.join(SANDBOX, "elsewhere") })
+    expect(await resolveTurnBinding(ROOT)).toBeNull()
+  })
+
+  test("a validation that outlasts the wait names nothing, and routing joins that same request", async () => {
+    await seedLocalLink(7, "project-link")
+    const answer = Promise.withResolvers<{ id: number; name: string }[]>()
+    ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = () => {
+      listCalls += 1
+      return answer.promise
+    }
+    setPin()
+    expect(await resolveTurnBinding(ROOT, 5)).toBeNull()
+    const routing = resolvePinnedBindingForRouting(ROOT)
+    answer.resolve([{ id: 42, name: "pinned-workspace" }])
+    expect((await routing)?.status).toBe("bound")
+    expect(listCalls).toBe(1)
   })
 })
 
