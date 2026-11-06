@@ -359,7 +359,7 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
       continue
     }
     if (result.error_code && RETRY_LATER.has(result.error_code)) {
-      failed.set(entry.id, result.error_detail ?? result.error_code)
+      failed.set(entry.id, result.error_detail || result.error_code)
       continue
     }
     done.add(entry.id)
@@ -370,7 +370,8 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
       status: result.status,
       // A refused item's `public_id` is not the person's proposal (a `stale` edit carries its target's).
       ...(ok && result.public_id ? { public_id: result.public_id } : {}),
-      ...(!ok ? { error: result.error_detail ?? result.error_code ?? result.status } : {}),
+      // Never empty: a recorded outcome without an error reads as accepted (`proposal.ts` `acted`).
+      ...(!ok ? { error: result.error_detail || result.error_code || result.status } : {}),
       ...(!ok && result.error_code ? { error_code: result.error_code } : {}),
       ...(!ok && result.error_code && TARGET_GONE.has(result.error_code) ? { target_gone: true } : {}),
     })
@@ -383,7 +384,10 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
   let foreign = false
   const after = await record(root, (s) => {
     if (!ownedBy(s, ctx)) return void (foreign = true)
-    s.outbox = s.outbox.filter((entry) => !done.has(entry.id))
+    // An entry queued again under its id while this send ran (`enqueue` replaces it) is not what was sent: it stays.
+    const version = (entry: OutboxEntry) => JSON.stringify([entry.created_at, entry.item, entry.approve])
+    const sentAs = new Map(batch.map((entry) => [entry.id, version(entry)]))
+    s.outbox = s.outbox.filter((entry) => !done.has(entry.id) || version(entry) !== sentAs.get(entry.id))
     for (const entry of s.outbox) {
       const error = failed.get(entry.id)
       if (error === undefined) continue
@@ -830,12 +834,12 @@ export async function pullOnly(root: string, directory: string, learn: LearnConf
     const report = ctx.status === "ready" ? { context: ctx, pull: await pull(root, ctx) } : await unready(root, key, ctx)
     if (report.pull?.ok) failedAt.delete(key)
     else if (report.pull) failedAt.set(key, Date.now())
-    await recordPullOutcome(root, report)
+    await recordPullOutcome(root, report, startedAt)
     RulesTelemetry.synced(trigger, report, startedAt)
     return report
   } catch (error) {
     // A pull that threw (the learn lock timed out): the next session start does not wait on it again.
-    await recordPullOutcome(root, undefined)
+    await recordPullOutcome(root, undefined, startedAt)
     RulesTelemetry.syncThrew(trigger, startedAt)
     throw error
   }
@@ -850,7 +854,7 @@ const TRANSIENT = new Set<string>(["link_unconfirmed", "account_unconfirmed"])
  * pull that ran and failed, a run that threw (`report` undefined), or a link or account the server could not confirm
  * is a failure: signed out, unlinked or no remote is not one to back off from (signing in pulls at once).
  */
-export async function recordPullOutcome(root: string, report: RunReport | undefined): Promise<void> {
+export async function recordPullOutcome(root: string, report: RunReport | undefined, startedAt: number): Promise<void> {
   const failed = !report || (report.pull ? !report.pull.ok : TRANSIENT.has(report.context.status === "skipped" ? report.context.code : ""))
   const { accountDigest, credentialDigest } = await import("../workspace/state")
   // Stamped with the credential the pull ran with, when it got that far: whoever signed in since gets a pull of their own.
@@ -859,6 +863,8 @@ export async function recordPullOutcome(root: string, report: RunReport | undefi
   await RulesStore.update(root, (s) => {
     // Not written into a state another account or workspace has adopted meanwhile.
     if (ctx && !ownedBy(s, ctx)) return
+    // A pull that succeeded after this run started is newer news than its failure (runs in other processes overlap).
+    if (failed && s.pulled_at && Date.parse(s.pulled_at) > startedAt) return
     if (failed) {
       s.pull_failed_at = new Date().toISOString()
       if (account) s.pull_failed_with = account

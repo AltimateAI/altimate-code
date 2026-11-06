@@ -35,6 +35,7 @@ const LOCK = { timeoutMs: 5_000 }
 const MAX_NOTICES = 50
 /** Unstored host requests kept until the next host session start reports them. */
 const MAX_HOST_UNSTORED = 10
+const MAX_HOST_SESSIONS = 50
 
 /** The key a host session start marks a review notice reported under (`host_notices_seen`). */
 export const hostNoticeKey = (notice: Pick<Notice, "public_id" | "status">) => `${notice.public_id}|${notice.status}`
@@ -223,6 +224,8 @@ export const State = z.object({
   host_notices_seen: z.array(z.string()).default([]),
   /** Host sessions whose check stopped with work left (the round limit): the next check with nothing new takes them first. */
   host_pending: z.array(z.string()).default([]),
+  /** Host sessions whose corrections this person's hooks recorded, latest last: the only ones checked as leftovers. */
+  host_sessions: z.array(z.string()).default([]),
   /** Per host session, when its failed check may be retried as a leftover (a failing model is not retried every turn). */
   host_retry: z.record(z.string(), z.string()).default({}),
   /** When the last pull without a sync run failed: a host session start does not wait on another one for `REFRESH_MS`. */
@@ -382,6 +385,7 @@ export async function update(root: string, change: (state: State) => State | voi
       next.host_notices_seen = next.host_notices_seen.filter((key) => !drop.has(key))
     }
     next.host_unstored = next.host_unstored.slice(-MAX_HOST_UNSTORED)
+    next.host_sessions = next.host_sessions.slice(-MAX_HOST_SESSIONS)
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
     if (next.scope_drop && !scopeDropShown(next.scope_drop, now)) delete next.scope_drop
@@ -473,6 +477,7 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
     host_notices_seen: state.host_notices_seen,
     host_checks: state.host_checks,
     host_pending: state.host_pending,
+    host_sessions: state.host_sessions,
     host_retry: state.host_retry,
     // A refused request's text is the person's: not shown to another account or workspace (`keepOutbox` is the same
     // scope, gone for now).

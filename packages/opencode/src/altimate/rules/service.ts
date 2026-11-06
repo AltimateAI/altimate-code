@@ -73,7 +73,8 @@ export async function localBinding(root: string, directory: string, options: { s
   // Inside `root` by path segments: `/work/repo-sibling` is not inside `/work/repo`.
   const inside = (dir: string) => {
     const relative = path.relative(top, dir)
-    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))
+    // `..generated` is a child: only a `..` segment leaves `top`.
+    return relative === "" || (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative))
   }
   for (let dir = path.resolve(directory); ; dir = path.dirname(dir)) {
     const binding = await read(dir)

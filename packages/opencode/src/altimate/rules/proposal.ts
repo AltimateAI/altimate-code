@@ -418,8 +418,11 @@ async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Pr
     const existing = s.proposals.find((p) => identity(p.scope, p.card) === wanted)
     if (existing) {
       repeat = true
-      // Being answered by another process: left as it is (the answer decides it).
-      if (existing.claim && existing.claim.pid !== process.pid && processAlive(existing.claim.pid)) return void (card = existing.card)
+      // Being answered by another process: left as it is (the answer decides it). A stale claim does not hold it
+      // (`answerStored`).
+      const claim = existing.claim
+      if (claim && claim.pid !== process.pid && processAlive(claim.pid) && Date.now() - Date.parse(claim.at) < CLAIM_STALE_MS)
+        return void (card = existing.card)
       // Asked again: as for a card, the latest session, memory block and request win. The evidence stays: a later
       // "remember" carries one session, and the proposal's `why` and sent evidence must not disagree.
       existing.card = { ...existing.card, sessionID: input.sessionID }
@@ -442,8 +445,11 @@ async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Pr
       ...(input.draft.memory ? { memory: input.draft.memory } : {}), ...(input.request ? { request: input.request } : {}),
       edits: 0, at: new Date().toISOString(),
     })
-  }).catch((error) => {
+  }).catch(async (error) => {
     // A busy learn lock: not stored, said to the caller (a "remember" then saves as before cards; corrections wait).
+    // A write that failed after the state was saved (the rules mirror) did store it: found again, it stands.
+    const saved = card && (await RulesStore.read(input.root).catch(() => undefined))?.proposals.some((p) => p.card.id === card!.id)
+    if (saved) return
     log.warn("proposal not stored", { error })
     card = undefined
     refused = "failed"

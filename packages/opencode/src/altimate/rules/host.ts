@@ -20,6 +20,7 @@ import { correctionReason } from "../learn/correction"
 import type { DigestCall, DigestSource } from "../learn/digest"
 import * as Playbook from "../learn/playbook"
 import { appendSignal, isHostSession, readSignals } from "../learn/signals"
+import { workspaceLabel } from "../workspace/workspace-name"
 import { printable } from "./printable"
 import { RuleProposal } from "./proposal"
 import { processAlive } from "./remember"
@@ -49,7 +50,7 @@ export interface HookInput {
 
 /** What a host session start learns about workspace rules. `rules` is empty when nothing may be shown. */
 export interface Start {
-  workspace?: { name: string; owner_name?: string | null; is_owner: boolean }
+  workspace?: { name: string; owner_name?: string | null; is_owner: boolean; id?: number }
   rules: { text: string; applies_to: string[] }[]
   proposals: number
   notices: RulesStore.Notice[]
@@ -164,7 +165,7 @@ export async function start(input: {
       undefined,
     )
   return {
-    workspace: state.workspace,
+    ...(state.workspace ? { workspace: { ...state.workspace, ...(state.scope ? { id: state.scope.datamateId } : {}) } } : {}),
     rules: lessons.map((lesson) => ({ text: lesson.text, applies_to: lesson.trigger?.paths ?? [] })),
     proposals: (await within(RuleProposal.storedFor(input.root), [])).length,
     notices,
@@ -173,9 +174,10 @@ export async function start(input: {
   }
 }
 
-/** `start` as context for the host agent; empty when there is nothing to say. Server text is made printable. */
+/** `start` as context for the host agent; empty when there is nothing to say. Server text is made printable, and the
+ * workspace name a bounded, quoted label. */
 export function context(start: Start, command = "/altimate-code:rules"): string {
-  const ws = printable(start.workspace?.name ?? "the workspace")
+  const ws = start.workspace ? `workspace ${workspaceLabel(start.workspace.name, start.workspace.id?.toString())}` : "the workspace"
   return [
     ...ruleLines(start, ws),
     ...proposalLines(start, command),
@@ -281,6 +283,8 @@ export async function recordCorrection(input: {
   if (!signal) return "duplicate"
   // A check of this session already running took its corrections before this one: it checks again before it ends.
   await RulesStore.update(input.root, (s) => {
+    // This person's own: only these are checked as leftovers (the project's signals may list others' sessions).
+    s.host_sessions = [...s.host_sessions.filter((session) => session !== input.session), input.session]
     const claim = s.host_checks[input.session]
     if (claim && claim.pid !== process.pid) claim.pending = (claim.pending ?? 0) + 1
   }).catch((error) => log.warn("host check not told of a new correction", { error: errorText(error) }))
@@ -383,11 +387,12 @@ async function syncAfterCheck(input: Parameters<typeof check>[0]) {
   const state = await RulesStore.read(input.root)
   if (await RulesSync.pullFailedRecently(state)) return
   if (!state.outbox.length && !(await RulesSync.due(input.root))) return
+  const startedAt = Date.now()
   const report = await RulesSync.runShared(input.root, input.directory, input.learn, "cli").catch((error) => {
     log.warn("rules sync after host check failed", { error: errorText(error) })
     return undefined
   })
-  await RulesSync.recordPullOutcome(input.root, report)
+  await RulesSync.recordPullOutcome(input.root, report, startedAt)
 }
 
 /**
@@ -426,15 +431,16 @@ async function runRounds(
 
 /**
  * One other host session with corrections no check has seen: first a session whose check stopped with work left
- * (`host_pending`), then the oldest unchecked correction's session. Skipped: sessions another check holds, and sessions
- * whose check failed or could not store its proposal within `RETRY_FAILED_MS`.
+ * (`host_pending`), then the oldest unchecked correction's session. Only sessions whose corrections this person's hooks
+ * recorded (`host_sessions`). Skipped: sessions another check holds, and sessions whose check failed or could not store
+ * its proposal within `RETRY_FAILED_MS`.
  */
 async function checkLeftover(input: Parameters<typeof check>[0]) {
   const state = await RulesStore.read(input.root)
   const processed = new Set(state.processed_signals)
   const now = Date.now()
   const eligible = (session: string) => {
-    if (session === input.session) return false
+    if (session === input.session || !state.host_sessions.includes(session)) return false
     const claim = state.host_checks[session]
     if (claim && processAlive(claim.pid) && now - Date.parse(claim.at) < CHECK_STALE_MS) return false
     const retry = state.host_retry[session]
