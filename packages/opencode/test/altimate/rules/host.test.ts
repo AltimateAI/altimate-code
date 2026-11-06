@@ -166,6 +166,52 @@ describe("stored proposals", () => {
     expect((await RulesStore.read(root)).proposals).toEqual([])
   })
 
+  test("a sent proposal's recorded outcome outlives a reset and the outcome cap, so a later dismiss is refused", async () => {
+    const root = await linkedRoot()
+    const card = (await RuleProposal.ask({ sessionID: "claude:c", root, directory: root, learn, draft: draft("Alias every joined table."), persist: true }))!
+    await RulesStore.update(root, (s) => {
+      s.proposals[0].claim = { pid: 1 << 22, at: new Date(0).toISOString(), answering: "send" }
+      s.push_outcomes = { [card.id]: { status: "pending", public_id: "p-1" }, other: { status: "pending" } }
+    })
+    // Signed out and back in: the state is reset, keeping the proposal.
+    await RulesStore.reset(root, { keepOutbox: true })
+    const { scope, workspace, settings, pulled_at, pulled_with } = linked()
+    await RulesStore.update(root, (s) => Object.assign(s, { scope, workspace, settings, pulled_at, pulled_with }))
+    expect(Object.keys((await RulesStore.read(root)).push_outcomes)).toEqual([card.id])
+    expect(await RuleProposal.replyStored({ root, directory: root, learn, id: card.id }, { action: "dismiss" })).toMatchObject({ ok: false, code: "not_available" })
+  })
+
+  test("an account change between the claim and the send leaves the proposal for the account it was raised for", async () => {
+    const root = await linkedRoot()
+    const card = (await RuleProposal.ask({ sessionID: "claude:c", root, directory: root, learn, draft: draft("Alias every joined table."), persist: true }))!
+    const enqueue = spyOn(RulesSync, "enqueue").mockRejectedValue(new RulesSync.ScopeChangedError())
+    try {
+      expect(await RuleProposal.replyStored({ root, directory: root, learn, id: card.id }, { action: "send" })).toMatchObject({ ok: false, code: "not_available" })
+    } finally {
+      enqueue.mockRestore()
+    }
+    const [left] = (await RulesStore.read(root)).proposals
+    expect(left.card.id).toBe(card.id)
+    expect(left.claim).toBeUndefined()
+  })
+
+  test("a reply taken over after its claim went stale leaves the newer claim alone", async () => {
+    const root = await linkedRoot()
+    const card = (await RuleProposal.ask({ sessionID: "claude:c", root, directory: root, learn, draft: draft("Alias every joined table."), persist: true }))!
+    const newer = { pid: process.ppid, at: new Date().toISOString() }
+    // While this reply's send is refused, another process takes the proposal over.
+    const enqueue = spyOn(RulesSync, "enqueue").mockImplementation(async () => {
+      await RulesStore.update(root, (s) => { s.proposals[0].claim = newer })
+      throw new Error("network down")
+    })
+    try {
+      expect(await RuleProposal.replyStored({ root, directory: root, learn, id: card.id }, { action: "send" })).toMatchObject({ ok: false })
+    } finally {
+      enqueue.mockRestore()
+    }
+    expect((await RulesStore.read(root)).proposals[0].claim).toEqual(newer)
+  })
+
   test("a reply that died after acting leaves the proposal answerable again, and the second answer does not queue it twice", async () => {
     process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     try {
@@ -468,7 +514,7 @@ describe("host session", () => {
     await RulesStore.update(off, (s) => Object.assign(s, linked({ learning_enabled: false }), { rules }))
     expect((await RulesHost.start({ root: off, directory: off, learn: undefined })).rules).toHaveLength(1)
     expect(await RulesHost.recordCorrection({ root: off, directory: off, learn: undefined, session: "claude:o", text: "no, use shipped_at" })).toBe("off")
-    expect(await RulesHost.check({ root: off, directory: off, learn: undefined, session: "claude:o" })).toContain("off")
+    expect(await RulesHost.check({ root: off, directory: off, learn: undefined, session: "claude:o" })).toBe("learning from sessions is off")
     const on = await linkedRoot({ rules })
     expect((await RulesHost.start({ root: on, directory: on, learn: { enabled: true, capture: false } })).rules).toHaveLength(1)
     expect(await RulesHost.recordCorrection({ root: on, directory: on, learn: { enabled: true, capture: false }, session: "claude:o", text: "no, use shipped_at" })).toBe("off")
@@ -744,10 +790,16 @@ describe("host session", () => {
     expect(seen).toEqual([1])
   })
 
-  test("a transcript path that is not a regular file is not read", async () => {
+  test("a transcript path that is not a regular file is not read: a directory, or a FIFO that would block", async () => {
     const root = await linkedRoot()
     const dir = await tmp()
     expect(await RulesHost.check({ root, directory: root, learn, session: "claude:f1", transcript: dir })).toBe("no new corrections")
+    if (process.platform === "win32") return
+    const fifo = path.join(dir, "transcript.fifo")
+    expect(Bun.spawnSync(["mkfifo", fifo]).exitCode).toBe(0)
+    const checked = RulesHost.check({ root, directory: root, learn, session: "claude:f2", transcript: fifo })
+    const timedOut = new Promise((resolve) => setTimeout(() => resolve("blocked"), 3_000).unref?.())
+    expect(await Promise.race([checked, timedOut])).toBe("no new corrections")
   })
 
   test("\"remember … as a team rule\" said to the host becomes a stored proposal; a preference does not", async () => {
@@ -761,7 +813,7 @@ describe("host session", () => {
 
   test("the check is skipped where learning is off", async () => {
     const root = await linkedRoot()
-    expect(await RulesHost.check({ root, directory: root, learn: { enabled: false }, session: "claude:o" })).toContain("off")
+    expect(await RulesHost.check({ root, directory: root, learn: { enabled: false }, session: "claude:o" })).toBe("learning or workspaces are off, signed out, or this project is not linked")
     expect((await RulesStore.read(root)).last_check).toBeUndefined()
   })
 })
@@ -784,6 +836,10 @@ describe("host session: checks, transcripts and stored answers", () => {
     "remember that I prefer CTEs",
     "Do not remember this as a team rule: use ordered_at for order timestamps.",
     "please don't save this as a rule: skip the tests.",
+    "I don't want you to remember this as a team rule: always use ref() in models",
+    "Do you remember that rule, the one about ref() in staging models?",
+    "Did you note that team rule - it says never select star in marts?",
+    "remember this rule: always alias joined tables",
   ])("not a team-rule request: %s", async (text) => {
     const root = await linkedRoot()
     expect(await RulesHost.recordCorrection({ root, directory: root, learn, session: "claude:fp", text })).not.toBe("proposed")
@@ -1046,6 +1102,22 @@ describe("host transcripts", () => {
     expect((await RulesHost.sourceFromTranscript(file))?.prompts).toEqual(["no, the column is ordered_at"])
   })
 
+  test("a background task's result, a shell command and its output, and host-added rows are not the person's prompts", async () => {
+    const file = path.join(await tmp(), "t.jsonl")
+    await fs.writeFile(file, [
+      { type: "user", message: { content: "<task-notification>\n<task-id>b1</task-id>\n<result>The column must not be exposed in marts.</result>\n</task-notification>" } },
+      { type: "user", message: { content: "<bash-input>git status</bash-input>" } },
+      { type: "user", message: { content: "<bash-stdout>nothing to commit</bash-stdout><bash-stderr></bash-stderr>" } },
+      { type: "user", message: { content: "<teammate-message teammate_id=\"r\">the id needs to be updated</teammate-message>" } },
+      { type: "user", message: { content: "no, the column is ordered_at" } },
+    ].map((row) => JSON.stringify(row)).join("\n"))
+    expect((await RulesHost.sourceFromTranscript(file))?.prompts).toEqual(["no, the column is ordered_at"])
+    const codex = path.join(await tmp(), "rollout.jsonl")
+    const said = (text: string) => ({ type: "response_item", payload: { type: "message", role: "user", content: [{ type: "input_text", text }] } })
+    await fs.writeFile(codex, [said("<recommended_plugins>\n- figma\n</recommended_plugins>"), said("no, use ref() here")].map((row) => JSON.stringify(row)).join("\n"))
+    expect((await RulesHost.sourceFromTranscript(codex))?.prompts).toEqual(["no, use ref() here"])
+  })
+
   test("a transcript with no prompt gives nothing", async () => {
     const file = path.join(await tmp(), "t.jsonl")
     await fs.writeFile(file, "{}\n")
@@ -1266,6 +1338,19 @@ describe("host session: requests, capacity and attribution", () => {
     await RulesStore.update(root, (s) => { s.pulled_at = new Date().toISOString() })
     await RulesSync.recordPullOutcome(root, { context: { status: "ready", actAs, scope }, pull: { ok: false, error: "x", rules: 0, pending: 0, notices: [] } }, startedAt)
     expect((await RulesStore.read(root)).pull_failed_at).toBeUndefined()
+  })
+
+  test("a session-start pull still running when the wait ends is recorded as failed", async () => {
+    const root = await linkedRoot()
+    const hang = spyOn(RulesSync, "pullOnly").mockImplementation(() => new Promise(() => {}))
+    try {
+      await RulesSync.pullWithin(root, root, learn, 10)
+      const state = await RulesStore.read(root)
+      expect(state.pull_failed_at).toBeDefined()
+      expect(await RulesSync.pullFailedRecently(state)).toBe(true)
+    } finally {
+      hang.mockRestore()
+    }
   })
 
   test("a session-start pull that throws is recorded as failed", async () => {

@@ -455,7 +455,9 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
 /** Keep each row's answer per outbox id (capped), for a card whose proposal another run sent. */
 function recordOutcomes(s: State, rows: PushResult["sent"]) {
   for (const row of rows) s.push_outcomes[row.id] = toRecorded(row)
-  const ids = Object.keys(s.push_outcomes)
+  // A stored proposal's outcome is kept while the proposal is: it says the send acted.
+  const open = new Set(s.proposals.map((p) => p.card.id))
+  const ids = Object.keys(s.push_outcomes).filter((id) => !open.has(id))
   for (const id of ids.slice(0, Math.max(0, ids.length - MAX_PUSH_OUTCOMES))) delete s.push_outcomes[id]
 }
 
@@ -884,10 +886,16 @@ export async function pullFailedRecently(state: State, now = Date.now()): Promis
   return (state.pull_failed_with ?? null) === (await accountDigest().catch(() => null))
 }
 
-/** `pullOnly`, waited for at most `waitMs`; never throws. */
+/** `pullOnly`, waited for at most `waitMs`; never throws. A pull still running then counts as failed (`pullFailedRecently`):
+ * the caller's process may exit under it, and a server that hangs is not waited on again by every start. */
 export async function pullWithin(root: string, directory: string, learn: LearnConfig, waitMs: number): Promise<void> {
-  const pulling = pullOnly(root, directory, learn).catch((error) => log.warn("rules pull failed", { error: errorText(error) }))
+  const startedAt = Date.now()
+  let done = false
+  const pulling = pullOnly(root, directory, learn)
+    .catch((error) => log.warn("rules pull failed", { error: errorText(error) }))
+    .finally(() => (done = true))
   await Promise.race([pulling, new Promise((resolve) => setTimeout(resolve, waitMs).unref?.())])
+  if (!done) await recordPullOutcome(root, undefined, startedAt)
 }
 
 // Keyed by the real path: the service and the session loop may name one project through different paths.

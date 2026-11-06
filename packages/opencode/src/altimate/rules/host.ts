@@ -77,9 +77,9 @@ export const HOOK_EXIT_TELEMETRY_MS = 1_000
 /** A review notice older than this is not reported at a host session start: the first one after an upgrade would
  * otherwise report every review ever kept. */
 export const NOTICE_MAX_AGE_MS = 14 * 24 * 60 * 60_000
-/** A check round that has run this long is taken to have died (its pid may be reused). One drafting call times out at
- * 2 minutes; the claim's time is renewed every round. */
-export const CHECK_STALE_MS = 4 * 60_000
+/** A check round that has run this long is taken to have died (its pid may be reused). A round is one drafting call
+ * (2 minutes at most) plus learn-lock waits (10 at most); the claim's time is renewed every round. */
+export const CHECK_STALE_MS = 15 * 60_000
 /** A leftover session whose check failed is not retried before this: a failing model is not called every turn. */
 export const RETRY_FAILED_MS = 30 * 60_000
 /** Checks one Stop runs for its session at most: the first, then one per round of Stops that arrived meanwhile. */
@@ -152,7 +152,9 @@ export async function start(input: {
   const seen = new Set(state.host_notices_seen)
   const now = Date.now()
   const notices = state.notices.filter((notice) => !seen.has(RulesStore.hostNoticeKey(notice)) && !(now - Date.parse(notice.at) > NOTICE_MAX_AGE_MS))
-  const failed = state.last_check?.outcome.startsWith("failed") && !seen.has(RulesStore.hostCheckKey(state.last_check)) ? state.last_check : undefined
+  // A host check's failure only: a TUI session's is said there.
+  const failed = state.last_check?.outcome.startsWith("failed") && isHostSession(state.last_check.session) &&
+    !seen.has(RulesStore.hostCheckKey(state.last_check)) ? state.last_check : undefined
   const unstored = state.host_unstored
   // Marked seen only if the write lands in time: otherwise they are said again next time, never lost.
   if (input.session && (notices.length || failed || unstored.length))
@@ -225,11 +227,13 @@ function noticeLines(start: Start, ws: string): string[] {
   return [`Reviews of the person's proposed rules in ${ws} since their last session:`, ...start.notices.map(line)]
 }
 
-/** "Remember this as a team rule: X", "save as a rule - X", "don't forget, team rule: X": a request that names a team rule,
- * and what it is. Only explicit wording: "remember to run the tests" or "do you remember …?" is the conversation, not a
- * rule. The cue words are the ones `RulesRemember` treats as asking to remember. The rule may start on the next line. */
-const REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note|save|from now on)\b,?(?:\s+(?:this|that|it))?\s+(?:as\s+)?(?:an?\s+)?(?:team\s+)?rule\b[ \t]*[:,-]\s*(.+)/i
-const NEGATED = /\b(?:do not|don'?t|never|not|no need to)\s+$/i
+/** "Remember this as a team rule: X", "save as a rule - X", "don't forget, team rule: X": a request that names a team rule
+ * ("as a rule" or "team rule", then ":" or "-"), and what it is. Only explicit wording: "remember to run the tests",
+ * "do you remember that rule, …?" or "remember this rule: …" is the conversation, not a team rule. The cue words are the
+ * ones `RulesRemember` treats as asking to remember. The rule may start on the next line. */
+const REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note|save|from now on)\b,?(?:\s+(?:this|that|it))?\s+(?:as\s+(?:an?\s+)?(?:team\s+)?rule|(?:an?\s+)?team\s+rule)\b[ \t]*[:\u2013\u2014-]\s*(.+)/i
+/** A negation earlier in the cue's sentence ("I don't want you to remember this as a team rule: …"), or a question. */
+const NEGATED = /\b(?:do not|don'?t|never|not|no need to|without)\b|^\s*(?:do|did|can|could|would|will|should)\s+(?:you|we)\b/i
 /** Shorter than this after the cue is not a rule ("remember?", "remember this"). */
 const MIN_REMEMBERED = 8
 
@@ -239,8 +243,9 @@ export function rememberedRule(prompt: string): string | undefined {
   const match = REMEMBER.exec(prompt)
   const rest = match?.[1]
   if (!match || !rest) return undefined
-  // "Do not remember this as a team rule: …" asks for the opposite.
-  if (NEGATED.test(prompt.slice(0, match.index))) return undefined
+  // "Do not remember this as a team rule: …" asks for the opposite; "did you note that team rule - …?" asks a question.
+  const sentence = prompt.slice(0, match.index).split(/[.!?\n]/).at(-1) ?? ""
+  if (NEGATED.test(sentence)) return undefined
   const line = rest.split(/\r?\n/)[0]
   // A sentence end. An abbreviation's dot ("e.g.", "i.e.", "etc.", "vs.", "cf.") ends it only when no lowercase word
   // follows: "etc. Then rerun the build." is two sentences, "e.g. in staging models" one.
@@ -507,10 +512,13 @@ export async function generate(model: string | undefined, source: DigestSource, 
   })
 }
 
-const CODEX_INJECTED = /^\s*(?:<environment_context>|<user_instructions>|# AGENTS\.md instructions)/
+const CODEX_INJECTED = /^\s*(?:<environment_context>|<user_instructions>|<recommended_plugins>|<user_shell_command>|<turn_aborted>|# AGENTS\.md instructions)/
 /** Claude Code rows typed as the person's that they did not write: an interrupt marker, a slash command's expansion or
- * its local output, the caveat before them. */
-const CLAUDE_INJECTED = /^\s*(?:\[Request interrupted by user|<command-name>|<command-message>|<command-args>|<local-command-stdout>|<local-command-stderr>|Caveat: The messages below were generated by the user while running local commands)/
+ * its local output, the caveat before them, a background task's or agent's result, a `!` shell command and its output,
+ * a message from another session. */
+const CLAUDE_INJECTED = /^\s*(?:\[Request interrupted by user|<command-name>|<command-message>|<command-args>|<local-command-stdout>|<local-command-stderr>|<task-notification>|<bash-input>|<bash-stdout>|<bash-stderr>|<teammate-message\b|<cross-session-message\b|<system-reminder>|Caveat: The messages below were generated by the user while running local commands)/
+/** A row that is one tag around its whole text (`<x>…</x>`): written by the host or a tool, not typed by the person. */
+const WRAPPED = /^\s*<([a-z][\w-]*)(?:\s[^>]*)?>[\s\S]*<\/\1>\s*$/
 
 /** The newest part of a transcript read at most: the drafter sees a bounded digest anyway. */
 const MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
@@ -548,7 +556,7 @@ function readClaudeRow(row: Row, parts: TranscriptParts) {
   const user = row.type === "user"
   const said = (value: string) => {
     if (!user) parts.finalText = value
-    else if (!CLAUDE_INJECTED.test(value)) parts.prompts.push(value)
+    else if (!CLAUDE_INJECTED.test(value) && !WRAPPED.test(value)) parts.prompts.push(value)
   }
   const content = isRow(row.message) ? row.message.content : undefined
   if (typeof content === "string") return said(content)
@@ -569,7 +577,7 @@ function readCodexRow(row: Row, parts: TranscriptParts) {
   if (item.type === "message" && Array.isArray(item.content)) {
     const said = item.content.map((part) => (isRow(part) ? text(part.text) : undefined)).filter((part) => part !== undefined).join("\n")
     if (!said) return
-    if (item.role === "user" && !CODEX_INJECTED.test(said)) parts.prompts.push(said)
+    if (item.role === "user" && !CODEX_INJECTED.test(said) && !WRAPPED.test(said)) parts.prompts.push(said)
     else if (item.role === "assistant") parts.finalText = said
   } else if (item.type === "function_call" || item.type === "custom_tool_call") {
     let args = item.arguments ?? item.input

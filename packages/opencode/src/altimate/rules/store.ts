@@ -455,6 +455,8 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
     usage_reported: state.usage_reported,
     corrected_reported: state.corrected_reported,
     processed_signals: state.processed_signals,
+    // A stored proposal's send recorded here is what says it acted (`proposal.ts` `acted`, `act`): kept with it.
+    push_outcomes: Object.fromEntries(Object.entries(state.push_outcomes).filter(([id]) => state.proposals.some((p) => p.card.id === id))),
     // A batch built for this scope can only be resent to it.
     // The same scope comes back (the link or access returns): its queue, approvals, the person's sent history and the
     // review cursor stay, so reviews made meanwhile are still announced.

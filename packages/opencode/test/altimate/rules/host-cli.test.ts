@@ -117,7 +117,7 @@ describe("learn check", () => {
     expect(own.stderr).toContain("claude:<id> or codex:<id>")
     const off = await cli(dir.path, ["learn", "check", "--session", "claude:x", "--json"], { env: { ALTIMATE_LEARN: "0" } })
     expect(off.code).toBe(0)
-    expect(JSON.parse(off.stdout).outcome).toContain("off")
+    expect(JSON.parse(off.stdout).outcome).toBe("learning or workspaces are off, signed out, or this project is not linked")
     expect(await cli(dir.path, ["learn", "hook", "stop"], { stdin: JSON.stringify({ session_id: "x", transcript_path: "/nonexistent" }), env: { ALTIMATE_LEARN: "0" } }))
       .toMatchObject({ code: 0, stdout: "" })
   }, 120_000)

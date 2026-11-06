@@ -420,6 +420,9 @@ async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Pr
       repeat = true
       // Being answered by another process: left as it is (the answer decides it). A stale claim does not hold it
       // (`answerStored`).
+      // Asked again: it is current, for the full expiry, and a new request is kept with it.
+      existing.at = new Date().toISOString()
+      if (input.request) existing.request = input.request
       const claim = existing.claim
       if (claim && claim.pid !== process.pid && processAlive(claim.pid) && Date.now() - Date.parse(claim.at) < CLAIM_STALE_MS)
         return void (card = existing.card)
@@ -432,7 +435,6 @@ async function store(input: Parameters<typeof ask>[0], trigger: CardTrigger): Pr
         existing.memory = input.draft.memory
         if (existing.card.memory_scope) existing.card.memory_scope = "project"
       }
-      if (input.request) existing.request = input.request
       card = existing.card
       return
     }
@@ -541,6 +543,7 @@ async function answerStored(
   let conflict: string | undefined
   let invalid: string | undefined
   let stale = false
+  let claimedAt: string | undefined
   await RulesStore.update(root, (s) => {
     const found = s.proposals.find((p) => p.card.id === id && storedLive(p))
     if (!found) return
@@ -572,7 +575,8 @@ async function answerStored(
     // one proposal is never both sent and dismissed. Repeating it is safe: the send is skipped once recorded as sent.
     const unfinished = found.claim?.answering
     if (unfinished && unfinished !== answer.action && acted(s, found.card.id, unfinished)) return void (conflict = unfinished)
-    found.claim = { pid: process.pid, at: new Date().toISOString(), ...(answer.action === "edit" ? {} : { answering: answer.action }) }
+    claimedAt = new Date().toISOString()
+    found.claim = { pid: process.pid, at: claimedAt, ...(answer.action === "edit" ? {} : { answering: answer.action }) }
   })
   if (!record) return { ok: false, code: "not_open", error: "This proposal is no longer open." }
   if (moved) return unavailable(moved, record)
@@ -603,6 +607,8 @@ async function answerStored(
     const found = s.proposals.find((p) => p.card.id === id)
     if (!found) return
     if (gone) return void (s.proposals = s.proposals.filter((p) => p !== found))
+    // Taken over meanwhile (this reply ran past `CLAIM_STALE_MS`): the newer reply's claim and wording stand.
+    if (found.claim?.pid !== process.pid || found.claim.at !== claimedAt) return
     delete found.claim
     found.card = entry.card
     found.edits = entry.edits
@@ -761,6 +767,8 @@ export async function reply(id: string, input: { action: ReplyAction; text?: str
       // is saved as before cards.
       entry.busy = false
       track("not_open")
+      // A stored proposal stays on disk for the account and workspace it was raised for (`answerStored` releases it).
+      if (entry.stored) return { ok: false, code: "not_available", error: "The account or workspace changed while this proposal was being answered: it was not sent, and it waits for the one it was raised for." }
       if (entry.closed) return (await settleIfClosed(id, entry))!
       const message = "The account or workspace changed since this proposal was shown: it was not sent."
       await close(id, entry, message, "closed", entry.directory)
