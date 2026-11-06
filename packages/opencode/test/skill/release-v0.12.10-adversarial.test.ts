@@ -28,18 +28,18 @@
  *     attempt cap, the in-flight set, the placeholder re-check before `setTitle`, the identifier-only
  *     `error_type`, and the telemetry event in the catalogue and the docs.
  */
-import { afterAll, beforeAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, test } from "bun:test"
 import * as fs from "fs"
 import * as os from "os"
 import * as path from "path"
 import { addsRemoteToLink, ADDING_REMOTE_MESSAGE } from "../../src/altimate/workspace/api-client"
 import { rulesNotSyncedLine } from "../../src/cli/cmd/learn"
 
+// The state directory is redirected before any module that reads `Global.Path.state` loads, so this
+// file never touches the developer's real state directory.
 const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "release-v0.12.10-state-"))
 const previousStateHome = process.env.OPENCODE_TEST_STATE_HOME
-beforeAll(() => {
-  process.env.OPENCODE_TEST_STATE_HOME = stateHome
-})
+process.env.OPENCODE_TEST_STATE_HOME = stateHome
 afterAll(() => {
   if (previousStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
   else process.env.OPENCODE_TEST_STATE_HOME = previousStateHome
@@ -96,21 +96,24 @@ describe("workspace rules state path (#1669)", () => {
     }
   })
 
-  test("RulesStore.stateFile resolves a symlinked root to the real root's file", async () => {
-    const { RulesStore } = await import("../../src/altimate/rules/store")
-    const real = fs.mkdtempSync(path.join(os.tmpdir(), "release-v0.12.10-root-"))
-    const link = real + "-link"
-    fs.symlinkSync(real, link)
-    try {
-      const viaReal = await RulesStore.stateFile(real)
-      const viaLink = await RulesStore.stateFile(link)
-      expect(viaLink).toBe(viaReal)
-      expect(viaReal).toBe(stateFileOf(fs.realpathSync(real)))
-    } finally {
-      fs.rmSync(link, { force: true })
-      fs.rmSync(real, { recursive: true, force: true })
-    }
-  })
+  test.skipIf(process.platform === "win32")(
+    "RulesStore.stateFile resolves a symlinked root to the real root's file",
+    async () => {
+      const { RulesStore } = await import("../../src/altimate/rules/store")
+      const real = fs.mkdtempSync(path.join(os.tmpdir(), "release-v0.12.10-root-"))
+      const link = real + "-link"
+      fs.symlinkSync(real, link)
+      try {
+        const viaReal = await RulesStore.stateFile(real)
+        const viaLink = await RulesStore.stateFile(link)
+        expect(viaLink).toBe(viaReal)
+        expect(viaReal).toBe(stateFileOf(fs.realpathSync(real)))
+      } finally {
+        fs.rmSync(link, { force: true })
+        fs.rmSync(real, { recursive: true, force: true })
+      }
+    },
+  )
 
   test("a root that no longer exists still gets a file name instead of throwing", async () => {
     const { RulesStore } = await import("../../src/altimate/rules/store")
@@ -220,7 +223,9 @@ describe("tool command output (#1687)", () => {
     expect(body).toMatch(/code !== "EAGAIN"\) throw error/)
     expect(body).toMatch(/writeSync\(1, bytes, at\)/)
     // A reader that stops draining the pipe no longer hangs the command forever.
-    expect(body).toMatch(/Date\.now\(\) - progressAt > WRITE_STALL_MS/)
+    expect(body).toMatch(/performance\.now\(\) - progressAt > WRITE_STALL_MS/)
+    // A zero-byte write counts as no progress, not as success.
+    expect(body).toMatch(/if \(wrote > 0\)/)
     expect(tool).toMatch(/const WRITE_STALL_MS = 60_000/)
   })
 
