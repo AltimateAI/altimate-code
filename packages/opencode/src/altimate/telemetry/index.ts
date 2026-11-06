@@ -438,7 +438,7 @@ export namespace Telemetry {
         model_id: string
         /** Which user message of the session triggered the request: 1 is the first, retries count up. */
         attempt: number
-        /** The error's class name (`APICallError`, `TypeError`, ...), no message text. */
+        /** The error's class name (`AI_APICallError`, `AI_RetryError`, `ProviderModelNotFoundError`, ...), no message text. */
         error_type: string
         /** Keyword classification from classifyError(). */
         error_class: string

@@ -16,7 +16,7 @@ import { Database } from "@opencode-ai/core/database/database"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Telemetry } from "@/telemetry"
 import { testEffect } from "../lib/effect"
-import { TestLLMServer, httpError } from "../lib/llm-server"
+import { TestLLMServer, httpError, reply } from "../lib/llm-server"
 import { provideTmpdirServerLegacy } from "./legacy-instance"
 import { LSP } from "@/lsp/lsp"
 import { MCP } from "../../src/mcp"
@@ -243,4 +243,92 @@ it.live(
       { git: true, config: providerCfg },
     ),
   { timeout: 90_000 },
+)
+
+/** The same provider, with a `small_model` it does not list. */
+const providerCfgBadSmallModel = (url: string) => ({ ...providerCfg(url), small_model: "test/does-not-exist" })
+
+it.live(
+  "a small_model the provider does not list is reported, not thrown",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ llm }) {
+        const { events } = yield* recordTitleFailures
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+
+        yield* llm.text("first answer")
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          parts: [{ type: "text", text: "first message" }],
+        })
+
+        // The lookup fails before any request is made, and that failure is still recorded.
+        let failed = events
+        for (let i = 0; i < 150 && failed.length === 0; i++) {
+          yield* Effect.sleep("20 millis")
+          failed = events
+        }
+        expect(failed).toHaveLength(1)
+        expect(failed[0]).toMatchObject({ provider_id: "test", model_id: "test-model", attempt: 1 })
+        expect(failed[0].error_type).toBe("ProviderModelNotFoundError")
+        expect(failed[0].http_status).toBeUndefined()
+        const titleHits = (yield* llm.hits).filter((hit) => JSON.stringify(hit.body).includes(TITLE_MARKER))
+        expect(titleHits).toHaveLength(0)
+        expect(LegacySession.isDefaultTitle((yield* sessions.get(session.id)).title)).toBe(true)
+      }),
+      { git: true, config: providerCfgBadSmallModel },
+    ),
+  { timeout: 60_000 },
+)
+
+it.live(
+  "a title request still in flight is not doubled by the next turn",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ llm }) {
+        const { events } = yield* recordTitleFailures
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+
+        // The first title answer is held open across the second turn.
+        const gate = Promise.withResolvers<void>()
+        yield* llm.title(reply().wait(gate.promise).text("Slow first title").stop())
+        yield* llm.text("first answer")
+        yield* llm.text("second answer")
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          parts: [{ type: "text", text: "first message" }],
+        })
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          parts: [{ type: "text", text: "second message" }],
+        })
+
+        // Two chat requests and one title request: the second turn did not start another.
+        yield* llm.wait(3)
+        yield* Effect.sleep("100 millis")
+        let titleHits = (yield* llm.hits).filter((hit) => JSON.stringify(hit.body).includes(TITLE_MARKER))
+        expect(titleHits).toHaveLength(1)
+        expect(LegacySession.isDefaultTitle((yield* sessions.get(session.id)).title)).toBe(true)
+
+        gate.resolve()
+        const title = yield* titleAfter(session.id, (t) => !LegacySession.isDefaultTitle(t))
+        expect(title).toBe("Slow first title")
+        titleHits = (yield* llm.hits).filter((hit) => JSON.stringify(hit.body).includes(TITLE_MARKER))
+        expect(titleHits).toHaveLength(1)
+        expect(events).toHaveLength(0)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  { timeout: 60_000 },
 )

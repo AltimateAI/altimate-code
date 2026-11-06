@@ -788,6 +788,7 @@ export class TestLLMServer extends Context.Service<TestLLMServer, TestLLMServer.
         reset: Effect.sync(() => {
           hits = []
           list = []
+          titles = [] // altimate_change
           waits = []
           misses = []
         }),
