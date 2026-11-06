@@ -19,7 +19,7 @@ import { SIGN_IN_COMMAND, stripControlChars } from "./link"
 import { AltimateApi } from "@/altimate/api/client"
 import { WorkspaceApi, type DatamateRef } from "@/altimate/workspace/api-client"
 import * as Manage from "@/altimate/workspace/manage"
-import { readLocalBinding, resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
+import { resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
 import { ReviewApi } from "@/altimate/workspace/review-api"
 import { printable } from "@/altimate/rules/printable"
 
@@ -301,10 +301,11 @@ export async function runUnlink(directory: string, json: boolean, yes: boolean, 
   }
 }
 
-/** What `workspace review status` needs; replaced in tests. Read-only: nothing here writes. */
+/** What `workspace review status` needs; replaced in tests. Changes nothing on the server. */
 export interface ReviewStatusDeps {
   isConfigured(): Promise<boolean>
-  /** The project's workspace from the local link, else the service (a GET; the answer is not cached). */
+  /** The project's workspace, resolved like every other command: the local link while recently confirmed, else the
+   * service, which also reports an unlink or a rebind made elsewhere. */
   binding(directory: string): Promise<{ status: "bound"; datamateId: number; datamateName: string } | { status: "unbound" | "unknown" }>
   listMine(datamateId: number): Promise<Awaited<ReturnType<typeof ReviewApi.listMine>>>
   print(line: string): void
@@ -315,19 +316,15 @@ export interface ReviewStatusDeps {
 export const reviewStatusDeps: ReviewStatusDeps = {
   isConfigured: defaultDeps.isConfigured,
   binding: async (directory) => {
-    const local = await readLocalBinding(directory).catch(() => null)
-    if (local) return { status: "bound", datamateId: local.datamateId, datamateName: local.datamateName }
-    try {
-      const { resolveProjectIdentifier } = await import("@/altimate/workspace/detect")
-      const hit = await WorkspaceApi.getBindingForProject(resolveProjectIdentifier(directory))
-      if (!hit) return { status: "unbound" }
-      const id = hit.binding?.datamate_id
-      return typeof id === "number" ? { status: "bound", datamateId: id, datamateName: hit.binding.datamate_name ?? String(id) } : { status: "unknown" }
-    } catch {
-      return { status: "unknown" }
-    }
+    const outcome = await resolveBindingOutcome(directory).catch((): BindingOutcome => ({ status: "unknown" }))
+    if (outcome.status !== "bound") return { status: outcome.status }
+    return { status: "bound", datamateId: outcome.binding.datamateId, datamateName: outcome.binding.datamateName }
   },
-  listMine: (datamateId) => ReviewApi.listMine(datamateId),
+  listMine: async (datamateId) => {
+    const actAs = await WorkspaceApi.captureCredentials()
+    if (!actAs) throw new Error("not signed in to Altimate")
+    return ReviewApi.listMine(datamateId, actAs)
+  },
   print: defaultDeps.print,
   printError: defaultDeps.printError,
   printJson: defaultDeps.printJson,
@@ -360,7 +357,8 @@ export function describeReviews(workspaceName: string, listed: Awaited<ReturnTyp
   return lines
 }
 
-/** `workspace review status`: the caller's own skill and knowledge submissions to the linked workspace. Writes nothing. */
+/** `workspace review status`: the caller's own skill and knowledge submissions to the linked workspace. Changes nothing
+ * on the server. */
 export async function runReviewStatus(directory: string, json: boolean, deps: ReviewStatusDeps = reviewStatusDeps): Promise<number> {
   const out = { ...defaultDeps, print: deps.print, printError: deps.printError, printJson: deps.printJson }
   if (!(await deps.isConfigured())) return failure(out, json, EXIT.USAGE, NOT_SIGNED_IN)
@@ -465,8 +463,8 @@ const UnlinkCommand = cmd({
   },
 })
 
-// Read-only and account-scoped like `list`: it does not open the project (no plugins, no background syncs), so it writes
-// nothing.
+// Account-scoped like `list`: it does not open the project (no plugins, no background syncs) and changes nothing on the
+// server; resolving the link may refresh this machine's record of it, as `workspace status` does.
 const ReviewStatusCommand = cmd({
   command: "status",
   describe: "list your skill and knowledge review requests on the linked workspace",

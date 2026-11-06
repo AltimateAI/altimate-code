@@ -494,63 +494,76 @@ const SkillPublishCommand = cmd({
       else process.stderr.write(message + EOL)
       process.exitCode = 1
     }
+    // A failure before or after the publish (opening the project, reading its skills, disposing it) reaches the same
+    // writer, once: a result already written is not followed by a second one.
+    let written = false
+    const once = (message: string) => {
+      if (written) return
+      written = true
+      fail(message)
+    }
     // altimate_change end
-    await bootstrap(cwd, async () => {
-      const skill = await Skill.get(name)
-      if (!skill) {
-        fail(`Skill "${name}" not found. Run \`altimate-code skill list\` to see the skills this project can reach.`)
-        return
-      }
-      // Built-in skills ship with altimate-code — embedded, or installed under
-      // `~/.altimate/builtin` — and are not the user's to publish. A personal
-      // skill under the home directory is the user's, but not this project's:
-      // publishing shares it with the whole workspace, which is not what
-      // keeping it in `~/.claude/skills` says. A skill the workspace sent us
-      // is refused by `publishSkill` itself, as is a symlinked root.
-      const source = skillSource(skill.location)
-      if (source === "builtin" || !path.isAbsolute(skill.location)) {
-        fail(`"${name}" is a built-in skill and cannot be published.`)
-        return
-      }
-      if (source === "global") {
-        fail(
-          `"${name}" is a personal skill (${path.dirname(skill.location)}), not one of this project's. ` +
-            `Copy it into the project's skills directory to publish it.`,
-        )
-        return
-      }
-      try {
-        const report = await publishSkill({
-          projectDirectory: Instance.directory,
-          // Discovery walks up to the worktree; so must the boundary, or a
-          // skill under the repository root is refused from a subdirectory.
-          projectRoot: Instance.worktree !== "/" ? Instance.worktree : Instance.directory,
-          skillDirectory: path.dirname(skill.location),
-          name: skill.name,
-          description: skill.description ?? "",
-          // altimate_change start — learn: opt-in adoption of this user's same-name skill
-          replace: args.replace === true,
-          // altimate_change end
-        })
-        if (json) process.stdout.write(JSON.stringify(publishJson(report), null, 2) + EOL)
-        else process.stdout.write(describePublish(report) + EOL)
+    try {
+      await bootstrap(cwd, async () => {
+        const skill = await Skill.get(name)
+        if (!skill) {
+          once(`Skill "${name}" not found. Run \`altimate-code skill list\` to see the skills this project can reach.`)
+          return
+        }
+        // Built-in skills ship with altimate-code — embedded, or installed under
+        // `~/.altimate/builtin` — and are not the user's to publish. A personal
+        // skill under the home directory is the user's, but not this project's:
+        // publishing shares it with the whole workspace, which is not what
+        // keeping it in `~/.claude/skills` says. A skill the workspace sent us
+        // is refused by `publishSkill` itself, as is a symlinked root.
+        const source = skillSource(skill.location)
+        if (source === "builtin" || !path.isAbsolute(skill.location)) {
+          once(`"${name}" is a built-in skill and cannot be published.`)
+          return
+        }
+        if (source === "global") {
+          once(
+            `"${name}" is a personal skill (${path.dirname(skill.location)}), not one of this project's. ` +
+              `Copy it into the project's skills directory to publish it.`,
+          )
+          return
+        }
         try {
-          Telemetry.track({
-            type: "skill_published",
-            timestamp: Date.now(),
-            session_id: Telemetry.getContext().sessionId || "",
-            skill_name: skill.name,
-            action: report.action,
-            file_count: report.files,
-            source: "cli",
-            workspace_id: report.datamateId,
+          const report = await publishSkill({
+            projectDirectory: Instance.directory,
+            // Discovery walks up to the worktree; so must the boundary, or a
+            // skill under the repository root is refused from a subdirectory.
+            projectRoot: Instance.worktree !== "/" ? Instance.worktree : Instance.directory,
+            skillDirectory: path.dirname(skill.location),
+            name: skill.name,
+            description: skill.description ?? "",
+            // altimate_change start — learn: opt-in adoption of this user's same-name skill
+            replace: args.replace === true,
+            // altimate_change end
           })
-        } catch {}
-      } catch (err) {
-        const known = explainPublishError(err)
-        fail(known ?? `Publish failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
-    })
+          written = true
+          if (json) process.stdout.write(JSON.stringify(publishJson(report), null, 2) + EOL)
+          else process.stdout.write(describePublish(report) + EOL)
+          try {
+            Telemetry.track({
+              type: "skill_published",
+              timestamp: Date.now(),
+              session_id: Telemetry.getContext().sessionId || "",
+              skill_name: skill.name,
+              action: report.action,
+              file_count: report.files,
+              source: "cli",
+              workspace_id: report.datamateId,
+            })
+          } catch {}
+        } catch (err) {
+          const known = explainPublishError(err)
+          once(known ?? `Publish failed: ${err instanceof Error ? err.message : String(err)}`)
+        }
+      })
+    } catch (err) {
+      once(`Publish failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
   },
 })
 

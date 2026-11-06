@@ -227,11 +227,13 @@ export class Delivery {
         log.info("learn session snapshot rebuilt without team rules", { session })
         return undefined
       }
-      // A rule shown as the person's pending proposal stays only while it is still that proposal, with that wording:
-      // approved, rejected or proposed again, the session is given what the state holds now.
+      // A rule shown as the person's pending proposal stays only while it is still that proposal, with that wording and
+      // those paths: approved, rejected or proposed again, the session is given what the state holds now.
       if (name === Store.WORKSPACE_RULES_STORE) {
         const now = (await vouched!).get(lesson.id)!
-        if (now.review !== lesson.review || (lesson.review === "pending" && now.text !== lesson.text)) {
+        const changed =
+          now.text !== lesson.text || JSON.stringify(now.trigger ?? null) !== JSON.stringify(lesson.trigger ?? null)
+        if (now.review !== lesson.review || (lesson.review === "pending" && changed)) {
           log.info("learn session snapshot rebuilt: a pending team rule changed", { session })
           return undefined
         }

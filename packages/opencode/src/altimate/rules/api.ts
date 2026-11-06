@@ -81,6 +81,8 @@ export type SyncResponse = Omit<z.infer<typeof SyncResponse>, "rules" | "my_revi
   my_reviewed: Reviewed[]
   my_pending: MyPending[]
   skipped: number
+  /** `my_pending` rows left out (unreadable, or failing the rule lint). */
+  pending_skipped: number
 }
 
 export const ORIGINS = ["session", "explicit", "bootstrap", "import_reviews"] as const
@@ -220,7 +222,14 @@ export async function sync(actAs: ActAs, datamateId: number, body: { repo_remote
     const parsed = MyPending.safeParse(row)
     return parsed.success && deliverable(parsed.data.text) ? [parsed.data] : []
   })
-  return { ...raw, rules, my_reviewed: reviewed, my_pending: pending, skipped: raw.rules.length - rules.length }
+  return {
+    ...raw,
+    rules,
+    my_reviewed: reviewed,
+    my_pending: pending,
+    skipped: raw.rules.length - rules.length,
+    pending_skipped: (raw.my_pending ?? []).length - pending.length,
+  }
 }
 
 export async function propose(actAs: ActAs, datamateId: number, body: { repo_remote: string; items: ProposalItem[] }) {

@@ -79,7 +79,7 @@ afterAll(() => {
 })
 
 const originalFetch = globalThis.fetch
-let requests: { method: string; url: string; body: any }[] = []
+let requests: { method: string; url: string; body: any; auth?: string }[] = []
 /** Per-method status. `POST` 409 exercises the name conflict; `PATCH` 404 the
  * published-then-deleted fallback. */
 let statuses: Record<string, number> = {}
@@ -101,6 +101,8 @@ let deleted: string[] = []
 /** The workspace review routes (`/datamates/{id}/reviews*`). Null is a server older than workspace review: they do not
  * exist (a bare 404). */
 let reviews: ((method: string, url: string, body: any) => Response) | null = null
+/** A skill detail that leaves out `attached_datamate_ids`. */
+let attachmentsUnreadable = false
 
 let project = ""
 let skillDir = ""
@@ -115,6 +117,7 @@ beforeEach(async () => {
   skillCreator = 7
   deleted = []
   reviews = null
+  attachmentsUnreadable = false
   project = mkdtempSync(path.join(SANDBOX, "proj-"))
   skillDir = path.join(project, "skills", "deploy")
   mkdirSync(skillDir, { recursive: true })
@@ -129,7 +132,7 @@ beforeEach(async () => {
     } catch {
       /* non-JSON bodies are not used here */
     }
-    requests.push({ method, url, body })
+    requests.push({ method, url, body, auth: (init?.headers as Record<string, string> | undefined)?.Authorization })
     if (url.includes("/reviews"))
       return reviews
         ? reviews(method, url, body)
@@ -167,6 +170,7 @@ beforeEach(async () => {
       method === "PUT"
         ? { public_id: "pub-1", attached_datamate_ids: attached }
         : { skill: { public_id: "pub-1", attached_datamate_ids: attached, created_by: skillCreator } }
+    if (method === "GET" && attachmentsUnreadable) delete (body_ as { skill: Record<string, unknown> }).skill.attached_datamate_ids
     return new Response(JSON.stringify(body_), { status, headers: { "content-type": "application/json" } })
   }) as typeof fetch
 
@@ -1037,6 +1041,12 @@ describe("attaching to the workspace", () => {
   // workspace skills by datamate id — which is the UAT report this closes.
   const puts = () => requests.filter((r) => r.method === "PUT" && r.url.includes("/datamates"))
 
+  test("a detail that does not say where the skill is attached fails, rather than replacing the set with this workspace", async () => {
+    attachmentsUnreadable = true
+    await expect(publish()).rejects.toThrow("did not say which workspaces")
+    expect(puts()).toEqual([])
+  })
+
   test("attaches a newly created skill to the bound workspace", async () => {
     const report = await publish()
     expect(report.action).toBe("created")
@@ -1254,6 +1264,36 @@ describe("workspace review", () => {
     const report = await publish()
     expect(report.review).toBeUndefined()
     expect(attaches()).toHaveLength(1)
+  })
+
+  test("one credential for the whole publish: a sign-in change mid-flow does not split it across two accounts", async () => {
+    workspaceOwners = { 42: 99 }
+    server(
+      () => {
+        // Another account signs in once the summary has answered.
+        stubCreds({ altimateApiKey: "k2" })
+        return reply(summary())
+      },
+      () => reply({ status: "pending", attached_directly: false, duplicate: false, contribution: contribution() }),
+    )
+    try {
+      requests = []
+      await publish()
+      expect(posted()).toHaveLength(1)
+      expect(new Set(requests.map((r) => r.auth))).toEqual(new Set(["Bearer k"]))
+    } finally {
+      stubCreds()
+    }
+  })
+
+  test("a member's submission to a server that turns out to have no review keeps the upload and says it failed", async () => {
+    workspaceOwners = { 42: 99 }
+    server(() => reply(summary()), () => reply({ detail: { code: "reviews_not_available", message: "x" } }, 404))
+    const err = await publish().catch((e) => e)
+    expect(err).toBeInstanceOf(SubmitFailedError)
+    // Not attached (the member cannot), and the upload is not taken back.
+    expect(attaches()).toEqual([])
+    expect(deleted).toEqual([])
   })
 
   test("coded refusals of the submission get their own errors", async () => {

@@ -4,9 +4,13 @@
 // knowledge base to a workspace, and the owner approves or rejects it in the web app. The CLI only submits and reads
 // status; it never approves or rejects.
 //
-// Errors are classified by the rules client's `classify` (one mapping for both features): a 404 `reviews_not_available`
-// or a 404 with no code (a server without these routes) is `unsupported`; a 401, or a 403 with no code, is `auth`, never
-// a decision about the request; a coded 409 is `conflict`.
+// Errors are classified by the rules client's `classify` (one mapping for both features): a 404 `reviews_not_available`,
+// or a 404 whose detail is plain text (a server without these routes answers `{"detail": "Not Found"}`), is
+// `unsupported`; a 404 with an object detail comes from these routes and is a refusal. A 401, or a 403 with no code, is
+// `auth`, never a decision about the request; a coded 409 is `conflict`.
+//
+// Every call takes the credential its caller captured once (`ActAs`): a sign-in change mid-flow never splits one flow
+// across two accounts.
 import z from "zod"
 import { classify, RulesApiError } from "../rules/api"
 import { altimateRequest, type ActAs } from "./api-client"
@@ -66,11 +70,11 @@ const Page = z.object({
 })
 
 /** One request; any failure (transport, status, or a body that does not parse) is a classified `RulesApiError`. */
-async function call<T>(schema: z.ZodType<T>, method: string, datamateId: number, subpath: string, opts: { actAs?: ActAs; body?: unknown; query?: Record<string, string> } = {}): Promise<T> {
+async function call<T>(schema: z.ZodType<T>, method: string, datamateId: number, subpath: string, opts: { actAs: ActAs; body?: unknown; query?: Record<string, string> }): Promise<T> {
   try {
     const raw = await altimateRequest<unknown>(method, `/${datamateId}/reviews${subpath}`, {
       base: "/datamates",
-      ...(opts.actAs ? { actAs: opts.actAs } : {}),
+      actAs: opts.actAs,
       ...(opts.body !== undefined ? { body: opts.body } : {}),
       ...(opts.query ? { query: opts.query } : {}),
     })
@@ -86,19 +90,20 @@ export function unavailable(error: unknown): boolean {
 }
 
 /** The caller's view of review on the workspace: owner or member, whether review is on, and the owner's name. */
-export function summary(datamateId: number, actAs?: ActAs): Promise<Summary> {
+export function summary(datamateId: number, actAs: ActAs): Promise<Summary> {
   return call(Summary, "GET", datamateId, "/summary", { actAs })
 }
 
 /** Submit the caller's own skill or knowledge base to the workspace. The owner's is attached directly. `source` is
  * recorded in the request's audit events. */
-export function submit(datamateId: number, body: { kind: "skill" | "knowledge"; subject_id: string; source?: "cli" }, actAs?: ActAs): Promise<SubmitResult> {
+export function submit(datamateId: number, body: { kind: "skill" | "knowledge"; subject_id: string; source?: "cli" }, actAs: ActAs): Promise<SubmitResult> {
   return call(SubmitResult, "POST", datamateId, "", { actAs, body })
 }
 
 /** The caller's own submissions to the workspace, newest first, every page up to `MAX_PAGES`. A row this version cannot
- * read is skipped and counted. `complete` is false when the list was cut at the page cap. */
-export async function listMine(datamateId: number, actAs?: ActAs): Promise<{ items: Contribution[]; skipped: number; complete: boolean }> {
+ * read is skipped and counted. `complete` is false when the list was cut at the page cap, or when the server's paging
+ * does not add up (a page short of `total`): only a complete list may say a request no longer exists. */
+export async function listMine(datamateId: number, actAs: ActAs): Promise<{ items: Contribution[]; skipped: number; complete: boolean }> {
   const items: Contribution[] = []
   const seen = new Set<string>()
   let skipped = 0
@@ -107,6 +112,7 @@ export async function listMine(datamateId: number, actAs?: ActAs): Promise<{ ite
       actAs,
       query: { view: "mine", page: String(page), size: String(PAGE_SIZE) },
     })
+    const before = items.length + skipped
     for (const row of body.items) {
       const parsed = Contribution.safeParse(row)
       if (!parsed.success) {
@@ -118,8 +124,14 @@ export async function listMine(datamateId: number, actAs?: ActAs): Promise<{ ite
       seen.add(parsed.data.public_id)
       items.push(parsed.data)
     }
-    const pages = body.pages ?? 1
-    if (page >= pages || body.items.length === 0) return { items, skipped, complete: true }
+    // A later page that adds nothing new (a server that ignores `page` repeats the first) ends the read, incomplete.
+    if (page > 1 && body.items.length > 0 && items.length + skipped === before) return { items, skipped, complete: false }
+    // Without `pages`, a full page may have more after it.
+    const pages = body.pages ?? (body.items.length < PAGE_SIZE ? page : page + 1)
+    if (page >= pages || body.items.length === 0) {
+      const short = typeof body.total === "number" && items.length + skipped < body.total
+      return { items, skipped, complete: !short }
+    }
   }
   return { items, skipped, complete: false }
 }

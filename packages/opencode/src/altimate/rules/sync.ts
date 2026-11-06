@@ -175,9 +175,16 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.pulled_at = new Date().toISOString()
       if (current) state.pulled_with = pulledWith
       else delete state.pulled_with
-      state.last_error = response.skipped
-        ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code, or did not pass the rule lint (one line, no commands, links or secrets), and ${response.skipped === 1 ? "is" : "are"} not delivered`
-        : undefined
+      const unreadable = [
+        response.skipped
+          ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code, or did not pass the rule lint (one line, no commands, links or secrets), and ${response.skipped === 1 ? "is" : "are"} not delivered`
+          : undefined,
+        // The person's own proposals waiting for review reach their sessions too; one left out is said, not dropped.
+        response.pending_skipped
+          ? `${response.pending_skipped} of your proposals waiting for review could not be read by this version of altimate-code, or did not pass the rule lint, and ${response.pending_skipped === 1 ? "is" : "are"} not in your sessions until approved`
+          : undefined,
+      ].filter(Boolean)
+      state.last_error = unreadable.length ? unreadable.join("; ") : undefined
       if (!response.unchanged) state.rules = response.rules
       // Always in the answer, `unchanged` or not (none from a server older than workspace review).
       state.my_pending = response.my_pending

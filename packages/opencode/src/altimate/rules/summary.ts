@@ -43,7 +43,8 @@ export interface ReviewNotice {
   at: string
 }
 
-/** `directory`: where the session runs, whose workspace link names the review notices (defaults to `root`). */
+/** `directory`: where the session runs, whose workspace link names the review notices. Every server and CLI caller
+ * passes the session's; it defaults to `root` only for callers with no session. */
 export async function summary(root: string, learn: LearnConfig, env: NodeJS.ProcessEnv = process.env, directory = root): Promise<Summary> {
   const state = await RulesStore.read(root)
   const { ReviewNotices } = await import("../workspace/review-notices")

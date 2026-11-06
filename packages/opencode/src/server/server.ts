@@ -1371,7 +1371,12 @@ export namespace Server {
             else state.personal_learning = on
           })
           await Bus.publish(RuleEvents.Event.Changed, { directory: Instance.directory }).catch(() => {})
-          const summary = await RulesSummary.summary(root, await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory))
+          const summary = await RulesSummary.summary(
+            root,
+            await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory),
+            process.env,
+            Instance.directory,
+          )
           const { RulesTelemetry } = await import("../altimate/rules/telemetry")
           RulesTelemetry.learningChanged(on, summary.learning, summary.learning_source)
           return c.json({ ok: true as const, ...summary, line: RulesSummary.sidebarLine(summary) })

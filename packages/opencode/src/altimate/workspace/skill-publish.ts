@@ -37,10 +37,9 @@ import { existsSync, realpathSync } from "fs"
 import { Log } from "@/altimate/util/log"
 import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
-import { AltimateApi } from "@/altimate/api/client"
 import { isInWorkspaceSnapshot } from "./snapshot-path"
 import { ConflictError, ForbiddenError, NotFoundError, WorkspaceApi, altimateRequest } from "./api-client"
-import type { ConflictDetail } from "./api-client"
+import type { ActAs, ConflictDetail } from "./api-client"
 import { resolveBinding } from "./state"
 import { printable } from "../rules/printable"
 import { RulesApiError } from "../rules/api"
@@ -548,11 +547,9 @@ interface LedgerScope {
   userId: number
 }
 
-async function currentScope(): Promise<LedgerScope | null> {
-  const creds = await AltimateApi.getCredentials().catch(() => null)
-  if (!creds) return null
-  const userId = await WorkspaceApi.whoami()
-  return { tenant: creds.altimateInstanceName, apiUrl: creds.altimateUrl, userId }
+async function currentScope(actAs: ActAs): Promise<LedgerScope> {
+  const userId = await WorkspaceApi.whoami(actAs)
+  return { tenant: actAs.instance, apiUrl: actAs.url, userId }
 }
 
 /** The skill directory as the ledger identifies it: its real path. `path.resolve`
@@ -615,7 +612,7 @@ async function recordPublished(skillDir: string, scope: LedgerScope, record: Pub
   })
 }
 
-async function knownPublicId(skillDir: string, scope: LedgerScope): Promise<string | null> {
+async function knownPublicId(skillDir: string, scope: LedgerScope, actAs: ActAs): Promise<string | null> {
   const record = await withLedger(async () => {
     const ledger = await readLedger()
     // Current key first. Then ANY row for this directory under this account,
@@ -644,7 +641,7 @@ async function knownPublicId(skillDir: string, scope: LedgerScope): Promise<stri
   // current key so the question is not asked again. Someone else's, or
   // gone: not ours, and the create path takes over.
   if (record.createdBy === undefined) {
-    const owner = await skillOwner(record.publicId)
+    const owner = await skillOwner(record.publicId, actAs)
     if (owner !== scope.userId) return null
     await recordPublished(skillDir, scope, { ...record, createdBy: owner })
   } else if (record.createdBy !== scope.userId) return null
@@ -652,13 +649,13 @@ async function knownPublicId(skillDir: string, scope: LedgerScope): Promise<stri
 }
 
 /** `created_by` from the skill's detail, or null when the skill is gone. */
-async function skillOwner(publicId: string): Promise<number | null> {
+async function skillOwner(publicId: string, actAs: ActAs): Promise<number | null> {
   try {
     const detail = await altimateRequest<{ created_by?: unknown; skill?: { created_by?: unknown } }>(
       "GET",
       `/${encodeURIComponent(publicId)}`,
       // altimate_change - a 404 is the answer "the skill is gone", not a failed call
-      { base: SKILLS_BASE, expectedStatuses: [404] },
+      { base: SKILLS_BASE, expectedStatuses: [404], actAs },
     )
     const raw = detail?.skill?.created_by ?? detail?.created_by
     return typeof raw === "number" ? raw : null
@@ -695,15 +692,16 @@ function withPublishLock<T>(skillDir: string, task: () => Promise<T>): Promise<T
  * ``PUT /skills/{id}/datamates`` REPLACES the whole set. A bare put with one id
  * would silently detach the skill from every other workspace it was already on,
  * so the current set is read first and merged. */
-async function attachToWorkspace(publicId: string, datamateId: number): Promise<void> {
+async function attachToWorkspace(publicId: string, datamateId: number, actAs: ActAs): Promise<void> {
   // The server answers `{skill: {...}}` (`CustomSkillResponse`); a flat body
   // is tolerated the way `extractPublicId` tolerates both. Reading only the
   // top level found nothing, and the replace below then detached the skill
   // from every workspace it was already on.
-  const current = await attachedWorkspaces(publicId)
+  const current = await attachedWorkspaces(publicId, actAs)
   if (current.includes(datamateId)) return
   await altimateRequest<unknown>("PUT", `/${encodeURIComponent(publicId)}/datamates`, {
     base: SKILLS_BASE,
+    actAs,
     body: { datamate_ids: [...current, datamateId] },
     allowEmptyBody: true,
   })
@@ -759,28 +757,31 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
 
   // Resolved once and pinned. The ledger lookup and the record after the
   // upload must describe the same account, or a credential change mid-publish
-  // files the id under one and looks for it under the other.
-  const scope = await currentScope()
-  if (!scope) throw new NotLinkedError()
+  // files the id under one and looks for it under the other. Every request
+  // below uses this one credential too: the review summary, the upload, the
+  // submission and the notice scope all belong to the same person.
+  const actAs = await WorkspaceApi.captureCredentials()
+  if (!actAs) throw new NotLinkedError()
+  const scope = await currentScope(actAs)
 
   // Whether the workspace reviews what members add, asked before anything is uploaded. With review, a member's own skill
   // is submitted for the owner's review and the owner's is attached directly; with review off only the owner adds
   // skills. A server without review answers `unsupported`: the skill is attached as before, which needs ownership.
-  const review = await reviewSummary(binding.datamateId)
+  const review = await reviewSummary(binding.datamateId, actAs)
   if (review && !review.is_owner && !review.review_enabled) throw new ReviewDisabledError(binding.datamateName, review.owner_name)
   // Without review the workspace must be the caller's. Linking needs only visibility, so
   // a project can be bound to a colleague's shared workspace — where the
   // attach would answer 404, on every publish, leaving a skill nothing from
   // the CLI could ever attach. Same rule as the link check: nothing is
   // uploaded until the attach is known to be possible.
-  if (!review) await assertOwnsWorkspace(binding.datamateId, binding.datamateName, scope.userId)
+  if (!review) await assertOwnsWorkspace(binding.datamateId, binding.datamateName, scope.userId, actAs)
 
   /** Submit the uploaded skill for review; undefined when the server turns out to have no review (then attached as
    * before by the caller). */
   const submit = async (publicId: string): Promise<PublishReview | undefined> => {
     if (!review) return undefined
     try {
-      const result = await ReviewApi.submit(binding.datamateId, { kind: "skill", subject_id: publicId, source: "cli" })
+      const result = await ReviewApi.submit(binding.datamateId, { kind: "skill", subject_id: publicId, source: "cli" }, actAs)
       // Remembered as pending, so the owner's decision is noticed even if it lands before the next poll.
       if (result.contribution)
         await ReviewNotices.recordSubmitted(
@@ -795,7 +796,10 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
         contribution: result.contribution,
       }
     } catch (err) {
-      if (ReviewApi.unavailable(err)) return undefined
+      // Only the owner falls back to attaching directly when the server turns out to have no review: a member cannot
+      // attach, and the fallback would answer 404 and take the upload back. The member's upload is kept and the
+      // submission reported as failed.
+      if (ReviewApi.unavailable(err) && review.is_owner) return undefined
       throw submitError(err, publicId, binding.datamateName, review.owner_name)
     }
   }
@@ -809,6 +813,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     try {
       await altimateRequest<unknown>("PATCH", `/${encodeURIComponent(existing)}`, {
         base: SKILLS_BASE,
+        actAs,
         // `replace_bundle` because `files` is the WHOLE bundle every time —
         // `collectBundle` walks the directory, so a path missing from it is a
         // file the user deleted. Without the flag the server refuses any
@@ -835,7 +840,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
       const reviewed = await submit(existing)
       if (!reviewed) {
         try {
-          await attachToWorkspace(existing, binding.datamateId)
+          await attachToWorkspace(existing, binding.datamateId, actAs)
         } catch (err) {
           throw new AttachFailedError(existing, err)
         }
@@ -878,7 +883,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
       } else throw err
     }
   }
-  const existing = await knownPublicId(input.skillDirectory, scope)
+  const existing = await knownPublicId(input.skillDirectory, scope, actAs)
   if (existing) {
     const updated = await update(existing)
     if (updated) return updated
@@ -888,6 +893,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   try {
     created = await altimateRequest<unknown>("POST", "", {
       base: SKILLS_BASE,
+      actAs,
       body: { name: input.name, description: input.description, files },
       timeoutMs: UPLOAD_TIMEOUT_MS,
     })
@@ -896,7 +902,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     // published from another machine, so this one holds no id for it.
     // altimate_change start — learn: `--replace` adopts this user's own same-name skill
     if (err instanceof ConflictError && input.replace) {
-      const own = await findOwnSkillByName(input.name, scope.userId, binding.datamateId)
+      const own = await findOwnSkillByName(input.name, scope.userId, binding.datamateId, actAs)
       if (!own) throw new SkillNameConflictError(input.name, "create", err.detail)
       const updated = await update(own, true)
       if (updated) return updated
@@ -931,7 +937,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
       review: reviewed,
     }
   try {
-    await attachToWorkspace(publicId, binding.datamateId)
+    await attachToWorkspace(publicId, binding.datamateId, actAs)
   } catch (err) {
     // A 404 straight after a create means the workspace refused the
     // attachment outright — not owned, or gone — and retrying will not change
@@ -940,6 +946,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     if (err instanceof NotFoundError) {
       await altimateRequest<unknown>("DELETE", `/${encodeURIComponent(publicId)}`, {
         base: SKILLS_BASE,
+        actAs,
         allowEmptyBody: true,
       }).catch((cleanup) => log.warn("could not remove an unattachable skill", { publicId, err: String(cleanup) }))
       await forgetPublished(input.skillDirectory, scope)
@@ -960,9 +967,9 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
 
 /** The workspace's review summary, or null when the server has no review (an older backend, or a tenant without the
  * tables). Any other failure (offline, 401, the workspace not visible) fails the publish before anything is uploaded. */
-async function reviewSummary(datamateId: number): Promise<ReviewApi.Summary | null> {
+async function reviewSummary(datamateId: number, actAs: ActAs): Promise<ReviewApi.Summary | null> {
   try {
-    return await ReviewApi.summary(datamateId)
+    return await ReviewApi.summary(datamateId, actAs)
   } catch (err) {
     if (ReviewApi.unavailable(err)) return null
     throw err
@@ -996,12 +1003,13 @@ function isAfterUpload(err: unknown): boolean {
  * submission was rejected (or is still pending for someone else's view) is attached nowhere, so the workspace list does
  * not name it, and `--replace` must still find it. An older server that ignores `mine` lists more; `created_by` still
  * picks this user's. */
-async function findOwnSkillByName(name: string, userId: number, datamateId: number): Promise<string | null> {
+async function findOwnSkillByName(name: string, userId: number, datamateId: number, actAs: ActAs): Promise<string | null> {
   const matches = new Set<string>()
   let expectedPages: number | undefined
   for (let page = 1; page <= 50; page++) {
     const body = await altimateRequest<{ items?: unknown[]; pages?: unknown }>("GET", "", {
       base: SKILLS_BASE,
+      actAs,
       query: { mine: "true", page: String(page), size: "50" },
     })
     const pages = typeof body?.pages === "number" ? body.pages : 1
@@ -1018,18 +1026,23 @@ async function findOwnSkillByName(name: string, userId: number, datamateId: numb
   }
   if (matches.size !== 1) return null
   const [publicId] = [...matches]
-  const attached = await attachedWorkspaces(publicId)
+  const attached = await attachedWorkspaces(publicId, actAs)
   return attached.length === 0 || attached.includes(datamateId) ? publicId : null
 }
 
-/** The workspaces a skill is attached to, from its library detail (`{skill: {...}}`, or flat). */
-async function attachedWorkspaces(publicId: string): Promise<number[]> {
+/** The workspaces a skill is attached to, from its library detail (`{skill: {...}}`, or flat). A detail without a
+ * readable list fails: read as "attached nowhere", it would let `--replace` adopt a skill attached elsewhere, and an
+ * attach replace the whole set with this workspace alone. */
+async function attachedWorkspaces(publicId: string, actAs: ActAs): Promise<number[]> {
   type Attached = { attached_datamate_ids?: unknown }
   const detail = await altimateRequest<Attached & { skill?: Attached }>("GET", `/${encodeURIComponent(publicId)}`, {
     base: SKILLS_BASE,
+    actAs,
   })
   const raw = detail?.skill?.attached_datamate_ids ?? detail?.attached_datamate_ids
-  return Array.isArray(raw) ? raw.filter((n): n is number => Number.isInteger(n)) : []
+  if (!Array.isArray(raw) || !raw.every((n) => Number.isInteger(n)))
+    throw new Error("The workspace did not say which workspaces this skill is attached to. Retry publishing.")
+  return raw as number[]
 }
 // altimate_change end
 
@@ -1135,8 +1148,8 @@ export function assertProjectSkill(projectRoot: string, skillDirectory: string):
  * from the same list the picker uses, which carries each workspace's owner. A
  * list that omits the owner (an older server) cannot answer, and the attach
  * itself then decides — with the compensation on the create path. */
-async function assertOwnsWorkspace(datamateId: number, datamateName: string, userId: number): Promise<void> {
-  const workspaces = await WorkspaceApi.listDatamates()
+async function assertOwnsWorkspace(datamateId: number, datamateName: string, userId: number, actAs: ActAs): Promise<void> {
+  const workspaces = await WorkspaceApi.listDatamates(actAs)
   const ws = workspaces.find((w) => w.id === datamateId)
   if (ws?.ownerId !== undefined && ws.ownerId !== userId) throw new NotWorkspaceOwnerError(datamateName)
 }

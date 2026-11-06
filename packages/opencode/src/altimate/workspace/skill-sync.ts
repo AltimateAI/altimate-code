@@ -1198,8 +1198,29 @@ async function mirrorToClaude(directory: string, opts?: { withdraw?: boolean }):
   }
 }
 
-async function removeManaged(directory: string): Promise<void> {
-  await fs.rm(managedRoot(directory), { recursive: true, force: true })
+/** Remove the live snapshot, under the same cross-process lock as a swap. With `expected`, only while the live
+ * manifest is still the one this run read: a snapshot another process swapped in since is newer than what this run
+ * knows, and not this run's to remove. Answers whether it removed. */
+async function removeManaged(directory: string, expected?: Manifest | null): Promise<boolean> {
+  const canon = path.resolve(directory)
+  return Flock.withLock(snapshotLock(canon), async () => {
+    if (expected !== undefined && !(await liveIs(canon, expected))) return false
+    await fs.rm(managedRoot(directory), { recursive: true, force: true })
+    return true
+  })
+}
+
+/** Under the snapshot lock: whether the live manifest is still `seen` (null: no readable snapshot). */
+async function liveIs(canon: string, seen: Manifest | null): Promise<boolean> {
+  return JSON.stringify(await readManifest(canon)) === JSON.stringify(seen)
+}
+
+/** Another process published a snapshot after this run read the live one: this run's result is older, so it is not
+ * swapped in. Not a failure the user is told about; the next sync starts from the newer snapshot. */
+class SupersededRunError extends Error {
+  constructor() {
+    super("another process updated the workspace skills while this sync ran")
+  }
 }
 
 /** Sync the bound workspace's custom skills into ``directory``.
@@ -1446,9 +1467,10 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
         was: manifest.datamateId,
         now: binding.datamateId,
       })
-      await removeManaged(canon)
-      changed = true
+      if (await removeManaged(canon, manifest)) changed = true
     }
+    // The live snapshot this run starts from: a swap or removal below goes ahead only while it is still the live one.
+    const seen = foreign ? null : manifest
 
     const remote = await listAll(binding)
     if (!remote) {
@@ -1473,7 +1495,11 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     }
 
     if (remote.length === 0) {
-      await removeManaged(canon)
+      if (!(await removeManaged(canon, seen))) {
+        log.info("workspace skills changed in another process; leaving them for the next sync")
+        failed = true
+        return
+      }
       const written = await writeEmptyRecord(canon, currentEmptyKey)
       // Not serialized with an unlink in another thread. An unlink forgets the binding before it
       // clears this record, so confirming the link after the write means an unlink that cleared
@@ -1632,13 +1658,14 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           // altimate_change start — workspace review: only the version the workspace still serves is carried over
           // What the server last said it serves: the list's revision, unless a read since answered that it moved on
           // (409 `revision_changed`, which names the revision it serves now). A copy of any other version is withdrawn,
-          // even though this download failed: a replaced or rejected version reaches nobody. A copy recorded without a
-          // revision (by an older client, or from a server that sent none) cannot be told stale over a plain failure
-          // and is kept; once the server says the version moved, it is withdrawn too.
+          // even though this download failed: a replaced or rejected version reaches nobody. Without a revision on
+          // either side (a copy recorded by an older client, or a list row from a server that sent none), a plain
+          // failure cannot tell the copy stale and it is kept; once the server says the version moved, it is withdrawn.
           const moved = revisionChangedTo(err)
           const served = moved === undefined ? summary.revision : moved
           const current =
-            !!prior && (prior.revision === undefined ? moved === undefined : prior.revision === served)
+            !!prior &&
+            (prior.revision === undefined || served === undefined ? moved === undefined : prior.revision === served)
           if (prior && !current) withdrawn.set(summary.publicId, prior)
           // altimate_change end
           if (prior && current) {
@@ -1741,6 +1768,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
       await fs.rm(retired, { recursive: true, force: true }).catch(() => {})
       // altimate_change start — workspace review: one swap or withdrawal at a time per project, across processes
       await Flock.withLock(snapshotLock(canon), async () => {
+        if (!(await liveIs(canon, seen))) throw new SupersededRunError()
         let hadPrevious = true
         try {
           await fs.rename(root, retired)
@@ -1766,6 +1794,13 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     } catch (err) {
       failed = true
       await fs.rm(staging, { recursive: true, force: true }).catch(() => {})
+      if (err instanceof SupersededRunError) {
+        // Not necessarily from a newer read of the server: what this run's read says is no longer served is still
+        // withdrawn (only a copy exactly at the version judged obsolete), and the next sync redoes the rest.
+        log.info("workspace skills changed in another process; kept the newer snapshot")
+        if (withdrawn.size) await withdrawFromLive(canon, binding.datamateId, withdrawn)
+        return
+      }
       log.warn("workspace skill sync failed; kept the existing snapshot", { err: String(err) })
       // altimate_change start — workspace review: keeping the existing snapshot must not keep a version the workspace no
       // longer serves

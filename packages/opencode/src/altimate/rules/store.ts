@@ -259,7 +259,8 @@ export async function vouched(root: string): Promise<Map<string, Lesson>> {
   return lessons
 }
 
-/** One of the person's pending proposals as a lesson, under the active rule's id and paths when it edits one. */
+/** One of the person's pending proposals as a lesson, under the active rule's id, paths and pin when it edits one: the
+ * edit changes the wording, not how the rule is selected. */
 function pendingLesson(pending: MyPending, replaces?: RuleOut): Lesson {
   const paths = pending.applies_to.length ? pending.applies_to : (replaces?.applies_to ?? [])
   return {
@@ -267,6 +268,7 @@ function pendingLesson(pending: MyPending, replaces?: RuleOut): Lesson {
     text: printable(pending.text),
     tags: pending.tags,
     scope: "project",
+    ...(replaces?.pinned ? { pinned: true } : {}),
     review: "pending",
     ...(paths.length ? { trigger: { paths } } : {}),
     helpful: 0,

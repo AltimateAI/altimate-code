@@ -103,6 +103,7 @@ afterAll(() => {
 })
 
 const scopeA = () => ReviewNotices.scopeOf(API, "acme", "user:7", 42)
+const ACT_AS = { url: API, instance: "acme", apiKey: "k" }
 /** Link the project for the account signed in now (the binding cache is per credential). */
 const link = () =>
   recordApprovedBinding(
@@ -239,6 +240,63 @@ describe("decision notices", () => {
     expect(back.shown.map((n) => n.public_id)).toEqual(["c-1"])
   })
 
+  test("a pending request is kept when the list had a row this version could not read", async () => {
+    mine = () => page([contribution({ status: "pending" })])
+    await poll()
+    expect((await ReviewNotices.read(scopeA()))?.pending).toEqual(["c-1"])
+    // One page, complete, but its only row does not parse: it may be c-1, so c-1 is not let go.
+    mine = () => page([{ public_id: "c-1", status: "weird" }])
+    await poll()
+    expect((await ReviewNotices.read(scopeA()))?.pending).toEqual(["c-1"])
+    mine = () => page([contribution({ status: "rejected", review_reason: "No" })])
+    expect((await poll()).shown.map((n) => n.public_id)).toEqual(["c-1"])
+  })
+
+  test("a list without page counts is read while pages are full; one short of its total is not complete", async () => {
+    let calls = 0
+    mine = () => {
+      calls++
+      const items = calls === 1 ? Array.from({ length: 50 }, (_, i) => contribution({ public_id: `c-${i}` })) : [contribution({ public_id: "c-last" })]
+      return reply({ items, total: 51 })
+    }
+    const listed = await ReviewApi.listMine(42, ACT_AS)
+    expect(calls).toBe(2)
+    expect(listed.items).toHaveLength(51)
+    expect(listed.complete).toBe(true)
+    mine = () => reply({ items: [contribution()], total: 3, page: 1, pages: 1 })
+    expect((await ReviewApi.listMine(42, ACT_AS)).complete).toBe(false)
+  })
+
+  test("a server that ignores the page number is read twice, not to the cap, and the list is not complete", async () => {
+    let calls = 0
+    mine = () => {
+      calls++
+      return reply({ items: Array.from({ length: 50 }, (_, i) => contribution({ public_id: `c-${i}` })) })
+    }
+    const listed = await ReviewApi.listMine(42, ACT_AS)
+    expect(calls).toBe(2)
+    expect(listed.complete).toBe(false)
+  })
+
+  test("decisions kept before are replayed for a credential this process has not polled with yet", async () => {
+    mine = () => page([contribution({ status: "pending" })])
+    await poll()
+    mine = () => page([contribution({ status: "active", reviewed_by_name: "Olive" })])
+    await poll()
+    // The same person signs in with a rotated key (as after a restart, nothing is known about it in this process).
+    apiKey = "rotated"
+    users = { ...users, rotated: 7 }
+    await link()
+    // The first replay does not wait on the network: it starts the lookup and shows nothing yet.
+    expect(await replayed()).toEqual([])
+    let shown: string[] = []
+    for (let i = 0; i < 50 && !shown.length; i++) {
+      await new Promise((r) => setTimeout(r, 10))
+      shown = (await replayed()).map((n) => n.public_id)
+    }
+    expect(shown).toEqual(["c-1"])
+  })
+
   test("the state is bounded", async () => {
     mine = () => page(Array.from({ length: ReviewNotices.MAX_PENDING + 25 }, (_, i) => contribution({ public_id: `c-${i}` })))
     await poll()
@@ -251,7 +309,7 @@ describe("decision notices", () => {
       calls++
       return page([contribution({ public_id: `c-${calls}` })], 99, calls)
     }
-    const listed = await ReviewApi.listMine(42)
+    const listed = await ReviewApi.listMine(42, ACT_AS)
     expect(calls).toBe(ReviewApi.MAX_PAGES)
     expect(listed.complete).toBe(false)
     expect(listed.items).toHaveLength(ReviewApi.MAX_PAGES)

@@ -47,7 +47,17 @@ async function post<T>(api: TuiPluginApi, url: string, body?: unknown): Promise<
 const sourceLabel = (source: string) =>
   source === "organization" ? "organization policy" : source === "you" ? "your setting" : source === "workspace" ? "workspace setting" : "default"
 
-const on = (api: TuiPluginApi) => api.event.on as unknown as (type: string, handler: (event: { properties: any }) => void) => () => void
+/** Events of this TUI's project only. A session server can host several projects, and the event stream carries every
+ * project's events: a card, a review notice or a refresh for another project is not this one's (it would show another
+ * project's skill name, reviewer and reason here). */
+const on = (api: TuiPluginApi) => (type: string, handler: (event: { properties: any }) => void) =>
+  (api.event.on as unknown as (type: string, handler: (event: { properties: any }, meta?: { directory?: string }) => void) => () => void)(
+    type,
+    (event, meta) => {
+      if (meta?.directory && meta.directory !== api.state.path.directory) return
+      handler(event)
+    },
+  )
 const root = (api: TuiPluginApi) => (api.state.path.worktree && api.state.path.worktree !== "/" ? api.state.path.worktree : api.state.path.directory)
 type Summary = RulesSummary.Summary & { ok: boolean; line: string }
 type Row = RulesSummary.RuleRow
@@ -495,6 +505,8 @@ function reviewToast(api: TuiPluginApi, raw: { text: string; status: string; rea
     const what = p.kind === "skill" ? `Your skill ${quoted}` : `Your knowledge base ${quoted}`
     if (p.status === "active") api.ui.toast({ variant: "success", message: `${what} was approved${who}. It now reaches the workspace.`, duration: 10000 })
     else if (p.status === "rejected") api.ui.toast({ variant: "warning", message: `${what} was rejected${who}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 })
+    // A status this version does not know (a newer server) is still shown, not dropped.
+    else api.ui.toast({ variant: "info", message: `${what} is now ${p.status}${who}.`, duration: 10000 })
     return
   }
   if (p.status === "active") api.ui.toast({ variant: "success", message: `Your rule was approved${who}: ${quoted}. It now applies to the team.`, duration: 10000 })

@@ -234,7 +234,8 @@ async function pollUnsafe(directory: string, deps: PollDeps): Promise<PollResult
     // Recorded only for the account it was fetched for: another sign-in meanwhile records nothing.
     if ((await accountDigest()) !== digest) return { state, result: { status: "account_changed" } }
     const recorded = decided(state, listed.items)
-    return { state: advance(state, listed.items, recorded, listed.complete), result: { status: "done", recorded } }
+    // A row this version could not read may be one of the pending requests: only a list read in full lets one go.
+    return { state: advance(state, listed.items, recorded, listed.complete && listed.skipped === 0), result: { status: "done", recorded } }
   })
   if (result.status === "done")
     for (const notice of result.recorded) await deps.announce?.(notice).catch((error) => log.warn("could not announce a review notice", { error: String(error) }))
@@ -242,12 +243,13 @@ async function pollUnsafe(directory: string, deps: PollDeps): Promise<PollResult
 }
 
 /** The notices kept for the project's workspace and the person signed in now, oldest first; none when workspaces are
- * off, nobody is signed in, the project has no local link, or the person is not known yet in this process. Asks no
- * server: for the rules summary, which clients replay. */
+ * off, nobody is signed in, the project has no local link, or the person is not known yet in this process. For the
+ * rules summary, which clients replay, so it never waits on the network: when the person is not known yet, asking who
+ * they are starts in the background and this answers none; the review poll learns it too and asks clients to replay. */
 export async function stored(directory: string): Promise<Notice[]> {
   if (!workspacesOn()) return []
   try {
-    const [{ WorkspaceApi }, { readLocalBinding }, { RulesSync }] = await Promise.all([
+    const [{ WorkspaceApi }, { readLocalBinding, credentialDigest, accountDigest }, { RulesSync }] = await Promise.all([
       import("./api-client"),
       import("./state"),
       import("../rules/sync"),
@@ -256,8 +258,14 @@ export async function stored(directory: string): Promise<Notice[]> {
     if (!actAs) return []
     const binding = await readLocalBinding(directory)
     if (!binding) return []
+    // The link was read with the credential signed in now: it must still be the captured one, or one account's
+    // notices could be paired with another account's link.
+    if ((await accountDigest()) !== credentialDigest(actAs.url, actAs.instance, actAs.apiKey)) return []
     const account = await RulesSync.knownAccount(actAs)
-    if (!account) return []
+    if (!account) {
+      void RulesSync.accountOf(actAs).catch(() => undefined)
+      return []
+    }
     return (await read(scopeOf(actAs.url, actAs.instance, account, binding.datamateId)))?.notices ?? []
   } catch (error) {
     log.warn("could not read the kept review notices", { error: String(error) })

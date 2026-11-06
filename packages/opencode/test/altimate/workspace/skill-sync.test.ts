@@ -3071,7 +3071,65 @@ describe("the served version", () => {
     expect(result.skipped[0].reason).toContain("no longer the version the workspace serves")
   })
 
-  test("an abandoned run withdraws a stale copy, but never one another process has replaced since", async () => {
+  test("a run whose snapshot another process replaced while it downloaded does not swap its older result in", async () => {
+    const manifestPath = path.join(project, MANAGED, ".manifest.json")
+    serveReviewed({ "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" } })
+    await syncSkills(project)
+    serveReviewed({
+      "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" },
+      "pub-2": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "two" },
+    })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/skills/pub-2/files/")) {
+        // Another process installs pub-1 at its approved revision meanwhile.
+        const m = JSON.parse(readFileSync(manifestPath, "utf8"))
+        m.skills["pub-1"].revision = "a1"
+        writeFileSync(manifestPath, JSON.stringify(m))
+        writeFileSync(skillFile("pub-1", "SKILL.md"), "approved")
+      }
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    const result = await syncSkills(project)
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("approved")
+    expect(existsSync(skillFile("pub-2", "SKILL.md"))).toBe(false)
+    expect(result.error).toBeUndefined()
+  })
+
+  test("an empty list does not remove a snapshot another process installed after this run read the live one", async () => {
+    const manifestPath = path.join(project, MANAGED, ".manifest.json")
+    serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "one" } })
+    await syncSkills(project)
+    serveReviewed({})
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (isList(String(input))) {
+        const m = JSON.parse(readFileSync(manifestPath, "utf8"))
+        m.skills["pub-1"].revision = "r2"
+        writeFileSync(manifestPath, JSON.stringify(m))
+      }
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(true)
+  })
+
+  test("a failed download keeps a copy recorded with a revision when the list names none", async () => {
+    serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "v1" } })
+    await syncSkills(project)
+    serveReviewed({ "pub-1": { updatedAt: "2026-01-02T00:00:00Z", body: "v2" } })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/skills/pub-1/files/")) throw new TypeError("network down")
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("v1")
+  })
+
+  // A read-only directory is what makes the swap fail here; it does not stop root, and Windows has no such mode.
+  const readOnlyDirsWork = process.platform !== "win32" && process.getuid?.() !== 0
+  test.skipIf(!readOnlyDirsWork)("an abandoned run withdraws a stale copy, but never one another process has replaced since", async () => {
     const manifestPath = path.join(project, MANAGED, ".manifest.json")
     // The swap cannot happen (the parent of the live tree is read-only), so the run is abandoned after downloading.
     const parent = path.dirname(path.join(project, MANAGED))
