@@ -82,7 +82,7 @@ altimate:
 
 ### The Altimate Code plugin (recommended)
 
-1. Install Altimate Code (Node.js 20 or later): `npm install -g altimate-code`
+1. Install Altimate Code (Node.js 20 or later): `npm install -g altimate-code`. Already installed? Run it again to upgrade; linking a project to a workspace needs 0.12.5 or later (see [Use an Altimate workspace from Claude Code](#use-an-altimate-workspace-from-claude-code)).
 2. Install the plugin from Anthropic's plugin directory:
 
     ```bash
@@ -116,7 +116,15 @@ This creates `~/.claude/commands/altimate.md`. You can now use `/altimate` in an
 
 Claude Code reaches a workspace through Altimate Code: every task the plugin hands over runs in your project, so it gets the workspace the project is linked to — its skills, its knowledge, your team's shared memory and its integrations. Nothing in Claude Code itself needs configuring.
 
-1. **Sign in to Altimate.** In a terminal:
+1. **Check your version.** Linking needs Altimate Code 0.12.5 or later; older versions have no `link` command, or say "Workspaces are a pilot feature and are off".
+
+    ```bash
+    altimate-code --version
+    ```
+
+    If it is older, run `npm install -g altimate-code` again. If `--version` still shows the old version after that, another copy runs first: `which -a altimate-code` (`where altimate-code` on Windows) lists every copy on your `PATH`, so remove the old one.
+
+2. **Sign in to Altimate.** In a terminal:
 
     ```bash
     altimate-code auth login -p altimate-backend --method "Altimate LLM Gateway"
@@ -124,7 +132,7 @@ Claude Code reaches a workspace through Altimate Code: every task the plugin han
 
     It opens your browser; sign in and return to the terminal. (Inside the TUI, `/connect` does the same.) The command also works from Claude Code: type it after `!` in the prompt.
 
-2. **Link the project.** In the project folder:
+3. **Link the project.** In the project folder:
 
     ```bash
     altimate-code link
@@ -132,9 +140,9 @@ Claude Code reaches a workspace through Altimate Code: every task the plugin han
 
     Pick the workspace, or create one. The picker needs an interactive terminal, so it does not run from Claude Code's `!` prompt or a script. There, list the workspaces with `altimate-code workspace list` and link with `altimate-code link --workspace <id or name>`, or create one with `altimate-code link --create`. Moving a linked project to a different workspace also needs `--yes`. Claude can run these for you: ask it to link the project to a workspace.
 
-3. **Check it.** `altimate-code workspace status` shows the linked workspace and when its skills last synced.
+4. **Check it.** `altimate-code workspace status` shows the linked workspace and when its skills last synced.
 
-4. **Ask Claude.** Questions about your team's conventions, best practices or knowledge are answered from the workspace when they reach Altimate Code. Start them with `/altimate-code:altimate` to be sure they do:
+5. **Ask Claude.** Questions about your team's conventions, best practices or knowledge are answered from the workspace when they reach Altimate Code. Start them with `/altimate-code:altimate` to be sure they do:
 
     ```
     /altimate-code:altimate what are our naming conventions for staging models?
