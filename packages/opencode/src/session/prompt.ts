@@ -4878,10 +4878,13 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       const code = o?.statusCode ?? o?.lastError?.statusCode
       return typeof code === "number" ? code : undefined
     }
-    if (err instanceof Error) return { name: err.name, message: err.message, status: statusOf(err) }
+    // The name becomes a telemetry dimension: an identifier-shaped token or nothing.
+    const safeName = (value: unknown, fallback: string) =>
+      typeof value === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : fallback
+    if (err instanceof Error) return { name: safeName(err.name, "Error"), message: err.message, status: statusOf(err) }
     if (err && typeof err === "object") {
       const o = err as Record<string, unknown>
-      const name = typeof o.name === "string" ? o.name : typeof o.type === "string" ? o.type : "object"
+      const name = safeName(o.name, safeName(o.type, "object"))
       let message = typeof o.message === "string" ? o.message : ""
       if (!message) {
         try {
@@ -4989,12 +4992,27 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     } finally {
       titleInFlight.delete(input.session.id)
     }
-    if (failure !== undefined || text.trim().length === 0) {
-      const err = failure ?? new Error("the model returned no text")
+    const cleaned = text
+      .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+      .split("\n")
+      .map((line: string) => line.trim())
+      .find((line: string) => line.length > 0)
+    // An answer with no usable line (empty, or thinking only) is a failed attempt too, so it is
+    // reported rather than silently using up one of the five.
+    if (failure !== undefined || !cleaned) {
+      const err = failure ?? new Error(text.trim() ? "the model returned no title line" : "the model returned no text")
       const described = describeTitleError(err)
       const providerID = model?.providerID ?? input.providerID
       const modelID = model?.id ?? input.modelID
-      log.error("failed to generate title", { error: err, attempt, providerID, modelID })
+      // Name, message and status only: a provider error object can carry the request body.
+      log.error("failed to generate title", {
+        errorType: described.name,
+        message: described.message.slice(0, 500),
+        status: described.status,
+        attempt,
+        providerID,
+        modelID,
+      })
       Telemetry.track({
         type: "title_generation_failed",
         timestamp: Date.now(),
@@ -5008,19 +5026,12 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       })
       return
     }
-    // altimate_change end
-    const cleaned = text
-      .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
-      .split("\n")
-      .map((line: string) => line.trim())
-      .find((line: string) => line.length > 0)
-    if (!cleaned) return
 
     const title = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
-    // altimate_change start — the user may have named the session while the request was in flight;
-    // a generated title only ever replaces the placeholder.
+    // The user may have named the session while the request was in flight: a generated title only
+    // ever replaces the placeholder, and when that cannot be checked the title is left for a retry.
     const current = await Session.get(input.session.id).catch(() => undefined)
-    if (current && !Session.isDefaultTitle(current.title)) return
+    if (!current || !Session.isDefaultTitle(current.title)) return
     // altimate_change end
     return Session.setTitle({ sessionID: input.session.id, title })
   }

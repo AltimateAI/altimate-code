@@ -232,8 +232,9 @@ it.live(
             parts: [{ type: "text", text: `message ${i}` }],
           })
         }
-        // Two requests per turn for the first five turns, one for the sixth.
+        // Two requests per turn for the first five turns, one for the sixth, and all five failures recorded.
         yield* llm.wait(11)
+        for (let i = 0; i < 150 && events.length < 5; i++) yield* Effect.sleep("20 millis")
 
         const titleHits = (yield* llm.hits).filter((hit) => JSON.stringify(hit.body).includes(TITLE_MARKER))
         expect(titleHits).toHaveLength(5)
@@ -308,6 +309,8 @@ it.live(
           agent: "build",
           parts: [{ type: "text", text: "first message" }],
         })
+        // The held title request has reached the server before the second turn starts.
+        yield* llm.wait(2)
         yield* prompt.prompt({
           sessionID: session.id,
           agent: "build",
