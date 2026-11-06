@@ -19,6 +19,7 @@ import * as git from "./utils/git"
 import * as logger from "./utils/logger"
 import { loadConfig, repoRoot } from "./utils/config"
 import { fetchReleases, type GitHubRelease } from "./utils/github"
+import { compareVersionMajor, versionMajor } from "./utils/version"
 
 // ---------------------------------------------------------------------------
 // CLI
@@ -193,16 +194,30 @@ async function main(): Promise<void> {
   logger.info(`Fetching releases from GitHub (${config.upstreamRepo})...`)
   const releases = await fetchReleases(config.upstreamRepo, {
     includePrerelease: Boolean(args["include-prerelease"]),
-    limit: limit === Infinity ? undefined : limit,
   })
 
-  // Extract tags and sort by version
-  const versionTags = releases
+  // Filter by the fork's major before applying --limit, so newer majors cannot
+  // hide compatible releases. Keep newer majors only for the informational note.
+  const releaseTags = releases
     .map((r) => r.tag_name)
+    .filter((tag) => {
+      try {
+        versionMajor(tag)
+        return true
+      } catch {
+        return false // Unrelated release tags (e.g., github-v1) are not merge targets.
+      }
+    })
     .sort(compareVersions)
+  const versionTags = releaseTags.filter((tag) => compareVersionMajor(tag, config.upstreamBaseline) === 0)
+  const newerMajorTags = releaseTags.filter((tag) => compareVersionMajor(tag, config.upstreamBaseline) > 0)
+
+  if (newerMajorTags.length > 0) {
+    logger.warn(`${newerMajorTags.length} newer-major release tag(s) excluded (highest: ${newerMajorTags[0]}); major upgrades require a re-port, not a merge.`)
+  }
 
   if (versionTags.length === 0) {
-    logger.warn("No published releases found on upstream")
+    logger.warn(`No published releases found for upstream baseline ${config.upstreamBaseline}'s major`)
     process.exit(0)
   }
 

@@ -9,6 +9,10 @@ We maintain a fork of [anomalyco/opencode](https://github.com/anomalyco/opencode
 - **Custom code is protected** — files in `keepOurs` patterns are never overwritten by upstream. Our Python engine, bridge layer, altimate tools, and CI workflows stay untouched.
 - **Upstream-only packages are skipped** — platform packages (app, web, desktop, etc.), nix, SST infra, and translated READMEs are discarded during merge.
 
+### Major versions
+
+`upstreamBaseline` in `utils/config.ts` records the upstream tag the fork is based on (currently `v1.17.9`). Bump it after each upstream merge lands. `list-versions.ts` lists and suggests only releases with that major version, and reports when newer-major tags exist. Both `merge.ts` and `bridge-merge.ts` reject cross-major targets, including in dry-run mode, before changing Git state. Upstream v2 replaces `packages/opencode` and the plugin, tool, session and server APIs, so moving to it is a re-port (Altimate features as v2 plugins on a thin branded build), not a merge with these scripts.
+
 ## Prerequisites
 
 ```bash
@@ -126,6 +130,7 @@ The merge script prints a `gh pr create` command at the end. Review the diff, th
 | `bun run script/upstream/analyze.ts` | Check `altimate_change` marker integrity |
 | `bun run script/upstream/analyze.ts --markers --base main` | Check PR for missing markers |
 | `bun run script/upstream/analyze.ts --markers --base main --strict` | Same, but fail CI on warnings |
+| `bun run script/upstream/analyze.ts --print-baseline` | Print the pinned upstream baseline tag |
 | `bun run script/upstream/verify-restructure.ts` | Verify branch restructure |
 
 ## Configuration
@@ -280,7 +285,16 @@ script/upstream/
 
 ## CI Integration
 
-The **Marker Guard** CI job (in `.github/workflows/ci.yml`) runs automatically on every PR. It checks whether any upstream-shared files (`packages/opencode/src/`) have new code without `altimate_change` markers. This prevents accidental overwrites during future upstream merges.
+The **Marker Guard** CI job (in `.github/workflows/ci.yml`) runs automatically on every PR. It checks whether any upstream-shared files (such as `packages/opencode/src/`) have new code without `altimate_change` markers. Ownership is determined from the pinned `upstreamBaseline` tag in `utils/config.ts`, so moving upstream branches to a new major version does not disable checks on v1 files. This prevents accidental overwrites during future upstream merges.
+
+After installing the merge tooling dependencies, CI fetches the upstream remote and then explicitly fetches the baseline tag into the dedicated `refs/upstream-baseline/` namespace. The analyzer reads this full ref to avoid collisions with same-named fork tags or local branches:
+
+```bash
+baseline=$(bun run script/upstream/analyze.ts --print-baseline)
+git fetch upstream "refs/tags/${baseline}:refs/upstream-baseline/${baseline}" --no-tags
+```
+
+If the namespaced baseline ref is missing locally, the analyzer attempts this fetch once and retries the check. If the ref is still unavailable, it warns on stderr with the tag and fetch command, then falls back to directory-based ownership checks. Fetch the tag into this namespace to restore the baseline-based check.
 
 ```bash
 # What CI runs:

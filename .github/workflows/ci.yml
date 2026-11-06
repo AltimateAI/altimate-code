@@ -829,14 +829,16 @@ jobs:
         with:
           bun-version: "1.3.14"
 
+      - name: Install merge tooling deps
+        run: bun install
+        working-directory: script/upstream
+
       - name: Add upstream remote
         run: |
           git remote add upstream https://github.com/anomalyco/opencode.git || true
           git fetch upstream --quiet --no-tags
-
-      - name: Install merge tooling deps
-        run: bun install
-        working-directory: script/upstream
+          baseline=$(bun run script/upstream/analyze.ts --print-baseline)
+          git fetch upstream "refs/tags/${baseline}:refs/upstream-baseline/${baseline}" --no-tags
 
       - name: Run marker parser tests
         run: bun test
