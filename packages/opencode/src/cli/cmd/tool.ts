@@ -303,17 +303,29 @@ const ToolDaemonCommand = cmd({
  */
 function writeAll(text: string) {
   const bytes = Buffer.from(text)
+  let progressAt = Date.now()
   for (let at = 0; at < bytes.length; ) {
     try {
       at += writeSync(1, bytes, at)
+      progressAt = Date.now()
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
       if (code === "EPIPE") return // The reader left, so nobody is waiting for the rest.
       if (code !== "EAGAIN") throw error
+      // A reader that stopped draining the pipe (a stopped pager, a wedged log shipper) would
+      // otherwise keep this process spinning forever; after a minute without progress, fail.
+      if (Date.now() - progressAt > WRITE_STALL_MS) {
+        throw new Error(
+          `stdout stopped accepting output for ${WRITE_STALL_MS / 1000} s; ${bytes.length - at} bytes of the answer were not written`,
+        )
+      }
       Bun.sleepSync(2)
     }
   }
 }
+
+/** How long `writeAll` waits for a reader that has stopped taking output before it gives up. */
+const WRITE_STALL_MS = 60_000
 
 export const ToolCommand = cmd({
   command: "tool",

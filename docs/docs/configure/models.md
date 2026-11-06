@@ -18,7 +18,7 @@ altimate supports models from all configured providers. Use the `model` and `sma
 
 The model format is `provider/model-name`.
 
-`small_model` handles the small background requests that are not part of the conversation, such as the session title and prompt enhancement. When it is not set, Altimate Code picks a cheap model from the same provider (Claude Haiku, Gemini Flash or GPT-5 nano when the provider lists one) and otherwise uses the chat model. A `small_model` the provider cannot serve, or does not list, fails only those requests: chat keeps working, while new sessions keep their `New session - <time>` placeholder title until a retry succeeds. Altimate Code retries the title on each of the first five messages of a session and reports every failure in telemetry.
+`small_model` handles the small background requests that are not part of the conversation, such as the session title and prompt enhancement. When it is not set, Altimate Code picks a cheap model from the same provider (Claude Haiku, Gemini Flash or GPT-5 nano when the provider lists one) and otherwise uses the chat model. A `small_model` the provider cannot serve, or does not list, fails only those requests: chat keeps working, while new sessions keep their `New session - <time>` placeholder title until a retry succeeds. Altimate Code retries the title on each of the first five messages of a session and reports every failure in telemetry. A failure shows up as a `failed to generate title` line in the log, with the provider's error, and as a `title_generation_failed` telemetry event naming the model that was asked for; correct or remove the `small_model` value to resolve it.
 
 ## Browsing Models
 
