@@ -4863,6 +4863,11 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     return result
   }
 
+  // altimate_change start — how many user messages of a session may each trigger a title request
+  // while the session still carries its placeholder title.
+  const TITLE_MAX_ATTEMPTS = 5
+  // altimate_change end
+
   async function ensureTitle(input: {
     session: Session.Info
     history: MessageV2.WithParts[]
@@ -4878,10 +4883,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     )
     if (firstRealUserIdx === -1) return
 
-    const isFirst =
-      input.history.filter((m) => m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic))
-        .length === 1
-    if (!isFirst) return
+    // altimate_change start — retry while the placeholder stands. Upstream requested a title only
+    // on the first user message, so one failed small-model call left `New session - <time>` for the
+    // rest of the session (field report, altimate-code 0.12.8). Later turns retry with the same
+    // first-message context, bounded so a permanently broken small model does not cost a failed
+    // request on every turn.
+    const attempt = input.history.filter(
+      (m) => m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic),
+    ).length
+    if (attempt > TITLE_MAX_ATTEMPTS) return
+    // altimate_change end
 
     // Gather all messages up to and including the first real user message for context
     // This includes any shell/subtask executions that preceded the user's first prompt
@@ -4930,21 +4941,53 @@ NOTE: At any point in time through this workflow you should feel free to ask the
           : await MessageV2.toModelMessages(contextMessages, model)),
       ],
     })
-    const text = await Promise.resolve(result.text).catch((err: unknown) => {
-      log.error("failed to generate title", { error: err })
-      return undefined
-    })
-    if (text) {
-      const cleaned = text
-        .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
-        .split("\n")
-        .map((line: string) => line.trim())
-        .find((line: string) => line.length > 0)
-      if (!cleaned) return
-
-      const title = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
-      return Session.setTitle({ sessionID: input.session.id, title })
+    // altimate_change start — read the stream itself. `result.text` rejects with the SDK's generic
+    // "No output generated. Check the stream for errors." and the provider's own error reaches only
+    // the stream's error part, so the log never said why a title failed. Record the real error and
+    // report it, so the next field report is answerable from App Insights.
+    let text = ""
+    let failure: unknown
+    try {
+      for await (const part of result.fullStream) {
+        if (part.type === "text-delta") text += part.text
+        else if (part.type === "error") failure = part.error
+      }
+    } catch (err) {
+      failure = err
     }
+    if (failure !== undefined || text.trim().length === 0) {
+      const err = failure ?? new Error("the model returned no text")
+      const message = err instanceof Error ? err.message : String(err)
+      const status = (err as { statusCode?: unknown })?.statusCode
+      log.error("failed to generate title", {
+        error: err,
+        attempt,
+        providerID: model.providerID,
+        modelID: model.id,
+      })
+      Telemetry.track({
+        type: "title_generation_failed",
+        timestamp: Date.now(),
+        session_id: input.session.id,
+        provider_id: model.providerID,
+        model_id: model.id,
+        attempt,
+        error_type: err instanceof Error ? err.name : typeof err,
+        error_class: Telemetry.classifyError(message),
+        ...(typeof status === "number" ? { http_status: status } : {}),
+      })
+      return
+    }
+    // altimate_change end
+    const cleaned = text
+      .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+      .split("\n")
+      .map((line: string) => line.trim())
+      .find((line: string) => line.length > 0)
+    if (!cleaned) return
+
+    const title = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
+    return Session.setTitle({ sessionID: input.session.id, title })
   }
 
   // altimate_change start — Effect Context.Service facade over the existing Promise namespace.

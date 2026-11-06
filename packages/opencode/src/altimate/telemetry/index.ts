@@ -428,6 +428,23 @@ export namespace Telemetry {
         error_message: string
         http_status?: number
       }
+    // altimate_change start — a session-title request failed, so the session keeps its
+    // `New session - <time>` placeholder until a later turn's retry succeeds
+    | {
+        type: "title_generation_failed"
+        timestamp: number
+        session_id: string
+        provider_id: string
+        model_id: string
+        /** Which user message of the session triggered the request: 1 is the first, retries count up. */
+        attempt: number
+        /** The error's class name (`APICallError`, `TypeError`, ...), no message text. */
+        error_type: string
+        /** Keyword classification from classifyError(). */
+        error_class: string
+        http_status?: number
+      }
+    // altimate_change end
     // DEPRECATED: Python engine eliminated. These event types are retained
     // for backward compatibility with existing telemetry dashboards but
     // are never fired by the native TypeScript implementation.
