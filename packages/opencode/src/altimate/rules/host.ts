@@ -229,14 +229,18 @@ function noticeLines(start: Start, ws: string): string[] {
  * and what it is. Only explicit wording: "remember to run the tests" or "do you remember …?" is the conversation, not a
  * rule. The cue words are the ones `RulesRemember` treats as asking to remember. The rule may start on the next line. */
 const REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note|save|from now on)\b,?(?:\s+(?:this|that|it))?\s+(?:as\s+)?(?:an?\s+)?(?:team\s+)?rule\b[ \t]*[:,-]\s*(.+)/i
+const NEGATED = /\b(?:do not|don'?t|never|not|no need to)\s+$/i
 /** Shorter than this after the cue is not a rule ("remember?", "remember this"). */
 const MIN_REMEMBERED = 8
 
 /** The rule a "remember … as a team rule" prompt asks for: its first line, up to the first sentence end. What follows
  * ("… Now fix stg_orders.") is the rest of the conversation. */
 export function rememberedRule(prompt: string): string | undefined {
-  const rest = REMEMBER.exec(prompt)?.[1]
-  if (!rest) return undefined
+  const match = REMEMBER.exec(prompt)
+  const rest = match?.[1]
+  if (!match || !rest) return undefined
+  // "Do not remember this as a team rule: …" asks for the opposite.
+  if (NEGATED.test(prompt.slice(0, match.index))) return undefined
   const line = rest.split(/\r?\n/)[0]
   // A sentence end. An abbreviation's dot ("e.g.", "i.e.", "etc.", "vs.", "cf.") ends it only when no lowercase word
   // follows: "etc. Then rerun the build." is two sentences, "e.g. in staging models" one.

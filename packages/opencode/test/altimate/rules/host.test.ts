@@ -782,6 +782,8 @@ describe("host session: checks, transcripts and stored answers", () => {
     "do you remember what the orders schema was?",
     "From now on, answer in French",
     "remember that I prefer CTEs",
+    "Do not remember this as a team rule: use ordered_at for order timestamps.",
+    "please don't save this as a rule: skip the tests.",
   ])("not a team-rule request: %s", async (text) => {
     const root = await linkedRoot()
     expect(await RulesHost.recordCorrection({ root, directory: root, learn, session: "claude:fp", text })).not.toBe("proposed")
