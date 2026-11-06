@@ -134,15 +134,30 @@ export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4)
 }
 
-/** Include only complete lesson lines; the heading and newlines count against the budget. */
+/** The heading of the person's own proposed rules that are still waiting for review. */
+export const PENDING_REVIEW_HEADING = "Your rules pending review (proposed by you, not yet approved by the workspace owner):"
+
+/** Include only complete lesson lines; the heading and newlines count against the budget. The person's own proposals
+ * still waiting for review (`review: "pending"`) are listed apart, under `PENDING_REVIEW_HEADING`. */
 export function renderSection(lessons: readonly Lesson[], budgetTokens: number, heading = "## Team rules"): { section: string; lessons: Lesson[] } {
+  const approved: string[] = []
+  const pending: string[] = []
+  const compose = () =>
+    [approved.length ? [heading, ...approved].join("\n") : "", pending.length ? [PENDING_REVIEW_HEADING, ...pending].join("\n") : ""]
+      .filter(Boolean)
+      .join("\n")
   let section = ""
   const included: Lesson[] = []
   for (const lesson of lessons) {
     const line = lessonLine(lesson)
     if (!line) continue
-    const next = `${section || heading}\n${line}`
-    if (estimateTokens(next) > budgetTokens) continue
+    const lines = lesson.review === "pending" ? pending : approved
+    lines.push(line)
+    const next = compose()
+    if (estimateTokens(next) > budgetTokens) {
+      lines.pop()
+      continue
+    }
     section = next
     included.push(lesson)
   }

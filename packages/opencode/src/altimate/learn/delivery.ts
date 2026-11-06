@@ -227,6 +227,15 @@ export class Delivery {
         log.info("learn session snapshot rebuilt without team rules", { session })
         return undefined
       }
+      // A rule shown as the person's pending proposal stays only while it is still that proposal, with that wording:
+      // approved, rejected or proposed again, the session is given what the state holds now.
+      if (name === Store.WORKSPACE_RULES_STORE) {
+        const now = (await vouched!).get(lesson.id)!
+        if (now.review !== lesson.review || (lesson.review === "pending" && now.text !== lesson.text)) {
+          log.info("learn session snapshot rebuilt: a pending team rule changed", { session })
+          return undefined
+        }
+      }
       // altimate_change end
       if (lesson.text.length > MAX_TEXT && !grandfathered.has(name))
         grandfathered.set(name, await Store.grandfathered(this.root, name, { migrate: false }).catch(() => []))

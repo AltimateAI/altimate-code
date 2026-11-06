@@ -17,6 +17,9 @@ export const Lesson = z.object({
   created: z.string(),
   updated: z.string(),
   provenance: z.string().optional(),
+  /** A workspace rule the person proposed that is still waiting for review: delivered to them only, under its own heading
+   * (`renderSection`). Set only by the workspace rules state (`RulesStore.vouched`). */
+  review: z.literal("pending").optional(),
 }).strict()
 export type Lesson = z.infer<typeof Lesson>
 export const RetiredLesson = Lesson.extend({ supersededBy: id.optional(), reason: z.string() })

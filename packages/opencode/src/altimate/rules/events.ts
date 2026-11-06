@@ -41,7 +41,8 @@ export const Event = {
     "rule.proposal.replied",
     z.object({ id: z.string(), sessionID: z.string(), action: z.string(), message: z.string() }),
   ),
-  /** The owner reviewed one of this person's proposals. */
+  /** The owner reviewed one of this person's proposals: a rule, or (`kind`) a skill or knowledge base the person
+   * submitted to the workspace, whose `text` is then its name. */
   Reviewed: BusEvent.define(
     "rule.proposal.reviewed",
     z.object({
@@ -50,6 +51,8 @@ export const Event = {
       status: z.string(),
       reason: z.string().optional(),
       reviewer: z.string().optional(),
+      /** Absent for a rule. */
+      kind: z.enum(["skill", "knowledge"]).optional(),
     }),
   ),
   /** The local rules state changed (pull, send, review): clients refresh their summary. */

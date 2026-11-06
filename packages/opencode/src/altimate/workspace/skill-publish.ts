@@ -42,6 +42,10 @@ import { isInWorkspaceSnapshot } from "./snapshot-path"
 import { ConflictError, ForbiddenError, NotFoundError, WorkspaceApi, altimateRequest } from "./api-client"
 import type { ConflictDetail } from "./api-client"
 import { resolveBinding } from "./state"
+import { printable } from "../rules/printable"
+import { RulesApiError } from "../rules/api"
+import { ReviewApi } from "./review-api"
+import { ReviewNotices } from "./review-notices"
 
 const log = Log.create({ service: "altimate-workspace-skill-publish" })
 
@@ -247,8 +251,52 @@ export class AttachFailedError extends Error {
     readonly publicId: string,
     cause: unknown,
   ) {
-    super(`The skill was uploaded (id ${publicId}) but could not be attached to the workspace: ${String(cause)}`)
+    super(`The skill was uploaded (id ${publicId}) but could not be attached to the workspace: ${printable(String(cause))}`)
     this.name = "AttachFailedError"
+  }
+}
+
+/** The workspace reviews what members add, and review is off: only its owner adds skills. Raised before anything is
+ * uploaded (from the workspace's review summary), or when the owner turned review off while this publish ran (the
+ * server's 409 `review_disabled`). */
+export class ReviewDisabledError extends Error {
+  constructor(
+    readonly workspaceName: string,
+    ownerName?: string | null,
+  ) {
+    const owner = ownerName ? printable(ownerName) : "its owner"
+    super(
+      `"${printable(workspaceName)}" belongs to ${owner}, and review is off there, so only ${owner} can add skills to it. ` +
+        `Ask them to turn on review in the workspace, or to publish the skill.`,
+    )
+    this.name = "ReviewDisabledError"
+  }
+}
+
+/** The author already has as many open review requests on this workspace as the server allows (409
+ * `too_many_requests`). The skill was uploaded; publishing again once some are decided sends it. */
+export class TooManyReviewRequestsError extends Error {
+  constructor(readonly publicId: string) {
+    super(
+      `The skill was uploaded (id ${publicId}), but you already have as many open review requests on this workspace as it ` +
+        `allows. Publish again once the owner has decided some of them; \`altimate-code workspace review status\` lists them.`,
+    )
+    this.name = "TooManyReviewRequestsError"
+  }
+}
+
+/** The skill exists on the server but could not be sent for review. The next publish takes the update path and submits
+ * again (a submission of unchanged content is answered as a duplicate), so nothing is stranded. */
+export class SubmitFailedError extends Error {
+  constructor(
+    readonly publicId: string,
+    cause: unknown,
+  ) {
+    super(
+      `The skill was uploaded (id ${publicId}) but could not be sent to the workspace: ` +
+        `${printable(cause instanceof Error ? cause.message : String(cause))}. Publish again to retry.`,
+    )
+    this.name = "SubmitFailedError"
   }
 }
 
@@ -305,8 +353,23 @@ export interface PublishReport {
   name: string
   files: number
   bytes: number
-  /** The workspace the skill is now attached to. */
+  /** The workspace the skill was published to. */
   datamateId: number
+  workspaceName: string
+  /** The server's answer to the submission, when the workspace has review (`POST /datamates/{id}/reviews`). Absent
+   * from a server without it: the skill was attached as before. */
+  review?: PublishReview
+}
+
+export interface PublishReview {
+  /** `active`: the workspace serves it now (the owner's own, attached directly, or already approved); `pending`: it waits
+   * for the owner's review. */
+  status: "active" | "pending"
+  attachedDirectly: boolean
+  /** The same content was already open or already active: nothing new was submitted. */
+  duplicate: boolean
+  ownerName: string | null
+  contribution: ReviewApi.Contribution | null
 }
 
 /** Read one directory into a bundle, refusing anything that cannot survive the
@@ -705,12 +768,42 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   const scope = await currentScope()
   if (!scope) throw new NotLinkedError()
 
-  // And the workspace must be the caller's. Linking needs only visibility, so
+  // Whether the workspace reviews what members add, asked before anything is uploaded. With review, a member's own skill
+  // is submitted for the owner's review and the owner's is attached directly; with review off only the owner adds
+  // skills. A server without review answers `unsupported`: the skill is attached as before, which needs ownership.
+  const review = await reviewSummary(binding.datamateId)
+  if (review && !review.is_owner && !review.review_enabled) throw new ReviewDisabledError(binding.datamateName, review.owner_name)
+  // Without review the workspace must be the caller's. Linking needs only visibility, so
   // a project can be bound to a colleague's shared workspace — where the
   // attach would answer 404, on every publish, leaving a skill nothing from
   // the CLI could ever attach. Same rule as the link check: nothing is
   // uploaded until the attach is known to be possible.
-  await assertOwnsWorkspace(binding.datamateId, binding.datamateName, scope.userId)
+  if (!review) await assertOwnsWorkspace(binding.datamateId, binding.datamateName, scope.userId)
+
+  /** Submit the uploaded skill for review; undefined when the server turns out to have no review (then attached as
+   * before by the caller). */
+  const submit = async (publicId: string): Promise<PublishReview | undefined> => {
+    if (!review) return undefined
+    try {
+      const result = await ReviewApi.submit(binding.datamateId, { kind: "skill", subject_id: publicId })
+      // Remembered as pending, so the owner's decision is noticed even if it lands before the next poll.
+      if (result.contribution)
+        await ReviewNotices.recordSubmitted(
+          ReviewNotices.scopeOf(scope.apiUrl, scope.tenant, `user:${scope.userId}`, binding.datamateId),
+          result.contribution,
+        )
+      return {
+        status: result.status,
+        attachedDirectly: result.attached_directly,
+        duplicate: result.duplicate,
+        ownerName: review.owner_name ?? null,
+        contribution: result.contribution,
+      }
+    } catch (err) {
+      if (ReviewApi.unavailable(err)) return undefined
+      throw submitError(err, publicId, binding.datamateName, review.owner_name)
+    }
+  }
 
   const files = await collectBundle(skillRoot)
   if (files.length === 0) throw new EmptyBundleError()
@@ -741,13 +834,16 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
           apiUrl: scope.apiUrl,
           createdBy: scope.userId,
         })
-      // Attached on update too: a skill published before this project was
-      // linked to its current workspace is otherwise updated but still absent
-      // from it.
-      try {
-        await attachToWorkspace(existing, binding.datamateId)
-      } catch (err) {
-        throw new AttachFailedError(existing, err)
+      // Submitted (or attached) on update too: a skill published before this project was linked to its current
+      // workspace is otherwise updated but still absent from it, and with review an edit reaches the team only through
+      // a new submission.
+      const reviewed = await submit(existing)
+      if (!reviewed) {
+        try {
+          await attachToWorkspace(existing, binding.datamateId)
+        } catch (err) {
+          throw new AttachFailedError(existing, err)
+        }
       }
       return {
         action: "updated",
@@ -756,6 +852,8 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
         files: files.length,
         bytes,
         datamateId: binding.datamateId,
+        workspaceName: binding.datamateName,
+        ...(reviewed ? { review: reviewed } : {}),
       }
     } catch (err) {
       // The skill was deleted in the workspace since we published it. Falling
@@ -766,6 +864,9 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
       // was never the problem — with no way forward, since renaming does not
       // help. Told apart by the server's own message.
       if (err instanceof ConflictError) throw updateConflict(err, input.name)
+      // A refusal of the submission (or a failed attach) after a successful upload is reported as is: the update
+      // happened, and creating a second skill would not help.
+      if (isAfterUpload(err)) throw err
       if (adopted) throw err
       // 403: the id is someone else's. Reachable through the legacy ledger
       // keys, which predate creator scoping — on a shared machine a row
@@ -819,9 +920,21 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     apiUrl: scope.apiUrl,
     createdBy: extractCreatedBy(created) ?? scope.userId,
   })
-  // After the id is recorded, deliberately. If the attach fails, the next
-  // publish finds the id, takes the update path, and attaches again — rather
+  // After the id is recorded, deliberately. If the submission or the attach fails, the next
+  // publish finds the id, takes the update path, and tries again — rather
   // than creating a second copy and 409ing on the name.
+  const reviewed = await submit(publicId)
+  if (reviewed)
+    return {
+      action: "created",
+      publicId,
+      name: input.name,
+      files: files.length,
+      bytes,
+      datamateId: binding.datamateId,
+      workspaceName: binding.datamateName,
+      review: reviewed,
+    }
   try {
     await attachToWorkspace(publicId, binding.datamateId)
   } catch (err) {
@@ -839,7 +952,45 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     }
     throw new AttachFailedError(publicId, err)
   }
-  return { action: "created", publicId, name: input.name, files: files.length, bytes, datamateId: binding.datamateId }
+  return {
+    action: "created",
+    publicId,
+    name: input.name,
+    files: files.length,
+    bytes,
+    datamateId: binding.datamateId,
+    workspaceName: binding.datamateName,
+  }
+}
+
+/** The workspace's review summary, or null when the server has no review (an older backend, or a tenant without the
+ * tables). Any other failure (offline, 401, the workspace not visible) fails the publish before anything is uploaded. */
+async function reviewSummary(datamateId: number): Promise<ReviewApi.Summary | null> {
+  try {
+    return await ReviewApi.summary(datamateId)
+  } catch (err) {
+    if (ReviewApi.unavailable(err)) return null
+    throw err
+  }
+}
+
+/** A failed submission, as the error the surfaces explain. Coded refusals get their own type; everything else
+ * (offline, 401/403, a 5xx) says the skill was uploaded and the next publish retries. */
+function submitError(err: unknown, publicId: string, workspaceName: string, ownerName?: string | null): Error {
+  const code = err instanceof RulesApiError && err.kind === "conflict" ? err.code : undefined
+  if (code === "review_disabled") return new ReviewDisabledError(workspaceName, ownerName)
+  if (code === "too_many_requests") return new TooManyReviewRequestsError(publicId)
+  return new SubmitFailedError(publicId, err)
+}
+
+/** Errors raised after the upload succeeded: the skill exists, so the update path must not fall through to a create. */
+function isAfterUpload(err: unknown): boolean {
+  return (
+    err instanceof AttachFailedError ||
+    err instanceof SubmitFailedError ||
+    err instanceof ReviewDisabledError ||
+    err instanceof TooManyReviewRequestsError
+  )
 }
 
 // altimate_change start — learn: find this user's skill by name for `--replace`
@@ -871,9 +1022,19 @@ async function findOwnSkillByName(name: string, userId: number, datamateId: numb
 /** One line for a surface to show after a publish. Both the CLI and the TUI
  * say the same thing, so a user moving between them recognises the outcome. */
 export function describePublish(report: PublishReport): string {
-  const verb = report.action === "created" ? "Published" : "Updated"
   const size = report.bytes >= 1024 ? `${Math.round(report.bytes / 1024)}KB` : `${report.bytes}B`
-  return `${verb} "${report.name}" in the workspace (${report.files} file${report.files === 1 ? "" : "s"}, ${size}).`
+  const detail = `(${report.files} file${report.files === 1 ? "" : "s"}, ${size})`
+  const review = report.review
+  if (!review) return `${report.action === "created" ? "Published" : "Updated"} "${report.name}" in the workspace ${detail}.`
+  // From the server's answer only: what it says the workspace now serves, never what this client expected.
+  const name = printable(report.name)
+  const workspace = printable(report.workspaceName)
+  const owner = review.ownerName ? printable(review.ownerName) : "the workspace owner"
+  if (review.duplicate && review.status === "pending")
+    return `Already waiting for review: "${name}" was sent to ${owner} with the same content. Nothing new was sent.`
+  if (review.duplicate) return `Already approved: "${name}" is in "${workspace}" with the same content. Nothing new was sent.`
+  if (review.status === "active") return `Published "${name}" to "${workspace}" ${detail}.`
+  return `Sent "${name}" for review to ${owner} ${detail}. It reaches the workspace once approved; \`altimate-code workspace review status\` shows where it stands.`
 }
 
 /** The message for an error this module raised on purpose, or null for one it
@@ -891,7 +1052,10 @@ export function explainPublishError(err: unknown): string | null {
     err instanceof SkillNameConflictError ||
     err instanceof SkillChangedElsewhereError ||
     err instanceof NotWorkspaceOwnerError ||
-    err instanceof AttachFailedError
+    err instanceof AttachFailedError ||
+    err instanceof ReviewDisabledError ||
+    err instanceof TooManyReviewRequestsError ||
+    err instanceof SubmitFailedError
   )
     return err.message
   return null

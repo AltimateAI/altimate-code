@@ -35,8 +35,15 @@
 //   GET "/{public_id}/files/{p}" -> {path, content} JSON (NOT raw bytes)
 // The summary carries ``file_count``, not an inventory, and nothing in the API
 // exposes a checksum — ``CustomSkillFileMeta`` is ``{path, size}``. So change
-// detection is per-skill ``updated_at`` and the only integrity check available
-// is byte length.
+// detection is per skill and the only integrity check available is byte length.
+//
+// altimate_change start — workspace review: the served version
+// A workspace with review serves each skill at a pinned version: the approved one for everyone, and the caller's own
+// pending one for its author. The detail and file reads therefore pass ``datamate_id`` so the server answers with the
+// version THIS workspace serves to THIS caller, not the library copy; and changes are detected by the summary's opaque
+// ``revision``, which moves whenever the served version does. A server without review sends no ``revision``: then
+// ``updated_at``, as before. A skill no longer listed (rejected, superseded, detached) leaves the next snapshot.
+// altimate_change end
 import fs from "fs/promises"
 import { statSync } from "node:fs"
 import path from "path"
@@ -84,8 +91,11 @@ const MANIFEST_NAME = ".manifest.json"
 const SYNCED_MARKER = ".synced-at"
 
 export interface ManifestSkill {
-  /** Server's ``updated_at``, verbatim. The only change signal the API offers. */
+  /** Server's ``updated_at``, verbatim: the change signal of a server without ``revision``. */
   updatedAt: string
+  // altimate_change start — workspace review: the served version's revision, when the server sends one
+  revision?: string
+  // altimate_change end
   files: Record<string, number>
 }
 
@@ -107,9 +117,20 @@ export interface Manifest {
 interface RemoteSummary {
   publicId: string
   updatedAt: string
+  // altimate_change start — workspace review: changes whenever the version the workspace serves changes
+  revision?: string
+  // altimate_change end
   /** Display name, for the sync-state change list. Optional: sync never depends on it. */
   name?: string
 }
+
+// altimate_change start — workspace review: one definition of "which version" for the manifest, the sync state and
+// change detection
+/** The version a summary or manifest entry names: the server's ``revision`` when it sends one, else ``updated_at``. */
+function versionOf(entry: { updatedAt: string; revision?: string }): string {
+  return entry.revision ?? entry.updatedAt
+}
+// altimate_change end
 
 /** ``CustomSkillDetail.files`` — ``CustomSkillFileMeta`` is ``{path, size}``. */
 interface RemoteFile {
@@ -282,7 +303,7 @@ async function recordSyncState(
           .filter((row) => !dropped.has(row.publicId))
           .map((row) => [
             row.publicId,
-            { label: displayId(row.name ?? row.publicId), version: carried.get(row.publicId) ?? row.updatedAt },
+            { label: displayId(row.name ?? row.publicId), version: carried.get(row.publicId) ?? versionOf(row) },
           ]),
       )
     : undefined
@@ -815,12 +836,15 @@ function parsePage(
   const rows: RemoteSummary[] = []
   for (const row of p.items) {
     if (!row || typeof row !== "object") return null
-    const r = row as { public_id?: unknown; updated_at?: unknown; name?: unknown }
+    const r = row as { public_id?: unknown; updated_at?: unknown; name?: unknown; revision?: unknown }
     if (typeof r.public_id !== "string" || !r.public_id) return null
     if (typeof r.updated_at !== "string" || !r.updated_at) return null
     rows.push({
       publicId: r.public_id,
       updatedAt: r.updated_at,
+      // altimate_change start — workspace review: absent (or not a string) from a server without review
+      ...(typeof r.revision === "string" && r.revision ? { revision: r.revision } : {}),
+      // altimate_change end
       ...(typeof r.name === "string" && r.name ? { name: r.name } : {}),
     })
   }
@@ -1494,11 +1518,14 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           continue
         }
         try {
+          // altimate_change start — workspace review: the version this workspace serves to this caller
+          const served = { datamate_id: String(binding.datamateId) }
           const detail = await altimateRequest<unknown>(
             "GET",
             `/${encodeURIComponent(summary.publicId)}`,
-            { base: SKILLS_BASE },
+            { base: SKILLS_BASE, query: served },
           )
+          // altimate_change end
           const files = parseDetailFiles(detail)
           if (!files) throw new WorkspaceApiError(`unrecognised detail for ${summary.publicId}`)
           // Decided BEFORE downloading, and against this skill's declared size,
@@ -1522,7 +1549,9 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
               `/${encodeURIComponent(summary.publicId)}/files/${encoded}`,
               // Bounded: this is the one response whose size is set by remote
               // bundle content rather than by our own query.
-              { base: SKILLS_BASE, boundResponse: true },
+              // altimate_change start — workspace review: the same served version as the detail
+              { base: SKILLS_BASE, boundResponse: true, query: served },
+              // altimate_change end
             )
             const content = parseFileContent(body, file.path)
             if (content === null) {
@@ -1546,7 +1575,13 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           }
           totalFiles += skillFiles
           totalBytes += skillBytes
-          next.skills[summary.publicId] = { updatedAt: summary.updatedAt, files: recorded }
+          next.skills[summary.publicId] = {
+            updatedAt: summary.updatedAt,
+            // altimate_change start — workspace review
+            ...(summary.revision ? { revision: summary.revision } : {}),
+            // altimate_change end
+            files: recorded,
+          }
         } catch (err) {
           skipped += 1
           // Keeps the run out of the poll window. A partial snapshot that
@@ -1566,7 +1601,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
               await fs.cp(priorDir, path.join(staging, summary.publicId), { recursive: true })
               next.skills[summary.publicId] = prior
               carried = true
-              carriedVersions.set(summary.publicId, prior.updatedAt)
+              carriedVersions.set(summary.publicId, versionOf(prior))
             } catch {
               carried = false
             }
@@ -1779,8 +1814,10 @@ async function listAll(binding: CachedBinding): Promise<RemoteSummary[] | null> 
 
 /** Does the on-disk snapshot already match the remote set?
  *
- * Compared on the server's ``updated_at`` per skill, because the API exposes no
- * checksum and the list carries only ``file_count``. */
+ * Compared per skill on the version the workspace serves (``revision``, else
+ * ``updated_at``), because the API exposes no checksum and the list carries only
+ * ``file_count``. A snapshot taken before the server sent ``revision`` does not
+ * match one that does, so it is fetched once more at the served version. */
 async function upToDate(
   directory: string,
   manifest: Manifest | null,
@@ -1791,7 +1828,12 @@ async function upToDate(
   if (ids.length !== remote.length) return false
   for (const summary of remote) {
     const local = manifest.skills[summary.publicId]
-    if (!local || local.updatedAt !== summary.updatedAt) return false
+    // altimate_change start — workspace review: the served version, not the library copy's timestamp
+    // With a revision only the revision counts: the author editing their library copy changes `updated_at` without
+    // changing what the workspace serves.
+    if (!local || local.revision !== summary.revision) return false
+    if (summary.revision === undefined && local.updatedAt !== summary.updatedAt) return false
+    // altimate_change end
   }
   // The manifest agreeing with the server says nothing about the files still
   // being there. A deleted, truncated or partially checked-out snapshot would

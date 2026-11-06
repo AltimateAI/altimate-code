@@ -24,6 +24,8 @@ test.each([500, 403, 404])("a failed replace (%d) leaves the ledger unchanged an
   const fetch = spyOn(globalThis, "fetch").mockImplementation((async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url)
     const method = init?.method ?? "GET"
+    // A server older than workspace review: its routes do not exist.
+    if (url.pathname.includes("/reviews")) return Response.json({ detail: "Not Found" }, { status: 404 })
     if (url.pathname.endsWith("/users/me")) return Response.json({ id: 7 })
     if (url.pathname.endsWith("/datamates/"))
       return Response.json({ datamates: [{ id: 42, name: "Growth", user_id: 7, memory_enabled: false }] })
@@ -85,6 +87,8 @@ test("replacement pins the original account scope through adoption and ledger pu
   const fetch = spyOn(globalThis, "fetch").mockImplementation((async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url)
     const method = init?.method ?? "GET"
+    // A server older than workspace review: its routes do not exist.
+    if (url.pathname.includes("/reviews")) return Response.json({ detail: "Not Found" }, { status: 404 })
     if (url.pathname.endsWith("/datamates/"))
       return Response.json({ datamates: [{ id: 42, name: "Growth", user_id: user, memory_enabled: false }] })
     if (method === "GET" && url.pathname.endsWith("/skills")) {
@@ -136,6 +140,8 @@ test("replace refuses a same-name skill attached only to another workspace", () 
   const fetch = spyOn(globalThis, "fetch").mockImplementation((async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input : input.url)
     const method = init?.method ?? "GET"
+    // A server older than workspace review: its routes do not exist.
+    if (url.pathname.includes("/reviews")) return Response.json({ detail: "Not Found" }, { status: 404 })
     if (url.pathname.endsWith("/users/me")) return Response.json({ id: 7 })
     if (url.pathname.endsWith("/datamates/"))
       return Response.json({ datamates: [{ id: 42, name: "Growth", user_id: 7, memory_enabled: false }] })

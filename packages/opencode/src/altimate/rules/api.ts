@@ -44,6 +44,20 @@ export const Reviewed = z.object({
 })
 export type Reviewed = z.infer<typeof Reviewed>
 
+/** One of the caller's own proposals still waiting for review (`my_pending` of a pull). */
+export const MyPending = z.object({
+  public_id: z.string(),
+  rule_key: z.string().regex(/^R-[0-9a-f]{12}$/),
+  repo_identity: z.string().nullable().optional(),
+  text: z.string(),
+  applies_to: z.array(z.string()),
+  tags: z.array(z.string()),
+  change: z.enum(["add", "edit", "retire"]),
+  replaces_public_id: z.string().nullable().optional(),
+  created_at: z.string(),
+})
+export type MyPending = z.infer<typeof MyPending>
+
 export const SyncResponse = z.object({
   unchanged: z.boolean(),
   revision: z.number().int(),
@@ -58,11 +72,14 @@ export const SyncResponse = z.object({
   // failed pull.
   rules: z.array(z.unknown()),
   my_reviewed: z.array(z.unknown()),
+  /** Absent from servers older than workspace review: read as none. */
+  my_pending: z.array(z.unknown()).optional(),
   cursor: z.string(),
 })
-export type SyncResponse = Omit<z.infer<typeof SyncResponse>, "rules" | "my_reviewed"> & {
+export type SyncResponse = Omit<z.infer<typeof SyncResponse>, "rules" | "my_reviewed" | "my_pending"> & {
   rules: RuleOut[]
   my_reviewed: Reviewed[]
+  my_pending: MyPending[]
   skipped: number
 }
 
@@ -139,14 +156,15 @@ const codeOf = (detail: Record<string, unknown> | undefined) => (typeof detail?.
 const messageOf = (detail: Record<string, unknown> | undefined, fallback: string) =>
   typeof detail?.message === "string" ? detail.message : fallback
 
-/** Map api-client's typed errors onto what callers do about them. */
-export function classify(error: unknown): RulesApiError {
+/** Map api-client's typed errors onto what callers do about them. `unavailable`: the 404 code saying the feature's tables
+ * are missing on the tenant (an uncoded 404 is a server without the routes); the workspace review client passes its own. */
+export function classify(error: unknown, unavailable = "rules_not_available"): RulesApiError {
   if (error instanceof RulesApiError) return error
   const message = error instanceof Error ? error.message : String(error)
   if (error instanceof NotFoundError) {
     const code = codeOf(error.detail)
     if (code === "workspace_not_found") return new RulesApiError("workspace_not_found", messageOf(error.detail, message), code, 404)
-    if (code === "rules_not_available" || !error.detail) return new RulesApiError("unsupported", messageOf(error.detail, message), code, 404)
+    if (code === unavailable || !error.detail) return new RulesApiError("unsupported", messageOf(error.detail, message), code, 404)
     return new RulesApiError("rejected", messageOf(error.detail, message), code, 404)
   }
   if (error instanceof ForbiddenError) {
@@ -177,6 +195,12 @@ async function call<T>(schema: z.ZodType<T>, actAs: ActAs, method: string, datam
   }
 }
 
+/** Text that may go into a prompt as a rule: passes the rule lint (one line, no commands, links or secrets; the length
+ * limit is the server's) and is already normalized. */
+export function deliverable(text: string): boolean {
+  return !lint(text, { grandfathered: true }) && normalizeText(text).trim() === text
+}
+
 export async function sync(actAs: ActAs, datamateId: number, body: { repo_remote: string; known_revision?: number; reviewed_since?: string }): Promise<SyncResponse> {
   const raw = await call(SyncResponse, actAs, "POST", datamateId, "/sync", body)
   // A rule goes into every teammate's prompt: like a proposal or a local promote, it must pass the rule lint (one line,
@@ -184,15 +208,19 @@ export async function sync(actAs: ActAs, datamateId: number, body: { repo_remote
   // and counted, and the pull keeps no revision, so it is fetched again once fixed.
   const rules = raw.rules.flatMap((rule) => {
     const parsed = RuleOut.safeParse(rule)
-    if (!parsed.success) return []
-    const text = parsed.data.text
-    return lint(text, { grandfathered: true }) || normalizeText(text).trim() !== text ? [] : [parsed.data]
+    return parsed.success && deliverable(parsed.data.text) ? [parsed.data] : []
   })
   const reviewed = raw.my_reviewed.flatMap((row) => {
     const parsed = Reviewed.safeParse(row)
     return parsed.success ? [parsed.data] : []
   })
-  return { ...raw, rules, my_reviewed: reviewed, skipped: raw.rules.length - rules.length }
+  // The caller's own pending proposals reach the caller's prompt too: the same check as a team rule. One that fails is
+  // left out (it is the person's own, still reviewable in the workspace).
+  const pending = (raw.my_pending ?? []).flatMap((row) => {
+    const parsed = MyPending.safeParse(row)
+    return parsed.success && deliverable(parsed.data.text) ? [parsed.data] : []
+  })
+  return { ...raw, rules, my_reviewed: reviewed, my_pending: pending, skipped: raw.rules.length - rules.length }
 }
 
 export async function propose(actAs: ActAs, datamateId: number, body: { repo_remote: string; items: ProposalItem[] }) {

@@ -9,7 +9,8 @@
 //   the wording, `n` is "Not a rule", Escape goes back to typing and leaves the card. When the wording did not
 //   say rule or memory, the card asks "Memory · Team rule · Skip". Open proposals load at startup, so a card
 //   asked before this TUI subscribed still shows; one answered in another client disappears.
-// - Review notices: `rule.proposal.reviewed` becomes a toast ("approved", or "rejected" with the reason).
+// - Review notices: `rule.proposal.reviewed` becomes a toast ("approved", or "rejected" with the reason), for a rule or,
+//   with `kind`, for a skill or knowledge base the person submitted to the workspace.
 // - `/rules`: the team rules, your proposals with their status and reasons, Sync now, and learning on/off.
 //
 // No rule logic lives here; the IDE extension renders the same events and calls the same routes.
@@ -434,7 +435,7 @@ function installCards(api: TuiPluginApi) {
   // subscribed (the startup sync): remembered by id and status.
   // The first time a project is seen, its existing reviews are recorded silently: they are history, not news.
   const seenKey = () => `altimate.rules.notices.${root(api)}`
-  const notify = (p: { public_id: string; text: string; status: string; reason?: string; reviewer?: string }, quiet = false) => {
+  const notify = (p: { public_id: string; text: string; status: string; reason?: string; reviewer?: string; kind?: "skill" | "knowledge" }, quiet = false) => {
     const seen = new Set(api.kv.get<string[]>(seenKey(), []))
     const key = `${p.public_id}:${p.status}`
     if (seen.has(key)) return
@@ -446,7 +447,8 @@ function installCards(api: TuiPluginApi) {
     void summaryOf(api).then((summary) => {
       const first = api.kv.get<string[] | undefined>(seenKey(), undefined) === undefined
       if (first) api.kv.set(seenKey(), [])
-      for (const notice of [...(summary?.notices ?? [])].reverse()) notify(notice, first)
+      // Rule reviews and skill/knowledge decisions alike: kept by the session server until replaced, shown here once.
+      for (const notice of [...(summary?.notices ?? []), ...(summary?.review_notices ?? [])].reverse()) notify(notice, first)
     })
   listen("altimate.rules.changed", replay)
   // This TUI shows proposal cards: it holds the server's renderer lease for its project while it runs, renewed at the
@@ -484,10 +486,17 @@ function installCards(api: TuiPluginApi) {
 }
 
 
-function reviewToast(api: TuiPluginApi, raw: { text: string; status: string; reason?: string; reviewer?: string }) {
+function reviewToast(api: TuiPluginApi, raw: { text: string; status: string; reason?: string; reviewer?: string; kind?: "skill" | "knowledge" }) {
   const p = { ...raw, text: printable(raw.text), reason: raw.reason && printable(raw.reason), reviewer: raw.reviewer && printable(raw.reviewer) }
   const who = p.reviewer ? ` by ${p.reviewer}` : ""
   const quoted = `"${p.text.length > 80 ? p.text.slice(0, 79) + "…" : p.text}"`
+  // A skill or knowledge base the person submitted to the workspace: `text` is its name.
+  if (p.kind) {
+    const what = p.kind === "skill" ? `Your skill ${quoted}` : `Your knowledge base ${quoted}`
+    if (p.status === "active") api.ui.toast({ variant: "success", message: `${what} was approved${who}. It now reaches the workspace.`, duration: 10000 })
+    else if (p.status === "rejected") api.ui.toast({ variant: "warning", message: `${what} was rejected${who}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 })
+    return
+  }
   if (p.status === "active") api.ui.toast({ variant: "success", message: `Your rule was approved${who}: ${quoted}. It now applies to the team.`, duration: 10000 })
   else if (p.status === "rejected") api.ui.toast({ variant: "warning", message: `Your rule was rejected${who}: ${quoted}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 })
   else if (p.status === "retired") api.ui.toast({ variant: "info", message: `Retired${who}: ${quoted}`, duration: 10000 })

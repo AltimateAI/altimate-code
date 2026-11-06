@@ -12,7 +12,7 @@ import { Global } from "@/global"
 import { detectToolReferences, skillSource, isToolOnPath } from "./skill-helpers"
 // altimate_change start — telemetry for skill operations
 import { Telemetry } from "@/altimate/telemetry"
-import { describePublish, explainPublishError, publishSkill } from "@/altimate/workspace/skill-publish"
+import { describePublish, explainPublishError, publishSkill, type PublishReport } from "@/altimate/workspace/skill-publish"
 import { Flag } from "@opencode-ai/core/flag/flag"
 // altimate_change end
 
@@ -478,16 +478,27 @@ const SkillPublishCommand = cmd({
         type: "boolean",
         default: false,
         describe: "update your own same-name skill even if it was published from another machine or checkout",
-      }),
+      })
+      // altimate_change end
+      // altimate_change start — workspace review: machine-readable result, with the server's review status
+      .option("json", { type: "boolean", default: false, describe: "Print the result as JSON" }),
   // altimate_change end
   async handler(args) {
     const name = args.name as string
     const cwd = process.cwd()
+    // altimate_change start — workspace review: every outcome goes through one writer, JSON or text, and every failure
+    // exits non-zero
+    const json = args.json === true
+    const fail = (message: string) => {
+      if (json) process.stdout.write(JSON.stringify({ ok: false, error: message }, null, 2) + EOL)
+      else process.stderr.write(message + EOL)
+      process.exitCode = 1
+    }
+    // altimate_change end
     await bootstrap(cwd, async () => {
       const skill = await Skill.get(name)
       if (!skill) {
-        process.stderr.write(`Skill "${name}" not found. Run \`altimate-code skill list\` to see the skills this project can reach.` + EOL)
-        process.exitCode = 1
+        fail(`Skill "${name}" not found. Run \`altimate-code skill list\` to see the skills this project can reach.`)
         return
       }
       // Built-in skills ship with altimate-code — embedded, or installed under
@@ -498,16 +509,14 @@ const SkillPublishCommand = cmd({
       // is refused by `publishSkill` itself, as is a symlinked root.
       const source = skillSource(skill.location)
       if (source === "builtin" || !path.isAbsolute(skill.location)) {
-        process.stderr.write(`"${name}" is a built-in skill and cannot be published.` + EOL)
-        process.exitCode = 1
+        fail(`"${name}" is a built-in skill and cannot be published.`)
         return
       }
       if (source === "global") {
-        process.stderr.write(
+        fail(
           `"${name}" is a personal skill (${path.dirname(skill.location)}), not one of this project's. ` +
-            `Copy it into the project's skills directory to publish it.` + EOL,
+            `Copy it into the project's skills directory to publish it.`,
         )
-        process.exitCode = 1
         return
       }
       try {
@@ -523,7 +532,8 @@ const SkillPublishCommand = cmd({
           replace: args.replace === true,
           // altimate_change end
         })
-        process.stdout.write(describePublish(report) + EOL)
+        if (json) process.stdout.write(JSON.stringify(publishJson(report), null, 2) + EOL)
+        else process.stdout.write(describePublish(report) + EOL)
         try {
           Telemetry.track({
             type: "skill_published",
@@ -538,12 +548,38 @@ const SkillPublishCommand = cmd({
         } catch {}
       } catch (err) {
         const known = explainPublishError(err)
-        process.stderr.write((known ?? `Publish failed: ${err instanceof Error ? err.message : String(err)}`) + EOL)
-        process.exitCode = 1
+        fail(known ?? `Publish failed: ${err instanceof Error ? err.message : String(err)}`)
       }
     })
   },
 })
+
+// altimate_change start — workspace review: `skill publish --json`
+/** `skill publish --json`: the upload, and the server's review answer as it gave it (`review` is null from a server
+ * without review, where the skill was attached directly). */
+export function publishJson(report: PublishReport) {
+  return {
+    ok: true,
+    action: report.action,
+    public_id: report.publicId,
+    name: report.name,
+    files: report.files,
+    bytes: report.bytes,
+    workspace_id: report.datamateId,
+    workspace_name: report.workspaceName,
+    message: describePublish(report),
+    review: report.review
+      ? {
+          status: report.review.status,
+          attached_directly: report.review.attachedDirectly,
+          duplicate: report.review.duplicate,
+          owner_name: report.review.ownerName,
+          contribution: report.review.contribution,
+        }
+      : null,
+  }
+}
+// altimate_change end
 
 const SkillShowCommand = cmd({
   command: "show <name>",
