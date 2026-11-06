@@ -26,7 +26,7 @@ import { RunBudget } from "@/altimate/run-budget"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect } from "effect"
 // altimate_change start — upstream_fix: recover committed child findings when cancellation interrupts a task.
-import { interruptedTaskOutput } from "../session/task-output"
+import { interruptedTaskOutput, lastTaskText } from "../session/task-output"
 // altimate_change end
 const log = Log.create({ service: "tool.task" })
 
@@ -253,12 +253,17 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       if (ctx.abort.aborted) partialOutput ??= await interruptedTaskOutput(session.id, messageID)
 
       const text = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
+      // altimate_change start — a child that ends on an error or with no text must not reach the
+      // parent as an empty result, which reads as "done, nothing found".
+      const status = text.trim() || ctx.abort.aborted ? [] : await emptyTaskStatus(session.id, messageID, result)
+      // altimate_change end
 
       const output = partialOutput ?? [
         `task_id: ${session.id} (for resuming to continue this task if needed)`,
         "",
         "<task_result>",
         ...(ctx.abort.aborted ? ["Task interrupted. Findings may be incomplete."] : []),
+        ...status,
         text,
         "</task_result>",
       ].join("\n")
@@ -278,3 +283,27 @@ export const TaskTool = Tool.define("task", async (ctx) => {
     },
   }
 })
+
+// altimate_change start — explicit status for a child that produced no final text
+async function emptyTaskStatus(
+  sessionID: SessionID,
+  messageID: MessageID,
+  result: MessageV2.WithParts | undefined,
+): Promise<string[]> {
+  const error = result?.info.role === "assistant" ? result.info.error : undefined
+  const reason = error
+    ? `Task stopped with an error before giving a final answer (${errorText(error)}).`
+    : "Task ended without a final text answer."
+  const partial = await lastTaskText(sessionID, messageID).catch(() => undefined)
+  return partial
+    ? [reason, "Its last written text, which may be incomplete:", partial]
+    : [reason, "It wrote no text. Resume it with task_id or treat its work as unfinished."]
+}
+
+function errorText(error: NonNullable<MessageV2.Assistant["error"]>): string {
+  const message = "data" in error && error.data && typeof error.data === "object" && "message" in error.data
+    ? String(error.data.message)
+    : ""
+  return message ? `${error.name}: ${message}` : error.name
+}
+// altimate_change end
