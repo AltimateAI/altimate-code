@@ -25,7 +25,8 @@ import { Log } from "@/util/log"
 import { canonical, parse as parseLessons, type Lesson } from "../learn/lesson"
 import { withLearnLock } from "../learn/lock"
 import * as Store from "../learn/store"
-import { RuleOut, Settings } from "./api"
+import { MyPending, RuleOut, Settings } from "./api"
+import { printable } from "./printable"
 
 /** The read-only store team rules are mirrored into (reserved: `learn/store.ts` `RESERVED_STORES`). */
 export const WORKSPACE_RULES_STORE = Store.WORKSPACE_RULES_STORE
@@ -33,6 +34,8 @@ const log = Log.create({ service: "rules.store" })
 const LOCK = { timeoutMs: 5_000 }
 const MAX_NOTICES = 50
 const MAX_SENT = 200
+/** The person's own pending proposals kept from a pull. The server caps open proposals per person well below this. */
+export const MAX_MY_PENDING = 100
 /** Safety cap for the signal id list; `processed_signals` is also pruned to live signals. */
 const MAX_TRACKED = 5000
 /** How long the "queued proposals were dropped" notice of an account or workspace change stays shown. */
@@ -142,6 +145,9 @@ export const State = z.object({
    * success) does not erase it. Shown for `SCOPE_DROP_NOTICE_MS`. */
   scope_drop: z.object({ count: z.number().int(), at: z.string() }).optional(),
   rules: z.array(RuleOut).default([]),
+  /** The person's own proposals still waiting for review, from the last pull (`my_pending`), with the same scope and
+   * credential binding as `rules`: delivered to this person only (`vouched`). Replaced by every pull. */
+  my_pending: z.array(MyPending).default([]),
   outbox: z.array(OutboxItem).default([]),
   sent: z.array(Sent).default([]),
   notices: z.array(Notice).default([]),
@@ -227,13 +233,51 @@ async function writePrivate(file: string, data: string): Promise<void> {
 /** The team rules delivery may give, by lesson id, built from the state: nothing of the project's `workspace-rules`
  * copy (wording, pin, tags, paths) is used. None while the project is not linked (unlinked and lost access clear the
  * state's workspace), and none unless the credential signed in now is the one they were pulled with: a sign-out or
- * another account stops them at once, not at the next sync. No network. */
+ * another account stops them at once, not at the next sync. No network.
+ *
+ * With them, the person's own pending proposals (`my_pending`), marked `review: "pending"`: an `add` as a rule of its
+ * own, an `edit` as its proposed wording in place of the active rule it replaces; a `retire` changes nothing. */
 export async function vouched(root: string): Promise<Map<string, Lesson>> {
   const state = await read(root)
   if (!state.workspace || !state.pulled_with) return new Map()
   const { accountDigest } = await import("../workspace/state")
   if ((await accountDigest().catch(() => null)) !== state.pulled_with) return new Map()
-  return new Map(state.rules.map((rule) => [lessonId(rule.rule_key), toLesson(rule)]))
+  const lessons = new Map(state.rules.map((rule) => [lessonId(rule.rule_key), toLesson(rule)]))
+  for (const pending of state.my_pending) {
+    if (pending.change === "retire") continue
+    if (pending.change === "edit") {
+      const active = state.rules.find((rule) => rule.public_id === pending.replaces_public_id)
+      // An edit of a rule this pull did not deliver (retired meanwhile, or not readable here) has nothing to replace.
+      if (!active) continue
+      lessons.set(lessonId(active.rule_key), pendingLesson(pending, active))
+      continue
+    }
+    const id = lessonId(pending.rule_key)
+    // An add whose rule is already active (approved after this pull) is delivered as the active rule.
+    if (!lessons.has(id)) lessons.set(id, pendingLesson(pending))
+  }
+  return lessons
+}
+
+/** One of the person's pending proposals as a lesson, under the active rule's id, paths and pin when it edits one: the
+ * edit changes the wording, not how the rule is selected. */
+function pendingLesson(pending: MyPending, replaces?: RuleOut): Lesson {
+  const paths = pending.applies_to.length ? pending.applies_to : (replaces?.applies_to ?? [])
+  return {
+    id: lessonId((replaces ?? pending).rule_key),
+    text: printable(pending.text),
+    tags: pending.tags,
+    scope: "project",
+    ...(replaces?.pinned ? { pinned: true } : {}),
+    review: "pending",
+    ...(paths.length ? { trigger: { paths } } : {}),
+    helpful: 0,
+    harmful: 0,
+    applied: 0,
+    created: pending.created_at,
+    updated: pending.created_at,
+    provenance: `workspace rule proposal ${pending.public_id}`,
+  }
 }
 
 function parse(raw: string | undefined): State | undefined {
@@ -305,6 +349,7 @@ export async function update(root: string, change: (state: State) => State | voi
     const next = change(current) ?? current
     next.notices = next.notices.slice(-MAX_NOTICES)
     next.sent = capSent(next.sent)
+    next.my_pending = next.my_pending.slice(0, MAX_MY_PENDING)
     next.processed_signals = next.processed_signals.slice(-MAX_TRACKED)
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)

@@ -1317,7 +1317,9 @@ export namespace Server {
           ])
           const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
           const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
-          const summary = await RulesSummary.summary(root, learn)
+          // altimate_change start — workspace review: the session's directory names the workspace of the review notices
+          const summary = await RulesSummary.summary(root, learn, process.env, Instance.directory)
+          // altimate_change end
           return c.json({ ok: true as const, ...summary, line: RulesSummary.sidebarLine(summary) })
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
@@ -1369,7 +1371,12 @@ export namespace Server {
             else state.personal_learning = on
           })
           await Bus.publish(RuleEvents.Event.Changed, { directory: Instance.directory }).catch(() => {})
-          const summary = await RulesSummary.summary(root, await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory))
+          const summary = await RulesSummary.summary(
+            root,
+            await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory),
+            process.env,
+            Instance.directory,
+          )
           const { RulesTelemetry } = await import("../altimate/rules/telemetry")
           RulesTelemetry.learningChanged(on, summary.learning, summary.learning_source)
           return c.json({ ok: true as const, ...summary, line: RulesSummary.sidebarLine(summary) })

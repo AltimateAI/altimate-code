@@ -75,13 +75,8 @@ export async function context(directory: string, learn: LearnConfig): Promise<Co
   if ((await accountDigest()) !== digest) return { status: "skipped", code: "account_changed", reason: "the Altimate account changed" }
   // Queued state belongs to a person, not to a key: rotating the key or signing in again keeps it, another user on
   // the same tenant does not. Unknown for now (the server did not answer): skipped, nothing reset.
-  let account = principals.get(digest)
-  if (!account) {
-    const id = await WorkspaceApi.whoami(actAs).catch(() => undefined)
-    if (id === undefined) return { status: "skipped", code: "account_unconfirmed", reason: "the Altimate account could not be confirmed" }
-    account = `user:${id}`
-    principals.set(digest, account)
-  }
+  const account = await accountOf(actAs)
+  if (!account) return { status: "skipped", code: "account_unconfirmed", reason: "the Altimate account could not be confirmed" }
   return {
     status: "ready",
     actAs,
@@ -93,6 +88,27 @@ export async function context(directory: string, learn: LearnConfig): Promise<Co
       repoRemote: outcome.binding.repoRemote,
     },
   }
+}
+
+/** `accountOf` from what this process already knows, asking no server: undefined until `accountOf` has answered. */
+export async function knownAccount(actAs: ActAs): Promise<string | undefined> {
+  const { credentialDigest } = await import("../workspace/state")
+  return principals.get(credentialDigest(actAs.url, actAs.instance, actAs.apiKey))
+}
+
+/** The person `actAs` signs in as (`user:<id>`), asked once per credential per process; undefined while the server
+ * cannot say. Per-person state (rules, workspace review notices) is keyed by it, never by the key. */
+export async function accountOf(actAs: ActAs): Promise<string | undefined> {
+  const { WorkspaceApi } = await import("../workspace/api-client")
+  const { credentialDigest } = await import("../workspace/state")
+  const digest = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
+  const known = principals.get(digest)
+  if (known) return known
+  const id = await WorkspaceApi.whoami(actAs).catch(() => undefined)
+  if (id === undefined) return undefined
+  const account = `user:${id}`
+  principals.set(digest, account)
+  return account
 }
 
 type Ready = Extract<Context, { status: "ready" }>
@@ -159,10 +175,19 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.pulled_at = new Date().toISOString()
       if (current) state.pulled_with = pulledWith
       else delete state.pulled_with
-      state.last_error = response.skipped
-        ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code, or did not pass the rule lint (one line, no commands, links or secrets), and ${response.skipped === 1 ? "is" : "are"} not delivered`
-        : undefined
+      const unreadable = [
+        response.skipped
+          ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code, or did not pass the rule lint (one line, no commands, links or secrets), and ${response.skipped === 1 ? "is" : "are"} not delivered`
+          : undefined,
+        // The person's own proposals waiting for review reach their sessions too; one left out is said, not dropped.
+        response.pending_skipped
+          ? `${response.pending_skipped} of your proposals waiting for review could not be read by this version of altimate-code, or did not pass the rule lint, and ${response.pending_skipped === 1 ? "is" : "are"} not in your sessions until approved`
+          : undefined,
+      ].filter(Boolean)
+      state.last_error = unreadable.length ? unreadable.join("; ") : undefined
       if (!response.unchanged) state.rules = response.rules
+      // Always in the answer, `unchanged` or not (none from a server older than workspace review).
+      state.my_pending = response.my_pending
       for (const reviewed of response.my_reviewed) {
         if (state.notices.some((n) => n.public_id === reviewed.public_id && n.status === reviewed.status)) continue
         const notice = {
