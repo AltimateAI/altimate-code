@@ -275,7 +275,8 @@ it.live(
           failed = events
         }
         expect(failed).toHaveLength(1)
-        expect(failed[0]).toMatchObject({ provider_id: "test", model_id: "test-model", attempt: 1 })
+        // The report names the model that was asked for, not the chat model it fell back from.
+        expect(failed[0]).toMatchObject({ provider_id: "test", model_id: "does-not-exist", attempt: 1 })
         expect(failed[0].error_type).toBe("ProviderModelNotFoundError")
         expect(failed[0].http_status).toBeUndefined()
         const titleHits = (yield* llm.hits).filter((hit) => JSON.stringify(hit.body).includes(TITLE_MARKER))
@@ -329,6 +330,41 @@ it.live(
         expect(title).toBe("Slow first title")
         titleHits = (yield* llm.hits).filter((hit) => JSON.stringify(hit.body).includes(TITLE_MARKER))
         expect(titleHits).toHaveLength(1)
+        expect(events).toHaveLength(0)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  { timeout: 60_000 },
+)
+
+it.live(
+  "a name the user gives the session while the title request runs is kept",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ llm }) {
+        const { events } = yield* recordTitleFailures
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+
+        const gate = Promise.withResolvers<void>()
+        yield* llm.title(reply().wait(gate.promise).text("Generated title").stop())
+        yield* llm.text("first answer")
+        yield* prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          parts: [{ type: "text", text: "first message" }],
+        })
+        yield* llm.wait(2)
+        // The user names the session while the title answer is still held.
+        yield* sessions.setTitle({ sessionID: session.id, title: "My own name" })
+        gate.resolve()
+
+        // The generated answer arrives and is discarded: only a placeholder is ever replaced.
+        for (let i = 0; i < 25; i++) yield* Effect.sleep("20 millis")
+        expect((yield* sessions.get(session.id)).title).toBe("My own name")
         expect(events).toHaveLength(0)
       }),
       { git: true, config: providerCfg },

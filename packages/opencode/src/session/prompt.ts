@@ -1254,12 +1254,13 @@ export namespace SessionPrompt {
 
       step++
       if (step === 1)
-        ensureTitle({
+        // altimate_change — fire-and-forget, but never an unhandled rejection
+        void ensureTitle({
           session,
           modelID: lastUser.model.modelID,
           providerID: lastUser.model.providerID,
           history: msgs,
-        })
+        }).catch((error) => log.error("failed to generate title", { error: String(error) }))
 
       const model = await Provider.getModel(lastUser.model.providerID, lastUser.model.modelID).catch((e) => {
         if (Provider.ModelNotFoundError.isInstance(e)) {
@@ -4948,7 +4949,17 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     let text = ""
     let failure: unknown
     let model: Provider.Model | undefined
+    // The model the request is for, so a failed lookup is reported against the model that was asked
+    // for (the title agent's own, or `small_model`), not against the chat model.
+    let requested: { providerID: string; modelID: string } | undefined
     try {
+      requested = await iife(async () => {
+        if (agent.model) return { providerID: String(agent.model.providerID), modelID: String(agent.model.modelID) }
+        const small = (await Config.get()).small_model
+        if (!small) return undefined
+        const parsed = Provider.parseModel(small)
+        return { providerID: String(parsed.providerID), modelID: String(parsed.modelID) }
+      })
       model = await iife(async () => {
         // agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
         if (agent.model)
@@ -5002,8 +5013,8 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     if (failure !== undefined || !cleaned) {
       const err = failure ?? new Error(text.trim() ? "the model returned no title line" : "the model returned no text")
       const described = describeTitleError(err)
-      const providerID = model?.providerID ?? input.providerID
-      const modelID = model?.id ?? input.modelID
+      const providerID = model?.providerID ?? requested?.providerID ?? input.providerID
+      const modelID = model?.id ?? requested?.modelID ?? input.modelID
       // Name, message and status only: a provider error object can carry the request body.
       log.error("failed to generate title", {
         errorType: described.name,
