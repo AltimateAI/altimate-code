@@ -6,7 +6,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { Dispatcher } from "../native"
 import type { Telemetry } from "../telemetry"
-import { columnReach, exposuresOn, type ColumnReach, type ColumnReachExposure } from "../native/dbt/column-reach"
+import { columnReach, exposuresDeclared, exposuresOn, type ColumnReach, type ColumnReachExposure } from "../native/dbt/column-reach"
 import { columnAnswer, describeAnswer, type ColumnAnswer } from "../native/dbt/column-answer"
 
 export const ImpactAnalysisTool = Tool.define("impact_analysis", {
@@ -89,6 +89,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       // Step 5: Exposures (dashboards) on the model or anything downstream, and, for a column, the
       // downstream models whose SQL reads it, traced model by model through the compiled manifest.
       let exposures: ColumnReachExposure[] = []
+      let declaredExposures: number | undefined
       let reach: ColumnReach | undefined
       let reachError: string | undefined
       let answer: ColumnAnswer | undefined
@@ -96,6 +97,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
       let exposuresError: string | undefined
       try {
         exposures = exposuresOn(args.manifest_path, affectedModelIds)
+        declaredExposures = exposuresDeclared(args.manifest_path)
       } catch (error) {
         // A manifest the parser read but the raw loader cannot: say so rather than imply no dashboards.
         exposuresError = error instanceof Error ? error.message : String(error)
@@ -167,6 +169,7 @@ export const ImpactAnalysisTool = Tool.define("impact_analysis", {
           change_type: args.change_type,
           downstream: downstream.map((d) => ({ name: d.name, ...(d.unique_id && { unique_id: d.unique_id }), depth: d.depth, materialized: d.materialized ?? null })),
           exposures,
+          ...(declaredExposures !== undefined && { exposures_declared: declaredExposures }),
           ...(reach && { column_reach: reach }),
           ...(reachError && { column_reach_error: reachError }),
           ...(answer && { column_answer: answer }),

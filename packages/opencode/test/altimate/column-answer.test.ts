@@ -327,6 +327,82 @@ describe("column answer: SQL rewrites and shapes", () => {
   })
 })
 
+describe("column answer: consumers", () => {
+  const exposure = (name: string, deps: string[], extra: Record<string, unknown> = {}) => ({
+    name,
+    type: "dashboard",
+    depends_on: { nodes: deps },
+    ...extra,
+  })
+  const withExposures = (exposures: Record<string, unknown>, more: Record<string, unknown> = {}) => ({
+    ...shop(),
+    exposures,
+    ...more,
+  })
+
+  test("each exposure lands in the tier of the models it reads, the closest tier first", () => {
+    const a = columnAnswer(
+      write(
+        withExposures({
+          "exposure.shop.z_cleared": exposure("z_cleared", ["model.shop.rpt_counts"]),
+          "exposure.shop.m_maybe": exposure("m_maybe", ["model.shop.rpt_big_child"], { type: "notebook" }),
+          "exposure.shop.c_carries": exposure("c_carries", ["model.shop.rpt_ltv", "model.shop.rpt_counts"], {
+            label: "Carries board",
+            url: "https://bi.example.com/1",
+            owner: { name: "Data team", email: "data@example.com" },
+          }),
+          "exposure.shop.a_focus": exposure("a_focus", ["model.shop.fct_orders"]),
+          "exposure.shop.upstream_only": exposure("upstream_only", ["model.shop.stg_orders"]),
+        }),
+      ),
+      "fct_orders",
+      "revenue",
+    )
+    expect(a.consumers.declared).toBe(5)
+    expect(a.consumers.exposures.map((c) => [c.label, c.tier, c.via])).toEqual([
+      ["Carries board", "carries", ["rpt_ltv"]],
+      ["a_focus", "carries", ["fct_orders"]],
+      ["m_maybe", "may_carry", ["rpt_big_child"]],
+      ["z_cleared", "cleared", ["rpt_counts"]],
+    ])
+    expect(a.consumers.exposures[0]).toMatchObject({ type: "dashboard", url: "https://bi.example.com/1", owner: "Data team" })
+    expect(JSON.stringify(a.consumers)).not.toContain("data@example.com")
+  })
+
+  test("an exposure that reads a metric reaches the model behind it", () => {
+    const a = columnAnswer(
+      write(
+        withExposures(
+          { "exposure.shop.via_metric": exposure("via_metric", ["metric.shop.ltv"]) },
+          {
+            metrics: { "metric.shop.ltv": { depends_on: { nodes: ["semantic_model.shop.ltv"] } } },
+            semantic_models: { "semantic_model.shop.ltv": { depends_on: { nodes: ["model.shop.mart_ltv"] } } },
+          },
+        ),
+      ),
+      "fct_orders",
+      "revenue",
+    )
+    expect(a.consumers.exposures.map((c) => [c.name, c.tier, c.via])).toEqual([["via_metric", "carries", ["mart_ltv"]]])
+  })
+
+  test("declared tells a project with no exposures from one with none downstream", () => {
+    const none = columnAnswer(write(withExposures({})), "fct_orders", "revenue")
+    expect(none.consumers).toEqual({ declared: 0, exposures: [] })
+    const elsewhere = columnAnswer(
+      write(withExposures({ "exposure.shop.up": exposure("up", ["model.shop.stg_orders"]) })),
+      "fct_orders",
+      "revenue",
+    )
+    expect(elsewhere.consumers).toEqual({ declared: 1, exposures: [] })
+  })
+
+  test("upstream lists none", () => {
+    const a = columnAnswer(write(shop()), "fct_orders", "revenue", "upstream")
+    expect(a.consumers).toEqual({ declared: 1, exposures: [] })
+  })
+})
+
 describe("column answer: contract", () => {
   test("has the fixed shape", () => {
     const a = columnAnswer(write(shop()), "fct_orders", "revenue")
@@ -343,6 +419,7 @@ describe("column answer: contract", () => {
       "unresolved",
       "flags",
       "cleared",
+      "consumers",
       "truncated",
       "next",
     ])

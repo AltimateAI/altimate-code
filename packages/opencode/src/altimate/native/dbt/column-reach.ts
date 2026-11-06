@@ -30,6 +30,9 @@ export interface ColumnReachExposure {
   /** The exposure's label when it has one, else its name. */
   label: string
   type: string
+  url?: string
+  /** The owner's name, as the project declares it. */
+  owner?: string
 }
 
 export interface ColumnReach {
@@ -490,10 +493,38 @@ export function exposuresOn(manifestPath: string, ids: Iterable<string>): Column
   }
   return Object.entries<any>(manifest?.exposures ?? {})
     .filter(([, node]) => (node?.depends_on?.nodes ?? []).some((dep: string) => wanted.has(dep)))
-    .map(([id, node]) => ({
-      unique_id: id,
-      name: node?.name ?? id,
-      label: node?.label || node?.name || id,
-      type: node?.type ?? "exposure",
-    }))
+    .map(([id, node]) => describeExposure(id, node))
+}
+
+/** An exposure as a manifest declares it. */
+export function describeExposure(id: string, node: any): ColumnReachExposure {
+  return {
+    unique_id: id,
+    name: node?.name ?? id,
+    label: node?.label || node?.name || id,
+    type: node?.type ?? "exposure",
+    ...(node?.url && { url: String(node.url) }),
+    ...(node?.owner?.name && { owner: String(node.owner.name) }),
+  }
+}
+
+/** How many exposures the project declares, whatever they read. */
+export function exposuresDeclared(manifestPath: string): number {
+  return Object.keys(loadRawManifest(manifestPath)?.exposures ?? {}).length
+}
+
+/** What an exposure reads, by unique_id: through metrics and semantic models, down to the models and sources. */
+export function exposureReads(manifest: any, exposure: any): Set<string> {
+  const reads = new Set<string>()
+  const seen = new Set<string>()
+  const queue: string[] = [...(exposure?.depends_on?.nodes ?? [])]
+  while (queue.length) {
+    const id = String(queue.shift())
+    if (seen.has(id)) continue
+    seen.add(id)
+    const layer = manifest?.metrics?.[id] ?? manifest?.semantic_models?.[id]
+    if (layer) queue.push(...(layer.depends_on?.nodes ?? []))
+    else reads.add(id)
+  }
+  return reads
 }

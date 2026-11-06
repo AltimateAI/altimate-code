@@ -61,6 +61,7 @@ const STRUCTURED_FIELDS: Record<string, readonly string[]> = {
     "test_count",
     "downstream",
     "exposures",
+    "exposures_declared",
     "column_reach",
     "column_reach_error",
     "column_answer",

@@ -49,7 +49,7 @@ const model = (name: string, deps: string[], sql: string) => ({
 })
 
 // orders.amount → fct.revenue (renamed) → mart.total (summed); rpt filters on fct.revenue.
-function setup() {
+function setup(exposures: Record<string, unknown> = {}) {
   const nodes = {
     "model.shop.orders": model("orders", [], "select 1 as order_id, 2.5 as amount"),
     "model.shop.fct": model("fct", ["orders"], "select order_id, amount as revenue from shop.main.orders"),
@@ -60,7 +60,7 @@ function setup() {
   dirs.push(dir)
   mkdirSync(join(dir, "target"))
   const file = join(dir, "target", "manifest.json")
-  writeFileSync(file, JSON.stringify({ metadata: { adapter_type: "duckdb" }, nodes, sources: {}, exposures: {} }))
+  writeFileSync(file, JSON.stringify({ metadata: { adapter_type: "duckdb" }, nodes, sources: {}, exposures }))
   const models = Object.values(nodes).map((n) => ({
     name: n.name,
     unique_id: n.unique_id,
@@ -115,6 +115,31 @@ describe("impact_analysis: column answer", () => {
     const manifest_path = setup()
     const result = await run({ model: "fct", manifest_path })
     expect(result.metadata.column_answer).toBeUndefined()
+  })
+
+  test("says how many exposures the project declares, with or without a column", async () => {
+    const none = await run({ model: "fct", manifest_path: setup() })
+    expect(none.metadata.exposures_declared).toBe(0)
+    expect(none.metadata.exposures).toEqual([])
+    const manifest_path = setup({
+      "exposure.shop.board": {
+        name: "board",
+        label: "Board",
+        type: "dashboard",
+        url: "https://bi.example.com/1",
+        owner: { name: "Data team" },
+        depends_on: { nodes: ["model.shop.mart"] },
+      },
+      "exposure.shop.up": { name: "up", depends_on: { nodes: ["model.shop.orders"] } },
+    })
+    const modelLevel = await run({ model: "fct", manifest_path })
+    expect(modelLevel.metadata.exposures_declared).toBe(2)
+    expect(modelLevel.metadata.exposures).toEqual([
+      { unique_id: "exposure.shop.board", name: "board", label: "Board", type: "dashboard", url: "https://bi.example.com/1", owner: "Data team" },
+    ])
+    const column = await run({ model: "fct", column: "revenue", manifest_path })
+    expect(column.metadata.exposures_declared).toBe(2)
+    expect(column.metadata.column_answer.consumers.exposures.map((c: any) => [c.name, c.tier])).toEqual([["board", "carries"]])
   })
 
   test("the MCP structured result carries it", async () => {

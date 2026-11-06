@@ -17,6 +17,7 @@ import * as path from "path"
 import { createHash } from "crypto"
 import * as core from "@altimateai/altimate-core"
 import { loadRawManifest, detectDialect, findModel } from "./helpers"
+import { describeExposure, exposureReads, type ColumnReachExposure } from "./column-reach"
 
 /** Must match the pinned `@altimateai/altimate-core` version (a test checks it). */
 export const ENGINE = "altimate-core 0.9.0"
@@ -60,6 +61,18 @@ export interface ColumnAnswerColumn {
   type?: string
 }
 
+export type ConsumerTier = "carries" | "may_carry" | "cleared"
+
+/**
+ * An exposure on the focus model or anything downstream of it. An exposure names the models it reads,
+ * not their columns, so "carries" means it reads a model the value reaches, not that it uses the value.
+ */
+export interface ColumnAnswerConsumer extends ColumnReachExposure {
+  tier: ConsumerTier
+  /** The models it reads in that tier, by name. */
+  via: string[]
+}
+
 /** [from column, to column, how], plus "name" when `how` was inferred from matching names. */
 export type ColumnAnswerEdge = [number, number, How] | [number, number, How, "name"]
 
@@ -92,6 +105,8 @@ export interface ColumnAnswer {
   flags: { model: number; flag: ShapeFlag }[]
   /** Model-level downstream (upstream: ancestors) in none of the tiers, by name. Not in `nodes`. */
   cleared: { id: string; name: string }[]
+  /** Downstream only: upstream, `exposures` is empty. `declared` counts every exposure in the project. */
+  consumers: { declared: number; exposures: ColumnAnswerConsumer[] }
   truncated: boolean
   next: null
 }
@@ -638,6 +653,26 @@ export function columnAnswer(
     .map((id) => ({ id, name: String(p.node(id)?.name ?? id) }))
     .sort((a, b) => compareText(a.name, b.name) || compareText(a.id, b.id))
 
+  const clearedIds = new Set(cleared.map((one) => one.id))
+  const consumers: ColumnAnswerConsumer[] = []
+  if (direction === "downstream") {
+    const carries = (id: string) => id === focus || valueModels.has(id)
+    for (const [id, node] of Object.entries<any>(p.manifest.exposures ?? {})) {
+      const reads = [...exposureReads(p.manifest, node)]
+      const tiers: [ConsumerTier, (one: string) => boolean][] = [
+        ["carries", carries],
+        ["may_carry", (one) => mayCarry.has(one)],
+        ["cleared", (one) => clearedIds.has(one)],
+      ]
+      const tier = tiers.find(([, has]) => reads.some(has))
+      if (!tier) continue
+      const via = reads.filter(tier[1]).map((one) => String(p.node(one)?.name ?? one))
+      consumers.push({ ...describeExposure(id, node), tier: tier[0], via: via.sort(compareText) })
+    }
+    const rank: ConsumerTier[] = ["carries", "may_carry", "cleared"]
+    consumers.sort((a, b) => rank.indexOf(a.tier) - rank.indexOf(b.tier) || compareText(a.label, b.label) || compareText(a.unique_id, b.unique_id))
+  }
+
   const alsoReads = [...also].map(([id, cols]) => ({
     model: nodeIdx(id),
     columns: [...cols],
@@ -682,6 +717,7 @@ export function columnAnswer(
     unresolved: unresolvedOut,
     flags,
     cleared,
+    consumers: { declared: Object.keys(p.manifest.exposures ?? {}).length, exposures: consumers },
     truncated,
     next: null,
   }
