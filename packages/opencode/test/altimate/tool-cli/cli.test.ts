@@ -5,6 +5,8 @@ import path from "node:path"
 
 const entry = path.join(import.meta.dir, "../../../src/index.ts")
 const cliEnv = { ...process.env, ALTIMATE_TELEMETRY_DISABLED: "1", ALTIMATE_TOOL_DAEMON: "0" }
+// These drive the CLI through a shell pipeline, which is what makes the reader late.
+const posixOnly = test.skipIf(process.platform === "win32")
 
 /** A manifest whose hub has 450 readers, so its `dbt_lineage` graph is far over a pipe's 64 KiB. */
 async function bigAnswerProject() {
@@ -80,7 +82,7 @@ describe("tool CLI", () => {
   }, 60000)
 
   // Past the 64 KiB a pipe holds, a process that exits with the rest still buffered loses it.
-  test("a big --json answer reaches a reader that starts late whole", async () => {
+  posixOnly("a big --json answer reaches a reader that starts late whole", async () => {
     const dir = await bigAnswerProject()
     expect(await lateReader(dir, "tool run dbt_lineage --args - --json < args.json")).toBe(0)
     const stdout = await Bun.file(path.join(dir, "out.json")).text()
@@ -88,7 +90,7 @@ describe("tool CLI", () => {
     expect(Object.keys(JSON.parse(stdout).metadata.graph.nodes).length).toBe(451)
   }, 60000)
 
-  test("tool list --json reaches a reader that starts late whole", async () => {
+  posixOnly("tool list --json reaches a reader that starts late whole", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "tool-cli-"))
     expect(await lateReader(dir, "tool list --json")).toBe(0)
     const stdout = await Bun.file(path.join(dir, "out.json")).text()
@@ -96,7 +98,7 @@ describe("tool CLI", () => {
     expect((JSON.parse(stdout) as unknown[]).length).toBeGreaterThan(0)
   }, 60000)
 
-  test("a reader that leaves early is not an error", async () => {
+  posixOnly("a reader that leaves early is not an error", async () => {
     const dir = await bigAnswerProject()
     const proc = Bun.spawn(
       [
