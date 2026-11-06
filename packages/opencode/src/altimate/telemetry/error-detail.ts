@@ -400,6 +400,24 @@ export function describeToolError(raw: string) {
   }
 }
 
+/**
+ * A running tool that the processor closed because the session's own abort signal fired
+ * (Stop/Esc, dispose) is a requested cancellation, already recorded as the session's
+ * "aborted" outcome, not a tool failure. Interruptions the session did not request
+ * (signal not aborted) and every real tool error are still fingerprinted.
+ */
+export function isRequestedToolInterruption(
+  state: { status: string; error?: unknown; metadata?: Record<string, unknown> },
+  sessionAborted: boolean,
+): boolean {
+  return (
+    sessionAborted &&
+    state.status === "error" &&
+    state.error === "Tool execution aborted" &&
+    state.metadata?.interrupted === true
+  )
+}
+
 export function buildErrorFingerprintEvent(
   sessionID: string,
   err: {
