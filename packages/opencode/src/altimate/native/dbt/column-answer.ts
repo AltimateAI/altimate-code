@@ -177,6 +177,8 @@ export function howOf(lens: unknown, code: unknown, source: string, target: stri
   return source === target ? { how: "=", howFrom: "name" } : { how: "?", howFrom: null }
 }
 
+const compareText = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+
 /** Quoted or bare parts of `"db"."schema"."table"."col"` or `orders.col`. */
 function idents(text: string): string[] {
   return [...text.matchAll(/"((?:[^"]|"")*)"|([^."]+)/g)].map((m) => (m[1] ?? m[2] ?? "").replace(/""/g, '"'))
@@ -428,7 +430,12 @@ export class ProjectLineage {
       const col = parts.pop() ?? ""
       return [parts.join(".").toLowerCase(), col]
     }
-    for (const e of result.column_lineage ?? []) {
+    // The engine's edge order changes from process to process. A fixed order keeps the answer the same
+    // between runs, and settles which of two entries for one edge is used.
+    const ordered = (result.column_lineage ?? [])
+      .map((e: any) => ({ e, key: [e?.source, e?.target, e?.lens_type, JSON.stringify(e?.lens_code)].join("\0") }))
+      .sort((a: { key: string }, b: { key: string }) => compareText(a.key, b.key))
+    for (const { e } of ordered) {
       const text = String(e?.source ?? "")
       let [k, col] = keyOf(text)
       // A column the schema doesn't list comes back as ""db"".""schema"".""table"".col.
@@ -629,7 +636,7 @@ export function columnAnswer(
   const cleared = [...modelLevel]
     .filter((id) => !valueModels.has(id) && !mayCarry.has(id))
     .map((id) => ({ id, name: String(p.node(id)?.name ?? id) }))
-    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .sort((a, b) => compareText(a.name, b.name) || compareText(a.id, b.id))
 
   const alsoReads = [...also].map(([id, cols]) => ({
     model: nodeIdx(id),
