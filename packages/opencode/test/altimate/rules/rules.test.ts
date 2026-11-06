@@ -355,6 +355,24 @@ describe("sending the outbox", () => {
     expect((await RulesStore.read(root)).outbox).toEqual([])
   })
 
+  test("an item queued again under its id while it was being sent stays queued; a refusal with an empty detail keeps an error", async () => {
+    const root = await tmp()
+    const id = await RulesSync.enqueue(root, item("first wording"))
+    let requeued: Promise<string> | undefined
+    // The proposal is answered again (an edit after a stale claim) while this send is on its way.
+    respond = (texts) => {
+      requeued = RulesSync.enqueue(root, item("edited wording"), undefined, undefined, { id })
+      return ok(texts)
+    }
+    await RulesSync.push(root, ready())
+    await requeued
+    expect((await RulesStore.read(root)).outbox.map((e) => [e.id, e.item.text])).toEqual([[id, "edited wording"]])
+    respond = (texts) => Response.json({ results: texts.map((_, index) => ({ index, status: "invalid", error_code: "", error_detail: "" })) })
+    const refused = await RulesSync.push(root, ready())
+    expect(refused.sent[0].error).toBe("invalid")
+    expect((await RulesStore.read(root)).push_outcomes[id].error).toBe("invalid")
+  })
+
   test("a transient failure, or no answer for an item, keeps it queued", async () => {
     const root = await tmp()
     for (const text of ["first", "second"]) await RulesSync.enqueue(root, item(text))
@@ -1470,17 +1488,18 @@ describe("remember, whichever save tool the agent picks", () => {
     return root
   }
 
-  test("with no client showing this project's cards, or in a subagent's session, both save tools save as before cards", async () => {
+  test("with no client showing this project's cards both save tools store the proposal; in a subagent's session they save as before cards", async () => {
     const root = await linkedRoot()
     const said = "Remember as a rule: always use CTEs in staging models."
     const content = "Always use CTEs in staging models."
-    // A client showing another project's cards says nothing about this one.
-    RuleProposal.setRendererForTest(await tmp())
-    expect(await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content, sessionID: "r0", said, via: "memory" })).toBeUndefined()
-    expect(await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content, sessionID: "r0", said })).toBeUndefined()
     RuleProposal.setRendererForTest(root)
     expect(await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content, sessionID: "r0", said, subagent: true })).toBeUndefined()
+    // A client showing another project's cards says nothing about this one.
+    RuleProposal.setRendererForTest(await tmp())
+    expect((await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content, sessionID: "r0", said, via: "memory" }))?.metadata.action).toBe("stored")
+    expect((await RulesRemember.proposeFor({ root, directory: root, learn: undefined, content, sessionID: "r0", said }))?.metadata.action).toBe("stored")
     expect(RuleProposal.list(root)).toEqual([])
+    expect((await RuleProposal.stored(root)).map((card) => card.text)).toEqual([content])
   })
 
   test("a card the person asked for that closes unanswered is saved as before cards; an answered one is not", async () => {
