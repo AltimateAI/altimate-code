@@ -4,7 +4,7 @@
 // that keeps warehouse connections and the schema cache warm between calls. The tool modules are
 // loaded lazily so the rest of the CLI does not pay for them at startup.
 import type { Argv } from "yargs"
-import { readFileSync, statSync } from "node:fs"
+import { readFileSync, statSync, writeSync } from "node:fs"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -233,7 +233,7 @@ const ToolRunCommand = cmd({
     if (result.status === "error" && ARGUMENT_ERROR.test(result.output))
       result = { ...result, output: `${result.output}\nInput schema: altimate-code tool schema ${name}` }
     if (args.json) {
-      console.log(JSON.stringify({ status: result.status, title: result.title, output: result.output, metadata: result.metadata }))
+      writeAll(JSON.stringify({ status: result.status, title: result.title, output: result.output, metadata: result.metadata }) + "\n")
     } else if (result.status === "error") {
       console.error(result.output)
     } else {
@@ -295,6 +295,23 @@ const ToolDaemonCommand = cmd({
     })
   },
 })
+
+/**
+ * All of a machine-read answer on stdout before returning. The CLI exits right after a command, and
+ * console.log leaves what a pipe can't take yet in a buffer that exit throws away, which cuts off an
+ * answer over the pipe's 64 KiB when its reader is slow. Only metadata gets that big: `output` is capped.
+ */
+function writeAll(text: string) {
+  const bytes = Buffer.from(text)
+  for (let at = 0; at < bytes.length; ) {
+    try {
+      at += writeSync(1, bytes, at)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EAGAIN") throw error
+      Bun.sleepSync(2)
+    }
+  }
+}
 
 export const ToolCommand = cmd({
   command: "tool",

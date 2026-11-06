@@ -28,6 +28,53 @@ describe("tool CLI", () => {
     expect(JSON.parse(stdout).output).toBe("SELECT a FROM t")
   }, 60000)
 
+  // Past the 64 KiB a pipe holds, a process that exits with the rest still buffered loses it.
+  test("a big --json answer reaches a reader that starts late whole", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "tool-cli-"))
+    const model = (name: string, deps: string[]) => ({
+      resource_type: "model",
+      unique_id: `model.shop.${name}`,
+      name,
+      alias: name,
+      database: "shop",
+      schema: "main",
+      original_file_path: `models/${name}.sql`,
+      depends_on: { nodes: deps.map((dep) => `model.shop.${dep}`) },
+      config: { materialized: "table" },
+      compiled_code: "select 1 as id",
+      columns: {},
+    })
+    const readers = Array.from({ length: 450 }, (_, i) => model(`reader_with_a_longish_name_${i}`, ["hub"]))
+    const nodes = [model("hub", []), ...readers]
+    const manifest = path.join(dir, "manifest.json")
+    await writeFile(
+      manifest,
+      JSON.stringify({
+        metadata: { adapter_type: "duckdb" },
+        nodes: Object.fromEntries(nodes.map((node) => [node.unique_id, node])),
+        sources: {},
+        exposures: {},
+      }),
+    )
+    await writeFile(path.join(dir, "args.json"), JSON.stringify({ manifest_path: manifest, model: "hub", include_graph: true }))
+    // The reader waits for the CLI to exit, up to 20 s, as a busy event loop can: the pipe is full until then.
+    // A CLI that drops what the pipe can't take exits at once and leaves 64 KiB; one that writes it all waits.
+    const proc = Bun.spawn(
+      [
+        "sh",
+        "-c",
+        `{ "$0" --conditions=browser "$1" tool run dbt_lineage --args - --json < args.json; touch done; } | { i=0; until [ -e done ] || [ $i -ge 200 ]; do sleep 0.1; i=$((i+1)); done; cat > out.json; }`,
+        process.execPath,
+        entry,
+      ],
+      { cwd: dir, stderr: "ignore", env: { ...process.env, ALTIMATE_TELEMETRY_DISABLED: "1", ALTIMATE_TOOL_DAEMON: "0" } },
+    )
+    expect(await proc.exited).toBe(0)
+    const stdout = await Bun.file(path.join(dir, "out.json")).text()
+    expect(stdout.length).toBeGreaterThan(100_000)
+    expect(Object.keys(JSON.parse(stdout).metadata.graph.nodes).length).toBe(451)
+  }, 60000)
+
   test("rejects --args - with empty stdin", async () => {
     const { stdout, code } = await cli(["tool", "run", "sql_format", "--args", "-", "--json"], "")
     expect(code).toBe(1)
