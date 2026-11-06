@@ -159,8 +159,8 @@ const ToolContextCommand = cmd({
         await Registry.closeAll()
       }
     })
-    if (args.json) console.log(JSON.stringify({ instructions, connections }, null, 2))
-    else console.log(instructions)
+    if (args.json) writeAll(JSON.stringify({ instructions, connections }, null, 2) + "\n")
+    else writeAll(instructions + "\n")
   },
 })
 
@@ -181,7 +181,7 @@ const ToolSchemaCommand = cmd({
       process.exitCode = 1
       return
     }
-    console.log(JSON.stringify(tool, null, 2))
+    writeAll(JSON.stringify(tool, null, 2) + "\n")
   },
 })
 
@@ -237,7 +237,7 @@ const ToolRunCommand = cmd({
     } else if (result.status === "error") {
       console.error(result.output)
     } else {
-      console.log(result.output)
+      writeAll(result.output + "\n")
     }
     if (result.status === "error") process.exitCode = 1
   },
@@ -297,10 +297,9 @@ const ToolDaemonCommand = cmd({
 })
 
 /**
- * All of a machine-read answer on stdout before returning. The CLI exits right after a command, and
- * console.log leaves what a pipe can't take yet in a buffer that exit throws away, which cuts off an
- * answer over the pipe's 64 KiB when its reader is slow. `tool run`'s `output` is capped, so there only
- * metadata gets that big.
+ * All of an answer on stdout before returning. The CLI exits right after a command, and console.log leaves
+ * what a pipe can't take yet in a buffer that exit throws away, which cuts off anything over the pipe's
+ * 64 KiB when its reader is slow: `metadata`, the tool list, or a workspace tool's output, which has no cap.
  */
 function writeAll(text: string) {
   const bytes = Buffer.from(text)

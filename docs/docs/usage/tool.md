@@ -45,6 +45,8 @@ echo '{"query":"select 1"}' | altimate-code tool run sql_execute --args -
 
 Arguments are validated against the tool's schema. An unknown tool, invalid arguments or a failing tool exits non-zero.
 
+Read stdout while the command runs. The command writes all of its output before it exits, so a caller that waits for it to exit before reading can block forever on output larger than a pipe holds. A reader that closes the pipe early doesn't change the exit code. A write that fails, such as on a full disk, exits non-zero.
+
 Only the data tools are exposed. Coding tools (`bash`, `read`, `edit`, ...), `dbt_pr_review` (use `altimate-code review`), memory and training tools are not available here.
 
 ## Permissions
