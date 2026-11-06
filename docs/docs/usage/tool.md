@@ -7,6 +7,8 @@ description: "Call Altimate Code data tools from any shell, agent or CI job with
 
 Expose the data tools -- warehouse, SQL, schema, lineage, impact, PII, data-diff, FinOps and dbt -- as plain commands. The local data tools use no model or API key, so Claude Code, Codex and CI jobs can call them directly. Linked workspace tools authenticate to Altimate and `workspace_execute` may use backend models.
 
+Read stdout while a `tool` command runs. These commands write all of their output before they exit, so a caller that waits for exit before reading can block forever on output larger than a pipe holds. A reader that closes the pipe early doesn't change the exit code. A write that fails, such as on a full disk, exits non-zero.
+
 ## List tools
 
 ```bash
@@ -44,8 +46,6 @@ echo '{"query":"select 1"}' | altimate-code tool run sql_execute --args -
 | `--json` | Print `{"status","title","output","metadata"}`. Otherwise only `output` is printed. |
 
 Arguments are validated against the tool's schema. An unknown tool, invalid arguments or a failing tool exits non-zero.
-
-Read stdout while the command runs. The command writes all of its output before it exits, so a caller that waits for it to exit before reading can block forever on output larger than a pipe holds. A reader that closes the pipe early doesn't change the exit code. A write that fails, such as on a full disk, exits non-zero.
 
 Only the data tools are exposed. Coding tools (`bash`, `read`, `edit`, ...), `dbt_pr_review` (use `altimate-code review`), memory and training tools are not available here.
 
