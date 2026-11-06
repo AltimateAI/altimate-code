@@ -4,7 +4,7 @@
 // that keeps warehouse connections and the schema cache warm between calls. The tool modules are
 // loaded lazily so the rest of the CLI does not pay for them at startup.
 import type { Argv } from "yargs"
-import { readFileSync, statSync } from "node:fs"
+import { readFileSync, statSync, writeSync } from "node:fs"
 import path from "node:path"
 import { randomUUID } from "node:crypto"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
@@ -128,7 +128,7 @@ const ToolListCommand = cmd({
     const workspaceTools = await resolveWorkspaceTools(args["workspace-tools"], process.cwd())
     const tools = await withRunner(process.cwd(), args.connections, workspaceTools, (runner) => runner.list())
     if (args.json) {
-      console.log(JSON.stringify(tools, null, 2))
+      writeAll(JSON.stringify(tools, null, 2) + "\n")
       return
     }
     const width = Math.max(...tools.map((tool) => tool.id.length))
@@ -159,8 +159,8 @@ const ToolContextCommand = cmd({
         await Registry.closeAll()
       }
     })
-    if (args.json) console.log(JSON.stringify({ instructions, connections }, null, 2))
-    else console.log(instructions)
+    if (args.json) writeAll(JSON.stringify({ instructions, connections }, null, 2) + "\n")
+    else writeAll(instructions + "\n")
   },
 })
 
@@ -181,7 +181,7 @@ const ToolSchemaCommand = cmd({
       process.exitCode = 1
       return
     }
-    console.log(JSON.stringify(tool, null, 2))
+    writeAll(JSON.stringify(tool, null, 2) + "\n")
   },
 })
 
@@ -233,11 +233,11 @@ const ToolRunCommand = cmd({
     if (result.status === "error" && ARGUMENT_ERROR.test(result.output))
       result = { ...result, output: `${result.output}\nInput schema: altimate-code tool schema ${name}` }
     if (args.json) {
-      console.log(JSON.stringify({ status: result.status, title: result.title, output: result.output, metadata: result.metadata }))
+      writeAll(JSON.stringify({ status: result.status, title: result.title, output: result.output, metadata: result.metadata }) + "\n")
     } else if (result.status === "error") {
       console.error(result.output)
     } else {
-      console.log(result.output)
+      writeAll(result.output + "\n")
     }
     if (result.status === "error") process.exitCode = 1
   },
@@ -295,6 +295,25 @@ const ToolDaemonCommand = cmd({
     })
   },
 })
+
+/**
+ * All of an answer on stdout before returning. The CLI exits right after a command, and console.log leaves
+ * what a pipe can't take yet in a buffer that exit throws away, which cuts off anything over the pipe's
+ * 64 KiB when its reader is slow: `metadata`, the tool list, or a workspace tool's output, which has no cap.
+ */
+function writeAll(text: string) {
+  const bytes = Buffer.from(text)
+  for (let at = 0; at < bytes.length; ) {
+    try {
+      at += writeSync(1, bytes, at)
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === "EPIPE") return // The reader left, so nobody is waiting for the rest.
+      if (code !== "EAGAIN") throw error
+      Bun.sleepSync(2)
+    }
+  }
+}
 
 export const ToolCommand = cmd({
   command: "tool",
