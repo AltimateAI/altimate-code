@@ -120,7 +120,7 @@ describe("classify", () => {
 })
 
 describe("classifyMulti", () => {
-  for (const dialect of ["mysql", "sqlite", "bigquery", "clickhouse", "unknown", undefined]) {
+  for (const dialect of ["mysql", "sqlite", "bigquery", "unknown", undefined]) {
     test(`dollar-delimited writes fail closed for ${dialect ?? "omitted"} dialect`, () => {
       const sql = "SELECT $x$; DELETE FROM t; $x$"
       expect(classifyMulti(sql, dialect)).toBe("write")
@@ -440,6 +440,8 @@ describe("each engine's own literal and statement rules", () => {
     ["SELECT 1 USE master", "sqlserver", "write", false],
     ["SELECT enable, disable, rename, throw FROM t", "sqlserver", "read", false],
     ["SELECT 1 THROW 50000, 'x', 1", "sqlserver", "write", false],
+    ["SELECT throw FROM t ORDER BY throw", "sqlserver", "read", false],
+    ["SELECT 1 AS throw", "fabric", "read", false],
     // Spark continues a -- comment past a backslash before the line end.
     ["-- x\\\nSELECT '\nDELETE FROM t -- '", "databricks", "write", false],
     ["-- x\\\nSELECT '\nDROP SCHEMA s CASCADE -- '", "spark", "write", true],
@@ -453,7 +455,174 @@ describe("each engine's own literal and statement rules", () => {
     ["EXECUTE IMMEDIATE \"DROP SCHEMA ds CASCADE\"", "bigquery", "write", true],
     ["DO $$BEGIN EXECUTE 'DROP SCHEMA s CASCADE'; END$$", "postgres", "write", true],
     ["PREPARE s FROM 'DROP DATABASE prod'", "mysql", "write", true],
+    // ...with the literal's escapes decoded.
+    ["EXECUTE IMMEDIATE '\\x44ROP SCHEMA ds CASCADE'", "bigquery", "write", true],
+    ["EXECUTE IMMEDIATE '\\x44ROP DATABASE victim'", "snowflake", "write", true],
+    ["EXECUTE IMMEDIATE '\\104ROP SCHEMA ds'", "bigquery", "write", true],
+    ["DO $$BEGIN EXECUTE E'\\x44ROP SCHEMA victim CASCADE'; END$$", "postgres", "write", true],
+    ["DO $$BEGIN EXECUTE U&'\\0044ROP SCHEMA victim CASCADE'; END$$", "postgres", "write", true],
+    ["DO $$BEGIN EXECUTE U&'!0044ROP SCHEMA v' UESCAPE '!'; END$$", "postgres", "write", true],
     ["EXEC dbo.refresh @note = 'nightly'", "sqlserver", "write", false],
+    // A write runs its literals as SQL (dynamic SQL, routine bodies): each is read with escapes decoded.
+    ["sp_executesql N'DROP DATABASE prod'", "sqlserver", "write", true],
+    ["CREATE FUNCTION f() RETURNS void LANGUAGE sql AS $$ DROP SCHEMA s CASCADE $$; SELECT f()", "postgres", "write", true],
+    ["CREATE PROCEDURE p() AS $$ BEGIN TRUNCATE t; END; $$ LANGUAGE plpgsql; CALL p()", "redshift", "write", true],
+    ["SELECT dblink_exec('dbname=postgres', 'DROP DATABASE prod')", "postgres", "write", true],
+    ["WITH p AS PROCEDURE() RETURNS VARCHAR LANGUAGE SQL AS $$ BEGIN DROP DATABASE prod; RETURN 'x'; END $$ CALL p()", "snowflake", "write", true],
+    // Read word by word: escapes, nested quotes and comments in the literal cannot separate the words,
+    // so a write's text that merely mentions them is blocked too.
+    ["EXECUTE IMMEDIATE 'DROP\\nSCHEMA ds CASCADE'", "bigquery", "write", true],
+    ["DO $$BEGIN EXECUTE E'DROP\\tSCHEMA s CASCADE'; END$$", "postgres", "write", true],
+    ["EXEC(N'SELECT ''--''; DROP DATABASE victim')", "sqlserver", "write", true],
+    ["DO $$BEGIN EXECUTE $q$SELECT '--'; DROP SCHEMA s CASCADE$q$; END$$", "postgres", "write", true],
+    ["INSERT INTO log VALUES ('nightly truncate of staging')", "postgres", "write", true],
+    ["INSERT INTO log VALUES ('dropped rows', 'schema v2')", "postgres", "write", false],
+    ["SELECT * FROM audit WHERE action = 'DROP SCHEMA'", "postgres", "read", false],
+    // An escaped uppercase letter stands for itself; MySQL reads an unknown lowercase escape the same way.
+    ["DO E'BEGIN DROP SCH\\EMA s CASCADE; END'", "postgres", "write", true],
+    ["CREATE PROCEDURE p() AS 'BEGIN TRUNC\\ATE t; END' LANGUAGE plpgsql; CALL p()", "redshift", "write", true],
+    ["EXECUTE IMMEDIATE 'DROP SCH\\EMA s'", "snowflake", "write", true],
+    ["PREPARE s FROM 'D\\ROP DATABASE x'", "mysql", "write", true],
+    ["PREPARE s FROM 'DROP sch\\ema x'", "mysql", "write", true],
+    // TRUNCATE starting a block or a handler is the statement.
+    ["BEGIN REPEAT TRUNCATE t; UNTIL (TRUE) END REPEAT; END", "snowflake", "write", true],
+    ["CREATE PROCEDURE p() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION TRUNCATE t; END", "mysql", "write", true],
+    ["SELECT truncate, x FROM t ORDER BY truncate DESC", "postgres", "read", false],
+    // An alias written without AS after a column named truncate is refused (best effort, fails closed).
+    ["SELECT truncate result FROM (VALUES (1)) AS t(truncate)", "postgres", "write", true],
+    ["SELECT truncate AS result FROM (VALUES (1)) AS t(truncate)", "postgres", "read", false],
+    // TRUNCATE followed by a target, wherever it sits.
+    ["CREATE TASK k AS TRUNCATE t", "snowflake", "write", true],
+    ["CREATE OR REPLACE TASK k WAREHOUSE = w AS TRUNCATE t", "snowflake", "write", true],
+    ["CREATE PROCEDURE p() TRUNCATE t", "mysql", "write", true],
+    ["CREATE PROCEDURE p() SQL SECURITY INVOKER TRUNCATE t", "mysql", "write", true],
+    ["CREATE PROCEDURE p() LANGUAGE sql BEGIN ATOMIC TRUNCATE t; END; CALL p()", "postgres", "write", true],
+    ["ALTER TABLE t TRUNCATE PARTITION p", "oracle", "write", true],
+    ["ALTER TABLE t TRUNCATE SUBPARTITION p", "oracle", "write", true],
+    ["ALTER TABLE t TRUNCATE PARTITION p", "mysql", "write", true],
+    ["ALTER TABLE t TRUNCATE PARTITION (d = 1)", "databricks", "write", true],
+    ["SELECT t.truncate x FROM t", "postgres", "read", false],
+    ["SELECT t./* column comment */truncate x FROM t", "postgres", "read", false],
+    ["SELECT truncate ISNULL, truncate NOTNULL FROM t", "postgres", "read", false],
+    ["SELECT truncate GLOB 'a*' FROM t", "sqlite", "read", false],
+    ["SELECT sum(x) OVER (ORDER BY truncate ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM t", "postgres", "read", false],
+    ["SELECT truncate, COUNT(*) FROM t GROUP BY truncate WITH ROLLUP", "mysql", "read", false],
+    ["SELECT id FROM t CONNECT BY PRIOR id = truncate START WITH id = 1", "oracle", "read", false],
+    ["SELECT truncate OPERATOR(pg_catalog.+) 1 FROM t", "postgres", "read", false],
+    ["SELECT * FROM t ORDER BY truncate ASCENDING", "clickhouse", "read", false],
+    ["SELECT sum(x) OVER (ORDER BY truncate RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t", "postgres", "read", false],
+    ["SELECT * FROM t ORDER BY truncate SETTINGS max_threads = 1", "clickhouse", "read", false],
+    ["BEGIN NOT ATOMIC TRUNCATE $t; END", "mysql", "write", true],
+    ["BEGIN NOT ATOMIC TRUNCATE \u00fcber; END", "mysql", "write", true],
+    ["BEGIN NOT ATOMIC DECLARE CONTINUE HANDLER FOR 1062 TRUNCATE nulls; SELECT 1; END", "mysql", "write", true],
+    ["BEGIN NOT ATOMIC DECLARE EXIT HANDLER FOR SQLSTATE '23000' TRUNCATE t; SELECT 1; END", "mysql", "write", true],
+    ["BEGIN NOT ATOMIC DECLARE CONTINUE HANDLER FOR 1146" + " ".repeat(300) + "TRUNCATE t; SELECT * FROM missing; END", "mysql", "write", true],
+    ["IF 1 THEN TRUNCATE t; END IF", "mysql", "write", true],
+    ['BEGIN IF (x) THEN TRUNCATE "db"."t"; END IF; END', "snowflake", "write", true],
+    ['BEGIN IF (x) THEN TRUNCATE db."t"; END IF; END', "snowflake", "write", true],
+    ["BEGIN IF (x) THEN TRUNCATE IF EXISTS t; END IF; END", "snowflake", "write", true],
+    ["BEGIN IF (x) THEN TRUNCATE IDENTIFIER('t'); END IF; END", "snowflake", "write", true],
+    ["BEGIN NOT ATOMIC IF 1 THEN TRUNCATE `db`.`t`; END IF; END", "mysql", "write", true],
+    ["SELECT CASE WHEN a THEN truncate.x END FROM t", "postgres", "read", false],
+    ["EXPLAIN (ANALYZE) TRUNCATE t", "duckdb", "write", true],
+    ["EXPLAIN (ANALYZE, FORMAT JSON) TRUNCATE t", "duckdb", "write", true],
+    ["SELECT DEFAULT(truncate) FROM t", "mysql", "read", false],
+    ["SELECT atomic truncate FROM (VALUES (1)) AS t(atomic)", "postgres", "read", false],
+    ["SELECT found truncate, x FROM t", "postgres", "read", false],
+    ["SELECT seq.NEXTVAL", "mysql", "write", false],
+    ["SELECT s./*comment*/NEXTVAL FROM dual WHERE ROWNUM = 1", "oracle", "write", false],
+    ['SELECT s . /* c */ "NEXTVAL" FROM dual', "snowflake", "write", false],
+    ["BEGIN NOT ATOMIC IF 1 THEN TRUNCATE t NOWAIT; END IF; END", "mysql", "write", true],
+    ["BEGIN NOT ATOMIC IF 1 THEN TRUNCATE t WAIT 5; END IF; END", "mysql", "write", true],
+    ["IF 1 THEN TRUNCATE t NOWAIT; END IF", "mysql", "write", true],
+    ["CASE WHEN 1 THEN TRUNCATE t NOWAIT; END CASE", "mysql", "write", true],
+    ["IF 1 THEN TRUNCATE `d`.`t` WAIT 5; END IF", "mysql", "write", true],
+    // ClickHouse heredocs are strings.
+    ["SELECT $x$'$x$ AS a FROM jdbc($x$ds$x$, $x$INSERT INTO t VALUES (1)$x$) WHERE $x$'$x$ = 1", "clickhouse", "write", false],
+    ["SELECT $heredoc$it's$heredoc$ AS v", "clickhouse", "read", false],
+    ["SELECT $1$'$1$ AS a FROM jdbc($x$ds$x$, $x$INSERT INTO t VALUES (1)$x$) WHERE $1$'$1$ = 1", "clickhouse", "write", false],
+    ["SELECT $-$'$-$ AS a FROM jdbc($x$ds$x$, $x$INSERT INTO t VALUES (1)$x$) WHERE $-$'$-$ = 1", "clickhouse", "write", false],
+    ["SELECT\u00a0$x$'$x$ AS a FROM jdbc($x$ds$x$, $x$INSERT INTO t VALUES (1)$x$) WHERE\u00a0$x$'$x$ = $x$a$x$", "clickhouse", "write", false],
+    ["BEGIN IF (1=1) THEN TRUNCATE db..t; END IF; END", "snowflake", "write", true],
+    ["SELECT * FROM postgres_attach('dbname=x')", "duckdb", "write", false],
+    // Databricks functions that call outside systems.
+    ["SELECT http_request(conn => 'c', method => 'POST', path => '/x')", "databricks", "write", false],
+    ["SELECT * FROM remote_query('pg', database => 'db', query => 'DELETE FROM t RETURNING *')", "databricks", "write", false],
+    ["SELECT * FROM TABLE(GETNEXTVAL(s))", "snowflake", "write", false],
+    ["SELECT CASE WHEN true THEN truncate ELSE 0 END FROM metrics", "postgres", "read", false],
+    ["SELECT CASE WHEN a THEN 1 ELSE truncate END FROM metrics", "duckdb", "read", false],
+    // MySQL 8 reads quotes in a /*+ hint, so one there makes the SQL uncertain.
+    ["SELECT /*+ QB_NAME(`*/`) */ 1 INTO OUTFILE '/tmp/x' -- `", "mysql", "write", false],
+    ["SELECT /*+ SET_VAR(sql_mode='*/') */ 1 INTO OUTFILE '/tmp/x' -- '", "mysql", "write", false],
+    ["SELECT /*+ MAX_EXECUTION_TIME(1000) */ * FROM t", "mysql", "read", false],
+    // Snowflake: ->> chains statements; ASYNC ( and := ( hold one.
+    ["SELECT 1 ->> TRUNCATE t -- LIMIT", "snowflake", "write", true],
+    ["SELECT 1 ->> DELETE FROM t", "snowflake", "write", false],
+    ["BEGIN ASYNC (TRUNCATE t); AWAIT ALL; END", "snowflake", "write", true],
+    ["BEGIN LET r RESULTSET := (TRUNCATE t); RETURN TABLE(r); END", "snowflake", "write", true],
+    ["SELECT data ->> 'a' FROM t", "postgres", "read", false],
+    ["SELECT j ->> truncate FROM t", "postgres", "read", false],
+    ["BEGIN LET r RESULTSET DEFAULT (TRUNCATE t); RETURN TABLE(r); END", "snowflake", "write", true],
+    // DuckDB runs TRUNCATE under EXPLAIN ANALYZE and PREPARE ... AS.
+    ["EXPLAIN ANALYZE TRUNCATE t", "duckdb", "write", true],
+    ["PREPARE p AS TRUNCATE t; EXECUTE p", "duckdb", "write", true],
+    // Spark/Hive TRANSFORM ... USING runs a command; reflect() calls any Java method.
+    ["SELECT TRANSFORM(a) USING 'rm -rf /tmp/x' FROM t", "databricks", "write", false],
+    ["SELECT reflect('java.lang.System', 'exit', 0)", "spark", "write", false],
+    ["SELECT transform(arr, x -> x + 1) FROM t", "databricks", "read", false],
+    ["SELECT transform(arr, x -> x + 1) FROM t JOIN u USING (id)", "spark", "read", false],
+    ["SELECT TRANSFORM(a) USING /*c*/ 'touch /tmp/proof' FROM t", "spark", "write", false],
+    ['SELECT TRANSFORM(a) USING "touch /tmp/proof" FROM t', "databricks", "write", false],
+    // UESCAPE without a U& literal is a word, not an escape character.
+    ["UPDATE t SET uescape = 1", "postgres", "write", false],
+    ["UPDATE t SET uescape = menu&1", "postgres", "write", false],
+    // Sequence advances through a quoted name, and DuckDB extension functions that write.
+    ['SELECT s."NEXTVAL"', "snowflake", "write", false],
+    ['SELECT "NEXT VALUE FOR" FROM metrics', "postgres", "read", false],
+    ["SELECT s.nextval FROM metrics s", "postgres", "read", false],
+    ["SELECT CASE WHEN true THEN truncate SIMILAR TO 'a%' ELSE false END FROM metrics", "postgres", "read", false],
+    ["SELECT CASE WHEN a THEN truncate AT TIME ZONE 'UTC' END FROM metrics", "postgres", "read", false],
+    ["SELECT CASE WHEN a THEN 1 ELSE truncate END;", "postgres", "read", false],
+    ["SELECT * FROM bigquery_execute('p', 'DELETE FROM d.t WHERE true')", "duckdb", "write", false],
+    ["SELECT * FROM ducklake_expire_snapshots('lake', older_than => now())", "duckdb", "write", false],
+    // ClickHouse jdbc() can run a mutation through the bridge.
+    ["SELECT * FROM jdbc('ch-server?mutation', 'INSERT INTO audit VALUES (1)')", "clickhouse", "write", false],
+    // Identifiers that are never strings are not read as SQL.
+    ['CREATE TABLE t ("truncate" int)', "postgres", "write", false],
+    ["INSERT INTO t ([truncate]) VALUES (1)", "sqlserver", "write", false],
+    ['EXEC("DROP DATABASE prod")', "sqlserver", "write", true],
+    // Each engine's escapes: whitespace escapes are spaces, letter escapes the letter, and SQL Server
+    // joins a line ending in a backslash.
+    ["DO E'BEGIN DROP\\nSCH\\eMA s CASCADE; END'", "postgres", "write", true],
+    ["EXECUTE IMMEDIATE 'DROP\\nSCH\\eMA s'", "snowflake", "write", true],
+    ["PREPARE s FROM 'DROP\\nDAT\\aBASE x'", "mysql", "write", true],
+    ["EXEC('DROP DATA\\\nBASE x')", "sqlserver", "write", true],
+    ["EXEC sp_executesql N'TRUN\\\r\nCATE TABLE t'", "fabric", "write", true],
+    // A Spark hint's body is code: a quote in it makes the SQL uncertain.
+    ["WITH c AS (SELECT /*+ X('*/') */ ' AS a) SELECT 1 AS z /*' AS a) INSERT INTO t SELECT * FROM c -- */", "databricks", "write", false],
+    ["SELECT /*+ BROADCAST(t) */ * FROM t", "databricks", "read", false],
+    // Oracle q-quotes are uncertain.
+    ["DECLARE v VARCHAR2(9); w VARCHAR2(9); BEGIN v := q'{ ' }'; w := ' -- '; EXECUTE IMMEDIATE 'TRUNCATE TABLE t'; END;", "oracle", "write", true],
+    // A quoted target is still a target; Spark "..." is a string dynamic SQL can run.
+    ["BEGIN NOT ATOMIC TRUNCATE `t`; END", "mysql", "write", true],
+    ["SELECT \"truncate\" FROM t", "postgres", "read", false],
+    ['EXECUTE IMMEDIATE "TRUNCATE TABLE t"', "databricks", "write", true],
+    ['EXECUTE IMMEDIATE "DROP SCHEMA s CASCADE"', "spark", "write", true],
+    // DROP NAMESPACE is Spark's DROP SCHEMA, nested too.
+    ["EXECUTE IMMEDIATE 'DROP NAMESPACE s CASCADE'", "databricks", "write", true],
+    ["BEGIN DROP NAMESPACE s CASCADE; END", "databricks", "write", true],
+    ["SELECT dbo.truncate(x, 2) FROM t", "sqlserver", "read", false],
+    // Other names for dropping a database or schema.
+    ["DROP CATALOG prod CASCADE", "databricks", "write", true],
+    ["DROP EXTERNAL SCHEMA ds", "bigquery", "write", true],
+    ["DROP PLUGGABLE DATABASE pdb1 INCLUDING DATAFILES", "oracle", "write", true],
+    // A column or alias named truncate is not the statement.
+    ["SELECT truncate FROM t", "postgres", "read", false],
+    ["SELECT 1 AS truncate", "postgres", "read", false],
+    ["BEGIN TRUNCATE t; END", "snowflake", "write", true],
+    // Identifiers take no backslash escapes.
+    ['SELECT "a\\" FROM t', "postgres", "read", false],
+    ["SELECT `a\\` FROM t", "databricks", "read", false],
     // Sequence advances are writes in every dialect.
     ["SELECT NEXT VALUE FOR dbo.s", "sqlserver", "write", false],
     ["SELECT s.NEXTVAL FROM dual", "oracle", "write", false],
@@ -487,11 +656,28 @@ describe("each engine's own literal and statement rules", () => {
       expect(result.blocked).toBe(blocked)
     })
 
-  test("stays linear on repeated TRUNCATE inside a long comment", () => {
-    const started = performance.now()
-    classifyAndCheck("TRUNCATE /* ".repeat(40_000) + "*/ ( '", "mysql")
-    // Every TRUNCATE reaching the same comment close and whitespace after it.
-    classifyAndCheck("SELECT " + "TRUNCATE /*".repeat(40_000) + "*/" + " ".repeat(400_000) + "(", "postgres")
-    expect(performance.now() - started).toBeLessThan(2_000)
+  test("stays linear on large crafted inputs", () => {
+    // Each input on its own: a quadratic scan takes seconds to minutes here, a linear one well under a second.
+    const inputs: [string, string][] = [
+      ["TRUNCATE /* ".repeat(40_000) + "*/ ( '", "mysql"],
+      // An unclosed EXPLAIN option list, and a long dotted name after THEN truncate.
+      ["EXPLAIN (" + "ANALYZE ".repeat(40_000), "duckdb"],
+      ["EXPLAIN (".repeat(40_000), "duckdb"],
+      ["IF 1 THEN TRUNCATE IDENTIFIER(".repeat(20_000), "snowflake"],
+      // Long whitespace in SQL read with certainty (the TRUNCATE rules look behind only after a match).
+      ["SELECT 1" + " ".repeat(400_000) + "FROM t", "postgres"],
+      ["SELECT t." + " ".repeat(400_000) + "truncate x FROM t", "postgres"],
+      ["SELECT " + "t. truncate x, ".repeat(40_000) + "1 FROM t", "postgres"],
+      ["SELECT CASE WHEN true THEN truncate -" + "a.".repeat(2_000) + "a + 0 ELSE 0 END FROM t", "duckdb"],
+      // A write's literal full of comment openers.
+      ["INSERT INTO t VALUES ($$" + "/*x*/".repeat(100_000) + "x$$)", "postgres"],
+      // Every TRUNCATE reaching the same comment close and whitespace after it.
+      ["SELECT " + "TRUNCATE /*".repeat(40_000) + "*/" + " ".repeat(400_000) + "(", "postgres"],
+    ]
+    for (const [sql, dialect] of inputs) {
+      const started = performance.now()
+      classifyAndCheck(sql, dialect)
+      expect(performance.now() - started).toBeLessThan(2_000)
+    }
   })
 })

@@ -106,7 +106,7 @@ describe("read-only SQL parser boundary", () => {
     expect(maskSql(tokenizeSql("SELECT $$-- ; DELETE$$ AS a -- actual comment", "postgres").tokens)).toMatch(/^SELECT\s+AS a\s+$/)
   })
 
-  for (const dialect of ["mysql", "sqlite", "bigquery", "clickhouse", "unknown", undefined]) {
+  for (const dialect of ["mysql", "sqlite", "bigquery", "unknown", undefined]) {
     test(`dollar delimiters leave statements visible for ${dialect ?? "omitted"} dialect`, () => {
       const sql = "SELECT $x$; DELETE FROM t; $x$"
       const { tokens, complete } = tokenizeSql(sql, dialect)

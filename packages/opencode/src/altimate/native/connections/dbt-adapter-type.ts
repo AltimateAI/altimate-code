@@ -25,13 +25,15 @@ export async function dbtProjectAdapterType(): Promise<{ project: boolean; type?
       try {
         if (existsSync(config.path())) saved = JSON.parse(readFileSync(config.path(), "utf8"))
       } catch {}
-      projectRoot = saved === undefined ? config.findProjectRoot() : (saved?.projectRoot ?? null)
+      projectRoot = saved === undefined ? config.findProjectRoot() : typeof saved?.projectRoot === "string" ? saved.projectRoot : null
     } catch {
       projectRoot = null
     }
   }
-  // A root without dbt_project.yml is rejected by the routing, which then uses the registry default.
-  if (!projectRoot || !existsSync(path.join(projectRoot, "dbt_project.yml"))) return { project: false, targetTypes: [] }
+  // A root without dbt_project.yml is rejected by the routing, which then uses the registry default;
+  // an adapter already created keeps running even if the file is removed since.
+  if (!projectRoot || (dbtRoute.root === undefined && !existsSync(path.join(projectRoot, "dbt_project.yml"))))
+    return { project: false, targetTypes: [] }
   const targetTypes = await profileTargetTypes(projectRoot)
   try {
     const { resolveDbtTargetPath } = await import("../../validators/validator-utils")

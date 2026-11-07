@@ -10,6 +10,7 @@ import { Effect, Exit } from "effect"
 import { Global } from "../../../src/global"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { registerDefaultNativeHandlers } from "../../lib/native-handlers"
+import * as Dispatcher from "../../../src/altimate/native/dispatcher"
 
 let dir: string
 let runner: Runner
@@ -396,6 +397,52 @@ describe("data_diff write-carrying inputs", () => {
         expect(JSON.stringify(result)).not.toContain("blocked for safety")
       }
     } finally {
+      Registry.reset()
+    }
+  })
+})
+
+describe("sql_explain", () => {
+  test("explains one statement only, since some drivers run every statement in the text", async () => {
+    Registry.setConfigs({ rs: { type: "redshift" } as any })
+    const sent: string[] = []
+    const get = spyOn(Registry, "get").mockResolvedValue({
+      execute: async (sql: string) => {
+        sent.push(sql)
+        return { columns: ["QUERY PLAN"], rows: [["Seq Scan"]], row_count: 1, truncated: false }
+      },
+    } as any)
+    try {
+      for (const sql of ["SELECT 1; DELETE FROM t", "SELECT 1; TRUNCATE t", "ANALYZE DELETE FROM t", "/* x */ ANALYZE DELETE FROM t", "(ANALYZE) DELETE FROM t", '("analyze") DELETE FROM t']) {
+        const result = await runner.run("sql_explain", { sql, warehouse: "rs" })
+        expect(JSON.stringify(result)).toMatch(/single statement|blocked for safety/)
+      }
+      expect(sent).toEqual([])
+      // A long run of whitespace after "(" is refused quickly.
+      const started = performance.now()
+      await runner.run("sql_explain", { sql: "(" + " ".repeat(200_000) + "x)", warehouse: "rs" })
+      expect(performance.now() - started).toBeLessThan(5_000)
+      // A parenthesized query is a query, not an EXPLAIN option list.
+      const plan = await runner.run("sql_explain", { sql: "(SELECT 1) UNION (SELECT 2)", warehouse: "rs" })
+      expect(JSON.stringify(plan)).not.toMatch(/single statement/)
+    } finally {
+      get.mockRestore()
+      Registry.reset()
+    }
+  })
+})
+
+describe("data_diff empty target_warehouse", () => {
+  test("dispatches the source warehouse", async () => {
+    Registry.setConfigs({ src: { type: "postgres" } as any, other: { type: "mysql" } as any })
+    const call = spyOn(Dispatcher, "call").mockResolvedValue({ success: true, outcome: { mode: "diff" } } as any)
+    try {
+      await runner.run("data_diff", { source: "orders", target: "orders_v2", key_columns: ["id"], source_warehouse: "src", target_warehouse: "" })
+      const params = call.mock.calls.find(([method]) => method === "data.diff")?.[1] as Record<string, unknown>
+      expect(params.source_warehouse).toBe("src")
+      expect(params.target_warehouse).toBeUndefined()
+    } finally {
+      call.mockRestore()
       Registry.reset()
     }
   })
