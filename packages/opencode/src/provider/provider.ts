@@ -82,8 +82,11 @@ import { isValidDatabricksHost } from "../altimate/plugin/databricks"
 // altimate_change start — raise SSE chunk-timeout watchdog 2min→5min (#844) for slow warehouse/LLM streams
 const DEFAULT_CHUNK_TIMEOUT = 300_000
 // altimate_change end
+// altimate_change start — upstream_fix: OpenAI's 10s first-byte deadline aborted healthy slow requests
+// (large prompts, high reasoning effort) before headers arrived; match upstream's 5min (anomalyco/opencode#37770)
+const OPENAI_HEADER_TIMEOUT_DEFAULT = 300_000
+// altimate_change end
 // altimate_change start — OpenAI-compatible HTTP header timeout support
-const OPENAI_HEADER_TIMEOUT_DEFAULT = 10_000
 const HEADER_TIMEOUT = Symbol.for("opencode.provider.header-timeout")
 // altimate_change end
 // altimate_change start — Altimate Base needs a far more generous header timeout than OpenAI.
