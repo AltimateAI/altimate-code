@@ -2289,6 +2289,17 @@ export namespace SessionPrompt {
         // altimate_change end
         if (toolChain.length < 50) toolChain.push(part.tool)
         const isError = part.state?.status === "error"
+        // altimate_change start — a user declining a permission prompt is a decision, not a tool fault: no error fingerprint
+        if (
+          isError &&
+          part.state.status === "error" &&
+          typeof part.state.error === "string" &&
+          ErrorDetail.isUserPermissionRejection(part.state.error)
+        ) {
+          toolErrorCount++
+          continue
+        }
+        // altimate_change end
         if (isError) {
           toolErrorCount++
           // Flush previous unrecovered error before recording new one
