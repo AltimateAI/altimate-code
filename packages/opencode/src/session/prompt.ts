@@ -2289,6 +2289,8 @@ export namespace SessionPrompt {
         // altimate_change end
         if (toolChain.length < 50) toolChain.push(part.tool)
         const isError = part.state?.status === "error"
+        // A user rejecting a permission prompt is their decision, not a tool failure: no fingerprint, no recovery link
+        if (part.state.status === "error" && typeof part.state.error === "string" && ErrorDetail.isUserRejection(part.state.error)) continue
         if (isError) {
           toolErrorCount++
           // Flush previous unrecovered error before recording new one
