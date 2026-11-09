@@ -103,12 +103,12 @@
     "@typescript/native-preview": "catalog:",
     "glob": "13.0.5",
     "husky": "9.1.7",
-    "minimatch": "10.0.3",
+    "minimatch": "10.2.5",
     "oxlint": "1.60.0",
     "oxlint-tsgolint": "0.21.0",
     "prettier": "3.6.2",
     "semver": "^7.6.0",
-    "turbo": "2.8.13"
+    "turbo": "2.9.14"
   },
   "dependencies": {
     "@opencode-ai/plugin": "workspace:*",
@@ -143,7 +143,9 @@
     "@types/bun": "catalog:",
     "@types/node": "catalog:",
     "@smithy/is-array-buffer": "4.2.2",
-    "@smithy/util-buffer-from": "4.2.2"
+    "@smithy/util-buffer-from": "4.2.2",
+    "@ai-sdk/provider-utils": "4.0.33",
+    "@babel/core": "7.29.6"
   },
   "patchedDependencies": {
     "@ff-labs/fff-bun@0.9.4": "patches/@ff-labs%2Ffff-bun@0.9.4.patch",
@@ -157,7 +159,7 @@
     "@ai-sdk/google@3.0.73": "patches/@ai-sdk%2Fgoogle@3.0.73.patch",
     "@tanstack/solid-virtual@3.13.28": "patches/@tanstack%2Fsolid-virtual@3.13.28.patch",
     "@pierre/trees@1.0.0-beta.4": "patches/@pierre%2Ftrees@1.0.0-beta.4.patch",
-    "@modelcontextprotocol/sdk@1.29.0": "patches/@modelcontextprotocol%2Fsdk@1.29.0.patch",
+    "@modelcontextprotocol/sdk@1.32.2": "patches/@modelcontextprotocol%2Fsdk@1.32.2.patch",
     "@tanstack/virtual-core@3.17.0": "patches/@tanstack%2Fvirtual-core@3.17.0.patch"
   }
 }
