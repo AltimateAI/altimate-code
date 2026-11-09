@@ -87,6 +87,18 @@ describe("answer_commit JSON-string tolerance (#1700)", () => {
     )
   })
 
+  test("readings and asked sent as JSON strings are decoded into metadata", async () => {
+    const readings = [{ clause: "order counts", reading: "distinct orders", result_summary: "99", decided_by: "request" }]
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    const result = await tool.execute(
+      { basis, fields, asked: '["Is anything wrong"]', readings: JSON.stringify(readings) },
+      context,
+    )
+    expect(result.metadata.readings).toEqual(readings)
+    expect(result.metadata.asked).toEqual(["Is anything wrong"])
+    expect(result.output).toBe(AnswerCommit.renderAnswer({ basis, fields }))
+  })
+
   test("a JSON string that is not valid JSON is still rejected with the normal error", async () => {
     const payload = { basis, fields: '[{"name": "diagnosis", "value": 1}' }
     expect(() => AnswerCommit.renderAnswer(payload)).toThrow(/fields.*expected array/i)
