@@ -126,6 +126,7 @@ const providerCfg = (url: string) => ({
 
 const PINNED = 42
 const LINKED = 7
+const RELINKED = 9
 const PIN_VARS = [
   "ALTIMATE_CODE_SERVE",
   "ALTIMATE_PINNED_WORKSPACE_ID",
@@ -205,13 +206,13 @@ const linkProject = (dir: string) =>
 
 /** One turn with attached files (one by default) and a model read, so both ways a turn reaches a tool
  * are covered. The files are missing on purpose: a successful `read` is a file tool and sends no
- * `tool_call` row. */
-const runTurn = (dir: string, llm: TestLLMServer["Service"], attached = 1) =>
+ * `tool_call` row. A new session unless `session` is given; returns the session it ran in. */
+const runTurn = (dir: string, llm: TestLLMServer["Service"], attached = 1, session?: { id: Session.Info["id"] }) =>
   Effect.gen(function* () {
     const file = path.join(dir, "missing.txt")
     const prompt = yield* SessionPrompt.Service
     const sessions = yield* Session.Service
-    const session = yield* sessions.create({
+    session ??= yield* sessions.create({
       title: "pinned session",
       permission: [{ permission: "*", pattern: "*", action: "allow" }],
     })
@@ -230,6 +231,7 @@ const runTurn = (dir: string, llm: TestLLMServer["Service"], attached = 1) =>
         })),
       ],
     })
+    return session
   })
 
 const named = (type: string) => rows.filter((row) => row.type === type)
@@ -296,6 +298,7 @@ it.live("attached files add no check of a refused pin: the turn resolves its wor
       pinTo(dir)
       yield* runTurn(dir, llm, 0)
       const withoutFiles = asked()
+      expect(withoutFiles).toBeGreaterThan(0)
       yield* runTurn(dir, llm, 3)
 
       expect(asked() - withoutFiles).toBe(withoutFiles)
@@ -304,6 +307,30 @@ it.live("attached files add no check of a refused pin: the turn resolves its wor
     { git: true, config: providerCfg },
   ),
   { timeout: 30_000 },
+)
+
+it.live("a later turn of the same session names the workspace it resolves, not the first turn's", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      accountSees([{ id: LINKED, name: "project-link" }])
+      yield* linkProject(dir)
+      const session = yield* runTurn(dir, llm)
+      yield* Effect.promise(() =>
+        recordApprovedBinding(
+          dir,
+          { datamateId: RELINKED, datamateName: "relinked", linkedAt: Date.now(), repoRemote: null, projectPath: dir } as never,
+          { awaitBackfill: true },
+        ),
+      )
+      expect((yield* Effect.promise(() => readLocalBinding(dir)))?.datamateId).toBe(RELINKED)
+      yield* runTurn(dir, llm, 1, session)
+
+      expect(named("task_outcome_signal").map((row) => row.workspace_id)).toEqual([LINKED, RELINKED])
+      expect(reads().map((row) => row.workspace_id)).toEqual([LINKED, LINKED, RELINKED, RELINKED])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 40_000 },
 )
 
 it.live("an unpinned session keeps naming the project's link", () =>
