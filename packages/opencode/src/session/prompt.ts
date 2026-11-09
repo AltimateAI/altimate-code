@@ -125,7 +125,7 @@ import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
 // altimate_change start — the session's bound workspace rides on every telemetry row; workspace rules canonicalize bound
 // directories like the bindings cache does
-import { canonicalDirectory, resolveTurnBinding } from "@/altimate/workspace/state"
+import { canonicalDirectory, endTurnBinding, turnBinding } from "@/altimate/workspace/state"
 
 /** The session's workspace use, as session_end fields. Read only: the row is tracked first, then the
  * turn ends its telemetry entries (`Telemetry.endSession`), so the row itself still carries the
@@ -429,6 +429,8 @@ export namespace SessionPrompt {
 
   export const prompt = fn(PromptInput, async (input) => {
     const session = await Session.get(input.sessionID)
+    // altimate_change — a new turn: its rows name the workspace it resolves, not one an earlier turn left
+    endTurnBinding(input.sessionID)
     // altimate_change start — fork Session.Info (index zod) ≡ core Session.Info (session.ts) at the SessionRevert boundary
     await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
     // altimate_change end
@@ -576,6 +578,7 @@ export namespace SessionPrompt {
     }
 
     if (input.noReply === true) {
+      endTurnBinding(input.sessionID) // altimate_change — no loop takes this turn's workspace
       return message
     }
 
@@ -814,7 +817,10 @@ export namespace SessionPrompt {
     // altimate_change end
     // altimate_change start — the workspace this turn works against (the IDE extension's pin, else
     // the project's link), named by the rows of this turn that carry workspace_id.
-    const boundWorkspace = await resolveTurnBinding(Instance.directory).catch(() => null)
+    // The verdict the user message's attachment reads used, when it has any, so every row of the turn
+    // names one workspace. Ended here: the next turn resolves its own.
+    const boundWorkspace = await turnBinding(sessionID, Instance.directory)
+    endTurnBinding(sessionID)
     const telemetryTurn = Telemetry.setContext({
       sessionId: sessionID,
       projectId: Instance.project?.id ?? "",
@@ -3383,7 +3389,7 @@ export namespace SessionPrompt {
                 const readCtx: Tool.Context = {
                   sessionID: input.sessionID,
                   // altimate_change — the turn's workspace, so the attachment read's tool rows name it
-                  workspaceId: (await resolveTurnBinding(Instance.directory).catch(() => null))?.datamateId,
+                  workspaceId: (await turnBinding(input.sessionID, Instance.directory))?.datamateId,
                   abort: new AbortController().signal,
                   agent: input.agent!,
                   messageID: info.id,

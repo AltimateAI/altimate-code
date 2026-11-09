@@ -140,9 +140,13 @@ let rows: Row[] = []
 let restore: (() => void)[] = []
 let stateHome = ""
 const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME
+let inheritedPin: Record<string, string | undefined> = {}
 
 beforeEach(() => {
   rows = []
+  // Cleared, so a pin in the runner's own environment can't decide the unpinned case; restored after.
+  inheritedPin = Object.fromEntries(PIN_VARS.map((name) => [name, process.env[name]]))
+  for (const name of PIN_VARS) delete process.env[name]
   stateHome = mkdtempSync(path.join(os.tmpdir(), "pinned-loop-state-"))
   process.env.OPENCODE_TEST_STATE_HOME = stateHome
   __resetPinValidation()
@@ -161,7 +165,11 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const undo of restore) undo()
-  for (const name of PIN_VARS) delete process.env[name]
+  for (const name of PIN_VARS) {
+    const value = inheritedPin[name]
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
   __resetPinValidation()
   if (originalStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
   else process.env.OPENCODE_TEST_STATE_HOME = originalStateHome
@@ -176,9 +184,11 @@ const pinTo = (root: string) => {
   process.env.ALTIMATE_PINNED_WORKSPACE_ROOT = root
 }
 
+/** The account's workspace list. Returns the number of times it has been asked so far. */
 const accountSees = (visible: { id: number; name: string }[]) => {
   const list = spyOn(WorkspaceApi, "listDatamates").mockImplementation(async () => visible as never)
   restore.push(() => list.mockRestore())
+  return () => list.mock.calls.length
 }
 
 /** The project's own link, naming a different workspace than the pin. Checked, so a seed that did not
@@ -193,9 +203,10 @@ const linkProject = (dir: string) =>
     expect((await readLocalBinding(dir))?.datamateId).toBe(LINKED)
   })
 
-/** One turn with an attached file and a model read, so both ways a turn reaches a tool are covered.
- * The file is missing on purpose: a successful `read` is a file tool and sends no `tool_call` row. */
-const runTurn = (dir: string, llm: TestLLMServer["Service"]) =>
+/** One turn with attached files (one by default) and a model read, so both ways a turn reaches a tool
+ * are covered. The files are missing on purpose: a successful `read` is a file tool and sends no
+ * `tool_call` row. */
+const runTurn = (dir: string, llm: TestLLMServer["Service"], attached = 1) =>
   Effect.gen(function* () {
     const file = path.join(dir, "missing.txt")
     const prompt = yield* SessionPrompt.Service
@@ -211,7 +222,12 @@ const runTurn = (dir: string, llm: TestLLMServer["Service"]) =>
       agent: "build",
       parts: [
         { type: "text", text: "read this" },
-        { type: "file", url: pathToFileURL(file).href, filename: "missing.txt", mime: "text/plain" },
+        ...Array.from({ length: attached }, (_, i) => ({
+          type: "file" as const,
+          url: pathToFileURL(path.join(dir, `missing-${i}.txt`)).href,
+          filename: `missing-${i}.txt`,
+          mime: "text/plain",
+        })),
       ],
     })
   })
@@ -266,6 +282,24 @@ it.live("a pin this account cannot see names no workspace, not the project's lin
       expect(named("session_start").map((row) => row.workspace_id)).toEqual([undefined])
       expect(reads().map((row) => row.workspace_id)).toEqual([undefined, undefined])
       expect(rows.filter((row) => row.workspace_id === LINKED)).toEqual([])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
+
+it.live("attached files add no check of a refused pin: the turn resolves its workspace once", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      // A refusal is never memoized, so every resolution that isn't shared asks the account again.
+      const asked = accountSees([{ id: LINKED, name: "project-link" }])
+      pinTo(dir)
+      yield* runTurn(dir, llm, 0)
+      const withoutFiles = asked()
+      yield* runTurn(dir, llm, 3)
+
+      expect(asked() - withoutFiles).toBe(withoutFiles)
+      expect(reads().map((row) => row.workspace_id)).toEqual([undefined, undefined, undefined, undefined, undefined])
     }),
     { git: true, config: providerCfg },
   ),

@@ -17,8 +17,15 @@ const SANDBOX = path.join(os.tmpdir(), `altimate-routing-pin-test-${process.pid}
 mkdirSync(path.join(SANDBOX, "state"), { recursive: true })
 process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
 
-const { resolvePinnedBindingForRouting, resolveTurnBinding, recordApprovedBinding, __resetPinValidation, cachePath } =
-  await import("../../../src/altimate/workspace/state")
+const {
+  resolvePinnedBindingForRouting,
+  resolveTurnBinding,
+  turnBinding,
+  endTurnBinding,
+  recordApprovedBinding,
+  __resetPinValidation,
+  cachePath,
+} = await import("../../../src/altimate/workspace/state")
 const { refresh, precedenceInternals } = await import("../../../src/altimate/workspace/precedence")
 const { Instance } = await import("../../../src/project/instance")
 const { SNOWFLAKE_TOOLS } = await import("./precedence-fixture")
@@ -179,7 +186,7 @@ describe("resolveTurnBinding", () => {
     expect((await resolveTurnBinding(ROOT))?.datamateId).toBe(42)
   })
 
-  test("with no pin it is the project's link, and the account is not consulted", async () => {
+  test("with no pin it is the project's link, with no network call", async () => {
     await seedLocalLink(7, "project-link")
     expect((await resolveTurnBinding(ROOT))?.datamateId).toBe(7)
     expect(listCalls).toBe(0)
@@ -210,6 +217,48 @@ describe("resolveTurnBinding", () => {
     answer.resolve([{ id: 42, name: "pinned-workspace" }])
     expect((await routing)?.status).toBe("bound")
     expect(listCalls).toBe(1)
+  })
+})
+
+describe("turnBinding", () => {
+  test("every read in a turn gets the first verdict, even once validation has finished", async () => {
+    const answer = Promise.withResolvers<{ id: number; name: string }[]>()
+    ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = () => {
+      listCalls += 1
+      return answer.promise
+    }
+    setPin()
+    expect(await turnBinding("ses_turn_slow", ROOT, 5)).toBeNull()
+    answer.resolve([{ id: 42, name: "pinned-workspace" }])
+    expect(await resolvePinnedBindingForRouting(ROOT)).toMatchObject({ status: "bound" })
+    expect(await turnBinding("ses_turn_slow", ROOT, 5)).toBeNull()
+
+    endTurnBinding("ses_turn_slow")
+    expect((await turnBinding("ses_turn_slow", ROOT, 5))?.datamateId).toBe(42)
+    expect(listCalls).toBe(1)
+    endTurnBinding("ses_turn_slow")
+  })
+
+  test("a refused pin is checked once per turn, however many reads the turn makes", async () => {
+    stubList([{ id: 7, name: "project-link" }])
+    setPin()
+    for (let read = 0; read < 3; read++) expect(await turnBinding("ses_turn_refused", ROOT)).toBeNull()
+    expect(listCalls).toBe(1)
+
+    endTurnBinding("ses_turn_refused")
+    expect(await turnBinding("ses_turn_refused", ROOT)).toBeNull()
+    expect(listCalls).toBe(2)
+    endTurnBinding("ses_turn_refused")
+  })
+
+  test("each session has its own turn", async () => {
+    await seedLocalLink(7, "project-link")
+    expect((await turnBinding("ses_turn_a", ROOT))?.datamateId).toBe(7)
+    setPin()
+    expect((await turnBinding("ses_turn_b", ROOT))?.datamateId).toBe(42)
+    expect((await turnBinding("ses_turn_a", ROOT))?.datamateId).toBe(7)
+    endTurnBinding("ses_turn_a")
+    endTurnBinding("ses_turn_b")
   })
 })
 
