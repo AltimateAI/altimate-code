@@ -30,6 +30,75 @@ function copyBinWrapper(destDir: string): string {
   return wrapperPath
 }
 
+// altimate_change start — #982: the launcher puts the bundled dbt toolkit on the app's PATH
+describe.each([
+  ["bin/altimate-code", BIN_WRAPPER_SCRIPT],
+  ["bin/altimate", path.join(path.dirname(BIN_WRAPPER_SCRIPT), "altimate")],
+])("%s puts altimate-dbt on the app's PATH (#982)", (_name, wrapperSource) => {
+  // Published layout: <pkg>/bin/<wrapper> and <pkg>/dbt-tools/bin/altimate-dbt.
+  function makeLayout(dir: string, opts: { linkedIntoBin: boolean }) {
+    const pkg = path.join(dir, "node_modules", "altimate-code")
+    const binDir = path.join(pkg, "bin")
+    const dbtToolsBin = path.join(pkg, "dbt-tools", "bin")
+    fs.mkdirSync(binDir, { recursive: true })
+    fs.mkdirSync(dbtToolsBin, { recursive: true })
+    const wrapperPath = path.join(binDir, path.basename(wrapperSource))
+    fs.copyFileSync(wrapperSource, wrapperPath)
+    fs.writeFileSync(path.join(dbtToolsBin, "altimate-dbt"), '#!/bin/sh\necho "bundled-dbt-tools"')
+    fs.chmodSync(path.join(dbtToolsBin, "altimate-dbt"), 0o755)
+    if (opts.linkedIntoBin) {
+      fs.writeFileSync(path.join(binDir, "altimate-dbt"), '#!/bin/sh\necho "linked-by-postinstall"')
+      fs.chmodSync(path.join(binDir, "altimate-dbt"), 0o755)
+    }
+    // Stand-in for the compiled app: runs altimate-dbt from PATH, then prints PATH.
+    const app = path.join(dir, "app")
+    fs.writeFileSync(app, '#!/bin/sh\naltimate-dbt\necho "PATH=$PATH"')
+    fs.chmodSync(app, 0o755)
+    return { wrapperPath, binDir, dbtToolsBin: fs.realpathSync(dbtToolsBin), app }
+  }
+
+  unixtest("falls back to dbt-tools/bin when postinstall did not link altimate-dbt", () => {
+    const { dir, cleanup: c } = installTmpdir()
+    cleanup = c
+    const { wrapperPath, app } = makeLayout(dir, { linkedIntoBin: false })
+
+    const result = runBinWrapper(wrapperPath, [], { ALTIMATE_CODE_BIN_PATH: app })
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("bundled-dbt-tools")
+  })
+
+  unixtest("uses the postinstall-linked altimate-dbt and does not add dbt-tools/bin", () => {
+    const { dir, cleanup: c } = installTmpdir()
+    cleanup = c
+    const { wrapperPath, dbtToolsBin, app } = makeLayout(dir, { linkedIntoBin: true })
+
+    const result = runBinWrapper(wrapperPath, [], { ALTIMATE_CODE_BIN_PATH: app })
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("linked-by-postinstall")
+    expect(result.stdout).not.toContain(dbtToolsBin)
+  })
+
+  unixtest("keeps the user's PATH and does not duplicate the bin folder", () => {
+    const { dir, cleanup: c } = installTmpdir()
+    cleanup = c
+    const { wrapperPath, app } = makeLayout(dir, { linkedIntoBin: true })
+    const realBinDir = path.dirname(fs.realpathSync(wrapperPath))
+
+    const result = runBinWrapper(wrapperPath, [], {
+      ALTIMATE_CODE_BIN_PATH: app,
+      PATH: [realBinDir, process.env.PATH ?? ""].join(path.delimiter),
+    })
+    expect(result.exitCode).toBe(0)
+    const pathLine = result.stdout.split("\n").find((l) => l.startsWith("PATH="))!
+    const entries = pathLine.slice("PATH=".length).split(path.delimiter)
+    expect(entries.filter((e) => e === realBinDir).length).toBe(1)
+    for (const original of (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
+      expect(entries).toContain(original)
+    }
+  })
+})
+// altimate_change end
+
 describe("bin/altimate-code wrapper", () => {
   unixtest("uses ALTIMATE_CODE_BIN_PATH env var when set", () => {
     const { dir, cleanup: c } = installTmpdir()

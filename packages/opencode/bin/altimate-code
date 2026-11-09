@@ -39,6 +39,22 @@ function run(target) {
   // available to agents without manual PATH configuration.
   env.ALTIMATE_BIN_DIR = scriptDir
 
+  // altimate_change start — #982: put the bundled dbt toolkit on PATH for the whole app.
+  // Agent commands, the built-in terminal and the dbt-schema-verify validator (which
+  // spawns `altimate-dbt` with the app's own PATH) all inherit this. postinstall normally
+  // links altimate-dbt into bin/; when lifecycle scripts were skipped (--ignore-scripts,
+  // pnpm/bun allow-lists) fall back to the bundled dbt-tools/bin, so the agent doesn't
+  // silently drop to plain dbt.
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH") || "PATH"
+  const toolDirs = [scriptDir]
+  const dbtToolsBin = path.join(scriptDir, "..", "dbt-tools", "bin")
+  if (!fs.existsSync(path.join(scriptDir, "altimate-dbt")) && fs.existsSync(path.join(dbtToolsBin, "altimate-dbt"))) {
+    toolDirs.push(dbtToolsBin)
+  }
+  const currentPath = (env[pathKey] || "").split(path.delimiter).filter(Boolean)
+  env[pathKey] = [...toolDirs.filter((d) => !currentPath.includes(d)), ...currentPath].join(path.delimiter)
+  // altimate_change end
+
   try {
     const resolvedTarget = fs.realpathSync(target)
     const targetDir = path.dirname(path.dirname(resolvedTarget))

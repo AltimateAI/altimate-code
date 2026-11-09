@@ -134,6 +134,12 @@ await Bun.file(`./dist/${pkg.name}/package.json`).write(
       bin: {
         altimate: "./bin/altimate",
         "altimate-code": "./bin/altimate-code",
+        // altimate_change start — expose the bundled dbt toolkit on PATH (#982).
+        // npm/pnpm/bun link `bin` entries at install time without running
+        // lifecycle scripts, so this works even when postinstall is skipped
+        // (--ignore-scripts, pnpm/bun script allow-lists, CI images).
+        "altimate-dbt": "./dbt-tools/bin/altimate-dbt",
+        // altimate_change end
       },
       scripts: {
         postinstall: "bun ./postinstall.mjs || node ./postinstall.mjs",
@@ -208,6 +214,9 @@ try {
         bin: {
           altimate: "./bin/altimate",
           "altimate-code": "./bin/altimate-code",
+          // altimate_change start — see note above (#982)
+          "altimate-dbt": "./dbt-tools/bin/altimate-dbt",
+          // altimate_change end
         },
         scripts: {
           postinstall: "bun ./postinstall.mjs || node ./postinstall.mjs",
