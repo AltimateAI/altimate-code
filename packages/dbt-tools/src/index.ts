@@ -3,6 +3,7 @@ import { existsSync } from "fs"
 import { read, type Config } from "./config"
 import { init } from "./commands/init"
 import { validate } from "./check"
+import { failureLines } from "./failure-text"
 
 const USAGE = {
   commands: {
@@ -64,18 +65,12 @@ function diagnose(err: Error): { error: string; fix?: string } {
   return { error: msg, fix: "Run: altimate-dbt doctor" }
 }
 
-function printFailure(failed: Record<string, unknown>) {
-  console.error(String(failed.error))
-  if ("fix" in failed) console.error(String(failed.fix))
-  if (Array.isArray(failed.logs)) console.error(failed.logs.join("\n"))
-}
-
 function output(result: unknown) {
   const fmt = rest.includes("--format") && rest[rest.indexOf("--format") + 1] === "text"
   if (fmt && typeof result === "object" && result !== null) {
     const obj = result as Record<string, unknown>
     if ("error" in obj) {
-      printFailure(obj)
+      console.error(failureLines(obj).join("\n"))
       process.exit(1)
     }
     if ("sql" in obj) {

@@ -4,6 +4,7 @@ import type { ParsedManifest } from "@altimateai/dbt-integration"
 import { create, hasModelLineage } from "../src/adapter"
 import { children, parents } from "../src/commands/graph"
 import { schemaVerify } from "../src/commands/schema-verify"
+import { failureLines } from "../src/failure-text"
 import { recordManifest, staleManifestNote } from "../src/stale-manifest"
 
 const WRITTEN_AT = Date.UTC(2026, 10, 5, 8, 0, 0)
@@ -87,6 +88,17 @@ describe("answers built from the manifest", () => {
   test("schema-verify's errors say so too: a model missing from an old manifest may exist", async () => {
     staleManifest()
     expect(Object.keys(await schemaVerify(notInManifest, ["--model", "a"]))).toEqual(["stale_manifest", "error"])
+  })
+
+  test("a text error answer leads with the note too", async () => {
+    staleManifest()
+    const answer = await schemaVerify(notInManifest, ["--model", "a"])
+    expect(failureLines(answer)).toEqual([staleManifestNote()!.message, String(answer.error)])
+  })
+
+  test("a text error answer on a current manifest is the error alone", async () => {
+    const answer = await schemaVerify(notInManifest, ["--model", "a"])
+    expect(failureLines(answer)).toEqual([String(answer.error)])
   })
 })
 
