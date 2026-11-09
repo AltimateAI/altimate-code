@@ -7,7 +7,7 @@ import { afterEach, beforeEach, expect, spyOn } from "bun:test"
 import { mkdtempSync, rmSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { Effect, Layer } from "effect"
+import { Effect, Fiber, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Session } from "@/session/session"
 import { SessionPrompt } from "../../src/session/prompt"
@@ -22,7 +22,7 @@ import * as WorkspaceFirstEvents from "../../src/altimate/workspace/first-events
 import { stubEmptySkillList } from "../altimate/workspace/skill-list-fixture"
 import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
-import { provideTmpdirServerLegacy } from "./legacy-instance"
+import { provideTmpdirServerLegacy, withLegacyInstance } from "./legacy-instance"
 import { LSP } from "@/lsp/lsp"
 import { MCP } from "../../src/mcp"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
@@ -274,6 +274,58 @@ it.live("a slash command is not a first prompt, and the next typed message is", 
       expect(firstPrompts()).toEqual([])
 
       yield* turn(dir, llm)
+      expect(firstPrompts()).toEqual([LINKED])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
+
+it.live("a slash command sent while the session is busy doesn't stop the next typed message counting", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      yield* linkProject(dir)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "queued command",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const gate = Promise.withResolvers<void>()
+      yield* llm.hold("first answer", gate.promise)
+      yield* llm.text("second answer")
+
+      OnboardingTelemetry.noteCommandSubmission(session.id)
+      const first = yield* prompt
+        .prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "first command" }] })
+        .pipe(Effect.forkChild)
+      yield* llm.wait(1)
+
+      // A second command joins the busy loop instead of starting one.
+      OnboardingTelemetry.noteCommandSubmission(session.id)
+      const second = yield* withLegacyInstance(
+        prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "queued command" }] }),
+      ).pipe(Effect.forkChild)
+      let saved = false
+      for (let i = 0; i < 100 && !saved; i++) {
+        const messages = yield* sessions.messages({ sessionID: session.id })
+        saved = messages.some(
+          (msg) => msg.info.role === "user" && msg.parts.some((p) => p.type === "text" && p.text === "queued command"),
+        )
+        if (!saved) yield* Effect.sleep("20 millis")
+      }
+      expect(saved).toBe(true)
+      gate.resolve()
+      yield* Fiber.join(first)
+      yield* Fiber.join(second)
+      const hits = (yield* llm.hits).filter((hit) => !JSON.stringify(hit.body).includes("Generate a title"))
+      expect(hits).toHaveLength(2)
+      expect(firstPrompts()).toEqual([])
+
+      yield* llm.text("third answer")
+      yield* withLegacyInstance(
+        prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "typed" }] }),
+      )
       expect(firstPrompts()).toEqual([LINKED])
     }),
     { git: true, config: providerCfg },

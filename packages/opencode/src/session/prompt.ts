@@ -1831,6 +1831,12 @@ export namespace SessionPrompt {
       // per-server timeout. Later catalogs keep the engine tools this request
       // started with.
       const boundary = turnBoundary(msgs)
+      // altimate_change start — a request's slash-command flag is read at its own boundary, so a command
+      // sent while the loop is busy clears its flag here and doesn't leave it for the next typed message.
+      const fromCommand =
+        boundary &&
+        (OnboardingTelemetry.consumeCommandSubmission(sessionID) || OnboardingTelemetry.consumeUntrackedCommand(sessionID))
+      // altimate_change end
       const tools = boundary ? await WorkspaceEngine.atTurnStart(sessionID, catalog) : await catalog()
       WorkspaceEngine.pinTurnTools(sessionID, boundary, tools)
       if (boundary) workspaceNotice.settle(sessionID)
@@ -1945,14 +1951,12 @@ export namespace SessionPrompt {
         //     on every turn. `claimFirstPrompt` is what makes this once-per-session.
         //   - `promptSent` scopes it to an onboarding session or a workspace not yet counted on this
         //     machine. Without that, the row would fire for every session in the product.
-        //   - `consumeCommandSubmission` excludes slash commands, because the scan gate submits
+        //   - `fromCommand` excludes slash commands, because the scan gate submits
         //     a hidden `/onboard-connect` as an ordinary user message: it would otherwise be
         //     recorded as the user's first typed prompt in every fresh onboarding.
         //   - a real text part, because a message carrying only attachments (a dragged-in file,
         //     a pasted image) reached this block too and was recorded as the user's first typed
         //     prompt before they had typed anything. Same filter as the intent classifier above.
-        const fromCommand =
-          OnboardingTelemetry.consumeCommandSubmission(sessionID) || OnboardingTelemetry.consumeUntrackedCommand(sessionID)
         const hasUserText = !!userMsg?.parts.some(
           (p) => p.type === "text" && !p.ignored && !p.synthetic && p.text.trim().length > 0,
         )

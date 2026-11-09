@@ -3,7 +3,8 @@
 // `first_prompt_sent` and `first_job_completed` for workspaces: once per workspace per machine, from
 // any session bound to that workspace. Onboarding sessions keep sending these rows as they always
 // did, and mark the workspace as sent, so a machine that onboards in a linked project doesn't send
-// them again from a later session.
+// them again from a later session. The marks don't hold back an onboarding row: its row for the job
+// it selected is sent even when the workspace's row was sent before it.
 //
 // A job has no finish signal of its own outside `sample_setup`: a skill loads instructions and the
 // agent does the work with other tools. So a job here is a turn with at least one tool call that

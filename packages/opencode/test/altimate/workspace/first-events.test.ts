@@ -53,7 +53,7 @@ describe("first-event claim", () => {
     expect(await claim("first_prompt_sent", 8)).toBe(true)
   })
 
-  test("two processes racing get one claim", async () => {
+  test("two claims racing with no shared memory, as two processes would, get one claim", async () => {
     const first = claim("first_prompt_sent", 7)
     resetForTest()
     const results = await Promise.all([first, claim("first_prompt_sent", 7)])
