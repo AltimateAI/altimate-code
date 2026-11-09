@@ -183,12 +183,34 @@ export type AnswerCommitInput = z.input<typeof parameters>
 
 // Tolerate boolean aliases at runtime while advertising the canonical boolean schema.
 // Only answer_only is boolean; answer values and table cells must remain untouched.
+// altimate_change start — #1700: some models (e.g. Altimate Base) send list/object inputs as
+// JSON-encoded strings. A string is never valid for these keys, so decode it when it parses as
+// JSON and let the schema validate the result as usual; anything else is left for the normal error.
+const JSON_SHAPED_KEYS = ["fields", "asked", "rows", "unresolved", "readings"] as const
+
+function decodeJsonShaped(value: unknown): unknown {
+  if (typeof value !== "string" || !/^\s*[[{]/.test(value)) return value
+  try {
+    return JSON.parse(value)
+  } catch {
+    return value
+  }
+}
+// altimate_change end
+
 const parser = z.preprocess((input) => {
-  if (!input || typeof input !== "object" || Array.isArray(input) || !("answer_only" in input)) return input
-  const value = typeof input.answer_only === "string" ? input.answer_only.toLowerCase() : input.answer_only
-  const answer_only =
-    value === "true" || value === 1 ? true : value === "false" || value === 0 ? false : input.answer_only
-  return { ...input, answer_only }
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input
+  const next: Record<string, unknown> = { ...input }
+  // altimate_change start — #1700: decode JSON-encoded list/object inputs before validation
+  for (const key of JSON_SHAPED_KEYS) {
+    if (key in next) next[key] = decodeJsonShaped(next[key])
+  }
+  // altimate_change end
+  if (!("answer_only" in next)) return next
+  const value = typeof next.answer_only === "string" ? next.answer_only.toLowerCase() : next.answer_only
+  next.answer_only =
+    value === "true" || value === 1 ? true : value === "false" || value === 0 ? false : next.answer_only
+  return next
 }, parameters)
 
 function validationError(error: z.ZodError): string {

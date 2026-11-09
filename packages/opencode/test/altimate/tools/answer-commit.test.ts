@@ -50,6 +50,67 @@ describe("answer_commit boolean tolerance", () => {
   })
 })
 
+// altimate_change start — #1700: some models (e.g. Altimate Base) send list/object inputs as
+// JSON-encoded strings. Every commit was rejected with "fields: Invalid input: expected array,
+// received string", the model retried with the same shape, and the structured answer was lost.
+describe("answer_commit JSON-string tolerance (#1700)", () => {
+  const basis = "Counted orders at order grain using stg_orders.order_id."
+  const fields = [{ name: "Is anything wrong", value: "Yes, a join fan-out inflates number_of_orders" }]
+
+  test("fields sent as a JSON string renders the same answer as a real array", async () => {
+    const expected = AnswerCommit.renderAnswer({ basis, fields })
+    const payload = { basis, fields: JSON.stringify(fields) }
+    expect(AnswerCommit.renderAnswer(payload)).toBe(expected)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(expected)
+  })
+
+  test("the exact shape from the #1700 trace is accepted", async () => {
+    // Pretty-printed with a space after the colon, as the model sent it.
+    const payload = {
+      basis,
+      asked: '["is anything wrong"]',
+      fields: '[{"name": "diagnosis", "value": 1}]',
+    }
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    expect((await tool.execute(payload, context)).output).toBe(`${basis}\n\n**Answer:** diagnosis: 1`)
+  })
+
+  test("rows and unresolved sent as JSON strings are accepted", async () => {
+    const rows = { columns: ["customer_id", "orders"], values: [[51, 3]] }
+    expect(AnswerCommit.renderAnswer({ basis, rows: JSON.stringify(rows) })).toBe(
+      AnswerCommit.renderAnswer({ basis, rows }),
+    )
+    const unresolved = { reason: "The warehouse was unreachable." }
+    expect(AnswerCommit.renderAnswer({ basis, unresolved: JSON.stringify(unresolved) })).toBe(
+      AnswerCommit.renderAnswer({ basis, unresolved }),
+    )
+  })
+
+  test("a JSON string that is not valid JSON is still rejected with the normal error", async () => {
+    const payload = { basis, fields: '[{"name": "diagnosis", "value": 1}' }
+    expect(() => AnswerCommit.renderAnswer(payload)).toThrow(/fields.*expected array/i)
+    const tool = await initTool(AnswerCommit.AnswerCommitTool)
+    await rejects(tool.execute(payload, context), /fields.*expected array/i)
+  })
+
+  test("a plain string that does not look like JSON is still rejected", () => {
+    expect(() => AnswerCommit.renderAnswer({ basis, fields: "Yes, a join fan-out" })).toThrow(/fields.*expected array/i)
+  })
+
+  test("decoded values still go through full validation", () => {
+    expect(() => AnswerCommit.renderAnswer({ basis, fields: '[{"name": "x", "value": ""}]' })).toThrow(
+      /non-empty/i,
+    )
+  })
+
+  test("string answer values that look like JSON are left untouched", () => {
+    const value = '[{"looks": "like json"}]'
+    expect(AnswerCommit.renderAnswer({ basis, fields: [{ name: "Raw", value }] })).toContain(value)
+  })
+})
+// altimate_change end
+
 describe("answer_commit required basis", () => {
   test.each([undefined, false, "false", 0, null, "", [], {}, true, "true", "TRUE", "TrUe", 1].map((value) => [value]))(
     "answer_only %j requires basis for every answer shape",
