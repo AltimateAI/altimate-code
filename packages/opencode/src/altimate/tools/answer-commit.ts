@@ -198,20 +198,22 @@ function decodeJsonShaped(value: unknown): unknown {
 }
 // altimate_change end
 
-const parser = z.preprocess((input) => {
+// altimate_change start — #1700: exported so raw-argument readers (MCP adapter/server) see the same decoded shape
+export function normalizeAnswerArgs(input: unknown): unknown {
   if (!input || typeof input !== "object" || Array.isArray(input)) return input
   const next: Record<string, unknown> = { ...input }
-  // altimate_change start — #1700: decode JSON-encoded list/object inputs before validation
   for (const key of JSON_SHAPED_KEYS) {
     if (key in next) next[key] = decodeJsonShaped(next[key])
   }
-  // altimate_change end
   if (!("answer_only" in next)) return next
   const value = typeof next.answer_only === "string" ? next.answer_only.toLowerCase() : next.answer_only
   next.answer_only =
     value === "true" || value === 1 ? true : value === "false" || value === 0 ? false : next.answer_only
   return next
-}, parameters)
+}
+
+const parser = z.preprocess(normalizeAnswerArgs, parameters)
+// altimate_change end
 
 function validationError(error: z.ZodError): string {
   const describe = (issues: z.core.$ZodIssue[], parent: PropertyKey[] = []): string[] =>
