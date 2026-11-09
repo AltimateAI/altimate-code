@@ -138,13 +138,13 @@ They are therefore inferred from the closest deterministic signals — the menu 
 - In onboarding, the "something else" branch has no tool signature at all and is never counted.
 - In onboarding, `first_job_completed` only fires for jobs with a real completion signal. Skill-driven jobs (downstream impact, SQL review, cost) load an instruction bundle and then do their work through other tools, so their completion is not observable and they are absent from this event rather than wrongly counted in it.
 
-In a linked project, `first_job_completed` means something broader: a turn with at least one tool call that didn't fail, which finished without an error or a cancel. Nothing says which job that was, so it reports `job` as `something_else`. What has been sent is remembered as one empty file per workspace and event in the CLI's state directory, outside the project. An onboarding session still sends its own `first_job_completed` for the job it selected, even if the workspace's row was sent before it.
+In a linked project, `first_job_completed` means something broader: a turn with at least one tool call that didn't fail, which finished without an error or a cancel. Nothing says which job that was, so it reports `job` as `something_else`. What has been sent is remembered as one empty file per Altimate instance, workspace and event in the CLI's state directory, outside the project. An onboarding session still sends its own `first_job_completed` for the job it selected, even if the workspace's row was sent before it.
 
 ## Delivery & Reliability
 
 Telemetry events are buffered in memory and flushed periodically. If a flush fails (e.g., due to a transient network error), events are re-added to the buffer for one retry. On process exit, the CLI performs a final flush to avoid losing events from the current session.
 
-No events are ever written to disk; the only telemetry state there is the empty files that record a workspace's first prompt and job as sent. If the process is killed before the final flush, buffered events are lost. This is by design to minimize on-disk footprint.
+No events are ever written to disk. The empty first-event files in the CLI's state directory record only that a workspace's row was sent, and hold no event data. If the process is killed before the final flush, buffered events are lost. This is by design to minimize on-disk footprint.
 
 The final flush is **time-bounded** so that quitting never hangs the shell: 2 seconds on the main thread and 5 seconds in the TUI worker. When that budget expires the in-flight request is aborted and its events are dropped rather than retried — a retry would only re-queue them into a buffer that is cleared moments later, to be shipped under the next launch's correlation id.
 

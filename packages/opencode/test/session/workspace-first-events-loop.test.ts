@@ -20,7 +20,7 @@ import { AltimateApi } from "../../src/altimate/api/client"
 import { readLocalBinding, recordApprovedBinding } from "../../src/altimate/workspace/state"
 import * as WorkspaceFirstEvents from "../../src/altimate/workspace/first-events"
 import { stubEmptySkillList } from "../altimate/workspace/skill-list-fixture"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import { provideTmpdirServerLegacy, withLegacyInstance } from "./legacy-instance"
 import { LSP } from "@/lsp/lsp"
@@ -123,7 +123,15 @@ const providerCfg = (url: string) => ({
 
 const LINKED = 7
 
-type Row = { type: string; workspace_id?: number; job?: string; status?: string; signal?: string }
+type Row = {
+  type: string
+  workspace_id?: number
+  job?: string
+  status?: string
+  signal?: string
+  tool_count?: number
+  had_errors?: boolean
+}
 type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 
 let rows: Row[] = []
@@ -266,6 +274,34 @@ it.live("a completed turn whose only tool call failed is not a job, and a later 
   { timeout: 30_000 },
 )
 
+it.live("a turn that ran a tool and then errored is not a job, and leaves the workspace free", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      yield* linkProject(dir)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "errored turn",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const file = path.join(dir, "note.txt")
+      yield* Effect.promise(() => Bun.write(file, "note"))
+      yield* llm.tool("read", { filePath: file })
+      yield* llm.error(400, { error: { message: "bad request" } })
+      yield* prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "do the thing" }] })
+      // One tool call that worked, then a provider error ends the turn.
+      expect(named("task_outcome_signal").map((row) => [row.signal, row.tool_count])).toEqual([["error", 1]])
+      expect(named("tool_chain_outcome").map((row) => row.had_errors)).toEqual([false])
+      expect(firstJobs()).toEqual([])
+
+      yield* turn(dir, llm, { tool: true })
+      expect(firstJobs()).toEqual([[LINKED, "something_else"]])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
+
 it.live("a slash command is not a first prompt, and the next typed message is", () =>
   provideTmpdirServerLegacy(
     Effect.fnUntraced(function* ({ dir, llm }) {
@@ -306,15 +342,21 @@ it.live("a slash command sent while the session is busy doesn't stop the next ty
       const second = yield* withLegacyInstance(
         prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "queued command" }] }),
       ).pipe(Effect.forkChild)
-      let saved = false
-      for (let i = 0; i < 100 && !saved; i++) {
-        const messages = yield* sessions.messages({ sessionID: session.id })
-        saved = messages.some(
-          (msg) => msg.info.role === "user" && msg.parts.some((p) => p.type === "text" && p.text === "queued command"),
-        )
-        if (!saved) yield* Effect.sleep("20 millis")
-      }
-      expect(saved).toBe(true)
+      yield* pollWithTimeout(
+        sessions
+          .messages({ sessionID: session.id })
+          .pipe(
+            Effect.map((messages) =>
+              messages.some(
+                (msg) =>
+                  msg.info.role === "user" && msg.parts.some((p) => p.type === "text" && p.text === "queued command"),
+              )
+                ? true
+                : undefined,
+            ),
+          ),
+        "the queued command was never saved",
+      )
       gate.resolve()
       yield* Fiber.join(first)
       yield* Fiber.join(second)
@@ -326,6 +368,36 @@ it.live("a slash command sent while the session is busy doesn't stop the next ty
       yield* withLegacyInstance(
         prompt.prompt({ sessionID: session.id, agent: "build", parts: [{ type: "text", text: "typed" }] }),
       )
+      expect(firstPrompts()).toEqual([LINKED])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
+
+it.live("a subagent's prompt is not a first prompt, and the parent's next typed message is", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      yield* linkProject(dir)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const parent = yield* sessions.create({
+        title: "parent",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      // What the task tool does for a subtask command or a model's task call: a child session whose
+      // first message is the command's template or the model's prompt, not something the user typed.
+      const child = yield* sessions.create({
+        parentID: parent.id,
+        title: "child",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* llm.text("child answer")
+      yield* prompt.prompt({ sessionID: child.id, agent: "build", parts: [{ type: "text", text: "review the diff" }] })
+      expect(firstPrompts()).toEqual([])
+
+      yield* llm.text("parent answer")
+      yield* prompt.prompt({ sessionID: parent.id, agent: "build", parts: [{ type: "text", text: "typed" }] })
       expect(firstPrompts()).toEqual([LINKED])
     }),
     { git: true, config: providerCfg },

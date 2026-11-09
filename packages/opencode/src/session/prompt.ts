@@ -1960,7 +1960,10 @@ export namespace SessionPrompt {
         const hasUserText = !!userMsg?.parts.some(
           (p) => p.type === "text" && !p.ignored && !p.synthetic && p.text.trim().length > 0,
         )
-        if (!fromCommand && hasUserText) await WorkspaceFirstEvents.promptSent(sessionID, boundWorkspace?.datamateId)
+        // A subagent's session starts from the command's template or the model's prompt, not a typed one.
+        if (!fromCommand && hasUserText && !session.parentID) {
+          await WorkspaceFirstEvents.promptSent(sessionID, boundWorkspace?.datamateId)
+        }
         // altimate_change end
         // altimate_change end — session start telemetry
       }
