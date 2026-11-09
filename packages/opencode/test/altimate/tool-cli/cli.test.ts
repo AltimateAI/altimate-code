@@ -1,9 +1,74 @@
-import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises"
+import { afterAll, describe, expect, test } from "bun:test"
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 
 const entry = path.join(import.meta.dir, "../../../src/index.ts")
+const cliEnv = { ...process.env, ALTIMATE_TELEMETRY_DISABLED: "1", ALTIMATE_TOOL_DAEMON: "0" }
+// These drive the CLI through a shell pipeline, which is what makes the reader late.
+const posixOnly = test.skipIf(process.platform === "win32")
+
+const pipeDirs: string[] = []
+async function pipeDir() {
+  const dir = await mkdtemp(path.join(tmpdir(), "tool-cli-"))
+  pipeDirs.push(dir)
+  return dir
+}
+afterAll(() => Promise.all(pipeDirs.map((dir) => rm(dir, { recursive: true, force: true }))))
+
+/** Runs a shell line with the CLI as `"$0" --conditions=browser "$1"`, and returns the CLI's exit code from code.txt. */
+async function inShell(dir: string, line: string) {
+  const proc = Bun.spawn(["sh", "-c", line, process.execPath, entry], { cwd: dir, stderr: "ignore", env: cliEnv, timeout: 50_000 })
+  try {
+    await proc.exited
+    return Number((await Bun.file(path.join(dir, "code.txt")).text()).trim())
+  } finally {
+    proc.kill()
+  }
+}
+
+/** A manifest whose hub has 450 readers, so its `dbt_lineage` graph is far over a pipe's 64 KiB. */
+async function bigAnswerProject() {
+  const dir = await pipeDir()
+  const model = (name: string, deps: string[]) => ({
+    resource_type: "model",
+    unique_id: `model.shop.${name}`,
+    name,
+    alias: name,
+    database: "shop",
+    schema: "main",
+    original_file_path: `models/${name}.sql`,
+    depends_on: { nodes: deps.map((dep) => `model.shop.${dep}`) },
+    config: { materialized: "table" },
+    compiled_code: "select 1 as id",
+    columns: {},
+  })
+  const readers = Array.from({ length: 450 }, (_, i) => model(`reader_with_a_longish_name_${i}`, ["hub"]))
+  const nodes = [model("hub", []), ...readers]
+  const manifest = path.join(dir, "manifest.json")
+  await writeFile(
+    manifest,
+    JSON.stringify({
+      metadata: { adapter_type: "duckdb" },
+      nodes: Object.fromEntries(nodes.map((node) => [node.unique_id, node])),
+      sources: {},
+      exposures: {},
+    }),
+  )
+  await writeFile(path.join(dir, "args.json"), JSON.stringify({ manifest_path: manifest, model: "hub", include_graph: true }))
+  return dir
+}
+
+/**
+ * Runs the CLI with a reader that waits for it to exit, up to 20 s, as a busy event loop can: the pipe is full
+ * until then. A CLI that drops what the pipe can't take exits at once and leaves 64 KiB; one that writes it all waits.
+ */
+function lateReader(dir: string, command: string) {
+  return inShell(
+    dir,
+    `{ "$0" --conditions=browser "$1" ${command}; echo $? > code.txt; touch done; } | { i=0; until [ -e done ] || [ $i -ge 200 ]; do sleep 0.1; i=$((i+1)); done; cat > out.json; }`,
+  )
+}
 
 async function cli(args: string[], stdin?: string) {
   const dir = await mkdtemp(path.join(tmpdir(), "tool-cli-"))
@@ -26,6 +91,46 @@ describe("tool CLI", () => {
     const { stdout, code } = await cli(["tool", "run", "sql_format", "--args", "-", "--json"], '{"sql":"select a from t"}')
     expect(code).toBe(0)
     expect(JSON.parse(stdout).output).toBe("SELECT a FROM t")
+  }, 60000)
+
+  // Past the 64 KiB a pipe holds, a process that exits with the rest still buffered loses it.
+  posixOnly("a big --json answer reaches a reader that starts late whole", async () => {
+    const dir = await bigAnswerProject()
+    expect(await lateReader(dir, "tool run dbt_lineage --args - --json < args.json")).toBe(0)
+    const stdout = await Bun.file(path.join(dir, "out.json")).text()
+    expect(stdout.length).toBeGreaterThan(100_000)
+    expect(Object.keys(JSON.parse(stdout).metadata.graph.nodes).length).toBe(451)
+  }, 60000)
+
+  posixOnly("tool list --json reaches a reader that starts late whole", async () => {
+    const dir = await pipeDir()
+    expect(await lateReader(dir, "tool list --json")).toBe(0)
+    const stdout = await Bun.file(path.join(dir, "out.json")).text()
+    expect(stdout.endsWith("]\n")).toBe(true)
+    expect((JSON.parse(stdout) as unknown[]).length).toBeGreaterThan(0)
+  }, 60000)
+
+  posixOnly("a reader that leaves early is not an error", async () => {
+    const dir = await bigAnswerProject()
+    const code = await inShell(
+      dir,
+      `{ "$0" --conditions=browser "$1" tool run dbt_lineage --args - --json < args.json 2> err.txt; echo $? > code.txt; } | head -c 10 > /dev/null`,
+    )
+    expect(code).toBe(0)
+    expect(await Bun.file(path.join(dir, "err.txt")).text()).toBe("")
+  }, 60000)
+
+  posixOnly("an error stays an error when the reader has left", async () => {
+    const dir = await pipeDir()
+    const code = await inShell(dir, `{ "$0" --conditions=browser "$1" tool run nope --args '{}' --json 2> err.txt; echo $? > code.txt; } | true`)
+    expect(code).toBe(1)
+  }, 60000)
+
+  posixOnly("a write that really fails exits non-zero and says why", async () => {
+    const dir = await pipeDir()
+    const code = await inShell(dir, `"$0" --conditions=browser "$1" tool list --json 1</dev/null 2> err.txt; echo $? > code.txt`)
+    expect(code).toBe(1)
+    expect(await Bun.file(path.join(dir, "err.txt")).text()).toContain("EBADF")
   }, 60000)
 
   test("rejects --args - with empty stdin", async () => {

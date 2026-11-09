@@ -24,6 +24,7 @@ We collect the following categories of events:
 | `auth_logout` | A user logs out (provider only) |
 | `mcp_server_status` | An MCP server connects, disconnects, or errors (server name and transport) |
 | `provider_error` | An AI provider returns an error (error type and HTTP status, but no request content) |
+| `title_generation_failed` | A session-title request failed, so the session keeps its `New session - <time>` placeholder until a retry succeeds; retries stop after the fifth user message. Provider, model, `attempt` (1 to 5), error class and type, HTTP status when there was one. No message text. |
 | `engine_started` | The native tool engine initializes (version and duration) |
 | `engine_error` | The native tool engine fails to start (phase and truncated error) |
 | `upgrade_attempted` | A CLI upgrade is attempted (version and method) |
@@ -251,6 +252,7 @@ Event type names use **snake_case** with a `domain_action` pattern:
 - `mcp_server_status`, `mcp_server_census` for MCP server lifecycle
 - `engine_started`, `engine_error` for native engine events
 - `provider_error` for AI provider errors
+- `title_generation_failed` for a session-title request the small model did not answer
 - `session_forked` for session lifecycle
 - `environment_census` for environment snapshot events
 - `context_utilization`, `context_overflow_recovered` for context management events

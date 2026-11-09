@@ -1254,12 +1254,13 @@ export namespace SessionPrompt {
 
       step++
       if (step === 1)
-        ensureTitle({
+        // altimate_change — fire-and-forget, but never an unhandled rejection
+        void ensureTitle({
           session,
           modelID: lastUser.model.modelID,
           providerID: lastUser.model.providerID,
           history: msgs,
-        })
+        }).catch((error) => log.error("failed to generate title", { error: String(error) }))
 
       const model = await Provider.getModel(lastUser.model.providerID, lastUser.model.modelID).catch((e) => {
         if (Provider.ModelNotFoundError.isInstance(e)) {
@@ -4863,6 +4864,42 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     return result
   }
 
+  // altimate_change start — how many user messages of a session may each trigger a title request
+  // while the session still carries its placeholder title.
+  const TITLE_MAX_ATTEMPTS = 5
+  /** Sessions with a title request in flight: one at a time, so a slow request and the next
+   * turn's retry cannot both set the title. */
+  const titleInFlight = new Set<string>()
+  /** Name, message and HTTP status of a title failure. Covers errors that are not Error instances
+   * (openai-compatible in-band errors are strings, Anthropic's are plain objects) and the SDK's
+   * RetryError, which carries the status on its last attempt rather than on itself. */
+  function describeTitleError(err: unknown): { name: string; message: string; status?: number } {
+    const statusOf = (value: unknown) => {
+      const o = value as { statusCode?: unknown; lastError?: { statusCode?: unknown } } | undefined
+      const code = o?.statusCode ?? o?.lastError?.statusCode
+      return typeof code === "number" ? code : undefined
+    }
+    // The name becomes a telemetry dimension: an identifier-shaped token or nothing.
+    const safeName = (value: unknown, fallback: string) =>
+      typeof value === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : fallback
+    if (err instanceof Error) return { name: safeName(err.name, "Error"), message: err.message, status: statusOf(err) }
+    if (err && typeof err === "object") {
+      const o = err as Record<string, unknown>
+      const name = safeName(o.name, safeName(o.type, "object"))
+      let message = typeof o.message === "string" ? o.message : ""
+      if (!message) {
+        try {
+          message = JSON.stringify(err).slice(0, 500)
+        } catch {
+          message = "[object]"
+        }
+      }
+      return { name, message, status: statusOf(err) }
+    }
+    return { name: typeof err, message: String(err) }
+  }
+  // altimate_change end
+
   async function ensureTitle(input: {
     session: Session.Info
     history: MessageV2.WithParts[]
@@ -4878,10 +4915,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     )
     if (firstRealUserIdx === -1) return
 
-    const isFirst =
-      input.history.filter((m) => m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic))
-        .length === 1
-    if (!isFirst) return
+    // altimate_change start — retry while the placeholder stands. Upstream requested a title only
+    // on the first user message, so one failed small-model call left `New session - <time>` for the
+    // rest of the session (field report, altimate-code 0.12.8). Later turns retry with the same
+    // first-message context, bounded so a permanently broken small model does not cost a failed
+    // request on every turn.
+    const attempt = input.history.filter(
+      (m) => m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic),
+    ).length
+    if (attempt > TITLE_MAX_ATTEMPTS) return
+    // altimate_change end
 
     // Gather all messages up to and including the first real user message for context
     // This includes any shell/subtask executions that preceded the user's first prompt
@@ -4895,56 +4938,113 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const agent = await Agent.get("title")
     if (!agent) return
-    const model = await iife(async () => {
-      // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
-      if (agent.model)
-        return await Provider.getModel(ProviderID.make(agent.model.providerID), ModelID.make(agent.model.modelID))
-      // altimate_change end
-      return (
-        (await Provider.getSmallModel(input.providerID)) ?? (await Provider.getModel(input.providerID, input.modelID))
-      )
-    })
-    const result = await LLM.stream({
-      agent,
-      user: firstRealUser.info as MessageV2.User,
-      system: [],
-      small: true,
-      tools: {},
-      // altimate_change start — title generation is toolless, but without an explicit "none" the
-      // historical-tool-stub injection in LLM.stream repopulates `tools` from any tool parts in
-      // the context, which both re-declares tools this request cannot use and suppresses the
-      // toolless message flattening. compaction.ts passes the same flag for the same reason.
-      toolChoice: "none" as const,
-      // altimate_change end
-      model,
-      abort: new AbortController().signal,
-      sessionID: input.session.id,
-      retries: 2,
-      messages: [
-        {
-          role: "user",
-          content: "Generate a title for this conversation:\n",
-        },
-        ...(hasOnlySubtaskParts
-          ? [{ role: "user" as const, content: subtaskParts.map((p) => p.prompt).join("\n") }]
-          : await MessageV2.toModelMessages(contextMessages, model)),
-      ],
-    })
-    const text = await Promise.resolve(result.text).catch((err: unknown) => {
-      log.error("failed to generate title", { error: err })
-      return undefined
-    })
-    if (text) {
-      const cleaned = text
-        .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
-        .split("\n")
-        .map((line: string) => line.trim())
-        .find((line: string) => line.length > 0)
-      if (!cleaned) return
-
-      const title = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
-      return Session.setTitle({ sessionID: input.session.id, title })
+    // altimate_change start — read the stream itself. `result.text` rejects with the SDK's generic
+    // "No output generated. Check the stream for errors." and the provider's own error reaches only
+    // the stream's error part, so the log never said why a title failed. The model lookup sits in
+    // the same try: a `small_model` the provider does not list used to throw out of this
+    // fire-and-forget call with no log line and no event. Record the real error and report it, so
+    // the next field report is answerable from App Insights.
+    if (titleInFlight.has(input.session.id)) return
+    titleInFlight.add(input.session.id)
+    let text = ""
+    let failure: unknown
+    let model: Provider.Model | undefined
+    // The model the request is for, so a failed lookup is reported against the model that was asked
+    // for (the title agent's own, or `small_model`), not against the chat model.
+    let requested: { providerID: string; modelID: string } | undefined
+    try {
+      requested = await iife(async () => {
+        if (agent.model) return { providerID: String(agent.model.providerID), modelID: String(agent.model.modelID) }
+        const small = (await Config.get()).small_model
+        if (!small) return undefined
+        const parsed = Provider.parseModel(small)
+        return { providerID: String(parsed.providerID), modelID: String(parsed.modelID) }
+      })
+      model = await iife(async () => {
+        // agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
+        if (agent.model)
+          return await Provider.getModel(ProviderID.make(agent.model.providerID), ModelID.make(agent.model.modelID))
+        return (
+          (await Provider.getSmallModel(input.providerID)) ??
+          (await Provider.getModel(input.providerID, input.modelID))
+        )
+      })
+      const result = await LLM.stream({
+        agent,
+        user: firstRealUser.info as MessageV2.User,
+        system: [],
+        small: true,
+        tools: {},
+        // title generation is toolless, but without an explicit "none" the historical-tool-stub
+        // injection in LLM.stream repopulates `tools` from any tool parts in the context, which both
+        // re-declares tools this request cannot use and suppresses the toolless message flattening.
+        // compaction.ts passes the same flag for the same reason.
+        toolChoice: "none" as const,
+        model,
+        abort: new AbortController().signal,
+        sessionID: input.session.id,
+        retries: 2,
+        messages: [
+          {
+            role: "user",
+            content: "Generate a title for this conversation:\n",
+          },
+          ...(hasOnlySubtaskParts
+            ? [{ role: "user" as const, content: subtaskParts.map((p) => p.prompt).join("\n") }]
+            : await MessageV2.toModelMessages(contextMessages, model)),
+        ],
+      })
+      for await (const part of result.fullStream) {
+        if (part.type === "text-delta") text += part.text
+        else if (part.type === "error") failure = part.error
+      }
+    } catch (err) {
+      failure = err
+    } finally {
+      titleInFlight.delete(input.session.id)
     }
+    const cleaned = text
+      .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+      .split("\n")
+      .map((line: string) => line.trim())
+      .find((line: string) => line.length > 0)
+    // An answer with no usable line (empty, or thinking only) is a failed attempt too, so it is
+    // reported rather than silently using up one of the five.
+    if (failure !== undefined || !cleaned) {
+      const err = failure ?? new Error(text.trim() ? "the model returned no title line" : "the model returned no text")
+      const described = describeTitleError(err)
+      const providerID = model?.providerID ?? requested?.providerID ?? input.providerID
+      const modelID = model?.id ?? requested?.modelID ?? input.modelID
+      // Name, message and status only: a provider error object can carry the request body.
+      log.error("failed to generate title", {
+        errorType: described.name,
+        message: described.message.slice(0, 500),
+        status: described.status,
+        attempt,
+        providerID,
+        modelID,
+      })
+      Telemetry.track({
+        type: "title_generation_failed",
+        timestamp: Date.now(),
+        session_id: input.session.id,
+        provider_id: providerID,
+        model_id: modelID,
+        attempt,
+        error_type: described.name,
+        error_class: Telemetry.classifyError(described.message),
+        ...(described.status !== undefined ? { http_status: described.status } : {}),
+      })
+      return
+    }
+
+    const title = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
+    // The user may have named the session while the request was in flight: a generated title only
+    // ever replaces the placeholder, and when that cannot be checked the title is left for a retry.
+    const current = await Session.get(input.session.id).catch(() => undefined)
+    if (!current || !Session.isDefaultTitle(current.title)) return
+    // altimate_change end
+    return Session.setTitle({ sessionID: input.session.id, title })
   }
 
   // altimate_change start — Effect Context.Service facade over the existing Promise namespace.
