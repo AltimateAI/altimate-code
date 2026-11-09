@@ -52,7 +52,8 @@ function run(target) {
     toolDirs.push(dbtToolsBin)
   }
   const currentPath = (env[pathKey] || "").split(path.delimiter).filter(Boolean)
-  env[pathKey] = [...toolDirs.filter((d) => !currentPath.includes(d)), ...currentPath].join(path.delimiter)
+  // Tool dirs go first even if already on PATH further down, so an older altimate-dbt cannot shadow ours.
+  env[pathKey] = [...toolDirs, ...currentPath.filter((d) => !toolDirs.includes(d))].join(path.delimiter)
   // altimate_change end
 
   try {

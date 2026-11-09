@@ -138,6 +138,8 @@ await Bun.file(`./dist/${pkg.name}/package.json`).write(
         // npm/pnpm/bun link `bin` entries at install time without running
         // lifecycle scripts, so this works even when postinstall is skipped
         // (--ignore-scripts, pnpm/bun script allow-lists, CI images).
+        // If another package already owns a global `altimate-dbt`, npm stops with EEXIST; remove or
+        // rename that shim (or install with --force) before upgrading.
         "altimate-dbt": "./dbt-tools/bin/altimate-dbt",
         // altimate_change end
       },

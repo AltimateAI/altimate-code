@@ -98,6 +98,27 @@ describe.each([
     }
   })
 
+  // Ours must win even when our folder is already on PATH behind an older altimate-dbt.
+  unixtest("moves the tool folders ahead of an older altimate-dbt already on PATH", () => {
+    const { dir, cleanup: c } = installTmpdir()
+    cleanup = c
+    const { wrapperPath, dbtToolsBin, app } = makeLayout(dir, { linkedIntoBin: false })
+    const stale = path.join(dir, "stale")
+    fs.mkdirSync(stale)
+    fs.writeFileSync(path.join(stale, "altimate-dbt"), '#!/bin/sh\necho "stale-altimate-dbt"')
+    fs.chmodSync(path.join(stale, "altimate-dbt"), 0o755)
+
+    const result = runBinWrapper(wrapperPath, [], {
+      ALTIMATE_CODE_BIN_PATH: app,
+      PATH: [stale, dbtToolsBin, process.env.PATH ?? ""].join(path.delimiter),
+    })
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toContain("bundled-dbt-tools")
+    expect(result.stdout).not.toContain("stale-altimate-dbt")
+    const pathLine = result.stdout.split("\n").find((l) => l.startsWith("PATH="))!
+    expect(pathLine.slice("PATH=".length).split(path.delimiter).filter((e) => e === dbtToolsBin).length).toBe(1)
+  })
+
   // Windows commonly spells the variable `Path`. The launcher must extend that key, not add a second `PATH`.
   unixtest("extends a mixed-case Path key instead of adding PATH", () => {
     const { dir, cleanup: c } = installTmpdir()
