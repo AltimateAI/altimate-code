@@ -24,7 +24,9 @@ const DBT_BIN_SOURCE = path.join(REPO_ROOT, "packages/dbt-tools/bin/altimate-dbt
 const PUBLISH_SCRIPT = fs.readFileSync(path.join(REPO_PKG_DIR, "script/publish.ts"), "utf-8")
 const DBT_BIN_ENTRY = '"altimate-dbt": "./dbt-tools/bin/altimate-dbt"'
 
-const npm = spawnSync("npm", ["--version"], { encoding: "utf-8" })
+// Bound every npm call so a stalled registry or cache lock fails the test instead of hanging CI.
+const NPM_TIMEOUT_MS = 120_000
+const npm = spawnSync("npm", ["--version"], { encoding: "utf-8", timeout: 10_000 })
 const HAS_NPM = npm.status === 0
 const IS_WINDOWS = process.platform === "win32"
 
@@ -84,6 +86,7 @@ function packAndInstall(root: string, pkgDir: string): string {
   const packed = spawnSync("npm", ["pack", "--silent", "--pack-destination", root], {
     cwd: pkgDir,
     encoding: "utf-8",
+    timeout: NPM_TIMEOUT_MS,
   })
   expect(packed.status).toBe(0)
   const tarball = path.join(root, packed.stdout.trim().split("\n").pop()!)
@@ -91,7 +94,7 @@ function packAndInstall(root: string, pkgDir: string): string {
   const installed = spawnSync(
     "npm",
     ["install", "-g", "--prefix", prefix, "--ignore-scripts", "--no-audit", "--no-fund", "--offline", tarball],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", timeout: NPM_TIMEOUT_MS },
   )
   expect(installed.status).toBe(0)
   return path.join(prefix, "bin")
@@ -101,6 +104,7 @@ function runFromPath(binDir: string, command: string, args: string[]) {
   return spawnSync(command, args, {
     cwd: os.tmpdir(),
     encoding: "utf-8",
+    timeout: 30_000,
     // The install prefix first, then the normal PATH (the launcher needs `node` via env).
     env: { ...process.env, PATH: [binDir, process.env.PATH ?? ""].join(path.delimiter) },
   })

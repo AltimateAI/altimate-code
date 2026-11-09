@@ -1,6 +1,7 @@
 import { describe, test, expect, afterEach } from "bun:test"
 import path from "path"
 import fs from "fs"
+import { spawnSync } from "child_process"
 import {
   installTmpdir,
   createBinaryPackage,
@@ -95,6 +96,32 @@ describe.each([
     for (const original of (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)) {
       expect(entries).toContain(original)
     }
+  })
+
+  // Windows commonly spells the variable `Path`. The launcher must extend that key, not add a second `PATH`.
+  unixtest("extends a mixed-case Path key instead of adding PATH", () => {
+    const { dir, cleanup: c } = installTmpdir()
+    cleanup = c
+    const { wrapperPath, dbtToolsBin } = makeLayout(dir, { linkedIntoBin: false })
+    const app = path.join(dir, "print-env")
+    fs.writeFileSync(app, '#!/bin/sh\necho "Path=$Path"\necho "PATH=$PATH"')
+    fs.chmodSync(app, 0o755)
+    const env: Record<string, string> = { ...process.env, ALTIMATE_CODE_BIN_PATH: app, Path: "/original/bin" } as Record<
+      string,
+      string
+    >
+    delete env.PATH
+    delete env.ALTIMATE_BIN_DIR
+
+    const result = spawnSync(process.execPath, [wrapperPath], { encoding: "utf-8", timeout: 10_000, env })
+    expect(result.status).toBe(0)
+    const pathLine = result.stdout.split("\n").find((l) => l.startsWith("Path="))!
+    const entries = pathLine.slice("Path=".length).split(path.delimiter)
+    expect(entries).toContain(dbtToolsBin)
+    expect(entries.at(-1)).toBe("/original/bin")
+    // No PATH key was created: /bin/sh fills in its own default PATH, which never holds our folders.
+    const upperLine = result.stdout.split("\n").find((l) => l.startsWith("PATH=")) ?? ""
+    expect(upperLine).not.toContain(dbtToolsBin)
   })
 })
 // altimate_change end
