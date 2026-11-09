@@ -188,6 +188,7 @@ export type AnswerCommitInput = z.input<typeof parameters>
 // JSON and let the schema validate the result as usual; anything else is left for the normal error.
 const JSON_SHAPED_KEYS = ["fields", "asked", "rows", "unresolved", "readings"] as const
 
+/** Parse a string that looks like a JSON array or object; return any other value, or invalid JSON, unchanged. */
 function decodeJsonShaped(value: unknown): unknown {
   if (typeof value !== "string" || !/^\s*[[{]/.test(value)) return value
   try {
@@ -199,6 +200,10 @@ function decodeJsonShaped(value: unknown): unknown {
 // altimate_change end
 
 // altimate_change start — #1700: exported so raw-argument readers (MCP adapter/server) see the same decoded shape
+/**
+ * Normalize raw answer_commit arguments before validation: decode JSON-string list/object inputs
+ * and coerce string or numeric `answer_only` flags. Non-object input is returned unchanged.
+ */
 export function normalizeAnswerArgs(input: unknown): unknown {
   if (!input || typeof input !== "object" || Array.isArray(input)) return input
   const next: Record<string, unknown> = { ...input }
@@ -207,8 +212,11 @@ export function normalizeAnswerArgs(input: unknown): unknown {
   }
   if (!("answer_only" in next)) return next
   const value = typeof next.answer_only === "string" ? next.answer_only.toLowerCase() : next.answer_only
-  next.answer_only =
-    value === "true" || value === 1 ? true : value === "false" || value === 0 ? false : next.answer_only
+  if (value === "true" || value === 1) {
+    next.answer_only = true
+  } else if (value === "false" || value === 0) {
+    next.answer_only = false
+  }
   return next
 }
 
