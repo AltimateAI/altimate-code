@@ -67,6 +67,7 @@ async function interruptedToolPart(part: MessageV2.ToolPart, capTokens: number):
     const output = await interruptedTaskOutput(
       state.metadata.sessionId as SessionID,
       state.metadata.messageID as MessageID,
+      { runMode: Flag.ALTIMATE_RUN_MODE },
     )
     if (output) return {
       ...part,
@@ -129,7 +130,8 @@ export namespace SessionProcessor {
 
   export function resolveFinishOutcome(state: {
     needsCompaction: boolean
-    /** errorless turn that finished with "stop" AND asserted completion; never the summarizer. */
+    /** errorless turn that finished with "stop" AND asserted completion (or, in run mode, ended on a
+     *  `BLOCKED:` report); never the summarizer. */
     explicitDone: boolean
     blocked: boolean
     error: boolean
@@ -1466,18 +1468,22 @@ export namespace SessionProcessor {
           // mode — prompt.ts's pre-dispatch overflow check compacts before the
           // next request. Never bare finishReason "stop" (that ends nearly every
           // ordinary text turn), and never for the compaction summarizer itself.
+          const finalStopInput = {
+            finish: input.assistantMessage.finish,
+            hasError: input.assistantMessage.error !== undefined,
+            parts: p,
+          }
           const explicitDone =
-            !input.assistantMessage.summary &&
-            SessionTermination.explicitDoneStop({
-              finish: input.assistantMessage.finish,
-              hasError: input.assistantMessage.error !== undefined,
-              parts: p,
-            })
-          if (needsCompaction && explicitDone) {
-            log.info("explicit DONE with pending compaction — terminating instead of compacting", {
-              sessionID: input.sessionID,
-              messageID: input.assistantMessage.id,
-            })
+            !input.assistantMessage.summary && SessionTermination.explicitDoneStop(finalStopInput)
+          // Run mode: a final BLOCKED: line is a report, terminal like DONE, so a pending
+          // compaction does not prompt the agent again.
+          const blockedEnding =
+            runMode && !input.assistantMessage.summary && SessionTermination.blockedStop(finalStopInput)
+          if (needsCompaction && (explicitDone || blockedEnding)) {
+            log.info(
+              `${explicitDone ? "explicit DONE" : "BLOCKED ending"} with pending compaction — terminating instead of compacting`,
+              { sessionID: input.sessionID, messageID: input.assistantMessage.id },
+            )
           }
           // altimate_change end
           // altimate_change start — the ordering itself lives in the exported
@@ -1486,7 +1492,7 @@ export namespace SessionProcessor {
           if (recoveredCommittedAnswer) return "stop" as const
           return resolveFinishOutcome({
             needsCompaction,
-            explicitDone,
+            explicitDone: explicitDone || blockedEnding,
             blocked,
             error: input.assistantMessage.error !== undefined,
             starvationStop,

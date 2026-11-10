@@ -180,7 +180,9 @@ describe("SessionTermination directive texts (/c/d wording contracts)", () => {
     expect(compaction).toContain(
       '"Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."',
     )
-    expect(compaction).toMatch(/if \(Flag\.ALTIMATE_RUN_MODE\) \{\s*NudgeArbiter\.register\(/)
+    // The nudge is gated on run mode and the agent (plan keeps the ordinary continuation).
+    expect(compaction).toMatch(/SessionTermination\.completionNudge\(\{\s*runMode: Flag\.ALTIMATE_RUN_MODE,/)
+    expect(compaction).toMatch(/if \(completionNudge\) \{\s*NudgeArbiter\.register\(/)
   })
   // altimate_change end
 
@@ -364,6 +366,66 @@ describe("SessionTermination.stripCompletionToken", () => {
     expect(SessionTermination.stripCompletionToken("Example:\n```\nDONE")).toBe("Example:\n```\nDONE")
     expect(SessionTermination.stripCompletionToken("All done.")).toBe("All done.")
     expect(SessionTermination.stripCompletionToken("Read it.\nBLOCKED: no access")).toBe("Read it.\nBLOCKED: no access")
+  })
+})
+// altimate_change end
+
+// altimate_change start — round-2 review: plan keeps its continuation, blocked is terminal, unsure → assume
+describe("SessionTermination.completionNudge", () => {
+  test("run mode gets the completion nudge for every agent but plan", () => {
+    expect(SessionTermination.completionNudge({ runMode: true, agent: "builder" })).toBe(
+      SessionTermination.COMPLETION_NUDGE,
+    )
+    expect(SessionTermination.completionNudge({ runMode: true, agent: "general" })).toBe(
+      SessionTermination.COMPLETION_NUDGE,
+    )
+  })
+
+  test("the plan agent and interactive sessions get none", () => {
+    expect(SessionTermination.completionNudge({ runMode: true, agent: "plan" })).toBeUndefined()
+    expect(SessionTermination.completionNudge({ runMode: false, agent: "builder" })).toBeUndefined()
+  })
+})
+
+describe("SessionTermination.blockedStop (stop-path decision)", () => {
+  const parts = (text: string) => [{ type: "text", text }]
+
+  test("an errorless stop whose final real text is a BLOCKED: line is terminal", () => {
+    expect(
+      SessionTermination.blockedStop({
+        finish: "stop",
+        hasError: false,
+        parts: parts("Read the config.\nBLOCKED: the password is missing"),
+      }),
+    ).toBe(true)
+  })
+
+  test("not for a tool-calls finish, an error, a synthetic part or a non-final BLOCKED line", () => {
+    const text = "BLOCKED: no access"
+    expect(SessionTermination.blockedStop({ finish: "tool-calls", hasError: false, parts: parts(text) })).toBe(false)
+    expect(SessionTermination.blockedStop({ finish: "stop", hasError: true, parts: parts(text) })).toBe(false)
+    expect(
+      SessionTermination.blockedStop({
+        finish: "stop",
+        hasError: false,
+        parts: [{ type: "text", text }, { type: "text", text: "nudge", synthetic: true }],
+      }),
+    ).toBe(true)
+    expect(
+      SessionTermination.blockedStop({ finish: "stop", hasError: false, parts: [{ type: "text", text, synthetic: true }] }),
+    ).toBe(false)
+    expect(
+      SessionTermination.blockedStop({ finish: "stop", hasError: false, parts: parts("BLOCKED: x\nthen continued") }),
+    ).toBe(false)
+  })
+})
+
+describe("run-mode completion contract: ambiguity", () => {
+  test("the contract tells the model to assume and continue on safe, reversible ambiguity", () => {
+    expect(SessionTermination.RUN_MODE_COMPLETION_INSTRUCTION).toContain(
+      "If you are unsure between safe, reversible choices, pick the most reasonable interpretation, state your " +
+        "assumption, and continue.",
+    )
   })
 })
 // altimate_change end

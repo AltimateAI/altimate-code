@@ -4,17 +4,25 @@ import type { MessageID, SessionID } from "./schema"
 import { stripCompletionToken } from "./termination"
 // altimate_change end
 
-export async function interruptedTaskOutput(sessionID: SessionID, parentID?: MessageID): Promise<string | undefined> {
+// altimate_change start — run mode: partial findings get the same report selection as a finished task
+export async function interruptedTaskOutput(
+  sessionID: SessionID,
+  parentID?: MessageID,
+  options: { runMode?: boolean } = {},
+): Promise<string | undefined> {
   for await (const message of MessageV2.stream(sessionID)) {
     if (message.info.role === "user") break
     if (message.info.role !== "assistant") continue
     if (parentID && message.info.parentID !== parentID) continue
-    const text = message.parts
+    const raw = message.parts
       .filter((part): part is MessageV2.TextPart => part.type === "text" && !part.ignored && !part.synthetic)
       .map((part) => part.text)
       .join("\n")
-      .trim()
+    // In run mode the completion token is dropped, and a bare-token reply falls through to
+    // the child's earlier report.
+    const text = (options.runMode ? stripCompletionToken(raw) : raw).trim()
     if (!text) continue
+    // altimate_change end
     return [
       `task_id: ${sessionID} (for resuming to continue this task if needed)`,
       "",

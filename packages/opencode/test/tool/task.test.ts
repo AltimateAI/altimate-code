@@ -780,6 +780,84 @@ describe("tool.task", () => {
     ),
   )
 
+  // Interrupted path: partial findings get the same run-mode report selection.
+  for (const rejects of [true, false]) {
+    it.instance(`run mode strips DONE from partial findings when an aborted prompt ${rejects ? "rejects" : "returns empty text"}`, () =>
+      withRunMode(
+        Effect.gen(function* () {
+          const sessions = yield* Session.Service
+          const { chat, assistant } = yield* seed()
+          const def = yield* (yield* TaskTool).init()
+          const controller = new AbortController()
+          const ready = yield* Deferred.make<void>()
+          const cancelled = yield* Deferred.make<void>()
+          const promptOps: TaskPromptOps = {
+            ...stubOps(),
+            cancel: () => Deferred.succeed(cancelled, undefined).pipe(Effect.asVoid),
+            prompt: (input) =>
+              Effect.gen(function* () {
+                const report = { ...assistant, id: MessageID.ascending(), sessionID: input.sessionID, parentID: input.messageID! }
+                yield* sessions.updateMessage(report)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: report.id,
+                  sessionID: input.sessionID,
+                  type: "text",
+                  text: "The archive contains three matching records.",
+                })
+                // The child then acknowledges with a bare DONE in a later message of the same prompt.
+                const ack = { ...assistant, id: MessageID.ascending(), sessionID: input.sessionID, parentID: input.messageID! }
+                yield* sessions.updateMessage(ack)
+                yield* sessions.updatePart({
+                  id: PartID.ascending(),
+                  messageID: ack.id,
+                  sessionID: input.sessionID,
+                  type: "text",
+                  text: "DONE",
+                })
+                yield* Deferred.succeed(ready, undefined)
+                yield* Deferred.await(cancelled)
+                if (rejects) return yield* Effect.die(new DOMException("Task cancelled", "AbortError"))
+                return reply(input, "")
+              }),
+          }
+          const fiber = yield* def
+            .execute(
+              { description: "inspect archive", prompt: "count matching records", subagent_type: "general" },
+              { ...taskContext(chat, assistant, promptOps), abort: controller.signal },
+            )
+            .pipe(Effect.forkChild)
+          yield* Deferred.await(ready).pipe(Effect.timeout("2 seconds"))
+          controller.abort()
+          const result = yield* Fiber.join(fiber).pipe(Effect.timeout("2 seconds"))
+          expect(result.output).toContain("The archive contains three matching records.")
+          expect(result.output).not.toMatch(/^DONE$/m)
+          expect(result.metadata.interrupted).toBe(true)
+        }),
+      ),
+    )
+  }
+
+  it.instance("partial findings keep a trailing DONE outside run mode", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const childID = (yield* sessions.create({ parentID: chat.id, title: "child" })).id
+      const promptID = MessageID.ascending()
+      const message = { ...assistant, id: MessageID.ascending(), sessionID: childID, parentID: promptID }
+      yield* sessions.updateMessage(message)
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: message.id,
+        sessionID: childID,
+        type: "text",
+        text: "Print it.\nDONE",
+      })
+      const output = yield* Effect.promise(() => interruptedTaskOutput(childID, promptID))
+      expect(output).toContain("Print it.\nDONE")
+    }),
+  )
+
   it.instance("outside run mode the child's text is returned unchanged", () =>
     Effect.gen(function* () {
       const previous = process.env.ALTIMATE_RUN_MODE

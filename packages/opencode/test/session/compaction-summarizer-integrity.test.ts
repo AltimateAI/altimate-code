@@ -490,12 +490,29 @@ describe("session.compaction continue-nudge termination path (/d)", () => {
     expect(result).toBe("continue")
     const continuePart = store.parts.find((p) => p.type === "text" && p.synthetic)
     // altimate_change start — byte-for-byte pin of the interactive continuation
-    expect(continuePart?.text).toContain(
+    expect(continuePart?.text).toBe(
       "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
     )
     // altimate_change end
     expect(continuePart?.text).not.toContain(SessionTermination.COMPLETION_NUDGE)
   })
+
+  // altimate_change start — the plan agent keeps the interactive continuation in run mode
+  test("run-mode plan-agent compaction keeps the ordinary continuation, without the completion nudge", async () => {
+    const sessionID = freshSessionID()
+    const { messages, markerID } = history(sessionID)
+    messages[2].info.agent = "plan"
+    processBehaviors = [writeSummary("a real summary")]
+
+    const result = await run({ sessionID, messages, markerID })
+
+    expect(result).toBe("continue")
+    const continuePart = store.parts.find((p) => p.type === "text" && p.synthetic)
+    expect(continuePart?.text).toBe(
+      "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
+    )
+  })
+  // altimate_change end
 
   test("one-directive-per-turn contract: exactly ONE directive block — pending lower-precedence directives are consumed", async () => {
     const sessionID = freshSessionID()
@@ -564,7 +581,7 @@ describe("session.compaction continue-nudge termination path (/d)", () => {
 
     expect(result).toBe("continue")
     const continuePart = store.parts.find((p) => p.type === "text" && p.synthetic)
-    expect(continuePart?.text).toContain(
+    expect(continuePart?.text).toBe(
       SessionTermination.OVERFLOW_NOTICE +
         "\n\nContinue if you have next steps, or stop and ask for clarification if you are unsure how to proceed.",
     )

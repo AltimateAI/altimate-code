@@ -206,6 +206,25 @@ export function explicitDoneStop(input: {
   return isExplicitDone(lastText.text)
 }
 
+// altimate_change start — a run-mode BLOCKED: ending is terminal before compaction
+/**
+ * Stop-path decision for a blocked ending: an errorless "stop" turn whose final real
+ * text part ends on a `BLOCKED: <reason>` line. The caller applies it in run mode only,
+ * so a blocked report ends the session instead of being compacted and prompted again.
+ */
+export function blockedStop(input: {
+  finish: string | undefined
+  hasError: boolean
+  parts: readonly { type: string; synthetic?: boolean; text?: string }[]
+}): boolean {
+  if (input.hasError) return false
+  if (input.finish !== "stop") return false
+  const lastText = input.parts.findLast((part) => part.type === "text" && part.synthetic !== true)
+  if (!lastText?.text) return false
+  return isBlocked(lastText.text)
+}
+// altimate_change end
+
 // altimate_change start — run-mode completion contract for every agent but plan
 /**
  * Run-mode completion instruction.
@@ -214,8 +233,9 @@ export function explicitDoneStop(input: {
  * static instruction there also governs interactive chat — where nothing
  * interprets or strips the token and the user saw a literal `DONE` on every
  * final answer, including mid-conversation on follow-ups. `isExplicitDone()`
- * is only consumed by the run-mode accounting path, and the `run` output
- * boundaries strip the token before a reader sees the text.
+ * is consumed by run-mode accounting and by the processor's explicit-DONE
+ * compaction deferral, and the `run` output boundaries strip the token before a
+ * reader sees the text.
  *
  * Injected only in run mode. It names the three ways a run-mode turn may end:
  * the token after the assigned task is done, a `BLOCKED:` line when the task
@@ -224,7 +244,8 @@ export function explicitDoneStop(input: {
  */
 export const RUN_MODE_COMPLETION_INSTRUCTION =
   "**Signal completion explicitly**: no one can answer questions during this run, so do not end your turn with a " +
-  "question. Only when the assigned task is fully completed and verified, end your final response with the literal " +
+  "question. If you are unsure between safe, reversible choices, pick the most reasonable interpretation, state " +
+  "your assumption, and continue. Only when the assigned task is fully completed and verified, end your final response with the literal " +
   `token \`${DONE_TOKEN}\` on its own final line. Do not emit \`${DONE_TOKEN}\` while work or verification remains. ` +
   "If you cannot proceed because something you cannot obtain is missing, or the only way forward is a destructive " +
   "or irreversible action on a guess, state what was completed, end with a final line " +
@@ -266,6 +287,16 @@ export const COMPLETION_NUDGE =
   "(3) if you cannot proceed because something you cannot obtain is missing, or the only way forward is a " +
   "destructive or irreversible action on a guess, state what was completed, end with a final line " +
   `${BLOCKED_PREFIX} <what blocked you>, and stop without ${DONE_TOKEN}.`
+
+/**
+ * The post-compaction continuation for run mode, or undefined when the ordinary
+ * continuation applies: interactive sessions and the plan agent, whose prompt ends a
+ * turn with a question or `plan_exit` (same exclusion as the completion contract).
+ */
+export function completionNudge(input: { runMode: boolean; agent: string }): string | undefined {
+  if (!input.runMode || CONTRACT_EXCLUDED_AGENTS.has(input.agent)) return undefined
+  return COMPLETION_NUDGE
+}
 // altimate_change end
 
 /**

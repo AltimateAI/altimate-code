@@ -2062,20 +2062,25 @@ When constructing the summary, try to stick to this template:
         // (d) the overflow notice is mechanism-accurate — the old text falsely
         //     blamed "large media attachments" (see SessionTermination.OVERFLOW_NOTICE);
         //     in run mode it does not ask the absent user to re-supply anything.
+        // The plan agent keeps the ordinary continuation (its prompt ends a turn with a
+        // question or plan_exit), as it gets no completion contract.
         let continuation =
           "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
-        if (Flag.ALTIMATE_RUN_MODE) {
+        const completionNudge = SessionTermination.completionNudge({
+          runMode: Flag.ALTIMATE_RUN_MODE,
+          agent: userMessage.agent,
+        })
+        if (completionNudge) {
           NudgeArbiter.register(
             input.sessionID,
             {
               source: "termination_challenge",
               kind: "completion_nudge",
-              text: SessionTermination.COMPLETION_NUDGE,
+              text: completionNudge,
             },
             input.nudgeGeneration,
           )
-          continuation =
-            NudgeArbiter.take(input.sessionID, input.nudgeGeneration)?.text ?? SessionTermination.COMPLETION_NUDGE
+          continuation = NudgeArbiter.take(input.sessionID, input.nudgeGeneration)?.text ?? completionNudge
         }
         const text =
           (input.overflow

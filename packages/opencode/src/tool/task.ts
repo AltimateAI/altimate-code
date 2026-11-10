@@ -492,11 +492,12 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           : SessionPrompt.prompt(promptInput)
         ).catch(async (error) => {
           if (!ctx.abort.aborted) throw error
-          partialOutput = await interruptedTaskOutput(session.id, messageID)
+          partialOutput = await interruptedTaskOutput(session.id, messageID, { runMode: Flag.ALTIMATE_RUN_MODE })
           if (!partialOutput) throw error
           return undefined
         })
-        if (ctx.abort.aborted) partialOutput ??= await interruptedTaskOutput(session.id, messageID)
+        if (ctx.abort.aborted)
+          partialOutput ??= await interruptedTaskOutput(session.id, messageID, { runMode: Flag.ALTIMATE_RUN_MODE })
 
         const lastText = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
         // Run mode: the child's completion token is a harness signal, not part of its report,
