@@ -105,22 +105,23 @@ afterEach(() => {
   delete dbtAdapterInternals.hasModelLineage
 })
 
+// dbt-tools' own tests cover how the check reads an adapter, an instance-field method included.
 describe("whether the dbt-integration answers a model's lineage", () => {
-  beforeEach(() => {
-    delete dbtAdapterInternals.hasModelLineage
+  test("asks about the started adapter once there is one, and about none before", async () => {
+    const asked: unknown[] = []
+    dbtAdapterInternals.hasModelLineage = (adapter) => {
+      asked.push(adapter)
+      return false
+    }
     useConfig()
-  })
-
-  test("a started adapter answers for itself, a method defined as an instance field included", async () => {
-    dbtAdapterInternals.create = async () => fakeAdapter(true, async () => TRACE)
-    expect(await getDbtAdapter()).toBeTruthy()
-    expect(await dbtAdapterHasLineage()).toBe(true)
-  })
-
-  test("a started adapter without the method doesn't", async () => {
+    await dbtAdapterHasLineage()
     dbtAdapterInternals.create = async () => fakeAdapter(true)
-    expect(await getDbtAdapter()).toBeTruthy()
-    expect(await dbtAdapterHasLineage()).toBe(false)
+    const started = await getDbtAdapter()
+    expect(started).toBeTruthy()
+    await dbtAdapterHasLineage()
+    expect(asked).toHaveLength(2)
+    expect(asked[0]).toBeUndefined()
+    expect(asked[1]).toBe(started)
   })
 })
 
