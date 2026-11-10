@@ -1214,3 +1214,60 @@ for (const finalAnswer of ["The available evidence supports this limited answer.
   )
 }
 // altimate_change end
+
+// altimate_change start — a reached token budget finalizes at the downgraded effort, like a hard time deadline
+cliIt.live(
+  "token-budget finalization uses low effort like the hard time deadline",
+  ({ llm, opencode, home }) =>
+    Effect.gen(function* () {
+      const config = testProviderConfig(llm.url)
+      const model = config.provider.test.models["test-model"]
+      // This one step's usage, 80 + 30 billed, reaches the limit of 100.
+      yield* llm.push(reply().tool("glob", { pattern: "*.sql", path: home }).usage({ input: 80, output: 30 }).item())
+      yield* llm.textMatch(({ body }) => isFinalization(body), "The available evidence supports this limited answer.")
+      yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().hang())
+      const result = yield* opencode.run("Inspect SQL files and report the available evidence.", {
+        format: "json",
+        extraArgs: ["--max-tokens", "100", "--variant", "high"],
+        bunRun: true,
+        env: {
+          ALTIMATE_RUN_BUDGET_EFFORT_DOWNGRADE: "1",
+          OPENCODE_CONFIG_CONTENT: JSON.stringify({
+            ...config,
+            permission: { glob: "allow" },
+            provider: {
+              test: {
+                ...config.provider.test,
+                models: {
+                  "test-model": {
+                    ...model,
+                    id: "o3",
+                    reasoning: true,
+                    variants: { high: { reasoningEffort: "high" }, low: { reasoningEffort: "low" } },
+                  },
+                },
+              },
+            },
+          }),
+        },
+        timeoutMs: 60_000,
+      })
+      const requests = (yield* llm.inputs).filter(
+        (body) => !JSON.stringify(body).includes("Generate a title for this conversation"),
+      )
+      expect(requests[0]?.reasoning_effort).toBe("high")
+      const finalizations = requests.filter(isFinalization)
+      expect(finalizations).toHaveLength(1)
+      expect(finalizations.map((body) => body.reasoning_effort)).toEqual(["low"])
+      opencode.expectExit(result, 0)
+      const events = opencode.parseJsonEvents(result.stdout)
+      expect(events.filter((event) => event.type === "budget_exhausted")).toMatchObject([
+        { limit_tokens: 100, tokens_used: 110 },
+      ])
+      expect(events.filter((event) => event.type === "termination")).toMatchObject([
+        { why_harness_stopped: "budget-exhausted", max_tokens: 100, token_budget_exhausted: true },
+      ])
+    }),
+  60_000,
+)
+// altimate_change end

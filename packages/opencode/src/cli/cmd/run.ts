@@ -920,6 +920,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change start — the step that reached the token limit ends the work phase like a hard deadline
       const exhaustTokenBudget = () => {
         if (!sessionID || !tokenBudget || timeBudgetDeadline === "hard") return
+        // The hard-deadline state also selects the effort-downgraded finalization headers.
+        timeBudgetDeadline = "hard"
         timeBudgetStop.abort()
         stopTimeBudget()
         accounting.onBudgetExhausted("time")
