@@ -266,7 +266,7 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
         // from the trigger site: a tool returning after its turn was cancelled and replaced still
         // names its own turn's workspace, not the replacement's.
         void OnboardingTelemetry.emit(
-          { type: "first_job_completed", job, workspace_id: input.workspaceId },
+          { type: "first_job_completed", job, workspace_id: input.workspaceId, origin: "onboarding" },
           input.sessionID,
         )
         // Marked so the end of this turn, or a later session, doesn't send the workspace's row as well.

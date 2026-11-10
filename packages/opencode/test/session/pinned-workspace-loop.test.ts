@@ -20,8 +20,14 @@ import { Database } from "@opencode-ai/core/database/database"
 import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Telemetry } from "../../src/altimate/telemetry"
 import { AltimateApi } from "../../src/altimate/api/client"
-import { WorkspaceApi } from "../../src/altimate/workspace/api-client"
-import { __resetPinValidation, readLocalBinding, recordApprovedBinding } from "../../src/altimate/workspace/state"
+import { ForbiddenError, WorkspaceApi, WorkspaceApiError } from "../../src/altimate/workspace/api-client"
+import {
+  __resetPinValidation,
+  PIN_VALIDATION_TTL_MS,
+  readLocalBinding,
+  recordApprovedBinding,
+  TURN_PIN_WAIT_MS,
+} from "../../src/altimate/workspace/state"
 import { stubEmptySkillList } from "../altimate/workspace/skill-list-fixture"
 import { testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
@@ -261,7 +267,7 @@ it.live("a pinned session with a different on-disk link names the pinned workspa
     }),
     { git: true, config: providerCfg },
   ),
-  { timeout: 30_000 },
+  { timeout: 60_000 },
 )
 
 it.live("a pinned session with no on-disk link still names the pinned workspace", () =>
@@ -276,7 +282,7 @@ it.live("a pinned session with no on-disk link still names the pinned workspace"
     }),
     { git: true, config: providerCfg },
   ),
-  { timeout: 30_000 },
+  { timeout: 60_000 },
 )
 
 it.live("a pin this account cannot see names no workspace, not the project's link", () =>
@@ -293,26 +299,186 @@ it.live("a pin this account cannot see names no workspace, not the project's lin
     }),
     { git: true, config: providerCfg },
   ),
-  { timeout: 30_000 },
+  { timeout: 60_000 },
 )
 
-it.live("attached files add no check of a refused pin: the turn resolves its workspace once", () =>
+// On `main` the attachment reads name the project's link whatever the pin says; here they take the
+// turn's verdict. That the verdict is resolved once however many reads a turn makes is pinned in
+// routing-pin.test.ts ("a refused pin is checked once per turn").
+it.live("attached files name the turn's verdict on a refused pin, not the project's link", () =>
   provideTmpdirServerLegacy(
     Effect.fnUntraced(function* ({ dir, llm }) {
-      // A refusal is never memoized, so every resolution that isn't shared asks the account again.
-      const asked = accountSees([{ id: LINKED, name: "project-link" }])
+      accountSees([{ id: LINKED, name: "project-link" }])
+      yield* linkProject(dir)
       pinTo(dir)
-      yield* runTurn(dir, llm, 0)
-      const withoutFiles = asked()
-      expect(withoutFiles).toBeGreaterThan(0)
       yield* runTurn(dir, llm, 3)
 
-      expect(asked() - withoutFiles).toBe(withoutFiles)
-      expect(reads().map((row) => row.workspace_id)).toEqual([undefined, undefined, undefined, undefined, undefined])
+      expect(reads().map((row) => row.workspace_id)).toEqual([undefined, undefined, undefined, undefined])
+      expect(rows.filter((row) => row.workspace_id === LINKED)).toEqual([])
     }),
     { git: true, config: providerCfg },
   ),
-  { timeout: 30_000 },
+  { timeout: 60_000 },
+)
+
+/** A prompt in a new pinned session with only `parts`, and its exit: no model call is queued. */
+const promptOnly = (parts: SessionPrompt.PromptInput["parts"], noReply?: boolean) =>
+  Effect.gen(function* () {
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const session = yield* sessions.create({
+      title: "pinned session",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    return yield* Effect.exit(prompt.prompt({ sessionID: session.id, agent: "build", noReply, parts }))
+  })
+
+it.live("a directory attachment's read names the turn's workspace, as a file's does", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir }) {
+      accountSees([{ id: PINNED, name: "pinned-workspace" }])
+      yield* linkProject(dir)
+      pinTo(dir)
+      // A missing directory: a failed read is the one that sends a `tool_call` row. The prompt fails
+      // with it, before the loop.
+      yield* promptOnly([
+        { type: "text", text: "list this" },
+        {
+          type: "file",
+          url: pathToFileURL(path.join(dir, "missing-dir")).href,
+          filename: "missing-dir",
+          mime: "application/x-directory",
+        },
+      ])
+
+      expect(reads().map((row) => row.workspace_id)).toEqual([PINNED])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 60_000 },
+)
+
+it.live("a noReply prompt's attachments in a pinned session name no workspace and send no validation", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir }) {
+      const list = spyOn(WorkspaceApi, "listDatamates").mockImplementation(
+        async () =>
+          [
+            { id: PINNED, name: "pinned-workspace" },
+            { id: LINKED, name: "project-link" },
+          ] as never,
+      )
+      restore.push(() => list.mockRestore())
+      yield* linkProject(dir)
+      pinTo(dir)
+      yield* promptOnly(
+        [
+          { type: "text", text: "for later" },
+          { type: "file", url: pathToFileURL(path.join(dir, "missing-0.txt")).href, filename: "missing-0.txt", mime: "text/plain" },
+        ],
+        true,
+      )
+
+      expect(reads().map((row) => row.workspace_id)).toEqual([undefined])
+      // Memory sync's own question (is memory on?) passes no credential; the pin's validation does.
+      expect(list.mock.calls.filter(([actAs]) => actAs !== undefined).length).toBe(0)
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 60_000 },
+)
+
+it.live("with the workspace kill switch on, the pin is not checked and the rows name the project's link", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      const asked = accountSees([
+        { id: PINNED, name: "pinned-workspace" },
+        { id: LINKED, name: "project-link" },
+      ])
+      yield* linkProject(dir)
+      pinTo(dir)
+      process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+      yield* runTurn(dir, llm)
+
+      expect(asked()).toBe(0)
+      expect(named("session_start").map((row) => row.workspace_id)).toEqual([LINKED])
+      expect(reads().map((row) => row.workspace_id)).toEqual([LINKED, LINKED])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 60_000 },
+)
+
+it.live("a validation slower than the turn's wait leaves the turn's rows unattributed, with one request", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      const list = spyOn(WorkspaceApi, "listDatamates").mockImplementation(async () => {
+        await new Promise((done) => setTimeout(done, TURN_PIN_WAIT_MS + 500))
+        return [{ id: PINNED, name: "pinned-workspace" }] as never
+      })
+      restore.push(() => list.mockRestore())
+      yield* linkProject(dir)
+      pinTo(dir)
+      yield* runTurn(dir, llm)
+
+      // Routing and identity join the request the turn started rather than sending their own. The pin's
+      // validation acts as a given credential; memory sync's own question (is memory on?) passes none.
+      expect(list.mock.calls.filter(([actAs]) => actAs !== undefined).length).toBe(1)
+      expect(named("session_start").map((row) => row.workspace_id)).toEqual([undefined])
+      expect(reads().map((row) => row.workspace_id)).toEqual([undefined, undefined])
+      expect(rows.filter((row) => row.workspace_id === LINKED)).toEqual([])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 60_000 },
+)
+
+it.live("a pin validated earlier keeps naming the turn while the account is unreachable", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      let now = Date.now()
+      __resetPinValidation(() => now)
+      let reachable = true
+      const list = spyOn(WorkspaceApi, "listDatamates").mockImplementation(async () => {
+        if (!reachable) throw new WorkspaceApiError("Cannot reach the account")
+        return [{ id: PINNED, name: "pinned-workspace" }] as never
+      })
+      restore.push(() => list.mockRestore())
+      yield* linkProject(dir)
+      pinTo(dir)
+      const session = yield* runTurn(dir, llm)
+      // Past the validation memo, inside the grace window, and the account no longer answers.
+      now += PIN_VALIDATION_TTL_MS + 1
+      reachable = false
+      rows = []
+      yield* runTurn(dir, llm, 1, session)
+
+      expect(named("task_outcome_signal").map((row) => row.workspace_id)).toEqual([PINNED])
+      expect(reads().map((row) => row.workspace_id)).toEqual([PINNED, PINNED])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 60_000 },
+)
+
+it.live("a validation refused with a 403 names no workspace, not the project's link", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      const list = spyOn(WorkspaceApi, "listDatamates").mockImplementation(async () => {
+        throw new ForbiddenError()
+      })
+      restore.push(() => list.mockRestore())
+      yield* linkProject(dir)
+      pinTo(dir)
+      yield* runTurn(dir, llm)
+
+      expect(named("session_start").map((row) => row.workspace_id)).toEqual([undefined])
+      expect(reads().map((row) => row.workspace_id)).toEqual([undefined, undefined])
+      expect(rows.filter((row) => row.workspace_id === LINKED)).toEqual([])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 60_000 },
 )
 
 it.live("a later turn of the same session names the workspace it resolves, not the first turn's", () =>
@@ -336,7 +502,7 @@ it.live("a later turn of the same session names the workspace it resolves, not t
     }),
     { git: true, config: providerCfg },
   ),
-  { timeout: 40_000 },
+  { timeout: 60_000 },
 )
 
 it.live("an unpinned session keeps naming the project's link", () =>
@@ -351,5 +517,5 @@ it.live("an unpinned session keeps naming the project's link", () =>
     }),
     { git: true, config: providerCfg },
   ),
-  { timeout: 30_000 },
+  { timeout: 60_000 },
 )

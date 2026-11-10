@@ -126,6 +126,7 @@ const LINKED = 7
 type Row = {
   type: string
   workspace_id?: number
+  origin?: string
   job?: string
   status?: string
   signal?: string
@@ -208,6 +209,7 @@ const turn = (
 const named = (type: string) => rows.filter((row) => row.type === type)
 const firstPrompts = () => named("first_prompt_sent").map((row) => row.workspace_id)
 const firstJobs = () => named("first_job_completed").map((row) => [row.workspace_id, row.job])
+const origins = (type: string) => named(type).map((row) => row.origin)
 
 it.live("a bound session sends both rows, naming the workspace", () =>
   provideTmpdirServerLegacy(
@@ -217,6 +219,8 @@ it.live("a bound session sends both rows, naming the workspace", () =>
 
       expect(firstPrompts()).toEqual([LINKED])
       expect(firstJobs()).toEqual([[LINKED, "something_else"]])
+      expect(origins("first_prompt_sent")).toEqual(["workspace"])
+      expect(origins("first_job_completed")).toEqual(["workspace"])
     }),
     { git: true, config: providerCfg },
   ),
@@ -405,6 +409,38 @@ it.live("a subagent's prompt is not a first prompt, and the parent's next typed 
   { timeout: 30_000 },
 )
 
+it.live("a subagent's working turn is not the workspace's job, and the parent's next working turn is", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      yield* linkProject(dir)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const parent = yield* sessions.create({
+        title: "parent",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const child = yield* sessions.create({
+        parentID: parent.id,
+        title: "child",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const file = path.join(dir, "note.txt")
+      yield* Effect.promise(() => Bun.write(file, "note"))
+      yield* llm.tool("read", { filePath: file })
+      yield* llm.text("child answer")
+      yield* prompt.prompt({ sessionID: child.id, agent: "build", parts: [{ type: "text", text: "review the diff" }] })
+      expect(firstJobs()).toEqual([])
+
+      yield* llm.tool("read", { filePath: file })
+      yield* llm.text("parent answer")
+      yield* prompt.prompt({ sessionID: parent.id, agent: "build", parts: [{ type: "text", text: "typed" }] })
+      expect(firstJobs()).toEqual([[LINKED, "something_else"]])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
+
 it.live("an unbound session sends neither row", () =>
   provideTmpdirServerLegacy(
     Effect.fnUntraced(function* ({ dir, llm }) {
@@ -426,6 +462,7 @@ it.live("an onboarding session in a bound project sends one row, and a later ses
       yield* turn(dir, llm)
 
       expect(firstPrompts()).toEqual([LINKED])
+      expect(origins("first_prompt_sent")).toEqual(["onboarding"])
     }),
     { git: true, config: providerCfg },
   ),
@@ -438,6 +475,7 @@ it.live("an onboarding session in an unbound project still sends its row", () =>
       yield* turn(dir, llm, { before: (id) => OnboardingTelemetry.markOnboardingSession(id) })
 
       expect(firstPrompts()).toEqual([undefined])
+      expect(origins("first_prompt_sent")).toEqual(["onboarding"])
     }),
     { git: true, config: providerCfg },
   ),

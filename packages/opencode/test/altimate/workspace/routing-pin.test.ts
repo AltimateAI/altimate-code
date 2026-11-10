@@ -20,6 +20,7 @@ process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
 const {
   resolvePinnedBindingForRouting,
   resolveTurnBinding,
+  unvalidatedTurnBinding,
   turnBinding,
   endTurnBinding,
   recordApprovedBinding,
@@ -232,6 +233,36 @@ describe("resolveTurnBinding", () => {
     expect((await resolveTurnBinding(ROOT))?.datamateId).toBe(7)
     expect(Date.now() - started).toBeLessThan(1_000)
     expect(listCalls).toBe(0)
+  })
+
+  test("the turn's workspace carries the account it was resolved under, from the link or the pin", async () => {
+    await seedLocalLink(7, "project-link")
+    expect((await resolveTurnBinding(ROOT))?.scope).toMatchObject({ tenant: "acme", apiUrl: "https://api.test" })
+    setPin()
+    expect((await resolveTurnBinding(ROOT))?.scope).toMatchObject({ tenant: "acme", apiUrl: "https://api.test" })
+  })
+})
+
+// The attachment reads of a `noReply` prompt, which runs no turn.
+describe("unvalidatedTurnBinding", () => {
+  test("in a pinned session the reads name nothing, with no validation request", async () => {
+    await seedLocalLink(7, "project-link")
+    setPin()
+    expect(await unvalidatedTurnBinding(ROOT)).toBeNull()
+    expect(listCalls).toBe(0)
+  })
+
+  test("in an unpinned session the reads name the project's link", async () => {
+    await seedLocalLink(7, "project-link")
+    expect((await unvalidatedTurnBinding(ROOT))?.datamateId).toBe(7)
+    expect(listCalls).toBe(0)
+  })
+
+  test("with the kill switch on, a pinned session's reads name the project's link", async () => {
+    await seedLocalLink(7, "project-link")
+    setPin()
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    expect((await unvalidatedTurnBinding(ROOT))?.datamateId).toBe(7)
   })
 })
 
