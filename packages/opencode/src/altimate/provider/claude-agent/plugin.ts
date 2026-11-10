@@ -30,27 +30,25 @@ export async function ClaudeAgentPlugin(_input: PluginInput): Promise<Hooks> {
         {
           type: "oauth",
           label: "Claude Code login (claude auth login)",
+          // Returns at once so the dialog shows its waiting screen; the login check (which starts
+          // `claude` and reads every model's context window) runs in the callback.
           async authorize() {
-            const first = ClaudeAgent.problem(await ClaudeAgent.check())
             return {
               url: SETUP_URL,
               method: "auto" as const,
-              instructions: first
-                ? `${first} This dialog connects as soon as Claude Code is logged in.`
-                : "Claude Code is logged in. Connecting…",
+              instructions:
+                "Checking your Claude Code login. If you have not logged in yet, run `claude auth login` in a terminal; this connects as soon as it finds the login.",
               async callback() {
-                const success = { type: "success" as const, key: ClaudeAgent.AUTH_KEY }
-                if (!first) return success
                 const deadline = Date.now() + RECHECK_LIMIT_MS
-                let reason = first
-                while (Date.now() < deadline) {
+                while (true) {
+                  const reason = ClaudeAgent.problem(await ClaudeAgent.check())
+                  if (!reason) return { type: "success" as const, key: ClaudeAgent.AUTH_KEY }
+                  if (Date.now() >= deadline) {
+                    log.warn("Claude Code login was not found", { reason })
+                    return { type: "failed" as const }
+                  }
                   await Bun.sleep(RECHECK_MS)
-                  const next = ClaudeAgent.problem(await ClaudeAgent.check())
-                  if (!next) return success
-                  reason = next
                 }
-                log.warn("Claude Code login was not found", { reason })
-                return { type: "failed" as const }
               },
             }
           },
