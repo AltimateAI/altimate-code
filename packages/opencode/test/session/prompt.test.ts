@@ -3549,4 +3549,174 @@ for (const mode of ["plain", "compacted"] as const) {
     30_000,
   )
 }
+
+// A committed-answer echo that is skipped because a newer user request arrived while it was being
+// prepared makes no model request, so it must not use up a step: the queued request still gets
+// its normal step.
+noLLMServer.instance(
+  "a skipped committed-answer echo does not count toward the step cap",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat } = yield* boot()
+      const requests: Record<string, unknown>[] = []
+      let queued = false
+      const toModelMessages = MessageV2.toModelMessages
+      const conversionSpy = spyOn(MessageV2, "toModelMessages").mockImplementation(async (...args) => {
+        // The request arrives during the echo's history conversion, after the commit request.
+        if (requests.length === 1 && !queued) {
+          queued = true
+          const userID = MessageID.ascending()
+          await LegacySession.updateMessage({
+            id: userID,
+            sessionID: chat.id,
+            role: "user",
+            agent: "analyst",
+            model: promptRef,
+            time: { created: Date.now() },
+          })
+          await LegacySession.updatePart({
+            id: PartID.ascending(),
+            messageID: userID,
+            sessionID: chat.id,
+            type: "text",
+            text: "A new question arrived; do not repeat the previous answer.",
+          })
+        }
+        return toModelMessages(...args)
+      })
+      const language = createOpenAICompatible({
+        name: "test",
+        baseURL: "https://unused.invalid/v1",
+        fetch: Object.assign(
+          async (_url: string | URL | Request, init?: RequestInit) => {
+            if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+            const request = JSON.parse(init.body)
+            requests.push(request)
+            if (requests.length > 2) throw new Error("unexpected extra request")
+            const response =
+              requests.length === 1
+                ? reply()
+                    .tool("answer_commit", {
+                      fields: [{ name: "", value: 42 }],
+                      answer_only: true,
+                      basis: "Counted all records at record grain using records.id.",
+                    })
+                    .usage({ input: 1, output: 1 })
+                    .item()
+                : reply().text("Answer to the new question.").stop().item()
+            if (response.type !== "sse") throw new Error("expected SSE response")
+            return new Response(
+              [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              { headers: { "Content-Type": "text/event-stream" } },
+            )
+          },
+          { preconnect: () => undefined },
+        ),
+      }).chatModel("test-model")
+      const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+      try {
+        const result = yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "analyst",
+          model: promptRef,
+          parts: [{ type: "text", text: "How many rows? Reply with only the count." }],
+        })
+        expect(queued).toBe(true)
+        expect(requests).toHaveLength(2)
+        // steps: 3 with one earlier model request: the queued request is the second, not the last.
+        expect(JSON.stringify(requests[1]!.messages)).not.toContain("CRITICAL - MAXIMUM STEPS REACHED")
+        expect(JSON.stringify(requests[1]!.messages)).not.toContain("Reply with exactly the text returned by answer_commit")
+        expect(result.parts).toContainEqual(
+          expect.objectContaining({ type: "text", text: "Answer to the new question." }),
+        )
+      } finally {
+        languageSpy.mockRestore()
+        conversionSpy.mockRestore()
+      }
+    }),
+  {
+    config: {
+      ...cfg,
+      snapshot: false,
+      learn: { enabled: false },
+      agent: { analyst: { steps: 3 } },
+    },
+  },
+  30_000,
+)
+
+// A json_schema request answers through the StructuredOutput tool, so at the step cap it gets a
+// schema-specific instruction, not the text-only one that says tools are disabled.
+noLLMServer.instance(
+  "the step cap of a json_schema request asks for the StructuredOutput call",
+  () =>
+    Effect.gen(function* () {
+      const { prompt, chat } = yield* boot()
+      const requests: Record<string, unknown>[] = []
+      const language = createOpenAICompatible({
+        name: "test",
+        baseURL: "https://unused.invalid/v1",
+        fetch: Object.assign(
+          async (_url: string | URL | Request, init?: RequestInit) => {
+            if (typeof init?.body !== "string") throw new Error("expected a JSON request body")
+            const request = JSON.parse(init.body)
+            requests.push(request)
+            if (requests.length > 2) throw new Error("the step cap was not enforced")
+            const response =
+              requests.length === 1
+                ? reply().tool("glob", { pattern: "probe-*" }).usage({ input: 1, output: 1 }).item()
+                : reply().tool("StructuredOutput", { count: 2 }).item()
+            if (response.type !== "sse") throw new Error("expected SSE response")
+            return new Response(
+              [...response.head, ...response.tail].map((chunk) => `data: ${JSON.stringify(chunk)}\n\n`).join("") +
+                "data: [DONE]\n\n",
+              { headers: { "Content-Type": "text/event-stream" } },
+            )
+          },
+          { preconnect: () => undefined },
+        ),
+      }).chatModel("test-model")
+      const languageSpy = spyOn(ProviderSvc, "getLanguage").mockResolvedValue(language)
+      try {
+        const result = yield* prompt.prompt({
+          sessionID: chat.id,
+          agent: "builder",
+          model: promptRef,
+          parts: [{ type: "text", text: "Count the probes." }],
+          format: {
+            type: "json_schema" as const,
+            retryCount: 0,
+            schema: {
+              type: "object",
+              properties: { count: { type: "number" } },
+              required: ["count"],
+              additionalProperties: false,
+            },
+          },
+        })
+        expect(requests).toHaveLength(2)
+        const last = requests[1]!
+        const instruction = requestText(requestMessages(last).at(-1)!.content)
+        expect(requestMessages(last).at(-1)!.role).toBe("user")
+        expect(instruction).toContain("StructuredOutput")
+        expect(instruction).not.toContain("Tools are disabled")
+        expect(JSON.stringify(last.messages)).not.toContain("CRITICAL - MAXIMUM STEPS REACHED")
+        expect(last.tool_choice).toBe("required")
+        expect(JSON.stringify(last.tools)).toContain("StructuredOutput")
+        expect(result.info).toHaveProperty("structured", { count: 2 })
+      } finally {
+        languageSpy.mockRestore()
+      }
+    }),
+  {
+    config: {
+      ...cfg,
+      snapshot: false,
+      learn: { enabled: false },
+      agent: { builder: { steps: 2, permission: { glob: "allow", StructuredOutput: "allow" } } },
+    },
+  },
+  30_000,
+)
 // altimate_change end
