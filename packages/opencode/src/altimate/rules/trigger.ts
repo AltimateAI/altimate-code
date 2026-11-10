@@ -151,118 +151,154 @@ async function draft(input: {
 
 const running = new Set<string>()
 
-/** Check the session's new corrections and show at most one card. Never throws. */
+/** A check's outcome when its proposal could not be stored. "failed" counts as a failed check (retried later). */
+const NOT_STORED: Record<RuleProposal.NotStored, string> = {
+  full: "not stored: too many proposals are waiting; corrections kept for a later check",
+  scope_changed: "not stored: the account or workspace changed while it was drafted; corrections kept for a later check",
+  failed: "failed: the proposal could not be stored; corrections kept for a later check",
+}
+
+/** Check the session's new corrections and show at most one card. Never throws; returns what the check decided. With
+ * `persist` (a host session through the plugin, `learn check`): no client shows cards, so the proposal is kept on disk
+ * for `learn proposals` instead. */
 export async function afterTurn(input: {
   sessionID: string
   root: string
   directory: string
   learn: LearnConfig
   deps: TriggerDeps
-}): Promise<void> {
+  persist?: boolean
+}): Promise<string> {
   // Idle can fire twice for one turn; one check per session at a time.
-  if (running.has(input.sessionID)) return
+  if (running.has(input.sessionID)) return "another check of this session is running"
   running.add(input.sessionID)
   let outcome = "no new corrections"
   let checked: string[] = []
   const note = (text: string) => { outcome = text }
   try {
-    const state = await RulesStore.read(input.root)
-    if (!learningEnabled(input.learn, state)) return
-    const processed = new Set(state.processed_signals)
-    // Read once per check: the recurrence path below uses the same signals.
-    const all = await readSignals(input.root, Playbook.DEFAULT_NAME)
-    const fresh = all.filter((signal) =>
-      signal.kind === "user_correction" && signal.sessionID === input.sessionID && !processed.has(signal.id))
-    if (!fresh.length) return
-    // Nothing attached would show a card (`altimate-code run`, ACP, a plugin): the corrections are left unprocessed,
-    // so a later turn of this session with a card client attached proposes them.
-    if (!RuleProposal.rendererAttached(input.directory)) {
-      outcome = "no client that shows cards is attached; corrections kept for a later check"
-      return RulesTelemetry.skipped(input.sessionID, undefined, "no_renderer")
-    }
-    // One card at a time per session: an explicit "remember" may already have shown one for this turn.
-    if (RuleProposal.list(input.directory, input.sessionID).length)
-      return RulesTelemetry.skipped(input.sessionID, undefined, "card_open")
-    // Marked processed once the check completes; a failed check is retried after the next turn.
-    checked = fresh.map((signal) => signal.id)
-    // The model call takes a while: if the client that shows cards went away meanwhile, the card would not be seen,
-    // so the corrections are left for a later check instead.
-    const stillShown = (trigger: "shown_rule" | "recurrence") => {
-      if (RuleProposal.rendererAttached(input.directory)) return true
-      checked = []
-      outcome = "the client that shows cards went away during the check; corrections kept for a later check"
-      RulesTelemetry.skipped(input.sessionID, trigger, "no_renderer")
-      return false
-    }
-    const newest = fresh[fresh.length - 1]
-    const correction = { excerpt: excerpt(newest.text), at: newest.correctedAt ?? newest.at }
-
-    // (c) A team rule shown in this session before the correction, on the same subject: propose changing it.
-    // A loose word-overlap filter picks the candidate; the drafter decides (HELPFUL = the rule already says it).
-    const snapshot = await readShownSnapshot(input.root, input.sessionID)
-    const correctedAt = Date.parse(newest.correctedAt ?? newest.at)
-    const shownIds = new Set((snapshot?.shown ?? [])
-      .filter((entry) => entry.name === RulesStore.WORKSPACE_RULES_STORE && !(Date.parse(entry.at) >= correctedAt))
-      .map((entry) => entry.id))
-    const said = words(fresh.map((signal) => signal.text).join(" "))
-    const hit = state.rules
-      .map((rule) => ({ id: RulesStore.lessonId(rule.rule_key), overlap: [...words(rule.text)].filter((w) => said.has(w)).length }))
-      .filter((rule) => shownIds.has(rule.id) && rule.overlap >= EDIT_OVERLAP && !RulesStore.dismissed(state, rule.id))
-      .sort((a, b) => b.overlap - a.overlap)[0]
-    log.info("rule edit candidate", { session: input.sessionID, hit: hit?.id, overlap: hit?.overlap, shown: shownIds.size })
-    if (hit) {
-      const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, trigger: "shown_rule", signals: fresh, state, target: hit.id, note })
-      // The shown rule already says it: no card, and no second drafting call for recurrence.
-      if (drafted === "covered") return RulesTelemetry.skipped(input.sessionID, "shown_rule", "covered")
-      if (drafted) {
-        if (!stillShown("shown_rule")) return
-        const card = await RuleProposal.ask({
-          sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "shown_rule",
-          draft: {
-            text: drafted.text,
-            // An edit or retire keeps the rule's scope; a new rule beside it takes the correction's.
-            applies_to: drafted.change === "add"
-              ? appliesTo(fresh.map((signal) => signal.text))
-              : state.rules.find((r) => RulesStore.lessonId(r.rule_key) === hit.id)?.applies_to ?? [],
-            why: clip(`${drafted.change === "add" ? "Corrected on the subject of a team rule" : "Corrected again after the rule was shown"}: ${drafted.reason}`, MAX_WHY),
-            change: drafted.change, ...(drafted.replaces ? { replaces: drafted.replaces } : {}),
-            origin: "session", evidence: { sessions: 1, correction }, topics: [hit.id],
-          },
-        })
-        outcome = card ? `showed a ${drafted.change} card for a shown team rule` : "the proposal for this team rule was dismissed"
-        return
+    // The check's early exits leave this function; `outcome` says what it decided.
+    await (async () => {
+      const state = await RulesStore.read(input.root)
+      if (!learningEnabled(input.learn, state)) return
+      const processed = new Set(state.processed_signals)
+      // Read once per check: the recurrence path below uses the same signals.
+      const all = await readSignals(input.root, Playbook.DEFAULT_NAME)
+      const fresh = all.filter((signal) =>
+        signal.kind === "user_correction" && signal.sessionID === input.sessionID && !processed.has(signal.id))
+      if (!fresh.length) return
+      // Nothing attached would show a card (`altimate-code run`, ACP, a plugin): the corrections are left unprocessed,
+      // so a later turn of this session with a card client attached proposes them.
+      if (!input.persist && !RuleProposal.rendererAttached(input.directory)) {
+        outcome = "no client that shows cards is attached; corrections kept for a later check"
+        return RulesTelemetry.skipped(input.sessionID, undefined, "no_renderer")
       }
-      // At most one drafting call per turn: the drafter found nothing to propose about the shown rule's subject.
-      return RulesTelemetry.skipped(input.sessionID, "shown_rule", "no_draft")
-    }
+      // One card at a time per session: an explicit "remember" may already have shown one for this turn. A stored proposal
+      // takes no place on a screen, so it does not hold the session's later corrections back.
+      if (!input.persist && RuleProposal.list(input.directory, input.sessionID).length)
+        return RulesTelemetry.skipped(input.sessionID, undefined, "card_open")
+      // No room for another stored proposal: no drafting call that could not be kept. The corrections wait for room.
+      if (input.persist && !(await RuleProposal.storedRoom(input.root))) {
+        outcome = "not stored: too many proposals are waiting; corrections kept for a later check"
+        return RulesTelemetry.skipped(input.sessionID, undefined, "stored_full")
+      }
+      // Marked processed once the check completes; a failed check is retried after the next turn.
+      checked = fresh.map((signal) => signal.id)
+      // The model call takes a while: if the client that shows cards went away meanwhile, the card would not be seen,
+      // so the corrections are left for a later check instead.
+      const stillShown = (trigger: "shown_rule" | "recurrence") => {
+        if (input.persist || RuleProposal.rendererAttached(input.directory)) return true
+        checked = []
+        outcome = "the client that shows cards went away during the check; corrections kept for a later check"
+        RulesTelemetry.skipped(input.sessionID, trigger, "no_renderer")
+        return false
+      }
+      // A stored proposal that could not be stored (too many waiting, the account or workspace changed while it was
+      // drafted, or the write failed) leaves its corrections unchecked, so they are proposed once that clears.
+      let notStored: RuleProposal.NotStored | undefined
+      const keepIfNotStored = { scope: state.scope, onNotStored: (reason: RuleProposal.NotStored) => void (notStored = reason) }
+      const unstored = () => {
+        if (!notStored) return false
+        checked = []
+        outcome = NOT_STORED[notStored]
+        return true
+      }
+      const newest = fresh[fresh.length - 1]
+      const correction = { excerpt: excerpt(newest.text), at: newest.correctedAt ?? newest.at }
 
-    // (a) The same topic corrected in 2 or more sessions, with no rule covering it. From the corrections themselves:
-    // a project with no approved rules yet has no delivery snapshots, and must still be able to get its first rule.
-    const topics = unmatchedCorrectionTopics(all, await approvedLessons(input.root))
-    const freshIds = new Set(fresh.map((signal) => signal.id))
-    const candidates = topics.filter((t) => t.sessions >= RECURRENCE_SESSIONS && t.signal_ids.some((id) => freshIds.has(id)))
-    const topic = candidates.find((t) => !RulesStore.dismissed(state, t.identifier))
-    if (!topic) {
-      if (!hit) outcome = "no team rule shown on this subject and no topic corrected in 2+ sessions"
-      return RulesTelemetry.skipped(input.sessionID, "recurrence", candidates.length ? "topic_dismissed" : "no_topic")
-    }
-    const backing = all.filter((signal) => topic.signal_ids.includes(signal.id))
-    const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, trigger: "recurrence", signals: backing, state, addOnly: true, note })
-    if (!drafted || drafted === "covered" || drafted.change !== "add")
-      return RulesTelemetry.skipped(input.sessionID, "recurrence", drafted === "covered" ? "covered" : "no_draft")
-    if (!stillShown("recurrence")) return
-    const card = await RuleProposal.ask({
-      sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "recurrence",
-      draft: {
-        text: drafted.text,
-        applies_to: appliesTo(backing.map((signal) => signal.text)),
-        why: clip(`Corrected in ${topic.sessions} sessions: ${drafted.reason}`, MAX_WHY),
-        change: "add", origin: "session",
-        evidence: { sessions: topic.sessions, correction },
-        topics: [topic.identifier],
-      },
-    })
-    outcome = card ? `showed an add card for topic ${topic.identifier}` : `topic ${topic.identifier} was dismissed`
+      // (c) A team rule shown in this session before the correction, on the same subject: propose changing it.
+      // A loose word-overlap filter picks the candidate; the drafter decides (HELPFUL = the rule already says it).
+      const snapshot = await readShownSnapshot(input.root, input.sessionID)
+      const correctedAt = Date.parse(newest.correctedAt ?? newest.at)
+      const shownIds = new Set((snapshot?.shown ?? [])
+        .filter((entry) => entry.name === RulesStore.WORKSPACE_RULES_STORE && !(Date.parse(entry.at) >= correctedAt))
+        .map((entry) => entry.id))
+      const said = words(fresh.map((signal) => signal.text).join(" "))
+      const hit = state.rules
+        .map((rule) => ({ id: RulesStore.lessonId(rule.rule_key), overlap: [...words(rule.text)].filter((w) => said.has(w)).length }))
+        .filter((rule) => shownIds.has(rule.id) && rule.overlap >= EDIT_OVERLAP && !RulesStore.dismissed(state, rule.id))
+        .sort((a, b) => b.overlap - a.overlap)[0]
+      log.info("rule edit candidate", { session: input.sessionID, hit: hit?.id, overlap: hit?.overlap, shown: shownIds.size })
+      if (hit) {
+        const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, trigger: "shown_rule", signals: fresh, state, target: hit.id, note })
+        // The shown rule already says it: no card, and no second drafting call for recurrence.
+        if (drafted === "covered") return RulesTelemetry.skipped(input.sessionID, "shown_rule", "covered")
+        if (drafted) {
+          if (!stillShown("shown_rule")) return
+          const card = await RuleProposal.ask({
+            sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "shown_rule", persist: input.persist,
+            ...(input.persist ? keepIfNotStored : {}),
+            draft: {
+              text: drafted.text,
+              // An edit or retire keeps the rule's scope; a new rule beside it takes the correction's.
+              applies_to: drafted.change === "add"
+                ? appliesTo(fresh.map((signal) => signal.text))
+                : state.rules.find((r) => RulesStore.lessonId(r.rule_key) === hit.id)?.applies_to ?? [],
+              why: clip(`${drafted.change === "add" ? "Corrected on the subject of a team rule" : "Corrected again after the rule was shown"}: ${drafted.reason}`, MAX_WHY),
+              change: drafted.change, ...(drafted.replaces ? { replaces: drafted.replaces } : {}),
+              origin: "session", evidence: { sessions: 1, correction }, topics: [hit.id],
+            },
+          })
+          if (unstored()) return
+          if (!card) outcome = "the proposal for this team rule was dismissed"
+          else if (input.persist) outcome = `stored a ${drafted.change} proposal for a shown team rule`
+          else outcome = `showed a ${drafted.change} card for a shown team rule`
+          return
+        }
+        // At most one drafting call per turn: the drafter found nothing to propose about the shown rule's subject.
+        return RulesTelemetry.skipped(input.sessionID, "shown_rule", "no_draft")
+      }
+
+      // (a) The same topic corrected in 2 or more sessions, with no rule covering it. From the corrections themselves:
+      // a project with no approved rules yet has no delivery snapshots, and must still be able to get its first rule.
+      const topics = unmatchedCorrectionTopics(all, await approvedLessons(input.root))
+      const freshIds = new Set(fresh.map((signal) => signal.id))
+      const candidates = topics.filter((t) => t.sessions >= RECURRENCE_SESSIONS && t.signal_ids.some((id) => freshIds.has(id)))
+      const topic = candidates.find((t) => !RulesStore.dismissed(state, t.identifier))
+      if (!topic) {
+        if (!hit) outcome = "no team rule shown on this subject and no topic corrected in 2+ sessions"
+        return RulesTelemetry.skipped(input.sessionID, "recurrence", candidates.length ? "topic_dismissed" : "no_topic")
+      }
+      const backing = all.filter((signal) => topic.signal_ids.includes(signal.id))
+      const drafted = await draft({ deps: input.deps, sessionID: input.sessionID, trigger: "recurrence", signals: backing, state, addOnly: true, note })
+      if (!drafted || drafted === "covered" || drafted.change !== "add")
+        return RulesTelemetry.skipped(input.sessionID, "recurrence", drafted === "covered" ? "covered" : "no_draft")
+      if (!stillShown("recurrence")) return
+      const card = await RuleProposal.ask({
+        sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, trigger: "recurrence", persist: input.persist,
+        ...(input.persist ? keepIfNotStored : {}),
+        draft: {
+          text: drafted.text,
+          applies_to: appliesTo(backing.map((signal) => signal.text)),
+          why: clip(`Corrected in ${topic.sessions} sessions: ${drafted.reason}`, MAX_WHY),
+          change: "add", origin: "session",
+          evidence: { sessions: topic.sessions, correction },
+          topics: [topic.identifier],
+        },
+      })
+      if (unstored()) return
+      if (!card) outcome = `topic ${topic.identifier} was dismissed`
+      else outcome = `${input.persist ? "stored an add proposal" : "showed an add card"} for topic ${topic.identifier}`
+    })()
   } catch (error) {
     checked = []
     outcome = `failed: ${error instanceof Error ? error.message : String(error)}`
@@ -283,6 +319,7 @@ export async function afterTurn(input: {
       }).catch(() => {})
     }
   }
+  return outcome
 }
 
 /** "Remember this as a rule": a card right away, worded as the agent saved it. */
@@ -300,12 +337,19 @@ export async function explicit(input: {
   unanswered?: (text: string) => Promise<void>
   /** What to keep on disk while the card is open (`RuleProposal.ask`). */
   request?: import("./proposal").RequestRecord
+  /** No client shows cards: store the proposal for `learn proposals` (`RuleProposal.ask`). */
+  persist?: boolean
+  /** With `persist`: why nothing was stored (`RuleProposal.ask`). */
+  onNotStored?: (reason: RuleProposal.NotStored) => void
 }): Promise<
   | { status: "shown"; card: Awaited<ReturnType<typeof RuleProposal.ask>>; choose: boolean }
   | { status: "invalid"; reason: string; kind: "rule" | "ambiguous" }
   | { status: "memory"; cue: string }
 > {
   const text = input.text.replace(/\s+/g, " ").trim()
+  // The account and workspace this is asked in: a stored request is labelled only for them, even if they change before
+  // it is written.
+  const scope = input.persist ? (await RulesStore.read(input.root)).scope : undefined
   const own = input.said ? RuleClassify.classify(input.said) : { kind: "ambiguous" as const }
   const { kind, cue } = own.kind === "ambiguous" ? RuleClassify.classify(text) : own
   if (kind === "memory") return { status: "memory", cue: cue ?? "a fact or preference" }
@@ -322,6 +366,7 @@ export async function explicit(input: {
   // drafter decides whether the shown rule is the subject.
   const card = await RuleProposal.ask({
     sessionID: input.sessionID, root: input.root, directory: input.directory, learn: input.learn, unanswered: input.unanswered, request: input.request,
+    persist: input.persist, ...(input.persist ? { scope, onNotStored: input.onNotStored } : {}),
     draft: {
       text,
       applies_to: appliesTo([text, ...(last ? [last.text] : [])]),

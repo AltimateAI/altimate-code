@@ -394,7 +394,10 @@ export async function reflectSessionSignals(input: ReflectSessionInput): Promise
     await check()
     const { kind, text } = Signals.feedbackFromSignals(signals)
     // The CLI's explicit external bucket accepts user feedback as well as review and CI text.
-    const external = input.sessionID === Signals.EXTERNAL_SESSION || signals.every((s) => s.kind === "review" || s.kind === "ci")
+    // altimate_change start — workspace rules: a host agent's session has no transcript here either
+    const external = input.sessionID === Signals.EXTERNAL_SESSION || Signals.isHostSession(input.sessionID) ||
+      signals.every((s) => s.kind === "review" || s.kind === "ci")
+    // altimate_change end
     const load = input.loadSource ?? sourceFromSession
     const source = await load(input.sessionID).catch((e) => {
       if (external) return { prompts: [], calls: [] } as DigestSource
