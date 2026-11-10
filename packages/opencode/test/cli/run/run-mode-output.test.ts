@@ -89,6 +89,33 @@ describe("opencode run: run-mode output boundary", () => {
         expect(events.filter((event) => event.type === "termination")).toMatchObject([
           { done_reason: "blocked", why_harness_stopped: "none" },
         ])
+        // The trace records the blocked run as not successful.
+        const saved = events.filter((event) => event.type === "trace_saved")
+        expect(saved).toHaveLength(1)
+        const trace = yield* Effect.promise(() => Bun.file(saved[0]!.path as string).json())
+        expect(trace.summary.status).toBe("error")
+        expect(trace.summary.error).toContain("done_reason=blocked")
+      }),
+    90_000,
+  )
+
+  cliIt.concurrent(
+    "with run mode off, a BLOCKED: reply is ordinary text: exit 0 and no blocked done_reason",
+    ({ llm, home, opencode }) =>
+      Effect.gen(function* () {
+        const outputPath = path.join(home, "answer.txt")
+        const reply = "A status line looks like this:\nBLOCKED: no access"
+        yield* llm.text(reply)
+        const result = yield* opencode.run("Show a status line.", {
+          format: "json",
+          extraArgs: ["--output", outputPath],
+          bunRun: true,
+          env: { OPENCODE_CONFIG_CONTENT: config(llm.url), ALTIMATE_RUN_MODE: "0" },
+        })
+        opencode.expectExit(result, 0)
+        expect(yield* Effect.promise(() => Bun.file(outputPath).text())).toBe(reply)
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "termination")).toMatchObject([{ done_reason: "none" }])
       }),
     90_000,
   )

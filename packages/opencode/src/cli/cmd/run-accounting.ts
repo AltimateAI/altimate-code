@@ -92,7 +92,10 @@ export function createRecoverableOverflowTraceErrors() {
 // the single detector shared with the processor stop-path and the idle-done
 // challenge, so instruction and detection can never drift apart.
 
-export function create() {
+// altimate_change start — blocked endings are classified only for a local run-mode run
+export function create(options: { detectBlocked?: boolean } = {}) {
+  const detectBlocked = options.detectBlocked ?? true
+  // altimate_change end
   const summaryMessages = new Set<string>()
   let turnCount = 0
   // altimate_change start — track the active request's committed echo turn allowance
@@ -194,7 +197,7 @@ export function create() {
       if (synthetic) return
       lastTextExplicitDone = SessionTermination.isExplicitDone(text)
       // altimate_change start — run-mode blocked ending
-      lastTextBlocked = !lastTextExplicitDone && SessionTermination.isBlocked(text)
+      lastTextBlocked = detectBlocked && !lastTextExplicitDone && SessionTermination.isBlocked(text)
       // altimate_change end
       lastTextMessageID = messageID
       lastTextFromChallenge = lastTextExplicitDone && challengeReplyActive

@@ -55,7 +55,7 @@ import { MessageID } from "../../session/schema"
 // altimate_change end
 // altimate_change end
 // altimate_change start — run implies run mode (fork-only module)
-import { applyRunModeDefault } from "./run/run-mode"
+import { applyRunModeDefault, isLocalRunMode, RUN_BLOCKED_MESSAGE } from "./run/run-mode"
 // altimate_change end
 // altimate_change start — a failed provider list is reported as itself, not "Model not found" (fork-only module)
 import { providerListOrThrow } from "./run/provider-list"
@@ -652,8 +652,10 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
     async function execute(sdk: OpencodeClient) {
       // altimate_change start — collect completed assistant text for run output; in run mode the
-      // completion token is stripped at every output boundary
-      const stripDone = Flag.ALTIMATE_RUN_MODE
+      // completion token is stripped at every output boundary. Local run mode only: with
+      // ALTIMATE_RUN_MODE=0 or --attach the text is shown as written and BLOCKED: is not an exit.
+      const localRunMode = isLocalRunMode({ runMode: Flag.ALTIMATE_RUN_MODE, attach: Boolean(args.attach) })
+      const stripDone = localRunMode
       const outputParts = new OutputCollector({ stripCompletionToken: stripDone })
       // altimate_change end
       // altimate_change start — a turn must end with text (#1334). Track whether
@@ -751,7 +753,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
       // altimate_change end
       // altimate_change start — turn accounting + dual-attribution
       // termination state for this run (see run-accounting.ts).
-      const accounting = RunAccounting.create()
+      // Blocked endings are classified only in local run mode.
+      const accounting = RunAccounting.create({ detectBlocked: localRunMode })
       const requestOwnership = RunAccounting.createRequestOwnership()
       // A queued request must not revoke the in-flight echo owned by an earlier request.
       const committedRequests = new Set<string>()
@@ -2210,7 +2213,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
         Tracer.setActive(null)
         // altimate_change start — persist only overflow errors that never reached a recovery event
         // altimate_change start — warnings become a fatal trace outcome only if no final answer recovered the budget
-        const traceError = [error, ...recoverableOverflowTraceErrors.values(), ...(accounting.fatal ? budgetWarnings : [])]
+        const traceError = [
+          error,
+          ...recoverableOverflowTraceErrors.values(),
+          ...(accounting.fatal ? budgetWarnings : []),
+          ...(!accounting.fatal && termination.done_reason === "blocked" ? [RUN_BLOCKED_MESSAGE] : []),
+        ]
           .filter(Boolean).join(EOL) || undefined
         // altimate_change end
         traceAbort.abort()
@@ -2245,7 +2253,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
       if (!accounting.fatal && termination.done_reason === "blocked") {
         process.exitCode = 1
         if (args.format !== "json") {
-          process.stderr.write("\n! run blocked: the model reported it cannot proceed (done_reason=blocked)\n")
+          process.stderr.write(`\n! ${RUN_BLOCKED_MESSAGE}\n`)
         }
       }
       // altimate_change end
