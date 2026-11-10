@@ -751,6 +751,66 @@ export async function resolvePinnedBindingForRouting(
   return resolvePinnedBinding(directory, pin)
 }
 
+/** How long a turn waits for the pin's verdict before its rows go without a workspace. Past the
+ * validation TTL the verdict is a round trip, and the routing read later in the same turn joins that
+ * request, so giving up here costs routing nothing. Waiting out the request instead would make a
+ * failed validation run twice, once here and once for routing. */
+export const TURN_PIN_WAIT_MS = 3_000
+
+/** The workspace a turn's telemetry rows name: the pin when there is one, else the project's link
+ * from the local cache.
+ *
+ * The pin's verdict comes from `resolvePinnedBindingForRouting`, so a row and the turn's routing
+ * cannot disagree. Unpinned turns stay on the local cache read, which makes no network call. A pin
+ * that cannot be honoured in time names nothing, for the reason routing fails closed: falling
+ * through would credit the turn to a workspace the user did not pick. */
+export async function resolveTurnBinding(
+  directory: string,
+  waitMs = TURN_PIN_WAIT_MS,
+): Promise<CachedBinding | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<BindingOutcome>((done) => {
+    timer = setTimeout(() => done({ status: "unknown" }), waitMs)
+    timer.unref?.()
+  })
+  const pinned = await Promise.race([resolvePinnedBindingForRouting(directory), deadline]).finally(() =>
+    clearTimeout(timer),
+  )
+  if (pinned) return pinned.status === "bound" ? pinned.binding : null
+  return readLocalBinding(directory)
+}
+
+/** Each session's verdict for its current turn, from the first read in the turn until the loop
+ * starts. Bounded: a turn that fails before its loop leaves its entry until the session's next
+ * turn clears it. */
+const turnVerdicts = new Map<string, Promise<CachedBinding | null>>()
+const TURN_VERDICTS_MAX = 256
+
+/** The workspace a session's current turn names. The first read in a turn resolves it and every
+ * later read in the turn gets the same answer: the attachment reads in the user message and the
+ * loop's start. So a turn waits for the pin at most once, adds at most one validation request, and
+ * names one workspace on all its rows. */
+export function turnBinding(
+  sessionID: string,
+  directory: string,
+  waitMs = TURN_PIN_WAIT_MS,
+): Promise<CachedBinding | null> {
+  const known = turnVerdicts.get(sessionID)
+  if (known) return known
+  const verdict = resolveTurnBinding(directory, waitMs).catch(() => null)
+  turnVerdicts.set(sessionID, verdict)
+  if (turnVerdicts.size > TURN_VERDICTS_MAX) {
+    const oldest = turnVerdicts.keys().next()
+    if (!oldest.done) turnVerdicts.delete(oldest.value)
+  }
+  return verdict
+}
+
+/** Ends the session's turn for `turnBinding`: the next read resolves afresh. */
+export function endTurnBinding(sessionID: string): void {
+  turnVerdicts.delete(sessionID)
+}
+
 export async function resolveBindingOutcome(directory: string): Promise<BindingOutcome> {
   // altimate_change — the IDE extension's selection outranks whatever binding this project carries.
   // Checked before the local cache and before any server lookup: the whole point is that the panel,
