@@ -24,7 +24,8 @@ import { Log } from "@/altimate/util/log"
 import type { Binding, ProjectBindingLookup } from "./api-client"
 import type { SeedOutcome } from "./memory-backfill"
 // altimate_change — the IDE extension's workspace pin; see ./pin.ts
-import { readPinLogged, resolveWithinRoot, type ValidPin } from "./pin"
+import { readPin, readPinLogged, resolveWithinRoot, type ValidPin } from "./pin"
+import { isEnabled as workspaceEnabled } from "./engine-seams"
 import { resolveProjectIdentifier } from "./detect"
 
 const CACHE_VERSION = 2
@@ -768,6 +769,9 @@ export async function resolveTurnBinding(
   directory: string,
   waitMs = TURN_PIN_WAIT_MS,
 ): Promise<CachedBinding | null> {
+  // With the workspace kill switch on, nothing else in the session reads the pin, so the turn sends
+  // no validation request and waits for none. Its rows read the link, as they do on `main`.
+  if (!workspaceEnabled()) return readLocalBinding(directory)
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<BindingOutcome>((done) => {
     timer = setTimeout(() => done({ status: "unknown" }), waitMs)

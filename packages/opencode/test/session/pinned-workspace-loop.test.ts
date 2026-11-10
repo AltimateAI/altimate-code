@@ -142,9 +142,13 @@ let restore: (() => void)[] = []
 let stateHome = ""
 const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME
 let inheritedPin: Record<string, string | undefined> = {}
+// The suite's preload turns the workspace feature off. With it off the turn never reads the pin, so
+// these tests turn it on, and the kill-switch test turns it back off.
+const originalKillSwitch = process.env.ALTIMATE_DISABLE_WORKSPACE
 
 beforeEach(() => {
   rows = []
+  delete process.env.ALTIMATE_DISABLE_WORKSPACE
   // Cleared, so a pin in the runner's own environment can't decide the unpinned case; restored after.
   inheritedPin = Object.fromEntries(PIN_VARS.map((name) => [name, process.env[name]]))
   for (const name of PIN_VARS) delete process.env[name]
@@ -166,6 +170,8 @@ beforeEach(() => {
 
 afterEach(() => {
   for (const undo of restore) undo()
+  if (originalKillSwitch === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  else process.env.ALTIMATE_DISABLE_WORKSPACE = originalKillSwitch
   for (const name of PIN_VARS) {
     const value = inheritedPin[name]
     if (value === undefined) delete process.env[name]

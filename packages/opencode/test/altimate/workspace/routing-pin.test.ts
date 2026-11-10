@@ -218,6 +218,21 @@ describe("resolveTurnBinding", () => {
     expect((await routing)?.status).toBe("bound")
     expect(listCalls).toBe(1)
   })
+
+  test("with the workspace kill switch on, the pin is neither validated nor waited for: the link names the turn", async () => {
+    await seedLocalLink(7, "project-link")
+    // A validation that never answers: waiting on it would take the full turn wait.
+    ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = () => {
+      listCalls += 1
+      return new Promise(() => {})
+    }
+    setPin()
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    const started = Date.now()
+    expect((await resolveTurnBinding(ROOT))?.datamateId).toBe(7)
+    expect(Date.now() - started).toBeLessThan(1_000)
+    expect(listCalls).toBe(0)
+  })
 })
 
 describe("turnBinding", () => {
