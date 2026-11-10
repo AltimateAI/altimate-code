@@ -1,11 +1,12 @@
 import type { DBTProjectIntegrationAdapter } from "@altimateai/dbt-integration"
 import { execDbtLs } from "../dbt-cli"
+import { staleManifestNote } from "../stale-manifest"
 
 export async function children(adapter: DBTProjectIntegrationAdapter, args: string[]) {
   const model = flag(args, "model")
   if (!model) return { error: "Missing --model" }
   try {
-    return await adapter.getChildrenModels({ table: model })
+    return fromManifest(await adapter.getChildrenModels({ table: model }))
   } catch (e) {
     // nodeMetaMap/graphMetaMap errors are specific to the library's manifest parsing.
     // Also catch TypeError for property-access failures on undefined nodes.
@@ -23,7 +24,7 @@ export async function parents(adapter: DBTProjectIntegrationAdapter, args: strin
   const model = flag(args, "model")
   if (!model) return { error: "Missing --model" }
   try {
-    return await adapter.getParentModels({ table: model })
+    return fromManifest(await adapter.getParentModels({ table: model }))
   } catch (e) {
     if (
       e instanceof TypeError ||
@@ -33,6 +34,12 @@ export async function parents(adapter: DBTProjectIntegrationAdapter, args: strin
     }
     throw e
   }
+}
+
+// The note comes first: a long answer can be cut off on its way to the reader.
+function fromManifest<T>(models: T[]) {
+  const stale_manifest = staleManifestNote()
+  return stale_manifest ? { stale_manifest, models } : models
 }
 
 function flag(args: string[], name: string): string | undefined {
