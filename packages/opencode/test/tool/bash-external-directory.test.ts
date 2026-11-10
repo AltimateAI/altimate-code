@@ -241,6 +241,9 @@ async function v2fixture() {
   return { outside, project }
 }
 
+// A top-level name that does not exist, so a missing first path segment is exercised.
+const MISSING_TOP = `altimate-guard-missing-${Math.random().toString(36).slice(2)}`
+
 // Files the refused commands would have created outside the project.
 async function leaked(outside: string, project: string) {
   const parent = path.dirname(project)
@@ -299,6 +302,32 @@ describe("tool.bash external_directory: deny (review cases)", () => {
     ["input redirection", (o: string) => `cat < ${o}/s.txt`, undefined],
     ["read-write redirection", (o: string) => `cat <> ${o}/s.txt`, undefined],
     ["quoted path with spaces", (o: string) => `cat "${o}/dir with space/s.txt"`, undefined],
+    // paths that do not exist yet are still outside the project
+    ["touch a missing file", (o: string) => `touch ${o}/w`, undefined],
+    ["touch a missing top-level file", () => `touch /${MISSING_TOP}`, undefined],
+    ["mkdir a missing top-level directory", () => `mkdir /${MISSING_TOP}`, undefined],
+    ["mkdir -p under an existing directory", (o: string) => `mkdir -p ${o}/w/x/y`, undefined],
+    ["mkdir -p under a missing top-level directory", () => `mkdir -p /${MISSING_TOP}/x/y`, undefined],
+    // after a cd that may fail, `;`, `||` and newline continuations can still run in the old directory
+    ["read after a failing cd and ;", (o: string) => `cd missing; head ../${path.basename(o)}/s.txt`, undefined],
+    ["read after a failing cd and ||", (o: string) => `cd missing || head ../${path.basename(o)}/s.txt`, undefined],
+    ["read after a failing cd and newline", (o: string) => `cd missing\nhead ../${path.basename(o)}/s.txt`, undefined],
+    [
+      "read after a failing cd and ; in a group",
+      (o: string) => `{ cd missing; head ../${path.basename(o)}/s.txt; }`,
+      undefined,
+    ],
+    [
+      "read after a failing cd and ; in a subshell",
+      (o: string) => `(cd missing; head ../${path.basename(o)}/s.txt)`,
+      undefined,
+    ],
+    [
+      "write after a failing cd in an && chain then ;",
+      (o: string, p: string) => `true && cd missing; echo x > ../${path.basename(p)}-marker`,
+      undefined,
+    ],
+    ["read after a failing pushd and ;", (o: string) => `pushd missing; head ../${path.basename(o)}/s.txt`, undefined],
   ])("refuses %s", async (_name, command, workdir) => {
     const { outside, project } = await v2fixture()
     await using _outside = outside
@@ -350,6 +379,9 @@ describe("tool.bash external_directory: deny (review cases)", () => {
         ["for f in inside.txt; do head -c 3 $f; done", "ins"],
         ["git log --format=%H/%s -n 1 || true", undefined],
         ["echo https://example.com/a/b", "https://example.com/a/b"],
+        // text whose first segment does not exist names no real location
+        ["echo foo/bar", "foo/bar"],
+        [`echo /${MISSING_TOP}/sub`, `/${MISSING_TOP}/sub`],
       ] as const) {
         const result = await bash.execute({ command, description: "Stay inside" }, ctx)
         if (expected !== undefined) expect([command, result.output.trim()]).toEqual([command, expected])

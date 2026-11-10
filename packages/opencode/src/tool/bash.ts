@@ -304,6 +304,8 @@ function assignmentValues(value: Node | null): string[] {
 
 interface GuardScan {
   candidates: Set<string>
+  // Operands of `mkdir`, which creates missing parents with `-p`.
+  creates: Set<string>
   refusals: Set<string>
   stack: string[][]
   depth: number
@@ -318,9 +320,12 @@ interface Cwds {
 const union = (...lists: string[][]) => [...new Set(lists.flat())].slice(0, MAX_TRACKED_DIRECTORIES)
 const same = (cwds: string[]): Cwds => ({ ok: cwds, any: cwds })
 
-function addCandidate(scan: GuardScan, cwds: string[], value: string) {
+function addCandidate(scan: GuardScan, cwds: string[], value: string, created = false) {
   const target = expandHome(value)
-  for (const cwd of cwds) scan.candidates.add(path.resolve(cwd, target))
+  for (const cwd of cwds) {
+    scan.candidates.add(path.resolve(cwd, target))
+    if (created) scan.creates.add(path.resolve(cwd, target))
+  }
 }
 
 // Walk the script in execution order, tracking the directories each command can run in.
@@ -350,6 +355,8 @@ function scanNode(node: Node | null, cwds: string[], scan: GuardScan): Cwds {
       return scanRedirected(body, redirects, cwds, scan)
     }
     case "list": {
+      // The parser builds `list` only for `&&` and `||`; `;`, `&` and newline-separated
+      // commands are siblings scanned by scanSequence, which keeps every directory possible.
       const [left, right] = node.namedChildren
       const or = node.children.some((child) => child?.type === "||")
       const l = scanNode(left, cwds, scan)
@@ -541,7 +548,7 @@ function scanCommand(node: Node, cwds: string[], scan: GuardScan): Cwds {
     for (const value of argumentValues(literal.text)) {
       // A wrapper's system-binary argument (`nohup /usr/bin/true`) is not an escape.
       if (wrapped && path.isAbsolute(value) && SYSTEM_BIN_DIRS.has(path.dirname(value))) continue
-      addCandidate(scan, cwds, value)
+      addCandidate(scan, cwds, value, base === "mkdir")
     }
   }
   return same(cwds)
@@ -549,16 +556,17 @@ function scanCommand(node: Node, cwds: string[], scan: GuardScan): Cwds {
 
 // Literal path candidates a command names, resolved against the directory each part runs in.
 export function commandPathCandidates(root: Node, cwd: string, parse: (text: string) => Node | undefined) {
-  const scan: GuardScan = { candidates: new Set(), refusals: new Set(), stack: [], depth: 0, parse }
+  const scan: GuardScan = { candidates: new Set(), creates: new Set(), refusals: new Set(), stack: [], depth: 0, parse }
   scanNode(root, [cwd], scan)
   return {
     candidates: [...scan.candidates].filter((target) => !isDevice(target)),
+    creates: scan.creates,
     refusals: [...scan.refusals],
   }
 }
 
 // Out-of-project locations a command names, with whether each exists yet.
-async function externalCommandPaths(candidates: string[], abort: AbortSignal) {
+async function externalCommandPaths(candidates: string[], creates: Set<string>, abort: AbortSignal) {
   if (candidates.length > MAX_GUARD_CANDIDATES)
     throw new Error(
       `external_directory is denied: this command names more than ${MAX_GUARD_CANDIDATES} paths to check. Split it into smaller commands.`,
@@ -568,10 +576,11 @@ async function externalCommandPaths(candidates: string[], abort: AbortSignal) {
     abort.throwIfAborted()
     const real = await realpathThroughParents(target)
     if (!real || isDevice(real)) continue
-    // Text whose first segment does not exist (an awk or sed program such as `/x/ {print}`)
-    // names no real location.
+    // Text below a top-level entry that does not exist (`/api/v1`, a regex such as `/x/y/`) names
+    // no real location: nothing but `mkdir -p` can create it. A missing top-level entry itself
+    // (`touch /new`) can be created, so it stays a candidate, as does every `mkdir` operand.
     const first = firstSegmentPath(real)
-    if (first && !(await fs.stat(first).catch(() => undefined))) continue
+    if (first && first !== real && !creates.has(target) && !(await fs.stat(first).catch(() => undefined))) continue
     if (Instance.containsPath(real)) continue
     const stat = await fs.stat(real).catch(() => undefined)
     found.push({ path: real, dir: stat?.isDirectory() ? real : path.dirname(real), exists: !!stat })
@@ -845,13 +854,13 @@ export const BashTool = Tool.define("bash", async () => {
         // operand check's directories (which keep pre-`cd` directories as aliases) are replaced.
         directories.clear()
         const p = await parser()
-        const { candidates, refusals } = commandPathCandidates(
+        const { candidates, creates, refusals } = commandPathCandidates(
           tree.rootNode,
           cwd,
           (text) => p.parse(text)?.rootNode ?? undefined,
         )
         const denied = new Set<string>(refusals)
-        for (const item of await externalCommandPaths(candidates, ctx.abort)) {
+        for (const item of await externalCommandPaths(candidates, creates, ctx.abort)) {
           externalPaths.add(item.path)
           // Paths here are symlink-resolved, so rules are matched with their resolved spelling too.
           // A directory that does not exist yet is also matched as itself (`ls <allowed-dir>`).
