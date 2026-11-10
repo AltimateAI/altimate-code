@@ -436,6 +436,10 @@ describe("the workspace API, by path", () => {
     const refused = await RulesSync.push(root, ready())
     expect(refused.queued).toBe(0)
     expect(refused.sent[0]).toMatchObject({ status: "rejected", error: "bad" })
+    // A refusal with no message still records an error: an outcome without one reads as sent.
+    await RulesSync.enqueue(root, item("refused quietly"))
+    answer = () => Response.json({ detail: { code: "invalid", message: "" } }, { status: 422 })
+    expect((await RulesSync.push(root, ready())).sent[0]).toMatchObject({ status: "rejected", error: "invalid" })
   })
 
   test("one invalid rule in a pull is skipped, not a failed pull", async () => {

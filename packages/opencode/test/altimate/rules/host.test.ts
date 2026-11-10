@@ -21,6 +21,7 @@ import { disposeAllInstances, tmpdir } from "../../fixture/fixture"
 import { withLearnLock } from "../../../src/altimate/learn/lock"
 import { RulesService } from "../../../src/altimate/rules/service"
 import { RulesSync } from "../../../src/altimate/rules/sync"
+import { RulesTelemetry } from "../../../src/altimate/rules/telemetry"
 
 /** The digest of the credential signed in, in these tests. */
 const ME = "digest-of-me"
@@ -210,6 +211,33 @@ describe("stored proposals", () => {
       enqueue.mockRestore()
     }
     expect((await RulesStore.read(root)).proposals[0].claim).toEqual(newer)
+  })
+
+  test("an edit whose claim was taken over meanwhile is not reported as made", async () => {
+    const root = await linkedRoot()
+    const card = (await RuleProposal.ask({ sessionID: "claude:e", root, directory: root, learn, draft: draft("Alias every joined table."), persist: true }))!
+    const newer = { pid: process.ppid, at: new Date().toISOString() }
+    // Once this reply's edit is made, and before its write-back, another process takes the proposal over.
+    const update = RulesStore.update
+    let armed = false
+    const answered = spyOn(RulesTelemetry, "answered").mockImplementation(() => void (armed = true))
+    const updates = spyOn(RulesStore, "update").mockImplementation(async (...args: Parameters<typeof update>) => {
+      if (armed) {
+        armed = false
+        await update(root, (s) => { s.proposals[0].claim = newer })
+      }
+      return update(...args)
+    })
+    try {
+      expect(await RuleProposal.replyStored({ root, directory: root, learn, id: card.id }, { action: "edit", text: "Alias every joined table in marts." }))
+        .toMatchObject({ ok: false, code: "busy" })
+    } finally {
+      answered.mockRestore()
+      updates.mockRestore()
+    }
+    const [stored] = (await RulesStore.read(root)).proposals
+    expect(stored.claim).toEqual(newer)
+    expect(stored.card.text).toBe("Alias every joined table.")
   })
 
   test("a reply that died after acting leaves the proposal answerable again, and the second answer does not queue it twice", async () => {
@@ -850,6 +878,8 @@ describe("host session: checks, transcripts and stored answers", () => {
     ["Remember this as a team rule:\nAlways use CTEs in staging models.", "Always use CTEs in staging models."],
     ["don't forget, team rule: never select star in marts", "never select star in marts"],
     ["save as a rule - prefix seeds with seed_", "prefix seeds with seed_"],
+    ["Can you remember this as a team rule: always alias joined tables", "always alias joined tables"],
+    ["Could you save this as a rule: quote reserved words", "quote reserved words"],
   ])("a team-rule request becomes a proposal: %s", async (text, rule) => {
     const root = await linkedRoot()
     expect(await RulesHost.recordCorrection({ root, directory: root, learn, session: "claude:tr", text })).toBe("proposed")

@@ -232,8 +232,9 @@ function noticeLines(start: Start, ws: string): string[] {
  * "do you remember that rule, …?" or "remember this rule: …" is the conversation, not a team rule. The cue words are the
  * ones `RulesRemember` treats as asking to remember. The rule may start on the next line. */
 const REMEMBER = /\b(?:remember|don'?t forget|do not forget|keep in mind|note|save|from now on)\b,?(?:\s+(?:this|that|it))?\s+(?:as\s+(?:an?\s+)?(?:team\s+)?rule|(?:an?\s+)?team\s+rule)\b[ \t]*[:\u2013\u2014-]\s*(.+)/i
-/** A negation earlier in the cue's sentence ("I don't want you to remember this as a team rule: …"), or a question. */
-const NEGATED = /\b(?:do not|don'?t|never|not|no need to|without)\b|^\s*(?:do|did|can|could|would|will|should)\s+(?:you|we)\b/i
+/** A negation earlier in the cue's sentence ("I don't want you to remember this as a team rule: …"), or a question ("did
+ * you note that team rule - …?"). "Can you remember …" and "could you …" are polite requests, not questions. */
+const NEGATED = /\b(?:do not|don'?t|never|not|no need to|without)\b|^\s*(?:do|did)\s+(?:you|we)\b/i
 /** Shorter than this after the cue is not a rule ("remember?", "remember this"). */
 const MIN_REMEMBERED = 8
 

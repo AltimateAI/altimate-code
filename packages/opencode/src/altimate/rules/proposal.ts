@@ -603,12 +603,13 @@ async function answerStored(
     pending.delete(id)
   }
   const gone = result.ok ? result.closed : result.code === "not_open"
+  let takenOver = false
   const writeBack = () => RulesStore.update(root, (s) => {
     const found = s.proposals.find((p) => p.card.id === id)
     if (!found) return
     if (gone) return void (s.proposals = s.proposals.filter((p) => p !== found))
     // Taken over meanwhile (this reply ran past `CLAIM_STALE_MS`): the newer reply's claim and wording stand.
-    if (found.claim?.pid !== process.pid || found.claim.at !== claimedAt) return
+    if (found.claim?.pid !== process.pid || found.claim.at !== claimedAt) return void (takenOver = true)
     delete found.claim
     found.card = entry.card
     found.edits = entry.edits
@@ -616,6 +617,9 @@ async function answerStored(
   for (let attempt = 1; ; attempt++) {
     try {
       await writeBack()
+      // A new wording not saved was not made: the newer reply's stands.
+      if (takenOver && answer.action === "edit" && result.ok)
+        return { ok: false, code: "busy", error: "Not changed: this proposal was answered elsewhere meanwhile.", card: record.card }
       return result
     } catch (error) {
       log.warn("stored proposal not updated after its reply", { id, attempt, error })

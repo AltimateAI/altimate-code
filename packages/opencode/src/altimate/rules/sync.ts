@@ -350,7 +350,7 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
       // queued with its error, which the card, `/rules` and `learn status` show.
       if (error.kind === "rejected") {
         done.add(entry.id)
-        sent.push({ id: entry.id, text: entry.item.text, status: "rejected", error: error.message })
+        sent.push({ id: entry.id, text: entry.item.text, status: "rejected", error: error.message || error.code || "rejected" })
       } else failed.set(entry.id, error.message)
       continue
     }
