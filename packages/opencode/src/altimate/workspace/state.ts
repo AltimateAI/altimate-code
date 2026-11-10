@@ -461,6 +461,9 @@ export type BindingOutcome =
        * or rebound elsewhere. Absent when the server confirmed it inside the
        * revalidation window. */
       stale?: true
+      /** altimate_change — the credential the pin's verdict was reached under, set by the pin path, so a
+       * caller that keys on the tenant needn't read the credentials again after a switch. */
+      scope?: AccountKey
     }
   | {
       status: "unbound"
@@ -497,7 +500,8 @@ let pinNow: () => number = () => Date.now()
 /** Exposed for tests; production never calls either. */
 export function __resetPinValidation(clock?: () => number): void {
   pinValidation.clear()
-  // A request an earlier test started could otherwise settle after the reset and fill the memo.
+  // A caller after the reset starts its own request rather than joining one from before it. (A
+  // caller already awaiting that request still writes the memo when it answers.)
   pinValidationInFlight.clear()
   pinNow = clock ?? (() => Date.now())
 }
@@ -725,6 +729,7 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
       pinned: true,
     },
     ...(stale ? { stale: true as const } : {}),
+    scope: { tenant: creds.altimateInstanceName, apiUrl: creds.altimateUrl, account },
   }
 }
 
@@ -800,7 +805,7 @@ export async function resolveTurnBinding(
   )
   if (pinned) {
     if (pinned.status !== "bound") return null
-    return { ...pinned.binding, scope: (await accountKey()) ?? undefined }
+    return { ...pinned.binding, scope: pinned.scope }
   }
   return linkedTurnBinding(directory)
 }

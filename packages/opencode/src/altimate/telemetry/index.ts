@@ -1557,8 +1557,8 @@ export namespace Telemetry {
         type: "first_prompt_sent"
         /** altimate_change — the turn's workspace, named by the emitter */
         workspace_id?: number
-        /** altimate_change — which rule sent the row: `onboarding` when the session is an onboarding one,
-         *  bound or not, else `workspace`. Rows from older clients have none and are onboarding rows. */
+        /** altimate_change — which rule sent the row: `onboarding` for an onboarding session's first typed
+         *  prompt, bound or not, else `workspace`. Rows from older clients have none and are onboarding rows. */
         origin: "onboarding" | "workspace"
         timestamp: number
         session_id: string
