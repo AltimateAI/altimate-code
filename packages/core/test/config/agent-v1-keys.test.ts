@@ -28,10 +28,50 @@ describe("ConfigAgentV1 top-level keys", () => {
   })
 
   test("the known-key list is the schema's own", () => {
-    for (const key of ["name", "model", "variant", "prompt", "steps", "maxSteps", "options", "permission", "tools"]) {
-      expect(ConfigAgentV1.knownKeys).toContain(key)
-    }
+    expect([...ConfigAgentV1.knownKeys].sort()).toEqual(
+      [
+        "name",
+        "model",
+        "variant",
+        "prompt",
+        "description",
+        "temperature",
+        "top_p",
+        "mode",
+        "hidden",
+        "color",
+        "steps",
+        "maxSteps",
+        "options",
+        "permission",
+        "disable",
+        "tools",
+      ].sort(),
+    )
     expect(ConfigAgentV1.unknownKeys(undefined)).toEqual([])
     expect(ConfigAgentV1.unknownKeys(["budget"])).toEqual([])
+  })
+
+  test("every field the schema interprets is decoded as itself, not folded into options", () => {
+    const raw = {
+      name: "reviewer",
+      model: "test/model",
+      variant: "high",
+      prompt: "Review the change.",
+      description: "Reviews changes",
+      temperature: 0.2,
+      top_p: 0.9,
+      mode: "subagent",
+      hidden: true,
+      color: "#FF5733",
+      steps: 3,
+      maxSteps: 4,
+      options: { audience: "executive" },
+      permission: { edit: "deny" },
+      disable: false,
+      tools: { bash: false },
+    }
+    expect(ConfigAgentV1.unknownKeys(raw)).toEqual([])
+    expect(decode(raw).options).toEqual({ audience: "executive" })
   })
 })
