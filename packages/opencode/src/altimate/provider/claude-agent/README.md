@@ -44,7 +44,9 @@ Altimate-only integration (replaces upstream `index.ts`, `provider.ts`, `aisdk.t
 
 - `provider/provider.ts` — bundled SDK factory, provider database entry, `haiku` as small model.
 - `provider/transform.ts` — `variants()` returns the effort levels Claude Code reported.
-- `session/llm.ts` — request kind and session headers, agent role and instructions as options, no default output cap.
+- `session/llm.ts` — request kind and session headers, agent role and instructions as options, no default output cap
+  (a plugin's explicit `maxOutputTokens` still applies).
+- `session/message-v2.ts` — stopped Claude Agent tool calls carry `toolAborted` (see `tools/aborted.ts`).
 - `plugin/index.ts` — registers `ClaudeAgentPlugin`.
 - `packages/tui/src/component/dialog-provider.tsx` — listed under Popular with a subscription hint.
 
@@ -58,8 +60,13 @@ Altimate-only integration (replaces upstream `index.ts`, `provider.ts`, `aisdk.t
 - **Instructions:** taken from `session/llm.ts` input (`input.system` and the user's system text) rather than
   keyed instruction metadata. The per-turn environment block stays out, as upstream leaves out
   `core/date` and `core/environment`.
-- **Tool errors:** upstream's `context` hook flags tool errors in provider metadata; the shipped runtime
-  already sends failed tools as `error-text` results, which `tools/result.ts` marks as errors.
+- **Tool errors and stops:** upstream's `context` hook flags tool errors and stops in provider metadata. The
+  shipped runtime already sends failed tools as `error-text` results, which `tools/result.ts` marks as errors.
+  Stopped calls get `toolAborted` from history conversion, so the waiting Claude turn is interrupted.
+- **Generate calls:** upstream only streams. `doGenerate` collects the streamed reply, because the shipped CLI
+  calls `generateObject`/`generateText` (agent creation, learning reflection). A JSON request is asked for in
+  the prompt, since Claude Code has no structured-output mode, and a markdown fence around it is removed.
+- **Per-project state:** each directory gets its own session registry, connection settings and login status.
 - **MCP server:** built on `@modelcontextprotocol/sdk` 1.x (already bundled) instead of `@modelcontextprotocol/server` 2.x.
 - **Connection settings:** `headerTimeout` and `chunkTimeout` are consumed by the provider loader before
   the factory runs, so they do not reach Claude Code.

@@ -33,39 +33,58 @@ export function matches(model: { readonly api: { readonly npm: string } }) {
 }
 
 const io = ClaudeIO.real
-// Lives outside any instance, so an instance reload adopts the running `claude` processes.
-const registry = ClaudeSessions.registry()
+// One registry per directory, outside any instance, so an instance reload of the same directory adopts its
+// running `claude` processes, and disposing one project never waits on another project's owner count.
+const registries = new Map<string, ReturnType<typeof ClaudeSessions.registry>>()
 
-let status: Promise<ClaudeStatus.Interface> | undefined
-let connection: Record<string, string> = {}
-
-function baseURL() {
-  return connection.ANTHROPIC_BASE_URL ?? io.env().ANTHROPIC_BASE_URL
+function registryFor(directory: string) {
+  let registry = registries.get(directory)
+  if (!registry) {
+    registry = ClaudeSessions.registry()
+    registries.set(directory, registry)
+  }
+  return registry
 }
 
 // A chat's own process reports the version, login and models it found, which keeps the saved model
 // list current without a separate check.
-async function saveCatalog(state: ClaudeStatus.State) {
+async function saveCatalog(state: ClaudeStatus.State, connection: Readonly<Record<string, string>>) {
   if (state.type !== "ready") return
-  await ClaudeAgentCatalog.update(state.probe, baseURL()).catch((error) =>
+  const baseURL = connection.ANTHROPIC_BASE_URL ?? io.env().ANTHROPIC_BASE_URL
+  await ClaudeAgentCatalog.update(state.probe, baseURL).catch((error) =>
     log.warn("failed to save Claude Agent models", { error }),
   )
 }
 
-function getStatus() {
-  status ??= Effect.runPromise(ClaudeStatus.make(io, () => Effect.succeed(connection))).then(
-    (inner): ClaudeStatus.Interface => ({
+// Per instance: this project's connection settings, login status and registry attachment. Disposing the
+// instance closes the attachment, and its processes get the registry's handover window.
+const instance = Instance.state(
+  async () => {
+    const settings = { connection: {} as Record<string, string> }
+    const inner = await Effect.runPromise(ClaudeStatus.make(io, () => Effect.sync(() => settings.connection)))
+    const status: ClaudeStatus.Interface = {
       ...inner,
-      report: (next) => inner.report(next).pipe(Effect.andThen(Effect.promise(() => saveCatalog(next)))),
-    }),
-  )
-  return status
-}
+      report: (next) =>
+        inner.report(next).pipe(Effect.andThen(Effect.promise(() => saveCatalog(next, settings.connection)))),
+    }
+    const scope = Scope.makeUnsafe()
+    const sessions = await Effect.runPromise(
+      registryFor(Instance.directory)
+        .attach({ io, status, storage: ClaudeAgentStorage.sessions, directory: Instance.directory })
+        .pipe(Scope.provide(scope)),
+    )
+    return { settings, status, sessions, scope }
+  },
+  async (entry) => {
+    await Effect.runPromise(Scope.close(entry.scope, Exit.void))
+  },
+)
 
-// The connection settings from the provider's config (`settings.baseURL`, `headers`, ...), as
-// Claude Code environment variables. Used by the login check, which runs before any chat.
-export function configure(options: Readonly<Record<string, unknown>> | undefined) {
-  connection = ClaudeQueryOptions.connectionEnv({
+// The connection settings from this project's provider config (`settings.baseURL`, `headers`, ...), as
+// Claude Code environment variables. Used by the login check, which runs before any chat. Call within the instance.
+export async function configure(options: Readonly<Record<string, unknown>> | undefined) {
+  const { settings } = await instance()
+  settings.connection = ClaudeQueryOptions.connectionEnv({
     settings: options,
     headers: options?.headers as Record<string, string> | undefined,
     body: options?.body as Record<string, unknown> | undefined,
@@ -73,11 +92,12 @@ export function configure(options: Readonly<Record<string, unknown>> | undefined
 }
 
 // Runs `claude` without sending a prompt (no tokens are used) to read its version, login and models.
+// Call within the instance.
 export async function check(): Promise<ClaudeStatus.State> {
-  const current = await getStatus()
-  await Effect.runPromise(current.refresh())
-  const state = await Effect.runPromise(SubscriptionRef.get(current.state))
-  await saveCatalog(state)
+  const { status, settings } = await instance()
+  await Effect.runPromise(status.refresh())
+  const state = await Effect.runPromise(SubscriptionRef.get(status.state))
+  await saveCatalog(state, settings.connection)
   return state
 }
 
@@ -90,27 +110,10 @@ export function problem(state: ClaudeStatus.State): string | undefined {
   return undefined
 }
 
-// One registry attachment per instance. Disposing the instance closes it, and its processes get the
-// registry's handover window, so a reload of the same directory picks them up again.
-const attachment = Instance.state(
-  async () => {
-    const scope = Scope.makeUnsafe()
-    const sessions = await Effect.runPromise(
-      registry
-        .attach({ io, status: await getStatus(), storage: ClaudeAgentStorage.sessions, directory: Instance.directory })
-        .pipe(Scope.provide(scope)),
-    )
-    return { sessions, scope }
-  },
-  async (entry) => {
-    await Effect.runPromise(Scope.close(entry.scope, Exit.void))
-  },
-)
-
 // The session stopped running, so a Claude turn still waiting for tool results will not get them.
 // Call within the instance.
 export async function idle(sessionID: string) {
-  const { sessions } = await attachment()
+  const { sessions } = await instance()
   await Effect.runPromise(sessions.idle(sessionID))
 }
 
@@ -129,7 +132,7 @@ export function connectionEnv(options: Readonly<Record<string, any>>) {
 // provider's merged options. Mirrors upstream's `ClaudeAISDK.register` "sdk" hook.
 export function createSDK(options: Record<string, any>) {
   // Resolved here, inside the instance, because the model's stream runs from the AI SDK's callbacks.
-  const current = attachment()
+  const current = instance()
   // A failed attach surfaces from the chat that awaits it, not as an unhandled rejection.
   current.catch(() => {})
   const env = connectionEnv(options)

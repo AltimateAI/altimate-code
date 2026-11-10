@@ -1,10 +1,17 @@
 export * as ClaudeAgentLanguageModel from "./claude-agent-language-model"
 
 import type {
+  JSONSchema7,
   LanguageModelV3,
   LanguageModelV3CallOptions,
+  LanguageModelV3Content,
+  LanguageModelV3FinishReason,
   LanguageModelV3FunctionTool,
+  LanguageModelV3GenerateResult,
+  LanguageModelV3Prompt,
+  LanguageModelV3StreamPart,
   LanguageModelV3StreamResult,
+  LanguageModelV3Usage,
 } from "@ai-sdk/provider"
 import type { ClaudeSessions } from "../claude/sessions"
 import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk"
@@ -28,9 +35,65 @@ export class Model implements LanguageModelV3 {
     readonly connection: Readonly<Record<string, string>> = {},
   ) {}
 
-  async doGenerate(_options: LanguageModelV3CallOptions): Promise<never> {
-    throw new Error("Claude Agent models only support streaming")
+  // altimate_change start — upstream only streams. The shipped CLI also calls generateObject/generateText
+  // (agent creation, learning reflection), so a generate call collects the streamed reply. Claude Code has no
+  // structured-output mode, so a JSON request is asked for in the prompt and any markdown fence is removed.
+  async doGenerate(options: LanguageModelV3CallOptions): Promise<LanguageModelV3GenerateResult> {
+    const json = options.responseFormat?.type === "json" ? options.responseFormat : undefined
+    const prompt: LanguageModelV3Prompt = json
+      ? [{ role: "system", content: jsonInstruction(json.schema) }, ...options.prompt]
+      : options.prompt
+    const { stream } = await this.doStream({ ...options, prompt })
+    const content: LanguageModelV3Content[] = []
+    const open = new Map<string, { type: "text" | "reasoning"; text: string }>()
+    let finishReason: LanguageModelV3FinishReason = { unified: "other", raw: undefined }
+    let usage: LanguageModelV3Usage | undefined
+    let response: { id?: string; modelId?: string } = {}
+    for await (const part of stream as unknown as AsyncIterable<LanguageModelV3StreamPart>) {
+      switch (part.type) {
+        case "text-start":
+        case "reasoning-start":
+          open.set(part.id, { type: part.type === "text-start" ? "text" : "reasoning", text: "" })
+          break
+        case "text-delta":
+        case "reasoning-delta": {
+          const block = open.get(part.id)
+          if (block) block.text += part.delta
+          break
+        }
+        case "text-end":
+        case "reasoning-end": {
+          const block = open.get(part.id)
+          open.delete(part.id)
+          if (block) content.push({ type: block.type, text: block.text })
+          break
+        }
+        case "tool-call":
+          content.push({ type: "tool-call", toolCallId: part.toolCallId, toolName: part.toolName, input: part.input })
+          break
+        case "response-metadata":
+          response = { id: part.id, modelId: part.modelId }
+          break
+        case "finish":
+          finishReason = part.finishReason
+          usage = part.usage
+          break
+        case "error":
+          throw part.error
+      }
+    }
+    if (json) {
+      for (const part of content) if (part.type === "text") part.text = stripFence(part.text)
+    }
+    return {
+      content,
+      finishReason,
+      usage: usage ?? { inputTokens: {}, outputTokens: {} },
+      warnings: [],
+      response,
+    } as LanguageModelV3GenerateResult
   }
+  // altimate_change end
 
   async doStream(options: LanguageModelV3CallOptions): Promise<LanguageModelV3StreamResult> {
     const abort = new AbortController()
@@ -111,3 +174,15 @@ function parseEffort(value: unknown): EffortLevel | undefined {
   if (effort !== undefined) return effort
   throw new Error("Claude Agent effort must be low, medium, high, xhigh or max")
 }
+
+// altimate_change start — JSON output for generate calls (see doGenerate)
+function jsonInstruction(schema: JSONSchema7 | undefined) {
+  const shape = schema ? ` that matches this JSON schema:\n${JSON.stringify(schema)}` : ""
+  return `Respond with only a JSON value${shape}\nDo not wrap it in a markdown code fence or add any other text.`
+}
+
+function stripFence(text: string) {
+  const match = text.trim().match(/^```(?:json)?\s*\n([\s\S]*?)\n?```$/)
+  return match ? match[1]! : text
+}
+// altimate_change end

@@ -16,7 +16,7 @@ const RECHECK_LIMIT_MS = 5 * 60_000
 export async function ClaudeAgentPlugin(_input: PluginInput): Promise<Hooks> {
   return {
     config: async (config) => {
-      ClaudeAgent.configure(config.provider?.[ClaudeAgent.ID]?.options)
+      await ClaudeAgent.configure(config.provider?.[ClaudeAgent.ID]?.options)
     },
     event: async ({ event }) => {
       if (event.type !== "session.idle") return

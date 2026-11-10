@@ -249,16 +249,14 @@ export namespace LLM {
           : undefined,
         topP: input.agent.topP ?? ProviderTransform.topP(input.model),
         topK: ProviderTransform.topK(input.model),
+        // Claude Agent: without an explicit cap from a plugin, Claude Code picks its own output budget
         maxOutputTokens:
-          isCodex || provider.id.includes("github-copilot")
+          isCodex || provider.id.includes("github-copilot") || claudeAgent
             ? undefined
             : ProviderTransform.maxOutputTokens(input.model),
         options,
       },
     )
-    // altimate_change end
-    // altimate_change start — Claude Agent: without an explicit cap, Claude Code picks its own output budget
-    if (claudeAgent) params.maxOutputTokens = undefined
     // altimate_change end
 
     const { headers } = await Plugin.trigger(
