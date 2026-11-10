@@ -32,7 +32,7 @@ import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
 import path from "node:path"
-import { existsSync } from "node:fs" // altimate_change — ledger: drop snapshot-listed files that no longer exist
+import { stat } from "node:fs/promises" // altimate_change — ledger: drop snapshot-listed files that no longer exist
 import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 // altimate_change end
 // altimate_change start — replay cleanup uses server-side lesson delivery provenance.
@@ -611,6 +611,12 @@ export namespace SessionCompaction {
   const LEDGER_SNAPSHOT = "snapshot"
   const LEDGER_SNAPSHOT_PER_STEP = 5
   const LEDGER_SNAPSHOT_MAX = 15
+  // Collection keeps the newest LEDGER_SNAPSHOT_RETAIN snapshot-only paths, so
+  // a long generator or formatter session cannot grow the ledger without bound.
+  // Paths a write tool wrote are always kept: they corroborate carried claims.
+  const LEDGER_SNAPSHOT_RETAIN = 200
+  // At most this many existence checks per compaction; see `pruneMissing`.
+  const LEDGER_EXISTS_CHECK_MAX = 64
   // altimate_change end
   const LEDGER_DETAIL_MAX = 100
 
@@ -851,12 +857,14 @@ export namespace SessionCompaction {
   }
   // altimate_change start — `sawSnapshot`: some steps recorded snapshot diffs, so
   // their changes are in `writes`. `root`: the project root paths render against.
+  // `snapshotOmitted`: snapshot-only file changes dropped past the retention cap.
   export type Ledger = {
     writes: LedgerWrite[]
     calls: LedgerCall[]
     sawBash: boolean
     sawSnapshot: boolean
     root?: string
+    snapshotOmitted?: number
   }
   // altimate_change end
 
@@ -897,31 +905,103 @@ export namespace SessionCompaction {
     return (root ? path.resolve(root, normalized) : normalized).replaceAll("\\", "/")
   }
 
-  export function buildLedger(
+  // altimate_change start — existence checks are async (`fs.stat`) and bounded,
+  // so a session with many snapshot-listed files cannot stall the event loop.
+  type LedgerExists = (file: string) => boolean | Promise<boolean>
+  const fileExists: LedgerExists = (file) =>
+    stat(file).then(
+      () => true,
+      () => false,
+    )
+
+  /**
+   * Drop entries whose file is gone, checking only what the ledger can use:
+   * tool-attributed entries (rendered and used for carry corroboration), newest
+   * first, then snapshot entries in render order until each step's displayable
+   * paths (LEDGER_SNAPSHOT_PER_STEP) and the overall LEDGER_SNAPSHOT_MAX are
+   * confirmed. At most LEDGER_EXISTS_CHECK_MAX checks run; unchecked entries
+   * stay (beyond the displayable set they only feed the "… and N more" counts).
+   */
+  async function pruneMissing(writes: Map<string, LedgerWrite>, exists: LedgerExists): Promise<void> {
+    const ordered = [...writes.entries()].sort(([, a], [, b]) => b.mtime - a.mtime || a.path.localeCompare(b.path))
+    let budget = LEDGER_EXISTS_CHECK_MAX
+    const checked = new Set<string>()
+    const attributed = ordered
+      .filter(([, w]) => w.tool !== LEDGER_SNAPSHOT || w.toolWritten === true)
+      .slice(0, budget)
+      .map(([key]) => key)
+    budget -= attributed.length
+    const found = await Promise.all(attributed.map((key) => exists(key)))
+    attributed.forEach((key, i) => {
+      checked.add(key)
+      if (!found[i]) writes.delete(key)
+    })
+    const steps = new Map<number, string[]>()
+    for (const [key, w] of ordered) {
+      if (w.tool !== LEDGER_SNAPSHOT) continue
+      const group = steps.get(w.step ?? 0)
+      if (group) group.push(key)
+      else steps.set(w.step ?? 0, [key])
+    }
+    let shown = 0
+    for (const group of steps.values()) {
+      let kept = 0
+      for (const key of group) {
+        if (kept >= LEDGER_SNAPSHOT_PER_STEP || shown >= LEDGER_SNAPSHOT_MAX) break
+        if (!checked.has(key)) {
+          if (budget <= 0) return
+          budget--
+          checked.add(key)
+          if (!(await exists(key))) {
+            writes.delete(key)
+            continue
+          }
+        }
+        if (!writes.has(key)) continue
+        kept++
+        shown++
+      }
+      if (shown >= LEDGER_SNAPSHOT_MAX) return
+    }
+  }
+  // altimate_change end
+
+  export async function buildLedger(
     messages: MessageV2.WithParts[],
     root?: string,
     // altimate_change — injectable so unit tests need no real files
-    exists: (file: string) => boolean = existsSync,
-  ): Ledger {
+    exists: LedgerExists = fileExists,
+  ): Promise<Ledger> {
     const writes = new Map<string, LedgerWrite>()
     const calls: LedgerCall[] = []
     let sawBash = false
     // altimate_change start — snapshot diffs record every file a step changed,
     // however it was changed (bash redirects, scripts, `sed -i`), which edit-tool
-    // events alone miss.
+    // events alone miss. `evictable`: snapshot-only keys, oldest first, capped at
+    // LEDGER_SNAPSHOT_RETAIN during collection.
     let sawSnapshot = false
     let step = 0
+    const evictable = new Set<string>()
+    let snapshotOmitted = 0
     // altimate_change end
     for (const msg of messages) {
-      // altimate_change start — per-step state, reset at each step's patch part
+      // altimate_change start — per-step state, reset at each step-start and patch part
       let toolWritten = new Set<string>()
       let stepBash = false
       let lastEnd: number | undefined
       // altimate_change end
       for (const part of msg.parts) {
-        // altimate_change start — a patch part lists the files its step changed.
-        // Files a write/edit tool wrote in this step keep that attribution; files
-        // that no longer exist are swept after the loop.
+        // altimate_change start — a step-start opens a new step: drop the previous
+        // step's attribution state (a step's patch part follows its step-finish, so
+        // resetting at step-finish would lose it). A patch part lists the files its
+        // step changed. Files a write/edit tool wrote in this step keep that
+        // attribution; files that no longer exist are swept after the loop.
+        if (part.type === "step-start") {
+          toolWritten = new Set()
+          stepBash = false
+          lastEnd = undefined
+          continue
+        }
         if (part.type === "patch") {
           sawSnapshot = true
           step++
@@ -931,14 +1011,23 @@ export namespace SessionCompaction {
             const key = ledgerPathKey(file, root)
             if (toolWritten.has(key)) continue
             const prior = writes.get(key)
+            const attributed = prior !== undefined && (prior.tool !== LEDGER_SNAPSHOT || prior.toolWritten === true)
             writes.set(key, {
               path: file,
               mtime: at,
               tool: LEDGER_SNAPSHOT,
               step,
               shell: stepBash,
-              toolWritten: prior !== undefined && (prior.tool !== LEDGER_SNAPSHOT || prior.toolWritten === true),
+              toolWritten: attributed,
             })
+            evictable.delete(key)
+            if (attributed) continue
+            evictable.add(key)
+            if (evictable.size <= LEDGER_SNAPSHOT_RETAIN) continue
+            const oldest = evictable.values().next().value as string
+            evictable.delete(oldest)
+            writes.delete(oldest)
+            snapshotOmitted++
           }
           toolWritten = new Set()
           stepBash = false
@@ -965,6 +1054,7 @@ export namespace SessionCompaction {
           if (filePath) {
             writes.set(ledgerPathKey(filePath, root), { path: filePath, mtime: state.time.end, tool: part.tool })
             toolWritten.add(ledgerPathKey(filePath, root)) // altimate_change
+            evictable.delete(ledgerPathKey(filePath, root)) // altimate_change
           }
         }
         if (part.tool === "apply_patch") {
@@ -975,12 +1065,14 @@ export namespace SessionCompaction {
             // no longer exists as freshly written.
             if (f?.type === "delete") {
               if (source) writes.delete(ledgerPathKey(source, root))
+              if (source) evictable.delete(ledgerPathKey(source, root)) // altimate_change
               continue
             }
             // On a move, `filePath` is the SOURCE and `movePath` is where the
             // content actually landed; the ledger must name the destination or
             // it sends the continuing agent back to the path that was removed.
             if (typeof f?.movePath === "string" && source) writes.delete(ledgerPathKey(source, root))
+            if (typeof f?.movePath === "string" && source) evictable.delete(ledgerPathKey(source, root)) // altimate_change
             const target = typeof f?.movePath === "string" ? f.movePath : f?.filePath
             if (typeof target === "string") {
               writes.set(ledgerPathKey(target, root), {
@@ -989,6 +1081,7 @@ export namespace SessionCompaction {
                 tool: "apply_patch",
               })
               toolWritten.add(ledgerPathKey(target, root)) // altimate_change
+              evictable.delete(ledgerPathKey(target, root)) // altimate_change
             }
           }
         }
@@ -996,8 +1089,8 @@ export namespace SessionCompaction {
     }
     // altimate_change start — with snapshot diffs, drop entries whose file is gone:
     // a shell rename lists only the new path, and a file written then deleted in
-    // one step is skipped by the attribution check above. One check per path.
-    if (sawSnapshot) for (const key of [...writes.keys()]) if (!exists(key)) writes.delete(key)
+    // one step is skipped by the attribution check above. Bounded async checks.
+    if (sawSnapshot) await pruneMissing(writes, exists)
     // altimate_change end
     return {
       writes: [...writes.values()].sort((a, b) => b.mtime - a.mtime || a.path.localeCompare(b.path)),
@@ -1006,6 +1099,7 @@ export namespace SessionCompaction {
       // altimate_change start
       sawSnapshot,
       root: root ? ledgerPathKey(root) : undefined,
+      ...(snapshotOmitted ? { snapshotOmitted } : {}),
       // altimate_change end
     }
   }
@@ -1018,7 +1112,12 @@ export namespace SessionCompaction {
   // altimate_change start — snapshot entries, newest step first: at most
   // LEDGER_SNAPSHOT_PER_STEP paths per step and `limit` overall, with counts of
   // the rest, so a formatter or generator run cannot fill the ledger budget.
-  function snapshotLines(entries: LedgerWrite[], limit: number, display: (w: LedgerWrite) => string): string[] {
+  function snapshotLines(
+    entries: LedgerWrite[],
+    limit: number,
+    display: (w: LedgerWrite) => string,
+    omitted = 0,
+  ): string[] {
     const steps = new Map<number, LedgerWrite[]>()
     for (const w of entries) {
       const group = steps.get(w.step ?? 0)
@@ -1047,6 +1146,7 @@ export namespace SessionCompaction {
       out.push(
         `- … and ${hiddenFiles} more files changed during ${hiddenSteps} earlier step${hiddenSteps === 1 ? "" : "s"} (snapshot)`,
       )
+    if (omitted) out.push(`- … and ${omitted} older file changes not retained (snapshot)`)
     return out
   }
   // altimate_change end
@@ -1067,7 +1167,7 @@ export namespace SessionCompaction {
     }
     const toolWrites = ledger.writes.filter((w) => w.tool !== LEDGER_SNAPSHOT)
     const snapshotWrites = ledger.writes.filter((w) => w.tool === LEDGER_SNAPSHOT)
-    const compose = (snapshotLimit: number): string[] => {
+    const compose = (snapshotLimit: number): { lines: string[]; callsAt: number } => {
       const lines: string[] = ["[Session state ledger — harness-recorded facts, generated automatically at compaction]"]
       if (toolWrites.length) {
         lines.push(
@@ -1083,7 +1183,7 @@ export namespace SessionCompaction {
         lines.push(
           "Files changed in the project during your steps (workspace snapshot diffs; may include changes by other processes such as IDE saves or formatters):",
         )
-        lines.push(...snapshotLines(snapshotWrites, snapshotLimit, display))
+        lines.push(...snapshotLines(snapshotWrites, snapshotLimit, display, ledger.snapshotOmitted))
       }
       if (ledger.sawSnapshot && (ledger.sawBash || snapshotWrites.length)) {
         lines.push(
@@ -1094,9 +1194,15 @@ export namespace SessionCompaction {
           "Shell commands also ran this session; any file changes they made are possible but unverified (shell writes produce no edit event).",
         )
       }
-      lines.push(
-        "Advisory: these files were last written by you at the times shown — prefer this ledger over re-reading them; re-read a file only if a tool errored, you suspect external changes (e.g. IDE edits), or you are about to edit it.",
-      )
+      // altimate_change — the advisory covers write-tool entries only: a
+      // snapshot entry may be an external change, which warrants a re-read.
+      if (toolWrites.length)
+        lines.push(
+          snapshotWrites.length
+            ? 'Advisory: the files marked "last written by you" were last written by you at the times shown — prefer this ledger over re-reading them; re-read a file only if a tool errored, you suspect external changes (e.g. IDE edits), or you are about to edit it. Snapshot-listed files may have been changed by another process.'
+            : "Advisory: these files were last written by you at the times shown — prefer this ledger over re-reading them; re-read a file only if a tool errored, you suspect external changes (e.g. IDE edits), or you are about to edit it.",
+        )
+      const callsAt = lines.length
       // altimate_change start — `slice(-0)` is `slice(0)`, i.e. EVERY call, so a
       // configured `ledger_recent_calls: 0` (which the NonNegativeInt schema
       // accepts) rendered the entire call history instead of none.
@@ -1115,28 +1221,39 @@ export namespace SessionCompaction {
           lines.push(`- ${c.tool} (${status})${c.detail ? ` — ${c.detail}` : ""}`)
         }
       }
-      return lines
+      return { lines, callsAt }
     }
     // Fewer snapshot paths first: the note, advisory and recent calls outrank
     // a long list of snapshot-listed files.
     for (let limit = Math.min(LEDGER_SNAPSHOT_MAX, snapshotWrites.length); limit > 0; limit--) {
-      const text = compose(limit).join("\n")
+      const text = compose(limit).lines.join("\n")
       if (Token.estimate(text) <= maxTokens) return text
     }
-    const lines = compose(0)
-    // altimate_change end
     // Find the longest fitting prefix in O(n log n); repeatedly joining after
     // one pop made a many-file ledger quadratic on the recovery hot path.
-    let low = 1
-    let high = lines.length
-    let best = 0
-    while (low <= high) {
-      const mid = Math.floor((low + high) / 2)
-      if (Token.estimate(lines.slice(0, mid).join("\n")) <= maxTokens) {
-        best = mid
-        low = mid + 1
-      } else high = mid - 1
+    const fit = (lines: string[]) => {
+      let low = 1
+      let high = lines.length
+      let best = 0
+      while (low <= high) {
+        const mid = Math.floor((low + high) / 2)
+        if (Token.estimate(lines.slice(0, mid).join("\n")) <= maxTokens) {
+          best = mid
+          low = mid + 1
+        } else high = mid - 1
+      }
+      return best
     }
+    // Recent calls are the overflow: keep one snapshot filename and drop the
+    // oldest calls, when everything before the calls still fits.
+    if (snapshotWrites.length) {
+      const one = compose(1)
+      const best = fit(one.lines)
+      if (best >= one.callsAt) return one.lines.slice(0, best).join("\n")
+    }
+    const { lines } = compose(0)
+    // altimate_change end
+    const best = fit(lines)
     // A bare header has no fact content and must not consume the configured cap.
     return best > 1 ? lines.slice(0, best).join("\n") : ""
   }
@@ -1560,7 +1677,10 @@ export namespace SessionCompaction {
     // failure falls back to the filtered view rather than losing the ledger.
     const ledger: Ledger =
       ledgerEnabled || carryEnabled
-        ? buildLedger(input.unfilteredMessages ?? ledgerHistory(input.sessionID, input.messages), Instance.directory)
+        ? await buildLedger(
+            input.unfilteredMessages ?? ledgerHistory(input.sessionID, input.messages),
+            Instance.directory,
+          )
         : { writes: [], calls: [], sawBash: false, sawSnapshot: false }
     // altimate_change end
     const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
