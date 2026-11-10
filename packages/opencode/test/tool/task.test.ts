@@ -911,6 +911,8 @@ describe("tool.task", () => {
         expect(RunBudget.queryDeadline(taskID)).toBe(deadline)
 
         let joinDone = false
+        // The collect publishes the child's identity on its own part just before it waits on the child.
+        const collecting = defer<void>()
         const join = yield* def
           .execute(
             {
@@ -919,13 +921,19 @@ describe("tool.task", () => {
               subagent_type: "general",
               task_id: taskID,
             },
-            context,
+            {
+              ...context,
+              metadata: (input: { metadata?: { sessionId?: string } }) =>
+                Effect.sync(() => {
+                  if (input.metadata?.sessionId === taskID) collecting.resolve()
+                }),
+            },
           )
           .pipe(
             Effect.tap(() => Effect.sync(() => (joinDone = true))),
             Effect.forkChild,
           )
-        yield* Effect.sleep("30 millis")
+        yield* Effect.promise(() => collecting.promise).pipe(Effect.timeout("2 seconds"))
         expect(joinDone).toBe(false)
 
         release.resolve()
@@ -1081,6 +1089,59 @@ describe("tool.task", () => {
         expect(Exit.isFailure(exit)).toBe(true)
         if (Exit.isFailure(exit)) expect(String(Cause.squash(exit.cause))).toContain("background tasks running")
         release.resolve()
+      }),
+    ),
+  )
+
+  background.instance("parallel launches cannot exceed the background cap", () =>
+    withBackgroundEnv(
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const def = yield* (yield* TaskTool).init()
+        const release = defer<void>()
+        const context = backgroundContext(chat, assistant, blockingOps({ resolve: () => {} }, release.promise))
+        const exits = yield* Effect.all(
+          Array.from({ length: MAX_RUNNING_BACKGROUND_TASKS + 1 }, () => def.execute(launchInput, context).pipe(Effect.exit)),
+          { concurrency: "unbounded" },
+        )
+        expect(exits.filter(Exit.isSuccess)).toHaveLength(MAX_RUNNING_BACKGROUND_TASKS)
+        const failed = exits.filter(Exit.isFailure)
+        expect(failed).toHaveLength(1)
+        expect(String(Cause.squash(failed[0].cause))).toContain("background tasks running")
+        release.resolve()
+      }),
+    ),
+  )
+
+  background.instance("a background child whose request failed reports the failure on every collect", () =>
+    withBackgroundEnv(
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const def = yield* (yield* TaskTool).init()
+        let prompts = 0
+        const promptOps: TaskPromptOps = {
+          ...stubOps(),
+          prompt: (input) =>
+            Effect.sync(() => {
+              prompts++
+              const failed = reply(input, "")
+              return {
+                info: { ...failed.info, error: { name: "APIError", data: { message: "CHILDBROKE", isRetryable: false } } },
+                parts: [],
+              } as MessageV2.WithParts
+            }),
+        }
+        const context = backgroundContext(chat, assistant, promptOps)
+        const launched = yield* def.execute(launchInput, context)
+        const taskID = launched.metadata.sessionId
+        const collect = def
+          .execute({ ...launchInput, background: undefined, task_id: taskID }, context)
+          .pipe(Effect.exit, Effect.timeout("2 seconds"))
+        for (const exit of [yield* collect, yield* collect]) {
+          expect(Exit.isFailure(exit)).toBe(true)
+          if (Exit.isFailure(exit)) expect(String(Cause.squash(exit.cause))).toContain("CHILDBROKE")
+        }
+        expect(prompts).toBe(1)
       }),
     ),
   )

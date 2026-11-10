@@ -365,7 +365,12 @@ export namespace ToolRegistry {
   }
   // altimate_change end
 
-  function applyRuntimeToolSchemaFlags<T extends Tool.DefWithoutID>(id: string, tool: T, flags?: ToolRuntimeFlags): T {
+  /** Shapes a tool definition by the runtime flags; tool_lookup describes `task` through it too. */
+  export function applyRuntimeToolSchemaFlags<T extends Tool.DefWithoutID>(
+    id: string,
+    tool: T,
+    flags?: ToolRuntimeFlags,
+  ): T {
     if (id !== "task") return tool
     // Execution reads the same decision that shapes the schema, so the two gates cannot disagree.
     const enabled = backgroundSubagentsEnabled(flags)

@@ -3,7 +3,7 @@
  * lost or silently replaced. The parent and its child share the mock server; requests are told
  * apart by the parent's first user text, which a child never sees.
  */
-import { afterAll, beforeAll, expect } from "bun:test"
+import { afterAll, beforeAll, expect, spyOn } from "bun:test"
 import { Effect, Fiber, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Session } from "@/session/session"
@@ -20,6 +20,8 @@ import { LSP } from "@/lsp/lsp"
 import { MCP } from "../../src/mcp"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Bus } from "@/bus"
+import { MessageV2 } from "../../src/session/message-v2"
 
 const mcp = Layer.succeed(
   MCP.Service,
@@ -90,16 +92,24 @@ const it = testEffect(
   }),
 )
 
-// The imperative prompt path builds its tools without RuntimeFlags, from the environment.
-const FLAG = "OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS"
-let previousFlag: string | undefined
+// The experiment is on only through the injected RuntimeFlags: the environment leaves it off.
+const FLAGS = ["OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS", "OPENCODE_EXPERIMENTAL"] as const
+const previousFlags = new Map<string, string | undefined>()
+// Text deltas the processor has received, the readiness signal for cancelling a streaming child.
+let published: ReturnType<typeof spyOn<typeof Bus, "publish">>
 beforeAll(() => {
-  previousFlag = process.env[FLAG]
-  process.env[FLAG] = "true"
+  for (const flag of FLAGS) {
+    previousFlags.set(flag, process.env[flag])
+    delete process.env[flag]
+  }
+  published = spyOn(Bus, "publish")
 })
 afterAll(() => {
-  if (previousFlag === undefined) delete process.env[FLAG]
-  else process.env[FLAG] = previousFlag
+  published.mockRestore()
+  for (const [flag, value] of previousFlags) {
+    if (value === undefined) delete process.env[flag]
+    else process.env[flag] = value
+  }
 })
 
 const providerCfg = (url: string) => ({
@@ -205,12 +215,24 @@ const taskParts = (messages: SessionV1.WithParts[]) =>
     message.parts.filter((part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "task"),
   )
 
-/** The child's request has started streaming its partial text (persisted when the stream ends). */
-const childStreaming = Effect.gen(function* () {
-  const llm = yield* TestLLMServer
-  yield* poll(() => Effect.map(llm.hits, (hits) => (hits.some(isChild) ? true : undefined)), "child request")
-  yield* Effect.sleep("300 millis")
-})
+/** The child's processor has received its partial text, so a cancel now keeps it. */
+const childStreaming = (childID: SessionID) =>
+  poll(
+    () =>
+      Effect.sync(() =>
+        published.mock.calls.some(([event, properties]) => {
+          const delta = properties as { sessionID?: string; delta?: string }
+          return (
+            event === MessageV2.Event.PartDelta &&
+            delta.sessionID === childID &&
+            delta.delta?.includes("PARTIALFINDING") === true
+          )
+        })
+          ? true
+          : undefined,
+      ),
+    "child partial text",
+  )
 
 const startSession = Effect.gen(function* () {
   const sessions = yield* Session.Service
@@ -256,7 +278,7 @@ it.live(
         const childID = launched.state.metadata?.sessionId as SessionID
         expect(launched.state.output).toContain(`task_id=${childID}`)
         expect(launched.state.output).toContain("cancelled if your turn ends before you collect it")
-        yield* childStreaming
+        yield* childStreaming(childID)
         parentDone.open()
         yield* Fiber.join(turn)
 
@@ -367,6 +389,8 @@ it.live(
               ? { status: part.state.status, output: part.state.error }
               : { status: part.state.status, output: "" }
         expect(outcome(joins[1])).toEqual(outcome(joins[0]))
+        expect(outcome(joins[0]).status).toBe("error")
+        expect(outcome(joins[0]).output).toContain("CHILDBROKE")
         const hits = yield* llm.hits
         expect(hits.filter(isChild)).toHaveLength(1)
         expect(hits.filter((hit) => !isParent(hit) && text(hit).includes("collect the result"))).toHaveLength(0)
@@ -398,7 +422,7 @@ it.live(
             }),
           "running collect",
         )
-        yield* childStreaming
+        yield* childStreaming(childID)
         yield* prompt.cancel(session.id)
         yield* Fiber.await(turn)
 

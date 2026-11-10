@@ -32,6 +32,7 @@ import { interruptedTaskOutput, lastTaskText } from "../session/task-output"
 import { redactSecrets } from "@/altimate/learn/digest"
 // altimate_change end
 // altimate_change start — upstream_fix: background subagents follow the experiment flag at execution time.
+import { AsyncLocalStorage } from "async_hooks"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 // altimate_change end
 const log = Log.create({ service: "tool.task" })
@@ -89,12 +90,25 @@ const taskJsonSchema = (() => {
 /** The `background` property the registry adds to the task schema when the experiment is on. */
 export const taskBackgroundJsonSchema = (zodToJsonSchema(parameters).properties as Record<string, unknown>).background
 
+type BackgroundFlag = Pick<RuntimeFlags.Info, "experimentalBackgroundSubagents">
+const runtimeFlagsScope = new AsyncLocalStorage<BackgroundFlag>()
+
 /**
- * Whether background subagents are on, read from the environment exactly as RuntimeFlags reads it.
- * The registry passes its own RuntimeFlags decision to execution (`extra.backgroundSubagents`), so
- * the schema gate and the execution gate always agree; this is the fallback when nothing is passed.
+ * Runs `fn` with the RuntimeFlags of the service that started it (SessionPrompt.Service), so the
+ * imperative prompt loop, its tool catalogue and tool_lookup take the injected decision.
+ */
+export function withRuntimeFlags<A>(flags: BackgroundFlag | undefined, fn: () => A): A {
+  return flags ? runtimeFlagsScope.run(flags, fn) : fn()
+}
+
+/**
+ * Whether background subagents are on: the RuntimeFlags in scope (see `withRuntimeFlags`), otherwise
+ * the environment read exactly as RuntimeFlags reads it. The registry passes its decision to execution
+ * (`extra.backgroundSubagents`), so the schema gate and the execution gate always agree.
  */
 export function backgroundSubagentsEnabled() {
+  const scoped = runtimeFlagsScope.getStore()
+  if (scoped) return scoped.experimentalBackgroundSubagents
   return Effect.runSync(
     Effect.gen(function* () {
       return (yield* RuntimeFlags.Service).experimentalBackgroundSubagents
@@ -118,6 +132,8 @@ export function backgroundTaskDescription(description: string) {
 export const MAX_RUNNING_BACKGROUND_TASKS = 4
 /** Recorded background tasks kept per parent session; the oldest settled records go first. */
 const MAX_BACKGROUND_RECORDS = 100
+/** Recorded background tasks kept across all parent sessions; the oldest settled records go first. */
+export const MAX_BACKGROUND_RECORDS_TOTAL = 1_000
 
 type TaskResult = {
   title: string
@@ -153,16 +169,47 @@ type BackgroundTask = {
  */
 const backgroundTasks = new Map<string, BackgroundTask>()
 
+/** Launches per parent session that passed the cap check and have not registered their child yet. */
+const pendingLaunches = new Map<string, number>()
+
 function runningBackgroundTasks(parentSessionID: string) {
-  let count = 0
+  let count = pendingLaunches.get(parentSessionID) ?? 0
   for (const task of backgroundTasks.values()) if (task.parentSessionID === parentSessionID && !task.settled) count++
   return count
 }
 
-function evictBackgroundRecords(parentSessionID: string) {
-  const settled = [...backgroundTasks].filter(([, task]) => task.parentSessionID === parentSessionID && task.settled)
-  const total = [...backgroundTasks.values()].filter((task) => task.parentSessionID === parentSessionID).length
-  for (const [id] of settled.slice(0, Math.max(0, total - MAX_BACKGROUND_RECORDS))) backgroundTasks.delete(id)
+/** Claims a running slot before the launch's first await; disposing it releases the claim. */
+function reserveBackgroundSlot(parentSessionID: string) {
+  if (runningBackgroundTasks(parentSessionID) >= MAX_RUNNING_BACKGROUND_TASKS) {
+    throw new Error(
+      `Too many background tasks running for this session (limit ${MAX_RUNNING_BACKGROUND_TASKS}). Collect a running task's result by calling task with its task_id before launching another.`,
+    )
+  }
+  pendingLaunches.set(parentSessionID, (pendingLaunches.get(parentSessionID) ?? 0) + 1)
+  return defer(() => {
+    const pending = (pendingLaunches.get(parentSessionID) ?? 1) - 1
+    if (pending > 0) pendingLaunches.set(parentSessionID, pending)
+    else pendingLaunches.delete(parentSessionID)
+  })
+}
+
+/** @internal Exported for testing. Drops the oldest settled records over the per-parent and total caps. */
+export function evictBackgroundRecords(
+  records: Map<string, Pick<BackgroundTask, "parentSessionID" | "settled">>,
+  parentSessionID: string,
+) {
+  const settled = [...records].filter(([, task]) => task.settled)
+  const own = settled.filter(([, task]) => task.parentSessionID === parentSessionID)
+  const total = [...records.values()].filter((task) => task.parentSessionID === parentSessionID).length
+  for (const [id] of own.slice(0, Math.max(0, total - MAX_BACKGROUND_RECORDS))) records.delete(id)
+  const remaining = settled.filter(([id]) => records.has(id))
+  for (const [id] of remaining.slice(0, Math.max(0, records.size - MAX_BACKGROUND_RECORDS_TOTAL))) records.delete(id)
+}
+
+/** The message a failed child request recorded, for a collect to report. */
+function childErrorMessage(error: { name: string; data?: unknown }) {
+  const message = (error.data as { message?: unknown } | undefined)?.message
+  return typeof message === "string" && message ? message : error.name
 }
 
 const resumeHeader = (id: string) => `task_id: ${id} (for resuming to continue this task if needed)`
@@ -299,11 +346,8 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           recorded.joins--
         }
       }
-      if (background && runningBackgroundTasks(ctx.sessionID) >= MAX_RUNNING_BACKGROUND_TASKS) {
-        throw new Error(
-          `Too many background tasks running for this session (limit ${MAX_RUNNING_BACKGROUND_TASKS}). Collect a running task's result by calling task with its task_id before launching another.`,
-        )
-      }
+      // Parallel launches in one step must not all pass the cap before any registers its child.
+      using _slot = background ? reserveBackgroundSlot(ctx.sessionID) : undefined
       // altimate_change end
 
       // Skip permission check when user explicitly invoked via @ or command subtask
@@ -464,6 +508,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         // parent as an empty result, which reads as "done, nothing found". An error is reported even
         // when the child wrote text before it, since that text may be incomplete.
         const childError = result?.info.role === "assistant" ? result.info.error : undefined
+        // A background child whose request failed reports that failure on every collect, not an empty result.
+        if (background && !ctx.abort.aborted && !text && childError) {
+          throw new Error(`Background task ${session.id} failed: ${childErrorMessage(childError)}`)
+        }
         const status =
           ctx.abort.aborted || (text.trim() && !childError)
             ? []
@@ -541,7 +589,7 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         },
       )
       backgroundTasks.set(session.id, record)
-      evictBackgroundRecords(ctx.sessionID)
+      evictBackgroundRecords(backgroundTasks, ctx.sessionID)
       return {
         title: params.description,
         metadata: { sessionId: session.id, model, background: true },

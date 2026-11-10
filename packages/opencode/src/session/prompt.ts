@@ -103,6 +103,11 @@ import { ToolJsonSchema } from "@/tool/json-schema"
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change end
+// altimate_change start — upstream_fix: SessionPrompt.Service passes its RuntimeFlags to the loop.
+import { Option } from "effect"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import { withRuntimeFlags } from "@/tool/task"
+// altimate_change end
 // altimate_change start - import fingerprint for env-based skill selection
 import { Fingerprint } from "../altimate/fingerprint"
 // altimate_change end
@@ -5138,23 +5143,29 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
   export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
 
-  export const layer = Layer.succeed(
+  // The imperative loop takes this service's RuntimeFlags for the background-subagent decision
+  // instead of re-reading the environment.
+  export const layer = Layer.effect(
     Service,
-    Service.of({
-      prompt: (input) => Effect.promise(() => prompt(input)),
-      loop: (input) => Effect.promise(() => loop(input)),
-      cancel: (sessionID) => Effect.promise(() => cancel(sessionID)),
-      shell: (input) =>
-        Effect.tryPromise({
-          try: () => shell(input),
-          catch: (e) => (e instanceof Session.BusyError ? e : new Session.BusyError(input.sessionID)),
-        }),
-      command: (input) => Effect.promise(() => command(input)),
+    Effect.gen(function* () {
+      const flags = Option.getOrUndefined(yield* Effect.serviceOption(RuntimeFlags.Service))
+      const scoped = <A>(fn: () => Promise<A>) => withRuntimeFlags(flags, fn)
+      return Service.of({
+        prompt: (input) => Effect.promise(() => scoped(() => prompt(input))),
+        loop: (input) => Effect.promise(() => scoped(() => loop(input))),
+        cancel: (sessionID) => Effect.promise(() => cancel(sessionID)),
+        shell: (input) =>
+          Effect.tryPromise({
+            try: () => scoped(() => shell(input)),
+            catch: (e) => (e instanceof Session.BusyError ? e : new Session.BusyError(input.sessionID)),
+          }),
+        command: (input) => Effect.promise(() => scoped(() => command(input))),
+      })
     }),
   )
 
   export const defaultLayer = layer
 
-  export const node = LayerNode.make(layer, [])
+  export const node = LayerNode.make(layer, () => [RuntimeFlags.node])
   // altimate_change end
 }
