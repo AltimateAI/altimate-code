@@ -21,8 +21,10 @@ const USAGE = {
     "schema-verify":
       "Diff a model's actual columns against the schema.yml spec --model <name>. Returns columns_extra / columns_missing / columns_reordered / type_mismatches. verdict: match | mismatch | no-spec",
     "column-values": "Get column values --model <name> --column <col>",
-    children: "Get downstream models --model <name>",
-    parents: "Get upstream models --model <name>",
+    children:
+      "Get downstream models --model <name>. A list, or { stale_manifest, models } when the project check failed and the answer comes from the last successful parse",
+    parents:
+      "Get upstream models --model <name>. A list, or { stale_manifest, models } when the project check failed and the answer comes from the last successful parse",
     deps: "Install dbt dependencies",
     "add-packages": "Add dbt packages --packages pkg1,pkg2",
   },

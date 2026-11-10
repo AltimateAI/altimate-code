@@ -16,6 +16,7 @@ import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
 import { Dispatcher } from "@/altimate/native"
 import {
+  dbtAdapterHasLineage,
   dbtAdapterInternals,
   disposeDbtAdapter,
   getDbtAdapter,
@@ -102,6 +103,25 @@ afterEach(() => {
   delete dbtAdapterInternals.readConfig
   delete dbtAdapterInternals.create
   delete dbtAdapterInternals.hasModelLineage
+})
+
+describe("whether the dbt-integration answers a model's lineage", () => {
+  beforeEach(() => {
+    delete dbtAdapterInternals.hasModelLineage
+    useConfig()
+  })
+
+  test("a started adapter answers for itself, a method defined as an instance field included", async () => {
+    dbtAdapterInternals.create = async () => fakeAdapter(true, async () => TRACE)
+    expect(await getDbtAdapter()).toBeTruthy()
+    expect(await dbtAdapterHasLineage()).toBe(true)
+  })
+
+  test("a started adapter without the method doesn't", async () => {
+    dbtAdapterInternals.create = async () => fakeAdapter(true)
+    expect(await getDbtAdapter()).toBeTruthy()
+    expect(await dbtAdapterHasLineage()).toBe(false)
+  })
 })
 
 describe("dbt_lineage in a read-only call", () => {

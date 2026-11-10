@@ -275,11 +275,14 @@ export function getDbtAdapter(): Promise<any | null> {
   return ensureDbtAdapter()
 }
 
-/** Whether the dbt-integration in use answers a model's lineage. Asking starts nothing. */
+/**
+ * Whether the dbt-integration in use answers a model's lineage. Asking starts nothing: an adapter
+ * already started answers for itself, and before that its class's prototype does.
+ */
 export async function dbtAdapterHasLineage(): Promise<boolean> {
   if (dbtAdapterInternals.hasModelLineage) return dbtAdapterInternals.hasModelLineage()
   try {
-    return (await import("../../../../../dbt-tools/src/adapter")).hasModelLineage()
+    return (await import("../../../../../dbt-tools/src/adapter")).hasModelLineage(dbtAdapter ?? undefined)
   } catch {
     // dbt-tools not available
     return false

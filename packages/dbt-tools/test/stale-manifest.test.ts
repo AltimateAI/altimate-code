@@ -134,4 +134,12 @@ describe("hasModelLineage", () => {
     prototype.getModelLineage = () => {}
     expect(hasModelLineage()).toBe(true)
   })
+
+  test("finds a method a started adapter defines as an instance field", () => {
+    delete prototype.getModelLineage
+    const adapter = Object.assign(Object.create(DBTProjectIntegrationAdapter.prototype), { getModelLineage: () => {} })
+    expect(hasModelLineage()).toBe(false)
+    expect(hasModelLineage(adapter)).toBe(true)
+    expect(hasModelLineage(Object.create(DBTProjectIntegrationAdapter.prototype))).toBe(false)
+  })
 })
