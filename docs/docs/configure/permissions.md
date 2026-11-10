@@ -204,7 +204,7 @@ When working near production systems. Blocks destructive operations entirely and
 }
 ```
 
-With `external_directory: "deny"`, the bash tool refuses any command whose literal text names a path outside the project (arguments and option values, programs run by path, redirections, assignment values, `cd`/`pushd` targets and literal `sh -c`/`eval` strings), resolved through symlinks and in the directory each command runs in. Directories you allow under `external_directory` keep working. A `"*": "deny"` also removes the default allow for skill directories and the CLI temp directory, so bundled skill scripts stored there are refused unless you allow those directories again.
+With `external_directory: "deny"`, the bash tool refuses any command whose literal text names a path outside the project (arguments and option values, programs run by path, redirections, assignment values, `cd`/`pushd` targets and literal `sh -c`/`eval` strings), resolved through symlinks and in the directory each command runs in. Directories you allow under `external_directory` keep working. A `"*": "deny"` also removes the default allow for skill directories, reference directories and the CLI temp directory, so bundled skill scripts and reference files stored there are refused unless you allow those directories again. The tool-output directory stays allowed.
 
 This is a guard rail, not a sandbox. It sees only literal command text: paths built at run time (`$HOME/x`, `$(pwd)/..`, globs) and files a program opens on its own (`python -c "open('/etc/hosts')"`, a script that writes to `/tmp`) are not checked. Use a container or VM when you need isolation.
 
