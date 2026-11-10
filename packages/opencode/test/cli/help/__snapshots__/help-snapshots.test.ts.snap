@@ -141,8 +141,8 @@ Options:
                                       ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow
                                                                                             [number]
       --max-tokens                    maximum billed tokens (input + output + cache writes + 0.1 ×
-                                      cache reads) across the run and its task sessions; bounded
-                                      finalization may follow                               [number]
+                                      cache reads, reported to one decimal) across the run and its
+                                      task sessions; bounded finalization may follow        [number]
       --dangerously-skip-permissions  auto-approve permissions that are not explicitly denied
                                       (dangerous!)                        [boolean] [default: false]"
 `;

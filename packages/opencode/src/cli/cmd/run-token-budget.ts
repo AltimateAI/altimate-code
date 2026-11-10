@@ -16,6 +16,11 @@ export function billedTokens(tokens: StepTokens): number {
   return tokens.input + tokens.output + tokens.cache.write + 0.1 * tokens.cache.read
 }
 
+/** A billed total as reported: cache reads make it fractional, so keep one decimal rather than rounding to an integer. */
+export function reportedTokens(total: number): number {
+  return Math.round(total * 10) / 10
+}
+
 /** A `--max-tokens` value the budget can enforce: a positive integer. */
 export function isValidMaxTokens(value: unknown): boolean {
   return typeof value === "number" && Number.isInteger(value) && value >= 1

@@ -431,7 +431,7 @@ export const RunCommand = cmd({
         .option("max-tokens", {
           type: "number",
           describe:
-            "maximum billed tokens (input + output + cache writes + 0.1 × cache reads) across the run and its task sessions; bounded finalization may follow",
+            "maximum billed tokens (input + output + cache writes + 0.1 × cache reads, reported to one decimal) across the run and its task sessions; bounded finalization may follow",
         })
         // altimate_change end
         // altimate_change end
@@ -889,7 +889,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         time_budget_deadline: timeBudgetDeadline,
         // altimate_change start — token accounting, only when a token budget is set
         max_tokens: tokenBudget?.limit,
-        tokens_used: tokenBudget === undefined ? undefined : Math.round(tokenBudget.total),
+        tokens_used: tokenBudget === undefined ? undefined : RunTokenBudget.reportedTokens(tokenBudget.total),
         token_budget_exhausted: tokenBudget?.exhausted,
         // altimate_change end
         // altimate_change start — actual server request-boundary timestamps, in Unix milliseconds
@@ -926,7 +926,7 @@ You are speaking to a non-technical business executive. Follow these rules stric
         stopTimeBudget()
         accounting.onBudgetExhausted("time")
         tracer?.setRunBudget(budgetMetadata())
-        const used = Math.round(tokenBudget.total)
+        const used = RunTokenBudget.reportedTokens(tokenBudget.total)
         const warning = `Budget exceeded: reached ${tokenBudget.limit} token limit (${used} billed). Aborting work and requesting a final reply.`
         emit("budget_exhausted", { limit_tokens: tokenBudget.limit, tokens_used: used })
         warnBudget(warning)

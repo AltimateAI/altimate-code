@@ -306,6 +306,15 @@ describe("token budget accounting", () => {
     expect(accounting.fatal).toBe(false)
     expect(accounting.termination().why_harness_stopped).toBe("budget-exhausted")
   })
+
+  test("reported usage keeps the tenth a cache read contributes instead of rounding it away", () => {
+    const budget = RunTokenBudget.create(root, 100)
+    expect(budget.observe(stepFinish(root, "root_1", { input: 97, output: 3, cache: { read: 4, write: 0 } }))).toBe(true)
+    expect(RunTokenBudget.reportedTokens(budget.total)).toBe(100.4)
+    // 0.1 × 3 is 0.30000000000000004 in binary floating point; the report stays at one decimal.
+    expect(RunTokenBudget.reportedTokens(100 + 0.1 * 3)).toBe(100.3)
+    expect(RunTokenBudget.reportedTokens(110)).toBe(110)
+  })
 })
 // altimate_change end
 
