@@ -39,9 +39,12 @@ export async function ClaudeAgentPlugin(_input: PluginInput): Promise<Hooks> {
               instructions:
                 "Checking your Claude Code login. If you have not logged in yet, run `claude auth login` in a terminal; this connects as soon as it finds the login.",
               async callback() {
+                // Bound to this instance; the dialog can be dismissed or the instance reloaded while this
+                // polls, and nothing cancels the callback, so it stops once the instance is disposed.
+                const login = await ClaudeAgent.loginCheck()
                 const deadline = Date.now() + RECHECK_LIMIT_MS
-                while (true) {
-                  const reason = ClaudeAgent.problem(await ClaudeAgent.check())
+                while (!login.disposed()) {
+                  const reason = ClaudeAgent.problem(await login.run())
                   if (!reason) return { type: "success" as const, key: ClaudeAgent.AUTH_KEY }
                   if (Date.now() >= deadline) {
                     log.warn("Claude Code login was not found", { reason })
@@ -49,6 +52,7 @@ export async function ClaudeAgentPlugin(_input: PluginInput): Promise<Hooks> {
                   }
                   await Bun.sleep(RECHECK_MS)
                 }
+                return { type: "failed" as const }
               },
             }
           },

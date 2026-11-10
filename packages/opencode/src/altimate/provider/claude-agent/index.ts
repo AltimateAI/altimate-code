@@ -33,25 +33,18 @@ export function matches(model: { readonly api: { readonly npm: string } }) {
 }
 
 const io = ClaudeIO.real
-// One registry per directory, outside any instance, so an instance reload of the same directory adopts its
-// running `claude` processes, and disposing one project never waits on another project's owner count.
-const registries = new Map<string, ReturnType<typeof ClaudeSessions.registry>>()
-
-function registryFor(directory: string) {
-  let registry = registries.get(directory)
-  if (!registry) {
-    registry = ClaudeSessions.registry()
-    registries.set(directory, registry)
-  }
-  return registry
-}
+// One registry for the process, as upstream. Saved Claude sessions are keyed by chat session ID, which a
+// server can reach from more than one directory, so the registry's per-session lock must be shared to keep
+// one `claude` process per saved Claude session. It lives outside any instance, so a reload adopts the
+// running processes. Its processes close after the last instance detaches, or after their idle timeout.
+const registry = ClaudeSessions.registry()
 
 // A chat's own process reports the version, login and models it found, which keeps the saved model
 // list current without a separate check.
 async function saveCatalog(state: ClaudeStatus.State, connection: Readonly<Record<string, string>>) {
   if (state.type !== "ready") return
   const baseURL = connection.ANTHROPIC_BASE_URL ?? io.env().ANTHROPIC_BASE_URL
-  await ClaudeAgentCatalog.update(state.probe, baseURL).catch((error) =>
+  await ClaudeAgentCatalog.update(state.probe, baseURL, connection).catch((error) =>
     log.warn("failed to save Claude Agent models", { error }),
   )
 }
@@ -60,7 +53,7 @@ async function saveCatalog(state: ClaudeStatus.State, connection: Readonly<Recor
 // instance closes the attachment, and its processes get the registry's handover window.
 const instance = Instance.state(
   async () => {
-    const settings = { connection: {} as Record<string, string> }
+    const settings = { connection: {} as Record<string, string>, disposed: false }
     const inner = await Effect.runPromise(ClaudeStatus.make(io, () => Effect.sync(() => settings.connection)))
     const status: ClaudeStatus.Interface = {
       ...inner,
@@ -69,13 +62,14 @@ const instance = Instance.state(
     }
     const scope = Scope.makeUnsafe()
     const sessions = await Effect.runPromise(
-      registryFor(Instance.directory)
+      registry
         .attach({ io, status, storage: ClaudeAgentStorage.sessions, directory: Instance.directory })
         .pipe(Scope.provide(scope)),
     )
     return { settings, status, sessions, scope }
   },
   async (entry) => {
+    entry.settings.disposed = true
     await Effect.runPromise(Scope.close(entry.scope, Exit.void))
   },
 )
@@ -84,21 +78,24 @@ const instance = Instance.state(
 // Claude Code environment variables. Used by the login check, which runs before any chat. Call within the instance.
 export async function configure(options: Readonly<Record<string, unknown>> | undefined) {
   const { settings } = await instance()
-  settings.connection = ClaudeQueryOptions.connectionEnv({
-    settings: options,
-    headers: options?.headers as Record<string, string> | undefined,
-    body: options?.body as Record<string, unknown> | undefined,
-  })
+  // The same mapping the provider loader uses, so the login check and the saved model list agree on it.
+  settings.connection = connectionEnv(options ?? {})
 }
 
-// Runs `claude` without sending a prompt (no tokens are used) to read its version, login and models.
-// Call within the instance.
-export async function check(): Promise<ClaudeStatus.State> {
+// The login check for this instance: runs `claude` without sending a prompt (no tokens are used) to read
+// its version, login and models. Bound once, inside the instance, so a caller that outlives the instance
+// (a /connect dialog left open) can tell it was disposed and stop, rather than recreating its state.
+export async function loginCheck() {
   const { status, settings } = await instance()
-  await Effect.runPromise(status.refresh())
-  const state = await Effect.runPromise(SubscriptionRef.get(status.state))
-  await saveCatalog(state, settings.connection)
-  return state
+  return {
+    disposed: () => settings.disposed,
+    run: async (): Promise<ClaudeStatus.State> => {
+      await Effect.runPromise(status.refresh())
+      const state = await Effect.runPromise(SubscriptionRef.get(status.state))
+      await saveCatalog(state, settings.connection)
+      return state
+    },
+  }
 }
 
 export function problem(state: ClaudeStatus.State): string | undefined {

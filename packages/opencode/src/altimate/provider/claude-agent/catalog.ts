@@ -1,6 +1,7 @@
 export * as ClaudeAgentCatalog from "./catalog"
 
 import type { AccountInfo } from "@anthropic-ai/claude-agent-sdk"
+import { createHash } from "node:crypto"
 import { Option, Schema } from "effect"
 import type { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
@@ -23,7 +24,14 @@ const Catalog = Schema.Struct({
   models: Schema.Array(CatalogModel),
 })
 export type Catalog = typeof Catalog.Type
-const KEY = "models"
+// One saved list per connection: a project whose config points Claude Code at a gateway or an API key sees
+// different models and prices than one using the machine's own Claude Code login. No settings keeps the
+// original key, so lists saved before this split still load.
+function key(connection: Readonly<Record<string, string>>) {
+  const entries = Object.entries(connection).sort(([a], [b]) => a.localeCompare(b))
+  if (entries.length === 0) return "models"
+  return `models-${createHash("sha256").update(JSON.stringify(entries)).digest("hex").slice(0, 16)}`
+}
 
 // Before the first `claude` start reports its models. Claude Code resolves these aliases to its
 // current models, so they stay valid as Anthropic ships new ones.
@@ -48,22 +56,26 @@ const PRICE_SOURCES: Partial<Record<NonNullable<AccountInfo["apiProvider"]>, str
   foundry: "azure",
 }
 
-export async function load(): Promise<Catalog> {
-  const saved = Schema.decodeUnknownOption(Catalog)(await ClaudeAgentStorage.read(KEY))
+export async function load(connection: Readonly<Record<string, string>> = {}): Promise<Catalog> {
+  const saved = Schema.decodeUnknownOption(Catalog)(await ClaudeAgentStorage.read(key(connection)))
   return Option.getOrElse(saved, (): Catalog => ({ models: [] }))
 }
 
 // Saves what a probe or a chat's startup reported. Returns whether the list changed, so the
 // caller knows the provider list needs a reload to show it.
-export async function update(probe: ClaudeProbe.Result, baseURL: string | undefined) {
-  const current = await load()
+export async function update(
+  probe: ClaudeProbe.Result,
+  baseURL: string | undefined,
+  connection: Readonly<Record<string, string>> = {},
+) {
+  const current = await load(connection)
   const source = priceSource(probe.account, baseURL)
   const next: Catalog = {
     ...(source ? { priceSource: source } : {}),
     models: fromClaude(probe.models, current.models),
   }
   if (JSON.stringify(next) === JSON.stringify(current)) return false
-  await ClaudeAgentStorage.write(KEY, next)
+  await ClaudeAgentStorage.write(key(connection), next)
   return true
 }
 

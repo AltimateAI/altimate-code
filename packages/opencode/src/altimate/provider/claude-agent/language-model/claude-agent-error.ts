@@ -1,5 +1,6 @@
 export * as ClaudeAgentError from "./claude-agent-error"
 
+import { APICallError } from "@ai-sdk/provider"
 import type { SDKAssistantMessageError, SDKMessage, SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk"
 
 // Keep request-local diagnostics until the terminal result. A usage warning alone
@@ -31,6 +32,19 @@ export function make() {
     const billing = code === "billing_error" ? " Check your Claude plan and extra-usage settings." : ""
     const auth = code === "authentication_failed" ? " Run `claude auth login` in a terminal." : ""
     const text = limit + reset + billing + auth
+
+    // altimate_change start — the shipped session compacts and retries only on an overflow-classified API
+    // error; a plain Error becomes UnknownError and ends the chat. Claude Code's own compaction is off.
+    if (message.terminal_reason === "prompt_too_long" || /prompt is too long/i.test(result)) {
+      return new APICallError({
+        message: /prompt is too long/i.test(text) ? text : `Prompt is too long. ${text}`.trim(),
+        url: "claude-code://messages",
+        requestBodyValues: {},
+        statusCode: status,
+        isRetryable: false,
+      })
+    }
+    // altimate_change end
 
     if (text) return new Error(text)
     if (status) return new Error(`Claude Code could not finish its reply (HTTP ${status})`)

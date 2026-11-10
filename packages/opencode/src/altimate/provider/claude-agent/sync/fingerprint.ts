@@ -71,12 +71,16 @@ function visible(message: Exclude<LanguageModelV3Message, { role: "system" }>) {
 }
 
 // OpenCode lowers tool attachments into this separate user message.
+// altimate_change start — the shipped history conversion uses `MessageV2.SYNTHETIC_ATTACHMENT_PROMPT`
+// ("Attached image(s) from tool result:"); upstream core says "media"
+const TOOL_MEDIA_PROMPTS = new Set(["Attached media from tool result:", "Attached image(s) from tool result:"])
+// altimate_change end
 function isToolMedia(message: LanguageModelV3Message) {
   return (
     message.role === "user" &&
     message.content.length > 1 &&
     message.content[0]?.type === "text" &&
-    message.content[0].text === "Attached media from tool result:" &&
+    TOOL_MEDIA_PROMPTS.has(message.content[0].text) &&
     message.content.slice(1).every((part) => part.type === "file")
   )
 }

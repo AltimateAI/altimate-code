@@ -1790,7 +1790,10 @@ export namespace Provider {
     // altimate_change end
 
     // altimate_change start — Claude Agent: models Claude Code last reported, priced from the login's provider
-    database[ClaudeAgent.ID] = ClaudeAgentCatalog.provider(await ClaudeAgentCatalog.load(), database)
+    database[ClaudeAgent.ID] = ClaudeAgentCatalog.provider(
+      await ClaudeAgentCatalog.load(ClaudeAgent.connectionEnv(configProviderMap[ClaudeAgent.ID]?.options ?? {})),
+      database,
+    )
     // altimate_change end
 
     function mergeProvider(providerID: ProviderID, provider: Partial<Info>) {

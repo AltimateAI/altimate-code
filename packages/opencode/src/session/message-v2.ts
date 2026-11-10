@@ -941,8 +941,8 @@ export namespace MessageV2 {
               // altimate_change start — upstream_fix: preserve partial output from aborted tools.
               const output = part.state.metadata?.interrupted === true ? part.state.metadata.output : undefined
               // altimate_change start — Claude Agent: a stopped call interrupts its waiting Claude turn
-              const callMetadata =
-                part.state.metadata?.interrupted === true ? ToolAborted.mark(part.metadata) : part.metadata
+              const stopped = part.state.metadata?.interrupted === true || part.state.metadata?.rejected === true
+              const callMetadata = stopped ? ToolAborted.mark(part.metadata) : part.metadata
               // altimate_change end
               if (typeof output === "string") {
                 assistantMessage.parts.push({

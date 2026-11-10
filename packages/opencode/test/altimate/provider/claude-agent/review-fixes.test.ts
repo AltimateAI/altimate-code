@@ -10,6 +10,9 @@ import { ToolAborted } from "@/altimate/provider/claude-agent/tools/aborted"
 import { ToolResult } from "@/altimate/provider/claude-agent/tools/result"
 import { MessageID, PartID, SessionID } from "@/session/schema"
 import { MessageV2 } from "@/session/message-v2"
+import { ClaudeAgentError } from "@/altimate/provider/claude-agent/language-model/claude-agent-error"
+import { ProviderID } from "@/provider/schema"
+import type { AccountInfo } from "@anthropic-ai/claude-agent-sdk"
 
 // A Claude reply as the SDK streams it: one text block, then the turn's result.
 function reply(text: string): SDKMessage[] {
@@ -140,9 +143,83 @@ describe("Claude Agent stopped tools", () => {
     expect(result.results.get("toolu_1")?.mcp.isError).toBe(true)
   })
 
+  test("a rejection that stopped the session interrupts the waiting Claude turn", async () => {
+    const result = await collected({
+      status: "error",
+      input: { command: "rm -rf build" },
+      error: "The user rejected permission to use this specific tool call.",
+      metadata: { rejected: true },
+      time: { start: 0, end: 1 },
+    })
+    expect(result.aborted).toBe(true)
+  })
+
   test("other providers' call metadata is left as is", () => {
     const openai = { openai: { itemId: "fc_1" } }
     expect(ToolAborted.mark(openai)).toBe(openai)
     expect(ToolAborted.mark(undefined)).toBeUndefined()
+  })
+})
+
+describe("Claude Agent history and errors", () => {
+  test("images a tool returned travel with its result, under the shipped attachment prompt", () => {
+    const image = { type: "file" as const, mediaType: "image/png", data: "aGVsbG8=" }
+    const prompt = [
+      { role: "assistant", content: [{ type: "tool-call", toolCallId: "toolu_1", toolName: "read", input: {} }] },
+      {
+        role: "tool",
+        content: [{ type: "tool-result", toolCallId: "toolu_1", toolName: "read", output: { type: "text", value: "ok" } }],
+      },
+      { role: "user", content: [{ type: "text", text: MessageV2.SYNTHETIC_ATTACHMENT_PROMPT }, image] },
+    ]
+    const result = ToolResult.collect(prompt as never, 1)
+    expect(result.end).toBe(3)
+    expect(result.results.get("toolu_1")?.mcp.content).toContainEqual({
+      type: "image",
+      mimeType: "image/png",
+      data: "aGVsbG8=",
+    })
+  })
+
+  test("a prompt-too-long result is classified as context overflow, so the session compacts", () => {
+    const failure = ClaudeAgentError.make()({
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      result: "Prompt is too long",
+      terminal_reason: "prompt_too_long",
+      num_turns: 1,
+    } as unknown as SDKMessage)
+    const stored = MessageV2.fromError(failure, { providerID: ProviderID.make(ClaudeAgentID.ID) })
+    expect(stored.name).toBe("ContextOverflowError")
+  })
+
+  test("other Claude failures stay ordinary errors", () => {
+    const failure = ClaudeAgentError.make()({
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      result: "Something else went wrong",
+      num_turns: 1,
+    } as unknown as SDKMessage)
+    expect(MessageV2.fromError(failure, { providerID: ProviderID.make(ClaudeAgentID.ID) }).name).not.toBe(
+      "ContextOverflowError",
+    )
+  })
+})
+
+describe("Claude Agent saved model lists", () => {
+  const probe = (account: AccountInfo) => ({
+    version: "2.1.322",
+    account,
+    models: [{ value: "opus", displayName: "Opus 5.5", description: "", resolvedModel: "claude-opus-5-5" }],
+  })
+
+  test("a project with its own connection settings keeps its own list and prices", async () => {
+    const gateway = { ANTHROPIC_API_KEY: "sk-ant-test" }
+    await ClaudeAgentCatalog.update(probe({ apiProvider: "firstParty", apiKeySource: "ANTHROPIC_API_KEY" } as AccountInfo), undefined, gateway)
+    await ClaudeAgentCatalog.update(probe({ apiProvider: "firstParty", subscriptionType: "Claude Max" } as AccountInfo), undefined)
+    expect((await ClaudeAgentCatalog.load(gateway)).priceSource).toBe("anthropic")
+    expect((await ClaudeAgentCatalog.load()).priceSource).toBeUndefined()
   })
 })

@@ -47,6 +47,8 @@ Altimate-only integration (replaces upstream `index.ts`, `provider.ts`, `aisdk.t
 - `session/llm.ts` — request kind and session headers, agent role and instructions as options, no default output cap
   (a plugin's explicit `maxOutputTokens` still applies).
 - `session/message-v2.ts` — stopped Claude Agent tool calls carry `toolAborted` (see `tools/aborted.ts`).
+- `session/processor.ts` — a permission or question rejection that stops the session is recorded as
+  `metadata.rejected`, so history conversion can flag it the same way.
 - `plugin/index.ts` — registers `ClaudeAgentPlugin`.
 - `packages/tui/src/component/dialog-provider.tsx` — listed under Popular with a subscription hint.
 
@@ -62,12 +64,21 @@ Altimate-only integration (replaces upstream `index.ts`, `provider.ts`, `aisdk.t
   `core/date` and `core/environment`.
 - **Tool errors and stops:** upstream's `context` hook flags tool errors and stops in provider metadata. The
   shipped runtime already sends failed tools as `error-text` results, which `tools/result.ts` marks as errors.
-  Stopped calls get `toolAborted` from history conversion, so the waiting Claude turn is interrupted.
+  Interrupted calls, and rejections that stop the session, get `toolAborted` from history conversion, so the
+  waiting Claude turn is interrupted.
+- **Tool media:** `sync/fingerprint.ts` also recognises the shipped attachment prompt
+  ("Attached image(s) from tool result:"), so images a tool returns stay with its result.
+- **Context overflow:** a Claude result with `terminal_reason: "prompt_too_long"` becomes an overflow-classified
+  `APICallError`, so the session compacts and retries instead of ending.
 - **Generate calls:** upstream only streams. `doGenerate` collects the streamed reply, because the shipped CLI
   calls `generateObject`/`generateText` (agent creation, learning reflection). A JSON request is asked for in
   the prompt, since Claude Code has no structured-output mode, and a markdown fence around it is removed.
-- **Per-project state:** each directory gets its own session registry, connection settings and login status.
-- **MCP server:** built on `@modelcontextprotocol/sdk` 1.x (already bundled) instead of `@modelcontextprotocol/server` 2.x.
+- **Per-project state:** each directory gets its own connection settings and login status, and the saved model
+  list is keyed by the project's connection settings. The session registry stays process-wide, as upstream,
+  because saved Claude sessions are keyed by chat session ID; a closed project's `claude` processes therefore
+  close after their idle timeout while another project stays open.
+- **/connect polling:** the login check is bound to its instance and stops when that instance is disposed. It
+  cannot see the dialog being dismissed, so it keeps checking for up to 5 minutes and may still connect.- **MCP server:** built on `@modelcontextprotocol/sdk` 1.x (already bundled) instead of `@modelcontextprotocol/server` 2.x.
 - **Connection settings:** `headerTimeout` and `chunkTimeout` are consumed by the provider loader before
   the factory runs, so they do not reach Claude Code.
 - **Model list refresh:** a new list from a chat's `claude` start is saved and shown after the next
