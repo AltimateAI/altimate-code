@@ -195,3 +195,90 @@ it.live(
     ),
   { timeout: 30_000 },
 )
+
+it.live(
+  "an imported summary with a greater id than a newer finished assistant does not skip the overflow check",
+  () =>
+    provideTmpdirServerLegacy(
+      Effect.fnUntraced(function* ({ dir, llm }) {
+        const prompt = yield* SessionPrompt.Service
+        const sessions = yield* Session.Service
+        const session = yield* sessions.create({
+          title: "imported summary",
+          permission: [{ permission: "*", pattern: "*", action: "allow" }],
+        })
+        const sessionID = session.id
+        const user = Effect.fnUntraced(function* (part: Record<string, any>, id = MessageID.ascending()) {
+          const msg = yield* sessions.updateMessage({
+            id,
+            role: "user",
+            sessionID,
+            agent: "build",
+            model,
+            time: { created: Date.now() },
+          } as any)
+          yield* sessions.updatePart({ id: PartID.ascending(), messageID: msg.id, sessionID, ...part } as any)
+          return msg
+        })
+        const assistant = Effect.fnUntraced(function* (
+          id: MessageID,
+          parentID: MessageID,
+          input: number,
+          extra: Record<string, any>,
+        ) {
+          const msg = yield* sessions.updateMessage({
+            id,
+            role: "assistant",
+            sessionID,
+            mode: "build",
+            agent: "build",
+            path: { cwd: dir, root: dir },
+            cost: 0,
+            tokens: usage(input),
+            modelID: model.modelID,
+            providerID: model.providerID,
+            parentID,
+            time: { created: Date.now(), completed: Date.now() },
+            ...extra,
+          } as any)
+          yield* sessions.updatePart({
+            id: PartID.ascending(),
+            messageID: msg.id,
+            sessionID,
+            type: "text",
+            text: extra.summary ? "summary of the work so far" : "working",
+          } as any)
+          return msg
+        })
+
+        // The imported summary keeps an id greater than the assistant stored after it.
+        yield* user({ type: "text", text: "start the task" })
+        const compaction = yield* user({ type: "compaction", auto: true })
+        const newerAssistantID = MessageID.ascending()
+        const importedSummaryID = MessageID.ascending()
+        yield* assistant(importedSummaryID, compaction.id, 2_000, {
+          summary: true,
+          finish: "stop",
+          mode: "compaction",
+          agent: "compaction",
+        })
+        const next = yield* user({ type: "text", text: "continue the task" })
+        yield* Effect.sleep("5 millis")
+        // Stored after the summary, at 95K of a 100K context: the overflow check must see it.
+        yield* assistant(newerAssistantID, next.id, 95_000, { finish: "stop" })
+        yield* Effect.sleep("5 millis")
+        yield* user({ type: "text", text: "and the next step" })
+
+        yield* llm.text("summary of the work so far")
+        yield* llm.text("agent reply after compaction")
+        yield* llm.text("agent reply after compaction")
+        yield* prompt.loop({ sessionID })
+
+        const messages = yield* sessions.messages({ sessionID })
+        const compactionUsers = messages.filter((m) => m.parts.some((part) => part.type === "compaction"))
+        expect(compactionUsers.length).toBe(2)
+      }),
+      { git: true, config: providerCfg },
+    ),
+  { timeout: 30_000 },
+)
