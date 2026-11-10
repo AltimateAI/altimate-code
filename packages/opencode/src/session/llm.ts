@@ -52,6 +52,9 @@ import { LLMRequestEvent } from "@/altimate/observability/tracing"
 import { applyBudgetEffort, budgetMessages } from "@/altimate/session/budget-effort"
 import { activeRun, effortOverride, hasActiveRuns, toolsDisabled } from "@/altimate/session/run-budget-effort"
 import { analystEffortOptions } from "@/altimate/session/analyst-effort"
+// altimate_change start — Claude Agent provider request routing
+import { ClaudeAgent } from "@/altimate/provider/claude-agent"
+// altimate_change end
 import { Session } from "@/session"
 import { SessionID } from "@/session/schema"
 // altimate_change end
@@ -211,6 +214,19 @@ export namespace LLM {
     if (isCodex) {
       options.instructions = SystemPrompt.instructions()
     }
+    // altimate_change start — Claude Agent: Claude Code's own prompt replaces the provider prompt, so the
+    // agent prompt and instruction sources travel as options; the environment block is left out
+    const claudeAgent = ClaudeAgent.matches(input.model)
+      ? ClaudeAgent.request({
+          sessionID: input.sessionID,
+          agent: input.agent.name,
+          agentPrompt: input.agent.prompt,
+          small: input.small,
+          instructions: [...input.system, input.user.system],
+        })
+      : undefined
+    if (claudeAgent) Object.assign(options, claudeAgent.options)
+    // altimate_change end
 
     // altimate_change start — pass maxOutputTokens INTO chat.params hook so plugins
     // (codex, github-copilot, third-party) can override it. Upstream PRs #21220 + #21225
@@ -240,6 +256,9 @@ export namespace LLM {
         options,
       },
     )
+    // altimate_change end
+    // altimate_change start — Claude Agent: without an explicit cap, Claude Code picks its own output budget
+    if (claudeAgent) params.maxOutputTokens = undefined
     // altimate_change end
 
     const { headers } = await Plugin.trigger(
@@ -273,6 +292,9 @@ export namespace LLM {
       input.model.headers,
       headers,
     )
+    // altimate_change end
+    // altimate_change start — Claude Agent: request kind and session, read by its language model
+    if (claudeAgent) Object.assign(requestHeaders, claudeAgent.headers)
     // altimate_change end
 
     // altimate_change start — finalization must have no executable catalog, even for unsolicited tool calls

@@ -155,6 +155,47 @@ identity.
 
 Available models: `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001`
 
+## Claude Agent (Claude subscription)
+
+Claude Agent runs Claude models through your own Claude Code login, so a Claude Pro or Max subscription covers usage. Altimate Code starts your installed `claude` program through Anthropic's Claude Agent SDK. It never reads or stores your Claude Code token.
+
+1. Install [Claude Code](https://code.claude.com/docs/en/setup) (2.1.248 or later) and run `claude auth login`.
+2. In Altimate Code, run `/connect` and pick **Claude Agent**. The dialog checks your Claude Code login and connects once it finds one.
+3. Pick a model with `/models`. The list is what your Claude Code reports, such as `claude-agent/opus`, `claude-agent/sonnet` and `claude-agent/haiku`, and each model offers Claude Code's effort levels as variants.
+
+Any Claude Code login works: a subscription, an API key or a cloud account. A subscription shows $0 cost. An API key or cloud login is priced from that provider's catalog.
+
+How it behaves:
+
+- Claude uses Altimate Code's tools, permissions, agents, skills and `AGENTS.md` instructions. Claude Code's own tools, settings files, `CLAUDE.md`, hooks, MCP servers, memory and auto compaction are turned off.
+- Chats use Claude Code's system prompt plus the selected agent's prompt as its role. Temperature, top-p and top-k are not supported.
+- You can switch between Claude Agent and other models in the same session. Claude is sent the part of the conversation it has not seen.
+- Each session keeps one `claude` process, which stops after 5 minutes idle and resumes the saved Claude session on the next message.
+- `claude` must be installed on the same machine. Set `OPENCODE_CLAUDE_PATH` to run a specific `claude` binary instead of the one on `PATH`.
+
+Connection settings in config map to Claude Code variables:
+
+```json
+{
+  "provider": {
+    "claude-agent": {
+      "options": {
+        "baseURL": "https://gateway.example.com",
+        "headers": { "x-team": "data" }
+      }
+    }
+  }
+}
+```
+
+| Option | Claude Code variable |
+|--------|---------------------|
+| `baseURL` | `ANTHROPIC_BASE_URL` |
+| `apiKey` | `ANTHROPIC_API_KEY` |
+| `authToken` | `ANTHROPIC_AUTH_TOKEN` |
+| `headers` | `ANTHROPIC_CUSTOM_HEADERS` |
+| `body` | `CLAUDE_CODE_EXTRA_BODY` |
+
 ## OpenAI
 
 ```json
