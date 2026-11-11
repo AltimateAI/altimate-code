@@ -407,7 +407,7 @@ describe("column answer: a column the model doesn't have", () => {
   })
 
   test("answers when a select * leaves the model's columns open", () => {
-    const value = shop()
+    const value: any = shop()
     value.sources["source.shop.raw.events"] = source("events", [])
     value.nodes["model.shop.stg_events"] = model("stg_events", ["source.shop.raw.events"], "select * from shop.raw.events")
     const a = columnAnswer(write(value), "stg_events", "kind")
