@@ -608,6 +608,93 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
+  describe("bedrock tool-result images", () => {
+    const png = Buffer.from("png").toString("base64")
+    const bedrock = (apiID: string): Provider.Model => ({
+      ...model,
+      id: ModelID.make(`amazon-bedrock/${apiID}`),
+      providerID: ProviderID.make("amazon-bedrock"),
+      api: { id: apiID, url: "https://bedrock-runtime.us-east-1.amazonaws.com", npm: "@ai-sdk/amazon-bedrock" },
+      capabilities: {
+        ...model.capabilities,
+        attachment: true,
+        input: { ...model.capabilities.input, image: true },
+      },
+    })
+    const history = (): SessionV1.WithParts[] => [
+      {
+        info: userInfo("m-user-bedrock-png"),
+        parts: [{ ...basePart("m-user-bedrock-png", "u1"), type: "text", text: "read it" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo("m-assistant-bedrock-png", "m-user-bedrock-png"),
+        parts: [
+          {
+            ...basePart("m-assistant-bedrock-png", "a1"),
+            type: "tool",
+            callID: "call-bedrock-png-1",
+            tool: "read",
+            state: {
+              status: "completed",
+              input: { filePath: "/tmp/a.png" },
+              output: "Image read successfully",
+              title: "Read",
+              metadata: {},
+              time: { start: 0, end: 1 },
+              attachments: [
+                {
+                  ...basePart("m-assistant-bedrock-png", "f1"),
+                  type: "file",
+                  mime: "image/png",
+                  filename: "a.png",
+                  url: `data:image/png;base64,${png}`,
+                },
+              ],
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    test.each(["us.anthropic.claude-sonnet-4-6", "amazon.nova-pro-v1:0", "us.meta.llama4-maverick-17b-instruct-v1:0"])(
+      "keeps images in the tool result for %s",
+      async (apiID) => {
+        const result = await MessageV2.toModelMessages(history() as unknown as MessageV2.WithParts[], bedrock(apiID))
+        expect(result).toHaveLength(3)
+        expect(result[2]?.content).toMatchObject([
+          {
+            type: "tool-result",
+            output: {
+              type: "content",
+              value: [
+                { type: "text", text: "Image read successfully" },
+                { type: "media", mediaType: "image/png", data: png },
+              ],
+            },
+          },
+        ])
+      },
+    )
+
+    test.each(["openai.gpt-oss-120b-1:0", "mistral.pixtral-large-2502-v1:0"])(
+      "hoists images into a user message for %s",
+      async (apiID) => {
+        const result = await MessageV2.toModelMessages(history() as unknown as MessageV2.WithParts[], bedrock(apiID))
+        expect(result).toHaveLength(4)
+        expect(result[2]?.content).toMatchObject([
+          { type: "tool-result", output: { type: "text", value: "Image read successfully" } },
+        ])
+        expect(result[3]).toMatchObject({
+          role: "user",
+          content: [
+            { type: "text", text: MessageV2.SYNTHETIC_ATTACHMENT_PROMPT },
+            { type: "file", mediaType: "image/png" },
+          ],
+        })
+      },
+    )
+  })
+
   test("omits provider metadata when assistant model differs", async () => {
     const userID = "m-user"
     const assistantID = "m-assistant"
