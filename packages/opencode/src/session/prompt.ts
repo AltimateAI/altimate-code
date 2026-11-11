@@ -2176,10 +2176,12 @@ export namespace SessionPrompt {
         sessionID,
         system,
         // altimate_change start — upstream_fix: append ambient context after the cached instructions.
-        // Hoisted reminders (task pin, plan switch) appear on some steps only, so they ride in the
-        // same trailing message, after the cache breakpoint; inside `system` they changed the
-        // cached prefix and re-created it at full input rate.
-        environment: [...(await SystemPrompt.environment(model)), ...hoistedReminders],
+        // Hoisted reminders (task pin, plan switch) appear on some steps only, so they ride after the
+        // cache breakpoints: inside `system` they changed the cached prefix, and inside the
+        // environment message they changed the last marked message; either re-created it at full
+        // input rate.
+        environment: await SystemPrompt.environment(model),
+        reminders: hoistedReminders,
         // altimate_change end
         messages: [
           // altimate_change start - use the history converted before the fresh-user check
