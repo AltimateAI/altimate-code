@@ -9,6 +9,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js"
 import * as Registry from "../native/connections/registry"
 import { createAdapter, descriptions, resultFailed } from "./adapter"
+import { normalizeAnswerArgs } from "../tools/answer-commit"
 import { catalogSummary } from "../tools/warehouse-discovery"
 import { readOnlyCaveat } from "../native/connections/read-only"
 import path from "node:path"
@@ -183,7 +184,10 @@ export async function createServer(options: ServeOptions = {}) {
     result: { status?: string },
     signal: AbortSignal,
   ) => {
-    const readings = Array.isArray(args?.readings) ? (args.readings as { reading?: unknown }[]) : []
+    // altimate_change start — #1700: readings may arrive as a JSON string; read the decoded shape
+    const decoded = normalizeAnswerArgs(args) as Record<string, unknown> | undefined
+    const readings = Array.isArray(decoded?.readings) ? (decoded.readings as { reading?: unknown }[]) : []
+    // altimate_change end
     const choices = readings.map((item) => item.reading).filter((item): item is string => typeof item === "string" && !!item)
     if (elicited || result.status === "error" || choices.length < 2 || !server.getClientCapabilities()?.elicitation) return undefined
     elicited = true

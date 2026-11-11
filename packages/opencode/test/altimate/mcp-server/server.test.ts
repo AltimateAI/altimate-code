@@ -855,6 +855,20 @@ mcpTest("answer_commit elicits a reading and asks for a recompute when another i
   expect(asked).toBe(1)
 })
 
+// #1700: readings sent as a JSON string still trigger the reading question.
+mcpTest("answer_commit elicits a reading when readings arrive as a JSON string", async () => {
+  const { client, call } = await fixture(false, { elicitation: {} })
+  let asked = 0
+  client.setRequestHandler(ElicitRequestSchema, async () => {
+    asked++
+    return { action: "accept", content: { reading: "by id" } }
+  })
+  const result = await call("answer_commit", { ...twoReadings, readings: JSON.stringify(twoReadings.readings) })
+  expect(result.isError).toBe(true)
+  expect(text(result)).toContain("by id")
+  expect(asked).toBe(1)
+})
+
 mcpTest("answer_commit degrades silently when the client cancels or lacks elicitation", async () => {
   const cancelled = await fixture(false, { elicitation: {} })
   cancelled.client.setRequestHandler(ElicitRequestSchema, async () => ({ action: "cancel" }))

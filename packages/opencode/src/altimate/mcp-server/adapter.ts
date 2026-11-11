@@ -9,7 +9,7 @@ import { Agent } from "@/agent/agent"
 import { Tool } from "@/tool/tool"
 import { Truncate } from "@/tool/truncate"
 import { outputLimits } from "./output-settings"
-import { MAX_BASIS_CHARACTERS, renderAnswer } from "../tools/answer-commit"
+import { MAX_BASIS_CHARACTERS, normalizeAnswerArgs, renderAnswer } from "../tools/answer-commit"
 import { AnswerCommitConjunction } from "../tools/answer-commit-conjunction"
 import { MAX_SCANNED_CHARACTERS } from "../tools/answer-commit-checks"
 import * as Precedence from "../workspace/precedence"
@@ -230,7 +230,10 @@ type TurnMessage = Tool.Context["messages"][number]
  * explanation never becomes part of the answer text a client copies. The basis is kept,
  * above that line, as context for the user.
  */
-export function finalAnswerText(args: Record<string, unknown>, committed: string, request?: unknown): string {
+export function finalAnswerText(raw: Record<string, unknown>, committed: string, request?: unknown): string {
+  // altimate_change start — #1700: read the same decoded shape the tool validated (JSON-string fields/rows)
+  const args = normalizeAnswerArgs(raw) as Record<string, unknown>
+  // altimate_change end
   // Answer-only only for a complete commit: rows, or fields covering every item the request names.
   // Otherwise keep the committed text (basis on the line) so an item kept only in the basis is not lost.
   const fields = Array.isArray(args.fields) ? args.fields.length : 0
