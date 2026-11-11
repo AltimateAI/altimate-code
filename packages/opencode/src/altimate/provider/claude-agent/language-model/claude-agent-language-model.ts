@@ -132,7 +132,6 @@ export class Model implements LanguageModelV3 {
             {
               sessionID,
               sourceID,
-              compaction: kind === "compaction",
               model: this.modelId,
               effort,
               maxOutputTokens: options.maxOutputTokens,
