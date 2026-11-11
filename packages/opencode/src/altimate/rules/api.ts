@@ -66,6 +66,8 @@ export const SyncResponse = z.object({
   workspace_name: z.string(),
   owner_name: z.string().nullable().optional(),
   is_owner: z.boolean(),
+  /** `owner`, `admin` or `member` (absent from servers older than workspace roles: see `WorkspaceRole.roleOf`). */
+  role: z.string().nullable().optional(),
   settings: Settings,
   pending_count: z.number().int(),
   // Each rule and each review is validated on its own in `sync` below: one this version cannot read is skipped, not a

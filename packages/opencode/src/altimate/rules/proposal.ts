@@ -20,6 +20,7 @@ import { RulesStore } from "./store"
 import { RulesSync } from "./sync"
 import { RulesTelemetry, type AnswerOutcome, type CardTrigger } from "./telemetry"
 import { processAlive, saveWithoutCard } from "./remember"
+import { WorkspaceRole } from "../workspace/role"
 
 const log = Log.create({ service: "rules.proposal" })
 export const MAX_EXCERPT = 280
@@ -257,7 +258,8 @@ async function publish<T extends (typeof RuleEvents.Event)[keyof typeof RuleEven
 
 /** What a card offers, from its change and the workspace it is for (none: saved for this project only). */
 function actionsFor(change: Draft["change"], choose: boolean | undefined, workspace: RulesStore.State["workspace"]): ProposalCard["actions"] {
-  const team: ProposalCard["actions"] = workspace ? [workspace.is_owner ? "approve" : "send"] : ["save_local"]
+  // A manager (the owner or an admin) approves; a member sends for review.
+  const team: ProposalCard["actions"] = workspace ? [WorkspaceRole.manages(workspace) ? "approve" : "send"] : ["save_local"]
   return choose
     ? ["save_memory", ...team, "dismiss"]
     : [...team, ...(change === "retire" ? [] : (["edit"] as const)), "dismiss"]

@@ -580,7 +580,7 @@ const ProposalsReplyCommand = effectCmd({
   builder: (yargs: Argv) =>
     yargs
       .positional("id", { type: "string", demandOption: true })
-      .option("send", { type: "boolean", describe: "send it to the workspace owner's review" })
+      .option("send", { type: "boolean", describe: "send it for review by the workspace owner or an admin" })
       .option("approve", { type: "boolean", describe: "approve it now (workspace owner)" })
       .option("approve-anyway", { type: "boolean", describe: "approve a rule flagged as weakening verification" })
       .option("edit", { type: "string", describe: "change the wording (it stays open)" })
