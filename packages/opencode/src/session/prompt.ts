@@ -3195,6 +3195,14 @@ export namespace SessionPrompt {
         ? await unvalidatedTurnBinding(Instance.directory)
         : await turnBinding(input.sessionID, Instance.directory)
       )?.datamateId
+    // Every part settles before a failed one is rethrown. A part still running after another failed could
+    // otherwise read the turn's workspace once `prompt` has cleared it, and leave a verdict for the next
+    // loop started without a prompt (summarize, resume) to take.
+    function settled<T>(results: PromiseSettledResult<T>[]): T[] {
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected")
+      if (failed) throw failed.reason
+      return results.map((result) => (result as PromiseFulfilledResult<T>).value)
+    }
     // altimate_change end
     const agentName = input.agent ?? (await Agent.defaultAgent())
     const agent = await Agent.get(agentName)
@@ -3250,7 +3258,9 @@ export namespace SessionPrompt {
       id: part.id ? PartID.make(part.id) : PartID.ascending(),
     })
 
-    const parts = await Promise.all(
+    // altimate_change start — every part settles before a failure is rethrown (see `settled`)
+    const parts = await Promise.allSettled(
+      // altimate_change end
       input.parts.map(async (part): Promise<Draft<MessageV2.Part>[]> => {
         if (part.type === "file") {
           // before checking the protocol we check if this is an mcp resource because it needs special handling
@@ -3580,7 +3590,9 @@ export namespace SessionPrompt {
           },
         ]
       }),
-    ).then((x) => x.flat().map(assign))
+      // altimate_change start — every part settles before a failure is rethrown (see `settled`)
+    ).then((x) => settled(x).flat().map(assign))
+    // altimate_change end
 
     await Plugin.trigger(
       "chat.message",

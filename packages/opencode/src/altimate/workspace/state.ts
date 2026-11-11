@@ -793,7 +793,8 @@ export async function resolveTurnBinding(
   waitMs = TURN_PIN_WAIT_MS,
 ): Promise<TurnBinding | null> {
   // With the workspace kill switch on, nothing else in the session reads the pin, so the turn sends
-  // no validation request and waits for none. Its rows read the link, as they do on `main`.
+  // no validation request and waits for none. Its rows read the link, as they did before the pin
+  // was honoured.
   if (!workspaceEnabled()) return linkedTurnBinding(directory)
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<BindingOutcome>((done) => {

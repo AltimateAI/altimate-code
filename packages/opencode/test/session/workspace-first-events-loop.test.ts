@@ -17,7 +17,7 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Telemetry } from "../../src/altimate/telemetry"
 import * as OnboardingTelemetry from "../../src/altimate/telemetry/onboarding"
 import { AltimateApi } from "../../src/altimate/api/client"
-import { readLocalBinding, recordApprovedBinding } from "../../src/altimate/workspace/state"
+import { __resetPinValidation, readLocalBinding, recordApprovedBinding } from "../../src/altimate/workspace/state"
 import * as WorkspaceFirstEvents from "../../src/altimate/workspace/first-events"
 import { stubEmptySkillList } from "../altimate/workspace/skill-list-fixture"
 import { pollWithTimeout, testEffect } from "../lib/effect"
@@ -139,9 +139,22 @@ let rows: Row[] = []
 let restore: (() => void)[] = []
 let stateHome = ""
 const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME
+// The suite's preload turns the workspace feature off, and with it off a turn never reads the pin. These
+// tests turn it on, as a user's CLI has it, and clear any pin in the runner's own environment.
+const PIN_VARS = [
+  "ALTIMATE_CODE_SERVE",
+  "ALTIMATE_PINNED_WORKSPACE_ID",
+  "ALTIMATE_PINNED_WORKSPACE_NAME",
+  "ALTIMATE_PINNED_WORKSPACE_ROOT",
+]
+const inherited = Object.fromEntries(
+  ["ALTIMATE_DISABLE_WORKSPACE", ...PIN_VARS].map((name) => [name, process.env[name]]),
+)
 
 beforeEach(() => {
   rows = []
+  for (const name of Object.keys(inherited)) delete process.env[name]
+  __resetPinValidation()
   stateHome = mkdtempSync(path.join(os.tmpdir(), "first-events-loop-state-"))
   process.env.OPENCODE_TEST_STATE_HOME = stateHome
   WorkspaceFirstEvents.resetForTest()
@@ -164,6 +177,10 @@ beforeEach(() => {
 afterEach(() => {
   for (const undo of restore) undo()
   OnboardingTelemetry.resetForTest()
+  for (const [name, value] of Object.entries(inherited)) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
   if (originalStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
   else process.env.OPENCODE_TEST_STATE_HOME = originalStateHome
   rmSync(stateHome, { recursive: true, force: true })
