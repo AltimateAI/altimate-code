@@ -158,3 +158,58 @@ it.live("a hoisted reminder rides after the breakpoint: the first system message
   ),
   { timeout: 30_000 },
 )
+
+// After a compaction the original task is pinned and hoisted on this model. The environment
+// message carries the last system cache breakpoint; on the gateway that breakpoint is the one a
+// short prompt hits, so the pin must not be folded into it. It rides as its own trailing system
+// message, after the marked environment message.
+const PIN_MARK = "Original task — authoritative over any summary"
+const marked = (message: ChatMessage) => JSON.stringify(message).includes("cache_control")
+
+it.live("after a compaction the task pin is its own message after the marked environment message", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ llm }) {
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "prefix stability across compaction",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      // Overflow -> compaction summary -> continuation, which carries the pinned task.
+      yield* llm.error(413, { error: { message: "request entity too large" } })
+      yield* llm.text("summary of the conversation so far")
+      yield* llm.text("final answer after compaction")
+      yield* prompt.prompt({
+        sessionID: session.id,
+        messageID: MessageID.ascending(),
+        agent: "build",
+        noReply: true,
+        parts: [{ type: "text", text: "count the rows in the orders table" }],
+      })
+      yield* prompt.loop({ sessionID: session.id })
+
+      const messages = yield* sessions.messages({ sessionID: session.id })
+      expect(messages.some((message) => message.parts.some((part) => part.type === "compaction"))).toBe(true)
+      const systemsOf = (body: Record<string, unknown>) => chatMessages(body).filter((m) => m.role === "system")
+      const hits = (yield* llm.hits).filter((hit) => !JSON.stringify(hit.body).includes("Generate a title"))
+      const before = systemsOf(hits[0].body)
+      const after = systemsOf(hits.findLast((hit) => JSON.stringify(hit.body).includes(PIN_MARK))!.body)
+
+      // Precondition: no pin before the compaction; header + environment, both marked.
+      expect(before.some((m) => text(m.content).includes(PIN_MARK))).toBe(false)
+      expect(before.length).toBe(2)
+      // Header and environment are byte-identical and keep their cache marks.
+      expect(text(after[0].content)).toBe(text(before[0].content))
+      expect(text(after[1].content)).toBe(text(before[1].content))
+      expect(marked(before[1])).toBe(true)
+      expect(marked(after[1])).toBe(true)
+      // The pin is a separate, unmarked, trailing system message.
+      expect(after.length).toBe(3)
+      expect(text(after[2].content)).toContain(PIN_MARK)
+      expect(marked(after[2])).toBe(false)
+      expect(after.slice(0, 2).some((m) => text(m.content).includes(PIN_MARK))).toBe(false)
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)

@@ -23,8 +23,10 @@ const NPM: Record<string, string> = {
 describe("session system cache prefix", () => {
   for (const providerID of ["anthropic", "amazon-bedrock", "openai", "google"]) {
     const explicit = providerID === "anthropic" || providerID === "amazon-bedrock"
-    for (const pluginInstructions of [false, true]) {
-      test(`${providerID} keeps a marked prefix across directories with plugin instructions ${pluginInstructions}`, async () => {
+    for (const [pluginInstructions, reminder] of [false, true].flatMap((p) => [false, true].map((r) => [p, r]))) {
+      const reminders = reminder ? ["<system-reminder>\nOriginal task: count the rows.\n</system-reminder>"] : undefined
+      const named = `plugin instructions ${pluginInstructions}${reminder ? " and a hoisted reminder" : ""}`
+      test(`${providerID} keeps a marked prefix across directories with ${named}`, async () => {
         const model: Provider.Model = {
           id: ModelID.make(explicit ? "claude-test" : "plain-test"),
           providerID: ProviderID.make(providerID),
@@ -122,6 +124,7 @@ describe("session system cache prefix", () => {
                   },
                   system: ["Project instructions.", "Skill instructions."],
                   environment: await SystemPrompt.environment(model),
+                  reminders,
                   messages: [{ role: "user", content: "Inspect the project." }],
                   tools: {
                     inspect: tool({ description: "Inspect the project", inputSchema: jsonSchema({ type: "object" }) }),
@@ -153,6 +156,8 @@ describe("session system cache prefix", () => {
               expect(text).toContain(`Working directory: ${directories[index]}`)
               expect(text).toContain(`Today's date: ${new Date().toDateString()}`)
               if (pluginInstructions) expect(text).toContain("Plugin rules.")
+              // Joined after the environment, as before the reminders had their own input.
+              if (reminder) expect(system[0].content).toContain(`</directories>\n${reminders![0]}`)
             }
             const stripped = systems.map((system, index) =>
               system.map((message) => String(message.content).split(directories[index]).join("<dir>")).join("\n"),
@@ -162,9 +167,18 @@ describe("session system cache prefix", () => {
             )
             return
           }
-          expect(systems[0]).toHaveLength(pluginInstructions ? 3 : 2)
-          expect(JSON.stringify(systems[0].slice(0, -1))).toBe(JSON.stringify(systems[1].slice(0, -1)))
+          expect(systems[0]).toHaveLength((pluginInstructions ? 3 : 2) + (reminder ? 1 : 0))
+          const stableEnd = reminder ? -2 : -1
+          expect(JSON.stringify(systems[0].slice(0, stableEnd))).toBe(JSON.stringify(systems[1].slice(0, stableEnd)))
           for (const [index, system] of systems.entries()) {
+            // A hoisted reminder is its own trailing message after the environment, never marked;
+            // the environment message is unchanged and keeps its place among the marked messages.
+            const reminderMessage = reminder ? system.pop() : undefined
+            if (reminder) {
+              expect(reminderMessage?.content).toBe(reminders![0])
+              expect(reminderMessage?.providerOptions).toBeUndefined()
+              if (!pluginInstructions) expect(system.at(-1)?.providerOptions).toBeDefined()
+            }
             const prefix = system.slice(0, -1)
             expect(prefix[0].content).toContain("Project instructions.\nSkill instructions.\nCustom instructions.")
             expect(prefix[0].providerOptions?.[providerID === "anthropic" ? "anthropic" : "bedrock"]).toEqual(
