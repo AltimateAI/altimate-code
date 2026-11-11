@@ -249,11 +249,18 @@ async function pollUnsafe(directory: string, deps: PollDeps): Promise<PollResult
   }
   // Past the page cap, a request still pending here may be one the list never reached (newer requests push it down,
   // and a decision does not move it up): each such one is asked for by id, a few per poll.
+  // One the server no longer has (404) is let go; one that could not be read stays and is asked again later, behind
+  // the others, so a few that keep failing never take every lookup.
+  const gone = new Set<string>()
+  let looked: string[] = []
   if (!listed.complete) {
     const listedIds = new Set(listed.items.map((item) => item.public_id))
-    const missing = ((await read(scope))?.pending ?? []).filter((id) => !listedIds.has(id)).slice(0, MAX_LOOKUPS)
-    for (const id of missing) {
-      const item = await ReviewApi.getMine(scope.datamateId, id, actAs).catch(() => null)
+    looked = ((await read(scope))?.pending ?? []).filter((id) => !listedIds.has(id)).slice(0, MAX_LOOKUPS)
+    for (const id of looked) {
+      const item = await ReviewApi.getMine(scope.datamateId, id, actAs).then(
+        (found) => (found === null ? (gone.add(id), undefined) : found),
+        () => undefined,
+      )
       if (item) listed = { ...listed, items: [...listed.items, item] }
     }
   }
@@ -262,7 +269,13 @@ async function pollUnsafe(directory: string, deps: PollDeps): Promise<PollResult
     if ((await accountDigest()) !== digest) return { state, result: { status: "account_changed" } }
     const recorded = decided(state, listed.items)
     // A row this version could not read may be one of the pending requests: only a list read in full lets one go.
-    return { state: advance(state, listed.items, recorded, listed.complete && listed.skipped === 0), result: { status: "done", recorded } }
+    const next = advance(state, listed.items, recorded, listed.complete && listed.skipped === 0)
+    const asked = new Set(looked)
+    const pending = next.pending.filter((id) => !gone.has(id))
+    return {
+      state: { ...next, pending: [...pending.filter((id) => !asked.has(id)), ...pending.filter((id) => asked.has(id))] },
+      result: { status: "done", recorded },
+    }
   })
   if (result.status === "done")
     for (const notice of result.recorded) await deps.announce?.(notice).catch((error) => log.warn("could not announce a review notice", { error: String(error) }))

@@ -1319,6 +1319,16 @@ describe("workspace review", () => {
     expect(uploads()).toEqual([])
   })
 
+  test("a submission the server accepted is not a failure when its row has a status this version does not know", async () => {
+    workspaceOwners = { 42: 99 }
+    server(
+      () => reply(summary()),
+      () => reply({ status: "pending", attached_directly: false, duplicate: false, contribution: contribution({ status: "held" }) }),
+    )
+    const report = await publish()
+    expect(report.review).toMatchObject({ status: "pending", contribution: null })
+  })
+
   test("coded refusals of the submission get their own errors", async () => {
     workspaceOwners = { 42: 99 }
     server(() => reply(summary()), () => reply({ detail: { code: "review_disabled", message: "off" } }, 409))

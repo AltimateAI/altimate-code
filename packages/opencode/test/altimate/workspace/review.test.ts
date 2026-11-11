@@ -353,6 +353,23 @@ describe("decision notices", () => {
     expect((await ReviewNotices.read(scopeA()))?.pending).not.toContain("c-old")
   })
 
+  test("past the cap, a request the server no longer has is let go, and one that fails moves behind the others", async () => {
+    mine = () => page([contribution({ public_id: "c-gone", status: "pending" }), contribution({ public_id: "c-flaky", status: "pending" })])
+    await poll()
+    let at = 0
+    mine = () => {
+      at++
+      return page(Array.from({ length: 50 }, (_, i) => contribution({ public_id: `n-${at}-${i}` })), 99, at)
+    }
+    byId = (id) => (id === "c-gone" ? reply({ detail: { code: "not_found", message: "gone" } }, 404) : reply({ detail: "boom" }, 502))
+    await poll()
+    const pending = (await ReviewNotices.read(scopeA()))?.pending ?? []
+    expect(pending).not.toContain("c-gone")
+    expect(pending).toContain("c-flaky")
+    // Asked this time, so it waits behind the requests not asked yet.
+    expect(pending.indexOf("c-flaky")).toBe(pending.length - 1)
+  })
+
   test("the state is bounded", async () => {
     mine = () => page(Array.from({ length: ReviewNotices.MAX_PENDING + 25 }, (_, i) => contribution({ public_id: `c-${i}` })))
     await poll()

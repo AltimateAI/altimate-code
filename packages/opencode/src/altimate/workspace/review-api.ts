@@ -58,7 +58,8 @@ export const SubmitResult = z.object({
   status: z.enum(["active", "pending"]),
   attached_directly: z.boolean(),
   duplicate: z.boolean(),
-  contribution: Contribution.nullable(),
+  // A row a later server shapes differently (a new status) must not turn an accepted submission into a failure.
+  contribution: Contribution.nullable().catch(null),
 })
 export type SubmitResult = z.infer<typeof SubmitResult>
 
