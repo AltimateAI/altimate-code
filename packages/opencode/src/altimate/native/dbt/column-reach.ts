@@ -8,6 +8,7 @@
 // engine reports no edge), and models that read it through a table name several parents share.
 import { loadRawManifest, findModel } from "./helpers"
 import { dbtLineage } from "./lineage"
+import { missingColumn, projectLineage, selectsStar, stripSql } from "./project-lineage"
 
 export interface ColumnReachModel {
   name: string
@@ -116,44 +117,6 @@ function documentedColumns(node: any): Set<string> {
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
-/**
- * SQL with comments blanked and string literals (quoted or dollar-quoted) emptied, in one pass so
- * none can swallow another.
- */
-function stripSql(sql: string): string {
-  return sql.replace(/'(?:[^']|'')*'|\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (match) =>
-    match.startsWith("'") || match.startsWith("$") ? "''" : " ",
-  )
-}
-
-/**
- * Whether the SQL selects `*` or `t.*` in any form (DISTINCT ON, TOP n, AS STRUCT, multi-part or
- * quoted qualifiers, EXCLUDE/EXCEPT/REPLACE/RENAME modifiers). Every `*` counts except count(*) and
- * multiplication, which has an operand on both sides that is not a keyword ending the projection.
- */
-export function selectsStar(sql: string): boolean {
-  const code = stripSql(sql)
-  const ends = /^(from|exclude|except|replace|rename|ilike|columns)\b/i
-  for (let at = code.indexOf("*"); at !== -1; at = code.indexOf("*", at + 1)) {
-    const before = code.slice(0, at).trimEnd()
-    const after = code.slice(at + 1).trimStart()
-    const prev = before.at(-1) ?? ""
-    const next = after[0] ?? ""
-    // count(*) reads no column; hash(*), object_construct(*), struct(*) read them all.
-    if (prev === "(" && next === ")" && /\bcount(?:_big|_if)?\s*\($/i.test(before)) continue
-    if (prev === "." || next === "" || next === "," || next === ")" || ends.test(after)) return true
-    const operand = /[\w"'`\])]/
-    // A sign on the right operand (`revenue * -1`) belongs to it.
-    const right = after.replace(/^[+-]\s*/, "")[0] ?? ""
-    if (operand.test(prev) && (operand.test(right) || right === "(" || /\d/.test(right))) {
-      // An operand before the `*` that is itself a keyword (SELECT, DISTINCT, ALL, STRUCT) is no operand.
-      if (/\b(select|distinct|all|struct)$/i.test(before)) return true
-      continue
-    }
-    return true
-  }
-  return false
-}
 
 /**
  * Whether compiled SQL names the column anywhere but as an output alias, comments and string
@@ -259,6 +222,11 @@ export function columnReach(manifestPath: string, model: string, column: string,
   const target = findModel(nodes, model)
   if (!target) throw new Error(`Model '${model}' not found in manifest`)
   const targetId: string = target.unique_id ?? Object.keys(nodes).find((id) => nodes[id] === target)
+  // The same parent columns dbtLineage reads each model against.
+  const project = projectLineage(manifestPath, dialect)
+  const missing = missingColumn(project, targetId, column)
+  if (missing) throw new Error(missing)
+  const known = (id: string) => new Set(project.columns(id).map((col) => col.name))
   const children = childMapOf(manifest)
 
   // Everything downstream, then a topological order over it, so each node is traced after all its
@@ -330,8 +298,10 @@ export function columnReach(manifestPath: string, model: string, column: string,
 
     const result = dbtLineage({ manifest_path: manifestPath, model: id, dialect })
     const lineage = result.raw_lineage as any
-    // dbtLineage rates a model low when the engine threw or answered SQL it cannot parse (`errors`, no edges).
-    if (result.confidence === "low") {
+    // dbtLineage rates a model low when the engine threw or answered SQL it cannot parse (`errors`, no
+    // edges), or when a `*` reads a parent with no known column. The edges it traced stand in the last
+    // case: a traced parent's columns are known, and a `*` over the target with none is caught below.
+    if (result.confidence === "low" && !result.unexpanded_stars?.length) {
       untraced.push(entry(id, result.confidence_factors[0] ?? "the lineage engine could not trace it"))
       unsure.add(id)
       continue
@@ -359,7 +329,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
     const collides = parents.some((p) => allParents.some((other) => other !== p && bareName(other) === bareName(p)))
     const wildcard =
       selectsStar(sqlText) &&
-      parents.some((p) => [...tracked.get(p)!].some((col) => !documentedColumns(lookup(p)).has(col)))
+      parents.some((p) => [...tracked.get(p)!].some((col) => !known(p).has(col)))
     if (collides || wildcard) {
       unsure.add(id)
       uncertain.push(
@@ -367,7 +337,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
           id,
           collides
             ? "reads a parent whose table name another parent shares"
-            : "selects * from a parent whose schema.yml does not list the column",
+            : "selects * from a parent whose known columns don't include the column",
         ),
       )
       continue

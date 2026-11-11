@@ -142,6 +142,19 @@ describe("impact_analysis: column answer", () => {
     expect(column.metadata.column_answer.consumers.exposures.map((c: any) => [c.name, c.tier])).toEqual([["board", "carries"]])
   })
 
+  test("a column the model doesn't have is a column error, with no column reach or answer", async () => {
+    const manifest_path = setup({
+      "exposure.shop.fct_board": { name: "fct_board", label: "Fct board", depends_on: { nodes: ["model.shop.fct"] } },
+    })
+    const result = await run({ model: "fct", column: "not_a_column", manifest_path })
+    const error = "fct has no column not_a_column; its columns are order_id, revenue"
+    expect(result.metadata.column_reach).toBeUndefined()
+    expect(result.metadata.column_answer).toBeUndefined()
+    expect(result.metadata.column_reach_error).toBe(error)
+    expect(result.metadata.column_answer_error).toBe(error)
+    expect(result.output).toContain(`Column Reach: not traced (${error}); the model-level impact above stands`)
+  })
+
   test("the MCP structured result carries it", async () => {
     const manifest_path = setup()
     const result = await run({ model: "fct", column: "revenue", manifest_path })

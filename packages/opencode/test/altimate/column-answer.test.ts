@@ -2,22 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import {
-  ENGINE,
-  MAX_ANSWER_COLUMNS,
-  clearColumnAnswerCache,
-  columnAnswer,
-  hasNestedWith,
-  howOf,
-  shapeFlags,
-  stripAggFilter,
-  type ColumnAnswer,
-} from "../../src/altimate/native/dbt/column-answer"
+import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
+import { clearLineageCaches, hasNestedWith, howOf, shapeFlags, stripAggFilter } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
-  clearColumnAnswerCache()
+  clearLineageCaches()
 })
 
 const model = (
@@ -400,6 +391,27 @@ describe("column answer: consumers", () => {
   test("upstream lists none", () => {
     const a = columnAnswer(write(shop()), "fct_orders", "revenue", "upstream")
     expect(a.consumers).toEqual({ declared: 1, exposures: [] })
+  })
+})
+
+describe("column answer: a column the model doesn't have", () => {
+  test("is an error when the model's columns are settled, naming them", () => {
+    expect(() => columnAnswer(write(shop()), "fct_orders", "not_a_column")).toThrow(
+      "fct_orders has no column not_a_column; its columns are customer_id, order_id, revenue, status",
+    )
+    expect(() => columnAnswer(write(shop()), "fct_orders", "not_a_column", "upstream")).toThrow("has no column")
+  })
+
+  test("matches the column in any case", () => {
+    expect(columnAnswer(write(shop()), "fct_orders", "Revenue").counts.models).toBe(3)
+  })
+
+  test("answers when a select * leaves the model's columns open", () => {
+    const value = shop()
+    value.sources["source.shop.raw.events"] = source("events", [])
+    value.nodes["model.shop.stg_events"] = model("stg_events", ["source.shop.raw.events"], "select * from shop.raw.events")
+    const a = columnAnswer(write(value), "stg_events", "kind")
+    expect(a.focus).toEqual({ model: "model.shop.stg_events", column: "kind" })
   })
 })
 

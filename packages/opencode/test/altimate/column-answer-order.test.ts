@@ -15,12 +15,13 @@ mock.module("@altimateai/altimate-core", () => ({
     return { ...result, column_lineage: reorder(result.column_lineage ?? []) }
   },
 }))
-const { clearColumnAnswerCache, columnAnswer } = await import("../../src/altimate/native/dbt/column-answer")
+const { columnAnswer } = await import("../../src/altimate/native/dbt/column-answer")
+const { clearLineageCaches } = await import("../../src/altimate/native/dbt/project-lineage")
 
 const dirs: string[] = []
 afterEach(() => {
   reorder = (edges) => edges
-  clearColumnAnswerCache()
+  clearLineageCaches()
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -58,7 +59,7 @@ function answer() {
       exposures: {},
     }),
   )
-  clearColumnAnswerCache()
+  clearLineageCaches()
   return columnAnswer(file, "stg", "amount")
 }
 
