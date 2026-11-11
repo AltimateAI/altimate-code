@@ -1,0 +1,38 @@
+name: dv_test_project
+version: '1.0.0'
+config-version: 2
+
+profile: dv_test
+
+vars:
+  # Runner sets these to 'raw_crm_customers' / 'raw_crm_customers_batch2' etc.
+  crm_customers_table: raw_crm_customers
+  am_table:            raw_crm_account_manager
+
+model-paths:   ["models"]
+seed-paths:    ["seeds"]
+macro-paths:   ["macros"]
+test-paths:    ["tests"]
+target-path:   "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  dv_test_project:
+    +on_schema_change: fail
+    staging:
+      +materialized: view
+    raw_vault:
+      +materialized: incremental
+      +incremental_strategy: append
+      hubs:
+        +tags: ["raw_vault", "hub"]
+      links:
+        +tags: ["raw_vault", "link"]
+      satellites:
+        +tags: ["raw_vault", "satellite"]
+
+seeds:
+  dv_test_project:
+    +quote_columns: false

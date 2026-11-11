@@ -1,0 +1,8 @@
+customer_id,first_name,last_name,email,phone,updated_at
+C-100,Alice,Anderson,alice@example.com,555-0001,2024-04-01 09:00:00
+C-101,Bob,Baker,bob@example.com,555-9999,2024-04-01 09:00:00
+C-102,Carol,Chen,carol@example.com,555-0003,2024-04-01 09:00:00
+C-103,Dan,Diaz,dan@example.com,555-0004,2024-04-01 09:00:00
+C-104,Eve,Edwards,eve@example.com,555-0005,2024-04-01 09:00:00
+C-106,Grace,Green,grace@example.com,555-0006,2024-04-01 09:00:00
+c-100,Alice,Anderson,ALICE@EXAMPLE.COM  ,555-0001,2024-04-01 09:00:00

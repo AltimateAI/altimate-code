@@ -1,0 +1,122 @@
+{
+  "timestamp": "2026-09-17T08:51:28.160287+00:00",
+  "mode": "deterministic",
+  "model": null,
+  "total_tasks": 14,
+  "tasks_passed": 14,
+  "tasks_failed": 0,
+  "results": [
+    {
+      "id": "task_design_hub_from_source",
+      "task": "Given a source table `crm.customers(customer_id PK, email, first_name, last_name, updated_at)`, describe how you'd model `hub_customer`: what's the business key, what's the hash, and what load metadata is needed.",
+      "passed": true,
+      "grader": "must_mention_all",
+      "detail": "all 4 phrases present",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_detect_bug_merge_strategy",
+      "task": "Review this hub model and identify the bug: `{{ config(materialized='incremental', incremental_strategy='merge', unique_key='customer_hk') }} SELECT dv_hash_bk(['customer_id']) AS customer_hk, ... FROM stg`",
+      "passed": true,
+      "grader": "sql_correctness",
+      "detail": "detected exactly the expected violations: ['hub_uses_merge_strategy']",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_detect_soft_rule_in_staging",
+      "task": "Identify what's wrong with this raw-vault SQL: `SELECT ... FROM stg WHERE is_test = FALSE`.",
+      "passed": true,
+      "grader": "sql_correctness",
+      "detail": "detected exactly the expected violations: ['raw_vault_soft_rule']",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_port_snowflake_to_databricks",
+      "task": "Port `MD5_BINARY(UPPER(TRIM(customer_id::VARCHAR)))` (Snowflake) to Databricks SQL. Explain the trade-offs of hex string vs. binary storage.",
+      "passed": true,
+      "grader": "must_mention_all",
+      "detail": "all 4 phrases present",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_effectivity_vs_status_tracking",
+      "task": "A customer's account manager changes over time. Should you use an effectivity satellite or a status-tracking satellite? Why?",
+      "passed": true,
+      "grader": "must_mention_all",
+      "detail": "all 3 phrases present",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_hashdiff_evolution",
+      "task": "The satellite `sat_customer_details` has been in production for a year. A new column `preferred_language` needs to be tracked. What do you do?",
+      "passed": true,
+      "grader": "must_mention_any",
+      "detail": "matched: ['new satellite', 'retire', 'reload']",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_ghost_row_reasoning",
+      "task": "Why does every hub need a ghost row?",
+      "passed": true,
+      "grader": "must_mention_all",
+      "detail": "all 3 phrases present",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_driver_key_analysis",
+      "task": "For an order-fulfillment link involving `order_id`, `warehouse_id`, and `carrier_id`, how do you decide which are driver keys?",
+      "passed": true,
+      "grader": "must_mention_any",
+      "detail": "matched: ['new relationship', 'driver-key test']",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_load_dts_source",
+      "task": "Should `load_dts` come from the source's `updated_at` column?",
+      "passed": true,
+      "grader": "must_mention_all",
+      "detail": "all 3 phrases present",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_pit_when",
+      "task": "When do you need to build a PIT table?",
+      "passed": true,
+      "grader": "must_mention_any",
+      "detail": "matched: ['MAX(load_dts)', 'snapshot']",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_gdpr_erasure_pattern",
+      "task": "A GDPR erasure request arrives for customer C-100. How do you honor it while keeping the vault insert-only?",
+      "passed": true,
+      "grader": "must_mention_all",
+      "detail": "all 3 phrases present",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_multi_tenant_hash",
+      "task": "A SaaS B2B vault holds customers for multiple tenants where tenant A's `C-100` is a different real-world customer than tenant B's `C-100`. What must the customer hub's hash key include, and why?",
+      "passed": true,
+      "grader": "must_mention_all",
+      "detail": "all 2 phrases present",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_cdc_delete_op",
+      "task": "The upstream Debezium CDC stream just emitted a `d` (delete) operation for customer C-500. What should the vault do?",
+      "passed": true,
+      "grader": "must_mention_all",
+      "detail": "all 2 phrases present",
+      "answer_source": "reference_answer"
+    },
+    {
+      "id": "task_shared_hub_change",
+      "task": "Someone opens a PR that changes the hash normalization from UPPER to LOWER in the customer hub's macro. Ten teams depend on this hub. What happens if this ships?",
+      "passed": true,
+      "grader": "must_mention_all",
+      "detail": "all 3 phrases present",
+      "answer_source": "reference_answer"
+    }
+  ]
+}

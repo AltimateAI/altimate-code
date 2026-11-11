@@ -1,0 +1,47 @@
+name: eval-data-vault-skill
+
+on:
+  push:
+    paths:
+      - '.opencode/skills/data-vault/**'
+      - 'experiments/data_vault_skill_validation/**'
+      - '.github/workflows/eval-data-vault-skill.yml'
+  pull_request:
+    paths:
+      - '.opencode/skills/data-vault/**'
+      - 'experiments/data_vault_skill_validation/**'
+      - '.github/workflows/eval-data-vault-skill.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install eval dependencies
+        run: |
+          pip install --upgrade pip
+          # dbt-duckdb pulls in dbt-core + duckdb; that's everything the eval
+          # suite needs — the offline evals rely only on the Python stdlib.
+          pip install "dbt-core>=1.8,<1.12" "dbt-duckdb>=1.8,<1.12"
+
+      - name: Run all eval suites
+        working-directory: experiments/data_vault_skill_validation
+        run: python run_all.py
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: data-vault-skill-eval-results
+          path: experiments/data_vault_skill_validation/**/results/**
+          retention-days: 30

@@ -1,0 +1,745 @@
+{
+  "timestamp": "2026-09-17T08:51:28.084298+00:00",
+  "total_cases": 32,
+  "cases_passed": 32,
+  "cases_failed": 0,
+  "results": [
+    {
+      "id": "hub_good_canonical",
+      "structure": "hub",
+      "category": "positive_control",
+      "expected": [],
+      "detected": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.695
+    },
+    {
+      "id": "hub_bad_merge_strategy",
+      "structure": "hub",
+      "category": "hub",
+      "expected": [
+        "hub_uses_merge_strategy"
+      ],
+      "detected": [
+        "hub_uses_merge_strategy"
+      ],
+      "true_positives": [
+        "hub_uses_merge_strategy"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.105
+    },
+    {
+      "id": "hub_bad_missing_incremental",
+      "structure": "hub",
+      "category": "hub",
+      "expected": [
+        "hub_missing_incremental"
+      ],
+      "detected": [
+        "hub_missing_incremental"
+      ],
+      "true_positives": [
+        "hub_missing_incremental"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.096
+    },
+    {
+      "id": "hub_bad_no_null_filter",
+      "structure": "hub",
+      "category": "hub",
+      "expected": [
+        "hub_no_null_bk_filter"
+      ],
+      "detected": [
+        "hub_no_null_bk_filter"
+      ],
+      "true_positives": [
+        "hub_no_null_bk_filter"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.094
+    },
+    {
+      "id": "hub_bad_no_dedup",
+      "structure": "hub",
+      "category": "hub",
+      "expected": [
+        "hub_no_dedup"
+      ],
+      "detected": [
+        "hub_no_dedup"
+      ],
+      "true_positives": [
+        "hub_no_dedup"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.087
+    },
+    {
+      "id": "hub_bad_inline_md5",
+      "structure": "hub",
+      "category": "hub",
+      "expected": [
+        "hub_inline_md5"
+      ],
+      "detected": [
+        "hub_inline_md5"
+      ],
+      "true_positives": [
+        "hub_inline_md5"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.082
+    },
+    {
+      "id": "hub_bad_current_timestamp_inline",
+      "structure": "hub",
+      "category": "hub",
+      "expected": [
+        "hub_current_timestamp_inline"
+      ],
+      "detected": [
+        "hub_current_timestamp_inline"
+      ],
+      "true_positives": [
+        "hub_current_timestamp_inline"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.082
+    },
+    {
+      "id": "hub_bad_source_updated_at",
+      "structure": "hub",
+      "category": "hub",
+      "expected": [
+        "source_updated_at_as_load_dts"
+      ],
+      "detected": [
+        "source_updated_at_as_load_dts"
+      ],
+      "true_positives": [
+        "source_updated_at_as_load_dts"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.079
+    },
+    {
+      "id": "hub_bad_soft_rule_filter",
+      "structure": "hub",
+      "category": "hub",
+      "expected": [
+        "raw_vault_soft_rule"
+      ],
+      "detected": [
+        "raw_vault_soft_rule"
+      ],
+      "true_positives": [
+        "raw_vault_soft_rule"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.079
+    },
+    {
+      "id": "hub_bad_missing_record_source",
+      "structure": "hub",
+      "category": "hub",
+      "expected": [
+        "no_record_source"
+      ],
+      "detected": [
+        "no_record_source"
+      ],
+      "true_positives": [
+        "no_record_source"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.105
+    },
+    {
+      "id": "link_good_canonical",
+      "structure": "link",
+      "category": "positive_control",
+      "expected": [],
+      "detected": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.332
+    },
+    {
+      "id": "link_bad_merge",
+      "structure": "link",
+      "category": "link",
+      "expected": [
+        "link_uses_merge_strategy"
+      ],
+      "detected": [
+        "link_uses_merge_strategy"
+      ],
+      "true_positives": [
+        "link_uses_merge_strategy"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.121
+    },
+    {
+      "id": "link_bad_inline_md5",
+      "structure": "link",
+      "category": "link",
+      "expected": [
+        "link_inline_md5"
+      ],
+      "detected": [
+        "link_inline_md5"
+      ],
+      "true_positives": [
+        "link_inline_md5"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.107
+    },
+    {
+      "id": "link_bad_payload_column",
+      "structure": "link",
+      "category": "link",
+      "expected": [
+        "link_payload_column"
+      ],
+      "detected": [
+        "link_payload_column"
+      ],
+      "true_positives": [
+        "link_payload_column"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.099
+    },
+    {
+      "id": "link_good_transactional_payload_allowed",
+      "structure": "link",
+      "category": "positive_control",
+      "expected": [],
+      "detected": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.099
+    },
+    {
+      "id": "sat_good_canonical",
+      "structure": "sat",
+      "category": "positive_control",
+      "expected": [],
+      "detected": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.359
+    },
+    {
+      "id": "sat_bad_merge",
+      "structure": "sat",
+      "category": "sat",
+      "expected": [
+        "sat_uses_merge_strategy"
+      ],
+      "detected": [
+        "sat_uses_merge_strategy"
+      ],
+      "true_positives": [
+        "sat_uses_merge_strategy"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.111
+    },
+    {
+      "id": "sat_bad_missing_hashdiff",
+      "structure": "sat",
+      "category": "sat",
+      "expected": [
+        "sat_missing_hashdiff"
+      ],
+      "detected": [
+        "sat_missing_hashdiff"
+      ],
+      "true_positives": [
+        "sat_missing_hashdiff"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.091
+    },
+    {
+      "id": "sat_bad_hashdiff_not_alphabetized",
+      "structure": "sat",
+      "category": "sat",
+      "expected": [
+        "sat_hashdiff_not_alphabetized"
+      ],
+      "detected": [
+        "sat_hashdiff_not_alphabetized"
+      ],
+      "true_positives": [
+        "sat_hashdiff_not_alphabetized"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.104
+    },
+    {
+      "id": "sat_bad_hashdiff_includes_metadata",
+      "structure": "sat",
+      "category": "sat",
+      "expected": [
+        "sat_hashdiff_includes_metadata"
+      ],
+      "detected": [
+        "sat_hashdiff_includes_metadata"
+      ],
+      "true_positives": [
+        "sat_hashdiff_includes_metadata"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.095
+    },
+    {
+      "id": "sat_bad_unique_key_wrong_grain",
+      "structure": "sat",
+      "category": "sat",
+      "expected": [
+        "sat_unique_key_wrong_grain"
+      ],
+      "detected": [
+        "sat_unique_key_wrong_grain"
+      ],
+      "true_positives": [
+        "sat_unique_key_wrong_grain"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.09
+    },
+    {
+      "id": "sat_bad_inline_md5",
+      "structure": "sat",
+      "category": "sat",
+      "expected": [
+        "sat_inline_md5"
+      ],
+      "detected": [
+        "sat_inline_md5"
+      ],
+      "true_positives": [
+        "sat_inline_md5"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.09
+    },
+    {
+      "id": "sat_bad_soft_rule_and_missing_ldts",
+      "structure": "sat",
+      "category": "sat",
+      "expected": [
+        "no_load_dts",
+        "raw_vault_soft_rule"
+      ],
+      "detected": [
+        "no_load_dts",
+        "raw_vault_soft_rule"
+      ],
+      "true_positives": [
+        "no_load_dts",
+        "raw_vault_soft_rule"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.143
+    },
+    {
+      "id": "sat_good_multi_source_record_source",
+      "structure": "sat",
+      "category": "positive_control",
+      "expected": [],
+      "detected": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.101
+    },
+    {
+      "id": "hub_bad_multiple_violations",
+      "structure": "hub",
+      "category": "regression",
+      "expected": [
+        "hub_current_timestamp_inline",
+        "hub_inline_md5",
+        "hub_missing_incremental",
+        "hub_no_dedup",
+        "hub_no_null_bk_filter",
+        "hub_uses_merge_strategy",
+        "no_record_source",
+        "raw_vault_soft_rule"
+      ],
+      "detected": [
+        "hub_current_timestamp_inline",
+        "hub_inline_md5",
+        "hub_missing_incremental",
+        "hub_no_dedup",
+        "hub_no_null_bk_filter",
+        "hub_uses_merge_strategy",
+        "no_record_source",
+        "raw_vault_soft_rule"
+      ],
+      "true_positives": [
+        "hub_current_timestamp_inline",
+        "hub_inline_md5",
+        "hub_missing_incremental",
+        "hub_no_dedup",
+        "hub_no_null_bk_filter",
+        "hub_uses_merge_strategy",
+        "no_record_source",
+        "raw_vault_soft_rule"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.061
+    },
+    {
+      "id": "regression_hub_convenience_join_from_fact",
+      "structure": "hub",
+      "category": "regression",
+      "expected": [],
+      "detected": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.092
+    },
+    {
+      "id": "regression_sat_hashdiff_includes_record_source",
+      "structure": "sat",
+      "category": "regression",
+      "expected": [
+        "sat_hashdiff_includes_metadata"
+      ],
+      "detected": [
+        "sat_hashdiff_includes_metadata"
+      ],
+      "true_positives": [
+        "sat_hashdiff_includes_metadata"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.095
+    },
+    {
+      "id": "regression_sat_hashdiff_two_col_reversed",
+      "structure": "sat",
+      "category": "regression",
+      "expected": [
+        "sat_hashdiff_not_alphabetized"
+      ],
+      "detected": [
+        "sat_hashdiff_not_alphabetized"
+      ],
+      "true_positives": [
+        "sat_hashdiff_not_alphabetized"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.085
+    },
+    {
+      "id": "regression_link_missing_null_check",
+      "structure": "link",
+      "category": "regression",
+      "expected": [],
+      "detected": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.116
+    },
+    {
+      "id": "regression_sat_soft_rule_status_filter",
+      "structure": "sat",
+      "category": "regression",
+      "expected": [
+        "raw_vault_soft_rule"
+      ],
+      "detected": [
+        "raw_vault_soft_rule"
+      ],
+      "true_positives": [
+        "raw_vault_soft_rule"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.092
+    },
+    {
+      "id": "regression_hub_ghost_row_sql_using_source_updated_at",
+      "structure": "hub",
+      "category": "regression",
+      "expected": [
+        "hub_current_timestamp_inline",
+        "source_updated_at_as_load_dts"
+      ],
+      "detected": [
+        "hub_current_timestamp_inline",
+        "source_updated_at_as_load_dts"
+      ],
+      "true_positives": [
+        "hub_current_timestamp_inline",
+        "source_updated_at_as_load_dts"
+      ],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.094
+    },
+    {
+      "id": "multi_tenant_hub_good",
+      "structure": "hub",
+      "category": "positive_control",
+      "expected": [],
+      "detected": [],
+      "true_positives": [],
+      "false_positives": [],
+      "false_negatives": [],
+      "passed": true,
+      "elapsed_ms": 0.187
+    }
+  ],
+  "rule_metrics": [
+    {
+      "rule": "hub_uses_merge_strategy",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "hub_missing_incremental",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "hub_no_null_bk_filter",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "hub_no_dedup",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "hub_inline_md5",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "hub_current_timestamp_inline",
+      "tp": 3,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "link_uses_merge_strategy",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "link_missing_incremental",
+      "tp": 0,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "link_inline_md5",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "link_payload_column",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "sat_uses_merge_strategy",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "sat_missing_hashdiff",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "sat_hashdiff_not_alphabetized",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "sat_hashdiff_includes_metadata",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "sat_unique_key_wrong_grain",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "sat_inline_md5",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "raw_vault_soft_rule",
+      "tp": 4,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "source_updated_at_as_load_dts",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "no_record_source",
+      "tp": 2,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    },
+    {
+      "rule": "no_load_dts",
+      "tp": 1,
+      "fp": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "f1": 1.0
+    }
+  ]
+}
