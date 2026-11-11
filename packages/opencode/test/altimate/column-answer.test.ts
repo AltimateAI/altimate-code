@@ -220,6 +220,20 @@ describe("column answer: downstream", () => {
     expect(a.columns).toHaveLength(MAX_ANSWER_COLUMNS)
     expect(a.truncated).toBe(true)
   })
+
+  test("a model the column limit kept from being traced, and what sits past it, may carry it: never cleared", () => {
+    const wide = Array.from({ length: MAX_ANSWER_COLUMNS + 5 }, (_, i) => `revenue as c${i}`).join(", ")
+    const m = shop()
+    m.nodes["model.shop.rpt_wide"] = model("rpt_wide", ["fct_orders"], `select ${wide} from ${T("fct_orders")}`)
+    m.nodes["model.shop.rpt_late"] = model("rpt_late", ["fct_orders"], `select order_id, revenue from ${T("fct_orders")}`)
+    m.nodes["model.shop.rpt_late_child"] = model("rpt_late_child", ["rpt_late"], "")
+    const a = columnAnswer(write(m), "fct_orders", "revenue")
+    expect(a.truncated).toBe(true)
+    const cleared = a.cleared.map((c) => c.name)
+    expect(cleared).not.toContain("rpt_late")
+    expect(cleared).not.toContain("rpt_late_child")
+    expect(a.counts.may_carry_models).toBeGreaterThanOrEqual(4)
+  })
 })
 
 describe("column answer: upstream", () => {

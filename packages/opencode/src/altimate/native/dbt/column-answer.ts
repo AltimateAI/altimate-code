@@ -180,6 +180,8 @@ export function columnAnswer(
   const queue: [string, string, number][] = [[focus, want, 0]]
   const also = new Map<string, Set<string>>()
   const unresolved = new Map<string, string>()
+  // Models with a column the cap left out: what sits past them was never checked.
+  const capped = new Set<string>()
 
   if (direction === "downstream") {
     while (queue.length) {
@@ -197,7 +199,10 @@ export function columnAnswer(
           hit = true
           const fresh = !columnIndex.has(`${reader}|${e.to}`)
           const to = colIdx(reader, e.to, h + 1, e.how, e.howFrom)
-          if (to === null) continue
+          if (to === null) {
+            capped.add(reader)
+            continue
+          }
           edges.push(edge(from, to, e.how, e.howFrom))
           if (fresh) queue.push([reader, e.to, h + 1])
         }
@@ -222,7 +227,10 @@ export function columnAnswer(
         if (e.to !== c) continue
         const fresh = !columnIndex.has(`${e.from}|${e.fromCol}`)
         const from = colIdx(e.from, e.fromCol, h + 1, e.how, e.howFrom)
-        if (from === null) continue
+        if (from === null) {
+          capped.add(e.from)
+          continue
+        }
         edges.push(edge(from, to, e.how, e.howFrom))
         if (fresh) queue.push([e.from, e.fromCol, h + 1])
       }
@@ -241,7 +249,7 @@ export function columnAnswer(
   const beyond = (id: string) => (direction === "downstream" ? p.descendants(id) : p.ancestors(id))
   const modelLevel = beyond(focus)
   const mayCarry = new Set<string>()
-  for (const id of [...also.keys(), ...unresolved.keys()]) {
+  for (const id of [...also.keys(), ...unresolved.keys(), ...capped]) {
     mayCarry.add(id)
     for (const d of beyond(id)) mayCarry.add(d)
   }
