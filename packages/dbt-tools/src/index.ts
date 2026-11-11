@@ -3,6 +3,7 @@ import { existsSync } from "fs"
 import { read, type Config } from "./config"
 import { init } from "./commands/init"
 import { validate } from "./check"
+import { failureLines } from "./failure-text"
 
 const USAGE = {
   commands: {
@@ -37,12 +38,6 @@ function flag(args: string[], name: string): string | undefined {
 
 function diagnose(err: Error): { error: string; fix?: string } {
   const msg = err.message || String(err)
-  if (msg.includes("private field") || msg.includes("#stdin") || msg.includes("#stdout")) {
-    return {
-      error: "Internal error: Bun runtime incompatibility with python-bridge. Please report this issue.",
-      fix: "Try updating: bun install, or file a bug at https://github.com/AltimateAI/altimate-code/issues",
-    }
-  }
   if (msg.includes("IPC channel") || msg.includes("ERR_IPC_CHANNEL_CLOSED")) {
     return {
       error: "Failed to start Python bridge. The dbt Python process exited unexpectedly.",
@@ -75,8 +70,7 @@ function output(result: unknown) {
   if (fmt && typeof result === "object" && result !== null) {
     const obj = result as Record<string, unknown>
     if ("error" in obj) {
-      console.error(String(obj.error))
-      if ("fix" in obj) console.error(String(obj.fix))
+      console.error(failureLines(obj).join("\n"))
       process.exit(1)
     }
     if ("sql" in obj) {
@@ -92,7 +86,7 @@ function output(result: unknown) {
   if (result && typeof result === "object" && "error" in result) process.exit(1)
 }
 
-function bail(err: unknown): never {
+function failure(err: unknown) {
   const result: Record<string, unknown> = diagnose(err instanceof Error ? err : new Error(String(err)))
   // Include buffered dbt logs for diagnostics (see #249 — logs are buffered
   // in-memory instead of written to stderr to avoid TUI corruption).
@@ -105,11 +99,15 @@ function bail(err: unknown): never {
   } catch {
     // log-buffer might not have been loaded yet
   }
-  console.log(JSON.stringify(result, null, 2))
+  return result
+}
+
+function bail(err: unknown): never {
+  console.log(JSON.stringify(failure(err), null, 2))
   process.exit(1)
 }
 
-// Catch unhandled rejections (bluebird throws outside normal promise chains)
+// An error that escapes main() still ends as a JSON error on stdout
 process.on("unhandledRejection", bail)
 process.on("uncaughtException", bail)
 
@@ -142,13 +140,13 @@ async function main() {
   const { configure } = await import("./dbt-cli")
   configure({ pythonPath: cfg.pythonPath, projectRoot: cfg.projectRoot })
 
-  // Lazy import to avoid loading python-bridge until needed
+  // Lazy import: the adapter loads dbt-integration, which commands above don't need
   let adapter
   try {
     const { create } = await import("./adapter")
     adapter = await create(cfg)
   } catch (err) {
-    return diagnose(err instanceof Error ? err : new Error(String(err)))
+    return failure(err)
   }
 
   let result: unknown

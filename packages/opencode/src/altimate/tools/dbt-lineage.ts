@@ -218,13 +218,16 @@ async function fromAdapter(
   session: () => ReturnType<typeof sessionProject>,
 ): Promise<{ result?: ModelLineage; reason?: string }> {
   try {
-    const { getDbtAdapter, getDbtProjectRoot } = await import("../native/connections/register")
+    const { dbtAdapterHasLineage, getDbtAdapter, getDbtProjectRoot } = await import("../native/connections/register")
     // The import yields: a call cancelled meanwhile starts nothing.
     signal.throwIfAborted()
     // A read-only call never starts or uses the dbt adapter: starting it runs dbt deps and writes
     // target/, and compiling renders Jinja, which can run SQL.
     // It answers from the manifest with no note: there's nothing for the user to fix.
     if (readOnly) return {}
+    // Starting it costs a dbt deps and a parse, which a dbt-integration without the lineage can't
+    // repay. That's nothing for the user to fix either, so it's no note.
+    if (!(await dbtAdapterHasLineage())) return {}
     const project = await session()
     // Reading the dbt config yields too.
     signal.throwIfAborted()

@@ -217,6 +217,7 @@ const ALL_EVENT_TYPES: Telemetry.Event["type"][] = [
   "auth_logout",
   "mcp_server_status",
   "provider_error",
+  "title_generation_failed", // altimate_change
   "engine_started",
   "engine_error",
   "upgrade_attempted",
@@ -261,7 +262,7 @@ const ALL_EVENT_TYPES: Telemetry.Event["type"][] = [
 
 describe("telemetry.event-types", () => {
   test("all event types are valid", () => {
-    expect(ALL_EVENT_TYPES.length).toBe(54)
+    expect(ALL_EVENT_TYPES.length).toBe(55)
   })
 })
 

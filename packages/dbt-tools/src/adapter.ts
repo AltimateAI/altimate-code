@@ -1,8 +1,10 @@
 import type { Config } from "./config"
 import { bufferLog } from "./log-buffer"
+import { recordManifest } from "./stale-manifest"
 export { getRecentDbtLogs, clearDbtLogs } from "./log-buffer"
 import {
   DBTProjectIntegrationAdapter,
+  DBTProjectIntegrationAdapterEvents,
   DEFAULT_CONFIGURATION_VALUES,
   DBTCommandFactory,
   DBTCommandExecutionInfrastructure,
@@ -15,6 +17,8 @@ import {
   GraphParser,
   SourceParser,
   TestParser,
+  UnitTestParser,
+  SemanticModelParser,
   ExposureParser,
   FunctionParser,
   DocParser,
@@ -63,7 +67,10 @@ function terminal(): DBTTerminal {
     show: async () => {},
     log: (msg: string) => bufferLog(`[dbt] ${msg}`),
     trace: () => {},
-    debug: () => {},
+    // A crash at bridge startup is told only on the bridge's stderr, which the library logs here.
+    debug: (name: string, msg: string) => {
+      if (name === "PythonBridgeStderr") bufferLog(`[dbt:stderr] ${msg}`)
+    },
     info: (_name: string, msg: string) => bufferLog(`[dbt] ${msg}`),
     warn: (_name: string, msg: string) => bufferLog(`[dbt:warn] ${msg}`),
     error: (_name: string, msg: string, e: unknown) => {
@@ -80,6 +87,12 @@ function env(cfg: Config): RuntimePythonEnvironment {
     pythonPath: cfg.pythonPath,
     getEnvironmentVariables: () => vars,
   }
+}
+
+/** Whether this dbt-integration answers a model's lineage, for a caller deciding whether to `create`. */
+export function hasModelLineage(): boolean {
+  const prototype = DBTProjectIntegrationAdapter.prototype as { getModelLineage?: unknown }
+  return typeof prototype.getModelLineage === "function"
 }
 
 export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter> {
@@ -141,6 +154,8 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
       defer,
       changed,
       cloudVariantDetector,
+      // Every variant but fusion-stable runs on a dbt Core command engine, which needs these.
+      { pythonDBTCommandExecutionStrategy: python, dbtConfiguration: config, dbtIntegrationClient: client },
     )
 
   const command = (
@@ -170,19 +185,7 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
     defer: DeferConfig,
     changed: () => void,
   ): DBTProjectIntegration =>
-    new DBTFusionCommandProjectIntegration(
-      infra,
-      factory,
-      cli,
-      runtime,
-      provider,
-      term,
-      root,
-      diag,
-      defer,
-      changed,
-      cloudVariantDetector,
-    )
+    new DBTFusionCommandProjectIntegration(infra, factory, cli, runtime, provider, term, root, diag, defer, changed)
 
   const adapter = new DBTProjectIntegrationAdapter(
     config,
@@ -200,13 +203,17 @@ export async function create(cfg: Config): Promise<DBTProjectIntegrationAdapter>
     new GraphParser(term),
     new SourceParser(term),
     new TestParser(term),
+    new UnitTestParser(term),
     new ExposureParser(term),
     new FunctionParser(term),
     new DocParser(term),
     term,
     new ModelDepthParser(term, client, config),
+    new SemanticModelParser(term),
   )
 
+  // Before `initialize`, whose parse is the one the commands answer from.
+  adapter.on(DBTProjectIntegrationAdapterEvents.MANIFEST_PARSED, recordManifest)
   try {
     await adapter.initialize()
   } catch (e) {

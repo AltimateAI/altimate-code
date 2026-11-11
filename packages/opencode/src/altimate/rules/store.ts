@@ -26,6 +26,7 @@ import { canonical, parse as parseLessons, type Lesson } from "../learn/lesson"
 import { withLearnLock } from "../learn/lock"
 import * as Store from "../learn/store"
 import { MyPending, RuleOut, Settings } from "./api"
+import { ProposalCard } from "./events"
 import { printable } from "./printable"
 
 /** The read-only store team rules are mirrored into (reserved: `learn/store.ts` `RESERVED_STORES`). */
@@ -33,6 +34,14 @@ export const WORKSPACE_RULES_STORE = Store.WORKSPACE_RULES_STORE
 const log = Log.create({ service: "rules.store" })
 const LOCK = { timeoutMs: 5_000 }
 const MAX_NOTICES = 50
+/** Unstored host requests kept until the next host session start reports them. */
+const MAX_HOST_UNSTORED = 10
+const MAX_HOST_SESSIONS = 50
+
+/** The key a host session start marks a review notice reported under (`host_notices_seen`). */
+export const hostNoticeKey = (notice: Pick<Notice, "public_id" | "status">) => `${notice.public_id}|${notice.status}`
+/** The key a host session start marks a failed check reported under (`host_notices_seen`). */
+export const hostCheckKey = (check: { at: string }) => `check|${check.at}`
 const MAX_SENT = 200
 /** The person's own pending proposals kept from a pull. The server caps open proposals per person well below this. */
 export const MAX_MY_PENDING = 100
@@ -128,6 +137,36 @@ export const MAX_REMEMBER_REQUESTS = 50
 const BOOT = Symbol.for("altimate.rules.process.boot")
 export const PROCESS_BOOT = ((globalThis as Record<symbol, unknown>)[BOOT] ??= randomUUID()) as string
 
+/**
+ * A proposal raised while no client that shows cards was attached (a Claude Code or Codex session through the plugin,
+ * a headless `run`): kept here until the person answers it with `learn proposals reply` (the plugin's
+ * `/altimate-code:rules`). Answering claims it first (`claim`), so two processes cannot act on it twice.
+ */
+export const StoredProposal = z.object({
+  card: ProposalCard,
+  /** The instance directory that raised it. */
+  directory: z.string(),
+  /** The account and workspace it was raised for: sent or approved only for them. */
+  scope: Scope.optional(),
+  trigger: z.enum(["remember", "recurrence", "shown_rule"]),
+  /** The session the evidence came from. */
+  source_session: z.string(),
+  memory: z.object({ id: z.string(), tags: z.array(z.string()) }).optional(),
+  /** A "remember" the person asked for: saved as before cards if the proposal is closed without an answer. */
+  request: RememberRequest.pick({ session: true, via: true, memory: true, training: true }).optional(),
+  edits: z.number().int().default(0),
+  at: z.string(),
+  /** A reply in progress: another process refuses to act on it while `pid` lives. `answering`: the closing action it
+   * took; until it is recorded as done, only that action finishes the proposal. */
+  claim: z.object({ pid: z.number().int(), at: z.string(), answering: z.string().optional() }).optional(),
+})
+export type StoredProposal = z.infer<typeof StoredProposal>
+/** Kept at most. A session proposal past it is not raised (its corrections stay unchecked); a "remember" the person asked
+ * for is kept anyway, up to `MAX_REQUESTED_PROPOSALS`, so a request is never dropped. */
+export const MAX_STORED_PROPOSALS = 20
+/** Hard bound on stored proposals, requested ones included, so the state file stays small. */
+export const MAX_REQUESTED_PROPOSALS = 100
+
 export const State = z.object({
   version: z.literal(1),
   scope: Scope.optional(),
@@ -184,6 +223,37 @@ export const State = z.object({
     attempts: z.number().int().default(0),
   })).default([]),
   remember_requests: z.array(RememberRequest).default([]),
+  /** Proposals waiting for an answer outside a card (`StoredProposal`). Never trimmed: `MAX_STORED_PROPOSALS` is
+   * enforced when one is added. */
+  proposals: z.array(StoredProposal).default([]),
+  /** Review notices already reported at a host session start (`public_id|status`). */
+  host_notices_seen: z.array(z.string()).default([]),
+  /** Host sessions whose check stopped with work left (the round limit): the next check with nothing new takes them first. */
+  host_pending: z.array(z.string()).default([]),
+  /** Host sessions whose corrections this person's hooks recorded, latest last: the only ones checked as leftovers. */
+  host_sessions: z.array(z.string()).default([]),
+  /** Per host session, when its failed check may be retried as a leftover (a failing model is not retried every turn). */
+  host_retry: z.record(z.string(), z.string()).default({}),
+  /** When the last pull without a sync run failed: a host session start does not wait on another one for `REFRESH_MS`. */
+  pull_failed_at: z.string().optional(),
+  /** The credential (`accountDigest`) that pull failed with: signed in as someone else since, the next start pulls. */
+  pull_failed_with: z.string().optional(),
+  /** "Remember … as a team rule" requests from a host prompt that were not stored: said at the next host session start,
+   * then dropped (the prompt hook runs in the background and cannot answer). */
+  host_unstored: z.array(z.object({
+    at: z.string(),
+    text: z.string(),
+    /** `full`: too many proposals waiting; `invalid`: not a one-line rule (`detail` says why); `failed`: not written. */
+    reason: z.enum(["full", "invalid", "failed"]),
+    detail: z.string().optional(),
+  })).default([]),
+  /** The after-turn check running for a host session, per session: one at a time across processes. */
+  host_checks: z.record(z.string(), z.object({
+    pid: z.number().int(),
+    at: z.string(),
+    /** Work that arrived while the check ran (another Stop, a new correction): it checks again before releasing. */
+    pending: z.number().int().optional(),
+  })).default({}),
   /** A usage report sent but not yet acknowledged: resent with the same `batch_id` so the server counts it once. */
   pending_usage: z.object({
     batch_id: z.string(),
@@ -351,6 +421,16 @@ export async function update(root: string, change: (state: State) => State | voi
     next.sent = capSent(next.sent)
     next.my_pending = next.my_pending.slice(0, MAX_MY_PENDING)
     next.processed_signals = next.processed_signals.slice(-MAX_TRACKED)
+    // Keys of notices still listed are never trimmed (they would be reported again): only keys of notices gone, and of
+    // failed checks reported before the last one, make room.
+    if (next.host_notices_seen.length > MAX_NOTICES) {
+      const live = new Set([...next.notices.map(hostNoticeKey), ...(next.last_check ? [hostCheckKey(next.last_check)] : [])])
+      const gone = next.host_notices_seen.filter((key) => !live.has(key))
+      const drop = new Set(gone.slice(0, next.host_notices_seen.length - MAX_NOTICES))
+      next.host_notices_seen = next.host_notices_seen.filter((key) => !drop.has(key))
+    }
+    next.host_unstored = next.host_unstored.slice(-MAX_HOST_UNSTORED)
+    next.host_sessions = next.host_sessions.slice(-MAX_HOST_SESSIONS)
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
     if (next.scope_drop && !scopeDropShown(next.scope_drop, now)) delete next.scope_drop
@@ -420,6 +500,8 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
     usage_reported: state.usage_reported,
     corrected_reported: state.corrected_reported,
     processed_signals: state.processed_signals,
+    // A stored proposal's send recorded here is what says it acted (`proposal.ts` `acted`, `act`): kept with it.
+    push_outcomes: Object.fromEntries(Object.entries(state.push_outcomes).filter(([id]) => state.proposals.some((p) => p.card.id === id))),
     // A batch built for this scope can only be resent to it.
     // The same scope comes back (the link or access returns): its queue, approvals, the person's sent history and the
     // review cursor stay, so reviews made meanwhile are still announced.
@@ -435,8 +517,18 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
       : {}),
     // A drop notice outlives a later reset: it is about proposals the person was told were queued.
     ...(state.scope_drop ? { scope_drop: state.scope_drop } : {}),
-    // A "remember" is saved locally whatever the workspace: no reset loses it.
+    // A "remember" is saved locally whatever the workspace: no reset loses it. Nor an open proposal: its answer checks
+    // the scope it was raised for.
     remember_requests: state.remember_requests,
+    proposals: state.proposals,
+    host_notices_seen: state.host_notices_seen,
+    host_checks: state.host_checks,
+    host_pending: state.host_pending,
+    host_sessions: state.host_sessions,
+    host_retry: state.host_retry,
+    // A refused request's text is the person's: not shown to another account or workspace (`keepOutbox` is the same
+    // scope, gone for now).
+    host_unstored: options.keepOutbox ? state.host_unstored : [],
   }
 }
 
@@ -448,6 +540,15 @@ export function scopeDropNote(state: State, now = Date.now()): string | undefine
   const drop = state.scope_drop
   if (!drop || !scopeDropShown(drop, now)) return undefined
   return `${drop.count} queued ${drop.count === 1 ? "proposal was" : "proposals were"} for another account or workspace and ${drop.count === 1 ? "was" : "were"} not sent`
+}
+
+/** The rules state was pulled with the credential signed in now (`pulled_with`). Two people can share a tenant: the
+ * credential's digest tells them apart, where the API URL and tenant would not. No network. Every path that shows
+ * workspace content outside a running session (a host session start, `learn proposals`, a reply) checks it. */
+export async function verified(state: State): Promise<boolean> {
+  if (!state.pulled_with) return false
+  const { accountDigest } = await import("../workspace/state")
+  return (await accountDigest().catch(() => null)) === state.pulled_with
 }
 
 /** Queued proposals at most; a new one is refused (the card stays open) rather than an older one dropped. */

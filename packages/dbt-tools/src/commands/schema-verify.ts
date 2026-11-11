@@ -1,4 +1,5 @@
 import type { ColumnMetaData, DBTProjectIntegrationAdapter } from "@altimateai/dbt-integration"
+import { staleManifestNote } from "../stale-manifest"
 
 /**
  * Verify that a model's actual produced columns match the spec declared in
@@ -22,8 +23,16 @@ import type { ColumnMetaData, DBTProjectIntegrationAdapter } from "@altimateai/d
  * Skip cases:
  *   - "no-spec": schema.yml doesn't declare columns for this model — nothing
  *     to verify; agent has no contract to fail against.
+ *
+ * Every answer rests on the manifest, its errors included, so each one says when that's a stale one.
  */
 export async function schemaVerify(adapter: DBTProjectIntegrationAdapter, args: string[]) {
+  const answer = await verify(adapter, args)
+  const stale_manifest = staleManifestNote()
+  return stale_manifest ? { stale_manifest, ...answer } : answer
+}
+
+async function verify(adapter: DBTProjectIntegrationAdapter, args: string[]) {
   const model = flag(args, "model")
   if (!model) return { error: "Missing --model" }
 
