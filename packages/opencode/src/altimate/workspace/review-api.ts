@@ -40,7 +40,10 @@ export const Contribution = z.object({
   name: z.string(),
   description: z.string().nullable().optional(),
   change: z.enum(["add", "edit"]),
-  status: z.enum(["pending", "active", "rejected", "superseded"]),
+  // `withdrawn`: the author withdrew it (or it was withdrawn when the author deleted the item or lost access);
+  // `retired`: removed from the workspace after approval, by an owner, an admin or the author. A status this version
+  // does not know makes the row unreadable (skipped and counted), never misread.
+  status: z.enum(["pending", "active", "rejected", "superseded", "withdrawn", "retired"]),
   version: z.number().int(),
   is_mine: z.boolean(),
   proposed_by_name: z.string().nullable().optional(),
@@ -53,6 +56,11 @@ export const Contribution = z.object({
   expired: z.boolean().default(false),
   file_count: z.number().int().nullable().optional(),
   document_version: z.number().int().nullable().optional(),
+  /** Whether the caller made the last decision (`reviewed_by`): a person is not told of their own retire. Absent from
+   * older servers: read as not. */
+  decided_by_me: z.boolean().default(false),
+  /** For owners and admins, on open requests: false when the author can no longer see the workspace. */
+  author_has_access: z.boolean().nullable().optional(),
 })
 export type Contribution = z.infer<typeof Contribution>
 

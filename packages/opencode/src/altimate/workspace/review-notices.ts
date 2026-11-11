@@ -7,8 +7,10 @@
 // (`review_notices`) when it next starts or refreshes. The TUI remembers per project which notices it showed.
 //
 // - What is noticed: a submission this client has seen pending (from `skill publish`, or an earlier poll) that the
-//   server now lists as approved (`active`) or `rejected`. A superseded one (replaced by the author's newer submission)
-//   is let go silently. Decisions on requests this client never saw pending are history, not news.
+//   server now lists as approved (`active`) or `rejected`; and one this client has seen approved (or pending) that an
+//   owner or admin then removed from the workspace (`retired`, by someone else: the person's own removal is not news).
+//   A superseded one (replaced by the author's newer submission) or a withdrawn one is let go silently. Decisions on
+//   requests this client never saw pending are history, not news.
 // - State: in the person's own state directory, outside every repository (`<state>/workspace-reviews/<digest>.json`), one
 //   file per API URL, tenant, account (the person, `user:<id>`) and workspace. Another account or workspace reads
 //   another file, so a switch, relink or sign-in as someone else never shows or records this one's notices. Bounded:
@@ -41,6 +43,8 @@ export function resetForTest(): void {
   unsupportedAt.clear()
 }
 export const MAX_SEEN = 500
+/** Approved requests tracked, so their removal from the workspace is noticed. */
+export const MAX_APPROVED = 200
 /** Notices kept for a client to replay, newest last: as many as the rules state keeps. */
 export const MAX_NOTICES = 50
 const LOCK = { staleMs: 60_000, timeoutMs: 10_000 }
@@ -58,7 +62,8 @@ export const Notice = z.object({
   public_id: z.string(),
   kind: z.enum(["skill", "knowledge"]),
   name: z.string(),
-  status: z.enum(["active", "rejected"]),
+  /** `retired`: removed from the workspace after approval. */
+  status: z.enum(["active", "rejected", "retired"]),
   reason: z.string().optional(),
   reviewer: z.string().optional(),
   /** When it was decided (the server's `reviewed_at`, else `updated_at`). */
@@ -71,6 +76,8 @@ export const State = z.object({
   scope: Scope,
   /** Contribution ids this client has seen pending. */
   pending: z.array(z.string()).default([]),
+  /** Contribution ids this client has seen approved (`active`), whose removal is noticed. Absent from older files. */
+  approved: z.array(z.string()).default([]),
   /** `<public_id>:<status>` of decisions already recorded as notices. */
   seen: z.array(z.string()).default([]),
   /** The recorded notices, kept for clients to show (replayed from the rules summary). */
@@ -122,7 +129,7 @@ async function locked<T>(scope: Scope, change: (state: State) => Promise<{ state
   return Flock.withLock(
     `workspace-reviews:${path.basename(stateFile(scope))}`,
     async () => {
-      const current = (await read(scope)) ?? { version: 1 as const, scope, pending: [], seen: [], notices: [] }
+      const current = (await read(scope)) ?? { version: 1 as const, scope, pending: [], approved: [], seen: [], notices: [] }
       const { state, result } = await change(current)
       const next = cap(state)
       if (JSON.stringify(next) !== JSON.stringify(current)) await write(next)
@@ -136,6 +143,7 @@ function cap(state: State): State {
   return {
     ...state,
     pending: state.pending.slice(-MAX_PENDING),
+    approved: state.approved.slice(-MAX_APPROVED),
     seen: state.seen.slice(-MAX_SEEN),
     notices: state.notices.slice(-MAX_NOTICES),
   }
@@ -146,10 +154,15 @@ const keyOf = (id: string, status: string) => `${id}:${status}`
 /** The decisions in `items` this client has not recorded yet: the caller's own, seen pending before. Pure. */
 export function decided(state: State, items: readonly ReviewApi.Contribution[]): Notice[] {
   const pending = new Set(state.pending)
+  const approved = new Set(state.approved)
   const seen = new Set(state.seen)
   return items.flatMap((item): Notice[] => {
-    if (!item.is_mine || (item.status !== "active" && item.status !== "rejected")) return []
-    if (!pending.has(item.public_id) || seen.has(keyOf(item.public_id, item.status))) return []
+    if (!item.is_mine || seen.has(keyOf(item.public_id, item.status))) return []
+    if (item.status === "retired") {
+      // Removed by someone else from a workspace this client saw it in (approved, or still pending before that).
+      if (item.decided_by_me || (!approved.has(item.public_id) && !pending.has(item.public_id))) return []
+    } else if (item.status !== "active" && item.status !== "rejected") return []
+    else if (!pending.has(item.public_id)) return []
     return [
       {
         public_id: item.public_id,
@@ -165,22 +178,34 @@ export function decided(state: State, items: readonly ReviewApi.Contribution[]):
 }
 
 /** The state after `items` was listed and `shown` notices were recorded (kept for replay, and marked seen). A decision
- * not recorded stays pending; a superseded request is let go. With the whole list (`complete`), ids it no longer holds
- * are let go. */
+ * not recorded stays pending; a superseded or withdrawn request is let go. Approved ones are tracked until they are
+ * removed. With the whole list (`complete`), ids it no longer holds are let go. */
 export function advance(state: State, items: readonly ReviewApi.Contribution[], shown: readonly Notice[], complete: boolean): State {
   const mine = items.filter((item) => item.is_mine)
   const listed = new Set(mine.map((item) => item.public_id))
   const shownIds = new Set(shown.map((notice) => notice.public_id))
   const settled = new Set(
     mine
-      .filter((item) => item.status === "superseded" || ((item.status === "active" || item.status === "rejected") && (shownIds.has(item.public_id) || !state.pending.includes(item.public_id))))
+      .filter(
+        (item) =>
+          item.status === "superseded" ||
+          item.status === "withdrawn" ||
+          item.status === "retired" ||
+          ((item.status === "active" || item.status === "rejected") && (shownIds.has(item.public_id) || !state.pending.includes(item.public_id))),
+      )
       .map((item) => item.public_id),
   )
   const pending = [...new Set([...state.pending, ...mine.filter((item) => item.status === "pending").map((item) => item.public_id)])].filter(
     (id) => !settled.has(id) && (!complete || listed.has(id)),
   )
+  // Approved ones are tracked until anything else (retired, or gone from a complete list) settles them. An approved one
+  // still pending here is kept pending too, until its approval is recorded.
+  const ended = new Set(mine.filter((item) => item.status !== "active").map((item) => item.public_id))
+  const approved = [...new Set([...state.approved, ...mine.filter((item) => item.status === "active").map((item) => item.public_id)])].filter(
+    (id) => !ended.has(id) && (!complete || listed.has(id)),
+  )
   const seen = [...new Set([...state.seen, ...shown.map((notice) => keyOf(notice.public_id, notice.status))])]
-  return { ...state, pending, seen, notices: [...state.notices, ...shown] }
+  return { ...state, pending, approved, seen, notices: [...state.notices, ...shown] }
 }
 
 /** Remember a request this client just submitted as pending, so its decision is noticed even before the next poll lists
