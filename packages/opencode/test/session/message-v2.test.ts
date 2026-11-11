@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { APICallError } from "ai"
+import { APICallError, type ModelMessage } from "ai"
 import { MessageV2, isEchoTransportError } from "../../src/session/message-v2"
 import { SessionRetry } from "../../src/session/retry"
 import { ProviderError } from "../../src/provider/error"
@@ -1383,6 +1383,172 @@ describe("session.message-v2.toModelMessage", () => {
   })
 })
 
+describe("session.message-v2.boundImages", () => {
+  const image = (mib: number, filename: string): ModelMessage => ({
+    role: "user",
+    content: [{ type: "file", mediaType: "image/png", filename, data: "a".repeat(mib * 1024 * 1024) }],
+  })
+  const removed = (messages: ModelMessage[]) =>
+    messages.filter((message) => (message.content as Array<{ type: string }>)[0]?.type === "text").length
+
+  test("preserves images below the trigger", () => {
+    const messages = [image(1, "small.png")]
+    expect(MessageV2.boundImages(messages)).toBe(messages)
+  })
+
+  test("replaces oldest images until the retained payload reaches the target", () => {
+    const text: ModelMessage = { role: "user", content: [{ type: "text", text: "plain" }] }
+    const third = image(9, "third.png")
+    const messages = [image(9, "first.png"), text, image(9, "second.png"), third]
+    const result = MessageV2.boundImages(messages)
+
+    expect(result[0]?.content).toEqual([{ type: "text", text: expect.stringContaining("image was removed") }])
+    expect(result[1]).toBe(text)
+    expect(result[2]?.content).toEqual([{ type: "text", text: expect.stringContaining("image was removed") }])
+    expect(result[3]).toBe(third)
+  })
+
+  test("keeps the replaced prefix stable as new images arrive, so the prompt cache survives", () => {
+    const history = Array.from({ length: 9 }, (_, i) => image(3, `${i}.png`))
+
+    // 27 MiB passes the 25 MiB trigger: the oldest four go, leaving 15 MiB.
+    expect(removed(MessageV2.boundImages(history))).toBe(4)
+    // The cut holds until the kept payload passes the trigger again.
+    expect(removed(MessageV2.boundImages([...history, image(3, "9.png")]))).toBe(4)
+    expect(removed(MessageV2.boundImages([...history, ...[9, 10, 11].map((i) => image(3, `${i}.png`))]))).toBe(4)
+    expect(removed(MessageV2.boundImages([...history, ...[9, 10, 11, 12].map((i) => image(3, `${i}.png`))]))).toBe(8)
+  })
+
+  test("ignores remote image URLs, which carry no inline payload", () => {
+    const remote: ModelMessage = {
+      role: "user",
+      content: [{ type: "image", image: new URL("https://example.com/a.png") }],
+    }
+    const messages = [remote, image(9, "a.png"), image(9, "b.png")]
+    expect(MessageV2.boundImages(messages)).toBe(messages)
+  })
+
+  test("keeps remote images that fall inside the replaced prefix", () => {
+    const remote: ModelMessage = {
+      role: "user",
+      content: [{ type: "image", image: "https://example.com/a.png" }],
+    }
+    const result = MessageV2.boundImages([remote, image(9, "a.png"), image(9, "b.png"), image(9, "c.png")])
+    expect(result[0]).toBe(remote)
+    expect(removed(result)).toBe(2)
+  })
+
+  test("replaces images nested in tool results", () => {
+    const data = "a".repeat(13 * 1024 * 1024)
+    const result = MessageV2.boundImages([
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "call-1",
+            toolName: "read",
+            output: {
+              type: "content",
+              value: [
+                { type: "media", mediaType: "image/png", data },
+                { type: "media", mediaType: "image/png", data },
+              ],
+            },
+          },
+        ],
+      },
+    ])
+
+    expect(result[0]?.content).toMatchObject([
+      {
+        type: "tool-result",
+        output: { type: "content", value: [{ type: "text" }, { type: "media", mediaType: "image/png" }] },
+      },
+    ])
+  })
+
+  const screenshotTurns = (prefix: string): MessageV2.WithParts[] => {
+    const userID = `m-user-${prefix}`
+    return [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, `u1-${prefix}`), type: "text", text: "read the screenshots" }] as SessionV1.Part[],
+      },
+      ...[1, 2].map((turn) => {
+        const assistantID = `m-assistant-${prefix}-${turn}`
+        return {
+          info: assistantInfo(assistantID, userID),
+          parts: [
+            {
+              ...basePart(assistantID, `a-${prefix}-${turn}`),
+              type: "tool",
+              callID: `call-${prefix}-${turn}`,
+              tool: "read",
+              state: {
+                status: "completed",
+                input: { filePath: `/tmp/screenshot-${turn}.png` },
+                output: "Image read successfully",
+                title: "Read",
+                metadata: {},
+                time: { start: 0, end: 1 },
+                attachments: [
+                  {
+                    ...basePart(assistantID, `file-${prefix}-${turn}`),
+                    type: "file",
+                    mime: "image/png",
+                    filename: `screenshot-${turn}.png`,
+                    url: `data:image/png;base64,${String(turn).repeat(13 * 1024 * 1024)}`,
+                  },
+                ],
+              },
+            },
+          ] as SessionV1.Part[],
+        }
+      }),
+    ] as unknown as MessageV2.WithParts[]
+  }
+
+  test("bounds tool-result images re-sent from history", async () => {
+    const messages = await MessageV2.toModelMessages(screenshotTurns("native"), model)
+    const media = messages.flatMap((message) =>
+      message.role === "tool"
+        ? message.content.flatMap((part) =>
+            part.type === "tool-result" && part.output.type === "content" ? part.output.value : [],
+          )
+        : [],
+    )
+
+    expect(media).toMatchObject([
+      { type: "text", text: "Image read successfully" },
+      { type: "text", text: expect.stringContaining("image was removed") },
+      { type: "text", text: "Image read successfully" },
+      { type: "media", mediaType: "image/png", data: expect.stringMatching(/^2+$/) },
+    ])
+  })
+
+  test("bounds tool-result images re-sent as synthetic user messages for OpenAI-compatible providers", async () => {
+    const compatibleModel: Provider.Model = {
+      ...model,
+      api: { ...model.api, npm: "@ai-sdk/openai-compatible" },
+      capabilities: { ...model.capabilities, attachment: true, input: { ...model.capabilities.input, image: true } },
+    }
+
+    const synthetic = (await MessageV2.toModelMessages(screenshotTurns("compat"), compatibleModel)).filter(
+      (message) =>
+        message.role === "user" &&
+        Array.isArray(message.content) &&
+        message.content[0]?.type === "text" &&
+        message.content[0].text === MessageV2.SYNTHETIC_ATTACHMENT_PROMPT,
+    )
+
+    expect(synthetic.map((message) => message.content.slice(1))).toMatchObject([
+      [{ type: "text", text: expect.stringContaining("image was removed") }],
+      [{ type: "file", mediaType: "image/png" }],
+    ])
+  })
+})
+
 describe("session.message-v2.fromError", () => {
   test("serializes context_length_exceeded as ContextOverflowError", () => {
     const input = {
@@ -1495,6 +1661,8 @@ describe("session.message-v2.fromError", () => {
       "Please reduce the length of the messages or completion",
       "400 status code (no body)",
       "413 status code (no body)",
+      "Request body too large",
+      "multimodal data size is too large",
     ]
 
     cases.forEach((message) => {
