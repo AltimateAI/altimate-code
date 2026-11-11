@@ -581,7 +581,7 @@ const ProposalsReplyCommand = effectCmd({
     yargs
       .positional("id", { type: "string", demandOption: true })
       .option("send", { type: "boolean", describe: "send it for review by the workspace owner or an admin" })
-      .option("approve", { type: "boolean", describe: "approve it now (workspace owner)" })
+      .option("approve", { type: "boolean", describe: "approve it now (workspace owner or an admin)" })
       .option("approve-anyway", { type: "boolean", describe: "approve a rule flagged as weakening verification" })
       .option("edit", { type: "string", describe: "change the wording (it stays open)" })
       .option("dismiss", { type: "boolean", describe: "not a rule: don't propose this topic again for 30 days" })
@@ -758,11 +758,11 @@ async function offerStagedForReview(input: { name: string; origin: "bootstrap" |
   if (!staged.items.length) return
   const owner = printable(staged.workspace.owner)
   const name = printable(staged.workspace.name)
-  out(`Staged ${staged.items.length} ${staged.items.length === 1 ? "rule" : "rules"} that can go to ${owner}'s review in ${name}:`)
+  out(`Staged ${staged.items.length} ${staged.items.length === 1 ? "rule" : "rules"} that can go for review in ${name} (${owner} or an admin decides):`)
   for (const item of staged.items) out(`  - ${printable(item.text)}`)
   let send = input.send
   if (!send && process.stdin.isTTY && process.stdout.isTTY)
-    send = (await prompts.confirm({ message: `Send ${staged.items.length === 1 ? "this rule" : `these ${staged.items.length} rules`} to ${owner}'s review in ${name}?`, initialValue: false })) === true
+    send = (await prompts.confirm({ message: `Send ${staged.items.length === 1 ? "this rule" : `these ${staged.items.length} rules`} for review in ${name}?`, initialValue: false })) === true
   if (!send) {
     out("Not sent; they stay local candidates for this project only (`learn show`, `learn promote`).")
     return
@@ -784,11 +784,11 @@ const BootstrapCommand = effectCmd({
     .option("yes", { type: "boolean", default: false, describe: "confirm sending the displayed scope; required outside a TTY" })
     .option("dry-run", { type: "boolean", default: false, describe: "print scope and redacted signals; send nothing and leave bootstrap state unchanged" })
     // altimate_change start — workspace rules
-    .option("send-for-review", { type: "boolean", default: false, describe: "in a project linked to a workspace, send the staged rules to the owner's review without asking (--yes does not imply it)" })
+    .option("send-for-review", { type: "boolean", default: false, describe: "in a project linked to a workspace, send the staged rules for review by the workspace owner or an admin without asking (--yes does not imply it)" })
     // altimate_change end
     .option("max-reflections", { type: "number", default: DEFAULT_MAX_REFLECTIONS, describe: "maximum reflection batches; 0 imports signals only" })
     .option("max-seconds", { type: "number", default: DEFAULT_MAX_SECONDS, describe: "total time budget after confirmation, in seconds" })
-    .epilog("Bootstrap sends redacted excerpts of past sessions to the chosen model. Review the scope before confirming. Rules are candidates only: learn show, then learn promote; in a project linked to a workspace they can be sent to the workspace owner's review (you are asked; --send-for-review skips the question). Rerun to finish pending reflections and continue the history cursor."),
+    .epilog("Bootstrap sends redacted excerpts of past sessions to the chosen model. Review the scope before confirming. Rules are candidates only: learn show, then learn promote; in a project linked to a workspace they can be sent to the workspace workspace owner's or an admin's review (you are asked; --send-for-review skips the question). Rerun to finish pending reflections and continue the history cursor."),
   handler: Effect.fn("Cli.learn.bootstrap")(function* (args) {
     // altimate_change start — workspace rules: the candidate before this run, so only what it stages is sent
     const staged = args["dry-run"] ? undefined : yield* run("", async () =>
@@ -854,10 +854,10 @@ const ImportReviewsCommand = effectCmd({
     .option("yes", { type: "boolean", default: false, describe: "confirm sending the displayed scope; required outside a TTY" })
     .option("dry-run", { type: "boolean", default: false, describe: "fetch and print redacted review comments; send nothing and leave import state unchanged" })
     // altimate_change start — workspace rules
-    .option("send-for-review", { type: "boolean", default: false, describe: "in a project linked to a workspace, send the staged rules to the owner's review without asking (--yes does not imply it)" })
+    .option("send-for-review", { type: "boolean", default: false, describe: "in a project linked to a workspace, send the staged rules for review by the workspace owner or an admin without asking (--yes does not imply it)" })
     // altimate_change end
     .option("max-reflections", { type: "number", default: DEFAULT_MAX_REFLECTIONS, describe: "maximum reflection batches; 0 imports signals only" })
-    .epilog("Requires gh installed and authenticated for the repository host. Review import sends redacted review comments to the chosen model after confirmation. Rules are candidates only: learn show, then learn promote; in a project linked to a workspace they can be sent to the workspace owner's review (you are asked; --send-for-review skips the question). Rerun to resume a checkpoint or finish pending reflections."),
+    .epilog("Requires gh installed and authenticated for the repository host. Review import sends redacted review comments to the chosen model after confirmation. Rules are candidates only: learn show, then learn promote; in a project linked to a workspace they can be sent to the workspace workspace owner's or an admin's review (you are asked; --send-for-review skips the question). Rerun to resume a checkpoint or finish pending reflections."),
   handler: Effect.fn("Cli.learn.importReviews")(function* (args) {
     // altimate_change start — workspace rules: the candidate before this run, so only what it stages is sent
     const staged = args["dry-run"] ? undefined : yield* run("", async () =>

@@ -5,7 +5,7 @@
 // - The proposed-rule card, inline above the session's input (the `session_prompt` slot, which renders the
 //   regular input below it): renders `rule.proposal.asked` (and `.updated` after an edit) and answers with
 //   `POST /rule-proposal/:id/reply`. Typing is never blocked. `<leader>p` (or a click) focuses the card; then
-//   Enter takes the selected action (first: send for review for a member, approve now for the owner), `e` edits
+//   Enter takes the selected action (first: send for review for a member, approve now for the owner or an admin), `e` edits
 //   the wording, `n` is "Not a rule", Escape goes back to typing and leaves the card. When the wording did not
 //   say rule or memory, the card asks "Memory · Team rule · Skip". Open proposals load at startup, so a card
 //   asked before this TUI subscribed still shows; one answered in another client disappears.
@@ -23,6 +23,7 @@ import { RuleClassify } from "@/altimate/rules/classify"
 import { printable } from "@/altimate/rules/printable"
 import type { RulesSummary } from "@/altimate/rules/summary"
 import { describeAge } from "@/altimate/workspace/attach-snapshot"
+import { WorkspaceRole } from "@/altimate/workspace/role"
 
 const id = "altimate:rules"
 
@@ -111,8 +112,9 @@ function buttons(card: ProposalCard): { action: ProposalCard["actions"][number];
 function explain(card: ProposalCard, action: string): string {
   const owner = card.workspace?.owner_name ? printable(card.workspace.owner_name) : "the workspace owner"
   const ws = card.workspace?.name ? printable(card.workspace.name) : "the workspace"
-  if (action === "send") return `Goes to ${owner}'s queue in ${ws} → Rules. Nothing changes for the team until approved.`
-  if (action === "approve") return `You own ${ws}: it reaches every teammate's sessions within a few minutes.`
+  if (action === "send") return `Goes to the review queue in ${ws} → Rules (${owner} or an admin decides). Nothing changes for the team until approved.`
+  if (action === "approve")
+    return `${card.workspace && WorkspaceRole.roleOf(card.workspace) === "admin" ? "You are an admin of" : "You own"} ${ws}: it reaches every teammate's sessions within a few minutes.`
   if (action === "save_local") return "Not linked to a workspace: saved as project training, no review."
   if (action === "save_memory")
     return memoryScope(card) === "global"

@@ -5,7 +5,7 @@
 // Bus wildcard (so it reaches `/event`), the client answers with `POST /rule-proposal/:id/reply`.
 //
 // The card never blocks the turn. Actions depend on the project:
-// - linked, member: send (to the owner's review queue), edit, dismiss ("Not a rule")
+// - linked, member: send (to the review queue: the owner or an admin decides), edit, dismiss ("Not a rule")
 // - linked, owner: approve instead of send (send and approve in one step; "approve anyway" when flagged): an owner
 //   reviewing their own proposal later adds nothing, so the card offers one team action, never both
 // - not linked: save_local (project training, no review), edit, dismiss
@@ -870,7 +870,7 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
       : undefined
     if (priorSent && (!approve || prior!.approved || priorSent.status === "active")) {
       if (approve || priorSent.status === "active") return { message: `Approved: now a team rule in ${ws}.`, outcome: "approved" }
-      return { message: `Sent to ${owner}'s review queue in ${ws}.`, outcome: "sent" }
+      return { message: `Sent for review in ${ws}: ${owner} or an admin decides.`, outcome: "sent" }
     }
     const quotes = current.settings?.include_quotes !== false
     const why = card.why ? (quotes ? redactSecrets(card.why) : neutralWhy(card)) : undefined
@@ -898,7 +898,7 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
     } else if (sent.status === "queued") {
       message = sent.error
         ? `Not sent yet (${sent.error}): kept queued and sent again on the next sync.`
-        : `Queued: it will be sent to ${owner}'s review queue when the workspace is reachable.`
+        : `Queued: it will be sent for review in ${ws} when the workspace is reachable.`
       outcome = "queued"
     } else if (!sent.row) {
       // Sent by another run whose answer is no longer recorded.
@@ -918,13 +918,13 @@ async function act(entry: Pending, action: Exclude<ReplyAction, "edit">): Promis
       message = `Approved: now a team rule in ${ws}.`
       outcome = "approved"
     } else if (sent.row?.approve_error && sent.row.approve_retry) {
-      message = `Sent to ${owner}'s review queue in ${ws}. Approving it failed for now (${sent.row.approve_error}); it is retried on the next sync.`
+      message = `Sent for review in ${ws}. Approving it failed for now (${sent.row.approve_error}); it is retried on the next sync.`
       outcome = "approve_retry"
     } else if (sent.row?.approve_error) {
-      message = `Sent to ${owner}'s review queue in ${ws}, but approving it failed (${sent.row.approve_error}). Approve it in the workspace's Rules tab.`
+      message = `Sent for review in ${ws}, but approving it failed (${sent.row.approve_error}). Approve it in the workspace's Rules tab.`
       outcome = "approve_failed"
     } else {
-      message = `Sent to ${owner}'s review queue in ${ws}.`
+      message = `Sent for review in ${ws}: ${owner} or an admin decides.`
       outcome = "sent"
     }
   }
