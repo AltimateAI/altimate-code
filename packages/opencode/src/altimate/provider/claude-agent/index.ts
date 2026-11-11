@@ -101,10 +101,23 @@ export async function loginCheck() {
 export function problem(state: ClaudeStatus.State): string | undefined {
   if (state.type === "missing") return "Claude Code is not installed. Install it, then run `claude auth login`."
   if (state.type === "failed") return state.message
+  if (state.type === "ready") {
+    const outdated = ClaudeProbe.versionError(state.probe.version)
+    if (outdated) return outdated.message
+  }
   if (state.type === "ready" && !ClaudeProbe.isLoggedIn(state.probe.account))
     return "Claude Code is not logged in. Run `claude auth login` in a terminal."
   if (state.type === "checking") return "Claude Code login check did not finish."
   return undefined
+}
+
+// What stops /connect before any login check: no `claude` on PATH, or one older than the minimum.
+export async function setupProblem(): Promise<string | undefined> {
+  const executable = io.which()
+  if (!executable) return problem({ type: "missing" })
+  const version = await ClaudeProbe.installedVersion(executable)
+  if (version === undefined) return
+  return ClaudeProbe.versionError(version)?.message
 }
 
 // The session stopped running, so a Claude turn still waiting for tool results will not get them.

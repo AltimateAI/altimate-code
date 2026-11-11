@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import fs from "node:fs/promises"
+import os from "node:os"
+import path from "node:path"
 import { Effect, Fiber } from "effect"
 import { TestClock } from "effect/testing"
 import { ClaudeProbe } from "@/altimate/provider/claude-agent/claude/probe"
@@ -85,10 +88,27 @@ describe("login check", () => {
 })
 
 describe("compatibility and login", () => {
-  test("only 2.1.248 or later is compatible", () => {
-    expect(ClaudeProbe.versionError("2.1.248")).toBeUndefined()
-    expect(ClaudeProbe.versionError("2.1.247")?.message).toContain("claude update")
-    expect(ClaudeProbe.versionError(undefined)?.message).toContain("claude update")
+  test("only 2.1.296 or later is compatible", () => {
+    expect(ClaudeProbe.versionError("2.1.296")).toBeUndefined()
+    expect(ClaudeProbe.versionError("2.1.295")?.message).toContain("claude update")
+    // Releases before 2.1.296 don't report a version at startup.
+    expect(ClaudeProbe.versionError(undefined)?.message).toContain("older than 2.1.296")
+  })
+
+  test("reads the installed version from `claude --version`", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-version-"))
+    try {
+      const script = (name: string, body: string) => {
+        const file = path.join(dir, name)
+        return fs.writeFile(file, `#!/bin/sh\n${body}\n`, { mode: 0o755 }).then(() => file)
+      }
+      expect(await ClaudeProbe.installedVersion(await script("ok", 'echo "2.1.311 (Claude Code)"'))).toBe("2.1.311")
+      expect(await ClaudeProbe.installedVersion(await script("fails", "exit 1"))).toBeUndefined()
+      expect(await ClaudeProbe.installedVersion(await script("garbled", "echo hello"))).toBeUndefined()
+      expect(await ClaudeProbe.installedVersion(path.join(dir, "absent"))).toBeUndefined()
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true })
+    }
   })
 
   test("only a missing credential counts as logged out", () => {

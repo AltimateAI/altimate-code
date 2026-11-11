@@ -30,14 +30,18 @@ export async function ClaudeAgentPlugin(_input: PluginInput): Promise<Hooks> {
         {
           type: "oauth",
           label: "Claude Code login (claude auth login)",
-          // Returns at once so the dialog shows its waiting screen; the login check (which starts
-          // `claude` and reads every model's context window) runs in the callback.
+          // Returns quickly (one `claude --version`) so the dialog shows its waiting screen; the login
+          // check (which starts `claude` and reads every model's context window) runs in the callback.
           async authorize() {
+            // A missing or outdated `claude` is named on the waiting screen, since the login check
+            // below only logs why it has not connected yet.
+            const blocker = await ClaudeAgent.setupProblem().catch(() => undefined)
             return {
               url: SETUP_URL,
               method: "auto" as const,
-              instructions:
-                "Checking your Claude Code login. If you have not logged in yet, run `claude auth login` in a terminal; this connects as soon as it finds the login.",
+              instructions: blocker
+                ? `${blocker} This connects as soon as a supported Claude Code is logged in.`
+                : "Checking your Claude Code login. If you have not logged in yet, run `claude auth login` in a terminal; this connects as soon as it finds the login.",
               async callback() {
                 // Bound to this instance; the dialog can be dismissed or the instance reloaded while this
                 // polls, and nothing cancels the callback, so it stops once the instance is disposed.

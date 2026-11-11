@@ -159,7 +159,7 @@ Available models: `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5-2025
 
 Claude Agent runs Claude models through your own Claude Code login, so a Claude Pro or Max subscription covers usage. Altimate Code starts your installed `claude` program through Anthropic's Claude Agent SDK. It never reads or stores your Claude Code token.
 
-1. Install [Claude Code](https://code.claude.com/docs/en/setup) (2.1.248 or later) and run `claude auth login`.
+1. Install [Claude Code](https://code.claude.com/docs/en/setup) (2.1.296 or later) and run `claude auth login`.
 2. In Altimate Code, run `/connect` and pick **Claude Agent**. The dialog checks your Claude Code login and connects once it finds one.
 3. Pick a model with `/models`. The list is what your Claude Code reports, such as `claude-agent/opus`, `claude-agent/sonnet` and `claude-agent/haiku`, and each model offers Claude Code's effort levels as variants.
 

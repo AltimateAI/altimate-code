@@ -18,8 +18,9 @@ export class ProbeError extends Schema.TaggedErrorClass<ProbeError>()("ClaudePro
   cause: Schema.Defect,
 }) {}
 
-// Older binaries silently ignore verbatimPrompts and can interpret user text as Claude commands.
-const MINIMUM_VERSION = "2.1.248"
+// Older binaries silently ignore verbatimPrompts and can interpret user text as Claude commands, and
+// releases before 2.1.296 do not report their version at startup, so their compatibility can't be checked.
+export const MINIMUM_VERSION = "2.1.296"
 // Older binaries do not support summary-only context usage. Their models keep the conservative fallback.
 const CONTEXT_DISCOVERY_VERSION = "2.1.257"
 
@@ -27,11 +28,26 @@ export function versionError(version: string | undefined) {
   if (version && atLeast(version, MINIMUM_VERSION)) return
   const message = version
     ? `Claude Code ${version} is too old; ${MINIMUM_VERSION} or later is required.`
-    : "Claude Code did not report its version, so compatibility could not be checked."
-  return new Error(`${message} Run \`claude update\`.`)
+    : `This Claude Code is older than ${MINIMUM_VERSION}, which Altimate Code needs.`
+  return new Error(`${message} Run \`claude update\`, then check \`claude --version\`.`)
 }
 
-// Compares release numbers like 2.1.248. A pre-release or build suffix is ignored.
+// Reads `claude --version` without starting a session, so /connect can name an old install before
+// the login check. Undefined when the version can't be read; the login check still decides then.
+export async function installedVersion(executable: string): Promise<string | undefined> {
+  try {
+    const proc = Bun.spawn([executable, "--version"], { stdout: "pipe", stderr: "ignore", stdin: "ignore" })
+    const timer = setTimeout(() => proc.kill(), 10_000)
+    const output = await new Response(proc.stdout).text()
+    clearTimeout(timer)
+    if ((await proc.exited) !== 0) return
+    return output.match(/^\s*(\d+\.\d+\.\d+)/)?.[1]
+  } catch {
+    return
+  }
+}
+
+// Compares release numbers like 2.1.296. A pre-release or build suffix is ignored.
 function atLeast(version: string, minimum: string) {
   const parse = (value: string) => value.split(/[-+]/)[0].split(".").map(Number)
   const current = parse(version)
