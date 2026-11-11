@@ -22,6 +22,15 @@ Ported from upstream opencode PR 58782, "feat(core): add Claude Agent provider" 
 run that runtime, so the upstream modules that only depend on the SDK live here, and the plugin-context
 wiring is replaced by the call sites below.
 
+Later upstream fixes ported on top (a move to upstream's own provider already includes them):
+
+- #63033 `993a280887` — a tool list or instruction change lets a parked tool turn finish; calls to removed tools
+  are answered as unavailable.
+- #63025 `51ce52546c` — compaction no longer stops a running Claude session. The shipped runtime sends
+  compaction as a utility request, so this keeps the code in line with upstream.
+- #61069 `4f3156ab3c` and #61067 `5e066ac922` — Claude Code's refusal and non-streaming fallbacks are off.
+- #60592 `ef3a7f13b8` — Claude Code's `/login` hint in errors becomes `claude auth login`.
+
 ## Layout
 
 Copied from upstream with import paths adjusted (compare against the upstream folder in a bridge merge):
