@@ -340,3 +340,19 @@ test("a row for a provider the server filtered out does not brick the dialog", a
     await picker.cleanup()
   }
 })
+
+test("the Claude subscription row appears when the server lists Claude Agent, and records its provider", async () => {
+  const picker = await mountPicker("first_run", [...ALL_PROVIDER_IDS, "claude-agent"])
+  try {
+    await wait(() => picker.events.length > 0)
+    // Rows: gateway, anthropic, Claude subscription, … — two Down presses land on it.
+    for (let i = 0; i < 2; i++) picker.app.mockInput.pressKey("ARROW_DOWN")
+    picker.app.mockInput.pressEnter()
+    await wait(() => picker.events.some((e) => e.name === "provider_selected"))
+    expect(picker.events.filter((e) => e.name === "provider_selected")[0]).toMatchObject({
+      providerID: "claude-agent",
+    })
+  } finally {
+    await picker.cleanup()
+  }
+})
