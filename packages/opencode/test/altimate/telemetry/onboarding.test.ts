@@ -14,6 +14,9 @@ import path from "path"
 import { Telemetry } from "@/altimate/telemetry"
 import * as Onboarding from "@/altimate/telemetry/onboarding"
 import { OnboardingTelemetryPlugin } from "@/altimate/plugin/onboarding-telemetry"
+import { AltimateApi } from "@/altimate/api/client"
+import * as WorkspaceFirstEvents from "@/altimate/workspace/first-events"
+import { withTestStateHome } from "../../fixture/fixture"
 import type { OnboardingTelemetryEvent } from "@opencode-ai/tui/context/onboarding-telemetry"
 
 type Tracked = Telemetry.Event
@@ -232,6 +235,31 @@ describe("activation events", () => {
     const completed = events.find((e) => e.type === "first_job_completed") as any
     expect(completed.workspace_id).toBe(7)
     expect("workspace_id" in (events.find((e) => e.type === "activation_job_selected") as any)).toBe(false)
+  })
+
+  test("the first job's row marks its workspace, so the workspace's own row isn't sent after it", async () => {
+    await withTestStateHome(async () => {
+      spyOn(Telemetry, "isEnabled").mockImplementation(() => true)
+      spyOn(AltimateApi, "isConfigured").mockImplementation(async () => true)
+      spyOn(AltimateApi, "getCredentials").mockImplementation(
+        async () => ({ altimateInstanceName: "acme", altimateUrl: "https://api.test", altimateApiKey: "k" }) as never,
+      )
+      WorkspaceFirstEvents.resetForTest()
+      captureEvents()
+      const hooks = await plugin()
+      await startOnboarding(hooks, "skip")
+
+      await runTool(
+        hooks,
+        { tool: "sample_setup", sessionID: SESSION, callID: "c3m", args: {}, workspaceId: 7 },
+        { title: "", output: "", metadata: { success: true } },
+      )
+      await settle()
+
+      expect(await WorkspaceFirstEvents.claim("first_job_completed", 7)).toBe(false)
+      expect(await WorkspaceFirstEvents.claim("first_job_completed", 8)).toBe(true)
+      WorkspaceFirstEvents.resetForTest()
+    })
   })
 
   test("a failed sample setup counts as selected but not completed", async () => {

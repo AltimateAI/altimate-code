@@ -128,7 +128,7 @@ const ToolListCommand = cmd({
     const workspaceTools = await resolveWorkspaceTools(args["workspace-tools"], process.cwd())
     const tools = await withRunner(process.cwd(), args.connections, workspaceTools, (runner) => runner.list())
     if (args.json) {
-      console.log(JSON.stringify(tools, null, 2))
+      writeAll(JSON.stringify(tools, null, 2) + "\n")
       return
     }
     const width = Math.max(...tools.map((tool) => tool.id.length))
@@ -159,8 +159,8 @@ const ToolContextCommand = cmd({
         await Registry.closeAll()
       }
     })
-    if (args.json) console.log(JSON.stringify({ instructions, connections }, null, 2))
-    else console.log(instructions)
+    if (args.json) writeAll(JSON.stringify({ instructions, connections }, null, 2) + "\n")
+    else writeAll(instructions + "\n")
   },
 })
 
@@ -181,7 +181,7 @@ const ToolSchemaCommand = cmd({
       process.exitCode = 1
       return
     }
-    console.log(JSON.stringify(tool, null, 2))
+    writeAll(JSON.stringify(tool, null, 2) + "\n")
   },
 })
 
@@ -237,7 +237,7 @@ const ToolRunCommand = cmd({
     } else if (result.status === "error") {
       console.error(result.output)
     } else {
-      console.log(result.output)
+      writeAll(result.output + "\n")
     }
     if (result.status === "error") process.exitCode = 1
   },
@@ -297,21 +297,41 @@ const ToolDaemonCommand = cmd({
 })
 
 /**
- * All of a machine-read answer on stdout before returning. The CLI exits right after a command, and
- * console.log leaves what a pipe can't take yet in a buffer that exit throws away, which cuts off an
- * answer over the pipe's 64 KiB when its reader is slow. Only metadata gets that big: `output` is capped.
+ * All of an answer on stdout before returning. The CLI exits right after a command, and console.log leaves
+ * what a pipe can't take yet in a buffer that exit throws away, which cuts off anything over the pipe's
+ * 64 KiB when its reader is slow: `metadata`, the tool list, or a workspace tool's output, which has no cap.
  */
 function writeAll(text: string) {
   const bytes = Buffer.from(text)
+  let progressAt = performance.now()
   for (let at = 0; at < bytes.length; ) {
+    let wrote = 0
     try {
-      at += writeSync(1, bytes, at)
+      wrote = writeSync(1, bytes, at)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EAGAIN") throw error
-      Bun.sleepSync(2)
+      const code = (error as NodeJS.ErrnoException).code
+      if (code === "EPIPE") return // The reader left, so nobody is waiting for the rest.
+      if (code !== "EAGAIN") throw error
     }
+    if (wrote > 0) {
+      at += wrote
+      progressAt = performance.now()
+      continue
+    }
+    // Nothing was taken (EAGAIN, or a zero-byte write). A reader that stopped draining the pipe (a
+    // stopped pager, a wedged log shipper) would otherwise keep this process spinning forever; after
+    // a minute without progress on a monotonic clock, fail.
+    if (performance.now() - progressAt > WRITE_STALL_MS) {
+      throw new Error(
+        `stdout stopped accepting output for ${WRITE_STALL_MS / 1000} s; ${bytes.length - at} bytes of the answer were not written`,
+      )
+    }
+    Bun.sleepSync(2)
   }
 }
+
+/** How long `writeAll` waits for a reader that has stopped taking output before it gives up. */
+const WRITE_STALL_MS = 60_000
 
 export const ToolCommand = cmd({
   command: "tool",
