@@ -17,7 +17,13 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Telemetry } from "../../src/altimate/telemetry"
 import * as OnboardingTelemetry from "../../src/altimate/telemetry/onboarding"
 import { AltimateApi } from "../../src/altimate/api/client"
-import { __resetPinValidation, readLocalBinding, recordApprovedBinding } from "../../src/altimate/workspace/state"
+import {
+  __resetPinValidation,
+  currentScope,
+  readLocalBinding,
+  recordApprovedBinding,
+} from "../../src/altimate/workspace/state"
+import { Plugin } from "../../src/plugin"
 import * as WorkspaceFirstEvents from "../../src/altimate/workspace/first-events"
 import { stubEmptySkillList } from "../altimate/workspace/skill-list-fixture"
 import { pollWithTimeout, testEffect } from "../lib/effect"
@@ -137,6 +143,8 @@ type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 
 let rows: Row[] = []
 let restore: (() => void)[] = []
+/** The tenant the stubbed credential names. A test can switch it while a turn runs. */
+let tenant = "acme"
 let stateHome = ""
 const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME
 // The suite's preload turns the workspace feature off, and with it off a turn never reads the pin. These
@@ -153,6 +161,7 @@ const inherited = Object.fromEntries(
 
 beforeEach(() => {
   rows = []
+  tenant = "acme"
   for (const name of Object.keys(inherited)) delete process.env[name]
   __resetPinValidation()
   stateHome = mkdtempSync(path.join(os.tmpdir(), "first-events-loop-state-"))
@@ -162,7 +171,7 @@ beforeEach(() => {
   const track = spyOn(Telemetry, "track").mockImplementation((event) => void rows.push(event as unknown as Row))
   const enabled = spyOn(Telemetry, "isEnabled").mockImplementation(() => true)
   const creds = spyOn(AltimateApi, "getCredentials").mockImplementation(
-    async () => ({ altimateInstanceName: "acme", altimateUrl: "https://api.test", altimateApiKey: "k" }) as Creds,
+    async () => ({ altimateInstanceName: tenant, altimateUrl: "https://api.test", altimateApiKey: "k" }) as Creds,
   )
   const configured = spyOn(AltimateApi, "isConfigured").mockImplementation(async () => true)
   restore = [
@@ -452,6 +461,33 @@ it.live("a subagent's working turn is not the workspace's job, and the parent's 
       yield* llm.text("parent answer")
       yield* prompt.prompt({ sessionID: parent.id, agent: "build", parts: [{ type: "text", text: "typed" }] })
       expect(firstJobs()).toEqual([[LINKED, "something_else"]])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
+
+it.live("a tool call's plugins get the credential its turn started under, not one switched to mid-turn", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      yield* linkProject(dir)
+      const seen: { turn?: string; now?: string }[] = []
+      const trigger = Plugin.trigger
+      const spy = spyOn(Plugin, "trigger").mockImplementation((async (name: string, input: any, output: any) => {
+        // The user signs in to another tenant while the tool runs.
+        if (name === "tool.execute.before") tenant = "other"
+        if (name === "tool.execute.after") {
+          seen.push({
+            turn: WorkspaceFirstEvents.callScope(input.callID)?.tenant,
+            now: (await currentScope())?.tenant,
+          })
+        }
+        return (trigger as any)(name, input, output)
+      }) as never)
+      restore.push(() => spy.mockRestore())
+      yield* turn(dir, llm, { tool: true })
+
+      expect(seen).toEqual([{ turn: "acme", now: "other" }])
     }),
     { git: true, config: providerCfg },
   ),

@@ -270,8 +270,13 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
           input.sessionID,
         )
         // Marked so the end of this turn, or a later session, doesn't send the workspace's row as well.
+        // Under the credential of the turn that ran the tool, which its workspace id belongs to.
         if (input.workspaceId !== undefined) {
-          await WorkspaceFirstEvents.claim("first_job_completed", input.workspaceId)
+          await WorkspaceFirstEvents.claim(
+            "first_job_completed",
+            input.workspaceId,
+            WorkspaceFirstEvents.callScope(input.callID),
+          )
         }
       }
     },

@@ -264,6 +264,39 @@ describe("activation events", () => {
     })
   })
 
+  test("the first job's mark is the tool's own turn's tenant, when the credential switched before a late return", async () => {
+    await withTestStateHome(async () => {
+      spyOn(Telemetry, "isEnabled").mockImplementation(() => true)
+      spyOn(AltimateApi, "isConfigured").mockImplementation(async () => true)
+      // By the time the tool returns, the user has signed in to another tenant.
+      spyOn(AltimateApi, "getCredentials").mockImplementation(
+        async () => ({ altimateInstanceName: "other", altimateUrl: "https://api.test", altimateApiKey: "k2" }) as never,
+      )
+      WorkspaceFirstEvents.resetForTest()
+      captureEvents()
+      const hooks = await plugin()
+      await startOnboarding(hooks, "skip")
+      const acme = { tenant: "acme", apiUrl: "https://api.test" }
+      const other = { tenant: "other", apiUrl: "https://api.test" }
+
+      // The cancelled turn's call, and its replacement's, both still running: each trigger site notes
+      // its own turn's credential.
+      using _late = WorkspaceFirstEvents.noteCallScope("c3late", acme)
+      using _replacement = WorkspaceFirstEvents.noteCallScope("c9new", other)
+      await runTool(
+        hooks,
+        { tool: "sample_setup", sessionID: SESSION, callID: "c3late", args: {}, workspaceId: 7 },
+        { title: "", output: "", metadata: { success: true } },
+      )
+      await settle()
+
+      expect(await WorkspaceFirstEvents.claim("first_job_completed", 7, acme)).toBe(false)
+      // The other tenant's workspace 7 is a different workspace: its own first row is still sent.
+      expect(await WorkspaceFirstEvents.claim("first_job_completed", 7, other)).toBe(true)
+      WorkspaceFirstEvents.resetForTest()
+    })
+  })
+
   test("a failed sample setup counts as selected but not completed", async () => {
     const events = captureEvents()
     const hooks = await plugin()

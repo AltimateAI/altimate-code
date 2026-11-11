@@ -80,6 +80,29 @@ export async function claim(event: FirstEvent, workspaceId: number, scope?: Scop
   }
 }
 
+/** The credential scope of the turn each tool call ran in, while that call's `tool.execute.after`
+ * plugins run. The trigger site notes it from its own turn, so a mark made there names the tenant the
+ * call's workspace id belongs to, even when the credential has switched since, or the turn was
+ * cancelled and replaced before the tool returned. Keyed by call id, not session: a session's later
+ * turn has its own calls. */
+const callScopes = new Map<string, Scope>()
+
+/** Notes `scope` for `callID` until the returned handle is disposed. */
+export function noteCallScope(callID: string | undefined, scope: Scope | undefined): Disposable {
+  if (callID === undefined || !scope) return { [Symbol.dispose]() {} }
+  callScopes.set(callID, scope)
+  return {
+    [Symbol.dispose]() {
+      if (callScopes.get(callID) === scope) callScopes.delete(callID)
+    },
+  }
+}
+
+/** The scope noted for a tool call, while its plugins run. */
+export function callScope(callID: string): Scope | undefined {
+  return callScopes.get(callID)
+}
+
 /** A typed prompt: the onboarding row and the workspace row are one row when both apply. */
 export async function promptSent(sessionID: string, workspaceId: number | undefined, scope?: Scope): Promise<void> {
   const onboarding = OnboardingTelemetry.isOnboardingSession(sessionID) && OnboardingTelemetry.claimFirstPrompt(sessionID)
@@ -106,5 +129,6 @@ export async function jobCompleted(sessionID: string, workspaceId: number | unde
 /** Test seam: drops this process's memory of the marks, as a new process would start. */
 export function resetForTest() {
   sent.clear()
+  callScopes.clear()
   warnedUnwritable = false
 }
