@@ -1530,6 +1530,9 @@ export namespace Telemetry {
         type: "first_job_completed"
         /** altimate_change — the turn's workspace, named by the emitter */
         workspace_id?: number
+        /** altimate_change — which rule sent the row: an onboarding session's selected job, or the
+         *  workspace's first job on this machine. Rows from older clients have none and are onboarding rows. */
+        origin: "onboarding" | "workspace"
         timestamp: number
         session_id: string
         job: "sample_duck_db" | "breaks_downstream" | "sql_review" | "cost" | "something_else"
@@ -1554,6 +1557,9 @@ export namespace Telemetry {
         type: "first_prompt_sent"
         /** altimate_change — the turn's workspace, named by the emitter */
         workspace_id?: number
+        /** altimate_change — which rule sent the row: `onboarding` for an onboarding session's first typed
+         *  prompt, bound or not, else `workspace`. Rows from older clients have none and are onboarding rows. */
+        origin: "onboarding" | "workspace"
         timestamp: number
         session_id: string
       }

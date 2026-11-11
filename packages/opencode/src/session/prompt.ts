@@ -125,7 +125,7 @@ import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
 // altimate_change start — the session's bound workspace rides on every telemetry row; workspace rules canonicalize bound
 // directories like the bindings cache does
-import { canonicalDirectory, endTurnBinding, turnBinding } from "@/altimate/workspace/state"
+import { canonicalDirectory, endTurnBinding, turnBinding, unvalidatedTurnBinding } from "@/altimate/workspace/state"
 
 /** The session's workspace use, as session_end fields. Read only: the row is tracked first, then the
  * turn ends its telemetry entries (`Telemetry.endSession`), so the row itself still carries the
@@ -560,7 +560,11 @@ export namespace SessionPrompt {
     }
     // altimate_change end
 
-    const message = await createUserMessage(input)
+    // altimate_change — a prompt that fails here runs no loop, so no later loop may take its verdict
+    const message = await createUserMessage(input).catch((err) => {
+      endTurnBinding(input.sessionID)
+      throw err
+    })
     await Session.touch(input.sessionID)
 
     // this is backwards compatibility for allowing `tools` to be specified when
@@ -702,6 +706,9 @@ export namespace SessionPrompt {
 
     const abort = resume_existing ? resume(sessionID) : start(sessionID)
     if (!abort) {
+      // altimate_change — this prompt joins the running loop, which named its workspace when it
+      // started, so its verdict is left for no later loop (the summarize route, a resume) to take.
+      endTurnBinding(sessionID)
       return new Promise<MessageV2.WithParts>((resolve, reject) => {
         const callbacks = state()[sessionID].callbacks
         callbacks.push({ resolve, reject })
@@ -1968,7 +1975,7 @@ export namespace SessionPrompt {
         )
         // A subagent's session starts from the command's template or the model's prompt, not a typed one.
         if (!fromCommand && hasUserText && !session.parentID) {
-          await WorkspaceFirstEvents.promptSent(sessionID, boundWorkspace?.datamateId)
+          await WorkspaceFirstEvents.promptSent(sessionID, boundWorkspace?.datamateId, boundWorkspace?.scope)
         }
         // altimate_change end
         // altimate_change end — session start telemetry
@@ -2633,8 +2640,9 @@ export namespace SessionPrompt {
           ? "abandoned"
           : "completed"
     // altimate_change start — emit quality signal, tool chain, and error fingerprint events
-    if (outcome === "completed" && toolCallCount > toolErrorCount) {
-      await WorkspaceFirstEvents.jobCompleted(sessionID, boundWorkspace?.datamateId)
+    // A subagent's turn is not the workspace's job: the parent's turn counts it through its `task` call.
+    if (outcome === "completed" && toolCallCount > toolErrorCount && !session.parentID) {
+      await WorkspaceFirstEvents.jobCompleted(sessionID, boundWorkspace?.datamateId, boundWorkspace?.scope)
     }
     Telemetry.track({
       type: "task_outcome_signal",
@@ -3180,6 +3188,14 @@ export namespace SessionPrompt {
   }
 
   async function createUserMessage(input: PromptInput) {
+    // altimate_change start — the workspace this message's attachment reads name: the turn's, or for a
+    // `noReply` prompt, which runs no turn, one read without the pin's validation or wait.
+    const attachmentWorkspace = async () =>
+      (input.noReply === true
+        ? await unvalidatedTurnBinding(Instance.directory)
+        : await turnBinding(input.sessionID, Instance.directory)
+      )?.datamateId
+    // altimate_change end
     const agentName = input.agent ?? (await Agent.defaultAgent())
     const agent = await Agent.get(agentName)
     if (!agent) {
@@ -3394,7 +3410,7 @@ export namespace SessionPrompt {
                 const readCtx: Tool.Context = {
                   sessionID: input.sessionID,
                   // altimate_change — the turn's workspace, so the attachment read's tool rows name it
-                  workspaceId: (await turnBinding(input.sessionID, Instance.directory))?.datamateId,
+                  workspaceId: await attachmentWorkspace(),
                   abort: new AbortController().signal,
                   agent: input.agent!,
                   messageID: info.id,
@@ -3463,6 +3479,8 @@ export namespace SessionPrompt {
                 const args = { filePath: filepath }
                 const listCtx: Tool.Context = {
                   sessionID: input.sessionID,
+                  // altimate_change — the turn's workspace, as on a file attachment's read
+                  workspaceId: await attachmentWorkspace(),
                   abort: new AbortController().signal,
                   agent: input.agent!,
                   messageID: info.id,

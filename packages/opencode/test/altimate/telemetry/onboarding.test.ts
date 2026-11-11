@@ -216,6 +216,8 @@ describe("activation events", () => {
 
     expect((events.find((e) => e.type === "activation_job_selected") as any).job).toBe("sample_duck_db")
     expect((events.find((e) => e.type === "first_job_completed") as any).job).toBe("sample_duck_db")
+    // Told apart from the workspace's own first job, which has the same name and shape.
+    expect((events.find((e) => e.type === "first_job_completed") as any).origin).toBe("onboarding")
   })
 
   test("the first job's row names the workspace the hook input carries", async () => {
