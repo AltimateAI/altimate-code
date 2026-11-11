@@ -13,6 +13,7 @@ import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
 import { writeFileSync, mkdtempSync, rmSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
+import { clearLineageCaches } from "../../src/altimate/native/dbt/project-lineage"
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -33,6 +34,7 @@ function writeManifest(dir: string, manifest: Record<string, any>): string {
 }
 
 afterEach(() => {
+  clearLineageCaches()
   for (const dir of tmpDirs) {
     rmSync(dir, { recursive: true, force: true })
   }

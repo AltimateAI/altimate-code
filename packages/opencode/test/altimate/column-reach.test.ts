@@ -14,9 +14,11 @@ import { selectsStar } from "../../src/altimate/native/dbt/project-lineage"
 import { lineageGraph } from "../../src/altimate/native/dbt/graph"
 import { structuredError, structuredResult } from "../../src/altimate/mcp-server/server"
 import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
+import { clearLineageCaches } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
 afterEach(() => {
+  clearLineageCaches()
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 

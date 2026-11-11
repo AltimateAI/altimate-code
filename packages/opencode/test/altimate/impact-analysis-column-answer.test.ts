@@ -9,6 +9,7 @@ import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { ImpactAnalysisTool } from "../../src/altimate/tools/impact-analysis"
 import { structuredResult } from "../../src/altimate/mcp-server/server"
 import { SessionID, MessageID } from "../../src/session/schema"
+import { clearLineageCaches } from "../../src/altimate/native/dbt/project-lineage"
 
 const ctx = {
   sessionID: SessionID.make("ses_test"),
@@ -27,6 +28,7 @@ beforeEach(() => {
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
 })
 afterEach(() => {
+  clearLineageCaches()
   spy?.mockRestore()
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
