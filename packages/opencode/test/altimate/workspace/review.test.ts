@@ -37,6 +37,8 @@ let requests: { method: string; url: string }[] = []
 let users: Record<string, number> = { k: 7, other: 8 }
 /** The answer to `GET /datamates/42/reviews?view=mine`. */
 let mine: () => Response = () => page([])
+/** The answer to `GET /datamates/42/reviews/{id}`. */
+let byId: (id: string) => Response = () => reply({ detail: { code: "not_found", message: "gone" } }, 404)
 let project = ""
 
 const reply = (body: unknown, status = 200) =>
@@ -66,11 +68,13 @@ const contribution = (over: Record<string, unknown> = {}) => ({
 })
 
 beforeEach(async () => {
+  ReviewNotices.resetForTest()
   delete process.env.ALTIMATE_DISABLE_WORKSPACE
   apiKey = "k"
   configured = true
   users = { k: 7, other: 8 }
   mine = () => page([])
+  byId = () => reply({ detail: { code: "not_found", message: "gone" } }, 404)
   requests = []
   rmSync(ReviewNotices.dir(), { recursive: true, force: true })
   project = mkdtempSync(path.join(SANDBOX, "proj-"))
@@ -80,6 +84,8 @@ beforeEach(async () => {
     requests.push({ method, url })
     const auth = (init?.headers as Record<string, string> | undefined)?.Authorization ?? ""
     if (url.endsWith("/users/me")) return reply({ id: users[auth.replace("Bearer ", "")] })
+    const one = url.match(/\/datamates\/42\/reviews\/([^/?]+)$/)
+    if (one) return byId(decodeURIComponent(one[1]))
     if (url.includes("/datamates/42/reviews")) return mine()
     // The link's own background skill sync: an empty workspace.
     return reply({ items: [], total: 0, page: 1, size: 50, pages: 1 })
@@ -169,7 +175,8 @@ describe("decision notices", () => {
     mine = () => page(Array.from({ length: ReviewNotices.MAX_NOTICES + 5 }, (_, i) => contribution({ public_id: `c-${i}`, status: "active" })))
     await poll()
     expect((await ReviewNotices.read(scopeA()))?.notices).toHaveLength(ReviewNotices.MAX_NOTICES)
-    expect(await replayed()).toHaveLength(10)
+    // Every kept decision is replayed, not only the newest few: a client away for many still shows each once.
+    expect(await replayed()).toHaveLength(ReviewNotices.MAX_NOTICES)
     process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
     expect(await replayed()).toEqual([])
   })
@@ -297,6 +304,55 @@ describe("decision notices", () => {
     expect(shown).toEqual(["c-1"])
   })
 
+  test("a server without review is not asked again for a while, and its 404 is not reported as an API error", async () => {
+    mine = () => reply({ detail: { code: "reviews_not_available", message: "x" } }, 404)
+    expect((await poll()).result.status).toBe("unsupported")
+    const asked = requests.filter((r) => r.url.includes("/reviews")).length
+    expect(asked).toBe(1)
+    expect((await poll()).result.status).toBe("unsupported")
+    expect(requests.filter((r) => r.url.includes("/reviews")).length).toBe(asked)
+  })
+
+  test("stored notices follow the IDE's pin for this tree, from what is on hand", async () => {
+    mine = () => page([contribution({ status: "pending" })])
+    await poll()
+    mine = () => page([contribution({ status: "active" })])
+    await poll()
+    expect((await replayed()).map((n) => n.public_id)).toEqual(["c-1"])
+    // Pinned to another workspace: its notices, not the link's (none kept for it here); pinned to this one: shown.
+    const keys = ["ALTIMATE_CODE_SERVE", "ALTIMATE_PINNED_WORKSPACE_ID", "ALTIMATE_PINNED_WORKSPACE_NAME", "ALTIMATE_PINNED_WORKSPACE_ROOT"]
+    const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+    try {
+      Object.assign(process.env, { ALTIMATE_CODE_SERVE: "1", ALTIMATE_PINNED_WORKSPACE_NAME: "Pinned", ALTIMATE_PINNED_WORKSPACE_ROOT: project })
+      process.env.ALTIMATE_PINNED_WORKSPACE_ID = "77"
+      expect(await replayed()).toEqual([])
+      process.env.ALTIMATE_PINNED_WORKSPACE_ID = "42"
+      expect((await replayed()).map((n) => n.public_id)).toEqual(["c-1"])
+      // A pin for another tree names no workspace here.
+      process.env.ALTIMATE_PINNED_WORKSPACE_ROOT = path.join(SANDBOX, "elsewhere")
+      expect(await replayed()).toEqual([])
+    } finally {
+      for (const key of keys)
+        if (saved[key] === undefined) delete process.env[key]
+        else process.env[key] = saved[key]
+    }
+  })
+
+  test("a pending request the capped list no longer reaches is asked for by id, and its decision is noticed", async () => {
+    mine = () => page([contribution({ public_id: "c-old", status: "pending" })])
+    await poll()
+    // Newer requests fill every page up to the cap; c-old is past it.
+    let at = 0
+    mine = () => {
+      at++
+      return page(Array.from({ length: 50 }, (_, i) => contribution({ public_id: `n-${at}-${i}` })), 99, at)
+    }
+    byId = (id) => reply(contribution({ public_id: id, status: "active", reviewed_by_name: "Olive" }))
+    const { shown } = await poll()
+    expect(shown.map((n) => n.public_id)).toEqual(["c-old"])
+    expect((await ReviewNotices.read(scopeA()))?.pending).not.toContain("c-old")
+  })
+
   test("the state is bounded", async () => {
     mine = () => page(Array.from({ length: ReviewNotices.MAX_PENDING + 25 }, (_, i) => contribution({ public_id: `c-${i}` })))
     await poll()
@@ -375,6 +431,20 @@ describe("workspace review status", () => {
     expect(c.out.join("\n")).toContain("rejected")
     expect(snapshot()).toEqual(before)
     expect(requests.every((r) => r.method === "GET")).toBe(true)
+  })
+
+  test("a sign-in switch while the link is resolved lists nothing for the other account", async () => {
+    const { spyOn } = await import("bun:test")
+    const WorkspaceState = await import("../../../src/altimate/workspace/state")
+    mine = () => page([contribution()])
+    const switched = spyOn(WorkspaceState, "accountDigest").mockResolvedValue("someone-else")
+    try {
+      const c = capture()
+      expect(await runReviewStatus(project, true, c.deps)).toBe(EXIT.FAILED)
+      expect(requests.some((r) => r.url.includes("/reviews"))).toBe(false)
+    } finally {
+      switched.mockRestore()
+    }
   })
 
   test("failures exit non-zero: 401, an outage, a server without review", async () => {

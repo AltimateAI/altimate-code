@@ -51,7 +51,9 @@ export interface HookInput {
 /** What a host session start learns about workspace rules. `rules` is empty when nothing may be shown. */
 export interface Start {
   workspace?: { name: string; owner_name?: string | null; is_owner: boolean; id?: number }
-  rules: { text: string; applies_to: string[] }[]
+  /** `review: "pending"`: the person's own proposal still waiting for the owner (`RulesStore.vouched`), never presented
+   * as approved. */
+  rules: { text: string; applies_to: string[]; review?: "pending" }[]
   proposals: number
   notices: RulesStore.Notice[]
   /** The last check for proposed rules failed (no model available, …): said once, so the person can fix it. */
@@ -132,9 +134,10 @@ export async function start(input: {
     await RulesSync.pullWithin(input.root, input.directory, input.learn, Math.min(left(), input.waitMs ?? (before.scope ? START_WAIT_MS : FIRST_PULL_WAIT_MS)))
   const state = await RulesStore.read(input.root)
   if (relinked(state) || !(await delivering(input.root, input.learn, state))) return none
-  // The same selection either way: pinned first, within the start budget.
+  // The same selection either way: what sync vouches for (team rules and the person's own pending proposals, as an
+  // altimate-code session gets them), pinned first, within the start budget.
   const { renderSection, resolveLimits } = await import("../learn/select")
-  const all = state.rules.map(RulesStore.toLesson).sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned))
+  const all = [...(await RulesStore.vouched(input.root)).values()].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned))
   const selected = renderSection(all, resolveLimits(input.learn as Parameters<typeof resolveLimits>[0]).budget_tokens).lessons
   // Recorded as shown when the learn lock allows within the deadline (a busy TUI may hold it): given either way.
   const lessons = input.session
@@ -168,7 +171,11 @@ export async function start(input: {
     )
   return {
     ...(state.workspace ? { workspace: { ...state.workspace, ...(state.scope ? { id: state.scope.datamateId } : {}) } } : {}),
-    rules: lessons.map((lesson) => ({ text: lesson.text, applies_to: lesson.trigger?.paths ?? [] })),
+    rules: lessons.map((lesson) => ({
+      text: lesson.text,
+      applies_to: lesson.trigger?.paths ?? [],
+      ...(lesson.review === "pending" ? { review: "pending" as const } : {}),
+    })),
     proposals: (await within(RuleProposal.storedFor(input.root), [])).length,
     notices,
     ...(failed ? { check_failed: failed.outcome.replace(/^failed:\s*/, "") } : {}),
@@ -191,11 +198,24 @@ export function context(start: Start, command = "/altimate-code:rules"): string 
 }
 
 function ruleLines(start: Start, ws: string): string[] {
-  if (!start.rules.length) return []
   const scope = (rule: Start["rules"][number]) => (rule.applies_to.length ? ` (applies to ${rule.applies_to.map(printable).join(", ")})` : "")
+  const line = (rule: Start["rules"][number]) => `- ${printable(rule.text)}${scope(rule)}`
+  const approved = start.rules.filter((rule) => rule.review !== "pending")
+  // The person's own proposals waiting for review are never listed as approved: apart, as in an altimate-code session.
+  const pending = start.rules.filter((rule) => rule.review === "pending")
   return [
-    `Team rules from ${ws} for this repository (approved by the workspace owner; they apply to all work here, including code you write yourself):`,
-    ...start.rules.map((rule) => `- ${printable(rule.text)}${scope(rule)}`),
+    ...(approved.length
+      ? [
+          `Team rules from ${ws} for this repository (approved by the workspace owner; they apply to all work here, including code you write yourself):`,
+          ...approved.map(line),
+        ]
+      : []),
+    ...(pending.length
+      ? [
+          `Rules the person proposed in ${ws}, still waiting for the workspace owner's review (not approved yet; they apply to the person's own work here):`,
+          ...pending.map(line),
+        ]
+      : []),
   ]
 }
 

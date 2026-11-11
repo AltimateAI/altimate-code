@@ -1201,7 +1201,7 @@ async function mirrorToClaude(directory: string, opts?: { withdraw?: boolean }):
 /** Remove the live snapshot, under the same cross-process lock as a swap. With `expected`, only while the live
  * manifest is still the one this run read: a snapshot another process swapped in since is newer than what this run
  * knows, and not this run's to remove. Answers whether it removed. */
-async function removeManaged(directory: string, expected?: Manifest | null): Promise<boolean> {
+async function removeManaged(directory: string, expected?: Live): Promise<boolean> {
   const canon = path.resolve(directory)
   return Flock.withLock(snapshotLock(canon), async () => {
     if (expected !== undefined && !(await liveIs(canon, expected))) return false
@@ -1210,9 +1210,20 @@ async function removeManaged(directory: string, expected?: Manifest | null): Pro
   })
 }
 
-/** Under the snapshot lock: whether the live manifest is still `seen` (null: no readable snapshot). */
-async function liveIs(canon: string, seen: Manifest | null): Promise<boolean> {
-  return JSON.stringify(await readManifest(canon)) === JSON.stringify(seen)
+/** What a run saw of the live snapshot: its manifest (null: none readable) and the "workspace has no skills" record
+ * (null: none). The record tells "no snapshot yet" from "removed as empty by another run", so a run that read skills
+ * before that removal does not bring them back. */
+interface Live {
+  manifest: Manifest | null
+  empty: string | null
+}
+
+/** Under the snapshot lock: whether the live snapshot is still what the run saw. */
+async function liveIs(canon: string, seen: Live): Promise<boolean> {
+  return (
+    JSON.stringify(await readManifest(canon)) === JSON.stringify(seen.manifest) &&
+    (await readEmptyRecordRaw(canon)) === seen.empty
+  )
 }
 
 /** Another process published a snapshot after this run read the live one: this run's result is older, so it is not
@@ -1296,6 +1307,12 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
   /** Copies on disk the server has said are no longer served, mapped to the entry this run saw, so a withdrawal never
    * removes a copy another process has replaced since. */
   const withdrawn = new Map<string, ManifestSkill>()
+  // altimate_change start — workspace review: copies whose listed revision moved on. The swap replaces them; a run
+  // abandoned or superseded before its swap withdraws them with `withdrawn`, so a replaced version reaches nobody even
+  // when its replacement downloaded fine.
+  const replaced = new Map<string, ManifestSkill>()
+  const obsoleteUnlessSwapped = () => new Map([...replaced, ...withdrawn])
+  // altimate_change end
   // altimate_change end
   /** Skills kept at their previous copy, mapped to that copy's version. */
   const carriedVersions = new Map<string, string>()
@@ -1467,10 +1484,11 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
         was: manifest.datamateId,
         now: binding.datamateId,
       })
-      if (await removeManaged(canon, manifest)) changed = true
+      if (await removeManaged(canon, { manifest, empty: await readEmptyRecordRaw(canon) })) changed = true
     }
     // The live snapshot this run starts from: a swap or removal below goes ahead only while it is still the live one.
-    const seen = foreign ? null : manifest
+    // The empty record is taken once this run has made its own change to it (below).
+    const seen: Live = { manifest: foreign ? null : manifest, empty: null }
 
     const remote = await listAll(binding)
     if (!remote) {
@@ -1483,6 +1501,7 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
     syncedFor.set(canon, accountKeyOf(creds.altimateInstanceName, creds.altimateUrl, account))
     // The workspace has skills now, even if installing them fails below.
     if (remote.length > 0) await clearEmptyRecordFor(canon, currentEmptyKey)
+    seen.empty = await readEmptyRecordRaw(canon)
 
     if (!foreign && (await upToDate(canon, manifest, remote))) {
       // Remembered for the stamp below, which runs after this block settles.
@@ -1564,6 +1583,13 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           dropped.add(summary.publicId)
           continue
         }
+        // altimate_change start — workspace review: a copy recorded at another revision than the one listed now
+        {
+          const prior = foreign ? undefined : manifest?.skills[summary.publicId]
+          if (prior?.revision !== undefined && summary.revision !== undefined && prior.revision !== summary.revision)
+            replaced.set(summary.publicId, prior)
+        }
+        // altimate_change end
         try {
           // altimate_change start — workspace review: the version this workspace serves to this caller
           // and bound to the listed revision, so every read below answers for that one version or refuses (409).
@@ -1652,7 +1678,8 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
           // A skill that synced before keeps its previous copy rather than
           // disappearing over a transient failure — the same "error is never
           // emptiness" rule the rest of this file follows, applied per skill.
-          const prior = manifest?.skills[summary.publicId]
+          // A previous workspace's or account's manifest describes nothing here (its tree was removed above).
+          const prior = foreign ? undefined : manifest?.skills[summary.publicId]
           const priorDir = path.join(root, summary.publicId)
           let carried = false
           // altimate_change start — workspace review: only the version the workspace still serves is carried over
@@ -1798,13 +1825,13 @@ export async function syncSkills(directory: string): Promise<SyncResult> {
         // Not necessarily from a newer read of the server: what this run's read says is no longer served is still
         // withdrawn (only a copy exactly at the version judged obsolete), and the next sync redoes the rest.
         log.info("workspace skills changed in another process; kept the newer snapshot")
-        if (withdrawn.size) await withdrawFromLive(canon, binding.datamateId, withdrawn)
+        if (await withdrawFromLive(canon, binding.datamateId, obsoleteUnlessSwapped())) changed = true
         return
       }
       log.warn("workspace skill sync failed; kept the existing snapshot", { err: String(err) })
       // altimate_change start — workspace review: keeping the existing snapshot must not keep a version the workspace no
       // longer serves
-      if (withdrawn.size) await withdrawFromLive(canon, binding.datamateId, withdrawn)
+      if (await withdrawFromLive(canon, binding.datamateId, obsoleteUnlessSwapped())) changed = true
       // altimate_change end
       // Per-skill reasons are already in `skippedSkills`; this says the snapshot
       // as a whole did not change. Only claim the old skills survived when they
@@ -1897,11 +1924,12 @@ function detailRevision(payload: unknown): string | undefined {
  * only a copy still exactly the one this run judged obsolete — under the same cross-process lock as a swap, so another
  * process that published a newer copy in the meantime keeps it. Each skill folder goes first, then the manifest is
  * rewritten without it (atomically), so discovery never reads a copy the manifest would vouch for. */
-async function withdrawFromLive(canon: string, datamateId: number, obsolete: Map<string, ManifestSkill>): Promise<void> {
+async function withdrawFromLive(canon: string, datamateId: number, obsolete: Map<string, ManifestSkill>): Promise<boolean> {
+  if (!obsolete.size) return false
   try {
-    await Flock.withLock(snapshotLock(canon), async () => {
+    return await Flock.withLock(snapshotLock(canon), async () => {
       const manifest = await ownManifest(canon)
-      if (!manifest || manifest.datamateId !== datamateId) return
+      if (!manifest || manifest.datamateId !== datamateId) return false
       const root = managedRoot(canon)
       const removed: string[] = []
       for (const [id, seen] of obsolete) {
@@ -1911,16 +1939,18 @@ async function withdrawFromLive(canon: string, datamateId: number, obsolete: Map
         delete manifest.skills[id]
         removed.push(id)
       }
-      if (!removed.length) return
+      if (!removed.length) return false
       const tmp = path.join(root, `${MANIFEST_NAME}.${process.pid}-${REALM_ID}.tmp`)
       await fs.writeFile(tmp, JSON.stringify(manifest, null, 2))
       await fs.rename(tmp, path.join(root, MANIFEST_NAME))
       // The marker vouched for a clean sync of what was there.
       await fs.rm(path.join(root, SYNCED_MARKER), { force: true })
       log.info("withdrew workspace skills no longer served at their stored version", { skills: removed })
+      return true
     })
   } catch (err) {
     log.warn("could not withdraw workspace skills no longer served", { err: String(err) })
+    return false
   }
 }
 

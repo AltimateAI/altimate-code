@@ -3127,6 +3127,23 @@ describe("the served version", () => {
     expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("v1")
   })
 
+  test("a run whose snapshot was removed as empty by another process does not bring its skills back", async () => {
+    const { emptyRecordPath } = await import("../../../src/altimate/workspace/empty-record-path")
+    // No snapshot yet; this run lists pub-1, and while it downloads another process finds the workspace empty.
+    serveReviewed({ "pub-1": { revision: "r1", updatedAt: "2026-01-01T00:00:00Z", body: "one" } })
+    const ok = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+      if (String(input).includes("/skills/pub-1/files/")) {
+        const file = emptyRecordPath(path.resolve(project))
+        mkdirSync(path.dirname(file), { recursive: true })
+        writeFileSync(file, "another\nwriter")
+      }
+      return ok(input as never, init as never)
+    }) as unknown as typeof fetch
+    await syncSkills(project)
+    expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+  })
+
   // A read-only directory is what makes the swap fail here; it does not stop root, and Windows has no such mode.
   const readOnlyDirsWork = process.platform !== "win32" && process.getuid?.() !== 0
   test.skipIf(!readOnlyDirsWork)("an abandoned run withdraws a stale copy, but never one another process has replaced since", async () => {
@@ -3167,6 +3184,27 @@ describe("the served version", () => {
         if (replacedMeanwhile) expect(readFileSync(skillFile("pub-1", "SKILL.md"), "utf8")).toBe("approved")
         else expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
       }
+    } finally {
+      if (existsSync(parent)) chmodSync(parent, 0o755)
+    }
+  })
+
+  test.skipIf(!readOnlyDirsWork)("an abandoned run withdraws a replaced copy even when its replacement downloaded fine", async () => {
+    const parent = path.dirname(path.join(project, MANAGED))
+    try {
+      serveReviewed({ "pub-1": { revision: "p1", updatedAt: "2026-01-01T00:00:00Z", body: "pending" } })
+      await syncSkills(project)
+      serveReviewed({ "pub-1": { revision: "a1", updatedAt: "2026-01-02T00:00:00Z", body: "approved" } })
+      const ok = globalThis.fetch
+      globalThis.fetch = (async (input: string | URL, init?: RequestInit) => {
+        // The new revision downloads; the swap then cannot happen.
+        if (String(input).includes("/skills/pub-1/files/")) chmodSync(parent, 0o555)
+        return ok(input as never, init as never)
+      }) as unknown as typeof fetch
+      const result = await syncSkills(project)
+      chmodSync(parent, 0o755)
+      expect(existsSync(skillFile("pub-1", "SKILL.md"))).toBe(false)
+      expect(result.changed).toBe(true)
     } finally {
       if (existsSync(parent)) chmodSync(parent, 0o755)
     }

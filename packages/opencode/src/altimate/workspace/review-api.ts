@@ -70,11 +70,18 @@ const Page = z.object({
 })
 
 /** One request; any failure (transport, status, or a body that does not parse) is a classified `RulesApiError`. */
-async function call<T>(schema: z.ZodType<T>, method: string, datamateId: number, subpath: string, opts: { actAs: ActAs; body?: unknown; query?: Record<string, string> }): Promise<T> {
+async function call<T>(
+  schema: z.ZodType<T>,
+  method: string,
+  datamateId: number,
+  subpath: string,
+  opts: { actAs: ActAs; body?: unknown; query?: Record<string, string>; expectedStatuses?: readonly number[] },
+): Promise<T> {
   try {
     const raw = await altimateRequest<unknown>(method, `/${datamateId}/reviews${subpath}`, {
       base: "/datamates",
       actAs: opts.actAs,
+      ...(opts.expectedStatuses ? { expectedStatuses: opts.expectedStatuses } : {}),
       ...(opts.body !== undefined ? { body: opts.body } : {}),
       ...(opts.query ? { query: opts.query } : {}),
     })
@@ -111,6 +118,8 @@ export async function listMine(datamateId: number, actAs: ActAs): Promise<{ item
     const body = await call(Page, "GET", datamateId, "", {
       actAs,
       query: { view: "mine", page: String(page), size: String(PAGE_SIZE) },
+      // A server or tenant without review answers 404 here on every poll: an answer, not an API error to report.
+      expectedStatuses: [404],
     })
     const before = items.length + skipped
     for (const row of body.items) {
@@ -134,6 +143,17 @@ export async function listMine(datamateId: number, actAs: ActAs): Promise<{ item
     }
   }
   return { items, skipped, complete: false }
+}
+
+/** One of the caller's own requests by id (the author may read their own), or null when the server no longer has it.
+ * For a request the capped list did not reach: its decision is noticed even when newer requests push it past the cap. */
+export async function getMine(datamateId: number, publicId: string, actAs: ActAs): Promise<Contribution | null> {
+  try {
+    return await call(Contribution, "GET", datamateId, `/${encodeURIComponent(publicId)}`, { actAs, expectedStatuses: [404] })
+  } catch (error) {
+    if (error instanceof RulesApiError && error.kind === "rejected" && error.status === 404) return null
+    throw error
+  }
 }
 
 export * as ReviewApi from "./review-api"

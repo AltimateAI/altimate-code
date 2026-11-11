@@ -506,7 +506,7 @@ function reviewToast(api: TuiPluginApi, raw: { text: string; status: string; rea
     if (p.status === "active") api.ui.toast({ variant: "success", message: `${what} was approved${who}. It now reaches the workspace.`, duration: 10000 })
     else if (p.status === "rejected") api.ui.toast({ variant: "warning", message: `${what} was rejected${who}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 })
     // A status this version does not know (a newer server) is still shown, not dropped.
-    else api.ui.toast({ variant: "info", message: `${what} is now ${p.status}${who}.`, duration: 10000 })
+    else api.ui.toast({ variant: "info", message: `${what} is now ${printable(p.status)}${who}.`, duration: 10000 })
     return
   }
   if (p.status === "active") api.ui.toast({ variant: "success", message: `Your rule was approved${who}: ${quoted}. It now applies to the team.`, duration: 10000 })

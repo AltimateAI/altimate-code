@@ -1296,6 +1296,29 @@ describe("workspace review", () => {
     expect(deleted).toEqual([])
   })
 
+  test("a sign-in switch while the link is resolved uploads nothing; signed out is said as such", async () => {
+    const { spyOn } = await import("bun:test")
+    const WorkspaceState = await import("../../../src/altimate/workspace/state")
+    const { CredentialsChangedError } = await import("../../../src/altimate/workspace/skill-publish")
+    const { NotConfiguredError } = await import("../../../src/altimate/workspace/api-client")
+    server(() => reply(summary()), () => reply({}, 500))
+    const switched = spyOn(WorkspaceState, "accountDigest").mockResolvedValue("someone-else")
+    try {
+      await expect(publish()).rejects.toBeInstanceOf(CredentialsChangedError)
+    } finally {
+      switched.mockRestore()
+    }
+    expect(uploads()).toEqual([])
+    const configured = AltimateApi.isConfigured
+    ;(AltimateApi as unknown as { isConfigured: () => Promise<boolean> }).isConfigured = async () => false
+    try {
+      await expect(publish()).rejects.toBeInstanceOf(NotConfiguredError)
+    } finally {
+      ;(AltimateApi as unknown as { isConfigured: typeof configured }).isConfigured = configured
+    }
+    expect(uploads()).toEqual([])
+  })
+
   test("coded refusals of the submission get their own errors", async () => {
     workspaceOwners = { 42: 99 }
     server(() => reply(summary()), () => reply({ detail: { code: "review_disabled", message: "off" } }, 409))

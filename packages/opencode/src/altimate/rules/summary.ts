@@ -48,7 +48,9 @@ export interface ReviewNotice {
 export async function summary(root: string, learn: LearnConfig, env: NodeJS.ProcessEnv = process.env, directory = root): Promise<Summary> {
   const state = await RulesStore.read(root)
   const { ReviewNotices } = await import("../workspace/review-notices")
-  const reviewNotices = (await ReviewNotices.stored(directory)).slice(-10).reverse().map((n): ReviewNotice => ({
+  // Every kept decision (the store keeps the 50 most recent), so a client away for many decisions still gets each once:
+  // clients show a notice once by its id and status.
+  const reviewNotices = (await ReviewNotices.stored(directory)).reverse().map((n): ReviewNotice => ({
     public_id: n.public_id,
     text: n.name,
     status: n.status,

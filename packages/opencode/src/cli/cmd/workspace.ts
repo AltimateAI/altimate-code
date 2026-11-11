@@ -17,9 +17,9 @@ import { bootstrap } from "../bootstrap"
 import { UI } from "../ui"
 import { SIGN_IN_COMMAND, stripControlChars } from "./link"
 import { AltimateApi } from "@/altimate/api/client"
-import { WorkspaceApi, type DatamateRef } from "@/altimate/workspace/api-client"
+import { WorkspaceApi, type ActAs, type DatamateRef } from "@/altimate/workspace/api-client"
 import * as Manage from "@/altimate/workspace/manage"
-import { resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
+import { accountDigest, credentialDigest, resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
 import { ReviewApi } from "@/altimate/workspace/review-api"
 import { printable } from "@/altimate/rules/printable"
 
@@ -306,8 +306,11 @@ export interface ReviewStatusDeps {
   isConfigured(): Promise<boolean>
   /** The project's workspace, resolved like every other command: the local link while recently confirmed, else the
    * service, which also reports an unlink or a rebind made elsewhere. */
-  binding(directory: string): Promise<{ status: "bound"; datamateId: number; datamateName: string } | { status: "unbound" | "unknown" }>
-  listMine(datamateId: number): Promise<Awaited<ReturnType<typeof ReviewApi.listMine>>>
+  binding(
+    directory: string,
+  ): Promise<{ status: "bound"; datamateId: number; datamateName: string; actAs: ActAs } | { status: "unbound" | "unknown" }>
+  /** With the credential the link was resolved for. */
+  listMine(datamateId: number, actAs: ActAs): Promise<Awaited<ReturnType<typeof ReviewApi.listMine>>>
   print(line: string): void
   printError(line: string): void
   printJson(payload: unknown): void
@@ -316,15 +319,16 @@ export interface ReviewStatusDeps {
 export const reviewStatusDeps: ReviewStatusDeps = {
   isConfigured: defaultDeps.isConfigured,
   binding: async (directory) => {
+    // One credential for the link and the listing: captured first, and still the one signed in once the link is
+    // resolved (a sign-in switch in between would list one account's requests against another's link).
+    const actAs = await WorkspaceApi.captureCredentials()
+    if (!actAs) return { status: "unknown" }
     const outcome = await resolveBindingOutcome(directory).catch((): BindingOutcome => ({ status: "unknown" }))
     if (outcome.status !== "bound") return { status: outcome.status }
-    return { status: "bound", datamateId: outcome.binding.datamateId, datamateName: outcome.binding.datamateName }
+    if ((await accountDigest()) !== credentialDigest(actAs.url, actAs.instance, actAs.apiKey)) return { status: "unknown" }
+    return { status: "bound", datamateId: outcome.binding.datamateId, datamateName: outcome.binding.datamateName, actAs }
   },
-  listMine: async (datamateId) => {
-    const actAs = await WorkspaceApi.captureCredentials()
-    if (!actAs) throw new Error("not signed in to Altimate")
-    return ReviewApi.listMine(datamateId, actAs)
-  },
+  listMine: (datamateId, actAs) => ReviewApi.listMine(datamateId, actAs),
   print: defaultDeps.print,
   printError: defaultDeps.printError,
   printJson: defaultDeps.printJson,
@@ -367,7 +371,7 @@ export async function runReviewStatus(directory: string, json: boolean, deps: Re
   if (binding.status !== "bound")
     return failure(out, json, EXIT.FAILED, "Could not reach the workspace service to check whether this project is linked. Try again.")
   try {
-    const listed = await deps.listMine(binding.datamateId)
+    const listed = await deps.listMine(binding.datamateId, binding.actAs)
     return report(
       out,
       json,

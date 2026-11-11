@@ -14,6 +14,7 @@ import { detectToolReferences, skillSource, isToolOnPath } from "./skill-helpers
 import { Telemetry } from "@/altimate/telemetry"
 import { describePublish, explainPublishError, publishSkill, type PublishReport } from "@/altimate/workspace/skill-publish"
 import { Flag } from "@opencode-ai/core/flag/flag"
+import { printable } from "@/altimate/rules/printable"
 // altimate_change end
 
 // ---------------------------------------------------------------------------
@@ -495,12 +496,16 @@ const SkillPublishCommand = cmd({
       process.exitCode = 1
     }
     // A failure before or after the publish (opening the project, reading its skills, disposing it) reaches the same
-    // writer, once: a result already written is not followed by a second one.
+    // writer, once: a result already written is not followed by a second one, but the command still exits non-zero.
+    // Server text is made inert before it reaches the terminal.
     let written = false
     const once = (message: string) => {
-      if (written) return
+      if (written) {
+        process.exitCode = 1
+        return
+      }
       written = true
-      fail(message)
+      fail(printable(message))
     }
     // altimate_change end
     try {

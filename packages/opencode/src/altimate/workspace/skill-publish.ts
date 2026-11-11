@@ -38,9 +38,9 @@ import { Log } from "@/altimate/util/log"
 import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
 import { isInWorkspaceSnapshot } from "./snapshot-path"
-import { ConflictError, ForbiddenError, NotFoundError, WorkspaceApi, altimateRequest } from "./api-client"
+import { ConflictError, ForbiddenError, NotConfiguredError, NotFoundError, WorkspaceApi, altimateRequest } from "./api-client"
 import type { ActAs, ConflictDetail } from "./api-client"
-import { resolveBinding } from "./state"
+import { accountDigest, credentialDigest, resolveBinding } from "./state"
 import { printable } from "../rules/printable"
 import { RulesApiError } from "../rules/api"
 import { ReviewApi } from "./review-api"
@@ -205,6 +205,14 @@ export class NotLinkedError extends Error {
   constructor() {
     super("This project is not linked to a workspace. Run `altimate-code link` first.")
     this.name = "NotLinkedError"
+  }
+}
+
+/** The Altimate sign-in changed while the publish started: nothing was uploaded. */
+export class CredentialsChangedError extends Error {
+  constructor() {
+    super("Your Altimate sign-in changed while publishing; nothing was uploaded. Publish again.")
+    this.name = "CredentialsChangedError"
   }
 }
 
@@ -752,16 +760,18 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   // Before the bundle is even read. An unlinked project has nowhere to attach
   // to, and uploading first would create the orphan this module exists to
   // prevent.
-  const binding = await resolveBinding(input.projectDirectory)
-  if (!binding) throw new NotLinkedError()
-
   // Resolved once and pinned. The ledger lookup and the record after the
   // upload must describe the same account, or a credential change mid-publish
   // files the id under one and looks for it under the other. Every request
   // below uses this one credential too: the review summary, the upload, the
   // submission and the notice scope all belong to the same person.
   const actAs = await WorkspaceApi.captureCredentials()
-  if (!actAs) throw new NotLinkedError()
+  if (!actAs) throw new NotConfiguredError()
+  const binding = await resolveBinding(input.projectDirectory)
+  if (!binding) throw new NotLinkedError()
+  // The link was resolved with the credential signed in now: it must still be the captured one, or the skill would go
+  // to one account's workspace under another account.
+  if ((await accountDigest()) !== credentialDigest(actAs.url, actAs.instance, actAs.apiKey)) throw new CredentialsChangedError()
   const scope = await currentScope(actAs)
 
   // Whether the workspace reviews what members add, asked before anything is uploaded. With review, a member's own skill
@@ -1070,6 +1080,8 @@ export function describePublish(report: PublishReport): string {
 export function explainPublishError(err: unknown): string | null {
   if (
     err instanceof NotLinkedError ||
+    err instanceof NotConfiguredError ||
+    err instanceof CredentialsChangedError ||
     err instanceof ManagedSkillError ||
     err instanceof NotProjectSkillError ||
     err instanceof BinaryFileError ||

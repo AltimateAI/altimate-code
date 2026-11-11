@@ -30,6 +30,16 @@ import { ReviewApi } from "./review-api"
 
 const log = Log.create({ service: "workspace.review-notices" })
 export const MAX_PENDING = 200
+/** After a server and tenant answer that they have no review, the poll asks them again only after this long. */
+/** Pending requests past the page cap asked for by id per poll. */
+export const MAX_LOOKUPS = 10
+export const UNSUPPORTED_BACKOFF_MS = 6 * 60 * 60 * 1000
+/** When each server and tenant (`apiUrl|tenant`) last answered "no review", in this process. */
+const unsupportedAt = new Map<string, number>()
+/** Tests: forget what servers answered. */
+export function resetForTest(): void {
+  unsupportedAt.clear()
+}
 export const MAX_SEEN = 500
 /** Notices kept for a client to replay, newest last: as many as the rules state keeps. */
 export const MAX_NOTICES = 50
@@ -214,6 +224,10 @@ async function pollUnsafe(directory: string, deps: PollDeps): Promise<PollResult
   ])
   const actAs = await WorkspaceApi.captureCredentials()
   if (!actAs) return { status: "signed_out" }
+  // A server that said it has no review is not asked again (nor is the link or the account resolved) for a while.
+  const server = `${actAs.url.replace(/\/+$/, "")}|${actAs.instance}`
+  const absentSince = unsupportedAt.get(server)
+  if (absentSince !== undefined && Date.now() - absentSince < UNSUPPORTED_BACKOFF_MS) return { status: "unsupported" }
   const outcome = await resolveBindingOutcome(directory).catch(() => ({ status: "unknown" as const }))
   if (outcome.status !== "bound") return { status: "not_linked" }
   const digest = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
@@ -227,8 +241,21 @@ async function pollUnsafe(directory: string, deps: PollDeps): Promise<PollResult
     listed = await ReviewApi.listMine(scope.datamateId, actAs)
   } catch (error) {
     // Nothing is decided by a failure: a 401/403 or an outage leaves the state as it was.
-    if (ReviewApi.unavailable(error)) return { status: "unsupported" }
+    if (ReviewApi.unavailable(error)) {
+      unsupportedAt.set(server, Date.now())
+      return { status: "unsupported" }
+    }
     return { status: "failed", error: error instanceof Error ? error.message : String(error) }
+  }
+  // Past the page cap, a request still pending here may be one the list never reached (newer requests push it down,
+  // and a decision does not move it up): each such one is asked for by id, a few per poll.
+  if (!listed.complete) {
+    const listedIds = new Set(listed.items.map((item) => item.public_id))
+    const missing = ((await read(scope))?.pending ?? []).filter((id) => !listedIds.has(id)).slice(0, MAX_LOOKUPS)
+    for (const id of missing) {
+      const item = await ReviewApi.getMine(scope.datamateId, id, actAs).catch(() => null)
+      if (item) listed = { ...listed, items: [...listed.items, item] }
+    }
   }
   const result = await locked(scope, async (state): Promise<{ state: State; result: PollResult }> => {
     // Recorded only for the account it was fetched for: another sign-in meanwhile records nothing.
@@ -256,7 +283,13 @@ export async function stored(directory: string): Promise<Notice[]> {
     ])
     const actAs = await WorkspaceApi.captureCredentials()
     if (!actAs) return []
-    const binding = await readLocalBinding(directory)
+    const { readPin, resolveWithinRoot } = await import("./pin")
+    // The workspace the poll resolves, from what is on hand (no network): the IDE's pin for this tree outranks the
+    // project's link, as in `resolveBindingOutcome`. A malformed pin, or one for another tree, names no workspace here.
+    const pin = readPin()
+    if (pin.kind === "invalid") return []
+    if (pin.kind === "valid" && resolveWithinRoot(directory, pin.root) === null) return []
+    const binding = pin.kind === "valid" ? { datamateId: pin.datamateId } : await readLocalBinding(directory)
     if (!binding) return []
     // The link was read with the credential signed in now: it must still be the captured one, or one account's
     // notices could be paired with another account's link.
