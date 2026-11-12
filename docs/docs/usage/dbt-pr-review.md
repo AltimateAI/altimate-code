@@ -96,7 +96,7 @@ below it fill gaps and add context without ever overriding a proof.
 
 ## Quick start (local)
 
-Run the reviewer on your working-tree changes against `origin/main`:
+Run the reviewer on your working-tree changes against the branch you will merge into (the remote default branch unless `--base` says otherwise):
 
 ```bash
 altimate review                 # human-readable summary
@@ -108,7 +108,7 @@ Options:
 
 | Flag | Description |
 |------|-------------|
-| `--base <ref>` | Base git ref. Defaults to the merge-base with `origin/main`. |
+| `--base <ref>` | Base git ref. Defaults to the pull request's target branch in CI (GitHub `pull_request.base.ref` or `GITHUB_BASE_REF`, GitLab `CI_MERGE_REQUEST_TARGET_BRANCH_NAME`), else the remote default branch. Always reduced to the merge-base with the head, so commits the base gained after the PR branched are never reviewed. In CI, a target branch that is not fetched is an error (use `fetch-depth: 0`). |
 | `--head <ref>` | Head git ref. Omit to review the working tree. |
 | `--manifest <path>` | Path to the compiled `manifest.json`. When omitted, the reviewer walks up from the current directory to find the nearest `dbt_project.yml` and uses its adjacent `target/manifest.json`; the discovered path is logged to stderr. |
 | `--mode comment\|gate` | `comment` never blocks; `gate` exits non-zero on `REQUEST_CHANGES`. |

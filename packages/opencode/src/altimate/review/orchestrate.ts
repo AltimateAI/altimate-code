@@ -8,11 +8,11 @@ import {
   dedupe,
   SEVERITY_ORDER,
 } from "./finding"
-import { type ChangedFile, filterChangedFiles } from "./diff-filter"
+import { type ChangedFile, type DbtProjectLayout, filterChangedFiles, hasOldSide } from "./diff-filter"
 import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
-import { type ReviewMode, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
+import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { type AiReviewInput } from "./ai-review"
 
@@ -198,6 +198,15 @@ export interface OrchestrateInput {
   forceTier?: "trivial" | "lite" | "full"
   /** Manifest was stale relative to change-affecting files (see run.ts::detectStaleManifest). */
   staleManifest?: boolean
+  /** The dbt project's directories from dbt_project.yml (custom model-paths). */
+  layout?: DbtProjectLayout
+  /** What the review covered: base resolution and files left out of scope. */
+  scope?: Omit<ReviewScope, "unverified">
+}
+
+/** True when SQL text contains Jinja (`{{ }}`, `{% %}` or `{# #}`). */
+export function hasJinja(sql: string | undefined): boolean {
+  return !!sql && /\{\{|\{%|\{#/.test(sql)
 }
 
 /** Derive the dbt model name from a model file path. */
@@ -317,7 +326,7 @@ async function semanticChangeLane(
   impact: ImpactResult,
   rubric: Rubric,
 ): Promise<Finding[]> {
-  if (file.status !== "modified") return []
+  if (!hasOldSide(file)) return []
   if (!oldSql || !newSql || oldSql.trim() === newSql.trim()) return []
   const model = modelNameFromPath(file.path)
   const eq = await runner.equivalence(oldSql, newSql, dialect)
@@ -478,7 +487,7 @@ async function columnBreakageLane(
 ): Promise<Finding[]> {
   if (!runner.columnLineage || !runner.downstreamModels || !getCompiled) return []
   const { file, engineOldSql, engineNewSql } = ctx
-  if (!engineOldSql || !engineNewSql || file.status !== "modified") return []
+  if (!engineOldSql || !engineNewSql || !hasOldSide(file)) return []
   const model = modelNameFromPath(file.path)
 
   // 1. Output columns removed by this change (column-lineage targets, old − new).
@@ -542,7 +551,7 @@ async function dataDiffLane(
   if (!cfg.enabled) return []
   if (!runner.dataDiff || !runner.columnLineage) return []
   const { file, engineOldSql, engineNewSql } = ctx
-  if (!engineOldSql || !engineNewSql || file.status !== "modified") return []
+  if (!engineOldSql || !engineNewSql || !hasOldSide(file)) return []
   const model = modelNameFromPath(file.path)
   const cols = (await runner.columnLineage(engineNewSql, dialect)).map((e) => e.target.toLowerCase())
   const keys = [...new Set(cols.filter((c) => c === "id" || /_id$/.test(c)))].slice(0, 1)
@@ -774,7 +783,7 @@ async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner): Promise<F
   const { file, newSql, oldSql } = ctx
   if (!newSql || file.status === "deleted") return []
   const model = modelNameFromPath(file.path)
-  const raw = await runner.dbtConfigLint(newSql, file.status === "modified" ? oldSql : undefined)
+  const raw = await runner.dbtConfigLint(newSql, hasOldSide(file) ? oldSql : undefined)
   const out: Finding[] = []
   for (const f of raw) {
     const cat: ReviewCategory = /var_no_default|microbatch|incremental|materialization/.test(f.rule)
@@ -842,9 +851,9 @@ async function structuralChangeLane(ctx: ModelContext, runner: ReviewRunner): Pr
   if (!runner.structuralDiff) return []
   // Use the ENGINE (compiled) SQL — structural_diff parses with a real SQL parser,
   // so raw Jinja (`{{ ref() }}`) would fail to parse and the lane would silently
-  // return nothing. engineOldSql/engineNewSql fall back to raw when no compiled SQL.
+  // return nothing. engineOldSql/engineNewSql fall back to raw only when it holds no Jinja.
   const { file, engineNewSql, engineOldSql } = ctx
-  if (file.status !== "modified" || !engineNewSql || !engineOldSql || engineNewSql.trim() === engineOldSql.trim())
+  if (!hasOldSide(file) || !engineNewSql || !engineOldSql || engineNewSql.trim() === engineOldSql.trim())
     return []
   const model = modelNameFromPath(file.path)
   const raw = await runner.structuralDiff(engineOldSql, engineNewSql)
@@ -1056,7 +1065,7 @@ interface ModelContext {
 }
 
 export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelope> {
-  const reviewable = filterChangedFiles(input.changedFiles, input.rubric.exclusions.excludeGlobs)
+  const reviewable = filterChangedFiles(input.changedFiles, input.rubric.exclusions.excludeGlobs, input.layout)
   const dialect = input.config.dialect
   const getContent = input.getContent
   const getCompiled = input.getCompiled
@@ -1066,6 +1075,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // both SQL sides. This avoids duplicate engine calls and lets tiering see PII.
   const modelFiles = reviewable.filter((f) => f.kind === "model_sql" || f.kind === "python_model")
   const ctxByPath = new Map<string, ModelContext>()
+  const unverified: Array<{ path: string; reason: string }> = []
   let anyManifest = false
   if (input.runner.manifestAvailable) {
     anyManifest = await input.runner.manifestAvailable().catch(() => false)
@@ -1075,16 +1085,25 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       const model = modelNameFromPath(file.path)
       // For renames the previous content lives at oldPath, not the new path.
       const oldRef = file.oldPath ?? file.path
+      const withOld = hasOldSide(file)
       const [newSql, oldSql, compiledNew, compiledOld] = await Promise.all([
         file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
-        file.status === "modified" ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
+        withOld ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
         file.status !== "deleted" ? getCompiled?.(file.path, "new") : Promise.resolve(undefined),
-        file.status === "modified" ? getCompiled?.(oldRef, "old") : Promise.resolve(undefined),
+        withOld ? getCompiled?.(oldRef, "old") : Promise.resolve(undefined),
       ])
-      // Engine lanes prefer dbt-compiled SQL (correct rendered SQL); raw is the
-      // fallback. The dbt-patterns lane always uses raw (it needs the Jinja).
-      const engineNewSql = compiledNew ?? newSql
-      const engineOldSql = compiledOld ?? oldSql
+      // Engine lanes need dbt-compiled SQL. Raw SQL is used only when it holds
+      // no Jinja: the AST engine reads `{{ config() }}` as an injection attempt
+      // and a mixed raw-vs-compiled pair can never be proven equivalent, so a
+      // Jinja model without compiled output is marked unverified instead of
+      // producing warnings about its template syntax. The dbt-patterns lane
+      // always uses raw (it needs the Jinja).
+      const engineNewSql = compiledNew ?? (file.kind === "model_sql" && hasJinja(newSql) ? undefined : newSql)
+      const engineOldSql = compiledOld ?? (file.kind === "model_sql" && hasJinja(oldSql) ? undefined : oldSql)
+      if (file.status !== "deleted" && newSql && !engineNewSql)
+        unverified.push({ path: file.path, reason: "no compiled SQL for the head (run dbt compile)" })
+      else if (withOld && oldSql && !engineOldSql)
+        unverified.push({ path: file.path, reason: "no compiled SQL for the base (compile the base into target-base)" })
       const impact = await input.runner.impact(model)
       if (impact.hasManifest) anyManifest = true
       const pii = engineNewSql ? (await input.runner.detectPii(engineNewSql, dialect)).columns : []
@@ -1432,6 +1451,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     staleManifest: input.staleManifest,
     generatedAt: input.generatedAt,
     degraded,
+    scope:
+      input.scope || unverified.length
+        ? { ...input.scope, unverified: unverified.length ? unverified.sort((a, b) => a.path.localeCompare(b.path)) : undefined }
+        : undefined,
     // Include tierReasons whenever `--explain-tier` / `--force-tier` is set,
     // when a riskTierPathTokens config error was caught above, OR when the
     // classifier lands on `full` tier — a naturally-full run is a customer-

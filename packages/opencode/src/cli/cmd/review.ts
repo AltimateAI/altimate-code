@@ -31,7 +31,7 @@ export const ReviewCommand = cmd({
       // (exit 0, no review runs). With `boolean-negation: false`, `--no-ai` binds
       // to the declared `noAi` boolean flag as authored. B1 fix, Round 18.
       .parserConfiguration({ "boolean-negation": false })
-      .option("base", { type: "string", describe: "base git ref (default: merge-base with origin/main)" })
+      .option("base", { type: "string", describe: "base git ref (default: the PR target branch from CI, else the remote default branch; always reduced to the merge-base)" })
       .option("head", { type: "string", describe: "head git ref (default: working tree)" })
       .option("manifest", { type: "string", describe: "path to dbt manifest.json (auto-discovered under target/ when omitted)" })
       .option("mode", {

@@ -1129,6 +1129,8 @@ describe("orchestrate", () => {
       mode: "comment",
       runner: withCore,
       getContent: content(sql),
+      // Core lint runs on dbt-compiled SQL; raw Jinja never reaches the engine.
+      getCompiled: async () => "select * from prod.a a, prod.b b",
       generatedAt: "2026-05-29T00:00:00Z",
     })
     // The regex comma-join twin is dropped; the core AST finding remains.
@@ -1361,6 +1363,7 @@ describe("orchestrate", () => {
       mode: "comment",
       runner,
       getContent: content(sql),
+      getCompiled: async () => "select getdate() as loaded_at from prod.a",
       generatedAt: "2026-05-29T00:00:00Z",
     })
     // Core L033 is the single portability source.
