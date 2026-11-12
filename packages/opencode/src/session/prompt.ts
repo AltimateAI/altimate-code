@@ -1176,6 +1176,21 @@ export namespace SessionPrompt {
           tasks.push(...task)
         }
       }
+      // altimate_change start — filterCompacted renders the retained tail after
+      // the summary, so the array-last finished assistant is a pre-compaction turn
+      // still carrying its overflowing usage. Select it by stored order (the
+      // summary is stored after the tail) so the overflow check sees the summary
+      // and does not compact again before the next request. Ids are not used:
+      // an imported message keeps its caller-provided id, so a summary with a
+      // greater id than a newer finished assistant would hide that turn's usage.
+      lastFinished = undefined
+      for (const msg of msgs) {
+        if (msg.info.role !== "assistant" || !msg.info.finish) continue
+        const info = msg.info as MessageV2.Assistant
+        const order = lastFinished ? compareMessageOrder(messageOrder, info.id, lastFinished.id) : 1
+        if (order > 0 || (order === 0 && lastFinished !== undefined && info.id > lastFinished.id)) lastFinished = info
+      }
+      // altimate_change end
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
       // altimate_change start - only compaction-created continuations belong to the same request
