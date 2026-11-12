@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
+import { columnReach } from "../../src/altimate/native/dbt/column-reach"
 import { clearLineageCaches, hasNestedWith, howOf, shapeFlags, stripAggFilter } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
@@ -530,5 +531,137 @@ describe("column answer: contract", () => {
 
   test("an unknown model throws", () => {
     expect(() => columnAnswer(write(shop()), "nope", "x")).toThrow("not found")
+  })
+})
+
+// Each case below is a shape where the answer once cleared a model that can carry the column.
+describe("column answer: never cleared while it may carry the column", () => {
+  const names = (a: ColumnAnswer) => ({
+    cleared: a.cleared.map((one) => one.name),
+    unresolved: a.unresolved.map((u) => named(a, u.model)),
+    also: a.also_reads.map((x) => named(a, x.model)),
+  })
+
+  test("a star reader over a parent with no known columns, beside another parent's edge, is unresolved", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: { "source.shop.raw.u": source("u", []) },
+      nodes: {
+        "model.shop.f": model("f", ["source.shop.raw.u"], "select * from shop.raw.u"),
+        "model.shop.g": model("g", [], "select 1 as x", ["x"]),
+        "model.shop.r": model("r", ["f", "g"], `select f.*, g.x from ${T("f")} f cross join ${T("g")} g`),
+      },
+    }
+    const a = names(columnAnswer(write(m), "f", "val"))
+    expect(a.cleared).not.toContain("r")
+    expect(a.unresolved).toContain("r")
+  })
+
+  test("a star reader over a parent whose known columns lack the column is unresolved, both ways", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: { "source.shop.raw.orders": source("orders", []) },
+      nodes: {
+        "model.shop.stg": model("stg", ["source.shop.raw.orders"], "select * from shop.raw.orders", ["order_id"]),
+        "model.shop.rpt": model("rpt", ["stg"], `select * from ${T("stg")}`),
+      },
+      exposures: { "exposure.shop.dash": { name: "dash", label: "Dash", depends_on: { nodes: ["model.shop.rpt"] } } },
+    }
+    const path = write(m)
+    const down = columnAnswer(path, "stg", "amount")
+    expect(names(down).cleared).toEqual([])
+    expect(names(down).unresolved).toContain("rpt")
+    expect(down.consumers.exposures.map((one) => [one.name, one.tier])).toEqual([["dash", "may_carry"]])
+    const up = columnAnswer(path, "rpt", "amount", "upstream")
+    expect(names(up).cleared).toEqual([])
+  })
+
+  test("a qualified star inside a function is unresolved even when every column is declared", () => {
+    const m = {
+      metadata: { adapter_type: "snowflake" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.r": model("r", ["f"], `select hash(f.*) as h, id from ${T("f")} f`),
+      },
+    }
+    const a = names(columnAnswer(write(m), "f", "val"))
+    expect(a.cleared).toEqual([])
+    expect(a.unresolved).toEqual(["r"])
+  })
+
+  test("a value model that also filters on the column also reads it, so what sits past it may carry it", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.r": model("r", ["f"], `select val as v, id from ${T("f")} where val > 1`),
+        "model.shop.child": model("child", ["r"], `select id from ${T("r")}`),
+      },
+    }
+    const a = names(columnAnswer(write(m), "f", "val"))
+    expect(a.also).toEqual(["r"])
+    expect(a.cleared).toEqual([])
+  })
+
+  test("a NATURAL JOIN reader and an IDENTIFIER() reader are unresolved", () => {
+    const natural = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.g": model("g", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.r": model("r", ["f", "g"], `select g.id from ${T("f")} natural join ${T("g")}`),
+      },
+    }
+    expect(names(columnAnswer(write(natural), "f", "val")).unresolved).toEqual(["r"])
+    const identifier = {
+      metadata: { adapter_type: "snowflake" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.r": model("r", ["f"], `select id, identifier('val') as x from ${T("f")}`),
+      },
+    }
+    const b = names(columnAnswer(write(identifier), "f", "val"))
+    expect(b.unresolved).toEqual(["r"])
+    expect(b.cleared).toEqual([])
+  })
+
+  test("upstream, an ephemeral model the value passes through is not cleared", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.base": model("base", [], "select 1 as id, 2 as amount", ["id", "amount"]),
+        "model.shop.eph": model("eph", ["base"], `select id, amount * 2 as doubled from ${T("base")}`, ["id", "doubled"], {
+          config: { materialized: "ephemeral" },
+        }),
+        "model.shop.r": model(
+          "r",
+          ["eph"],
+          `with __dbt__cte__eph as (select id, amount * 2 as doubled from ${T("base")}) select doubled as total from __dbt__cte__eph`,
+          ["total"],
+        ),
+      },
+    }
+    const a = columnAnswer(write(m), "r", "total", "upstream")
+    expect(a.columns.map((c) => `${named(a, c.model)}.${c.column}`)).toContain("base.amount")
+    expect(names(a).cleared).not.toContain("eph")
+  })
+
+  test("a star over a source documented only in part leaves its other columns real, in both tools", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: { "source.shop.raw.orders": source("orders", ["order_id"]) },
+      nodes: {
+        "model.shop.stg": model("stg", ["source.shop.raw.orders"], "select * from shop.raw.orders"),
+        "model.shop.rpt": model("rpt", ["stg"], `select order_id, amount from ${T("stg")}`),
+      },
+    }
+    const path = write(m)
+    expect(() => columnAnswer(path, "stg", "amount")).not.toThrow()
+    expect(columnReach(path, "stg", "amount").models.map((one) => one.name)).toEqual(["rpt"])
   })
 })

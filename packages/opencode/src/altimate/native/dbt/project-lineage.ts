@@ -89,6 +89,42 @@ export function hasNestedWith(sql: string): boolean {
 }
 
 /**
+ * Whether the SQL names the column under WHERE, ON, USING, GROUP BY, HAVING, QUALIFY, PARTITION BY or
+ * ORDER BY: a use that can change outputs other than the ones the column feeds.
+ */
+export function namesOutsideSelect(sql: string, column: string): boolean {
+  const code = stripSql(sql).toLowerCase()
+  const name = column.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const word = new RegExp(`(?<![\\w$])"?${name}"?(?![\\w$])`, "g")
+  const clause = /\b(select|from|join|where|on|using|group\s+by|having|qualify|partition\s+by|order\s+by)\b/g
+  const uses = new Set(["where", "on", "using", "group by", "having", "qualify", "partition by", "order by"])
+  for (const m of code.matchAll(word)) {
+    let last = ""
+    for (const k of code.slice(0, m.index).matchAll(clause)) last = k[1]!.replace(/\s+/g, " ")
+    if (uses.has(last)) return true
+  }
+  return false
+}
+
+/** Whether a function takes a `*` (hash(*), hash(t.*), row(t.*)): the engine may not expand it. Not count(*). */
+export function starInFunction(sql: string): boolean {
+  return /\b(?!count\b)[a-z_][\w$]*\s*\(\s*(?:[a-z_][\w$]*"?\s*\.\s*)?\*\s*\)/.test(stripSql(sql).toLowerCase())
+}
+
+/**
+ * Whether a `*` in the SQL may read the table: an unqualified one, or one qualified by the table's name
+ * or an alias given to it.
+ */
+export function starOver(sql: string, table: string): boolean {
+  if (!selectsStar(sql)) return false
+  const code = stripSql(sql).toLowerCase()
+  const qualified = [...code.matchAll(/([a-z_][\w$]*)"?\s*\.\s*\*/g)].map((m) => m[1]!)
+  if (selectsStar(code.replace(/[a-z_][\w$]*"?\s*\.\s*\*/g, "1"))) return true
+  const t = table.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  return qualified.some((q) => q === table.toLowerCase() || new RegExp(`\\b${t}"?\\s+(?:as\\s+)?"?${q}\\b`).test(code))
+}
+
+/**
  * Whether the SQL selects `*` or `t.*` in any form (DISTINCT ON, TOP n, AS STRUCT, multi-part or
  * quoted qualifiers, EXCLUDE/EXCEPT/REPLACE/RENAME modifiers). Every `*` counts except count(*) and
  * multiplication, which has an operand on both sides that is not a keyword ending the projection.
@@ -345,13 +381,15 @@ export class ProjectLineage {
   /**
    * The node's columns, lower-cased, when nothing can be missing from them; undefined otherwise.
    * A model's are settled by a SELECT list with no `*`, or, with one, by lineage that resolved over
-   * parents whose own columns are settled. A source's or seed's are those it declares (or its header).
+   * parents whose own columns are settled. A seed's are its header; a source's are never settled.
    */
   settledColumns(id: string): Set<string> | undefined {
     if (this.settledMemo.has(id)) return this.settledMemo.get(id)
     this.settledMemo.set(id, undefined)
     const names = new Set(this.columns(id).map((c) => c.name))
     let settled = names.size > 0
+    // A source's docs often list only some of its columns; a seed's header lists them all.
+    if (settled && !this.traced(id) && this.node(id)?.resource_type !== "seed") settled = false
     if (settled && this.traced(id)) {
       const sql = this.sqlOf(id)
       settled = !!sql && (selectsStar(sql)

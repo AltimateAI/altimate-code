@@ -4,8 +4,20 @@
 import * as fs from "fs"
 import * as path from "path"
 import { findModel } from "./helpers"
-import { describeExposure, exposureReads, type ColumnReachExposure } from "./column-reach"
-import { compareText, missingColumn, projectLineage, type How, type HowFrom, type ProjectLineage, type ShapeFlag } from "./project-lineage"
+import { describeExposure, exposureReads, joinsNaturally, namesThroughIdentifier, type ColumnReachExposure } from "./column-reach"
+import {
+  compareText,
+  missingColumn,
+  namesOutsideSelect,
+  projectLineage,
+  selectsStar,
+  starInFunction,
+  starOver,
+  type How,
+  type HowFrom,
+  type ProjectLineage,
+  type ShapeFlag,
+} from "./project-lineage"
 
 export type { How, HowFrom, ShapeFlag } from "./project-lineage"
 
@@ -182,6 +194,20 @@ export function columnAnswer(
   const unresolved = new Map<string, string>()
   // Models with a column the cap left out: what sits past them was never checked.
   const capped = new Set<string>()
+  const addAlso = (id: string, col: string) => {
+    const set = also.get(id) ?? new Set<string>()
+    set.add(col)
+    also.set(id, set)
+  }
+  const nameOf = (id: string) => String(p.node(id)?.name ?? id)
+  const tableOf = (id: string) => String(p.node(id)?.alias || p.node(id)?.identifier || p.node(id)?.name || id)
+  // Uses the engine can't show: what the model outputs from the column is unknown.
+  const opaqueUse = (sql: string, col: string): string | null =>
+    joinsNaturally(sql)
+      ? "joins with NATURAL JOIN, which may join on the column"
+      : namesThroughIdentifier(sql, [col])
+        ? "names the column through IDENTIFIER(), which the trace can't follow"
+        : null
 
   if (direction === "downstream") {
     while (queue.length) {
@@ -208,19 +234,27 @@ export function columnAnswer(
           edges.push(edge(from, to, e.how, e.howFrom))
           if (fresh) queue.push([reader, e.to, h + 1])
         }
-        if (hit) continue
+        const sql = p.sqlOf(reader)
+        const opaque = opaqueUse(sql, c)
+        if (opaque) unresolved.set(reader, opaque)
+        if (hit) {
+          // A value model that also filters, joins or groups on the column can change its other outputs.
+          if (namesOutsideSelect(sql, c)) addAlso(reader, c)
+          continue
+        }
         // An ephemeral focus is inlined as a CTE: its readers' edges name its parents' columns, not its own.
         if (u === focus && p.ephemeral(focus)) {
           unresolved.set(reader, `reads ${String(p.node(focus)?.name ?? focus)}, an ephemeral model inlined as a CTE, whose columns the trace can't follow`)
           continue
         }
+        // A `*` over the model whose known columns lack the column, or inside a function, may still carry it.
+        if (starOver(sql, tableOf(u)) && (!p.columns(u).some((col) => col.name.toLowerCase() === c) || starInFunction(sql))) {
+          unresolved.set(reader, `selects * from ${nameOf(u)}, which the trace couldn't expand to ${c}`)
+          continue
+        }
         const reads = p.reads(reader)
         if (reads === null) unresolved.set(reader, "the engine couldn't list the columns its SQL reads")
-        else if (reads.has(c)) {
-          const set = also.get(reader) ?? new Set<string>()
-          set.add(c)
-          also.set(reader, set)
-        }
+        else if (reads.has(c)) addAlso(reader, c)
       }
     }
   } else {
@@ -234,6 +268,11 @@ export function columnAnswer(
         continue
       }
       if (lin.partial) unresolved.set(u, `read in part: ${lin.partial}`)
+      const sql = p.sqlOf(u)
+      const opaque = opaqueUse(sql, c)
+      if (opaque) unresolved.set(u, opaque)
+      // A `*` the trace couldn't expand to the column may still be where it comes from.
+      if (!lin.edges.some((e) => e.to === c) && selectsStar(sql)) unresolved.set(u, `selects *, which the trace couldn't follow back to ${c}`)
       for (const e of lin.edges) {
         if (e.to !== c) continue
         const fresh = !columnIndex.has(`${e.from}|${e.fromCol}`)
@@ -265,6 +304,11 @@ export function columnAnswer(
     for (const d of beyond(id)) mayCarry.add(d)
   }
   for (const id of [...valueModels, focus]) mayCarry.delete(id)
+  // Upstream, the value passes through an ephemeral model without naming it: it is inlined, so the
+  // edges skip it.
+  if (direction === "upstream")
+    for (const id of modelLevel)
+      if (p.ephemeral(id) && !valueModels.has(id) && [...valueModels].some((v) => p.ancestors(id).has(v))) mayCarry.add(id)
   const cleared = [...modelLevel]
     .filter((id) => !valueModels.has(id) && !mayCarry.has(id))
     .map((id) => ({ id, name: String(p.node(id)?.name ?? id) }))
