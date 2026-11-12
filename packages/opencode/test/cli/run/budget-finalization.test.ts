@@ -325,6 +325,66 @@ describe("token budget accounting", () => {
     expect(budget.total).toBe(5015)
     expect(budget.exhausted).toBe(true)
   })
+
+  test("a limit reached through cache-read tenths is met exactly, not missed by float drift", () => {
+    const budget = RunTokenBudget.create(root, 81)
+    const reached = Array.from({ length: 10 }, (_, i) =>
+      budget.observe(stepFinish(root, `root_${i}`, { input: 7, output: 1, cache: { read: 1, write: 0 } })),
+    )
+    expect(reached).toEqual([...Array(9).fill(false), true])
+    expect(budget.total).toBe(81)
+    expect(RunTokenBudget.reportedTokens(budget.total)).toBe(81)
+  })
+
+  test("a step from a session linked only afterwards is held and counted on admission", () => {
+    const budget = RunTokenBudget.create(root, 100)
+    expect(budget.observe(stepFinish("ses_child", "child_1", { input: 120, output: 0, cache: { read: 0, write: 0 } }))).toBe(
+      false,
+    )
+    expect(budget.total).toBe(0)
+    expect(budget.observe(child("ses_child", root))).toBe(true)
+    expect(budget.total).toBe(120)
+    // The held step is counted once, even if it is reported again.
+    budget.observe(stepFinish("ses_child", "child_1", { input: 120, output: 0, cache: { read: 0, write: 0 } }))
+    expect(budget.total).toBe(120)
+  })
+
+  test("held steps are bounded and a session that is never linked never counts", () => {
+    const budget = RunTokenBudget.create(root, undefined)
+    for (let i = 0; i <= RunTokenBudget.MAX_PENDING_STEPS; i++)
+      budget.observe(stepFinish("ses_late", `late_${i}`, { input: 1, output: 0, cache: { read: 0, write: 0 } }))
+    budget.observe(stepFinish("ses_other", "other_1", { input: 500, output: 0, cache: { read: 0, write: 0 } }))
+    budget.observe(child("ses_late", root))
+    expect(budget.total).toBe(RunTokenBudget.MAX_PENDING_STEPS - 1)
+  })
+
+  test("a requested task_id is not linked; only the session the task tool resolved is", () => {
+    const budget = RunTokenBudget.create(root, 100)
+    budget.observe({
+      type: "message.part.updated",
+      properties: {
+        part: { id: "task_1", sessionID: root, messageID: "m", type: "tool", tool: "task", state: { input: { task_id: "ses_unrelated" } } },
+      },
+    })
+    expect(budget.isDescendant("ses_unrelated")).toBe(false)
+    expect(budget.observe(stepFinish("ses_unrelated", "u_1", { input: 500, output: 0, cache: { read: 0, write: 0 } }))).toBe(false)
+    expect(budget.total).toBe(0)
+    budget.observe({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "task_1",
+          sessionID: root,
+          messageID: "m",
+          type: "tool",
+          tool: "task",
+          state: { input: { task_id: "ses_unrelated" }, metadata: { sessionId: "ses_new_child" } },
+        },
+      },
+    })
+    expect(budget.isDescendant("ses_new_child")).toBe(true)
+    expect(budget.isDescendant("ses_unrelated")).toBe(false)
+  })
 })
 // altimate_change end
 

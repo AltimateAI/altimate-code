@@ -13,11 +13,18 @@ export type StepTokens = {
 }
 
 /**
- * Billed weight of one step: reasoning is billed as output, a cache read costs
- * a tenth of an input token.
+ * Billed weight of one step in tenths of a token, an integer so a running sum
+ * meets the limit exactly: reasoning is billed as output, a cache read costs a
+ * tenth of an input token.
  */
+export function billedTenths(tokens: StepTokens): number {
+  const full = tokens.input + tokens.output + (tokens.reasoning ?? 0) + tokens.cache.write
+  return Math.round(10 * full + tokens.cache.read)
+}
+
+/** Billed weight of one step: input + output + reasoning + cache writes + 0.1 × cache reads. */
 export function billedTokens(tokens: StepTokens): number {
-  return tokens.input + tokens.output + (tokens.reasoning ?? 0) + tokens.cache.write + 0.1 * tokens.cache.read
+  return billedTenths(tokens) / 10
 }
 
 /** A billed total as reported: cache reads make it fractional, so keep one decimal rather than rounding to an integer. */
@@ -32,16 +39,26 @@ export function isValidMaxTokens(value: unknown): boolean {
 
 type Event = { type: string; properties: Record<string, any> }
 
+/** Steps held for sessions not linked yet; the oldest is dropped beyond this. */
+export const MAX_PENDING_STEPS = 1_000
+
 export function create(rootSessionID: string, limit: number | undefined) {
   // Sessions known to descend from the root. A child announces itself through
   // `session.created`/`session.updated` (parentID) or through the parent's
-  // task tool part (state.metadata.sessionId); either may arrive first, so
-  // edges are kept until their parent is admitted.
+  // task tool part (state.metadata.sessionId, set once the tool has resolved
+  // the child); either may arrive first, so edges are kept until their parent
+  // is admitted, and a step from a session not linked yet is held until it is.
   const sessions = new Set<string>([rootSessionID])
   const parents = new Map<string, string>()
   const counted = new Set<string>()
-  let total = 0
+  const pending = new Map<string, { sessionID: string; tenths: number }>()
+  let tenths = 0
   let exhausted = false
+
+  function count(id: string, weight: number) {
+    counted.add(id)
+    tenths += weight
+  }
 
   function admit() {
     let changed = true
@@ -53,6 +70,32 @@ export function create(rootSessionID: string, limit: number | undefined) {
         changed = true
       }
     }
+    for (const [id, step] of pending) {
+      if (!sessions.has(step.sessionID)) continue
+      pending.delete(id)
+      count(id, step.tenths)
+    }
+  }
+
+  function step(part: Record<string, any>) {
+    const tokens = part.tokens as Partial<StepTokens> | undefined
+    if (!tokens || typeof part.id !== "string" || counted.has(part.id)) return
+    const weight = billedTenths({
+      input: tokens.input ?? 0,
+      output: tokens.output ?? 0,
+      reasoning: tokens.reasoning ?? 0,
+      cache: { read: tokens.cache?.read ?? 0, write: tokens.cache?.write ?? 0 },
+    })
+    if (sessions.has(part.sessionID)) return count(part.id, weight)
+    pending.delete(part.id)
+    pending.set(part.id, { sessionID: part.sessionID, tenths: weight })
+    if (pending.size > MAX_PENDING_STEPS) pending.delete(pending.keys().next().value!)
+  }
+
+  function reached() {
+    if (limit === undefined || exhausted || tenths < limit * 10) return false
+    exhausted = true
+    return true
   }
 
   function link(id: unknown, parentID: unknown) {
@@ -64,7 +107,7 @@ export function create(rootSessionID: string, limit: number | undefined) {
 
   return {
     get total() {
-      return total
+      return tenths / 10
     },
     get exhausted() {
       return exhausted
@@ -76,7 +119,7 @@ export function create(rootSessionID: string, limit: number | undefined) {
       return sessions.has(sessionID)
     },
     /**
-     * Feed one SDK event. Returns true exactly once: on the step whose usage
+     * Feed one SDK event. Returns true exactly once: on the event whose usage
      * takes the total to (or past) the limit. Without a limit it only counts.
      */
     observe(event: Event): boolean {
@@ -85,25 +128,16 @@ export function create(rootSessionID: string, limit: number | undefined) {
       if (event.type === "session.created" || event.type === "session.updated") {
         link(props.info?.id, props.info?.parentID)
       }
-      if (event.type !== "message.part.updated") return false
+      if (event.type !== "message.part.updated") return reached()
       const part = props.part
-      if (!part || typeof part.sessionID !== "string") return false
+      if (!part || typeof part.sessionID !== "string") return reached()
       if (part.type === "tool" && part.tool === "task") {
-        link(part.state?.metadata?.sessionId ?? part.state?.input?.task_id, part.sessionID)
+        // Only the id the tool resolved: a requested task_id may name a session
+        // the tool refuses to resume, and then it starts a new child instead.
+        link(part.state?.metadata?.sessionId, part.sessionID)
       }
-      if (part.type !== "step-finish" || !sessions.has(part.sessionID)) return false
-      const tokens = part.tokens as Partial<StepTokens> | undefined
-      if (!tokens || typeof part.id !== "string" || counted.has(part.id)) return false
-      counted.add(part.id)
-      total += billedTokens({
-        input: tokens.input ?? 0,
-        output: tokens.output ?? 0,
-        reasoning: tokens.reasoning ?? 0,
-        cache: { read: tokens.cache?.read ?? 0, write: tokens.cache?.write ?? 0 },
-      })
-      if (limit === undefined || exhausted || total < limit) return false
-      exhausted = true
-      return true
+      if (part.type === "step-finish") step(part)
+      return reached()
     },
   }
 }
