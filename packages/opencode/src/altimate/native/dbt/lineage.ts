@@ -19,7 +19,11 @@ function withoutPlaceholders(
   placeholders: Map<string, string>,
 ): { lineage: Record<string, unknown>; starred: string[] } {
   if (!placeholders.size) return { lineage, starred: [] }
-  const named = (text: unknown) => [...placeholders.keys()].some((placeholder) => String(text ?? "").toLowerCase().includes(placeholder))
+  const parentOf = (text: unknown) => {
+    const lower = String(text ?? "").toLowerCase()
+    return [...placeholders].find(([placeholder]) => lower.includes(placeholder))?.[1]
+  }
+  const named = (text: unknown) => parentOf(text) !== undefined
   const starred = new Set<string>()
   const dict: Record<string, unknown> = {}
   for (const [target, sources] of Object.entries<any>(lineage.column_dict ?? {})) {
@@ -28,7 +32,16 @@ function withoutPlaceholders(
       starred.add(parent)
       continue
     }
-    dict[target] = Array.isArray(sources) ? sources.filter((source) => !named(source)) : sources
+    if (!Array.isArray(sources)) {
+      dict[target] = sources
+      continue
+    }
+    // A `*` inside a function (hash(*), object_construct(*)) reads every column of the parent too.
+    for (const source of sources) {
+      const reads = parentOf(source)
+      if (reads) starred.add(reads)
+    }
+    dict[target] = sources.filter((source) => !named(source))
   }
   const edges = Array.isArray(lineage.column_lineage)
     ? lineage.column_lineage.filter((edge: any) => !named(edge?.source) && !named(edge?.target))

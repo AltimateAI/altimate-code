@@ -878,6 +878,20 @@ describe("structuredResult over the cap", () => {
     expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(60_000)
     expect("x".repeat(300_000).startsWith(out.report as string)).toBe(true)
   })
+
+  test("a column answer too big for the cap goes first; the reach and the model-level fields stay", () => {
+    const columnAnswer = { columns: Array.from({ length: 3000 }, (_, i) => ({ model: 0, name: `column_${i}` })) }
+    const out = structuredResult(
+      "impact_analysis",
+      { severity: "HIGH", downstream: ["a"], column_reach: { models: [] }, column_answer: columnAnswer },
+      "Impact",
+    ) as Record<string, unknown>
+    expect(out.column_answer).toBeUndefined()
+    expect(out.column_answer_error).toContain("for size")
+    expect(out).toMatchObject({ severity: "HIGH", downstream: ["a"], column_reach: { models: [] }, report: "Impact" })
+    expect(out.truncated).toBeUndefined()
+    expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(60_000)
+  })
 })
 
 describe("structuredError escaping", () => {

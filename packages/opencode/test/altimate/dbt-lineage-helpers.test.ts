@@ -418,7 +418,17 @@ select * from final`,
     ),
     ...more,
   }
-  return { metadata: { adapter_type: "duckdb" }, nodes, sources: {}, exposures: {} }
+  const sources = {
+    "source.jaffle.raw.events": {
+      resource_type: "source",
+      name: "events",
+      source_name: "raw",
+      database: "jaffle",
+      schema: "raw",
+      columns: {},
+    },
+  }
+  return { metadata: { adapter_type: "duckdb" }, nodes, sources, exposures: {} }
 }
 
 const outputs = (result: ReturnType<typeof dbtLineage>) =>
@@ -516,6 +526,16 @@ describe("dbtLineage: parents with no declared columns", () => {
     ])
     expect(result.unexpanded_stars).toEqual(["stg_events"])
     expect(outputs(result)).toContain("first_name")
+  })
+
+  test("a * inside a function over such a parent is low too, naming it", () => {
+    const result = dbtLineage({
+      manifest_path: writeManifest(makeTmpDir(), unknownEvents('select hash(*) as h from "jaffle"."main"."stg_events"')),
+      model: "events_child",
+    })
+    expect(result.confidence).toBe("low")
+    expect(result.unexpanded_stars).toEqual(["stg_events"])
+    expect((result.raw_lineage as any).column_dict.h).toEqual([])
   })
 
   test("a select * over a CTE that lists such a parent's columns stays high", () => {
