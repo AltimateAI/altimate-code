@@ -27,15 +27,10 @@ function findAllNodeModules(startDir) {
   return paths
 }
 
-function hasControllingTerminal() {
-  // A controlling terminal delivers Ctrl-C (SIGINT) and hangup (SIGHUP) to the
-  // whole foreground process group, so the child already has them. Opening
-  // /dev/tty is the portable test for one; it fails in CI, under harnesses,
-  // and after setsid, where the wrapper is the only process that was signalled.
-  if (process.platform === "win32") return true
+function isExecutableFile(file) {
   try {
-    fs.closeSync(fs.openSync("/dev/tty", "r"))
-    return true
+    fs.accessSync(file, fs.constants.X_OK)
+    return fs.statSync(file).isFile()
   } catch {
     return false
   }
@@ -71,9 +66,23 @@ function run(target) {
     // NODE_PATH; spawn will report the missing binary via the "error" event.
   }
 
-  // Asynchronous spawn so this process can forward termination signals: with
+  // Become the binary where node can (POSIX, node >= 22.15 / 23.11): one
+  // process, so a signal sent to this pid or to its process group reaches the
+  // binary exactly once, as if it had been started directly, and the caller
+  // sees the binary's own exit status, a signal death included. A failed
+  // execve aborts node instead of throwing, so only an executable file is
+  // exec'd; anything else falls through to spawn, which reports it as before.
+  if (typeof process.execve === "function" && isExecutableFile(target)) {
+    process.execve(target, [target, ...process.argv.slice(2)], env)
+  }
+
+  // Otherwise spawn asynchronously and forward termination signals: with
   // spawnSync a `kill <wrapper pid>` ended the wrapper alone and left the
   // binary running as an orphan (observed: a run kept going past its budget).
+  // A signal sent to the process group then reaches the binary twice, directly
+  // and through the forward; `run` takes a repeat of the same signal within a
+  // second as the same delivery when this variable says it is forwarded.
+  env.ALTIMATE_WRAPPER_FORWARDS_SIGNALS = "1"
   const child = childProcess.spawn(target, process.argv.slice(2), {
     stdio: "inherit",
     env,
@@ -85,19 +94,15 @@ function run(target) {
       // The child already exited; its "exit" handler below decides the status.
     }
   }
-  // SIGTERM is never terminal-generated, so it is always ours to deliver.
-  process.on("SIGTERM", () => forward("SIGTERM"))
-  // SIGINT and SIGHUP reach the child directly from a controlling terminal;
-  // forwarding them again would deliver a second signal, which `run` treats as
-  // "exit now" and skips its shutdown flush. Keep waiting for the child either
-  // way so its exit status is the wrapper's.
-  const terminal = hasControllingTerminal()
-  process.on("SIGINT", () => {
-    if (!terminal) forward("SIGINT")
-  })
-  process.on("SIGHUP", () => {
-    if (!terminal) forward("SIGHUP")
-  })
+  // On Windows the console delivers Ctrl-C to every attached process and
+  // child.kill terminates outright, so only SIGTERM is forwarded there. Every
+  // signal keeps a listener so the wrapper waits for the child and exits with
+  // the child's status.
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.on(signal, () => {
+      if (signal === "SIGTERM" || process.platform !== "win32") forward(signal)
+    })
+  }
   child.on("error", (error) => {
     console.error(error.message)
     process.exit(1)

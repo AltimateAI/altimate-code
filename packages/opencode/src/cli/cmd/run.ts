@@ -46,6 +46,9 @@ import { RunTimeBudget } from "./run-time-budget"
 // altimate_change end
 // altimate_change start — billed-token budget across the run and its task sessions (fork-only module)
 import { RunTokenBudget } from "./run-token-budget"
+// altimate_change end
+// altimate_change start — a signal the npm wrapper forwards is one delivery (fork-only module)
+import { RunSignal } from "./run-signal"
 import { defer } from "../../util/defer"
 import { setTimeout as sleep } from "node:timers/promises"
 // altimate_change end
@@ -1629,14 +1632,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
           process.exit(code)
         })
       }
-      const onSigint = () => {
+      // A group-directed signal the npm wrapper also forwards arrives twice; the
+      // copy is not the second signal that skips the flush above.
+      const acceptSignal = RunSignal.coalescer(RunSignal.forwardedByWrapper())
+      const onSigint = acceptSignal("SIGINT", () => {
         runTracing?.flushSync("Process interrupted")
         exitAfterMirrors(130)
-      }
-      const onSigterm = () => {
+      })
+      const onSigterm = acceptSignal("SIGTERM", () => {
         runTracing?.flushSync("Process interrupted")
         exitAfterMirrors(143)
-      }
+      })
       // altimate_change end
       // altimate_change start — honest rc on fatal abort. beforeExit firing
       // before the run finishes means the event loop drained before the run
