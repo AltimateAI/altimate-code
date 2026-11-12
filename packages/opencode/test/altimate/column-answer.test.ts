@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "nod
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
-import { columnReach } from "../../src/altimate/native/dbt/column-reach"
+import { columnReach, namesColumn } from "../../src/altimate/native/dbt/column-reach"
+import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
 import { clearLineageCaches, hasNestedWith, howOf, quotingIsClear, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
@@ -50,7 +51,7 @@ const T = (name: string) => `shop.main.${name}`
 // - renamed and calculated by mart_ltv (an enforced contract), then passed through a CTE by rpt_ltv,
 // - only filtered on by rpt_big_orders (whose child may carry it),
 // - read by rpt_nested through a WITH inside a CTE (unresolved; its child may carry it),
-// - never read by rpt_counts (cleared).
+// - never read by rpt_counts (not traced).
 function shop() {
   const nodes: Record<string, any> = {
     "model.shop.stg_orders": model(
@@ -159,19 +160,21 @@ describe("column answer: downstream", () => {
     })
   })
 
-  test("tiers: also reads, unresolved and what sits past them may carry it; the rest is cleared", () => {
+  test("tiers: also reads, unresolved and what sits past them may carry it; so may the rest, as not traced", () => {
     const a = columnAnswer(write(shop()), "fct_orders", "revenue")
     expect(
       a.also_reads.map((r) => ({ name: named(a, r.model), columns: r.columns, downstream: r.downstream })),
     ).toEqual([{ name: "rpt_big_orders", columns: ["revenue"], downstream: 1 }])
     expect(a.unresolved.map((u) => [named(a, u.model), u.downstream])).toEqual([["rpt_nested", 1]])
-    // value 3 + may carry 4 (rpt_big_orders, rpt_big_child, rpt_nested, rpt_nested_child) + cleared 1 (rpt_counts)
-    expect(a.counts).toMatchObject({ may_carry_models: 4, cleared_models: 1, model_level: 8 })
-    expect(a.cleared).toEqual([{ id: "model.shop.rpt_counts", name: "rpt_counts" }])
+    // value 3 + may carry 5 (rpt_big_orders, rpt_big_child, rpt_nested, rpt_nested_child, and rpt_counts, not traced)
+    expect(a.counts).toMatchObject({ may_carry_models: 5, model_level: 8 })
+    expect(a.may_carry).toContainEqual({ id: "model.shop.rpt_counts", name: "rpt_counts", reason: "not_traced" })
+    // Every model past the edited one is in one of the two tiers.
+    expect(a.counts.models + a.counts.may_carry_models).toBe(a.counts.model_level)
     expect(a.nodes.map((n) => n.name)).not.toContain("rpt_counts")
   })
 
-  test("a WITH nested inside a CTE is unresolved with the reason, never cleared, and flagged", () => {
+  test("a WITH nested inside a CTE is unresolved with the reason, and flagged", () => {
     const a = columnAnswer(write(shop()), "fct_orders", "revenue")
     const nested = a.unresolved.find((u) => named(a, u.model) === "rpt_nested")!
     expect(nested.reason).toContain("WITH nested inside a CTE")
@@ -179,7 +182,7 @@ describe("column answer: downstream", () => {
     expect(at(a, "rpt_nested", "revenue")).toBe(-1)
   })
 
-  test("a union all of select * over columns the engine can't see is unresolved, not cleared", () => {
+  test("a union all of select * over columns the engine can't see is unresolved", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },
       sources: { "source.shop.raw.a": source("a", []), "source.shop.raw.b": source("b", []) },
@@ -196,10 +199,10 @@ describe("column answer: downstream", () => {
     const a = columnAnswer(write(m), "m_a", "id")
     expect(a.unresolved.map((u) => named(a, u.model))).toEqual(["m_union"])
     expect(a.unresolved[0]!.reason).toContain("traced no column")
-    expect(a.counts).toMatchObject({ columns: 0, may_carry_models: 1, cleared_models: 0, model_level: 1 })
+    expect(a.counts).toMatchObject({ columns: 0, may_carry_models: 1, model_level: 1 })
   })
 
-  test("an ephemeral focus's readers may carry it, never cleared: their SQL names its parents' columns", () => {
+  test("an ephemeral focus's readers may carry it: their SQL names its parents' columns", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },
       sources: {},
@@ -210,11 +213,10 @@ describe("column answer: downstream", () => {
       },
     }
     const a = columnAnswer(write(m), "eph", "amount")
-    expect(a.cleared.map((one) => one.name)).toEqual([])
     expect(a.may_carry.map((m) => [m.name, m.reason])).toEqual([["r_star", "ephemeral"]])
   })
 
-  test("a reader the engine reads only in part, or whose columns it can't list, is unresolved, never cleared", () => {
+  test("a reader the engine reads only in part, or whose columns it can't list, is unresolved", () => {
     // Snowflake path access the engine parses only in part (`::variant:`), in a filter and in an output.
     const m = {
       metadata: { adapter_type: "snowflake" },
@@ -227,7 +229,7 @@ describe("column answer: downstream", () => {
       },
     }
     const a = columnAnswer(write(m), "f", "b")
-    expect(a.cleared.map((one) => one.name)).toEqual([])
+    expect(a.may_carry.map((one) => [one.name, one.reason])).toEqual([["after_filter", "below"], ["r_filter", "read_in_part"]])
     expect(a.unresolved.map((u) => named(a, u.model)).sort()).toEqual(["r_filter", "r_value"])
     expect(a.unresolved.every((u) => u.reason.length > 0)).toBe(true)
     // What the engine did trace still stands.
@@ -249,7 +251,7 @@ describe("column answer: downstream", () => {
     expect(at(a, "rpt_eph", "eph_revenue")).toBeGreaterThan(0)
   })
 
-  test("stops at the column limit, says so, and leaves what it never traced as may carry it, never cleared", () => {
+  test("stops at the column limit, says so, and leaves what it never traced as may carry it", () => {
     // One wide model fills the answer; a reader after it, and that reader's child, are never traced.
     const wide = Array.from({ length: MAX_ANSWER_COLUMNS + 5 }, (_, i) => `revenue as c${i}`).join(", ")
     const m = shop()
@@ -259,9 +261,9 @@ describe("column answer: downstream", () => {
     const a = columnAnswer(write(m), "fct_orders", "revenue")
     expect(a.columns).toHaveLength(MAX_ANSWER_COLUMNS)
     expect(a.truncated).toBe(true)
-    const cleared = a.cleared.map((c) => c.name)
-    expect(cleared).not.toContain("rpt_late")
-    expect(cleared).not.toContain("rpt_late_child")
+    const why = Object.fromEntries(a.may_carry.map((m) => [m.name, m.reason]))
+    expect(why.rpt_late).toBe("capped")
+    expect(why.rpt_late_child).toBe("below")
     expect(a.counts.may_carry_models).toBeGreaterThanOrEqual(4)
   })
 })
@@ -291,10 +293,10 @@ describe("column answer: upstream", () => {
       a.unresolved.map((u) => [named(a, u.model), u.reason.includes("nested inside a CTE"), u.downstream]),
     ).toEqual([["rpt_nested", true, 3]])
     // Everything above it may carry the value: fct_orders, stg_orders and the source.
-    expect(a.counts).toMatchObject({ may_carry_models: 3, cleared_models: 0, model_level: 4 })
+    expect(a.counts).toMatchObject({ may_carry_models: 3, model_level: 4 })
   })
 
-  test("ancestors in none of the tiers are listed as cleared, by name, outside nodes", () => {
+  test("ancestors the value isn't traced to may carry it as not traced, by name, outside nodes", () => {
     const m: any = shop()
     m.sources["source.shop.raw.customers"] = source("customers", ["customer_id", "name"])
     m.nodes["model.shop.stg_customers"] = model(
@@ -308,11 +310,11 @@ describe("column answer: upstream", () => {
       `select o.revenue from ${T("fct_orders")} o join ${T("stg_customers")} c on o.customer_id = c.customer_id`,
     )
     const a = columnAnswer(write(m), "fct_mix", "revenue", "upstream")
-    expect(a.cleared).toEqual([
-      { id: "source.shop.raw.customers", name: "customers" },
-      { id: "model.shop.stg_customers", name: "stg_customers" },
+    expect(a.may_carry).toEqual([
+      { id: "source.shop.raw.customers", name: "customers", reason: "not_traced" },
+      { id: "model.shop.stg_customers", name: "stg_customers", reason: "not_traced" },
     ])
-    expect(a.counts).toMatchObject({ models: 3, cleared_models: 2, model_level: 5 })
+    expect(a.counts).toMatchObject({ models: 3, may_carry_models: 2, model_level: 5 })
     expect(a.nodes.map((n) => n.name)).not.toContain("stg_customers")
   })
 })
@@ -379,7 +381,7 @@ describe("column answer: consumers", () => {
     const a = columnAnswer(
       write(
         withExposures({
-          "exposure.shop.z_cleared": exposure("z_cleared", ["model.shop.rpt_counts"]),
+          "exposure.shop.z_untraced": exposure("z_untraced", ["model.shop.rpt_counts"]),
           "exposure.shop.m_maybe": exposure("m_maybe", ["model.shop.rpt_big_child"], { type: "notebook" }),
           "exposure.shop.c_carries": exposure("c_carries", ["model.shop.rpt_ltv", "model.shop.rpt_counts"], {
             label: "Carries board",
@@ -398,7 +400,7 @@ describe("column answer: consumers", () => {
       ["Carries board", "carries", ["rpt_ltv"]],
       ["a_focus", "carries", ["fct_orders"]],
       ["m_maybe", "may_carry", ["rpt_big_child"]],
-      ["z_cleared", "cleared", ["rpt_counts"]],
+      ["z_untraced", "may_carry", ["rpt_counts"]],
     ])
     expect(a.consumers.exposures[0]).toMatchObject({ type: "dashboard", url: "https://bi.example.com/1", owner: "Data team" })
     expect(JSON.stringify(a.consumers)).not.toContain("data@example.com")
@@ -475,7 +477,6 @@ describe("column answer: contract", () => {
       "unresolved",
       "may_carry",
       "flags",
-      "cleared",
       "consumers",
       "truncated",
       "next",
@@ -491,7 +492,7 @@ describe("column answer: contract", () => {
     })
     expect(a.inputs.workarounds).toContain("aggregate FILTER clause dropped before analysis")
     expect(Object.keys(a.counts).sort()).toEqual(
-      ["cleared_models", "columns", "contracts", "ends", "hops", "may_carry_models", "model_level", "models"].sort(),
+      ["columns", "contracts", "ends", "hops", "may_carry_models", "model_level", "models"].sort(),
     )
     expect(a.nodes[0]).toEqual({
       id: "model.shop.fct_orders",
@@ -534,10 +535,9 @@ describe("column answer: contract", () => {
   })
 })
 
-// Each case below is a shape where the answer once cleared a model that can carry the column.
-describe("column answer: never cleared while it may carry the column", () => {
+// Each case below is a shape where an earlier answer called a model unaffected although it can carry the column.
+describe("column answer: a model that can carry the column may carry it, with its reason", () => {
   const names = (a: ColumnAnswer) => ({
-    cleared: a.cleared.map((one) => one.name),
     unresolved: a.unresolved.map((u) => named(a, u.model)),
     also: a.also_reads.map((x) => named(a, x.model)),
     mayCarry: Object.fromEntries(a.may_carry.map((m) => [m.name, m.reason])),
@@ -554,7 +554,6 @@ describe("column answer: never cleared while it may carry the column", () => {
       },
     }
     const a = names(columnAnswer(write(m), "f", "val"))
-    expect(a.cleared).not.toContain("r")
     expect(a.mayCarry.r).toBe("star")
   })
 
@@ -570,11 +569,10 @@ describe("column answer: never cleared while it may carry the column", () => {
     }
     const path = write(m)
     const down = columnAnswer(path, "stg", "amount")
-    expect(names(down).cleared).toEqual([])
     expect(names(down).mayCarry.rpt).toBe("star")
     expect(down.consumers.exposures.map((one) => [one.name, one.tier])).toEqual([["dash", "may_carry"]])
     const up = columnAnswer(path, "rpt", "amount", "upstream")
-    expect(names(up).cleared).toEqual([])
+    expect(names(up).mayCarry).toEqual({ orders: "below", stg: "below" })
   })
 
   test("a qualified star inside a function may carry it even when every column is declared", () => {
@@ -587,7 +585,6 @@ describe("column answer: never cleared while it may carry the column", () => {
       },
     }
     const a = names(columnAnswer(write(m), "f", "val"))
-    expect(a.cleared).toEqual([])
     expect(a.mayCarry.r).toBe("star")
   })
 
@@ -603,7 +600,6 @@ describe("column answer: never cleared while it may carry the column", () => {
     }
     const a = names(columnAnswer(write(m), "f", "val"))
     expect(a.mayCarry.child).toBe("reads_value_model")
-    expect(a.cleared).toEqual([])
   })
 
   test("a NATURAL JOIN reader and an IDENTIFIER() reader may carry it", () => {
@@ -627,10 +623,9 @@ describe("column answer: never cleared while it may carry the column", () => {
     }
     const b = names(columnAnswer(write(identifier), "f", "val"))
     expect(b.mayCarry.r).toBe("dynamic_name")
-    expect(b.cleared).toEqual([])
   })
 
-  test("upstream, an ephemeral model the value passes through is not cleared", () => {
+  test("upstream, an ephemeral model the value passes through may carry it as ephemeral", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },
       sources: {},
@@ -649,10 +644,10 @@ describe("column answer: never cleared while it may carry the column", () => {
     }
     const a = columnAnswer(write(m), "r", "total", "upstream")
     expect(a.columns.map((c) => `${named(a, c.model)}.${c.column}`)).toContain("base.amount")
-    expect(names(a).cleared).not.toContain("eph")
+    expect(names(a).mayCarry.eph).toBe("ephemeral")
   })
 
-  test("upstream, an ephemeral model that starts the value as a constant is not cleared", () => {
+  test("upstream, an ephemeral model that starts the value as a constant may carry it as ephemeral", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },
       sources: {},
@@ -661,7 +656,7 @@ describe("column answer: never cleared while it may carry the column", () => {
         "model.shop.r": model("r", ["e"], "with __dbt__cte__e as (select 2 as val) select val from __dbt__cte__e", ["val"]),
       },
     }
-    expect(names(columnAnswer(write(m), "r", "val", "upstream")).cleared).toEqual([])
+    expect(names(columnAnswer(write(m), "r", "val", "upstream")).mayCarry).toEqual({ e: "ephemeral" })
   })
 
   test("a filter on the name of an output the column feeds counts as reading it", () => {
@@ -676,7 +671,6 @@ describe("column answer: never cleared while it may carry the column", () => {
     }
     const a = names(columnAnswer(write(m), "f", "val"))
     expect(a.mayCarry.child).toBe("reads_value_model")
-    expect(a.cleared).toEqual([])
   })
 
   test("IDENTIFIER() naming a longer column doesn't make a reader of a shorter one unresolved", () => {
@@ -702,7 +696,6 @@ describe("column answer: never cleared while it may carry the column", () => {
     }
     const a = names(columnAnswer(write(m), "stg", "amount"))
     expect(a.mayCarry.rpt).toBe("star")
-    expect(a.cleared).toEqual([])
   })
 
   test("upstream, IDENTIFIER() naming a parent's column leaves the output unresolved", () => {
@@ -714,7 +707,7 @@ describe("column answer: never cleared while it may carry the column", () => {
         "model.shop.r": model("r", ["f"], `select id, identifier('val') as x from ${T("f")}`, ["id", "x"]),
       },
     }
-    expect(names(columnAnswer(write(m), "r", "x", "upstream")).cleared).toEqual([])
+    expect(names(columnAnswer(write(m), "r", "x", "upstream")).mayCarry).toEqual({ f: "below" })
   })
 
   test("a filter on the column after a subquery in the same WHERE still counts as reading it", () => {
@@ -730,7 +723,6 @@ describe("column answer: never cleared while it may carry the column", () => {
     }
     const a = names(columnAnswer(write(m), "f", "val"))
     expect(a.mayCarry.child).toBe("reads_value_model")
-    expect(a.cleared).not.toContain("child")
   })
 
   test("a seed whose header can't be read isn't settled by its docs", () => {
@@ -770,7 +762,7 @@ describe("column answer: never cleared while it may carry the column", () => {
       },
     }
     const a = names(columnAnswer(write(m), "f", "net.amount"))
-    expect(a.cleared).not.toContain("child")
+    expect(a.mayCarry.child).toBe("reads_value_model")
     const spaced = {
       metadata: { adapter_type: "snowflake" },
       sources: {},
@@ -780,7 +772,7 @@ describe("column answer: never cleared while it may carry the column", () => {
         "model.shop.child": model("child", ["r"], `select id from ${T("r")}`),
       },
     }
-    expect(names(columnAnswer(write(spaced), "f", "order id")).cleared).not.toContain("child")
+    expect(names(columnAnswer(write(spaced), "f", "order id")).mayCarry.child).toBe("reads_value_model")
   })
 
   test("a seed with an empty first line isn't settled by its docs", () => {
@@ -830,10 +822,10 @@ describe("column answer: never cleared while it may carry the column", () => {
   })
 })
 
-// "Cleared" only when proven: a reader of the edited model proves it doesn't read the column only when the
-// engine read its SQL in full, it has no `*`, NATURAL JOIN, run-time name, whole-row value or ephemeral
-// model, and its SQL never names the column. Everything else may carry it, with a reason.
-describe("column answer: cleared only when proven", () => {
+// Nothing past the edited model is reported unaffected. A reader of it gets the first sign found that it may
+// read the column: SQL the engine couldn't read in full, a `*`, NATURAL JOIN, run-time name, whole-row value,
+// ephemeral model or SQL naming the column; with none of those, `not_traced`.
+describe("column answer: why a model may carry it", () => {
   const base = (sql: string, dialect = "duckdb") => ({
     metadata: { adapter_type: dialect },
     sources: {},
@@ -844,17 +836,18 @@ describe("column answer: cleared only when proven", () => {
     },
   })
   const reasons = (a: ColumnAnswer) => Object.fromEntries(a.may_carry.map((m) => [m.name, [m.reason, m.via ?? null]]))
+  // SQL that the engine or the text checks couldn't read for certain.
+  const UNREAD = ["unresolved", "read_in_part", "read_columns_unknown", "unclear_sql"]
 
-  test("a reader that never names the column, read in full, is cleared, and so is what sits past it", () => {
+  test("a reader that never names the column, read in full, may carry it as not traced, and so may what sits past it", () => {
     const a = columnAnswer(write(base(`select id from ${T("f")} where id > 0`)), "f", "val")
-    expect(a.cleared.map((one) => one.name)).toEqual(["after", "r"])
-    expect(a.may_carry).toEqual([])
+    expect(reasons(a)).toEqual({ after: ["not_traced", null], r: ["not_traced", null] })
+    expect(a.counts).toMatchObject({ models: 0, may_carry_models: 2, model_level: 2 })
   })
 
   test("a reader that names the column with no traced edge may carry it, and what sits past it is below it", () => {
     const a = columnAnswer(write(base(`select id from ${T("f")} where val > 0`)), "f", "val")
     expect(reasons(a)).toEqual({ r: ["names_column", null], after: ["below", "r"] })
-    expect(a.cleared).toEqual([])
   })
 
   test("a whole row used as a value may carry it", () => {
@@ -886,7 +879,7 @@ describe("column answer: cleared only when proven", () => {
     const a = columnAnswer(write(m), "f", "val")
     expect(a.columns.map((c) => `${named(a, c.model)}.${c.column}`)).toContain("v.doubled")
     expect(reasons(a)).toEqual({ ids: ["reads_value_model", "v"] })
-    expect(a.counts).toMatchObject({ models: 1, may_carry_models: 1, cleared_models: 0 })
+    expect(a.counts).toMatchObject({ models: 1, may_carry_models: 1 })
   })
 
   test("only models the engine couldn't read are unresolved, each with its code", () => {
@@ -910,9 +903,11 @@ describe("column answer: cleared only when proven", () => {
       },
     }
     const path = write(m)
-    expect(columnAnswer(path, "f", "a--b").cleared.map((one) => one.name)).not.toContain("r")
-    expect(columnAnswer(path, "f", "c/*d").cleared.map((one) => one.name)).not.toContain("s")
-    // The engine can't parse these names today; the text check keeps them whole either way.
+    // The engine can't parse these names today, so both are unresolved; the text check keeps them whole either way.
+    expect(reasons(columnAnswer(path, "f", "a--b")).r?.[0]).toBe("unresolved")
+    expect(reasons(columnAnswer(path, "f", "c/*d")).s?.[0]).toBe("unresolved")
+    expect(namesColumn('select id from f where "a--b" > 0', "a--b")).toBe(true)
+    expect(namesColumn('select id from f where "c/*d" > 0 and id > 0', "c/*d")).toBe(true)
     expect(stripSql('select id from f where "a--b" > 0')).toBe('select id from f where "a--b" > 0')
     expect(stripSql("select id from f where `c/*d` > 0 -- note")).toBe("select id from f where `c/*d` > 0  ")
   })
@@ -933,16 +928,16 @@ describe("column answer: cleared only when proven", () => {
     expect(a.r_comma?.[0]).toBe("row_reference")
   })
 
-  test("quoting the check can't read for certain stops the proof: a bracket name, a backslash, a dollar-quote", () => {
+  test("quoting the check can't read for certain is a reason: a bracket name, a backslash, a dollar-quote", () => {
     for (const sql of [
       `select id from ${T("f")} where [c--d] > 0`,
       `select id from ${T("f")} where id <> 'it\\'s'`,
       `select id, $$x$$ as note from ${T("f")}`,
     ]) {
-      // The guard itself, then the answer: never cleared, whether the engine or the guard stops it.
+      // The guard itself, then the answer: a reason, whether the engine or the guard gives it.
       expect(quotingIsClear(sql)).toBe(false)
       const a = columnAnswer(write(base(sql, "duckdb")), "f", "val")
-      expect(a.cleared.map((one) => one.name)).not.toContain("r")
+      expect(UNREAD).toContain(String(reasons(a).r?.[0]))
     }
     expect(quotingIsClear(`select id from ${T("f")} where note = 'a''b' and "c""d" > 0`)).toBe(true)
     expect(stripSql("select id from f where [c--d] > 0")).toBe("select id from f where [c--d] > 0")
@@ -951,14 +946,14 @@ describe("column answer: cleared only when proven", () => {
     expect(guarded.r?.[0]).toBe("unclear_sql")
   })
 
-  test("a FROM list the check can't classify stops the proof: a table function, TABLESAMPLE, an unquoted dash", () => {
+  test("a FROM list the check can't classify is a reason: a table function, TABLESAMPLE, an unquoted dash", () => {
     for (const [sql, dialect] of [
       [`select f.id, x.value from ${T("f")} f, lateral flatten(input => f.id) x`, "snowflake"],
       [`select id from ${T("f")} tablesample (10)`, "duckdb"],
     ] as const) {
       expect(relationUse(sql)).toBe("unclear")
       const a = columnAnswer(write(base(sql, dialect)), "f", "val")
-      expect(a.cleared.map((one) => one.name)).not.toContain("r")
+      expect(UNREAD).toContain(String(reasons(a).r?.[0]))
     }
     expect(relationUse("select id from my-project.ds.f o")).toBe("unclear")
     // FROM inside extract/trim/substring is syntax, not a table list; inside other functions it stays a table list.
@@ -980,7 +975,7 @@ describe("column answer: cleared only when proven", () => {
     expect(relationUse(`select a.id, b.k, c.v, d.w, e.x, l.n ${chain}`)).toBeNull()
     // So a table listed after them is still watched for whole-row use.
     expect(relationUse(`select to_json(e) as j ${chain}`)).toBe("row")
-    // Anything the reader can't place stops the proof.
+    // Anything the reader can't place is unclear.
     expect(relationUse("select a.id from shop.main.a a, lateral flatten(input => a.v) x")).toBe("unclear")
     expect(relationUse("select a.id from shop.main.a a foo bar")).toBe("unclear")
     // FROM as syntax is no FROM list.
@@ -1001,7 +996,38 @@ describe("column answer: cleared only when proven", () => {
     expect(relationUse("select t.id from (select to_json(b) as j, b.id from b) t")).toBe("row")
     expect(relationUse("select u.id from ((select 1 as id) union (select 2 as id)) u")).toBe("unclear")
     const a = columnAnswer(write(base(`select to_json(f) as j from (${T("f")} f join ${T("f")} g on f.id = g.id)`)), "f", "val")
-    expect(a.cleared.map((one) => one.name)).not.toContain("r")
+    // The engine can't read the parenthesised join today; either way it is a reason, never not_traced.
+    expect(["unresolved", "row_reference"]).toContain(String(reasons(a).r?.[0]))
+  })
+
+  test("a filter the text check can't see behind a # or // comment still names the column, by the engine's read list", () => {
+    for (const [sql, dialect] of [
+      ["select id  # the customer's id\nfrom `shop`.`main`.`f`\nwhere val > 1  # don't count small ones", "bigquery"],
+      ["select id  // the customer's id\nfrom shop.main.f\nwhere val > 1  // don't count small ones", "snowflake"],
+    ] as const) {
+      expect(reasons(columnAnswer(write(base(sql, dialect)), "f", "val"))).toEqual({ r: ["names_column", null], after: ["below", "r"] })
+    }
+  })
+
+  test("DuckDB's FROM-only statement is a star: the engine's `* → *` edge reads every column", () => {
+    for (const sql of [`from ${T("f")}`, `from ${T("f")} where id > 0`]) {
+      expect(reasons(columnAnswer(write(base(sql)), "f", "val"))).toEqual({ r: ["star", null], after: ["below", "r"] })
+    }
+  })
+
+  test("upstream, an ephemeral grandparent off the value path may carry it as ephemeral", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.a": model("a", [], "select 1 as id, 2 as x", ["id", "x"]),
+        "model.shop.eph": model("eph", [], "select 1 as id", ["id"], { config: { materialized: "ephemeral" } }),
+        "model.shop.b": model("b", ["eph"], "with __dbt__cte__eph as (select 1 as id) select id from __dbt__cte__eph", ["id"]),
+        "model.shop.r": model("r", ["a", "b"], `select a.x from ${T("a")} a join ${T("b")} b on a.id = b.id`, ["x"]),
+      },
+    }
+    // Only the upstream ephemeral rule reaches eph: no blocker runs on b, which the value doesn't pass.
+    expect(reasons(columnAnswer(write(m), "r", "x", "upstream"))).toEqual({ b: ["not_traced", null], eph: ["ephemeral", null] })
   })
 
   test("the same manifest gives the same may_carry list, in name order", () => {
@@ -1022,3 +1048,49 @@ describe("column answer: cleared only when proven", () => {
   })
 })
 
+// Names the engine hands back that aren't columns of the model must not settle it or hide a real column.
+describe("both tools: names that aren't columns", () => {
+  test("a COLUMNS() alias template isn't a column, and doesn't settle the model's columns", () => {
+    const f = model("f", [], "select 1 as id, 2 as val", ["id", "val"])
+    const template = `select columns('.*') as "col_\\0" from ${T("f")}`
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": f,
+        "model.shop.r": model("r", ["f"], template),
+        "model.shop.child": model("child", ["r"], `select col_val from ${T("r")}`),
+      },
+    }
+    const path = write(m)
+    expect(columnReach(path, "r", "col_val").models.map((one) => one.name)).toEqual(["child"])
+    expect(() => columnAnswer(path, "r", "col_val")).not.toThrow()
+    // Declared columns plus a star over them: dbt_lineage lists only the real ones.
+    const declared = {
+      ...m,
+      nodes: {
+        "model.shop.f": f,
+        "model.shop.r": model("r", ["f"], template, ["col_id", "col_val"]),
+        "model.shop.child": model("child", ["r"], `select * from ${T("r")}`),
+      },
+    }
+    const lineage = dbtLineage({ manifest_path: write(declared), model: "child" })
+    expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["col_id", "col_val"])
+  })
+
+  test("a real column named like the internal placeholder keeps its edge", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 2 as __altimate_unknown_0__", ["__altimate_unknown_0__"]),
+        "model.shop.g": model("g", [], ""),
+        "model.shop.r": model("r", ["f", "g"], `select f.__altimate_unknown_0__ as val from ${T("f")} f cross join ${T("g")} g`),
+      },
+    }
+    const lineage = dbtLineage({ manifest_path: write(m), model: "r" })
+    expect(lineage.confidence).toBe("high")
+    expect(lineage.unexpanded_stars).toBeUndefined()
+    expect(JSON.stringify((lineage.raw_lineage as any).column_dict?.val ?? [])).toContain("__altimate_unknown_0__")
+  })
+})

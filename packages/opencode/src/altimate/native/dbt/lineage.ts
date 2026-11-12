@@ -150,11 +150,18 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
   // columns it carries are missing. Placeholders are taken out of the lineage returned.
   const tables: Record<string, any> = { ...(schemaContext?.tables ?? {}) }
   const placeholders = new Map<string, string>()
+  // A placeholder is matched by substring in what the engine returns, so it must not occur in the SQL or
+  // in any known column's name.
+  const taken = [
+    sql.toLowerCase(),
+    ...Object.values<any>(tables).flatMap((t) => (t?.columns ?? []).map((c: any) => String(c?.name ?? "").toLowerCase())),
+  ]
   for (const id of project.unknownParents(uniqueId)) {
     const node = project.node(id)
     const table = node?.alias || node?.name || ""
     if (!table || tables[table]) continue
-    const placeholder = `__altimate_unknown_${placeholders.size}__`
+    let placeholder = `__altimate_unknown_${placeholders.size}__`
+    while (taken.some((text) => text.includes(placeholder))) placeholder += "_"
     tables[table] = { columns: [{ name: placeholder, type: "" }] }
     placeholders.set(placeholder, String(node.name ?? table))
   }

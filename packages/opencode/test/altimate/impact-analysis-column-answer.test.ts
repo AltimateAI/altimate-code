@@ -94,7 +94,6 @@ describe("impact_analysis: column answer", () => {
       columns: 1,
       models: 1,
       may_carry_models: 1,
-      cleared_models: 0,
       model_level: 2,
     })
     expect(answer.also_reads).toEqual([
@@ -103,6 +102,7 @@ describe("impact_analysis: column answer", () => {
     expect(result.metadata.column_reach.models.map((m: any) => m.name)).toEqual(["mart"])
     expect(result.output).toContain("Column Reach: fct.revenue")
     expect(result.output.trimEnd().split("\n").at(-1)).toStartWith("Column impact: 1 column in 1 model")
+    expect(result.output.trimEnd().split("\n").at(-1)).toContain("; 1 more of the 2 downstream may carry it")
   })
 
   test("upstream traces where the column comes from", async () => {

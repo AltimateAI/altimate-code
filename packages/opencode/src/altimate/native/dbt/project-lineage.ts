@@ -476,7 +476,8 @@ export class ProjectLineage {
     const n = this.node(id)
     const found = new Map<string, { name: string; type: string }>()
     const add = (name: unknown, type?: unknown) => {
-      if (typeof name !== "string" || !name || name === "*") return
+      // A backslash marks an alias template (DuckDB `columns('.*') as "col_\0"`), not a column.
+      if (typeof name !== "string" || !name || name === "*" || name.includes("\\")) return
       const k = name.toLowerCase()
       const t = typeof type === "string" ? type : ""
       const had = found.get(k)
@@ -501,9 +502,9 @@ export class ProjectLineage {
 
   /**
    * The node's columns, lower-cased, when nothing can be missing from them; undefined otherwise.
-   * A model's are settled by a SELECT list with no `*`, or, with one, by lineage that resolved over
-   * parents whose own columns are settled. A seed's are its header, when it can be read; a source's are
-   * never settled.
+   * A model's are settled by a SELECT list with no `*` and no column named at run time (IDENTIFIER(),
+   * COLUMNS()), or, with a `*`, by lineage that resolved over parents whose own columns are settled.
+   * A seed's are its header, when it can be read; a source's are never settled.
    */
   settledColumns(id: string): Set<string> | undefined {
     if (this.settledMemo.has(id)) return this.settledMemo.get(id)
@@ -515,7 +516,7 @@ export class ProjectLineage {
       settled = this.node(id)?.resource_type === "seed" && this.seedHeader(this.node(id)).some((c) => c.trim() !== "")
     if (settled && this.traced(id)) {
       const sql = this.sqlOf(id)
-      settled = !!sql && (selectsStar(sql)
+      settled = !!sql && !/(?<![\w$])(?:identifier|columns)\s*\(/i.test(stripSql(sql)) && (selectsStar(sql)
         ? !this.lineage(id).unresolved && this.parents(id).every((p) => this.settledColumns(p) !== undefined)
         : this.outputColumns(sql).length > 0)
     }

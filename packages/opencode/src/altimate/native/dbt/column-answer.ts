@@ -57,9 +57,9 @@ export interface ColumnAnswerColumn {
   type?: string
 }
 
-export type ConsumerTier = "carries" | "may_carry" | "cleared"
+export type ConsumerTier = "carries" | "may_carry"
 
-/** Why a model is in the "may carry it" tier: the first thing that kept it from being proven unaffected. */
+/** Why a model may carry the value: the first sign found, or `not_traced` when there is none. */
 export type MayCarryReason =
   | "unresolved"
   | "read_in_part"
@@ -74,6 +74,7 @@ export type MayCarryReason =
   | "reads_value_model"
   | "below"
   | "capped"
+  | "not_traced"
 
 /**
  * An exposure on the focus model or anything downstream of it. An exposure names the models it reads,
@@ -106,7 +107,6 @@ export interface ColumnAnswer {
     contracts: number
     ends: number
     may_carry_models: number
-    cleared_models: number
     model_level: number
   }
   nodes: ColumnAnswerNode[]
@@ -116,19 +116,12 @@ export interface ColumnAnswer {
   /** Models whose SQL the engine couldn't read in full, or whose read columns it couldn't list. */
   unresolved: { model: number; reason: string; code: MayCarryReason; downstream?: number }[]
   /**
-   * Every model in the "may carry it" tier, with the first reason it couldn't be proven unaffected; `via`
-   * names the model it sits past (`below`) or reads (`reads_value_model`). Not in `nodes`.
+   * Every model past the edited one that the traced edges don't reach, each once, with the first reason it
+   * may carry the value (`not_traced` when nothing more is known); `via` names the model it sits past
+   * (`below`) or reads (`reads_value_model`). Not in `nodes`. Nothing is reported unaffected.
    */
   may_carry: { id: string; name: string; reason: MayCarryReason; via?: string }[]
   flags: { model: number; flag: ShapeFlag }[]
-  /**
-   * Proven unaffected: downstream, every path from the column passes a reader of the edited model that
-   * the engine read in full, with no `*`, NATURAL JOIN, run-time name, whole-row value or ephemeral model,
-   * no quoting or FROM item the text checks can't read for certain (they fail closed), and whose SQL never
-   * names the column. Upstream: ancestors the engine traced no edge from, through
-   * models it read in full with none of those. By name; not in `nodes`.
-   */
-  cleared: { id: string; name: string }[]
   /** Downstream only: upstream, `exposures` is empty. `declared` counts every exposure in the project. */
   consumers: { declared: number; exposures: ColumnAnswerConsumer[] }
   truncated: boolean
@@ -225,7 +218,7 @@ export function columnAnswer(
   const queue: [string, string, number][] = [[focus, want, 0]]
   const also = new Map<string, Set<string>>()
   const unresolved = new Map<string, { reason: string; code: MayCarryReason }>()
-  // The first reason each model couldn't be proven unaffected.
+  // The first reason each model may carry the value.
   const marks = new Map<string, { reason: MayCarryReason; via?: string }>()
   const mark = (id: string, reason: MayCarryReason, via?: string) => {
     if (!marks.has(id)) marks.set(id, via ? { reason, via } : { reason })
@@ -249,10 +242,12 @@ export function columnAnswer(
       const raw: string[] = p.node(id)?.depends_on?.nodes ?? []
       if (p.ephemeral(id) || raw.some((one) => p.ephemeral(one)))
         return { reason: "an ephemeral model is inlined into it as a CTE", code: "ephemeral" }
-      // The text checks below fail closed: SQL they can't read for certain proves nothing.
+      // The text checks below fail closed: SQL they can't read for certain gets its own reason.
       if (!quotingIsClear(sql))
         return { reason: "its SQL has quoting the check can't read for certain (a backslash, bracket, dollar-quote or unclosed quote)", code: "unclear_sql" }
-      if (selectsStar(sql)) return { reason: "selects *, so it may read the column without naming it", code: "star" }
+      // A `*` in the text, or one the engine kept as `* → *` (DuckDB's FROM-only `from t`).
+      if (selectsStar(sql) || lin.edges.some((e) => e.fromCol === "*" || e.to === "*"))
+        return { reason: "selects *, so it may read the column without naming it", code: "star" }
       if (joinsNaturally(sql)) return { reason: "joins with NATURAL JOIN, which may join on the column", code: "natural_join" }
       if (RUN_TIME_NAME.test(sql) || POSITIONAL.test(stripSql(sql)))
         return { reason: "names columns at run time (IDENTIFIER, COLUMNS or a positional $n)", code: "dynamic_name" }
@@ -298,8 +293,8 @@ export function columnAnswer(
           if (fresh) queue.push([reader, e.to, h + 1])
         }
         if (hit) continue
-        // Only the edited model's readers can prove they don't read the value: a model the value reaches
-        // may change any of its outputs (a filter, a join, a grouping), so what reads it may change too.
+        // A model the value reaches may change any of its outputs (a filter, a join, a grouping), so what
+        // reads it may change too.
         if (u !== focus) {
           mark(reader, "reads_value_model", nameOf(u))
           continue
@@ -309,8 +304,9 @@ export function columnAnswer(
           block(reader, found)
           continue
         }
-        // Read in full, no `*` or run-time name or whole row: a column it never names, it doesn't read.
-        if (namesColumn(p.sqlOf(reader), c)) {
+        // Read in full, no `*` or run-time name or whole row: whether it names the column, by its text or
+        // by the engine's own read list (which also sees past comments the text check can't read).
+        if (namesColumn(p.sqlOf(reader), c) || p.reads(reader)?.has(c)) {
           addAlso(reader, c)
           mark(reader, "names_column")
         }
@@ -326,8 +322,8 @@ export function columnAnswer(
         block(u, { reason: lin.unresolved, code: "unresolved" })
         continue
       }
-      // Upstream the engine's edges are the answer: a model whose SQL can't prove them complete leaves
-      // everything above it uncertain.
+      // Upstream the engine's edges are the answer: a model whose SQL may hide one leaves everything
+      // above it uncertain.
       const found = blockerOf(u)
       if (found) block(u, found)
       for (const e of lin.edges) {
@@ -357,7 +353,7 @@ export function columnAnswer(
   const open = (id: string) => id !== focus && !valueModels.has(id) && modelLevel.has(id)
   for (const [id, m] of marks) if (open(id)) mayCarry.set(id, m)
   // Upstream, the edges skip an ephemeral model (it is inlined), so one the value may pass through or
-  // start in (a constant) is never cleared.
+  // start in (a constant) is marked as such.
   if (direction === "upstream") for (const id of modelLevel) if (p.ephemeral(id) && open(id) && !mayCarry.has(id)) mayCarry.set(id, { reason: "ephemeral" })
   // One walk from every model in the tier: each model past one sits "below" the nearest that reaches it.
   const step = (id: string) => (direction === "downstream" ? p.childrenOf(id) : p.parentsOf(id))
@@ -372,12 +368,9 @@ export function columnAnswer(
       walk.push([next, via])
     }
   }
-  const cleared = [...modelLevel]
-    .filter((id) => !valueModels.has(id) && !mayCarry.has(id))
-    .map((id) => ({ id, name: nameOf(id) }))
-    .sort((a, b) => compareText(a.name, b.name) || compareText(a.id, b.id))
+  // Nothing past the edited model is reported unaffected: what no sign reached may still carry it.
+  for (const id of modelLevel) if (open(id) && !mayCarry.has(id)) mayCarry.set(id, { reason: "not_traced" })
 
-  const clearedIds = new Set(cleared.map((one) => one.id))
   const consumers: ColumnAnswerConsumer[] = []
   if (direction === "downstream") {
     const carries = (id: string) => id === focus || valueModels.has(id)
@@ -386,14 +379,13 @@ export function columnAnswer(
       const tiers: [ConsumerTier, (one: string) => boolean][] = [
         ["carries", carries],
         ["may_carry", (one) => mayCarry.has(one)],
-        ["cleared", (one) => clearedIds.has(one)],
       ]
       const tier = tiers.find(([, has]) => reads.some(has))
       if (!tier) continue
       const via = reads.filter(tier[1]).map((one) => String(p.node(one)?.name ?? one))
       consumers.push({ ...describeExposure(id, node), tier: tier[0], via: via.sort(compareText) })
     }
-    const rank: ConsumerTier[] = ["carries", "may_carry", "cleared"]
+    const rank: ConsumerTier[] = ["carries", "may_carry"]
     consumers.sort((a, b) => rank.indexOf(a.tier) - rank.indexOf(b.tier) || compareText(a.label, b.label) || compareText(a.unique_id, b.unique_id))
   }
 
@@ -434,7 +426,6 @@ export function columnAnswer(
       contracts: [...valueModels].filter((id) => !!p.node(id)?.config?.contract?.enforced).length,
       ends: columns.filter((c) => c.end).length,
       may_carry_models: mayCarry.size,
-      cleared_models: cleared.length,
       model_level: modelLevel.size,
     },
     nodes,
@@ -444,7 +435,6 @@ export function columnAnswer(
     unresolved: unresolvedOut,
     may_carry: mayCarryOut,
     flags,
-    cleared,
     consumers: { declared: Object.keys(p.manifest.exposures ?? {}).length, exposures: consumers },
     truncated,
     next: null,
@@ -472,6 +462,6 @@ export function describeAnswer(a: ColumnAnswer): string {
   const c = a.counts
   const what = a.direction === "downstream" ? "Column impact" : "Column trace (upstream)"
   const reach = `${c.columns} column${c.columns === 1 ? "" : "s"} in ${c.models} model${c.models === 1 ? "" : "s"}, ${c.hops} hop${c.hops === 1 ? "" : "s"}, ${c.ends} end${c.ends === 1 ? "" : "s"}`
-  const tiers = `${c.may_carry_models} more may carry it, ${c.cleared_models} cleared of ${c.model_level} at model level`
+  const tiers = `${c.may_carry_models} more of the ${c.model_level} ${a.direction} may carry it`
   return `${what}: ${reach}; ${tiers}${a.truncated ? " (truncated)" : ""} (metadata.column_answer)`
 }
