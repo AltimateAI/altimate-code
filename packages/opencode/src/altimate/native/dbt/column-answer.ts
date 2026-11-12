@@ -4,15 +4,14 @@
 import * as fs from "fs"
 import * as path from "path"
 import { findModel } from "./helpers"
-import { describeExposure, exposureReads, joinsNaturally, namesThroughIdentifier, type ColumnReachExposure } from "./column-reach"
+import { describeExposure, exposureReads, GAP, joinsNaturally, namesColumn, type ColumnReachExposure } from "./column-reach"
 import {
   compareText,
   missingColumn,
-  namesOutsideSelect,
   projectLineage,
   selectsStar,
-  starInFunction,
-  starOver,
+  stripSql,
+  usesRowAsValue,
   type How,
   type HowFrom,
   type ProjectLineage,
@@ -59,6 +58,21 @@ export interface ColumnAnswerColumn {
 
 export type ConsumerTier = "carries" | "may_carry" | "cleared"
 
+/** Why a model is in the "may carry it" tier: the first thing that kept it from being proven unaffected. */
+export type MayCarryReason =
+  | "unresolved"
+  | "read_in_part"
+  | "read_columns_unknown"
+  | "ephemeral"
+  | "star"
+  | "natural_join"
+  | "dynamic_name"
+  | "row_reference"
+  | "names_column"
+  | "reads_value_model"
+  | "below"
+  | "capped"
+
 /**
  * An exposure on the focus model or anything downstream of it. An exposure names the models it reads,
  * not their columns, so "carries" means it reads a model the value reaches, not that it uses the value.
@@ -97,9 +111,20 @@ export interface ColumnAnswer {
   columns: ColumnAnswerColumn[]
   edges: ColumnAnswerEdge[]
   also_reads: { model: number; columns: string[]; downstream: number }[]
-  unresolved: { model: number; reason: string; downstream?: number }[]
+  /** Models whose SQL the engine couldn't read in full, or whose read columns it couldn't list. */
+  unresolved: { model: number; reason: string; code: MayCarryReason; downstream?: number }[]
+  /**
+   * Every model in the "may carry it" tier, with the first reason it couldn't be proven unaffected; `via`
+   * names the model it sits past (`below`) or reads (`reads_value_model`). Not in `nodes`.
+   */
+  may_carry: { id: string; name: string; reason: MayCarryReason; via?: string }[]
   flags: { model: number; flag: ShapeFlag }[]
-  /** Model-level downstream (upstream: ancestors) in none of the tiers, by name. Not in `nodes`. */
+  /**
+   * Proven unaffected: downstream, every path from the column passes a reader of the edited model that
+   * the engine read in full, with no `*`, NATURAL JOIN, run-time name, whole-row value or ephemeral model,
+   * and whose SQL never names the column. Upstream: ancestors the engine traced no edge from, through
+   * models it read in full with none of those. By name; not in `nodes`.
+   */
   cleared: { id: string; name: string }[]
   /** Downstream only: upstream, `exposures` is empty. `declared` counts every exposure in the project. */
   consumers: { declared: number; exposures: ColumnAnswerConsumer[] }
@@ -110,6 +135,11 @@ export interface ColumnAnswer {
 
 // ---------------------------------------------------------------------------------------------
 // The answer
+
+// IDENTIFIER(…) and COLUMNS(…) name columns at run time; a comment may sit before the parenthesis.
+const RUN_TIME_NAME = new RegExp(String.raw`(?<![\w$])(?:identifier|columns)(?:${GAP})?\(`, "i")
+// A positional column ($1), outside strings and comments.
+const POSITIONAL = /(?<![\w$])\$\d+/
 
 export function columnAnswer(
   manifestPath: string,
@@ -191,38 +221,48 @@ export function columnAnswer(
   const start = colIdx(focus, want, 0, null, null)!
   const queue: [string, string, number][] = [[focus, want, 0]]
   const also = new Map<string, Set<string>>()
-  const unresolved = new Map<string, string>()
+  const unresolved = new Map<string, { reason: string; code: MayCarryReason }>()
   // Models with a column the cap left out: what sits past them was never checked.
   const capped = new Set<string>()
+  // The first reason each model couldn't be proven unaffected.
+  const marks = new Map<string, { reason: MayCarryReason; via?: string }>()
+  const mark = (id: string, reason: MayCarryReason, via?: string) => {
+    if (!marks.has(id)) marks.set(id, via ? { reason, via } : { reason })
+  }
   const addAlso = (id: string, col: string) => {
     const set = also.get(id) ?? new Set<string>()
     set.add(col)
     also.set(id, set)
   }
   const nameOf = (id: string) => String(p.node(id)?.name ?? id)
-  const tableOf = (id: string) => String(p.node(id)?.alias || p.node(id)?.identifier || p.node(id)?.name || id)
-  // The SQL checks below run once per model, column or parent, however many columns are traced.
-  const once = new Map<string, boolean>()
-  const cached = (key: string, test: () => boolean) => {
-    let hit = once.get(key)
-    if (hit === undefined) once.set(key, (hit = test()))
-    return hit
+  const blockers = new Map<string, { reason: string; code: MayCarryReason } | null>()
+  /** What keeps a model's SQL from proving which columns it reads: null when nothing does. */
+  const blockerOf = (id: string) => {
+    if (blockers.has(id)) return blockers.get(id)!
+    const found = ((): { reason: string; code: MayCarryReason } | null => {
+      const sql = p.sqlOf(id)
+      const lin = p.lineage(id)
+      if (!sql || lin.unresolved) return { reason: lin.unresolved ?? "no compiled SQL", code: "unresolved" }
+      if (lin.partial) return { reason: `read in part: ${lin.partial}`, code: "read_in_part" }
+      if (p.reads(id) === null) return { reason: "the engine couldn't list the columns its SQL reads", code: "read_columns_unknown" }
+      const raw: string[] = p.node(id)?.depends_on?.nodes ?? []
+      if (p.ephemeral(id) || raw.some((one) => p.ephemeral(one)))
+        return { reason: "an ephemeral model is inlined into it as a CTE", code: "ephemeral" }
+      if (selectsStar(sql)) return { reason: "selects *, so it may read the column without naming it", code: "star" }
+      if (joinsNaturally(sql)) return { reason: "joins with NATURAL JOIN, which may join on the column", code: "natural_join" }
+      if (RUN_TIME_NAME.test(sql) || POSITIONAL.test(stripSql(sql)))
+        return { reason: "names columns at run time (IDENTIFIER, COLUMNS or a positional $n)", code: "dynamic_name" }
+      if (usesRowAsValue(sql)) return { reason: "uses a whole table row as a value", code: "row_reference" }
+      return null
+    })()
+    blockers.set(id, found)
+    return found
   }
-  // Uses the engine can't show: what the model outputs from the column is unknown.
-  const opaqueUse = (id: string, sql: string, cols: string | string[]): string | null =>
-    cached(`natural|${id}`, () => joinsNaturally(sql))
-      ? "joins with NATURAL JOIN, which may join on the column"
-      : cached(`any-identifier|${id}`, () => /identifier\s*\(/i.test(sql)) &&
-          cached(`identifier|${id}|${Array.isArray(cols) ? "parents" : cols}`, () => namesThroughIdentifier(sql, [cols].flat()))
-        ? "names the column through IDENTIFIER(), which the trace can't follow"
-        : null
-  const parentNames = new Map<string, string[]>()
-  const parentColumns = (id: string) => {
-    let names = parentNames.get(id)
-    if (!names) parentNames.set(id, (names = p.parents(id).flatMap((one) => p.columns(one).map((col) => col.name))))
-    return names
+  const READ_CODES: ReadonlySet<MayCarryReason> = new Set(["unresolved", "read_in_part", "read_columns_unknown"])
+  const block = (id: string, found: { reason: string; code: MayCarryReason }) => {
+    if (READ_CODES.has(found.code)) unresolved.set(id, found)
+    mark(id, found.code)
   }
-  const usesOutside = (id: string, sql: string, col: string) => cached(`outside|${id}|${col}`, () => namesOutsideSelect(sql, col))
 
   if (direction === "downstream") {
     while (queue.length) {
@@ -231,11 +271,11 @@ export function columnAnswer(
       for (const reader of p.readers(u)) {
         const lin = p.lineage(reader)
         if (lin.unresolved) {
-          unresolved.set(reader, lin.unresolved)
+          block(reader, { reason: lin.unresolved, code: "unresolved" })
           continue
         }
-        // Read in part: what it traced stands, and what sits past it may carry the value.
-        if (lin.partial) unresolved.set(reader, `read in part: ${lin.partial}`)
+        // Read in part: what it traced stands, and it is listed as not read in full.
+        if (lin.partial) unresolved.set(reader, { reason: `read in part: ${lin.partial}`, code: "read_in_part" })
         let hit = false
         for (const e of lin.edges) {
           if (e.from !== u || e.fromCol !== c) continue
@@ -244,37 +284,29 @@ export function columnAnswer(
           const to = colIdx(reader, e.to, h + 1, e.how, e.howFrom)
           if (to === null) {
             capped.add(reader)
+            mark(reader, "capped")
             continue
           }
           edges.push(edge(from, to, e.how, e.howFrom))
           if (fresh) queue.push([reader, e.to, h + 1])
         }
-        const sql = p.sqlOf(reader)
-        const opaque = opaqueUse(reader, sql, c)
-        if (opaque) unresolved.set(reader, opaque)
-        if (hit) {
-          // A value model that also filters, joins or groups on the column can change its other outputs.
-          // Under its own name, or under the name of an output it feeds (a CTE's alias, say).
-          if (usesOutside(reader, sql, c) || lin.edges.some((e) => e.from === u && e.fromCol === c && usesOutside(reader, sql, e.to)))
-            addAlso(reader, c)
+        if (hit) continue
+        // Only the edited model's readers can prove they don't read the value: a model the value reaches
+        // may change any of its outputs (a filter, a join, a grouping), so what reads it may change too.
+        if (u !== focus) {
+          mark(reader, "reads_value_model", nameOf(u))
           continue
         }
-        // An ephemeral focus is inlined as a CTE: its readers' edges name its parents' columns, not its own.
-        if (u === focus && p.ephemeral(focus)) {
-          unresolved.set(reader, `reads ${String(p.node(focus)?.name ?? focus)}, an ephemeral model inlined as a CTE, whose columns the trace can't follow`)
+        const found = blockerOf(reader)
+        if (found) {
+          block(reader, found)
           continue
         }
-        // A `*` over the model whose known columns lack the column, or inside a function, may still carry it.
-        if (
-          cached(`star|${reader}|${u}`, () => starOver(sql, tableOf(u))) &&
-          (!p.columns(u).some((col) => col.name.toLowerCase() === c) || cached(`starfn|${reader}`, () => starInFunction(sql)))
-        ) {
-          unresolved.set(reader, `selects * from ${nameOf(u)}, which the trace couldn't expand to ${c}`)
-          continue
+        // Read in full, no `*` or run-time name or whole row: a column it never names, it doesn't read.
+        if (namesColumn(p.sqlOf(reader), c)) {
+          addAlso(reader, c)
+          mark(reader, "names_column")
         }
-        const reads = p.reads(reader)
-        if (reads === null) unresolved.set(reader, "the engine couldn't list the columns its SQL reads")
-        else if (reads.has(c)) addAlso(reader, c)
       }
     }
   } else {
@@ -284,22 +316,20 @@ export function columnAnswer(
       const to = columnIndex.get(`${u}|${c}`)!
       const lin = p.lineage(u)
       if (lin.unresolved) {
-        unresolved.set(u, lin.unresolved)
+        block(u, { reason: lin.unresolved, code: "unresolved" })
         continue
       }
-      if (lin.partial) unresolved.set(u, `read in part: ${lin.partial}`)
-      const sql = p.sqlOf(u)
-      // Upstream, IDENTIFIER() names the parents' columns, not this output.
-      const opaque = opaqueUse(u, sql, c) ?? opaqueUse(u, sql, parentColumns(u))
-      if (opaque) unresolved.set(u, opaque)
-      // A `*` the trace couldn't expand to the column may still be where it comes from.
-      if (!lin.edges.some((e) => e.to === c) && selectsStar(sql)) unresolved.set(u, `selects *, which the trace couldn't follow back to ${c}`)
+      // Upstream the engine's edges are the answer: a model whose SQL can't prove them complete leaves
+      // everything above it uncertain.
+      const found = blockerOf(u)
+      if (found) block(u, found)
       for (const e of lin.edges) {
         if (e.to !== c) continue
         const fresh = !columnIndex.has(`${e.from}|${e.fromCol}`)
         const from = colIdx(e.from, e.fromCol, h + 1, e.how, e.howFrom)
         if (from === null) {
           capped.add(e.from)
+          mark(e.from, "capped")
           continue
         }
         edges.push(edge(from, to, e.how, e.howFrom))
@@ -314,23 +344,20 @@ export function columnAnswer(
 
   const valueModels = new Set(columns.filter((_, i) => i !== start).map((c) => nodes[c.model]!.id))
   valueModels.delete(focus)
-  // A value model that also reads the column in a filter, join or grouping stays listed: its other
-  // outputs (and the models past it) may change with the column too.
 
   const beyond = (id: string) => (direction === "downstream" ? p.descendants(id) : p.ancestors(id))
   const modelLevel = beyond(focus)
-  const mayCarry = new Set<string>()
-  for (const id of [...also.keys(), ...unresolved.keys(), ...capped]) {
-    mayCarry.add(id)
-    for (const d of beyond(id)) mayCarry.add(d)
-  }
-  for (const id of [...valueModels, focus]) mayCarry.delete(id)
+  const mayCarry = new Map<string, { reason: MayCarryReason; via?: string }>()
+  const open = (id: string) => id !== focus && !valueModels.has(id) && modelLevel.has(id)
+  for (const [id, m] of marks) if (open(id)) mayCarry.set(id, m)
   // Upstream, the edges skip an ephemeral model (it is inlined), so one the value may pass through or
   // start in (a constant) is never cleared.
-  if (direction === "upstream") for (const id of modelLevel) if (p.ephemeral(id) && !valueModels.has(id)) mayCarry.add(id)
+  if (direction === "upstream") for (const id of modelLevel) if (p.ephemeral(id) && open(id) && !mayCarry.has(id)) mayCarry.set(id, { reason: "ephemeral" })
+  for (const id of [...marks.keys(), ...mayCarry.keys()])
+    for (const d of beyond(id)) if (open(d) && !mayCarry.has(d)) mayCarry.set(d, { reason: "below", via: nameOf(id) })
   const cleared = [...modelLevel]
     .filter((id) => !valueModels.has(id) && !mayCarry.has(id))
-    .map((id) => ({ id, name: String(p.node(id)?.name ?? id) }))
+    .map((id) => ({ id, name: nameOf(id) }))
     .sort((a, b) => compareText(a.name, b.name) || compareText(a.id, b.id))
 
   const clearedIds = new Set(cleared.map((one) => one.id))
@@ -358,10 +385,13 @@ export function columnAnswer(
     columns: [...cols],
     downstream: p.descendants(id).size,
   }))
-  const unresolvedOut = [...unresolved].map(([id, reason]) => {
+  const unresolvedOut = [...unresolved].map(([id, { reason, code }]) => {
     const n = beyond(id).size
-    return { model: nodeIdx(id), reason, ...(n && { downstream: n }) }
+    return { model: nodeIdx(id), reason, code, ...(n && { downstream: n }) }
   })
+  const mayCarryOut = [...mayCarry]
+    .map(([id, m]) => ({ id, name: nameOf(id), ...m }))
+    .sort((a, b) => compareText(a.name, b.name) || compareText(a.id, b.id))
   const flags: ColumnAnswer["flags"] = []
   for (const n of nodes)
     if (p.traced(n.id)) for (const flag of p.lineage(n.id).flags) flags.push({ model: nodeIndex.get(n.id)!, flag })
@@ -395,6 +425,7 @@ export function columnAnswer(
     edges,
     also_reads: alsoReads,
     unresolved: unresolvedOut,
+    may_carry: mayCarryOut,
     flags,
     cleared,
     consumers: { declared: Object.keys(p.manifest.exposures ?? {}).length, exposures: consumers },

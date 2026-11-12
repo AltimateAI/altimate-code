@@ -122,7 +122,7 @@ const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&
  * Whether compiled SQL names the column anywhere but as an output alias, comments and string
  * literals aside. Used only to mark a model as one that may read the column.
  */
-function namesColumn(sql: string, column: string): boolean {
+export function namesColumn(sql: string, column: string): boolean {
   const code = stripSql(sql)
   const name = escapeRegExp(column)
   // Quoted, the closing delimiter in the name is written doubled: "a""b", `a``b`, [a]]b].
@@ -150,7 +150,7 @@ function namesColumn(sql: string, column: string): boolean {
  */
 // Between the keywords: whitespace, or a comment (`--`, `#` or `//` to the line's end, `/* … */` to its
 // first `*/`). Limit: a nested Postgres comment between them is not read as one.
-const GAP = String.raw`(?:\s|(?:--|#|\/\/)[^\r\n]*[\r\n]|\/\*(?:[^*]|\*(?!\/))*\*\/)+`
+export const GAP = String.raw`(?:\s|(?:--|#|\/\/)[^\r\n]*[\r\n]|\/\*(?:[^*]|\*(?!\/))*\*\/)+`
 // The join's modifiers in any dialect: LEFT/RIGHT/FULL/INNER/CROSS, OUTER, Spark's SEMI/ANTI, Snowflake's DIRECTED.
 const NATURAL = new RegExp(
   String.raw`^natural${GAP}(?:(?:left|right|full|inner|cross|outer|semi|anti|directed)${GAP}){0,4}join\b`,

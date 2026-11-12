@@ -89,56 +89,36 @@ export function hasNestedWith(sql: string): boolean {
 }
 
 /**
- * Whether the SQL names the column under WHERE, ON, USING, GROUP BY, HAVING, QUALIFY, PARTITION BY or
- * ORDER BY: a use that can change outputs other than the ones the column feeds.
+ * Whether the SQL uses a table's whole row as a value (`to_json(t)`, `select t from t`, `t::text`): one of
+ * its FROM or JOIN names, or their aliases, standing alone outside the place that names it. Such a row
+ * carries every column without naming any. Matching only adds doubt: a column that shares a table's name
+ * counts too.
  */
-export function namesOutsideSelect(sql: string, column: string): boolean {
-  return remember(outsideCache, hash("outside", sql), () => namedOutsideSelect(sql)).has(column.toLowerCase())
-}
-
-/** The names the SQL uses under those clauses, lower-cased, in one pass. */
-function namedOutsideSelect(sql: string): Set<string> {
-  // An aggregate's FILTER (WHERE …) is how its value is computed, not a filter on the rows.
-  const code = stripSql(stripAggFilter(sql)).toLowerCase()
-  // A quoted name (`"my col"`, `"net.amount"`, backticks, brackets) is one name, spaces and dots included.
-  const token =
-    /\b(select|from|join|where|on|using|group\s+by|having|qualify|partition\s+by|order\s+by)\b|[()]|"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([\p{L}_][\p{L}\p{N}_$]*)/gu
-  const uses = new Set(["where", "on", "using", "group by", "having", "qualify", "partition by", "order by"])
-  const out = new Set<string>()
-  // The clause each parenthesis level is in: a subquery's FROM doesn't end the outer WHERE.
-  const levels: string[] = [""]
-  for (const m of code.matchAll(token)) {
-    if (m[0] === "(") levels.push("")
-    else if (m[0] === ")") {
-      if (levels.length > 1) levels.pop()
-    } else if (m[1]) levels[levels.length - 1] = m[1].replace(/\s+/g, " ")
-    else {
-      const name = m[2] ?? m[3] ?? m[4] ?? m[5]
-      if (name && uses.has([...levels].reverse().find(Boolean) ?? "")) out.add(name)
-    }
-  }
-  return out
-}
-
-/** Whether a function takes a `*` (hash(*), hash(t.*), row(t.*)): the engine may not expand it. Not count(*). */
-export function starInFunction(sql: string): boolean {
-  return /\b(?!count\b)[a-z_][\w$]*\s*\(\s*(?:[a-z_][\w$]*"?\s*\.\s*)?\*\s*\)/.test(stripSql(sql).toLowerCase())
-}
-
-/**
- * Whether a `*` in the SQL may read the table: an unqualified one, or one qualified by the table's name
- * or an alias given to it.
- */
-export function starOver(sql: string, table: string): boolean {
-  if (!selectsStar(sql)) return false
+export function usesRowAsValue(sql: string): boolean {
   const code = stripSql(sql).toLowerCase()
-  // Qualifiers and table names may be quoted with "", `` or [] (BigQuery, Databricks, SQL Server).
-  const qualified = [...code.matchAll(/([a-z_][\w$]*)["`\]]?\s*\.\s*\*/g)].map((m) => m[1]!)
-  if (selectsStar(code.replace(/[a-z_][\w$]*["`\]]?\s*\.\s*\*/g, "1"))) return true
-  const t = table.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  return qualified.some(
-    (q) => q === table.toLowerCase() || new RegExp(`\\b${t}["\`\\]]?\\s+(?:as\\s+)?["\`\\[]?${q}\\b`).test(code),
-  )
+  const word = '"[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[\\p{L}_][\\p{L}\\p{N}_$]*'
+  const unquote = (t: string) => t.replace(/^["`[]|["`\]]$/g, "")
+  const names = new Set<string>()
+  const keywords = /^(on|using|where|join|left|right|full|inner|outer|cross|natural|lateral|group|order|having|qualify|limit|union|window|as|tablesample|pivot|unpivot|match_recognize|for|at|before|changes)$/
+  const relation = new RegExp(String.raw`\b(?:from|join)\s+((?:${word})(?:\s*\.\s*(?:${word}))*)(?:\s+(?:as\s+)?(${word}))?`, "gu")
+  for (const m of code.matchAll(relation)) {
+    if (m[1]!.startsWith("(")) continue
+    names.add(unquote(m[1]!.split(".").pop()!.trim()))
+    if (m[2] && !keywords.test(unquote(m[2]))) names.add(unquote(m[2]))
+  }
+  if (!names.size) return false
+  const tokens = [...code.matchAll(new RegExp(String.raw`${word}|[.,()=<>+\-*/:;]`, "gu"))].map((m) => m[0])
+  for (const [i, raw] of tokens.entries()) {
+    const t = unquote(raw)
+    if (!names.has(t)) continue
+    const prev = tokens[i - 1] ?? ""
+    const next = tokens[i + 1] ?? ""
+    // Qualifying a column (`t.x`), being named (`from t`, `join db.s.t t`, `t as (` for a CTE), or given an alias.
+    if (next === "." || next === "as" || prev === "." || prev === "from" || prev === "join" || prev === "as" || prev === "with") continue
+    if (/^[\p{L}_"`[]/u.test(prev) && !/^(select|distinct|by|then|else|when|and|or|not|in|is|on|where|having|qualify|returning)$/.test(prev)) continue
+    return true
+  }
+  return false
 }
 
 /**
@@ -208,7 +188,6 @@ const CACHE_LIMIT = 20_000
 const lineageCache = new Map<string, any>()
 const outputColumnsCache = new Map<string, string[]>()
 const readsCache = new Map<string, Set<string> | null>()
-const outsideCache = new Map<string, Set<string>>()
 
 function remember<T>(cache: Map<string, T>, key: string, make: () => T): T {
   const hit = cache.get(key)
@@ -226,7 +205,6 @@ export function clearLineageCaches() {
   lineageCache.clear()
   outputColumnsCache.clear()
   readsCache.clear()
-  outsideCache.clear()
 }
 
 // ---------------------------------------------------------------------------------------------

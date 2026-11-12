@@ -199,7 +199,7 @@ describe("column answer: downstream", () => {
     expect(a.counts).toMatchObject({ columns: 0, may_carry_models: 1, cleared_models: 0, model_level: 1 })
   })
 
-  test("an ephemeral focus's readers are unresolved, not cleared: their SQL names its parents' columns", () => {
+  test("an ephemeral focus's readers may carry it, never cleared: their SQL names its parents' columns", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },
       sources: {},
@@ -211,8 +211,7 @@ describe("column answer: downstream", () => {
     }
     const a = columnAnswer(write(m), "eph", "amount")
     expect(a.cleared.map((one) => one.name)).toEqual([])
-    expect(a.unresolved.map((u) => named(a, u.model))).toEqual(["r_star"])
-    expect(a.unresolved[0]!.reason).toContain("ephemeral")
+    expect(a.may_carry.map((m) => [m.name, m.reason])).toEqual([["r_star", "ephemeral"]])
   })
 
   test("a reader the engine reads only in part, or whose columns it can't list, is unresolved, never cleared", () => {
@@ -474,6 +473,7 @@ describe("column answer: contract", () => {
       "edges",
       "also_reads",
       "unresolved",
+      "may_carry",
       "flags",
       "cleared",
       "consumers",
@@ -540,9 +540,10 @@ describe("column answer: never cleared while it may carry the column", () => {
     cleared: a.cleared.map((one) => one.name),
     unresolved: a.unresolved.map((u) => named(a, u.model)),
     also: a.also_reads.map((x) => named(a, x.model)),
+    mayCarry: Object.fromEntries(a.may_carry.map((m) => [m.name, m.reason])),
   })
 
-  test("a star reader over a parent with no known columns, beside another parent's edge, is unresolved", () => {
+  test("a star reader over a parent with no known columns, beside another parent's edge, may carry it", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },
       sources: { "source.shop.raw.u": source("u", []) },
@@ -554,10 +555,10 @@ describe("column answer: never cleared while it may carry the column", () => {
     }
     const a = names(columnAnswer(write(m), "f", "val"))
     expect(a.cleared).not.toContain("r")
-    expect(a.unresolved).toContain("r")
+    expect(a.mayCarry.r).toBe("star")
   })
 
-  test("a star reader over a parent whose known columns lack the column is unresolved, both ways", () => {
+  test("a star reader over a parent whose known columns lack the column may carry it, both ways", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },
       sources: { "source.shop.raw.orders": source("orders", []) },
@@ -570,13 +571,13 @@ describe("column answer: never cleared while it may carry the column", () => {
     const path = write(m)
     const down = columnAnswer(path, "stg", "amount")
     expect(names(down).cleared).toEqual([])
-    expect(names(down).unresolved).toContain("rpt")
+    expect(names(down).mayCarry.rpt).toBe("star")
     expect(down.consumers.exposures.map((one) => [one.name, one.tier])).toEqual([["dash", "may_carry"]])
     const up = columnAnswer(path, "rpt", "amount", "upstream")
     expect(names(up).cleared).toEqual([])
   })
 
-  test("a qualified star inside a function is unresolved even when every column is declared", () => {
+  test("a qualified star inside a function may carry it even when every column is declared", () => {
     const m = {
       metadata: { adapter_type: "snowflake" },
       sources: {},
@@ -587,10 +588,10 @@ describe("column answer: never cleared while it may carry the column", () => {
     }
     const a = names(columnAnswer(write(m), "f", "val"))
     expect(a.cleared).toEqual([])
-    expect(a.unresolved).toEqual(["r"])
+    expect(a.mayCarry.r).toBe("star")
   })
 
-  test("a value model that also filters on the column also reads it, so what sits past it may carry it", () => {
+  test("what reads a value model may carry it: the value model may filter, join or group on the column", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },
       sources: {},
@@ -601,11 +602,11 @@ describe("column answer: never cleared while it may carry the column", () => {
       },
     }
     const a = names(columnAnswer(write(m), "f", "val"))
-    expect(a.also).toEqual(["r"])
+    expect(a.mayCarry.child).toBe("reads_value_model")
     expect(a.cleared).toEqual([])
   })
 
-  test("a NATURAL JOIN reader and an IDENTIFIER() reader are unresolved", () => {
+  test("a NATURAL JOIN reader and an IDENTIFIER() reader may carry it", () => {
     const natural = {
       metadata: { adapter_type: "duckdb" },
       sources: {},
@@ -615,7 +616,7 @@ describe("column answer: never cleared while it may carry the column", () => {
         "model.shop.r": model("r", ["f", "g"], `select g.id from ${T("f")} natural join ${T("g")}`),
       },
     }
-    expect(names(columnAnswer(write(natural), "f", "val")).unresolved).toEqual(["r"])
+    expect(names(columnAnswer(write(natural), "f", "val")).mayCarry.r).toBe("natural_join")
     const identifier = {
       metadata: { adapter_type: "snowflake" },
       sources: {},
@@ -625,7 +626,7 @@ describe("column answer: never cleared while it may carry the column", () => {
       },
     }
     const b = names(columnAnswer(write(identifier), "f", "val"))
-    expect(b.unresolved).toEqual(["r"])
+    expect(b.mayCarry.r).toBe("dynamic_name")
     expect(b.cleared).toEqual([])
   })
 
@@ -674,7 +675,7 @@ describe("column answer: never cleared while it may carry the column", () => {
       },
     }
     const a = names(columnAnswer(write(m), "f", "val"))
-    expect(a.also).toEqual(["r"])
+    expect(a.mayCarry.child).toBe("reads_value_model")
     expect(a.cleared).toEqual([])
   })
 
@@ -700,7 +701,7 @@ describe("column answer: never cleared while it may carry the column", () => {
       },
     }
     const a = names(columnAnswer(write(m), "stg", "amount"))
-    expect(a.unresolved).toContain("rpt")
+    expect(a.mayCarry.rpt).toBe("star")
     expect(a.cleared).toEqual([])
   })
 
@@ -728,7 +729,7 @@ describe("column answer: never cleared while it may carry the column", () => {
       },
     }
     const a = names(columnAnswer(write(m), "f", "val"))
-    expect(a.also).toContain("r")
+    expect(a.mayCarry.child).toBe("reads_value_model")
     expect(a.cleared).not.toContain("child")
   })
 
@@ -828,3 +829,91 @@ describe("column answer: never cleared while it may carry the column", () => {
     expect(columnReach(path, "stg", "amount").models.map((one) => one.name)).toEqual(["rpt"])
   })
 })
+
+// "Cleared" only when proven: a reader of the edited model proves it doesn't read the column only when the
+// engine read its SQL in full, it has no `*`, NATURAL JOIN, run-time name, whole-row value or ephemeral
+// model, and its SQL never names the column. Everything else may carry it, with a reason.
+describe("column answer: cleared only when proven", () => {
+  const base = (sql: string, dialect = "duckdb") => ({
+    metadata: { adapter_type: dialect },
+    sources: {},
+    nodes: {
+      "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+      "model.shop.r": model("r", ["f"], sql),
+      "model.shop.after": model("after", ["r"], `select 1 as one from ${T("r")}`),
+    },
+  })
+  const reasons = (a: ColumnAnswer) => Object.fromEntries(a.may_carry.map((m) => [m.name, [m.reason, m.via ?? null]]))
+
+  test("a reader that never names the column, read in full, is cleared, and so is what sits past it", () => {
+    const a = columnAnswer(write(base(`select id from ${T("f")} where id > 0`)), "f", "val")
+    expect(a.cleared.map((one) => one.name)).toEqual(["after", "r"])
+    expect(a.may_carry).toEqual([])
+  })
+
+  test("a reader that names the column with no traced edge may carry it, and what sits past it is below it", () => {
+    const a = columnAnswer(write(base(`select id from ${T("f")} where val > 0`)), "f", "val")
+    expect(reasons(a)).toEqual({ r: ["names_column", null], after: ["below", "r"] })
+    expect(a.cleared).toEqual([])
+  })
+
+  test("a whole row used as a value may carry it", () => {
+    for (const sql of [`select to_json(t) as j from ${T("f")} t`, `select t::varchar as j from ${T("f")} t`]) {
+      expect(reasons(columnAnswer(write(base(sql)), "f", "val")).r?.[0]).toBe("row_reference")
+    }
+  })
+
+  test("a column named at run time may carry it: IDENTIFIER (a comment before its parenthesis too), COLUMNS, $n", () => {
+    for (const [sql, dialect] of [
+      [`select id, identifier /* c */ ('id') as x from ${T("f")}`, "snowflake"],
+      [`select id, columns('i.*') from ${T("f")}`, "duckdb"],
+      [`select id, $1 as x from ${T("f")}`, "snowflake"],
+    ] as const) {
+      expect(reasons(columnAnswer(write(base(sql, dialect)), "f", "val")).r?.[0]).toBe("dynamic_name")
+    }
+  })
+
+  test("what reads a model the value reaches may carry it, naming that model; the reached model itself carries it", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.v": model("v", ["f"], `select val * 2 as doubled, id from ${T("f")}`),
+        "model.shop.ids": model("ids", ["v"], `select id from ${T("v")}`),
+      },
+    }
+    const a = columnAnswer(write(m), "f", "val")
+    expect(a.columns.map((c) => `${named(a, c.model)}.${c.column}`)).toContain("v.doubled")
+    expect(reasons(a)).toEqual({ ids: ["reads_value_model", "v"] })
+    expect(a.counts).toMatchObject({ models: 1, may_carry_models: 1, cleared_models: 0 })
+  })
+
+  test("only models the engine couldn't read are unresolved, each with its code", () => {
+    const m = base(`select id from ${T("f")} where val::variant:ok::boolean`, "snowflake")
+    const a = columnAnswer(write(m), "f", "val")
+    expect(a.unresolved.map((u) => [named(a, u.model), u.code])).toEqual([["r", "read_in_part"]])
+    expect(reasons(a).r?.[0]).toBe("read_in_part")
+    // A `*` is a reason to doubt, not a failure to read: the star reader isn't listed as unresolved.
+    const star = columnAnswer(write(base(`select id, hash(*) as h from ${T("f")} where val > 0`)), "f", "val")
+    expect(star.unresolved.map((u) => named(star, u.model))).not.toContain("r")
+  })
+
+  test("the same manifest gives the same may_carry list, in name order", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.z": model("z", ["f"], `select to_json(t) as j from ${T("f")} t`),
+        "model.shop.a": model("a", ["f"], `select id from ${T("f")} where val > 1`),
+      },
+    }
+    const path = write(m)
+    const one = JSON.stringify(columnAnswer(path, "f", "val").may_carry)
+    clearLineageCaches()
+    expect(JSON.stringify(columnAnswer(path, "f", "val").may_carry)).toBe(one)
+    expect(JSON.parse(one).map((x: any) => x.name)).toEqual(["a", "z"])
+  })
+})
+
