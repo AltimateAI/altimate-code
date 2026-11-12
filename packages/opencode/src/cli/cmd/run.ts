@@ -430,11 +430,11 @@ export const RunCommand = cmd({
           describe: "maximum time in seconds including startup (env: ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow",
         })
         // altimate_change end
-        // altimate_change start — billed-token budget: input + output + cache writes + 0.1 × cache reads
+        // altimate_change start — billed-token budget: input + output + reasoning + cache writes + 0.1 × cache reads
         .option("max-tokens", {
           type: "number",
           describe:
-            "maximum billed tokens (input + output + cache writes + 0.1 × cache reads, reported to one decimal) across the run and its task sessions; bounded finalization may follow",
+            "maximum billed tokens (input + output + reasoning + cache writes + 0.1 × cache reads, reported to one decimal) across the run and its task sessions; bounded finalization may follow",
         })
         // altimate_change end
         // altimate_change end

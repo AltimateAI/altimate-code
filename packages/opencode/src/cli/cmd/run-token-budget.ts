@@ -4,16 +4,20 @@
 // running total reaches the limit. Pure: it observes the SDK event stream and
 // never talks to the server, so the decision is testable without one.
 
-/** Token counts as a `step-finish` part reports them. */
+/** Token counts as a `step-finish` part reports them; `output` excludes `reasoning`. */
 export type StepTokens = {
   input: number
   output: number
+  reasoning?: number
   cache: { read: number; write: number }
 }
 
-/** Billed weight of one step: a cache read costs a tenth of an input token. */
+/**
+ * Billed weight of one step: reasoning is billed as output, a cache read costs
+ * a tenth of an input token.
+ */
 export function billedTokens(tokens: StepTokens): number {
-  return tokens.input + tokens.output + tokens.cache.write + 0.1 * tokens.cache.read
+  return tokens.input + tokens.output + (tokens.reasoning ?? 0) + tokens.cache.write + 0.1 * tokens.cache.read
 }
 
 /** A billed total as reported: cache reads make it fractional, so keep one decimal rather than rounding to an integer. */
@@ -94,6 +98,7 @@ export function create(rootSessionID: string, limit: number | undefined) {
       total += billedTokens({
         input: tokens.input ?? 0,
         output: tokens.output ?? 0,
+        reasoning: tokens.reasoning ?? 0,
         cache: { read: tokens.cache?.read ?? 0, write: tokens.cache?.write ?? 0 },
       })
       if (limit === undefined || exhausted || total < limit) return false

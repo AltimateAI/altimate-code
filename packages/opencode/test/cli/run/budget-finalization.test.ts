@@ -315,6 +315,16 @@ describe("token budget accounting", () => {
     expect(RunTokenBudget.reportedTokens(100 + 0.1 * 3)).toBe(100.3)
     expect(RunTokenBudget.reportedTokens(110)).toBe(110)
   })
+
+  test("reasoning tokens are billed like output and count toward the limit", () => {
+    expect(RunTokenBudget.billedTokens({ input: 10, output: 5, reasoning: 5000, cache: { read: 0, write: 0 } })).toBe(5015)
+    const budget = RunTokenBudget.create(root, 1000)
+    expect(
+      budget.observe(stepFinish(root, "root_1", { input: 10, output: 5, reasoning: 5000, cache: { read: 0, write: 0 } })),
+    ).toBe(true)
+    expect(budget.total).toBe(5015)
+    expect(budget.exhausted).toBe(true)
+  })
 })
 // altimate_change end
 
