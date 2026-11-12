@@ -1608,6 +1608,8 @@ export namespace Telemetry {
         /** Where the review base came from (flag, github_event, default_branch, …). */
         base_source?: string
         out_of_scope_files?: number
+        /** Engine calls that threw during the review (their checks did not run). */
+        engine_errors?: number
         stale_manifest?: boolean
         critical?: number
         warning?: number

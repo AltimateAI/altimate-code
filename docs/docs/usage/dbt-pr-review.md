@@ -311,7 +311,14 @@ rubric:
   fingerprint, so a push does not repeat findings already on the PR, and a
   non-blocking rerun with nothing new only updates the summary.
 - **PII:** flagged only for PII columns the change newly exposes, not for
-  columns the base already surfaced.
+  columns the base already surfaced. A model the PII check could not analyse is
+  listed as not fully verified.
+- **Failures are never a clean pass:** if an engine check throws, the comment
+  names it and the verdict is at most COMMENT, never APPROVE (envelope
+  `engineErrors`). A failure on one file marks that file unverified and the rest
+  of the PR is still reviewed.
+- **The gate clears itself:** when a rerun no longer blocks, the earlier blocking
+  altimate review is dismissed (needs `pull-requests: write`).
 
 ### Risk-tier path tokens
 

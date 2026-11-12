@@ -154,6 +154,11 @@ export const VerdictEnvelope = z.object({
   staleManifest: z.boolean().optional(),
   /** Base resolution and review coverage (see ReviewScope). */
   scope: ReviewScope.optional(),
+  /** Engine calls that failed during the review. Their checks did not run, so
+   *  the verdict is never a clean APPROVE when this is present. */
+  engineErrors: z
+    .array(z.object({ method: z.string(), reason: z.string(), count: z.number().int().positive() }))
+    .optional(),
   /** The review policy applied: from the base branch, the working tree, or
    *  defaults; its hash; and settings the PR changes but that were not applied. */
   policy: z
@@ -233,6 +238,7 @@ export interface BuildEnvelopeInput {
   scope?: ReviewScope
   ai?: VerdictEnvelope["ai"]
   policy?: VerdictEnvelope["policy"]
+  engineErrors?: VerdictEnvelope["engineErrors"]
 }
 
 function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
@@ -244,7 +250,10 @@ function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["sum
 /** Assemble the verdict envelope (unsigned). Call signEnvelope to sign it. */
 export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
   const rubric = input.rubric ?? DEFAULT_RUBRIC
-  const ideal = computeIdealVerdict(input.findings, rubric)
+  // An engine failure means some checks did not run: "no findings" is then
+  // unknown, not clean, so the verdict cannot be APPROVE.
+  const computed = computeIdealVerdict(input.findings, rubric)
+  const ideal = computed === "APPROVE" && input.engineErrors?.length ? "COMMENT" : computed
   const verdict = applyMode(ideal, input.mode)
   const degraded = input.degraded ?? input.findings.some((f) => f.degraded)
   return VerdictEnvelope.parse({
@@ -264,6 +273,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     scope: input.scope,
     ai: input.ai,
     policy: input.policy,
+    engineErrors: input.engineErrors,
     generatedAt: input.generatedAt,
   })
 }
