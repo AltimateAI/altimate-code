@@ -144,7 +144,8 @@ export function relationUse(sql: string): "row" | "unclear" | null {
         k = end + 1
         continue
       }
-      if (t === ")" || t === "," || t === ";" || ends.test(t) || joins.test(t)) return k
+      // A clause or join word ends the condition, but not as a qualified name (`on a.offset = b.offset`).
+      if (t === ")" || t === "," || t === ";" || ((ends.test(t) || joins.test(t)) && tokens[k - 1] !== ".")) return k
       k++
     }
     return k

@@ -985,6 +985,10 @@ describe("column answer: why a model may carry it", () => {
     expect(relationUse("select f.id from db.s.f f order by f.id offset 5 rows fetch first 10 rows only")).toBeNull()
     expect(relationUse("select f.id from db.s.f f offset 5")).toBeNull()
     expect(relationUse("select f.id from db.s.f f for update")).toBe("unclear")
+    // A column named like a clause word, qualified, stays inside its ON condition.
+    expect(relationUse("select f.id from db.s.f f join db.s.g g on f.offset = g.offset, lateral flatten(input => f.v) x")).toBe("unclear")
+    expect(relationUse("select to_json(c) as j from a join b on a.offset = b.offset join c on true")).toBe("row")
+    expect(relationUse("select f.id from db.s.f f join db.s.g g on f.offset = g.offset where f.id > 0")).toBeNull()
   })
 
   test("a parenthesised join is read as a FROM list, so its tables are watched for whole-row use", () => {
