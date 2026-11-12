@@ -11,7 +11,8 @@ import { readStreamText } from "../llm/stream-text"
 
 const log = Log.create({ service: "ai-review" })
 
-const AI_TIMEOUT_MS = 60_000
+const AI_TIMEOUT_BASE_MS = 60_000
+const AI_TIMEOUT_MAX_MS = 300_000
 const MAX_DIFF_CHARS = 6_000 // per file, keep the prompt bounded
 const MAX_FILES = 20
 
@@ -31,6 +32,39 @@ export interface AiReviewInput {
   grounding: Finding[]
   prTitle?: string
   prBody?: string
+  /** Explicit `provider/model`; omit to use the configured default model. */
+  model?: string
+}
+
+/** What happened in the advisory lane, reported on the envelope and in the comment. */
+export type AiLaneState = "ok" | "skipped" | "timeout" | "error"
+export interface AiLaneStatus {
+  state: AiLaneState
+  /** Why the lane was skipped or failed (never contains credentials). */
+  reason?: string
+  /** `provider/model` the lane ran with. */
+  model?: string
+  durationMs?: number
+}
+export interface AiReviewResult {
+  findings: Finding[]
+  status: AiLaneStatus
+}
+
+/** Timeout scaled to the prompt: 60 s plus 1 s per 2,000 characters, capped at 5 minutes. */
+export function aiTimeoutMs(promptChars: number): number {
+  return Math.min(AI_TIMEOUT_MAX_MS, AI_TIMEOUT_BASE_MS + Math.ceil(promptChars / 2_000) * 1_000)
+}
+
+/** Error text safe to show in a PR comment: one line, bounded, with anything
+ *  that looks like a key or bearer token masked. */
+function safeReason(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  return raw
+    .replace(/\s+/g, " ")
+    .replace(/(bearer\s+)[^\s]+/gi, "$1***")
+    .replace(/\b(sk|pk|key|token)[-_][A-Za-z0-9_-]{8,}/gi, "***")
+    .slice(0, 200)
 }
 
 /**
@@ -73,23 +107,39 @@ function buildUserMessage(input: AiReviewInput): string {
 
 /**
  * Run the LLM reviewer lane. Returns advisory findings (severity ≤ warning,
- * clamped by core), or [] if no model / core is available or the call fails —
- * a review must never crash because the AI layer is unavailable.
+ * clamped by core) and a status saying whether the lane ran, was skipped, timed
+ * out or failed. Never throws — a review must not crash because the AI layer is
+ * unavailable — but never fails silently either: the status reaches the
+ * envelope and the PR comment.
  */
-export async function runAiReview(input: AiReviewInput): Promise<Finding[]> {
+export async function runAiReview(input: AiReviewInput): Promise<AiReviewResult> {
+  const startedAt = Date.now()
+  const done = (findings: Finding[], status: Omit<AiLaneStatus, "durationMs">): AiReviewResult => ({
+    findings,
+    status: { ...status, durationMs: Date.now() - startedAt },
+  })
   const files = input.files.filter((f) => f.status !== "deleted" && (f.diff || f.sql))
-  if (!files.length) return []
+  if (!files.length) return done([], { state: "skipped", reason: "no changed model SQL to review" })
 
+  const message = buildUserMessage({ ...input, files })
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), AI_TIMEOUT_MS)
+  const timeoutMs = aiTimeoutMs(message.length)
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+  let modelLabel: string | undefined
   try {
     // Prompt comes from the compiled core, not this file.
     const promptRes = await Dispatcher.call("altimate_core.review_ai_prompt", {})
     const system = ((promptRes.data ?? {}) as Record<string, unknown>).prompt as string | undefined
-    if (!system) return []
+    if (!system) return done([], { state: "error", reason: "the core reviewer prompt is unavailable" })
 
-    const defaultModel = await Provider.defaultModel()
-    const model = await Provider.getModel(defaultModel.providerID, defaultModel.modelID)
+    let model: Awaited<ReturnType<typeof Provider.getModel>>
+    try {
+      const chosen = input.model ? Provider.parseModel(input.model) : await Provider.defaultModel()
+      model = await Provider.getModel(chosen.providerID, chosen.modelID)
+    } catch (err) {
+      return done([], { state: "skipped", reason: `no usable model: ${safeReason(err)}`, model: input.model })
+    }
+    modelLabel = `${model.providerID}/${model.id}`
 
     const agent: Agent.Info = {
       name: "dbt-ai-reviewer",
@@ -119,10 +169,12 @@ export async function runAiReview(input: AiReviewInput): Promise<Finding[]> {
       abort: controller.signal,
       sessionID: user.sessionID,
       retries: 1,
-      messages: [{ role: "user", content: buildUserMessage({ ...input, files }) }],
+      messages: [{ role: "user", content: message }],
     })
     const text = await readStreamText(stream)
-    if (!text) return []
+    if (controller.signal.aborted)
+      return done([], { state: "timeout", reason: `no answer within ${Math.round(timeoutMs / 1000)} s`, model: modelLabel })
+    if (!text) return done([], { state: "error", reason: "the model returned no text", model: modelLabel })
 
     // Parse + clamp in core (the prompt-injection-resistant, advisory-only
     // contract). Returns already-validated, severity-clamped, file-checked items.
@@ -165,10 +217,12 @@ export async function runAiReview(input: AiReviewInput): Promise<Finding[]> {
       }
     }
     log.info("ai review complete", { findings: out.length })
-    return out
+    return done(out, { state: "ok", model: modelLabel })
   } catch (err) {
     log.error("ai review failed", { error: err })
-    return []
+    if (controller.signal.aborted)
+      return done([], { state: "timeout", reason: `no answer within ${Math.round(timeoutMs / 1000)} s`, model: modelLabel })
+    return done([], { state: "error", reason: safeReason(err), model: modelLabel })
   } finally {
     clearTimeout(timeout)
   }

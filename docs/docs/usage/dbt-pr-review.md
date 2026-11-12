@@ -199,6 +199,34 @@ jobs:
           #                      model_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 ```
 
+### What the review needs (and what each input unlocks)
+
+| Input | How to produce it | Unlocks |
+|---|---|---|
+| Full git history of the PR's target branch | `actions/checkout` with `fetch-depth: 0` | Correct base: the diff starts at the merge-base with the PR's target branch. A target branch that is not fetched is an error, never a silent fallback to `main`. |
+| `target/manifest.json` | `dbt compile` (or `dbt parse` for lint + lineage only) | Blast radius, lineage breakage, tiering. Without it the run is lint-only. |
+| `target/compiled/…` | `dbt compile` | Engine checks on the head (lint, grade, PII, grain). |
+| `target-base/compiled/…` | Compile the base ref into `target-base/` (below) | Equivalence proofs and column-breakage for modified models. |
+| `target/catalog.json` | `dbt docs generate` | Complete warehouse columns for column-lineage breakage. |
+
+Compiling the base (optional, for equivalence and column-breakage):
+
+```yaml
+      - name: Compile the base into target-base/
+        run: |
+          git worktree add ../base "origin/${{ github.base_ref }}"
+          (cd ../base && dbt deps && dbt compile --target-path "$GITHUB_WORKSPACE/target-base")
+```
+
+**Monorepos:** set `project_dir` to the folder holding `dbt_project.yml`. Only
+changes inside it are reviewed, `manifest_path` is resolved relative to it, and
+changes elsewhere are counted in the comment.
+
+**What the comment tells you it could not check:** findings the engine could not
+decide, models without compiled SQL, files outside the project, and whether the
+advisory AI lane ran, was skipped, timed out or failed (with the reason). The
+same facts are in the envelope (`scope`, `ai`) and the `review_run` telemetry.
+
 ### Model & credentials for the advisory lane
 
 The deterministic engine (lineage, equivalence, PII, grade, lint — the only layer
@@ -356,8 +384,9 @@ reviewer does **not** re-implement Jinja — it consumes dbt's own compiled outp
    from `target/compiled/<project>/…` (HEAD) and `target-base/compiled/…` (BASE),
    produced by `dbt compile`. To enable full equivalence verdicts, compile both
    the base and head refs in CI (the base into `target-base/`, the Recce
-   convention). Without compiled SQL the engine lanes fall back to raw and stay
-   *undecidable* (never fabricated) — the `dbt-patterns` lane still runs.
+   convention). A model without compiled SQL is never sent to the engine as raw
+   Jinja: it is listed as **not verified** (with the reason) in the comment and in
+   the envelope's `scope.unverified`, and the `dbt-patterns` lane still runs.
 
 ## What it checks — deterministic rule catalog
 
