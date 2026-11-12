@@ -1080,6 +1080,23 @@ export function describePublish(report: PublishReport): string {
 /** The message for an error this module raised on purpose, or null for one it
  * did not — a surface shows the former as-is (each already says what to do)
  * and wraps the latter as a failure. */
+/** A stable code for an error this module raised on purpose, for clients that explain it in their own words (the
+ * extension's `/workspace publish`); null for any other error. */
+export function publishErrorCode(err: unknown): string | null {
+  const codes: [new (...args: never[]) => Error, string][] = [
+    [ReviewDisabledError, "review_disabled"],
+    [TooManyReviewRequestsError, "too_many_requests"],
+    [SubmitFailedError, "submit_failed"],
+    [NotLinkedError, "not_linked"],
+    [CredentialsChangedError, "credentials_changed"],
+    [NotWorkspaceOwnerError, "not_workspace_owner"],
+    [SkillNameConflictError, "name_conflict"],
+    [SkillChangedElsewhereError, "changed_elsewhere"],
+    [AttachFailedError, "attach_failed"],
+  ]
+  return codes.find(([type]) => err instanceof type)?.[1] ?? null
+}
+
 export function explainPublishError(err: unknown): string | null {
   if (
     err instanceof NotLinkedError ||

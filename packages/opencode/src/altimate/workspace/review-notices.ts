@@ -312,7 +312,13 @@ async function pollUnsafe(directory: string, deps: PollDeps): Promise<PollResult
  * rules summary, which clients replay, so it never waits on the network: when the person is not known yet, asking who
  * they are starts in the background and this answers none; the review poll learns it too and asks clients to replay. */
 export async function stored(directory: string): Promise<Notice[]> {
-  if (!workspacesOn()) return []
+  return (await storedState(directory))?.notices ?? []
+}
+
+/** The whole kept state behind `stored` (notices, and the ids still pending): undefined in the same cases `stored` has
+ * none. No network. */
+export async function storedState(directory: string): Promise<State | undefined> {
+  if (!workspacesOn()) return undefined
   try {
     const [{ WorkspaceApi }, { readLocalBinding, credentialDigest, accountDigest }, { RulesSync }] = await Promise.all([
       import("./api-client"),
@@ -320,27 +326,27 @@ export async function stored(directory: string): Promise<Notice[]> {
       import("../rules/sync"),
     ])
     const actAs = await WorkspaceApi.captureCredentials()
-    if (!actAs) return []
+    if (!actAs) return undefined
     const { readPin, resolveWithinRoot } = await import("./pin")
     // The workspace the poll resolves, from what is on hand (no network): the IDE's pin for this tree outranks the
     // project's link, as in `resolveBindingOutcome`. A malformed pin, or one for another tree, names no workspace here.
     const pin = readPin()
-    if (pin.kind === "invalid") return []
-    if (pin.kind === "valid" && resolveWithinRoot(directory, pin.root) === null) return []
+    if (pin.kind === "invalid") return undefined
+    if (pin.kind === "valid" && resolveWithinRoot(directory, pin.root) === null) return undefined
     const binding = pin.kind === "valid" ? { datamateId: pin.datamateId } : await readLocalBinding(directory)
-    if (!binding) return []
+    if (!binding) return undefined
     // The link was read with the credential signed in now: it must still be the captured one, or one account's
     // notices could be paired with another account's link.
-    if ((await accountDigest()) !== credentialDigest(actAs.url, actAs.instance, actAs.apiKey)) return []
+    if ((await accountDigest()) !== credentialDigest(actAs.url, actAs.instance, actAs.apiKey)) return undefined
     const account = await RulesSync.knownAccount(actAs)
     if (!account) {
       void RulesSync.accountOf(actAs).catch(() => undefined)
-      return []
+      return undefined
     }
-    return (await read(scopeOf(actAs.url, actAs.instance, account, binding.datamateId)))?.notices ?? []
+    return await read(scopeOf(actAs.url, actAs.instance, account, binding.datamateId))
   } catch (error) {
     log.warn("could not read the kept review notices", { error: String(error) })
-    return []
+    return undefined
   }
 }
 

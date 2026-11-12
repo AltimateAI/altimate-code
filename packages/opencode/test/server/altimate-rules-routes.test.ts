@@ -98,3 +98,36 @@ describe("rule proposal routes", () => {
     expect((await request("POST", "/altimate/rules/learning", {})).status).toBe(400)
   })
 })
+
+describe("workspace request routes", () => {
+  test("a browser origin is refused", async () => {
+    const origin = { origin: "https://evil.example", "sec-fetch-site": "cross-site" }
+    for (const [method, url, body] of [
+      ["GET", "/altimate/workspace/requests"],
+      ["POST", "/altimate/workspace/requests/c-1/withdraw", { expected_version: 1 }],
+      ["POST", "/altimate/workspace/requests/c-1/remove", { expected_version: 1 }],
+    ] as const) {
+      const response = await request(method, url, body, origin)
+      expect([403, 409]).toContain(response.status)
+      expect(await response.json()).toMatchObject({ ok: false })
+    }
+  })
+
+  test("an action is validated before anything is asked", async () => {
+    expect((await request("POST", "/altimate/workspace/requests/c-1/approve", { expected_version: 1 })).status).toBe(404)
+    for (const body of [{}, { expected_version: 0 }, { expected_version: "1" }, { expected_version: 1, reason: 5 }]) {
+      const response = await request("POST", "/altimate/workspace/requests/c-1/withdraw", body)
+      expect(response.status).toBe(400)
+      expect(await response.json()).toMatchObject({ ok: false })
+    }
+  })
+
+  test("without a link, the list still answers with the person's rules and says why skills and knowledge are missing", async () => {
+    await using dir = await tmpdir({ git: true })
+    const response = await Server.Default().request("/altimate/workspace/requests", { headers: { "x-opencode-directory": dir.path } })
+    expect(response.status).toBe(200)
+    const body = await response.json()
+    expect(body).toMatchObject({ ok: true, requests: [] })
+    expect(["signed_out", "not_linked"]).toContain(body.review_status)
+  })
+})

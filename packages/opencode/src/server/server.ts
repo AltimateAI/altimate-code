@@ -1404,6 +1404,73 @@ export namespace Server {
         }
       })
       // altimate_change end
+      // altimate_change start — workspace review: the person's own requests (rules, skills, knowledge) for clients, and
+      // withdrawing or removing a skill or knowledge request. Approving and rejecting stay in the web app.
+      .get("/altimate/workspace/requests", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        try {
+          const [{ RulesSummary }, { ReviewRequests }] = await Promise.all([
+            import("../altimate/rules/summary"),
+            import("../altimate/workspace/review-requests"),
+          ])
+          const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
+          const rules = (await RulesSummary.rows(root, "mine")).map((row) => ({
+            kind: "rule" as const,
+            public_id: row.public_id,
+            name: row.text,
+            status: row.status,
+            ...(row.reason ? { reason: row.reason } : {}),
+            ...(row.reviewer ? { reviewer: row.reviewer } : {}),
+            actions: [] as string[],
+          }))
+          const review = await ReviewRequests.listReview(Instance.directory)
+          return c.json({
+            ok: true as const,
+            ...(review.status === "ok" ? { workspace: review.workspace } : {}),
+            // `ok`, or why skills and knowledge are missing: signed_out, not_linked, account_changed, unsupported, failed.
+            review_status: review.status,
+            ...(review.status === "failed" ? { review_error: review.error } : {}),
+            ...(review.status === "ok" && !review.complete ? { review_complete: false } : {}),
+            requests: [...rules, ...(review.status === "ok" ? review.items.map(ReviewRequests.fromContribution) : [])],
+          })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error("workspace requests failed", { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      .post("/altimate/workspace/requests/:id/:action", async (c) => {
+        const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
+        if (refused) return c.json(refused.body, refused.status)
+        const action = c.req.param("action")
+        if (action !== "withdraw" && action !== "remove") return c.json({ ok: false, error: "action must be withdraw or remove." }, 404)
+        const read = await readJsonObject(() => c.req.text(), `workspace request ${action}`)
+        if ("failure" in read) return c.json(read.failure.body, read.failure.status)
+        const version = read.body.expected_version
+        if (typeof version !== "number" || !Number.isInteger(version) || version < 1)
+          return c.json({ ok: false, error: "expected_version must be a positive integer." }, 400)
+        const reason = read.body.reason
+        if (reason !== undefined && reason !== null && typeof reason !== "string")
+          return c.json({ ok: false, error: "reason must be a string." }, 400)
+        try {
+          const { ReviewRequests } = await import("../altimate/workspace/review-requests")
+          const result = await ReviewRequests.act(Instance.directory, c.req.param("id"), action, {
+            expected_version: version,
+            ...(typeof reason === "string" && reason.trim() ? { reason } : {}),
+          })
+          if (!result.ok) return c.json({ ok: false, ...(result.code ? { code: result.code } : {}), error: result.error }, result.status)
+          // Clients refresh their lists and the skill sync drops a removed skill on the next turn.
+          const [{ RuleEvents }, { Bus }] = await Promise.all([import("../altimate/rules/events"), import("@/bus")])
+          await Bus.publish(RuleEvents.Event.Changed, { directory: Instance.directory }).catch(() => {})
+          return c.json({ ok: true as const, request: result.request })
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err)
+          log.error(`workspace request ${action} failed`, { error })
+          return c.json({ ok: false, error }, 500)
+        }
+      })
+      // altimate_change end
       // altimate_change start — GET /altimate/skill/publishable, POST /altimate/skill/publish
       // The CLI's `skill publish <name>` for the IDE extension. Only `serve` holds the extension's
       // pin, so publishing here targets the workspace selected in the panel — through the same
@@ -1450,7 +1517,7 @@ export namespace Server {
           const { explainIneligible, projectRootFor, publishEligibility } = await import(
             "../altimate/workspace/publishable"
           )
-          const { describePublish, explainPublishError, publishSkill } = await import(
+          const { describePublish, explainPublishError, publishErrorCode, publishSkill } = await import(
             "../altimate/workspace/skill-publish"
           )
           const registry = await reloadSkills()
@@ -1508,7 +1575,10 @@ export namespace Server {
             const known = explainPublishError(err) ?? (err instanceof ConflictError ? err.message : null)
             if (known) {
               log.info("skill publish: refused by the engine", { skill: skill.name, reason: known })
-              return c.json({ ok: false, error: known }, 422)
+              // altimate_change start — workspace review: a stable code beside the message
+              const code = publishErrorCode(err)
+              return c.json({ ok: false, ...(code ? { code } : {}), error: known }, 422)
+              // altimate_change end
             }
             throw err
           }

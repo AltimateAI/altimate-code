@@ -28,11 +28,32 @@ export interface Summary {
   /** Decisions on the person's own skill and knowledge submissions to the linked workspace, newest first, kept until
    * replaced by newer ones (`ReviewNotices`): clients show each once, like `notices`. */
   review_notices: ReviewNotice[]
+  /** Every decision on the person's requests in one list, newest first: rule reviews (`kind: "rule"`) and skill and
+   * knowledge decisions. What new clients read (`notices` and `review_notices` stay for released ones); each is shown
+   * once by `decisionKey`. */
+  decisions: Decision[]
   /** What the last post-turn check decided. */
   last_check?: { at: string; session: string; outcome: string }
 }
 
 /** A skill or knowledge decision as clients replay it: the fields of `rule.proposal.reviewed`. */
+/** A decision on one of the person's requests: a rule review, or a skill or knowledge decision. */
+export interface Decision {
+  kind: "rule" | "skill" | "knowledge"
+  public_id: string
+  /** The rule's text, or the skill's or knowledge base's name. */
+  text: string
+  status: string
+  reason?: string
+  reviewer?: string
+  at: string
+}
+
+/** How a client remembers a decision it showed: rule and skill ids live in different id spaces. */
+export function decisionKey(decision: Pick<Decision, "kind" | "public_id" | "status">): string {
+  return `${decision.kind}:${decision.public_id}:${decision.status}`
+}
+
 export interface ReviewNotice {
   public_id: string
   text: string
@@ -76,6 +97,10 @@ export async function summary(root: string, learn: LearnConfig, env: NodeJS.Proc
     ...(lastError ? { last_error: lastError } : {}),
     notices: state.notices.slice(-10).reverse(),
     review_notices: reviewNotices,
+    decisions: [
+      ...state.notices.slice(-10).map((n): Decision => ({ kind: "rule", ...n })),
+      ...reviewNotices,
+    ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)),
     ...(state.last_check ? { last_check: state.last_check } : {}),
   }
 }

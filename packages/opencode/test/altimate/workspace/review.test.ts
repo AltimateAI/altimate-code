@@ -544,3 +544,95 @@ describe("workspace review status", () => {
     expect(await runReviewStatus(project, true, { ...c.deps, binding: async () => ({ status: "unbound" }) })).toBe(EXIT.NOT_LINKED)
   })
 })
+
+describe("requests for other clients", () => {
+  const { ReviewRequests } = require("../../../src/altimate/workspace/review-requests") as typeof import("../../../src/altimate/workspace/review-requests")
+  const { RulesHost } = require("../../../src/altimate/rules/host") as typeof import("../../../src/altimate/rules/host")
+
+  /** Answer `POST .../reviews/<id>/<action>` with `answer`, everything else as the harness does. */
+  const onAction = (answer: (action: string, body: any) => Response) => {
+    const harness = globalThis.fetch
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      const hit = url.match(/\/datamates\/42\/reviews\/[^/?]+\/(withdraw|retire)$/)
+      if (hit) return answer(hit[1], JSON.parse(init?.body ?? "{}"))
+      return harness(input, init)
+    }) as typeof fetch
+  }
+
+  test("each request says what the person may do with it", async () => {
+    mine = () =>
+      page([
+        contribution({ public_id: "c-1", status: "pending" }),
+        contribution({ public_id: "c-2", status: "active", name: "two" }),
+        contribution({ public_id: "c-3", status: "rejected", review_reason: "No" }),
+      ])
+    const listed = await ReviewRequests.listReview(project)
+    expect(listed.status).toBe("ok")
+    if (listed.status !== "ok") return
+    expect(listed.workspace).toEqual({ id: 42, name: "Growth" })
+    expect(listed.items.map(ReviewRequests.fromContribution).map((r) => [r.public_id, r.actions])).toEqual([
+      ["c-1", ["withdraw"]],
+      ["c-2", ["remove"]],
+      ["c-3", []],
+    ])
+  })
+
+  test("withdraw and remove go to the server with the version and say what it answered", async () => {
+    const sent: [string, any][] = []
+    onAction((action, body) => {
+      sent.push([action, body])
+      return reply(contribution({ status: action === "withdraw" ? "withdrawn" : "retired", version: 2 }))
+    })
+    const withdrawn = await ReviewRequests.act(project, "c-1", "withdraw", { expected_version: 1 })
+    expect(withdrawn).toMatchObject({ ok: true, request: { status: "withdrawn", actions: [] } })
+    const removed = await ReviewRequests.act(project, "c-1", "remove", { expected_version: 1, reason: "old" })
+    expect(removed).toMatchObject({ ok: true, request: { status: "retired" } })
+    expect(sent).toEqual([
+      ["withdraw", { expected_version: 1, source: "cli" }],
+      ["retire", { expected_version: 1, reason: "old", source: "cli" }],
+    ])
+  })
+
+  test("a refusal keeps its code and status", async () => {
+    onAction(() => reply({ detail: { code: "already_decided", message: "The request is active" } }, 409))
+    expect(await ReviewRequests.act(project, "c-1", "withdraw", { expected_version: 1 })).toEqual({
+      ok: false,
+      status: 409,
+      code: "already_decided",
+      error: "The request is active",
+    })
+    configured = false
+    expect(await ReviewRequests.act(project, "c-1", "withdraw", { expected_version: 1 })).toMatchObject({ ok: false, code: "signed_out" })
+  })
+
+  test("the summary's decisions put rule and skill decisions in one list, newest first", async () => {
+    mine = () => page([contribution({ status: "pending" })])
+    await poll()
+    mine = () => page([contribution({ status: "rejected", reviewed_by_name: "Olive", review_reason: "No", reviewed_at: "2026-11-02T00:00:00Z" })])
+    await poll()
+    const summary = await RulesSummary.summary(project, undefined, process.env, project)
+    expect(summary.decisions).toEqual([
+      { kind: "skill", public_id: "c-1", text: "deploy", status: "rejected", reason: "No", reviewer: "Olive", at: "2026-11-02T00:00:00Z" },
+    ])
+    expect(RulesSummary.decisionKey(summary.decisions[0])).toBe("skill:c-1:rejected")
+  })
+
+  test("a host session start polls once and reports each decision once, with the waiting count", async () => {
+    mine = () => page([contribution({ status: "pending" }), contribution({ public_id: "c-2", status: "pending" })])
+    await poll()
+    mine = () =>
+      page([
+        contribution({ status: "active", reviewed_by_name: "Olive", reviewed_at: new Date().toISOString() }),
+        contribution({ public_id: "c-2", status: "pending" }),
+      ])
+    const first = await RulesHost.reviewForHost(project, new Set(), 3000)
+    expect(first.decisions.map((d) => [d.public_id, d.status, d.reviewer])).toEqual([["c-1", "active", "Olive"]])
+    expect(first.waiting).toBe(1)
+    const again = await RulesHost.reviewForHost(project, new Set(first.decisions.map(RulesHost.reviewSeenKey)), 3000)
+    expect(again.decisions).toEqual([])
+    const text = RulesHost.context({ rules: [], proposals: 0, notices: [], review_decisions: first.decisions, review_waiting: 1 })
+    expect(text).toContain('skill "deploy": approved by Olive; it now reaches the workspace')
+    expect(text).toContain("One of the person's skill or knowledge requests is waiting for review")
+  })
+})

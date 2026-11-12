@@ -523,6 +523,10 @@ async function showMenu(api: TuiPluginApi) {
   const rows = (await get<{ ok: boolean; rules: Row[] }>(api, "/altimate/rules"))?.rules ?? []
   const team = rows.filter((r) => r.source === "team")
   const mine = rows.filter((r) => r.source === "mine")
+  // altimate_change start — workspace review: the person's skill and knowledge requests, in the same view
+  const listed = await get<RequestsResponse>(api, "/altimate/workspace/requests")
+  const requests = (listed?.requests ?? []).filter((r) => r.kind !== "rule")
+  // altimate_change end
   const status = summary.linked
     ? printable(`${summary.workspace?.name ?? "Workspace"} · ${summary.line}${summary.pulled_at ? ` · synced ${describeAge(Date.parse(summary.pulled_at))}` : ""}`)
     : "Not linked to a workspace — run `altimate-code link`"
@@ -541,6 +545,14 @@ async function showMenu(api: TuiPluginApi) {
       description: `${label[r.status] ?? printable(r.status)}${r.reviewer ? ` by ${printable(r.reviewer)}` : ""}${r.reason ? ` — ${printable(r.reason)}` : ""}`,
       category: `Your proposals (${mine.length})`,
     })),
+    // altimate_change start — workspace review
+    ...requests.map((r) => ({
+      title: `${r.kind === "skill" ? "Skill" : "Knowledge"}: ${printable(r.name)}`,
+      value: `request:${r.public_id}`,
+      description: requestLine(r),
+      category: `Your skill and knowledge requests (${requests.length})`,
+    })),
+    // altimate_change end
     { title: "Sync now", value: "sync", description: summary.last_error ? `last sync: ${printable(summary.last_error)}` : "Pull approved rules and send queued proposals", category: "Actions" },
     {
       title: summary.learning ? "Turn learning off for me" : "Turn learning on for me",
@@ -557,6 +569,13 @@ async function showMenu(api: TuiPluginApi) {
       title={`Rules — ${status}`}
       options={options}
       onSelect={async (option) => {
+        // altimate_change start — workspace review: withdraw or remove one of the person's requests
+        if (option.value.startsWith("request:")) {
+          const request = requests.find((r) => `request:${r.public_id}` === option.value)
+          if (request?.actions.length) return showRequestActions(api, request)
+          return
+        }
+        // altimate_change end
         // Sync and the learning toggle are actions, not navigation: close the menu, report with a toast.
         if (option.value === "sync" || option.value === "toggle" || option.value === "follow") api.ui.dialog.clear()
         if (option.value === "sync") {
@@ -591,6 +610,75 @@ async function showMenu(api: TuiPluginApi) {
   ))
 }
 
+// altimate_change start — workspace review: the person's requests (`GET /altimate/workspace/requests`)
+interface WorkspaceRequest {
+  kind: "rule" | "skill" | "knowledge"
+  public_id: string
+  name: string
+  status: string
+  change?: string
+  reason?: string
+  reviewer?: string
+  version?: number
+  expired?: boolean
+  actions: ("withdraw" | "remove")[]
+}
+type RequestsResponse = { ok: boolean; requests?: WorkspaceRequest[]; review_status?: string }
+
+const REQUEST_STATUS: Record<string, string> = {
+  pending: "pending review",
+  active: "approved",
+  rejected: "rejected",
+  superseded: "replaced by a newer request",
+  withdrawn: "withdrawn",
+  retired: "removed from the workspace",
+}
+
+function requestLine(r: WorkspaceRequest): string {
+  const status = REQUEST_STATUS[r.status] ?? printable(r.status)
+  const by = r.reviewer && r.status !== "pending" ? ` by ${printable(r.reviewer)}` : ""
+  const update = r.change === "edit" ? " · update" : ""
+  const expired = r.expired ? " · waiting over 14 days" : ""
+  return `${status}${by}${update}${expired}${r.reason ? ` — ${printable(r.reason)}` : ""}`
+}
+
+/** Withdraw a waiting request, or remove an approved one from the workspace: each after a confirm. */
+function showRequestActions(api: TuiPluginApi, request: WorkspaceRequest) {
+  const what = `${request.kind === "skill" ? "skill" : "knowledge base"} "${printable(request.name)}"`
+  const options: TuiDialogSelectOption<string>[] = [
+    ...(request.actions.includes("withdraw")
+      ? [{ title: "Withdraw the request", value: "withdraw", description: "Take it back before it is reviewed. You can send it again later." }]
+      : []),
+    ...(request.actions.includes("remove")
+      ? [{ title: "Remove from the workspace", value: "remove", description: "Stop serving it to the team. You can send it again later." }]
+      : []),
+    { title: "Cancel", value: "cancel" },
+  ]
+  api.ui.dialog.replace(() => (
+    <api.ui.DialogSelect
+      title={`Your ${what}`}
+      options={options}
+      onSelect={async (option) => {
+        api.ui.dialog.clear()
+        if (option.value !== "withdraw" && option.value !== "remove") return
+        const result = await post<{ ok: boolean; error?: string; code?: string; request?: WorkspaceRequest }>(
+          api,
+          `/altimate/workspace/requests/${encodeURIComponent(request.public_id)}/${option.value}`,
+          { expected_version: request.version },
+        ).catch(() => undefined)
+        if (!result?.ok)
+          return api.ui.toast({ variant: "error", message: `Not ${option.value === "withdraw" ? "withdrawn" : "removed"}: ${printable(result?.error ?? "the session server did not answer")}`, duration: 8000 })
+        api.ui.toast({
+          variant: "success",
+          message: option.value === "withdraw" ? `Withdrew your ${what}.` : `Removed your ${what} from the workspace.`,
+          duration: 6000,
+        })
+      }}
+    />
+  ))
+}
+// altimate_change end
+
 const tui: TuiPlugin = async (api) => {
   installCards(api)
   api.keymap.registerLayer({
@@ -598,7 +686,7 @@ const tui: TuiPlugin = async (api) => {
       {
         name: "altimate.rules",
         title: "Rules",
-        desc: "Team rules, your proposed rules and their review status, sync",
+        desc: "Team rules, your proposed rules, your skill and knowledge requests and their review status, sync",
         category: "Altimate",
         namespace: "palette",
         slashName: "rules",

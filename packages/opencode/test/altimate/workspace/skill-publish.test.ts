@@ -1424,3 +1424,13 @@ describe("workspace review", () => {
   })
 })
 // altimate_change end
+
+describe("refusal codes for clients", () => {
+  test("each deliberate refusal has a stable code; anything else has none", async () => {
+    const mod = await import("../../../src/altimate/workspace/skill-publish")
+    expect(mod.publishErrorCode(new mod.ReviewDisabledError("Growth", "Olive"))).toBe("review_disabled")
+    expect(mod.publishErrorCode(new mod.TooManyReviewRequestsError("Growth"))).toBe("too_many_requests")
+    expect(mod.publishErrorCode(new mod.NotLinkedError())).toBe("not_linked")
+    expect(mod.publishErrorCode(new Error("boom"))).toBeNull()
+  })
+})

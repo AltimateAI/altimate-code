@@ -56,11 +56,35 @@ export interface Start {
   rules: { text: string; applies_to: string[]; review?: "pending" }[]
   proposals: number
   notices: RulesStore.Notice[]
+  /** Decisions on the person's skill and knowledge requests to the workspace since the last host session (approved,
+   * rejected, removed from the workspace). */
+  review_decisions?: ReviewDecision[]
+  /** How many of the person's skill and knowledge requests wait for review, as last seen. */
+  review_waiting?: number
   /** The last check for proposed rules failed (no model available, …): said once, so the person can fix it. */
   check_failed?: string
   /** "Remember … as a team rule" requests from a prompt that were not stored: said once. */
   unstored?: RulesStore.State["host_unstored"]
 }
+
+/** A skill or knowledge decision as a host session start reports it. */
+export interface ReviewDecision {
+  kind: "skill" | "knowledge"
+  public_id: string
+  name: string
+  status: string
+  reason?: string
+  reviewer?: string
+  at: string
+}
+
+/** How long a session start waits for the review poll (skill and knowledge decisions) before answering from what was
+ * kept: the poll is the only way a host-only person learns of them. */
+export const REVIEW_POLL_WAIT_MS = 3_000
+
+/** The key a host session start remembers a skill or knowledge decision by. */
+export const reviewSeenKey = (decision: Pick<ReviewDecision, "kind" | "public_id" | "status">) =>
+  `${decision.kind}:${decision.public_id}:${decision.status}`
 
 /** How long a session start waits for a pull before answering from the last one. */
 export const START_WAIT_MS = 3_000
@@ -159,12 +183,19 @@ export async function start(input: {
   const failed = state.last_check?.outcome.startsWith("failed") && isHostSession(state.last_check.session) &&
     !seen.has(RulesStore.hostCheckKey(state.last_check)) ? state.last_check : undefined
   const unstored = state.host_unstored
+  // Skill and knowledge decisions: one bounded poll (nothing else polls in a host-only setup), then what is kept.
+  const review = await within(reviewForHost(input.directory, new Set(state.host_review_seen), Math.min(left(), REVIEW_POLL_WAIT_MS)), {
+    decisions: [] as ReviewDecision[],
+    waiting: 0,
+  })
   // Marked seen only if the write lands in time: otherwise they are said again next time, never lost.
-  if (input.session && (notices.length || failed || unstored.length))
+  if (input.session && (notices.length || failed || unstored.length || review.decisions.length))
     await within(
       RulesStore.update(input.root, (s) => {
         const keys = [...notices.map(RulesStore.hostNoticeKey), ...(failed ? [RulesStore.hostCheckKey(failed)] : [])]
         s.host_notices_seen = [...s.host_notices_seen, ...keys.filter((key) => !s.host_notices_seen.includes(key))]
+        const reviewKeys = review.decisions.map(reviewSeenKey)
+        s.host_review_seen = [...s.host_review_seen, ...reviewKeys.filter((key) => !s.host_review_seen.includes(key))]
         s.host_unstored = s.host_unstored.filter((entry) => !unstored.some((said) => said.at === entry.at && said.text === entry.text))
       }).catch((error) => log.warn("host notices not marked seen", { error: errorText(error) })),
       undefined,
@@ -178,8 +209,45 @@ export async function start(input: {
     })),
     proposals: (await within(RuleProposal.storedFor(input.root), [])).length,
     notices,
+    ...(review.decisions.length ? { review_decisions: review.decisions } : {}),
+    ...(review.waiting ? { review_waiting: review.waiting } : {}),
     ...(failed ? { check_failed: failed.outcome.replace(/^failed:\s*/, "") } : {}),
     ...(unstored.length ? { unstored } : {}),
+  }
+}
+
+/** The person's skill and knowledge decisions not reported to a host yet (within `NOTICE_MAX_AGE_MS`), and how many of
+ * their requests wait. Polls the server once, within `waitMs`; past it (offline, a slow server), what was kept is used.
+ * Never throws. */
+export async function reviewForHost(
+  directory: string,
+  seen: Set<string>,
+  waitMs: number,
+): Promise<{ decisions: ReviewDecision[]; waiting: number }> {
+  try {
+    const { ReviewNotices } = await import("../workspace/review-notices")
+    await Promise.race([
+      ReviewNotices.poll(directory).catch(() => undefined),
+      new Promise((resolve) => setTimeout(resolve, waitMs).unref?.()),
+    ])
+    const state = await ReviewNotices.storedState(directory)
+    if (!state) return { decisions: [], waiting: 0 }
+    const now = Date.now()
+    const decisions = state.notices
+      .filter((n) => !seen.has(reviewSeenKey(n)) && !(now - Date.parse(n.at) > NOTICE_MAX_AGE_MS))
+      .map((n): ReviewDecision => ({
+        kind: n.kind,
+        public_id: n.public_id,
+        name: n.name,
+        status: n.status,
+        at: n.at,
+        ...(n.reason ? { reason: n.reason } : {}),
+        ...(n.reviewer ? { reviewer: n.reviewer } : {}),
+      }))
+    return { decisions, waiting: state.pending.length }
+  } catch (error) {
+    log.warn("host review decisions not read", { error: errorText(error) })
+    return { decisions: [], waiting: 0 }
   }
 }
 
@@ -191,6 +259,7 @@ export function context(start: Start, command = "/altimate-code:rules"): string 
     ...ruleLines(start, ws),
     ...proposalLines(start, command),
     ...noticeLines(start, ws),
+    ...reviewLines(start, ws, command),
     ...(start.check_failed
       ? [`The last check of the person's corrections for proposed team rules failed (${printable(start.check_failed)}). It needs a model altimate-code can use: \`altimate learn status\` shows the setting.`]
       : []),
@@ -245,6 +314,24 @@ function noticeLines(start: Start, ws: string): string[] {
     return `- ${status}${by}: "${printable(notice.text)}"${notice.reason ? ` — ${printable(notice.reason)}` : ""}`
   }
   return [`Reviews of the person's proposed rules in ${ws} since their last session:`, ...start.notices.map(line)]
+}
+
+function reviewLines(start: Start, ws: string, command: string): string[] {
+  const what = (d: ReviewDecision) => (d.kind === "skill" ? "skill" : "knowledge base")
+  const line = (d: ReviewDecision) => {
+    const by = d.reviewer ? ` by ${printable(d.reviewer)}` : ""
+    const outcome =
+      d.status === "active" ? `approved${by}; it now reaches the workspace` : d.status === "retired" ? `removed from the workspace${by}` : `${printable(d.status)}${by}`
+    return `- ${what(d)} "${printable(d.name)}": ${outcome}${d.reason ? ` — ${printable(d.reason)}` : ""}`
+  }
+  const lines: string[] = []
+  if (start.review_decisions?.length)
+    lines.push(`Decisions on the skills and knowledge bases the person sent to ${ws} for review, since their last session (tell them):`, ...start.review_decisions.map(line))
+  if (start.review_waiting) {
+    const one = start.review_waiting === 1
+    lines.push(`${one ? "One" : start.review_waiting} of the person's skill or knowledge requests ${one ? "is" : "are"} waiting for review in ${ws}; ${command} lists ${one ? "it" : "them"}.`)
+  }
+  return lines
 }
 
 /** "Remember this as a team rule: X", "save as a rule - X", "don't forget, team rule: X": a request that names a team rule
