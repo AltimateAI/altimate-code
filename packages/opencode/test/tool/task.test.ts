@@ -1146,6 +1146,41 @@ describe("tool.task", () => {
     ),
   )
 
+  background.instance("a background child's provider error is redacted before it reaches the parent", () =>
+    withBackgroundEnv(
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const def = yield* (yield* TaskTool).init()
+        const secret = "abcdefghijklmnopqrstuvwxyz123456"
+        const promptOps: TaskPromptOps = {
+          ...stubOps(),
+          prompt: (input) =>
+            Effect.sync(() => {
+              const failed = reply(input, "")
+              const message = `bad request api_key=${secret} rejected ${"x".repeat(400)}`
+              return {
+                info: { ...failed.info, error: { name: "APIError", data: { message, isRetryable: false } } },
+                parts: [],
+              } as MessageV2.WithParts
+            }),
+        }
+        const context = backgroundContext(chat, assistant, promptOps)
+        const launched = yield* def.execute(launchInput, context)
+        const exit = yield* def
+          .execute({ ...launchInput, background: undefined, task_id: launched.metadata.sessionId }, context)
+          .pipe(Effect.exit, Effect.timeout("2 seconds"))
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          const error = String(Cause.squash(exit.cause))
+          expect(error).toContain("APIError: bad request [REDACTED] rejected")
+          expect(error).not.toContain(secret)
+          expect(error).toContain("…")
+          expect(error).not.toContain("x".repeat(300))
+        }
+      }),
+    ),
+  )
+
   it.instance("the execution flag check parses the variable exactly as RuntimeFlags does", () =>
     Effect.gen(function* () {
       const previous = { flag: process.env[BACKGROUND_FLAG], experimental: process.env["OPENCODE_EXPERIMENTAL"] }

@@ -206,12 +206,6 @@ export function evictBackgroundRecords(
   for (const [id] of remaining.slice(0, Math.max(0, records.size - MAX_BACKGROUND_RECORDS_TOTAL))) records.delete(id)
 }
 
-/** The message a failed child request recorded, for a collect to report. */
-function childErrorMessage(error: { name: string; data?: unknown }) {
-  const message = (error.data as { message?: unknown } | undefined)?.message
-  return typeof message === "string" && message ? message : error.name
-}
-
 const resumeHeader = (id: string) => `task_id: ${id} (for resuming to continue this task if needed)`
 const recordedHeader = (id: string) =>
   `task_id: ${id} (background task: calling task with this task_id returns this same result)`
@@ -508,9 +502,10 @@ export const TaskTool = Tool.define("task", async (ctx) => {
         // parent as an empty result, which reads as "done, nothing found". An error is reported even
         // when the child wrote text before it, since that text may be incomplete.
         const childError = result?.info.role === "assistant" ? result.info.error : undefined
-        // A background child whose request failed reports that failure on every collect, not an empty result.
+        // A background child whose request failed reports that failure on every collect, not an
+        // empty result. The message is the redacted, length-capped provider error.
         if (background && !ctx.abort.aborted && !text && childError) {
-          throw new Error(`Background task ${session.id} failed: ${childErrorMessage(childError)}`)
+          throw new Error(`Background task ${session.id} failed: ${errorText(childError)}`)
         }
         const status =
           ctx.abort.aborted || (text.trim() && !childError)
