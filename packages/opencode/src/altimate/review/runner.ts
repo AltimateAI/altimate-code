@@ -102,6 +102,16 @@ export interface DispatcherRunnerOptions {
 
 export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRunner {
   const checkCache = new Map<string, CheckResult>()
+  // Engine calls that threw, by method → first reason. Each method still
+  // returns its empty result so one failure never aborts the review, but the
+  // failures are reported (envelope `engineErrors`, the comment, telemetry)
+  // instead of reading as "no findings".
+  const failures = new Map<string, { reason: string; count: number }>()
+  function fail(method: string, err: unknown) {
+    const reason = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, " ").slice(0, 200)
+    const prev = failures.get(method)
+    failures.set(method, { reason: prev?.reason ?? reason, count: (prev?.count ?? 0) + 1 })
+  }
   let manifestPromise: Promise<CachedManifest> | undefined
 
   async function loadManifest(): Promise<CachedManifest> {
@@ -252,8 +262,14 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       ].filter((c): c is string => typeof c === "string" && !!c)
       // ran=true: the core parsed and analyzed the SQL (even if zero issues).
       // This lets the orchestrator defer structural checks to the AST lint.
-      out = { issues, piiColumns: [...new Set(piiColumns)], ran: true }
-    } catch {
+      out = {
+        issues,
+        piiColumns: [...new Set(piiColumns)],
+        ran: true,
+        piiAbstained: !!(data.pii as any)?.parse_error,
+      }
+    } catch (err) {
+      fail("check", err)
       out = { issues: [], piiColumns: [], ran: false }
     }
     checkCache.set(cacheKey, out)
@@ -310,7 +326,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         const res = await Dispatcher.call("altimate_core.grade", { sql, schema_context: await resolveSchema() })
         const data = (res.data ?? {}) as Record<string, any>
         return { grade: data.overall_grade ?? data.grade }
-      } catch {
+      } catch (err) {
+        fail("grade", err)
         return {}
       }
     },
@@ -324,7 +341,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         const res = await Dispatcher.call("altimate_core.grain", { sql })
         const d = (res.data ?? {}) as Record<string, any>
         return { group_by: asArray<string>(d.group_by), dedup_partition: asArray<string>(d.dedup_partition) }
-      } catch {
+      } catch (err) {
+        fail("grain", err)
         return { group_by: [], dedup_partition: [] }
       }
     },
@@ -337,14 +355,16 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       try {
         const res = await Dispatcher.call("altimate_core.dbt_config_lint", { sql: rawSql })
         out.push(...asArray((res.data as any)?.findings))
-      } catch {
+      } catch (err) {
+        fail("dbtConfigLint", err)
         /* skip */
       }
       if (oldRawSql) {
         try {
           const res = await Dispatcher.call("altimate_core.dbt_config_diff", { base_sql: oldRawSql, head_sql: rawSql })
           out.push(...asArray((res.data as any)?.findings))
-        } catch {
+        } catch (err) {
+          fail("dbtConfigLint", err)
           /* skip */
         }
       }
@@ -358,7 +378,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       try {
         const res = await Dispatcher.call("altimate_core.structural_diff", { base_sql: baseSql, head_sql: headSql })
         return asArray((res.data as any)?.findings)
-      } catch {
+      } catch (err) {
+        fail("structuralDiff", err)
         return []
       }
     },
@@ -368,7 +389,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         const res = await Dispatcher.call("altimate_core.source_filters", { sql })
         const d = (res.data ?? {}) as Record<string, any>
         return (d.filters ?? {}) as Record<string, string[]>
-      } catch {
+      } catch (err) {
+        fail("sourceFilters", err)
         return {}
       }
     },
@@ -397,7 +419,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
         const res = await Dispatcher.call("altimate_core.metadata", { sql })
         const d = (res.data ?? {}) as Record<string, any>
         return !!(d.has_window_functions || d.has_subqueries || (typeof d.node_count === "number" && d.node_count >= 12))
-      } catch {
+      } catch (err) {
+        fail("isComplex", err)
         return false
       }
     },
@@ -423,7 +446,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
             confidence: typeof c.confidence === "number" ? c.confidence : 0,
             masking: c.suggested_masking ?? undefined,
           }))
-      } catch {
+      } catch (err) {
+        fail("classifyPii", err)
         return []
       }
     },
@@ -450,7 +474,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           rowsChanged: o.rows_changed ?? o.different ?? o.changed,
           summary: o.summary ?? r.summary,
         }
-      } catch {
+      } catch (err) {
+        fail("dataDiff", err)
         return null
       }
     },
@@ -468,7 +493,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           source: String(e.source ?? ""),
           target: String(e.target ?? ""),
         }))
-      } catch {
+      } catch (err) {
+        fail("columnLineage", err)
         return []
       }
     },
@@ -484,7 +510,8 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           message: String(f.message ?? ""),
           line: f.line,
         }))
-      } catch {
+      } catch (err) {
+        fail("lexicalScan", err)
         return []
       }
     },
@@ -529,16 +556,24 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           differences: diffs.map((d) => d?.description ?? String(d)),
           confidence: EngineCoerce.bandConfidence(data.confidence),
         }
-      } catch {
+      } catch (err) {
+        fail("equivalence", err)
         return { decided: false }
       }
     },
 
-    async detectPii(sql: string): Promise<{ columns: string[] }> {
+    async detectPii(sql: string): Promise<{ columns: string[]; abstained?: boolean }> {
       // Text-based PII comes from altimate_core.check (schema.detect_pii is
       // warehouse-based and unavailable in CI). Reuses the memoized check.
+      // When core could not analyse the SQL (check did not run, or its PII
+      // parser reported a parse error) the empty list means "unknown", not
+      // "no PII": say so.
       const result = await runCheck(sql)
-      return { columns: result.piiColumns ?? [] }
+      return { columns: result.piiColumns ?? [], abstained: !result.ran || result.piiAbstained === true }
+    },
+
+    failures() {
+      return [...failures].map(([method, f]) => ({ method, reason: f.reason, count: f.count }))
     },
   }
 }

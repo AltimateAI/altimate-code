@@ -67,16 +67,25 @@ export interface PostResult {
    *  blocking, and this bot's latest review already carries the same headline
    *  (the summary comment was updated). */
   reviewSkipped?: boolean
+  /** Earlier blocking altimate reviews dismissed because this run no longer blocks. */
+  dismissedReviews?: number
 }
 
 /** Headline of a review this bot posted (see verdictHeadline). */
 const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
 
+/** The Octokit surface the poster uses; injectable so the posting rules
+ *  (dedup, dismissal, skip) are testable without the network. */
+export type GitHubClient = Pick<Octokit, "paginate"> & {
+  rest: Pick<Octokit["rest"], "issues" | "pulls">
+}
+
 export async function postGitHubReview(
   env: VerdictEnvelope,
   target: GitHubTarget,
-  octo: Octokit = new Octokit({ auth: target.token }),
+  client?: GitHubClient,
 ): Promise<PostResult> {
+  const octo = client ?? new Octokit({ auth: target.token })
   const { owner, repo, prNumber } = target
   const result: PostResult = { inlineFellBack: false }
 
@@ -109,17 +118,21 @@ export async function postGitHubReview(
   // ignores line numbers) is not posted again on the next push.
   let posted = new Set<string>()
   let lastBotHeadline: string | undefined
+  let staleBlocking: number[] = []
   try {
     const [reviewComments, reviews] = await Promise.all([
       octo.paginate(octo.rest.pulls.listReviewComments, { owner, repo, pull_number: prNumber, per_page: 100 }),
       octo.paginate(octo.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 }),
     ])
     posted = postedFindingIds(reviewComments.map((c) => c.body))
-    // Reviews are listed oldest first; only this bot's own latest review counts.
-    const mine = botLogin
-      ? reviews.filter((r) => r.user?.login === botLogin && BOT_REVIEW_RE.test(r.body ?? ""))
-      : []
-    lastBotHeadline = mine.at(-1)?.body?.trim()
+    // Reviews are listed oldest first; only this bot's own reviews count. When
+    // the bot's login is unknown, fall back to the headline match alone for
+    // dismissal, and never skip (no own-review headline to compare).
+    const botReviews = reviews.filter(
+      (r) => BOT_REVIEW_RE.test(r.body ?? "") && (!botLogin || r.user?.login === botLogin),
+    )
+    lastBotHeadline = botLogin ? botReviews.at(-1)?.body?.trim() : undefined
+    staleBlocking = botReviews.filter((r) => r.state === "CHANGES_REQUESTED").map((r) => r.id)
   } catch {
     /* listing failed: post everything rather than nothing */
   }
@@ -136,6 +149,28 @@ export async function postGitHubReview(
   }
   const comments = inlineComments(env, posted, commentable)
   result.inlineSkippedAsPosted = inlineComments(env, new Set(), commentable).length - comments.length
+
+  // Gate lifecycle: when this run no longer blocks, an earlier blocking
+  // altimate review would keep the PR blocked forever. Dismiss it, pointing at
+  // the new verdict. (Requires `pull-requests: write`; a failure is non-fatal.)
+  if (event === "COMMENT" && staleBlocking.length) {
+    let dismissed = 0
+    for (const id of staleBlocking) {
+      try {
+        await octo.rest.pulls.dismissReview({
+          owner,
+          repo,
+          pull_number: prNumber,
+          review_id: id,
+          message: `Superseded by a newer altimate review: ${reviewBody}`,
+        })
+        dismissed++
+      } catch {
+        /* keep going; the summary still shows the current verdict */
+      }
+    }
+    result.dismissedReviews = dismissed
+  }
 
   // Nothing new inline, not blocking, and this bot's latest review already says
   // the same thing: the updated summary comment covers it; another identical
