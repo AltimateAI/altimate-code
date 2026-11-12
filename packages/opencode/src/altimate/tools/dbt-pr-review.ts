@@ -77,7 +77,7 @@ export const DbtPrReviewTool = Tool.define("dbt_pr_review", {
         signature: env.signature,
         findingCount: env.findings.length,
       },
-      output: renderSummary(env),
+      output: renderSummary(env, { maxChars: Infinity }),
     }
   },
 })

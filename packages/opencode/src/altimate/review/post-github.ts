@@ -1,7 +1,7 @@
 import { Octokit } from "@octokit/rest"
 import { promises as fs } from "node:fs"
 import { type VerdictEnvelope, VCS_EVENT } from "./verdict"
-import { renderSummary, inlineComments, REVIEW_MARKER, verdictHeadline } from "./format"
+import { renderSummary, inlineComments, postedFindingIds, REVIEW_MARKER, verdictHeadline } from "./format"
 
 /**
  * Post a verdict envelope to a GitHub pull request: an upserted summary comment
@@ -54,7 +54,15 @@ export interface PostResult {
   inlineFellBack: boolean
   /** Set when the review event could not be posted for a non-positioning reason. */
   postError?: string
+  /** Inline comments not re-posted because the same finding is already on the PR. */
+  inlineSkippedAsPosted?: number
+  /** True when no review was submitted: nothing new to say and a previous
+   *  non-blocking altimate review already exists (the summary comment was updated). */
+  reviewSkipped?: boolean
 }
+
+/** Headline of a review this bot posted (see verdictHeadline). */
+const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
 
 export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarget): Promise<PostResult> {
   const octo = new Octokit({ auth: target.token })
@@ -85,8 +93,33 @@ export async function postGitHubReview(env: VerdictEnvelope, target: GitHubTarge
   //    this map only translates verdict → GitHub event. APPROVE always maps to a
   //    COMMENT event — the bot must never submit a formal GitHub approval.
   const event = VCS_EVENT[env.verdict]
-  const comments = inlineComments(env)
   const reviewBody = verdictHeadline(env)
+
+  // Rerun dedup: a finding already commented inline (same fingerprint, which
+  // ignores line numbers) is not posted again on the next push.
+  let posted = new Set<string>()
+  let priorBotReview = false
+  try {
+    const [reviewComments, reviews] = await Promise.all([
+      octo.paginate(octo.rest.pulls.listReviewComments, { owner, repo, pull_number: prNumber, per_page: 100 }),
+      octo.paginate(octo.rest.pulls.listReviews, { owner, repo, pull_number: prNumber, per_page: 100 }),
+    ])
+    posted = postedFindingIds(reviewComments.map((c) => c.body))
+    priorBotReview = reviews.some((r) => BOT_REVIEW_RE.test(r.body ?? ""))
+  } catch {
+    /* listing failed: post everything rather than nothing */
+  }
+  const comments = inlineComments(env, posted)
+  const withLine = env.findings.filter((f) => typeof f.startLine === "number").length
+  result.inlineSkippedAsPosted = withLine - comments.length
+
+  // Nothing new inline, not blocking, and the PR already has an altimate
+  // review: the updated summary comment says it all; another "Reviewed with
+  // comments" entry per push is noise. A blocking verdict always posts.
+  if (!comments.length && event === "COMMENT" && priorBotReview) {
+    result.reviewSkipped = true
+    return result
+  }
 
   // Anchor inline comments to the PR head commit. Without commit_id, GitHub's
   // line-positioning is fragile and can 422 even on valid lines.

@@ -71,7 +71,8 @@ export function classifyReviewFailure(err: unknown): "config_error" | "git_error
  * caller reports `summary_failed` for that.
  */
 export function classifyPostOutcome(result: PostResult): "full" | "partial" {
-  if (result.inlineFellBack || result.postError || result.reviewId === undefined) return "partial"
+  if (result.inlineFellBack || result.postError) return "partial"
+  if (result.reviewId === undefined && !result.reviewSkipped) return "partial"
   return "full"
 }
 

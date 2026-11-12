@@ -1967,8 +1967,8 @@ describe("orchestrate", () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+email\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
-      async detectPii() {
-        return { columns: ["email", "ssn"] }
+      async detectPii(sql: string) {
+        return { columns: ["email", "ssn"].filter((c) => sql.includes(c)) }
       },
     }
     const env = await runReview({
@@ -1977,7 +1977,7 @@ describe("orchestrate", () => {
       rubric: DEFAULT_RUBRIC,
       mode: "gate",
       runner,
-      getContent: content("select email, ssn from x"),
+      getContent: content("select email, ssn from x", "select id from x"),
     })
     const pii = env.findings.find((f) => f.category === "pii_exposure")
     expect(pii).toBeDefined()
@@ -2024,7 +2024,7 @@ describe("orchestrate", () => {
     expect(env.verdict).toBe("REQUEST_CHANGES")
   })
 
-  test("broad PII detector remains fallback for existing output columns", async () => {
+  test("a PII column the base already exposed is not re-flagged when the PR only touches it", async () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    lower(email) as email\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
@@ -2056,18 +2056,18 @@ describe("orchestrate", () => {
       runner,
       getContent: content("select customer_id, lower(email) as email from customers", "select customer_id, email from customers"),
     })
+    // `email` was already in the base's output: this PR does not newly expose it.
     const pii = env.findings.filter((f) => f.category === "pii_exposure")
-    expect(pii).toHaveLength(1)
-    expect(pii[0].evidence?.tool).toBe("schema.detect_pii")
-    expect(env.verdict).toBe("REQUEST_CHANGES")
+    expect(pii).toHaveLength(0)
+    expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
   test("PII fallback survives core lineage failure instead of aborting review", async () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    email\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
-      async detectPii() {
-        return { columns: ["email"] }
+      async detectPii(sql: string) {
+        return { columns: sql.includes("email") ? ["email"] : [] }
       },
       async columnLineage() {
         throw new Error("lineage parser crashed")
@@ -2098,8 +2098,8 @@ describe("orchestrate", () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    email\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
-      async detectPii() {
-        return { columns: ["email"] }
+      async detectPii(sql: string) {
+        return { columns: sql.includes("email") ? ["email"] : [] }
       },
       async columnLineage(sql) {
         return sql.includes("email")
@@ -2205,8 +2205,8 @@ describe("orchestrate", () => {
     const files: ChangedFile[] = [{ path: "models/marts/dim_customers.sql", status: "modified", diff: "+    ssn\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
-      async detectPii() {
-        return { columns: ["ssn"] }
+      async detectPii(sql: string) {
+        return { columns: sql.includes("ssn") ? ["ssn"] : [] }
       },
       async columnLineage(sql) {
         return sql.includes("ssn")

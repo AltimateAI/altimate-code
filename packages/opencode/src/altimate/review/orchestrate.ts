@@ -206,6 +206,57 @@ export interface OrchestrateInput {
   layout?: DbtProjectLayout
   /** What the review covered: base resolution and files left out of scope. */
   scope?: Omit<ReviewScope, "unverified">
+  /** Drop the regex catalog's cross-engine portability findings (single known engine). */
+  suppressPortability?: boolean
+}
+
+const PORTABILITY_RE = /portab|dialect[ -]specific|non-?standard|n't standard|not standard|standard sql/i
+
+/** A regex-catalog finding whose concern is portability across warehouses. */
+export function isCatalogPortability(f: Finding): boolean {
+  const tool = f.evidence?.tool
+  return (tool === "rule-catalog" || tool === "dbt-patterns") && PORTABILITY_RE.test(`${f.title} ${f.body}`)
+}
+
+/** Line numbers on the head side of a unified diff that GitHub accepts for an
+ *  inline comment: added lines and context lines inside a hunk. */
+export function commentableLines(diff: string | undefined): Set<number> {
+  const out = new Set<number>()
+  if (!diff) return out
+  let right = 0
+  let inHunk = false
+  const rows = diff.split("\n")
+  if (rows[rows.length - 1] === "") rows.pop() // the diff's trailing newline, not a line
+  for (const line of rows) {
+    const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line)
+    if (h) {
+      right = Number(h[1])
+      inHunk = true
+      continue
+    }
+    // File headers (`--- a/…`, `+++ b/…`) only occur outside a hunk.
+    if (!inHunk || line.startsWith("\\")) continue
+    // A blank context line may have lost its leading space in transit.
+    if (line.startsWith("+") || line.startsWith(" ") || line === "") out.add(right++)
+    else if (!line.startsWith("-")) inHunk = false
+  }
+  return out
+}
+
+/**
+ * Keep a finding's line only when it can be commented on: inside the file's
+ * diff hunks on the head side. Anything else (a line from compiled SQL, an
+ * unchanged region) moves to the summary instead of making GitHub reject the
+ * whole batch of inline comments.
+ */
+export function anchorToDiff(findings: Finding[], files: ChangedFile[]): Finding[] {
+  const lines = new Map(files.map((f) => [f.path, commentableLines(f.diff)]))
+  return findings.map((f) => {
+    if (typeof f.startLine !== "number") return f
+    if (lines.get(f.file)?.has(f.startLine)) return f
+    const { startLine: _s, endLine: _e, ...rest } = f
+    return rest as Finding
+  })
 }
 
 /** True when SQL text contains Jinja (`{{ }}`, `{% %}` or `{# #}`). */
@@ -395,6 +446,8 @@ async function qualityLane(
   sql: string | undefined,
   dialect: string,
   oldSql?: string,
+  /** True when `sql` is the raw file; compiled-SQL line numbers do not exist in the PR's file. */
+  linesMatchFile = false,
 ): Promise<Finding[]> {
   if (!sql || file.status === "deleted") return []
   const model = modelNameFromPath(file.path)
@@ -432,8 +485,8 @@ async function qualityLane(
         body: issue.message,
         file: file.path,
         model,
-        startLine: issue.line,
-        endLine: issue.line,
+        startLine: linesMatchFile ? issue.line : undefined,
+        endLine: linesMatchFile ? issue.line : undefined,
         evidence: { tool: "altimate_core.check", result: issue },
         // Include the message so distinct instances of the same rule (e.g. two
         // different non-portable functions) don't collapse under one fingerprint.
@@ -1186,7 +1239,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     const tasks: Promise<Finding[]>[] = []
     // Engine lanes consume COMPILED SQL (rendered by dbt) when available.
     if (lanes.has("sql_quality") || lanes.has("warehouse_cost"))
-      tasks.push(qualityLane(ctx.file, input.runner, ctx.engineNewSql, dialect, ctx.engineOldSql))
+      tasks.push(
+        qualityLane(ctx.file, input.runner, ctx.engineNewSql, dialect, ctx.engineOldSql, ctx.engineNewSql === ctx.newSql),
+      )
     if (lanes.has("semantic_change")) {
       tasks.push(dataDiffLane(ctx, input.runner, dialect, input.config.dataDiff))
       tasks.push(grainMismatchLane(ctx, input.runner))
@@ -1228,9 +1283,17 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           // classify (pre-existing columns, or ones core's classifier missed) —
           // dedup against the columns core actually CONSIDERED, never all
           // introduced columns, so a missed column still surfaces here.
-          const fallbackPii = diffScopedPii.completed
+          let fallbackPii = diffScopedPii.completed
             ? currentCtx.pii.filter((col) => !diffScopedPii.classifiedColumns.has(col.toLowerCase()))
             : currentCtx.pii
+          // Only columns this PR newly exposes: a PII column the base already
+          // surfaced is not this change's concern (the docs promise "newly expose").
+          if (fallbackPii.length && hasOldSide(currentCtx.file) && currentCtx.engineOldSql) {
+            const basePii = new Set(
+              (await input.runner.detectPii(currentCtx.engineOldSql, dialect)).columns.map((c) => c.toLowerCase()),
+            )
+            fallbackPii = fallbackPii.filter((col) => !basePii.has(col.toLowerCase()))
+          }
           findings.push(...piiLane(currentCtx.file, fallbackPii))
         }
         return findings
@@ -1448,6 +1511,11 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Flatten, drop excluded, dedupe, threshold-filter.
   let findings = dedupe(merged)
   findings = findings.filter((f) => !exclusionReason(f, input.rubric))
+  // Cross-engine portability advice from the regex catalog is noise for a
+  // project that runs on one known engine. Core's dialect-aware check (a
+  // function missing on THIS engine) is a real error and is kept.
+  if (input.suppressPortability) findings = findings.filter((f) => !isCatalogPortability(f))
+  findings = anchorToDiff(findings, input.changedFiles)
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
   findings = findings.filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
   // Sort by severity desc, then file.
