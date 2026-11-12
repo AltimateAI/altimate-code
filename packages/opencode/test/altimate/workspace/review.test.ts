@@ -656,6 +656,11 @@ describe("decisions for clients that show them (workspace review decisions)", ()
     expect(other.ok && other.decisions.length).toBe(1)
   })
 
+  test("a linked person with nothing decided yet gets an empty answer, not 'not linked'", async () => {
+    mine = () => page([])
+    expect(await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true })).toEqual({ ok: true, decisions: [], waiting: 0 })
+  })
+
   test("without a link or a sign-in it says why", async () => {
     configured = false
     expect(await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, waitMs: 500 })).toMatchObject({ ok: false })

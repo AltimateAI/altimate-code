@@ -377,8 +377,10 @@ export async function hostDecisions(
     ])
     const state = await storedState(directory)
     if (!state) {
-      const status = polled && polled.status !== "done" && polled.status !== "failed" ? polled.status : "not_linked"
-      return { ok: false, status }
+      // A poll that finished with nothing kept: linked, with nothing decided yet (no state file is written until there
+      // is something to keep). A poll that did not finish in time is not an answer: asked again later.
+      if (polled?.status === "done") return { ok: true, decisions: [], waiting: 0 }
+      return { ok: false, status: polled ? polled.status : "account_unconfirmed" }
     }
     if (polled && polled.status === "unsupported") return { ok: false, status: "unsupported" }
     const key = (n: Notice) => `${n.kind}:${n.public_id}:${n.status}`

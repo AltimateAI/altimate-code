@@ -524,8 +524,12 @@ async function showMenu(api: TuiPluginApi) {
   const team = rows.filter((r) => r.source === "team")
   const mine = rows.filter((r) => r.source === "mine")
   // altimate_change start — workspace review: the person's skill and knowledge requests, in the same view
-  const listed = await get<RequestsResponse>(api, "/altimate/workspace/requests")
-  const requests = (listed?.requests ?? []).filter((r) => r.kind !== "rule")
+  // Bounded: the list asks the server (the link, every page of requests); a slow server must not hold the menu.
+  const listed = await Promise.race([
+    get<RequestsResponse>(api, "/altimate/workspace/requests"),
+    new Promise<"slow">((resolve) => setTimeout(() => resolve("slow"), REQUESTS_WAIT_MS)),
+  ])
+  const requests = (listed === "slow" ? [] : (listed?.requests ?? [])).filter((r) => r.kind !== "rule")
   // altimate_change end
   const status = summary.linked
     ? printable(`${summary.workspace?.name ?? "Workspace"} · ${summary.line}${summary.pulled_at ? ` · synced ${describeAge(Date.parse(summary.pulled_at))}` : ""}`)
@@ -546,6 +550,9 @@ async function showMenu(api: TuiPluginApi) {
       category: `Your proposals (${mine.length})`,
     })),
     // altimate_change start — workspace review
+    ...(listed === "slow"
+      ? [{ title: "Your skill and knowledge requests did not load in time", value: "requests-slow", description: "Open /rules again in a moment", category: "Your skill and knowledge requests" }]
+      : []),
     ...requests.map((r) => ({
       title: `${r.kind === "skill" ? "Skill" : "Knowledge"}: ${printable(r.name)}`,
       value: `request:${r.public_id}`,
@@ -624,6 +631,8 @@ interface WorkspaceRequest {
   actions: ("withdraw" | "remove")[]
 }
 type RequestsResponse = { ok: boolean; requests?: WorkspaceRequest[]; review_status?: string }
+/** How long `/rules` waits for the person's skill and knowledge requests before opening without them. */
+const REQUESTS_WAIT_MS = 5_000
 
 const REQUEST_STATUS: Record<string, string> = {
   pending: "pending review",

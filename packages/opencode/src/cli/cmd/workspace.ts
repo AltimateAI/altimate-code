@@ -378,7 +378,19 @@ export async function runReviewStatus(directory: string, json: boolean, deps: Re
       out,
       json,
       EXIT.OK,
-      { workspace_id: binding.datamateId, workspace_name: binding.datamateName, ...listed },
+      {
+        workspace_id: binding.datamateId,
+        workspace_name: printable(binding.datamateName),
+        ...listed,
+        // Server text reaches terminals and agent context: made printable here, as the text form is.
+        items: listed.items.map((item) => ({
+          ...item,
+          name: printable(item.name),
+          ...(item.review_reason ? { review_reason: printable(item.review_reason) } : {}),
+          ...(item.reviewed_by_name ? { reviewed_by_name: printable(item.reviewed_by_name) } : {}),
+          ...(item.proposed_by_name ? { proposed_by_name: printable(item.proposed_by_name) } : {}),
+        })),
+      },
       describeReviews(binding.datamateName, listed),
     )
   } catch (err) {

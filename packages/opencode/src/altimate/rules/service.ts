@@ -109,6 +109,9 @@ function triggerDeps(ctx: InstanceContext, model?: string): RuleTrigger.TriggerD
 /** Check the person's skill and knowledge requests now: each new decision is published as `rule.proposal.reviewed`
  * (with its `kind`) to clients listening, and `altimate.rules.changed` asks them to replay when anything was recorded
  * (or `announceChange`). For the refresh timer and "Sync now". Throws only what the poll does not swallow. */
+/** The newest kept decision per directory, as this process last saw it. */
+const lastKept = new Map<string, string>()
+
 export async function pollReviewDecisions(directory: string, opts: { announceChange?: boolean } = {}) {
   const { ReviewNotices } = await import("../workspace/review-notices")
   const result = await ReviewNotices.poll(directory, {
@@ -123,7 +126,16 @@ export async function pollReviewDecisions(directory: string, opts: { announceCha
       })
     },
   })
-  if (result.status === "done" && (opts.announceChange || result.recorded.length))
+  // A decision another process recorded (a plugin's session start, `workspace review decisions`) is not announced by
+  // it, and this poll then finds it already seen: a change in what is kept still asks clients to replay.
+  let keptChanged = false
+  if (result.status === "done") {
+    const newest = (await ReviewNotices.storedState(directory))?.notices.at(-1)
+    const key = newest ? `${newest.kind}:${newest.public_id}:${newest.status}` : ""
+    keptChanged = lastKept.has(directory) && lastKept.get(directory) !== key
+    lastKept.set(directory, key)
+  }
+  if (result.status === "done" && (opts.announceChange || result.recorded.length || keptChanged))
     await Bus.publish(RuleEvents.Event.Changed, { directory }).catch(() => {})
   return result
 }

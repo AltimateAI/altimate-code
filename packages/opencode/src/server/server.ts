@@ -1431,12 +1431,13 @@ export namespace Server {
             actions: [] as string[],
           }))
           const review = await ReviewRequests.listReview(Instance.directory)
+          const { printable } = await import("../altimate/rules/printable")
           return c.json({
             ok: true as const,
             ...(review.status === "ok" ? { workspace: review.workspace } : {}),
             // `ok`, or why skills and knowledge are missing: signed_out, not_linked, account_changed, unsupported, failed.
             review_status: review.status,
-            ...(review.status === "failed" ? { review_error: review.error } : {}),
+            ...(review.status === "failed" ? { review_error: printable(review.error) } : {}),
             ...(review.status === "ok" && !review.complete ? { review_complete: false } : {}),
             requests: [...rules, ...(review.status === "ok" ? review.items.map(ReviewRequests.fromContribution) : [])],
           })
