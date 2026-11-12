@@ -118,11 +118,13 @@ export function relationUse(sql: string): "row" | "unclear" | null {
   const isWord = (t: string | undefined) => !!t && !punct.test(t) && !/^\d/.test(t)
   const unquote = (t: string) => t.replace(/^["`[]|["`\]]$/g, "")
   const tokens = [...code.matchAll(new RegExp(String.raw`${word}|\d[\w.]*|[.,()=<>+\-*/:;]`, "gu"))].map((m) => m[0])
-  // What may follow a FROM item: another item, a join, the end of the list, or a clause.
-  const after = /^(,|\)|;|on|using|join|left|right|full|inner|outer|cross|natural|where|group|order|having|qualify|limit|window|union|intersect|except|select)$/
-  // A join condition (ON, USING) doesn't end the list: a comma after it adds another table.
-  const ends = /^(where|group|order|having|qualify|limit|window|union|intersect|except|select|set|values|returning)$/
-  const keywords = /^(on|using|where|join|left|right|full|inner|outer|cross|natural|lateral|group|order|having|qualify|limit|union|intersect|except|window|as|select)$/
+  // A FROM list ends only at one of these, at a closing parenthesis of its level, or at the end.
+  const ends = /^(where|group|having|qualify|window|order|limit|union|intersect|except)$/
+  const joins = /^(join|left|right|full|inner|outer|cross|natural)$/
+  // Functions whose arguments use FROM as syntax, not as a list of tables (`extract(year from d)`).
+  const fromSyntax = /^(extract|trim|substring|overlay|position)$/
+  // Words that can't be an alias: anything after an item that isn't one of the shapes below is unclear.
+  const reserved = /^(on|using|join|left|right|full|inner|outer|cross|natural|lateral|as|select|where|group|having|qualify|window|order|limit|union|intersect|except|tablesample|pivot|unpivot|match_recognize|at|before|changes|for|start|connect|sample)$/
   const close = (open: number) => {
     let depth = 0
     for (let k = open; k < tokens.length; k++) {
@@ -131,56 +133,92 @@ export function relationUse(sql: string): "row" | "unclear" | null {
     }
     return -1
   }
-  // Functions whose arguments use FROM as syntax, not as a list of tables (`extract(year from d)`).
-  const fromSyntax = /^(extract|trim|substring|overlay|position)$/
+  // An ON condition: read through, nested parentheses whole, up to what ends it at this level.
+  const condition = (k: number) => {
+    while (k < tokens.length) {
+      const t = tokens[k]!
+      if (t === "(") {
+        const end = close(k)
+        if (end < 0) return -1
+        k = end + 1
+        continue
+      }
+      if (t === ")" || t === "," || t === ";" || ends.test(t) || joins.test(t)) return k
+      k++
+    }
+    return k
+  }
   const names = new Set<string>()
   const named = new Set<number>()
-  const inFrom: boolean[] = [false]
+  /** Reads one FROM list, item by item; false when something in it can't be placed. */
+  const readList = (from: number): boolean => {
+    let k = from + 1
+    for (;;) {
+      if (tokens[k] === "lateral") k++
+      if (tokens[k] === "(") {
+        const end = close(k)
+        if (end < 0) return false
+        k = end + 1
+      } else {
+        let last = -1
+        while (isWord(tokens[k]) && !reserved.test(unquote(tokens[k]!))) {
+          last = k
+          if (tokens[k + 1] !== ".") break
+          k += 2
+        }
+        if (last < 0) return false
+        names.add(unquote(tokens[last]!))
+        named.add(last)
+        k = last + 1
+        // A table function (unnest(…), flatten(…), table(…)): what it reads isn't a named column.
+        if (tokens[k] === "(") return false
+      }
+      if (tokens[k] === "as") k++
+      if (isWord(tokens[k]) && !reserved.test(unquote(tokens[k]!))) {
+        names.add(unquote(tokens[k]!))
+        named.add(k)
+        k++
+      }
+      // After an item: the next one, a join condition, or the end of the list.
+      for (;;) {
+        const t = tokens[k]
+        if (t === undefined || t === ";" || t === ")" || ends.test(t)) return true
+        if (t === ",") {
+          k++
+          break
+        }
+        if (joins.test(t)) {
+          while (k < tokens.length && tokens[k] !== "join" && joins.test(tokens[k]!)) k++
+          if (tokens[k] !== "join") return false
+          k++
+          break
+        }
+        if (t === "on") {
+          k = condition(k + 1)
+          if (k < 0) return false
+          continue
+        }
+        if (t === "using") {
+          const end = tokens[k + 1] === "(" ? close(k + 1) : -1
+          if (end < 0) return false
+          k = end + 1
+          continue
+        }
+        return false
+      }
+    }
+  }
   const opener: string[] = [""]
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!
-    if (t === "(") {
-      inFrom.push(false)
-      opener.push(tokens[i - 1] ?? "")
-      continue
+    if (t === "(") opener.push(tokens[i - 1] ?? "")
+    else if (t === ")") {
+      if (opener.length > 1) opener.pop()
+    } else if (t === "from") {
+      // FROM as syntax: extract(year from d), trim(both from s), a is distinct from b.
+      if (fromSyntax.test(opener[opener.length - 1]!) || tokens[i - 1] === "distinct") continue
+      if (!readList(i)) return "unclear"
     }
-    if (t === ")") {
-      if (inFrom.length > 1) (inFrom.pop(), opener.pop())
-      continue
-    }
-    const top = inFrom.length - 1
-    if (t === "from" && fromSyntax.test(opener[top]!)) continue
-    if (t === "from" || t === "join") inFrom[top] = true
-    else if (ends.test(t)) inFrom[top] = false
-    if (!inFrom[top] || !(t === "from" || t === "join" || t === ",")) continue
-    let k: number
-    if (tokens[i + 1] === "(") {
-      // A subquery: read inside on its own level; its alias follows the closing parenthesis.
-      const end = close(i + 1)
-      if (end < 0) return "unclear"
-      k = end + 1
-    } else {
-      let last = -1
-      let j = i + 1
-      while (isWord(tokens[j])) {
-        last = j
-        if (tokens[j + 1] !== ".") break
-        j += 2
-      }
-      if (last < 0 || keywords.test(unquote(tokens[last]!))) return "unclear"
-      names.add(unquote(tokens[last]!))
-      named.add(last)
-      k = last + 1
-      // A table function (unnest(…), flatten(…), table(…)): what it reads isn't a named column.
-      if (tokens[k] === "(") return "unclear"
-    }
-    if (tokens[k] === "as") k++
-    if (isWord(tokens[k]) && !keywords.test(unquote(tokens[k]!))) {
-      names.add(unquote(tokens[k]!))
-      named.add(k)
-      k++
-    }
-    if (k < tokens.length && !after.test(tokens[k]!)) return "unclear"
   }
   for (const [i, raw] of tokens.entries()) {
     if (named.has(i) || !names.has(unquote(raw))) continue

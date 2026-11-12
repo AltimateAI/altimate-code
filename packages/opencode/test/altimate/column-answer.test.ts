@@ -968,6 +968,21 @@ describe("column answer: cleared only when proven", () => {
     expect(relationUse("select c, f.id from shop.main.f f join shop.main.g g on f.id = g.k, shop.main.c")).toBe("row")
     expect(relationUse("select c, f.id from shop.main.f f join shop.main.g g using (id), shop.main.c")).toBe("row")
     expect(relationUse("select f.id from shop.main.f f join shop.main.g g on f.id = g.k, shop.main.c c where c.x > 0")).toBeNull()
+  })
+
+  test("the FROM reader reads a join chain item by item and ends only at a clause, a closing parenthesis or the end", () => {
+    const chain =
+      "from shop.main.a a join shop.main.b b on a.id = b.id left join shop.main.c c using (id) cross join shop.main.d d, shop.main.e e, " +
+      "lateral (select count(*) as n from shop.main.g g where g.k = a.id) l where a.id > 0"
+    // ON, USING, CROSS JOIN, commas and a LATERAL subquery are all read through.
+    expect(relationUse(`select a.id, b.k, c.v, d.w, e.x, l.n ${chain}`)).toBeNull()
+    // So a table listed after them is still watched for whole-row use.
+    expect(relationUse(`select to_json(e) as j ${chain}`)).toBe("row")
+    // Anything the reader can't place stops the proof.
+    expect(relationUse("select a.id from shop.main.a a, lateral flatten(input => a.v) x")).toBe("unclear")
+    expect(relationUse("select a.id from shop.main.a a foo bar")).toBe("unclear")
+    // FROM as syntax is no FROM list.
+    expect(relationUse("select a from shop.main.t where a is distinct from b")).toBeNull()
     expect(relationUse("select id from db.s.f f left join db.s.g g using (id) where f.id > 1")).toBeNull()
   })
 
