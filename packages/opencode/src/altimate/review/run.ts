@@ -318,7 +318,9 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // Resolve the SQL dialect: explicit config wins; otherwise auto-detect from
   // the dbt manifest's `adapter_type` (so a BigQuery/Redshift project isn't
   // analyzed as the snowflake default — wrong-dialect portability suppression).
-  if (!config.dialect) config.dialect = (await detectDialect(manifestAbs)) ?? "snowflake"
+  const detectedDialect = config.dialect ? undefined : await detectDialect(manifestAbs)
+  const dialectKnown = !!config.dialect || !!detectedDialect
+  if (!config.dialect) config.dialect = detectedDialect ?? "snowflake"
 
   // Prefer dbt's catalog.json (real warehouse columns from `dbt docs generate`)
   // for the schema context — complete columns are what make column-lineage
@@ -389,6 +391,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     forceTier: opts.forceTier,
     staleManifest,
     layout,
+    suppressPortability: config.portability === undefined ? dialectKnown : !config.portability,
     scope: {
       baseRef: resolved?.ref ?? opts.base,
       baseSha: resolved?.sha,
