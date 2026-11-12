@@ -740,7 +740,24 @@ describe("tool.task", () => {
           ...stubOps(),
           prompt: (input) =>
             Effect.gen(function* () {
-              const report = { ...assistant, id: MessageID.ascending(), sessionID: input.sessionID, parentID: input.messageID! }
+              // The prompt's own user message, which SessionPrompt.prompt writes with this id; the
+              // child's turns follow it in time.
+              const created = Date.now()
+              yield* sessions.updateMessage({
+                id: input.messageID!,
+                role: "user",
+                sessionID: input.sessionID,
+                agent: "general",
+                model: coreRef,
+                time: { created },
+              })
+              const report = {
+                ...assistant,
+                id: MessageID.ascending(),
+                sessionID: input.sessionID,
+                parentID: input.messageID!,
+                time: { created: created + 1 },
+              }
               yield* sessions.updateMessage(report)
               yield* sessions.updatePart({
                 id: PartID.ascending(),
@@ -756,9 +773,15 @@ describe("tool.task", () => {
                 sessionID: input.sessionID,
                 agent: "general",
                 model: coreRef,
-                time: { created: Date.now() },
+                time: { created: created + 2 },
               })
-              const ack = { ...assistant, id: MessageID.ascending(), sessionID: input.sessionID, parentID: nudge.id }
+              const ack = {
+                ...assistant,
+                id: MessageID.ascending(),
+                sessionID: input.sessionID,
+                parentID: nudge.id,
+                time: { created: created + 3 },
+              }
               yield* sessions.updateMessage(ack)
               yield* sessions.updatePart({
                 id: PartID.ascending(),
