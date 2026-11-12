@@ -480,10 +480,49 @@ const ReviewStatusCommand = cmd({
   },
 })
 
+// For clients that show decisions themselves (the Claude Code plugin's toast): always JSON, always exit 0, so a client
+// can tell an older CLI (no such command, non-JSON) from an answer.
+const ReviewDecisionsCommand = cmd({
+  command: "decisions",
+  describe: "decisions on your skill and knowledge requests, as JSON (for editor and agent plugins)",
+  builder: (yargs) =>
+    yargs
+      .option("directory", DIRECTORY)
+      .option("json", JSON_FLAG)
+      .option("unseen", { type: "boolean", default: false, describe: "Only decisions not given to --host yet (last 14 days)" })
+      .option("mark-seen", { type: "boolean", default: false, describe: "Remember the decisions returned as given to --host" })
+      .option("host", { type: "string", describe: "The client asking, e.g. claude-ui" }),
+  handler: async (args) => {
+    const { ReviewNotices } = await import("@/altimate/workspace/review-notices")
+    const result = await ReviewNotices.hostDecisions(args.directory ?? process.cwd(), {
+      ...(args.host ? { host: args.host } : {}),
+      unseen: args.unseen,
+      markSeen: args["mark-seen"],
+    })
+    const body = result.ok
+      ? {
+          ok: true,
+          decisions: result.decisions.map((d) => ({
+            kind: d.kind,
+            public_id: d.public_id,
+            name: printable(d.name),
+            status: d.status,
+            at: d.at,
+            ...(d.reason ? { reason: printable(d.reason) } : {}),
+            ...(d.reviewer ? { reviewer: printable(d.reviewer) } : {}),
+          })),
+          waiting: result.waiting,
+        }
+      : result
+    process.stdout.write(JSON.stringify(body) + "\n")
+    process.exitCode = 0
+  },
+})
+
 const ReviewCommand = cmd({
   command: "review",
   describe: "your review requests on the linked workspace (approve or reject them in the Altimate web app)",
-  builder: (yargs) => yargs.command(ReviewStatusCommand).demandCommand(),
+  builder: (yargs) => yargs.command(ReviewStatusCommand).command(ReviewDecisionsCommand).demandCommand(),
   async handler() {},
 })
 

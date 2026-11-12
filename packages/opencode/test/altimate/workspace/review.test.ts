@@ -636,3 +636,28 @@ describe("requests for other clients", () => {
     expect(text).toContain("One of the person's skill or knowledge requests is waiting for review")
   })
 })
+
+describe("decisions for clients that show them (workspace review decisions)", () => {
+  test("each decision is given once per host, newest first, with the waiting count", async () => {
+    mine = () => page([contribution({ status: "pending" }), contribution({ public_id: "c-2", status: "pending" })])
+    await poll()
+    mine = () =>
+      page([
+        contribution({ status: "rejected", review_reason: "No", reviewed_by_name: "Olive", reviewed_at: new Date().toISOString() }),
+        contribution({ public_id: "c-2", status: "pending" }),
+      ])
+    const first = await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, markSeen: true })
+    expect(first).toMatchObject({ ok: true, waiting: 1 })
+    if (!first.ok) return
+    expect(first.decisions.map((d) => [d.public_id, d.status, d.reason])).toEqual([["c-1", "rejected", "No"]])
+    // Given to claude-ui: not again for it, still for another host.
+    expect(await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true })).toMatchObject({ ok: true, decisions: [] })
+    const other = await ReviewNotices.hostDecisions(project, { host: "other", unseen: true })
+    expect(other.ok && other.decisions.length).toBe(1)
+  })
+
+  test("without a link or a sign-in it says why", async () => {
+    configured = false
+    expect(await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, waitMs: 500 })).toMatchObject({ ok: false })
+  })
+})

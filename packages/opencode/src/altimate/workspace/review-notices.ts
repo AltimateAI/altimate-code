@@ -82,6 +82,9 @@ export const State = z.object({
   seen: z.array(z.string()).default([]),
   /** The recorded notices, kept for clients to show (replayed from the rules summary). */
   notices: z.array(Notice).default([]),
+  /** Per client that shows decisions itself (`workspace review decisions --host`, e.g. the Claude Code plugin's toast):
+   * the `kind:public_id:status` keys it was given with `--mark-seen`. Absent from older files. */
+  host_seen: z.record(z.string(), z.array(z.string())).default({}),
 })
 export type State = z.infer<typeof State>
 
@@ -129,7 +132,7 @@ async function locked<T>(scope: Scope, change: (state: State) => Promise<{ state
   return Flock.withLock(
     `workspace-reviews:${path.basename(stateFile(scope))}`,
     async () => {
-      const current = (await read(scope)) ?? { version: 1 as const, scope, pending: [], approved: [], seen: [], notices: [] }
+      const current = (await read(scope)) ?? { version: 1 as const, scope, pending: [], approved: [], seen: [], notices: [], host_seen: {} }
       const { state, result } = await change(current)
       const next = cap(state)
       if (JSON.stringify(next) !== JSON.stringify(current)) await write(next)
@@ -347,6 +350,54 @@ export async function storedState(directory: string): Promise<State | undefined>
   } catch (error) {
     log.warn("could not read the kept review notices", { error: String(error) })
     return undefined
+  }
+}
+
+/** How many seen keys one host keeps: the state keeps far fewer notices. */
+export const MAX_HOST_SEEN = 200
+/** A decision older than this is not given as unseen: a host's first check would otherwise report every kept one. */
+export const HOST_DECISION_MAX_AGE_MS = 14 * 24 * 60 * 60_000
+
+export type HostDecisions =
+  | { ok: true; decisions: Notice[]; waiting: number }
+  | { ok: false; status: "off" | "signed_out" | "not_linked" | "unsupported" | "account_changed" | "account_unconfirmed" | "failed" }
+
+/** The person's skill and knowledge decisions on the project's workspace, newest first, after one poll bounded by
+ * `waitMs` (past it, what was kept). `unseen` with `host`: only those not given to that host yet, decided within
+ * `HOST_DECISION_MAX_AGE_MS`; `markSeen`: remember the ones returned for that host. For clients that show decisions
+ * themselves (`workspace review decisions`). Never throws. */
+export async function hostDecisions(
+  directory: string,
+  opts: { host?: string; unseen?: boolean; markSeen?: boolean; waitMs?: number } = {},
+): Promise<HostDecisions> {
+  try {
+    const polled = await Promise.race([
+      poll(directory),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), opts.waitMs ?? 3_000).unref?.()),
+    ])
+    const state = await storedState(directory)
+    if (!state) {
+      const status = polled && polled.status !== "done" && polled.status !== "failed" ? polled.status : "not_linked"
+      return { ok: false, status }
+    }
+    if (polled && polled.status === "unsupported") return { ok: false, status: "unsupported" }
+    const key = (n: Notice) => `${n.kind}:${n.public_id}:${n.status}`
+    const host = opts.host
+    const seen = new Set(host ? (state.host_seen[host] ?? []) : [])
+    const now = Date.now()
+    const decisions = [...state.notices]
+      .reverse()
+      .filter((n) => !opts.unseen || !host || (!seen.has(key(n)) && !(now - Date.parse(n.at) > HOST_DECISION_MAX_AGE_MS)))
+    if (opts.markSeen && host && decisions.length)
+      await locked(state.scope, async (current) => {
+        const kept = current.host_seen[host] ?? []
+        const added = decisions.map(key).filter((k) => !kept.includes(k))
+        return { state: { ...current, host_seen: { ...current.host_seen, [host]: [...kept, ...added].slice(-MAX_HOST_SEEN) } }, result: undefined }
+      }).catch((error) => log.warn("could not mark review decisions seen", { error: String(error) }))
+    return { ok: true, decisions, waiting: state.pending.length }
+  } catch (error) {
+    log.warn("review decisions failed", { error: String(error) })
+    return { ok: false, status: "failed" }
   }
 }
 
