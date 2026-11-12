@@ -17,14 +17,18 @@ import { Global } from "@/global"
 import { Log } from "@/altimate/util/log"
 import { Telemetry } from "@/altimate/telemetry"
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding"
-import { currentScope } from "./state"
+import { currentScope, type AccountKey } from "./state"
 
 const log = Log.create({ service: "workspace-first-events" })
 
 export type FirstEvent = "first_prompt_sent" | "first_job_completed"
+type Scope = Pick<AccountKey, "tenant" | "apiUrl">
 
 /** What this process already knows is sent, so a bound turn skips the filesystem after the first. */
 const sent = new Set<string>()
+/** Set once a mark couldn't be written, so a state directory that stays unwritable logs once, not
+ * every turn. The next turn still tries again. */
+let warnedUnwritable = false
 
 /**
  * True the one time this machine should send `event` for this workspace.
@@ -38,9 +42,11 @@ const sent = new Set<string>()
  * mark that can't be written claims nothing either, and the next turn tries again. The claim comes
  * before the send, so a process killed between the two loses the row rather than duplicating it.
  */
-export async function claim(event: FirstEvent, workspaceId: number): Promise<boolean> {
+export async function claim(event: FirstEvent, workspaceId: number, scope?: Scope): Promise<boolean> {
   if (!Telemetry.isEnabled()) return false
-  const scope = await currentScope().catch(() => null)
+  // The credential the turn's binding was resolved under, when the caller has it: the workspace id
+  // belongs to that tenant, and the turn doesn't read the credentials again.
+  scope ??= (await currentScope().catch(() => null)) ?? undefined
   if (!scope) return false
   const id = createHash("sha256")
     .update(JSON.stringify([scope.tenant, scope.apiUrl, workspaceId, event]))
@@ -49,34 +55,49 @@ export async function claim(event: FirstEvent, workspaceId: number): Promise<boo
   if (sent.has(id)) return false
   const dir = path.join(Global.Path.state, "altimate-workspace-first-events")
   // Apart from the write: only the exclusive create may answer EEXIST with "already sent". A failure
-  // here shows up on the write below.
-  await mkdir(dir, { recursive: true }).catch(() => undefined)
+  // here shows up on the write below, and is logged with it, since it is usually the cause.
+  const dirError = await mkdir(dir, { recursive: true }).then(
+    () => undefined,
+    (err: unknown) => String(err),
+  )
   try {
+    // `wx` makes the create exclusive on every platform. `mode` has no effect on Windows, where the
+    // file takes the state directory's permissions.
     await writeFile(path.join(dir, id), "", { flag: "wx", mode: 0o600 })
     sent.add(id)
     return true
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "EEXIST") sent.add(id)
-    else log.warn("could not record a workspace first event", { event, err: String(err) })
+    else if (!warnedUnwritable) {
+      warnedUnwritable = true
+      log.warn("could not record a workspace first event; later failures in this process are not logged", {
+        event,
+        err: String(err),
+        ...(dirError && { dirError }),
+      })
+    }
     return false
   }
 }
 
 /** A typed prompt: the onboarding row and the workspace row are one row when both apply. */
-export async function promptSent(sessionID: string, workspaceId: number | undefined): Promise<void> {
+export async function promptSent(sessionID: string, workspaceId: number | undefined, scope?: Scope): Promise<void> {
   const onboarding = OnboardingTelemetry.isOnboardingSession(sessionID) && OnboardingTelemetry.claimFirstPrompt(sessionID)
-  const inWorkspace = workspaceId !== undefined && (await claim("first_prompt_sent", workspaceId))
+  const inWorkspace = workspaceId !== undefined && (await claim("first_prompt_sent", workspaceId, scope))
   if (onboarding || inWorkspace) {
-    await OnboardingTelemetry.emit({ type: "first_prompt_sent", workspace_id: workspaceId }, sessionID)
+    await OnboardingTelemetry.emit(
+      { type: "first_prompt_sent", workspace_id: workspaceId, origin: onboarding ? "onboarding" : "workspace" },
+      sessionID,
+    )
   }
 }
 
 /** A turn in a workspace that ended `completed` with at least one tool call that didn't fail. */
-export async function jobCompleted(sessionID: string, workspaceId: number | undefined): Promise<void> {
+export async function jobCompleted(sessionID: string, workspaceId: number | undefined, scope?: Scope): Promise<void> {
   if (workspaceId === undefined) return
-  if (await claim("first_job_completed", workspaceId)) {
+  if (await claim("first_job_completed", workspaceId, scope)) {
     await OnboardingTelemetry.emit(
-      { type: "first_job_completed", job: "something_else", workspace_id: workspaceId },
+      { type: "first_job_completed", job: "something_else", workspace_id: workspaceId, origin: "workspace" },
       sessionID,
     )
   }
@@ -85,4 +106,5 @@ export async function jobCompleted(sessionID: string, workspaceId: number | unde
 /** Test seam: drops this process's memory of the marks, as a new process would start. */
 export function resetForTest() {
   sent.clear()
+  warnedUnwritable = false
 }
