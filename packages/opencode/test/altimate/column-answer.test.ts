@@ -962,7 +962,9 @@ describe("column answer: cleared only when proven", () => {
     }
     expect(relationUse("select id from my-project.ds.f o")).toBe("unclear")
     // FROM inside extract/trim/substring is syntax, not a table list; inside other functions it stays a table list.
-    expect(relationUse("select extract(year from d) as y, d from db.s.f")).toBeNull()
+    for (const expression of ["extract(year from d)", "trim(both from d)", "substring(d from 1 for 2)", "overlay(d placing x from 1)"]) {
+      expect(relationUse(`select ${expression} as y, d from db.s.f`)).toBeNull()
+    }
     expect(relationUse("select array(select t from db.s.g t) as a from db.s.f")).toBe("row")
     // A table after a comma that follows a join condition is still in the list, so its whole row counts.
     expect(relationUse("select c, f.id from shop.main.f f join shop.main.g g on f.id = g.k, shop.main.c")).toBe("row")
@@ -984,6 +986,22 @@ describe("column answer: cleared only when proven", () => {
     // FROM as syntax is no FROM list.
     expect(relationUse("select a from shop.main.t where a is distinct from b")).toBeNull()
     expect(relationUse("select id from db.s.f f left join db.s.g g using (id) where f.id > 1")).toBeNull()
+    // OFFSET and FETCH end the list; FOR doesn't, since FOR SYSTEM_TIME AS OF sits inside one.
+    expect(relationUse("select f.id from db.s.f f order by f.id offset 5 rows fetch first 10 rows only")).toBeNull()
+    expect(relationUse("select f.id from db.s.f f offset 5")).toBeNull()
+    expect(relationUse("select f.id from db.s.f f for update")).toBe("unclear")
+  })
+
+  test("a parenthesised join is read as a FROM list, so its tables are watched for whole-row use", () => {
+    expect(relationUse("select to_json(b) from (a join b on a.id = b.id)")).toBe("row")
+    expect(relationUse("select to_json(c) from a join (b join c on b.id = c.id) on a.id = b.id")).toBe("row")
+    expect(relationUse("select a.id, c.v from ((a join b on a.id = b.id) join c using (id)) j where a.id > 0")).toBeNull()
+    expect(relationUse("select x.id from ((select 1 as id) x join b on x.id = b.id)")).toBeNull()
+    // A subquery's own FROM is still read where the scan meets it; a parenthesised group it can't place is unclear.
+    expect(relationUse("select t.id from (select to_json(b) as j, b.id from b) t")).toBe("row")
+    expect(relationUse("select u.id from ((select 1 as id) union (select 2 as id)) u")).toBe("unclear")
+    const a = columnAnswer(write(base(`select to_json(f) as j from (${T("f")} f join ${T("f")} g on f.id = g.id)`)), "f", "val")
+    expect(a.cleared.map((one) => one.name)).not.toContain("r")
   })
 
   test("the same manifest gives the same may_carry list, in name order", () => {

@@ -107,9 +107,10 @@ export function quotingIsClear(sql: string): boolean {
 /**
  * How the SQL's FROM lists read: "row" when a relation or its alias is used as a value anywhere other than
  * `alias.column` (`to_json(t)`, `select t from t`, `t as row`, `t::text`); "unclear" when a FROM list holds
- * something other than a named relation or a parenthesised subquery, each with an optional alias (a
- * table function, TABLESAMPLE, PIVOT, an unquoted dash, …); null otherwise. Fail-closed: anything it can't
- * classify is "unclear". A column that shares a table's name counts as a row, which only adds doubt.
+ * something other than a named relation, a parenthesised subquery or a parenthesised join of these, each
+ * with an optional alias (a table function, TABLESAMPLE, PIVOT, an unquoted dash, …); null otherwise.
+ * Fail-closed: anything it can't classify is "unclear". A column that shares a table's name counts as a row,
+ * which only adds doubt.
  */
 export function relationUse(sql: string): "row" | "unclear" | null {
   const code = stripSql(sql).toLowerCase()
@@ -119,12 +120,12 @@ export function relationUse(sql: string): "row" | "unclear" | null {
   const unquote = (t: string) => t.replace(/^["`[]|["`\]]$/g, "")
   const tokens = [...code.matchAll(new RegExp(String.raw`${word}|\d[\w.]*|[.,()=<>+\-*/:;]`, "gu"))].map((m) => m[0])
   // A FROM list ends only at one of these, at a closing parenthesis of its level, or at the end.
-  const ends = /^(where|group|having|qualify|window|order|limit|union|intersect|except)$/
+  const ends = /^(where|group|having|qualify|window|order|limit|offset|fetch|union|intersect|except)$/
   const joins = /^(join|left|right|full|inner|outer|cross|natural)$/
   // Functions whose arguments use FROM as syntax, not as a list of tables (`extract(year from d)`).
-  const fromSyntax = /^(extract|trim|substring|overlay|position)$/
+  const fromSyntax = /^(extract|trim|substring|overlay)$/
   // Words that can't be an alias: anything after an item that isn't one of the shapes below is unclear.
-  const reserved = /^(on|using|join|left|right|full|inner|outer|cross|natural|lateral|as|select|where|group|having|qualify|window|order|limit|union|intersect|except|tablesample|pivot|unpivot|match_recognize|at|before|changes|for|start|connect|sample)$/
+  const reserved = /^(on|using|join|left|right|full|inner|outer|cross|natural|lateral|as|select|where|group|having|qualify|window|order|limit|offset|fetch|union|intersect|except|tablesample|pivot|unpivot|match_recognize|at|before|changes|for|start|connect|sample)$/
   const close = (open: number) => {
     let depth = 0
     for (let k = open; k < tokens.length; k++) {
@@ -150,14 +151,16 @@ export function relationUse(sql: string): "row" | "unclear" | null {
   }
   const names = new Set<string>()
   const named = new Set<number>()
-  /** Reads one FROM list, item by item; false when something in it can't be placed. */
-  const readList = (from: number): boolean => {
+  /** Reads one FROM list, item by item: the index it ends at, or -1 when something in it can't be placed. */
+  const readList = (from: number): number => {
     let k = from + 1
     for (;;) {
       if (tokens[k] === "lateral") k++
       if (tokens[k] === "(") {
         const end = close(k)
-        if (end < 0) return false
+        if (end < 0) return -1
+        // A subquery's own FROM is read where the scan below meets it; a parenthesised join is read here.
+        if (!/^(select|with|from)$/.test(tokens[k + 1] ?? "") && readList(k) !== end) return -1
         k = end + 1
       } else {
         let last = -1
@@ -166,12 +169,12 @@ export function relationUse(sql: string): "row" | "unclear" | null {
           if (tokens[k + 1] !== ".") break
           k += 2
         }
-        if (last < 0) return false
+        if (last < 0) return -1
         names.add(unquote(tokens[last]!))
         named.add(last)
         k = last + 1
         // A table function (unnest(…), flatten(…), table(…)): what it reads isn't a named column.
-        if (tokens[k] === "(") return false
+        if (tokens[k] === "(") return -1
       }
       if (tokens[k] === "as") k++
       if (isWord(tokens[k]) && !reserved.test(unquote(tokens[k]!))) {
@@ -182,29 +185,29 @@ export function relationUse(sql: string): "row" | "unclear" | null {
       // After an item: the next one, a join condition, or the end of the list.
       for (;;) {
         const t = tokens[k]
-        if (t === undefined || t === ";" || t === ")" || ends.test(t)) return true
+        if (t === undefined || t === ";" || t === ")" || ends.test(t)) return k
         if (t === ",") {
           k++
           break
         }
         if (joins.test(t)) {
           while (k < tokens.length && tokens[k] !== "join" && joins.test(tokens[k]!)) k++
-          if (tokens[k] !== "join") return false
+          if (tokens[k] !== "join") return -1
           k++
           break
         }
         if (t === "on") {
           k = condition(k + 1)
-          if (k < 0) return false
+          if (k < 0) return -1
           continue
         }
         if (t === "using") {
           const end = tokens[k + 1] === "(" ? close(k + 1) : -1
-          if (end < 0) return false
+          if (end < 0) return -1
           k = end + 1
           continue
         }
-        return false
+        return -1
       }
     }
   }
@@ -217,7 +220,7 @@ export function relationUse(sql: string): "row" | "unclear" | null {
     } else if (t === "from") {
       // FROM as syntax: extract(year from d), trim(both from s), a is distinct from b.
       if (fromSyntax.test(opener[opener.length - 1]!) || tokens[i - 1] === "distinct") continue
-      if (!readList(i)) return "unclear"
+      if (readList(i) < 0) return "unclear"
     }
   }
   for (const [i, raw] of tokens.entries()) {
