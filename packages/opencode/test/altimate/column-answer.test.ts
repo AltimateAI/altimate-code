@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
 import { columnReach } from "../../src/altimate/native/dbt/column-reach"
-import { clearLineageCaches, hasNestedWith, howOf, shapeFlags, stripAggFilter } from "../../src/altimate/native/dbt/project-lineage"
+import { clearLineageCaches, hasNestedWith, howOf, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -897,6 +897,24 @@ describe("column answer: cleared only when proven", () => {
     // A `*` is a reason to doubt, not a failure to read: the star reader isn't listed as unresolved.
     const star = columnAnswer(write(base(`select id, hash(*) as h from ${T("f")} where val > 0`)), "f", "val")
     expect(star.unresolved.map((u) => named(star, u.model))).not.toContain("r")
+  })
+
+  test("a quoted name holding comment marks is one name, so a filter on it still counts", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], 'select 1 as id, 2 as "a--b", 3 as "c/*d"', ["id", "a--b", "c/*d"]),
+        "model.shop.r": model("r", ["f"], `select id from ${T("f")} where "a--b" > 0`),
+        "model.shop.s": model("s", ["f"], `select id from ${T("f")} where "c/*d" > 0 and id > 0`),
+      },
+    }
+    const path = write(m)
+    expect(columnAnswer(path, "f", "a--b").cleared.map((one) => one.name)).not.toContain("r")
+    expect(columnAnswer(path, "f", "c/*d").cleared.map((one) => one.name)).not.toContain("s")
+    // The engine can't parse these names today; the text check keeps them whole either way.
+    expect(stripSql('select id from f where "a--b" > 0')).toBe('select id from f where "a--b" > 0')
+    expect(stripSql("select id from f where `c/*d` > 0 -- note")).toBe("select id from f where `c/*d` > 0  ")
   })
 
   test("the same manifest gives the same may_carry list, in name order", () => {

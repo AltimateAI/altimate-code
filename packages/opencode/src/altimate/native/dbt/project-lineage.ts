@@ -78,8 +78,9 @@ export function stripAggFilter(sql: string): string {
  * none can swallow another.
  */
 export function stripSql(sql: string): string {
-  return sql.replace(/'(?:[^']|'')*'|\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (match) =>
-    match.startsWith("'") || match.startsWith("$") ? "''" : " ",
+  // A quoted name ("a--b", `c/*d`) is kept whole, so comment marks inside it start no comment.
+  return sql.replace(/"(?:[^"]|"")*"|`(?:[^`]|``)*`|'(?:[^']|'')*'|\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (match) =>
+    match.startsWith('"') || match.startsWith("`") ? match : match.startsWith("'") || match.startsWith("$") ? "''" : " ",
   )
 }
 
