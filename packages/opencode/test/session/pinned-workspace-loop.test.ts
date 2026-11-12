@@ -27,9 +27,10 @@ import {
   readLocalBinding,
   recordApprovedBinding,
   TURN_PIN_WAIT_MS,
+  turnBinding,
 } from "../../src/altimate/workspace/state"
 import { stubEmptySkillList } from "../altimate/workspace/skill-list-fixture"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import { provideTmpdirServerLegacy } from "./legacy-instance"
 import { LSP } from "@/lsp/lsp"
@@ -64,6 +65,9 @@ const mcp = Layer.succeed(
   }),
 )
 
+/** The ranged-file attachment's symbol lookup. Instant unless a test slows it down. */
+let symbolLookup: () => Promise<never[]> = async () => []
+
 const lsp = Layer.succeed(
   LSP.Service,
   LSP.Service.of({
@@ -76,7 +80,7 @@ const lsp = Layer.succeed(
     definition: () => Effect.succeed([]),
     references: () => Effect.succeed([]),
     implementation: () => Effect.succeed([]),
-    documentSymbol: () => Effect.succeed([]),
+    documentSymbol: () => Effect.promise(() => symbolLookup()),
     workspaceSymbol: () => Effect.succeed([]),
     prepareCallHierarchy: () => Effect.succeed([]),
     incomingCalls: () => Effect.succeed([]),
@@ -154,6 +158,7 @@ const originalKillSwitch = process.env.ALTIMATE_DISABLE_WORKSPACE
 
 beforeEach(() => {
   rows = []
+  symbolLookup = async () => []
   delete process.env.ALTIMATE_DISABLE_WORKSPACE
   // Cleared, so a pin in the runner's own environment can't decide the unpinned case; restored after.
   inheritedPin = Object.fromEntries(PIN_VARS.map((name) => [name, process.env[name]]))
@@ -352,6 +357,62 @@ it.live("a directory attachment's read names the turn's workspace, as a file's d
       ])
 
       expect(reads().map((row) => row.workspace_id)).toEqual([PINNED])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 60_000 },
+)
+
+it.live("a prompt that fails leaves no verdict, even from an attachment read that ends after the failure", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir }) {
+      accountSees([{ id: LINKED, name: "project-link" }])
+      yield* linkProject(dir)
+      // The ranged file's symbol lookup outlasts the missing directory, whose failed read fails the prompt.
+      symbolLookup = () => new Promise((done) => setTimeout(() => done([]), 300))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const session = yield* sessions.create({
+        title: "a session",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      const exit = yield* Effect.exit(
+        prompt.prompt({
+          sessionID: session.id,
+          agent: "build",
+          parts: [
+            { type: "text", text: "read these" },
+            {
+              type: "file",
+              url: pathToFileURL(path.join(dir, "missing-dir")).href,
+              filename: "missing-dir",
+              mime: "application/x-directory",
+            },
+            {
+              type: "file",
+              url: `${pathToFileURL(path.join(dir, "missing.txt")).href}?start=3&end=3`,
+              filename: "missing.txt",
+              mime: "text/plain",
+            },
+          ],
+        }),
+      )
+      expect(exit._tag).toBe("Failure")
+      // Both attachments' reads have run: the ranged file's row is the last thing its part does.
+      yield* pollWithTimeout(
+        Effect.sync(() => (reads().length === 2 ? true : undefined)),
+        "the ranged file's read never ran",
+      )
+      yield* Effect.promise(() =>
+        recordApprovedBinding(
+          dir,
+          { datamateId: RELINKED, datamateName: "relinked", linkedAt: Date.now(), repoRemote: null, projectPath: dir } as never,
+          { awaitBackfill: true },
+        ),
+      )
+
+      // A loop started now without a prompt (summarize, resume) resolves its own verdict.
+      expect((yield* Effect.promise(() => turnBinding(session.id, dir)))?.datamateId).toBe(RELINKED)
     }),
     { git: true, config: providerCfg },
   ),

@@ -17,7 +17,13 @@ import { SessionProjector } from "@opencode-ai/core/session/projector"
 import { Telemetry } from "../../src/altimate/telemetry"
 import * as OnboardingTelemetry from "../../src/altimate/telemetry/onboarding"
 import { AltimateApi } from "../../src/altimate/api/client"
-import { readLocalBinding, recordApprovedBinding } from "../../src/altimate/workspace/state"
+import {
+  __resetPinValidation,
+  currentScope,
+  readLocalBinding,
+  recordApprovedBinding,
+} from "../../src/altimate/workspace/state"
+import { Plugin } from "../../src/plugin"
 import * as WorkspaceFirstEvents from "../../src/altimate/workspace/first-events"
 import { stubEmptySkillList } from "../altimate/workspace/skill-list-fixture"
 import { pollWithTimeout, testEffect } from "../lib/effect"
@@ -137,11 +143,27 @@ type Creds = Awaited<ReturnType<typeof AltimateApi.getCredentials>>
 
 let rows: Row[] = []
 let restore: (() => void)[] = []
+/** The tenant the stubbed credential names. A test can switch it while a turn runs. */
+let tenant = "acme"
 let stateHome = ""
 const originalStateHome = process.env.OPENCODE_TEST_STATE_HOME
+// The suite's preload turns the workspace feature off, and with it off a turn never reads the pin. These
+// tests turn it on, as a user's CLI has it, and clear any pin in the runner's own environment.
+const PIN_VARS = [
+  "ALTIMATE_CODE_SERVE",
+  "ALTIMATE_PINNED_WORKSPACE_ID",
+  "ALTIMATE_PINNED_WORKSPACE_NAME",
+  "ALTIMATE_PINNED_WORKSPACE_ROOT",
+]
+const inherited = Object.fromEntries(
+  ["ALTIMATE_DISABLE_WORKSPACE", ...PIN_VARS].map((name) => [name, process.env[name]]),
+)
 
 beforeEach(() => {
   rows = []
+  tenant = "acme"
+  for (const name of Object.keys(inherited)) delete process.env[name]
+  __resetPinValidation()
   stateHome = mkdtempSync(path.join(os.tmpdir(), "first-events-loop-state-"))
   process.env.OPENCODE_TEST_STATE_HOME = stateHome
   WorkspaceFirstEvents.resetForTest()
@@ -149,7 +171,7 @@ beforeEach(() => {
   const track = spyOn(Telemetry, "track").mockImplementation((event) => void rows.push(event as unknown as Row))
   const enabled = spyOn(Telemetry, "isEnabled").mockImplementation(() => true)
   const creds = spyOn(AltimateApi, "getCredentials").mockImplementation(
-    async () => ({ altimateInstanceName: "acme", altimateUrl: "https://api.test", altimateApiKey: "k" }) as Creds,
+    async () => ({ altimateInstanceName: tenant, altimateUrl: "https://api.test", altimateApiKey: "k" }) as Creds,
   )
   const configured = spyOn(AltimateApi, "isConfigured").mockImplementation(async () => true)
   restore = [
@@ -164,6 +186,10 @@ beforeEach(() => {
 afterEach(() => {
   for (const undo of restore) undo()
   OnboardingTelemetry.resetForTest()
+  for (const [name, value] of Object.entries(inherited)) {
+    if (value === undefined) delete process.env[name]
+    else process.env[name] = value
+  }
   if (originalStateHome === undefined) delete process.env.OPENCODE_TEST_STATE_HOME
   else process.env.OPENCODE_TEST_STATE_HOME = originalStateHome
   rmSync(stateHome, { recursive: true, force: true })
@@ -435,6 +461,71 @@ it.live("a subagent's working turn is not the workspace's job, and the parent's 
       yield* llm.text("parent answer")
       yield* prompt.prompt({ sessionID: parent.id, agent: "build", parts: [{ type: "text", text: "typed" }] })
       expect(firstJobs()).toEqual([[LINKED, "something_else"]])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
+
+it.live("a tool call's plugins get the credential its turn started under, not one switched to mid-turn", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      yield* linkProject(dir)
+      const seen: { turn?: string; now?: string }[] = []
+      const trigger = Plugin.trigger
+      const spy = spyOn(Plugin, "trigger").mockImplementation((async (name: string, input: any, output: any) => {
+        // The user signs in to another tenant while the tool runs.
+        if (name === "tool.execute.before") tenant = "other"
+        if (name === "tool.execute.after") {
+          seen.push({
+            turn: WorkspaceFirstEvents.callScope(input.callID)?.tenant,
+            now: (await currentScope())?.tenant,
+          })
+        }
+        return (trigger as any)(name, input, output)
+      }) as never)
+      restore.push(() => spy.mockRestore())
+      yield* turn(dir, llm, { tool: true })
+
+      expect(seen).toEqual([{ turn: "acme", now: "other" }])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
+
+it.live("with the workspace kill switch set, a linked project sends neither row, and both come once it is off", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      yield* linkProject(dir)
+      process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+      yield* turn(dir, llm, { tool: true })
+
+      expect(firstPrompts()).toEqual([])
+      expect(firstJobs()).toEqual([])
+      // The turn's other rows still name the saved link.
+      expect(named("task_outcome_signal").map((row) => row.workspace_id)).toEqual([LINKED])
+
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      yield* turn(dir, llm, { tool: true })
+
+      expect(firstPrompts()).toEqual([LINKED])
+      expect(firstJobs()).toEqual([[LINKED, "something_else"]])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
+
+it.live("with the workspace kill switch set, an onboarding session's row names no workspace", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      yield* linkProject(dir)
+      process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+      yield* turn(dir, llm, { before: (id) => OnboardingTelemetry.markOnboardingSession(id) })
+
+      expect(firstPrompts()).toEqual([undefined])
+      expect(origins("first_prompt_sent")).toEqual(["onboarding"])
     }),
     { git: true, config: providerCfg },
   ),

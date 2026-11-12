@@ -125,7 +125,13 @@ import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
 // altimate_change start — the session's bound workspace rides on every telemetry row; workspace rules canonicalize bound
 // directories like the bindings cache does
-import { canonicalDirectory, endTurnBinding, turnBinding, unvalidatedTurnBinding } from "@/altimate/workspace/state"
+import {
+  canonicalDirectory,
+  endTurnBinding,
+  turnBinding,
+  unvalidatedTurnBinding,
+  type AccountKey,
+} from "@/altimate/workspace/state"
 
 /** The session's workspace use, as session_end fields. Read only: the row is tracked first, then the
  * turn ends its telemetry entries (`Telemetry.endSession`), so the row itself still carries the
@@ -1850,6 +1856,7 @@ export namespace SessionPrompt {
               // altimate_change start — file rules append only to this tool result
               lessons,
               workspaceId: boundWorkspace?.datamateId,
+              workspaceScope: boundWorkspace?.scope,
               turn: telemetryTurn,
               // altimate_change end
             }),
@@ -2883,6 +2890,8 @@ export namespace SessionPrompt {
     /** The workspace the calling turn resolved, for the rows its MCP calls emit, and the turn itself,
      * so a call landing after the turn was replaced does not count toward the replacement. */
     workspaceId?: number
+    /** The credential that turn's workspace was resolved under, noted for each tool call's plugins. */
+    workspaceScope?: AccountKey
     turn?: number
     // altimate_change end
   }) {
@@ -3008,6 +3017,8 @@ export namespace SessionPrompt {
             // altimate_change start — stamp authoritative tool source so clients render the right
             // badge. Shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
             const stamped = stampRegistryToolSource(output, item)
+            // The turn's credential, for this call's plugins: a first-event mark names its tenant.
+            using _callScope = WorkspaceFirstEvents.noteCallScope(ctx.callID, input.workspaceScope)
             // altimate_change end
             await Plugin.trigger(
               "tool.execute.after",
@@ -3233,6 +3244,14 @@ export namespace SessionPrompt {
         ? await unvalidatedTurnBinding(Instance.directory)
         : await turnBinding(input.sessionID, Instance.directory)
       )?.datamateId
+    // Every part settles before a failed one is rethrown. A part still running after another failed could
+    // otherwise read the turn's workspace once `prompt` has cleared it, and leave a verdict for the next
+    // loop started without a prompt (summarize, resume) to take.
+    function settled<T>(results: PromiseSettledResult<T>[]): T[] {
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected")
+      if (failed) throw failed.reason
+      return results.map((result) => (result as PromiseFulfilledResult<T>).value)
+    }
     // altimate_change end
     const agentName = input.agent ?? (await Agent.defaultAgent())
     const agent = await Agent.get(agentName)
@@ -3288,7 +3307,9 @@ export namespace SessionPrompt {
       id: part.id ? PartID.make(part.id) : PartID.ascending(),
     })
 
-    const parts = await Promise.all(
+    // altimate_change start — every part settles before a failure is rethrown (see `settled`)
+    const parts = await Promise.allSettled(
+      // altimate_change end
       input.parts.map(async (part): Promise<Draft<MessageV2.Part>[]> => {
         if (part.type === "file") {
           // before checking the protocol we check if this is an mcp resource because it needs special handling
@@ -3618,7 +3639,9 @@ export namespace SessionPrompt {
           },
         ]
       }),
-    ).then((x) => x.flat().map(assign))
+      // altimate_change start — every part settles before a failure is rethrown (see `settled`)
+    ).then((x) => settled(x).flat().map(assign))
+    // altimate_change end
 
     await Plugin.trigger(
       "chat.message",

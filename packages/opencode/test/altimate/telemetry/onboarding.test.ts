@@ -123,6 +123,14 @@ async function runTool(hooks: any, input: any, output: any) {
 
 describe("activation events", () => {
   const SESSION = "ses_test"
+  // The suite's preload sets the workspace kill switch. A test that needs workspaces on, as a user's
+  // CLI has them, clears it, and it is put back after each test.
+  const KILL_SWITCH = process.env.ALTIMATE_DISABLE_WORKSPACE
+  const workspacesOn = () => delete process.env.ALTIMATE_DISABLE_WORKSPACE
+  afterEach(() => {
+    if (KILL_SWITCH === undefined) delete process.env.ALTIMATE_DISABLE_WORKSPACE
+    else process.env.ALTIMATE_DISABLE_WORKSPACE = KILL_SWITCH
+  })
 
   async function plugin() {
     return OnboardingTelemetryPlugin({} as any)
@@ -221,6 +229,7 @@ describe("activation events", () => {
   })
 
   test("the first job's row names the workspace the hook input carries", async () => {
+    workspacesOn()
     const events = captureEvents()
     const hooks = await plugin()
     await startOnboarding(hooks, "skip")
@@ -240,6 +249,7 @@ describe("activation events", () => {
   })
 
   test("the first job's row marks its workspace, so the workspace's own row isn't sent after it", async () => {
+    workspacesOn()
     await withTestStateHome(async () => {
       spyOn(Telemetry, "isEnabled").mockImplementation(() => true)
       spyOn(AltimateApi, "isConfigured").mockImplementation(async () => true)
@@ -260,6 +270,70 @@ describe("activation events", () => {
 
       expect(await WorkspaceFirstEvents.claim("first_job_completed", 7)).toBe(false)
       expect(await WorkspaceFirstEvents.claim("first_job_completed", 8)).toBe(true)
+      WorkspaceFirstEvents.resetForTest()
+    })
+  })
+
+  test("the first job's mark is the tool's own turn's tenant, when the credential switched before a late return", async () => {
+    workspacesOn()
+    await withTestStateHome(async () => {
+      spyOn(Telemetry, "isEnabled").mockImplementation(() => true)
+      spyOn(AltimateApi, "isConfigured").mockImplementation(async () => true)
+      // By the time the tool returns, the user has signed in to another tenant.
+      spyOn(AltimateApi, "getCredentials").mockImplementation(
+        async () => ({ altimateInstanceName: "other", altimateUrl: "https://api.test", altimateApiKey: "k2" }) as never,
+      )
+      WorkspaceFirstEvents.resetForTest()
+      captureEvents()
+      const hooks = await plugin()
+      await startOnboarding(hooks, "skip")
+      const acme = { tenant: "acme", apiUrl: "https://api.test" }
+      const other = { tenant: "other", apiUrl: "https://api.test" }
+
+      // The cancelled turn's call, and its replacement's, both still running: each trigger site notes
+      // its own turn's credential.
+      using _late = WorkspaceFirstEvents.noteCallScope("c3late", acme)
+      using _replacement = WorkspaceFirstEvents.noteCallScope("c9new", other)
+      await runTool(
+        hooks,
+        { tool: "sample_setup", sessionID: SESSION, callID: "c3late", args: {}, workspaceId: 7 },
+        { title: "", output: "", metadata: { success: true } },
+      )
+      await settle()
+
+      expect(await WorkspaceFirstEvents.claim("first_job_completed", 7, acme)).toBe(false)
+      // The other tenant's workspace 7 is a different workspace: its own first row is still sent.
+      expect(await WorkspaceFirstEvents.claim("first_job_completed", 7, other)).toBe(true)
+      WorkspaceFirstEvents.resetForTest()
+    })
+  })
+
+  test("with the workspace kill switch set, the first job's row names no workspace and marks none", async () => {
+    await withTestStateHome(async () => {
+      process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+      spyOn(Telemetry, "isEnabled").mockImplementation(() => true)
+      spyOn(AltimateApi, "isConfigured").mockImplementation(async () => true)
+      spyOn(AltimateApi, "getCredentials").mockImplementation(
+        async () => ({ altimateInstanceName: "acme", altimateUrl: "https://api.test", altimateApiKey: "k" }) as never,
+      )
+      WorkspaceFirstEvents.resetForTest()
+      const events = captureEvents()
+      const hooks = await plugin()
+      await startOnboarding(hooks, "skip")
+
+      await runTool(
+        hooks,
+        { tool: "sample_setup", sessionID: SESSION, callID: "c3k", args: {}, workspaceId: 7 },
+        { title: "", output: "", metadata: { success: true } },
+      )
+      await settle()
+
+      const completed = events.find((e) => e.type === "first_job_completed") as any
+      expect(completed.origin).toBe("onboarding")
+      expect(completed.workspace_id).toBeUndefined()
+      // Nothing was marked: with the switch off, the workspace's own first job is still sent.
+      workspacesOn()
+      expect(await WorkspaceFirstEvents.claim("first_job_completed", 7)).toBe(true)
       WorkspaceFirstEvents.resetForTest()
     })
   })
