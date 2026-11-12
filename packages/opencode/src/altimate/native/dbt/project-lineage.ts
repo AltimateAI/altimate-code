@@ -130,20 +130,25 @@ export function relationUse(sql: string): "row" | "unclear" | null {
     }
     return -1
   }
+  // Functions whose arguments use FROM as syntax, not as a list of tables (`extract(year from d)`).
+  const fromSyntax = /^(extract|trim|substring|overlay|position)$/
   const names = new Set<string>()
   const named = new Set<number>()
   const inFrom: boolean[] = [false]
+  const opener: string[] = [""]
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i]!
     if (t === "(") {
       inFrom.push(false)
+      opener.push(tokens[i - 1] ?? "")
       continue
     }
     if (t === ")") {
-      if (inFrom.length > 1) inFrom.pop()
+      if (inFrom.length > 1) (inFrom.pop(), opener.pop())
       continue
     }
     const top = inFrom.length - 1
+    if (t === "from" && fromSyntax.test(opener[top]!)) continue
     if (t === "from" || t === "join") inFrom[top] = true
     else if (ends.test(t)) inFrom[top] = false
     if (!inFrom[top] || !(t === "from" || t === "join" || t === ",")) continue

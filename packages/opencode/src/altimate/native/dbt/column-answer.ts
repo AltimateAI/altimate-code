@@ -124,7 +124,8 @@ export interface ColumnAnswer {
   /**
    * Proven unaffected: downstream, every path from the column passes a reader of the edited model that
    * the engine read in full, with no `*`, NATURAL JOIN, run-time name, whole-row value or ephemeral model,
-   * and whose SQL never names the column. Upstream: ancestors the engine traced no edge from, through
+   * no quoting or FROM item the text checks can't read for certain (they fail closed), and whose SQL never
+   * names the column. Upstream: ancestors the engine traced no edge from, through
    * models it read in full with none of those. By name; not in `nodes`.
    */
   cleared: { id: string; name: string }[]

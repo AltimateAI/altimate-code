@@ -961,6 +961,9 @@ describe("column answer: cleared only when proven", () => {
       expect(a.cleared.map((one) => one.name)).not.toContain("r")
     }
     expect(relationUse("select id from my-project.ds.f o")).toBe("unclear")
+    // FROM inside extract/trim/substring is syntax, not a table list; inside other functions it stays a table list.
+    expect(relationUse("select extract(year from d) as y, d from db.s.f")).toBeNull()
+    expect(relationUse("select array(select t from db.s.g t) as a from db.s.f")).toBe("row")
     expect(relationUse("select id from db.s.f f left join db.s.g g using (id) where f.id > 1")).toBeNull()
   })
 
