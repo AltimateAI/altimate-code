@@ -8,6 +8,7 @@ import { getOrCreateMachineId } from "@/altimate/util/machine-id"
 import { TelemetryIdentity } from "./identity"
 import { OptOutMarker } from "./opt-out"
 import { TelemetryConfig } from "./config-state"
+import { Ansi } from "./ansi"
 import { createHash, randomUUID } from "crypto"
 // altimate_change — first-run health: the event-loop stall monitor labels which thread stalled
 import { isMainThread } from "node:worker_threads"
@@ -161,8 +162,8 @@ const pmTail = (sep: string, term: string) => pmSpan(sep) + "*" + pmChunks(sep) 
 const PM_NOT_ROUTE = "(?<!(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|route|endpoint)\\s)"
 // input cap and the lookahead the rules may see past it (wider than any
 // proof scan — all are bounded at the 255-byte component limit)
-const PM_CAP = 8192
-const PM_LOOKAHEAD = 2048
+const PM_CAP = Ansi.MAX_INPUT
+const PM_LOOKAHEAD = Ansi.LOOKAHEAD
 // is a `q`-quoted span still open at the end of `s`? Mirrors the quote rules'
 // grammar exactly (`q(?:[^q\\]|\\.)*q`): a backslash escapes only inside a span
 function pmQuoteOpen(s: string, q: string): boolean {
@@ -2073,10 +2074,8 @@ export namespace Telemetry {
 
   // the masking chain proper, on bounded input (see maskString)
   function pmMask(s: string, opts?: { maskPaths?: boolean }): string {
-    let out = s
-      // ANSI CSI sequences (colored subprocess stderr) would otherwise split
-      // tokens so neither credential nor path rules can see them
-      .replace(/\x1b(?:\[[0-?]*[ -\/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/g, "")
+    // The shared helper's legacy profile preserves historical maskString/hash behavior.
+    let out = Ansi.normalize(s, "legacy")
       .replace(/sk-(?:ant-)?[A-Za-z0-9_-]{20,}/g, "sk-***")
       .replace(/Bearer\s+[A-Za-z0-9._-]{20,}/gi, "Bearer ***")
       .replace(/'(?:[^'\\]|\\.)*'/g, "?")
