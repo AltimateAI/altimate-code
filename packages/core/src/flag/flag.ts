@@ -129,7 +129,6 @@ export const Flag = {
   // memory sync, the workspace engine). Workspaces are on by default; setting this turns every
   // part of the feature off and takes already-synced workspace skills out of service. Read as a getter so tests and the
   // runtime `--` middleware can flip it between plugin activation and command execution.
-  // Telemetry rows still name a link the project already had (docs/docs/reference/telemetry.md).
   // Unrelated to OPENCODE_EXPERIMENTAL_WORKSPACES (multi-instance control plane).
   get ALTIMATE_DISABLE_WORKSPACE() {
     return killSwitchSet(env("ALTIMATE_DISABLE_WORKSPACE"))

@@ -494,6 +494,44 @@ it.live("a tool call's plugins get the credential its turn started under, not on
   { timeout: 30_000 },
 )
 
+it.live("with the workspace kill switch set, a linked project sends neither row, and both come once it is off", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      yield* linkProject(dir)
+      process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+      yield* turn(dir, llm, { tool: true })
+
+      expect(firstPrompts()).toEqual([])
+      expect(firstJobs()).toEqual([])
+      // The turn's other rows still name the saved link.
+      expect(named("task_outcome_signal").map((row) => row.workspace_id)).toEqual([LINKED])
+
+      delete process.env.ALTIMATE_DISABLE_WORKSPACE
+      yield* turn(dir, llm, { tool: true })
+
+      expect(firstPrompts()).toEqual([LINKED])
+      expect(firstJobs()).toEqual([[LINKED, "something_else"]])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
+
+it.live("with the workspace kill switch set, an onboarding session's row names no workspace", () =>
+  provideTmpdirServerLegacy(
+    Effect.fnUntraced(function* ({ dir, llm }) {
+      yield* linkProject(dir)
+      process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+      yield* turn(dir, llm, { before: (id) => OnboardingTelemetry.markOnboardingSession(id) })
+
+      expect(firstPrompts()).toEqual([undefined])
+      expect(origins("first_prompt_sent")).toEqual(["onboarding"])
+    }),
+    { git: true, config: providerCfg },
+  ),
+  { timeout: 30_000 },
+)
+
 it.live("an unbound session sends neither row", () =>
   provideTmpdirServerLegacy(
     Effect.fnUntraced(function* ({ dir, llm }) {
