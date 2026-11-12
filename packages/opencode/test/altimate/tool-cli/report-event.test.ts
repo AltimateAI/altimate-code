@@ -3,6 +3,7 @@ import { REPORT_ACTIONS, reportEvent } from "../../../src/altimate/tool-cli/repo
 
 describe("tool report-event", () => {
   test("an action and a Claude Code session make one event with nothing else in it", () => {
+    expect(REPORT_ACTIONS).toEqual(["summary_shown", "open_pressed", "command_run", "built", "build_failed", "no_browser"])
     for (const action of REPORT_ACTIONS) {
       expect(reportEvent(action, "claude:3f6c2a10-7b2e-4c1d-9a55-0e1f2a3b4c5d", 1000)).toEqual({
         type: "lineage_report",
