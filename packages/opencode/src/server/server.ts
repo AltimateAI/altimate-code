@@ -1397,9 +1397,11 @@ export namespace Server {
           const { RulesSync } = await import("../altimate/rules/sync")
           const report = await RulesService.syncNow(root, Instance.directory, learn, "manual")
           // altimate_change start — workspace review: "Sync now" also checks skill and knowledge decisions
-          await RulesService.pollReviewDecisions(Instance.directory).catch((error) =>
+          // Bounded: past it the reply goes out and the poll goes on, announcing what it records when it ends.
+          const polling = RulesService.pollReviewDecisions(Instance.directory).catch((error) =>
             log.warn("workspace review notices failed", { error: error instanceof Error ? error.message : String(error) }),
           )
+          await Promise.race([polling, new Promise((resolve) => setTimeout(resolve, RulesService.SYNC_REVIEW_POLL_MS).unref?.())])
           // altimate_change end
           // Never the captured credential: the report goes to clients that may log or cache it.
           return c.json({ ok: true as const, ...RulesSync.publicReport(report) })
@@ -1416,21 +1418,10 @@ export namespace Server {
         const refused = workspaceRouteRefusal(c.req.header("origin"), c.req.header("host"), undefined, c.req.header("sec-fetch-site"))
         if (refused) return c.json(refused.body, refused.status)
         try {
-          const [{ RulesSummary }, { ReviewRequests }] = await Promise.all([
-            import("../altimate/rules/summary"),
-            import("../altimate/workspace/review-requests"),
-          ])
+          const { ReviewRequests } = await import("../altimate/workspace/review-requests")
           const root = Instance.worktree !== "/" ? Instance.worktree : Instance.directory
-          const rules = (await RulesSummary.rows(root, "mine")).map((row) => ({
-            kind: "rule" as const,
-            public_id: row.public_id,
-            name: row.text,
-            status: row.status,
-            ...(row.reason ? { reason: row.reason } : {}),
-            ...(row.reviewer ? { reviewer: row.reviewer } : {}),
-            actions: [] as string[],
-          }))
           const review = await ReviewRequests.listReview(Instance.directory)
+          const rules = await ReviewRequests.ruleRequests(root, Instance.directory, review.status === "ok" ? review.workspace.id : undefined)
           const { printable } = await import("../altimate/rules/printable")
           return c.json({
             ok: true as const,

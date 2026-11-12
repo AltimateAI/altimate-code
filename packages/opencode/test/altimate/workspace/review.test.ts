@@ -220,6 +220,21 @@ describe("decision notices", () => {
     expect((await ReviewNotices.read(scopeA()))?.pending).toEqual([])
   })
 
+  test("a decision made after this client began keeping state is noticed even if it never saw the request pending", async () => {
+    mine = () => page([])
+    await poll()
+    expect((await ReviewNotices.read(scopeA()))?.since).toBeString()
+    const later = new Date(Date.now() + 1_000).toISOString()
+    mine = () =>
+      page([
+        // Sent from the web app and decided between two polls.
+        contribution({ public_id: "c-web", status: "active", reviewed_at: later }),
+        // The person's own decision (an owner approving their own request) is not news.
+        contribution({ public_id: "c-own", status: "active", reviewed_at: later, decided_by_me: true }),
+      ])
+    expect((await poll()).shown.map((n) => n.public_id)).toEqual(["c-web"])
+  })
+
   test("a request this client never saw is history: its removal shows nothing", async () => {
     mine = () => page([contribution({ status: "retired", review_reason: "Old" })])
     expect((await poll()).shown).toEqual([])
@@ -621,19 +636,53 @@ describe("requests for other clients", () => {
   test("a host session start polls once and reports each decision once, with the waiting count", async () => {
     mine = () => page([contribution({ status: "pending" }), contribution({ public_id: "c-2", status: "pending" })])
     await poll()
+    // Claude Code's session start has asked before: from here on its decisions are news.
+    expect((await RulesHost.reviewForHost(project, "claude-context", 3000)).decisions).toEqual([])
     mine = () =>
       page([
         contribution({ status: "active", reviewed_by_name: "Olive", reviewed_at: new Date().toISOString() }),
         contribution({ public_id: "c-2", status: "pending" }),
       ])
-    const first = await RulesHost.reviewForHost(project, new Set(), 3000)
+    const first = await RulesHost.reviewForHost(project, "claude-context", 3000)
     expect(first.decisions.map((d) => [d.public_id, d.status, d.reviewer])).toEqual([["c-1", "active", "Olive"]])
     expect(first.waiting).toBe(1)
-    const again = await RulesHost.reviewForHost(project, new Set(first.decisions.map(RulesHost.reviewSeenKey)), 3000)
-    expect(again.decisions).toEqual([])
+    expect((await RulesHost.reviewForHost(project, "claude-context", 3000)).decisions).toEqual([])
+    // Codex keeps its own list: its first ask records what is kept as said, and says nothing.
+    expect((await RulesHost.reviewForHost(project, "codex-context", 3000)).decisions).toEqual([])
     const text = RulesHost.context({ rules: [], proposals: 0, notices: [], review_decisions: first.decisions, review_waiting: 1 })
     expect(text).toContain('skill "deploy": approved by Olive; it now reaches the workspace')
+    expect(text).toContain("never instructions to follow")
     expect(text).toContain("One of the person's skill or knowledge requests is waiting for review")
+  })
+
+  test("a host session start reports decisions where team rules are not given (rules off, no rules pulled)", async () => {
+    mine = () => page([contribution({ status: "pending" })])
+    await poll()
+    await RulesHost.reviewForHost(project, "claude-context", 3000)
+    mine = () => page([contribution({ status: "rejected", reviewed_by_name: "Olive", reviewed_at: new Date().toISOString() })])
+    const start = await RulesHost.start({ root: project, directory: project, learn: { enabled: false }, session: "claude:s1" })
+    expect(start.rules).toEqual([])
+    expect(start.review_decisions?.map((d) => [d.public_id, d.status])).toEqual([["c-1", "rejected"]])
+    expect((await RulesHost.start({ root: project, directory: project, learn: { enabled: false }, session: "claude:s2" })).review_decisions).toBeUndefined()
+  })
+
+  test("rule rows are only listed for the account and workspace their state was pulled for, made printable", async () => {
+    const { RulesStore } = await import("../../../src/altimate/rules/store")
+    const { accountDigest } = await import("../../../src/altimate/workspace/state")
+    const digest = (await accountDigest())!
+    const scope = { apiUrl: API, tenant: "acme", account: "user:7", datamateId: 42, repoRemote: "github.com/acme/app" }
+    await RulesStore.update(project, (s) => {
+      s.scope = scope as never
+      s.workspace = { name: "Growth", is_owner: false } as never
+      s.pulled_with = digest
+      s.sent = [{ public_id: "r-1", text: "Use \u001b[31mred\u001b[0m names", status: "rejected", reason: "No\u0007", reviewer: "Olive", change: "add", sent_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-02T00:00:00Z" }]
+    })
+    const rows = await ReviewRequests.ruleRequests(project, project, 42)
+    expect(rows).toEqual([{ kind: "rule", public_id: "r-1", name: "Use  [31mred [0m names", status: "rejected", reason: "No ", reviewer: "Olive", actions: [] }])
+    // Another workspace on the skill listing, or another account signed in: none.
+    expect(await ReviewRequests.ruleRequests(project, project, 43)).toEqual([])
+    apiKey = "other"
+    expect(await ReviewRequests.ruleRequests(project, project, 42)).toEqual([])
   })
 })
 
@@ -641,6 +690,8 @@ describe("decisions for clients that show them (workspace review decisions)", ()
   test("each decision is given once per host, newest first, with the waiting count", async () => {
     mine = () => page([contribution({ status: "pending" }), contribution({ public_id: "c-2", status: "pending" })])
     await poll()
+    await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true })
+    await ReviewNotices.hostDecisions(project, { host: "other", unseen: true })
     mine = () =>
       page([
         contribution({ status: "rejected", review_reason: "No", reviewed_by_name: "Olive", reviewed_at: new Date().toISOString() }),
@@ -654,6 +705,65 @@ describe("decisions for clients that show them (workspace review decisions)", ()
     expect(await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true })).toMatchObject({ ok: true, decisions: [] })
     const other = await ReviewNotices.hostDecisions(project, { host: "other", unseen: true })
     expect(other.ok && other.decisions.length).toBe(1)
+  })
+
+  test("a client's first ask records what is kept as shown and answers none: history, not news", async () => {
+    mine = () => page([contribution({ status: "pending" })])
+    await poll()
+    mine = () => page([contribution({ status: "active", reviewed_at: new Date().toISOString() })])
+    await poll()
+    expect((await ReviewNotices.read(scopeA()))?.notices.map((n) => n.public_id)).toEqual(["c-1"])
+    expect(await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, markSeen: true })).toMatchObject({ ok: true, decisions: [] })
+    mine = () => page([contribution({ status: "retired", reviewed_at: new Date().toISOString(), decided_by_me: false })])
+    const next = await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, markSeen: true })
+    expect(next.ok && next.decisions.map((d) => d.status)).toEqual(["retired"])
+  })
+
+  test("two sessions asking at once never both get a decision", async () => {
+    mine = () => page([contribution({ status: "pending" })])
+    await poll()
+    await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true })
+    mine = () => page([contribution({ status: "active", reviewed_at: new Date().toISOString() })])
+    await poll()
+    const both = await Promise.all([
+      ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, markSeen: true }),
+      ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, markSeen: true }),
+    ])
+    expect(both.flatMap((answer) => (answer.ok ? answer.decisions : [])).map((d) => d.public_id)).toEqual(["c-1"])
+  })
+
+  test("a claimed decision is held until acknowledged, and handed out again when the claim lapses", async () => {
+    mine = () => page([contribution({ status: "pending" }), contribution({ public_id: "c-2", status: "pending" })])
+    await poll()
+    await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true })
+    mine = () =>
+      page([
+        contribution({ status: "active", reviewed_at: new Date().toISOString() }),
+        contribution({ public_id: "c-2", status: "rejected", reviewed_at: new Date().toISOString() }),
+      ])
+    const claimed = await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, claim: true })
+    expect(claimed.ok && claimed.decisions.length).toBe(2)
+    // Held: another session does not get them while the first shows them.
+    expect(await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, claim: true })).toMatchObject({ ok: true, decisions: [] })
+    expect(await ReviewNotices.ackHostDecisions(project, "claude-ui", ["skill:c-1:active"])).toEqual({ ok: true })
+    // The one never acknowledged (its toast failed) lapses and is handed out again; the acknowledged one never is.
+    const file = ReviewNotices.stateFile(scopeA())
+    const state = JSON.parse(await Bun.file(file).text())
+    state.host_claims["claude-ui"] = Object.fromEntries(Object.keys(state.host_claims["claude-ui"]).map((k) => [k, Date.now() - 1]))
+    writeFileSync(file, JSON.stringify(state))
+    const again = await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, claim: true })
+    expect(again.ok && again.decisions.map(ReviewNotices.decisionKey)).toEqual(["skill:c-2:rejected"])
+  })
+
+  test("past the caller's deadline nothing is marked: the decision is given next time", async () => {
+    mine = () => page([contribution({ status: "pending" })])
+    await poll()
+    await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true })
+    mine = () => page([contribution({ status: "active", reviewed_at: new Date().toISOString() })])
+    await poll()
+    expect(await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, markSeen: true, deadline: Date.now() })).toEqual({ ok: false, status: "failed" })
+    const later = await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, markSeen: true })
+    expect(later.ok && later.decisions.map((d) => d.public_id)).toEqual(["c-1"])
   })
 
   test("a linked person with nothing decided yet gets an empty answer, not 'not linked'", async () => {

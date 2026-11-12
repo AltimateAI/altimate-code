@@ -443,25 +443,34 @@ function installCards(api: TuiPluginApi) {
   listen("rule.proposal.asked", (event) => offer(event.properties as ProposalCard))
   listen("rule.proposal.updated", (event) => offer(event.properties as ProposalCard))
   listen("rule.proposal.replied", (event) => closed((event.properties as { id: string }).id))
-  // Each review is shown once per project, whether it arrived as an event or was pulled before this TUI
-  // subscribed (the startup sync): remembered by id and status.
-  // The first time a project is seen, its existing reviews are recorded silently: they are history, not news.
-  const seenKey = () => `altimate.rules.notices.${root(api)}`
-  const notify = (p: { public_id: string; text: string; status: string; reason?: string; reviewer?: string; kind?: "skill" | "knowledge" }, quiet = false) => {
+  // Each decision is shown once per project and per account and workspace (the summary's `notices_scope`), whether it
+  // arrived as an event or was pulled before this TUI subscribed (the startup sync): remembered by kind, id and status.
+  // The first time a project, account and workspace are seen, their existing decisions are recorded silently: they are
+  // history, not news (as the plugins and the extension do on their first run).
+  let scope: string | undefined
+  const seenKey = () => `altimate.rules.notices.${root(api)}.${scope}`
+  const notify = (p: Shown, quiet = false) => {
     const seen = new Set(api.kv.get<string[]>(seenKey(), []))
-    const key = `${p.public_id}:${p.status}`
+    const key = shownKey(p)
     if (seen.has(key)) return
     api.kv.set(seenKey(), [...seen, key].slice(-200))
     if (!quiet) reviewToast(api, p)
   }
-  listen("rule.proposal.reviewed", (event) => notify(event.properties))
   const replay = () =>
     void summaryOf(api).then((summary) => {
+      if (!summary) return
+      scope = summary.notices_scope ?? "none"
       const first = api.kv.get<string[] | undefined>(seenKey(), undefined) === undefined
       if (first) api.kv.set(seenKey(), [])
       // Rule reviews and skill/knowledge decisions alike: kept by the session server until replaced, shown here once.
-      for (const notice of [...(summary?.notices ?? []), ...(summary?.review_notices ?? [])].reverse()) notify(notice, first)
+      const decisions: Shown[] = summary.decisions ?? [
+        ...(summary.notices ?? []).map((n) => ({ ...n, kind: "rule" as const })),
+        ...(summary.review_notices ?? []),
+      ]
+      for (const decision of [...decisions].reverse()) notify(decision, first)
     })
+  // Before the first replay this TUI does not know whose decisions they are: the replay shows this one too.
+  listen("rule.proposal.reviewed", (event) => (scope ? notify(event.properties) : replay()))
   listen("altimate.rules.changed", replay)
   // This TUI shows proposal cards: it holds the server's renderer lease for its project while it runs, renewed at the
   // interval the server asks for. Without a live lease, the save tools save as before cards and the after-turn check
@@ -498,12 +507,17 @@ function installCards(api: TuiPluginApi) {
 }
 
 
-function reviewToast(api: TuiPluginApi, raw: { text: string; status: string; reason?: string; reviewer?: string; kind?: "skill" | "knowledge" }) {
+/** A decision as the TUI shows it: an event's properties, or one of the summary's `decisions`. No `kind`: a rule. */
+type Shown = { public_id: string; text: string; status: string; reason?: string; reviewer?: string; kind?: "rule" | "skill" | "knowledge" }
+/** How a decision is remembered as shown: rule and skill ids live in different id spaces. */
+export const shownKey = (p: Pick<Shown, "kind" | "public_id" | "status">) => `${p.kind ?? "rule"}:${p.public_id}:${p.status}`
+
+function reviewToast(api: TuiPluginApi, raw: Shown) {
   const p = { ...raw, text: printable(raw.text), reason: raw.reason && printable(raw.reason), reviewer: raw.reviewer && printable(raw.reviewer) }
   const who = p.reviewer ? ` by ${p.reviewer}` : ""
   const quoted = `"${p.text.length > 80 ? p.text.slice(0, 79) + "…" : p.text}"`
   // A skill or knowledge base the person submitted to the workspace: `text` is its name.
-  if (p.kind) {
+  if (p.kind && p.kind !== "rule") {
     const what = p.kind === "skill" ? `Your skill ${quoted}` : `Your knowledge base ${quoted}`
     if (p.status === "active") api.ui.toast({ variant: "success", message: `${what} was approved${who}. It now reaches the workspace.`, duration: 10000 })
     else if (p.status === "rejected") api.ui.toast({ variant: "warning", message: `${what} was rejected${who}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 })
@@ -530,6 +544,7 @@ async function showMenu(api: TuiPluginApi) {
     new Promise<"slow">((resolve) => setTimeout(() => resolve("slow"), REQUESTS_WAIT_MS)),
   ])
   const requests = (listed === "slow" ? [] : (listed?.requests ?? [])).filter((r) => r.kind !== "rule")
+  const requestsNote = requestsProblem(listed)
   // altimate_change end
   const status = summary.linked
     ? printable(`${summary.workspace?.name ?? "Workspace"} · ${summary.line}${summary.pulled_at ? ` · synced ${describeAge(Date.parse(summary.pulled_at))}` : ""}`)
@@ -550,9 +565,7 @@ async function showMenu(api: TuiPluginApi) {
       category: `Your proposals (${mine.length})`,
     })),
     // altimate_change start — workspace review
-    ...(listed === "slow"
-      ? [{ title: "Your skill and knowledge requests did not load in time", value: "requests-slow", description: "Open /rules again in a moment", category: "Your skill and knowledge requests" }]
-      : []),
+    ...(requestsNote ? [{ ...requestsNote, value: "requests-note", category: "Your skill and knowledge requests" }] : []),
     ...requests.map((r) => ({
       title: `${r.kind === "skill" ? "Skill" : "Knowledge"}: ${printable(r.name)}`,
       value: `request:${r.public_id}`,
@@ -581,6 +594,10 @@ async function showMenu(api: TuiPluginApi) {
           const request = requests.find((r) => `request:${r.public_id}` === option.value)
           if (request?.actions.length) return showRequestActions(api, request)
           return
+        }
+        if (option.value === "requests-note") {
+          api.ui.dialog.clear()
+          return api.ui.toast({ variant: "warning", message: requestsNote?.description ?? "", duration: 6000 })
         }
         // altimate_change end
         // Sync and the learning toggle are actions, not navigation: close the menu, report with a toast.
@@ -630,7 +647,7 @@ interface WorkspaceRequest {
   expired?: boolean
   actions: ("withdraw" | "remove")[]
 }
-type RequestsResponse = { ok: boolean; requests?: WorkspaceRequest[]; review_status?: string }
+type RequestsResponse = { ok: boolean; requests?: WorkspaceRequest[]; review_status?: string; review_error?: string; review_complete?: boolean }
 /** How long `/rules` waits for the person's skill and knowledge requests before opening without them. */
 const REQUESTS_WAIT_MS = 5_000
 
@@ -641,6 +658,20 @@ const REQUEST_STATUS: Record<string, string> = {
   superseded: "replaced by a newer request",
   withdrawn: "withdrawn",
   retired: "removed from the workspace",
+}
+
+/** Why the skill and knowledge part of `/rules` is missing or short, as a row: undefined when it is whole, or absent for
+ * a reason the header already says (signed out, not linked) or that is no fault (a server without review). */
+export function requestsProblem(listed: RequestsResponse | "slow" | undefined): { title: string; description: string } | undefined {
+  if (listed === "slow") return { title: "Your skill and knowledge requests did not load in time", description: "Open /rules again in a moment." }
+  if (!listed?.ok) return { title: "Your skill and knowledge requests could not be loaded", description: "The session server did not answer. Open /rules again in a moment." }
+  if (listed.review_status === "failed")
+    return { title: "Your skill and knowledge requests could not be loaded", description: printable(listed.review_error ?? "The workspace did not answer.") }
+  if (listed.review_status === "account_changed")
+    return { title: "Your skill and knowledge requests are not shown", description: "The account signed in changed. Open /rules again." }
+  if (listed.review_complete === false)
+    return { title: "Showing your most recent skill and knowledge requests", description: "Older ones are in the Altimate web app." }
+  return undefined
 }
 
 function requestLine(r: WorkspaceRequest): string {

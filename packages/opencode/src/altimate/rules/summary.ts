@@ -2,6 +2,7 @@
 //
 // What clients show about workspace rules, from local state only (no network): the sidebar line, the
 // `/rules` menu, `GET /altimate/rules/summary` and `learn status`.
+import { createHash } from "node:crypto"
 import { RulesStore } from "./store"
 import { RuleTrigger } from "./trigger"
 
@@ -32,11 +33,13 @@ export interface Summary {
    * knowledge decisions. What new clients read (`notices` and `review_notices` stay for released ones); each is shown
    * once by `decisionKey`. */
   decisions: Decision[]
+  /** Which account and workspace the notices and decisions belong to (an opaque digest): a client keeps what it showed
+   * per value, so another sign-in or a relink starts from its own list. Absent while neither is known. */
+  notices_scope?: string
   /** What the last post-turn check decided. */
   last_check?: { at: string; session: string; outcome: string }
 }
 
-/** A skill or knowledge decision as clients replay it: the fields of `rule.proposal.reviewed`. */
 /** A decision on one of the person's requests: a rule review, or a skill or knowledge decision. */
 export interface Decision {
   kind: "rule" | "skill" | "knowledge"
@@ -54,6 +57,7 @@ export function decisionKey(decision: Pick<Decision, "kind" | "public_id" | "sta
   return `${decision.kind}:${decision.public_id}:${decision.status}`
 }
 
+/** A skill or knowledge decision as clients replay it: the fields of `rule.proposal.reviewed`. */
 export interface ReviewNotice {
   public_id: string
   text: string
@@ -71,7 +75,9 @@ export async function summary(root: string, learn: LearnConfig, env: NodeJS.Proc
   const { ReviewNotices } = await import("../workspace/review-notices")
   // Every kept decision (the store keeps the 50 most recent), so a client away for many decisions still gets each once:
   // clients show a notice once by its id and status.
-  const reviewNotices = (await ReviewNotices.stored(directory)).reverse().map((n): ReviewNotice => ({
+  const reviewScope = await ReviewNotices.storedScope(directory)
+  const kept = reviewScope ? ((await ReviewNotices.read(reviewScope))?.notices ?? []) : []
+  const reviewNotices = [...kept].reverse().map((n): ReviewNotice => ({
     public_id: n.public_id,
     text: n.name,
     status: n.status,
@@ -80,6 +86,7 @@ export async function summary(root: string, learn: LearnConfig, env: NodeJS.Proc
     ...(n.reason ? { reason: n.reason } : {}),
     ...(n.reviewer ? { reviewer: n.reviewer } : {}),
   }))
+  const scope = noticesScope(reviewScope ?? state.scope)
   const learning = RuleTrigger.learningDecision(learn, state, env)
   // Dropped proposals first: the person was told they were queued, and a later pull does not clear it.
   const lastError = [RulesStore.scopeDropNote(state), state.last_error].filter(Boolean).join("; ")
@@ -101,8 +108,16 @@ export async function summary(root: string, learn: LearnConfig, env: NodeJS.Proc
       ...state.notices.slice(-10).map((n): Decision => ({ kind: "rule", ...n })),
       ...reviewNotices,
     ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)),
+    ...(scope ? { notices_scope: scope } : {}),
     ...(state.last_check ? { last_check: state.last_check } : {}),
   }
+}
+
+/** `Summary.notices_scope` of a person on a workspace of a server and tenant. */
+export function noticesScope(scope: { apiUrl: string; tenant: string; account: string; datamateId: number } | undefined): string | undefined {
+  if (!scope) return undefined
+  const key = JSON.stringify([scope.apiUrl.replace(/\/+$/, ""), scope.tenant, scope.account, scope.datamateId])
+  return createHash("sha256").update(key).digest("hex").slice(0, 16)
 }
 
 /** "6 team rules · 3 pending review": zero counts after the first are left out. */

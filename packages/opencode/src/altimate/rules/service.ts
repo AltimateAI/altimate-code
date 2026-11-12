@@ -104,14 +104,15 @@ function triggerDeps(ctx: InstanceContext, model?: string): RuleTrigger.TriggerD
   }
 }
 
-/** Sync now, or join the sync already running. Its notices and change event are published by the run itself, once.
- * Shared with routes and the TUI menu. */
-/** Check the person's skill and knowledge requests now: each new decision is published as `rule.proposal.reviewed`
- * (with its `kind`) to clients listening, and `altimate.rules.changed` asks them to replay when anything was recorded
- * (or `announceChange`). For the refresh timer and "Sync now". Throws only what the poll does not swallow. */
+/** How long "Sync now" waits for the skill and knowledge check before it answers. */
+export const SYNC_REVIEW_POLL_MS = 5_000
+
 /** The newest kept decision per directory, as this process last saw it. */
 const lastKept = new Map<string, string>()
 
+/** Check the person's skill and knowledge requests now: each new decision is published as `rule.proposal.reviewed`
+ * (with its `kind`) to clients listening, and `altimate.rules.changed` asks them to replay when anything was recorded
+ * (or `announceChange`). For the refresh timer and "Sync now". Throws only what the poll does not swallow. */
 export async function pollReviewDecisions(directory: string, opts: { announceChange?: boolean } = {}) {
   const { ReviewNotices } = await import("../workspace/review-notices")
   const result = await ReviewNotices.poll(directory, {
@@ -131,7 +132,7 @@ export async function pollReviewDecisions(directory: string, opts: { announceCha
   let keptChanged = false
   if (result.status === "done") {
     const newest = (await ReviewNotices.storedState(directory))?.notices.at(-1)
-    const key = newest ? `${newest.kind}:${newest.public_id}:${newest.status}` : ""
+    const key = newest ? ReviewNotices.decisionKey(newest) : ""
     keptChanged = lastKept.has(directory) && lastKept.get(directory) !== key
     lastKept.set(directory, key)
   }
@@ -140,6 +141,8 @@ export async function pollReviewDecisions(directory: string, opts: { announceCha
   return result
 }
 
+/** Sync now, or join the sync already running. Its notices and change event are published by the run itself, once.
+ * Shared with routes and the TUI menu. */
 export async function syncNow(root: string, directory: string, learn: Parameters<typeof RulesSync.run>[2], trigger: RulesTelemetry.SyncTrigger = "refresh") {
   return RulesSync.runShared(root, directory, learn, trigger)
 }

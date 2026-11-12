@@ -5,8 +5,8 @@
 // status, the reviewer and their reason, and the actions the person may take on a skill or knowledge request (withdraw
 // a waiting one, remove an approved one from the workspace). Approving and rejecting stay in the web app.
 //
-// Rules come from the person's local rules state (`RulesSummary.rows`, no network). Skill and knowledge requests are
-// read from the server with one captured credential, checked against the account the project's link was resolved
+// Rules come from the person's local rules state (`RulesSummary.rows`, no network), shown only for the account and
+// workspace it was pulled for. Skill and knowledge requests are read from the server with one captured credential, checked against the account the project's link was resolved
 // with, as the review poll does.
 import { RulesApiError } from "../rules/api"
 import { printable } from "../rules/printable"
@@ -72,6 +72,31 @@ export function fromContribution(item: ReviewApi.Contribution): Request {
     ...(item.expired ? { expired: true } : {}),
     actions,
   }
+}
+
+/** The person's team rule requests (local rules state, no network), only when that state was pulled for the account
+ * signed in now and for the workspace the project is on: `workspaceId` when the skill listing resolved it, else the
+ * folder's cached link. A link cache that cannot be read hides them. Text is made printable. */
+export async function ruleRequests(root: string, directory: string, workspaceId?: number): Promise<Request[]> {
+  const [{ RulesStore }, { RulesSummary }, { RulesService }] = await Promise.all([
+    import("../rules/store"),
+    import("../rules/summary"),
+    import("../rules/service"),
+  ])
+  const state = await RulesStore.read(root)
+  if (!state.scope || !(await RulesStore.verified(state))) return []
+  const expected =
+    workspaceId ?? (await RulesService.localBinding(root, directory, { strict: true }).then((b) => b?.datamateId ?? state.scope!.datamateId, () => undefined))
+  if (expected !== state.scope.datamateId) return []
+  return (await RulesSummary.rows(root, "mine")).map((row) => ({
+    kind: "rule" as const,
+    public_id: row.public_id,
+    name: printable(row.text),
+    status: row.status,
+    ...(row.reason ? { reason: printable(row.reason) } : {}),
+    ...(row.reviewer ? { reviewer: printable(row.reviewer) } : {}),
+    actions: [],
+  }))
 }
 
 export type ActionResult =

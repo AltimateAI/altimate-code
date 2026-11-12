@@ -39,7 +39,6 @@ const MAX_HOST_UNSTORED = 10
 const MAX_HOST_SESSIONS = 50
 
 /** The key a host session start marks a review notice reported under (`host_notices_seen`). */
-export const MAX_HOST_REVIEW_SEEN = 200
 export const hostNoticeKey = (notice: Pick<Notice, "public_id" | "status">) => `${notice.public_id}|${notice.status}`
 /** The key a host session start marks a failed check reported under (`host_notices_seen`). */
 export const hostCheckKey = (check: { at: string }) => `check|${check.at}`
@@ -237,9 +236,6 @@ export const State = z.object({
   proposals: z.array(StoredProposal).default([]),
   /** Review notices already reported at a host session start (`public_id|status`). */
   host_notices_seen: z.array(z.string()).default([]),
-  /** Skill and knowledge decisions already reported at a host session start (`kind:public_id:status`). Apart from
-   * `host_notices_seen`, whose trimming knows only rule notices. */
-  host_review_seen: z.array(z.string()).default([]),
   /** Host sessions whose check stopped with work left (the round limit): the next check with nothing new takes them first. */
   host_pending: z.array(z.string()).default([]),
   /** Host sessions whose corrections this person's hooks recorded, latest last: the only ones checked as leftovers. */
@@ -441,8 +437,6 @@ export async function update(root: string, change: (state: State) => State | voi
       const drop = new Set(gone.slice(0, next.host_notices_seen.length - MAX_NOTICES))
       next.host_notices_seen = next.host_notices_seen.filter((key) => !drop.has(key))
     }
-    // Newest kept: the review state keeps 50 decisions, reported at most once each within NOTICE_MAX_AGE_MS.
-    next.host_review_seen = next.host_review_seen.slice(-MAX_HOST_REVIEW_SEEN)
     next.host_unstored = next.host_unstored.slice(-MAX_HOST_UNSTORED)
     next.host_sessions = next.host_sessions.slice(-MAX_HOST_SESSIONS)
     const now = Date.now()

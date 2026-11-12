@@ -501,20 +501,31 @@ const ReviewDecisionsCommand = cmd({
     yargs
       .option("directory", DIRECTORY)
       .option("json", JSON_FLAG)
-      .option("unseen", { type: "boolean", default: false, describe: "Only decisions not given to --host yet (last 14 days)" })
+      .option("unseen", { type: "boolean", default: false, describe: "Only decisions not given to --host yet (last 14 days); the first ask answers none" })
       .option("mark-seen", { type: "boolean", default: false, describe: "Remember the decisions returned as given to --host" })
+      .option("claim", { type: "boolean", default: false, describe: "Hold the decisions returned for --host until --ack (or 5 minutes)" })
+      .option("ack", { type: "string", array: true, describe: "Keys (from `key`) --host showed: remembered as given, nothing else is asked" })
       .option("host", { type: "string", describe: "The client asking, e.g. claude-ui" }),
   handler: async (args) => {
     const { ReviewNotices } = await import("@/altimate/workspace/review-notices")
-    const result = await ReviewNotices.hostDecisions(args.directory ?? process.cwd(), {
+    const directory = args.directory ?? process.cwd()
+    if (args.ack?.length) {
+      const acked = args.host ? await ReviewNotices.ackHostDecisions(directory, args.host, args.ack.map(String)) : { ok: false }
+      process.stdout.write(JSON.stringify(acked.ok ? { ok: true } : { ok: false, status: args.host ? "failed" : "host_required" }) + "\n")
+      process.exitCode = 0
+      return
+    }
+    const result = await ReviewNotices.hostDecisions(directory, {
       ...(args.host ? { host: args.host } : {}),
       unseen: args.unseen,
       markSeen: args["mark-seen"],
+      claim: args.claim,
     })
     const body = result.ok
       ? {
           ok: true,
           decisions: result.decisions.map((d) => ({
+            key: ReviewNotices.decisionKey(d),
             kind: d.kind,
             public_id: d.public_id,
             name: printable(d.name),

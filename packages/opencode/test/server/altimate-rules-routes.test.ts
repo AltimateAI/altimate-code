@@ -147,4 +147,20 @@ describe("rules sync route", () => {
       poll.mockRestore()
     }
   })
+
+  test("Sync now answers when the decision check is slow: the check is bounded", async () => {
+    const { RulesService } = await import("../../src/altimate/rules/service")
+    const { spyOn } = await import("bun:test")
+    const sync = spyOn(RulesService, "syncNow").mockResolvedValue({ context: { status: "skipped", reason: "not linked" } } as never)
+    const poll = spyOn(RulesService, "pollReviewDecisions").mockReturnValue(new Promise(() => {}) as never)
+    try {
+      const began = Date.now()
+      const response = await request("POST", "/altimate/rules/sync")
+      expect(response.status).toBe(200)
+      expect(Date.now() - began).toBeLessThan(RulesService.SYNC_REVIEW_POLL_MS + 2_000)
+    } finally {
+      sync.mockRestore()
+      poll.mockRestore()
+    }
+  }, 15_000)
 })
