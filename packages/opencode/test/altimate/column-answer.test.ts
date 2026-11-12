@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
 import { columnReach } from "../../src/altimate/native/dbt/column-reach"
-import { clearLineageCaches, hasNestedWith, howOf, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
+import { clearLineageCaches, hasNestedWith, howOf, quotingIsClear, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -939,11 +939,16 @@ describe("column answer: cleared only when proven", () => {
       `select id from ${T("f")} where id <> 'it\\'s'`,
       `select id, $$x$$ as note from ${T("f")}`,
     ]) {
+      // The guard itself, then the answer: never cleared, whether the engine or the guard stops it.
+      expect(quotingIsClear(sql)).toBe(false)
       const a = columnAnswer(write(base(sql, "duckdb")), "f", "val")
       expect(a.cleared.map((one) => one.name)).not.toContain("r")
-      expect(reasons(a).r?.[0]).toBeOneOf(["unclear_sql", "unresolved", "read_in_part"])
     }
+    expect(quotingIsClear(`select id from ${T("f")} where note = 'a''b' and "c""d" > 0`)).toBe(true)
     expect(stripSql("select id from f where [c--d] > 0")).toBe("select id from f where [c--d] > 0")
+    // A model the engine reads in full but whose quoting the check can't: the guard alone gives the reason.
+    const guarded = reasons(columnAnswer(write(base(`select id, $$x$$ as note from ${T("f")}`, "snowflake")), "f", "val"))
+    expect(guarded.r?.[0]).toBe("unclear_sql")
   })
 
   test("a FROM list the check can't classify stops the proof: a table function, TABLESAMPLE, an unquoted dash", () => {
@@ -951,9 +956,9 @@ describe("column answer: cleared only when proven", () => {
       [`select f.id, x.value from ${T("f")} f, lateral flatten(input => f.id) x`, "snowflake"],
       [`select id from ${T("f")} tablesample (10)`, "duckdb"],
     ] as const) {
+      expect(relationUse(sql)).toBe("unclear")
       const a = columnAnswer(write(base(sql, dialect)), "f", "val")
       expect(a.cleared.map((one) => one.name)).not.toContain("r")
-      expect(reasons(a).r?.[0]).toBeOneOf(["unclear_sql", "unresolved", "read_in_part"])
     }
     expect(relationUse("select id from my-project.ds.f o")).toBe("unclear")
     expect(relationUse("select id from db.s.f f left join db.s.g g using (id) where f.id > 1")).toBeNull()
