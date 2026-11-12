@@ -2,6 +2,7 @@ import z from "zod"
 import path from "node:path"
 import { promises as fs } from "node:fs"
 import YAML from "yaml"
+import { createHash } from "node:crypto"
 import { Rubric, DEFAULT_RUBRIC } from "./rubric"
 import { ReviewMode } from "./verdict"
 import { Severity } from "./finding"
@@ -34,6 +35,9 @@ export const ReviewConfig = z.object({
    * Functions missing on the project's own engine are always reported.
    */
   portability: z.boolean().optional(),
+  /** Allow `--force-tier` (a debug bypass of the risk classifier). Set false
+   *  in gate CI so a run cannot skip checks by forcing a lower tier. */
+  allowForceTier: z.boolean().default(true),
   /**
    * Data-diff: actually run base-vs-head against the warehouse (core DataParity)
    * and report row/value deltas. OPT-IN — it costs warehouse compute and needs a
@@ -112,6 +116,102 @@ const CANDIDATE_FILES = [".altimate/review.yml", ".altimate/review.yaml", ".alti
 export function parseReviewConfig(text: string): ReviewConfig {
   const data = YAML.parse(text) ?? {}
   return ReviewConfig.parse(data)
+}
+
+/** Where the applied policy came from. */
+export type PolicySource = "base" | "working_tree" | "default"
+
+export interface ReviewPolicy {
+  config: ReviewConfig
+  source: PolicySource
+  /** Short hash of the applied config (canonical JSON), signed into the envelope. */
+  hash: string
+  /** Settings the PR changes relative to the applied base policy (not applied). */
+  changedInPr: string[]
+}
+
+function canonical(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null"
+  if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]"
+  const obj = value as Record<string, unknown>
+  return (
+    "{" +
+    Object.keys(obj)
+      .filter((k) => obj[k] !== undefined)
+      .sort()
+      .map((k) => JSON.stringify(k) + ":" + canonical(obj[k]))
+      .join(",") +
+    "}"
+  )
+}
+
+/** Short, stable hash of a resolved config. */
+export function policyHash(config: ReviewConfig): string {
+  return createHash("sha256").update(canonical(config)).digest("hex").slice(0, 16)
+}
+
+/** Settings that differ between two configs: top-level keys, and `rubric.*` one level down. */
+export function policyChanges(base: ReviewConfig, head: ReviewConfig): string[] {
+  const out: string[] = []
+  const keys = new Set([...Object.keys(base), ...Object.keys(head)]) as Set<keyof ReviewConfig>
+  for (const k of [...keys].sort()) {
+    if (canonical(base[k]) === canonical(head[k])) continue
+    if (k === "rubric") {
+      const b = (base.rubric ?? {}) as Record<string, unknown>
+      const h = (head.rubric ?? {}) as Record<string, unknown>
+      for (const rk of [...new Set([...Object.keys(b), ...Object.keys(h)])].sort())
+        if (canonical(b[rk]) !== canonical(h[rk])) out.push(`rubric.${rk}`)
+    } else out.push(k)
+  }
+  return out
+}
+
+async function readFirst(read: (rel: string) => Promise<string | undefined>): Promise<string | undefined> {
+  for (const rel of CANDIDATE_FILES) {
+    const text = await read(rel)
+    if (text !== undefined) return text
+  }
+  return undefined
+}
+
+/**
+ * Load the review policy the PR is judged by.
+ *
+ * With `readBase` (a reader over the merge-base commit), the policy is the
+ * BASE branch's `.altimate/review.yml`: a pull request must not be able to
+ * relax the rules it is reviewed under (switch `mode` to comment, drop a
+ * `blockOn` category, exclude its own paths, disable lanes). The PR's own
+ * version is parsed only to list what it would change, which the comment
+ * shows; it takes effect once merged. Without `readBase` (no git), the working
+ * tree's file applies.
+ */
+export async function loadReviewPolicy(opts: {
+  cwd: string
+  readBase?: (rel: string) => Promise<string | undefined>
+}): Promise<ReviewPolicy> {
+  if (!opts.readBase) {
+    const config = await loadReviewConfig(opts.cwd)
+    const present = await readFirst((rel) => fs.readFile(path.join(opts.cwd, rel), "utf8").catch(() => undefined))
+    return { config, source: present === undefined ? "default" : "working_tree", hash: policyHash(config), changedInPr: [] }
+  }
+  const baseText = await readFirst(opts.readBase)
+  let config: ReviewConfig
+  try {
+    config = baseText === undefined ? structuredClone(DEFAULT_REVIEW_CONFIG) : parseReviewConfig(baseText)
+  } catch (e: any) {
+    throw new Error(`Failed to load the base branch's .altimate/review config: ${e?.message ?? e}`)
+  }
+  const headText = await readFirst((rel) => fs.readFile(path.join(opts.cwd, rel), "utf8").catch(() => undefined))
+  let changedInPr: string[] = []
+  if (headText !== baseText) {
+    try {
+      const head = headText === undefined ? structuredClone(DEFAULT_REVIEW_CONFIG) : parseReviewConfig(headText)
+      changedInPr = policyChanges(config, head)
+    } catch {
+      changedInPr = ["(the PR's .altimate/review file does not parse)"]
+    }
+  }
+  return { config, source: baseText === undefined ? "default" : "base", hash: policyHash(config), changedInPr }
 }
 
 /**
