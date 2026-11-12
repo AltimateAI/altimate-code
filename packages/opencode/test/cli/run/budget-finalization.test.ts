@@ -988,6 +988,41 @@ describe("opencode run: budget finalization subprocess", () => {
   }
   // altimate_change end
 
+  // altimate_change start — a token limit first crossed by a finalization step is still reported once
+  cliIt.concurrent(
+    "a token limit first crossed during a turn-budget finalization emits budget_exhausted and warns once",
+    ({ llm, opencode, home }) =>
+      Effect.gen(function* () {
+        // The work step stays under the limit (15 of 100); the finalization step takes it to 125.
+        yield* llm.push(reply().tool("glob", { pattern: "*.sql", path: home }).usage({ input: 10, output: 5 }).item())
+        yield* llm.textMatch(({ body }) => isFinalization(body), "The available evidence supports this limited answer.", {
+          usage: { input: 80, output: 30 },
+        })
+        yield* llm.pushMatch(({ body }) => !isFinalization(body), reply().hang())
+        const result = yield* opencode.run("Inspect SQL files and report the available evidence.", {
+          format: "json",
+          extraArgs: ["--max-turns", "1", "--max-tokens", "100"],
+          env: {
+            OPENCODE_CONFIG_CONTENT: JSON.stringify({ ...testProviderConfig(llm.url), permission: { glob: "allow" } }),
+          },
+          timeoutMs: 60_000,
+          bunRun: true,
+        })
+        const events = opencode.parseJsonEvents(result.stdout)
+        expect(events.filter((event) => event.type === "budget_exhausted")).toMatchObject([
+          { limit: 1 },
+          { limit_tokens: 100, tokens_used: 125 },
+        ])
+        expect(result.stderr.match(/reached 100 token limit/g) ?? []).toHaveLength(1)
+        expect(events.filter((event) => event.type === "termination")).toMatchObject([
+          { max_tokens: 100, tokens_used: 125, token_budget_exhausted: true },
+        ])
+        expect((yield* llm.inputs).filter(isFinalization)).toHaveLength(1)
+      }),
+    90_000,
+  )
+  // altimate_change end
+
   cliIt.concurrent(
     "a silent stop exactly at --max-turns 1 gets one finalization and honors --no-trace",
     ({ llm, opencode, home }) =>

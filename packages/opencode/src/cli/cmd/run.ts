@@ -742,12 +742,16 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       // altimate_change start — preserve the first budget event across work and finalization loops
       let budgetExhaustedEmitted = false
+      // A token limit first reached during finalization is still reported, once.
+      let tokenBudgetExhaustedEmitted = false
       // altimate_change end
       function emit(type: string, data: Record<string, unknown>) {
         if (args.format === "json") {
           // altimate_change start — finalization can exhaust its own allowance after the work budget
           if (type === "budget_exhausted") {
-            if (budgetExhaustedEmitted) return true
+            const token = data.limit_tokens !== undefined
+            if (token ? tokenBudgetExhaustedEmitted : budgetExhaustedEmitted) return true
+            if (token) tokenBudgetExhaustedEmitted = true
             budgetExhaustedEmitted = true
           }
           // altimate_change end
@@ -920,20 +924,26 @@ You are speaking to a non-technical business executive. Follow these rules stric
         })
         // altimate_change end
       }
-      // altimate_change start — the step that reached the token limit ends the work phase like a hard deadline
-      const exhaustTokenBudget = () => {
-        if (!sessionID || !tokenBudget || timeBudgetDeadline === "hard") return
-        // The hard-deadline state also selects the effort-downgraded finalization headers.
-        timeBudgetDeadline = "hard"
-        timeBudgetStop.abort()
-        stopTimeBudget()
-        accounting.onBudgetExhausted("time")
+      // altimate_change start — the step that reached the token limit ends the work phase like a hard deadline;
+      // reached during finalization or after a hard time deadline, it is still reported, without a second stop
+      const exhaustTokenBudget = (finalizing = false) => {
+        if (!sessionID || !tokenBudget) return
+        const stop = !finalizing && timeBudgetDeadline !== "hard"
+        if (stop) {
+          // The hard-deadline state also selects the effort-downgraded finalization headers.
+          timeBudgetDeadline = "hard"
+          timeBudgetStop.abort()
+          stopTimeBudget()
+          accounting.onBudgetExhausted("time")
+        }
         tracer?.setRunBudget(budgetMetadata())
         const used = RunTokenBudget.reportedTokens(tokenBudget.total)
-        const warning = `Budget exceeded: reached ${tokenBudget.limit} token limit (${used} billed). Aborting work and requesting a final reply.`
+        const warning = stop
+          ? `Budget exceeded: reached ${tokenBudget.limit} token limit (${used} billed). Aborting work and requesting a final reply.`
+          : `Budget exceeded: reached ${tokenBudget.limit} token limit (${used} billed) while finalizing.`
         emit("budget_exhausted", { limit_tokens: tokenBudget.limit, tokens_used: used })
         warnBudget(warning)
-        abortForTimeBudget()
+        if (stop) abortForTimeBudget()
       }
       // altimate_change end
       const checkTimeBudget = () => {
@@ -1040,8 +1050,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (options?.signal?.aborted) break
           // altimate_change start — count every session of the run before the root-session filters below;
           // finalization turns are not cut off by the budget they are closing out
-          if (tokenBudget?.observe(event as { type: string; properties: Record<string, any> }) && options?.turnLimit === undefined) {
-            exhaustTokenBudget()
+          if (tokenBudget?.observe(event as { type: string; properties: Record<string, any> })) {
+            exhaustTokenBudget(options?.turnLimit !== undefined)
           }
           // altimate_change end
           // altimate_change start — preserve request boundaries and internal continuation ownership on attached streams
