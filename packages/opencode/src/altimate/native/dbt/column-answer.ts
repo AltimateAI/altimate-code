@@ -193,6 +193,8 @@ export function columnAnswer(
           unresolved.set(reader, lin.unresolved)
           continue
         }
+        // Read in part: what it traced stands, and what sits past it may carry the value.
+        if (lin.partial) unresolved.set(reader, `read in part: ${lin.partial}`)
         let hit = false
         for (const e of lin.edges) {
           if (e.from !== u || e.fromCol !== c) continue
@@ -206,7 +208,15 @@ export function columnAnswer(
           edges.push(edge(from, to, e.how, e.howFrom))
           if (fresh) queue.push([reader, e.to, h + 1])
         }
-        if (!hit && p.reads(reader).has(c)) {
+        if (hit) continue
+        // An ephemeral focus is inlined as a CTE: its readers' edges name its parents' columns, not its own.
+        if (u === focus && p.ephemeral(focus)) {
+          unresolved.set(reader, `reads ${String(p.node(focus)?.name ?? focus)}, an ephemeral model inlined as a CTE, whose columns the trace can't follow`)
+          continue
+        }
+        const reads = p.reads(reader)
+        if (reads === null) unresolved.set(reader, "the engine couldn't list the columns its SQL reads")
+        else if (reads.has(c)) {
           const set = also.get(reader) ?? new Set<string>()
           set.add(c)
           also.set(reader, set)
@@ -223,6 +233,7 @@ export function columnAnswer(
         unresolved.set(u, lin.unresolved)
         continue
       }
+      if (lin.partial) unresolved.set(u, `read in part: ${lin.partial}`)
       for (const e of lin.edges) {
         if (e.to !== c) continue
         const fresh = !columnIndex.has(`${e.from}|${e.fromCol}`)

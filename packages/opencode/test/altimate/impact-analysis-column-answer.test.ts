@@ -24,6 +24,7 @@ const ctx = {
 
 const dirs: string[] = []
 let spy: ReturnType<typeof spyOn> | undefined
+const telemetryBefore = process.env.ALTIMATE_TELEMETRY_DISABLED
 beforeEach(() => {
   process.env.ALTIMATE_TELEMETRY_DISABLED = "true"
 })
@@ -33,7 +34,8 @@ afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 afterAll(() => {
-  delete process.env.ALTIMATE_TELEMETRY_DISABLED
+  if (telemetryBefore === undefined) delete process.env.ALTIMATE_TELEMETRY_DISABLED
+  else process.env.ALTIMATE_TELEMETRY_DISABLED = telemetryBefore
 })
 
 const model = (name: string, deps: string[], sql: string) => ({

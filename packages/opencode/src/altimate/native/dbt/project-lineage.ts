@@ -35,6 +35,8 @@ export interface ModelLineage {
   edges: LineageEdge[]
   /** Why the engine's answer for this model can't be used, when it can't. */
   unresolved?: string
+  /** The engine read only part of the SQL: its edges stand, and what it missed may carry a value. */
+  partial?: string
   flags: ShapeFlag[]
 }
 
@@ -152,7 +154,7 @@ function idents(text: string): string[] {
 const CACHE_LIMIT = 20_000
 const lineageCache = new Map<string, any>()
 const outputColumnsCache = new Map<string, string[]>()
-const readsCache = new Map<string, Set<string>>()
+const readsCache = new Map<string, Set<string> | null>()
 
 function remember<T>(cache: Map<string, T>, key: string, make: () => T): T {
   const hit = cache.get(key)
@@ -208,7 +210,7 @@ export class ProjectLineage {
     return TRACED.has(this.nodes[id]?.resource_type)
   }
 
-  private ephemeral(id: string): boolean {
+  ephemeral(id: string): boolean {
     return this.nodes[id]?.config?.materialized === "ephemeral"
   }
 
@@ -285,8 +287,8 @@ export class ProjectLineage {
     })
   }
 
-  /** Columns the SQL names anywhere (filters, joins, groupings included), lower-cased. */
-  reads(id: string): Set<string> {
+  /** Columns the SQL names anywhere (filters, joins, groupings included), lower-cased; null when the engine can't list them. */
+  reads(id: string): Set<string> | null {
     const sql = this.sqlOf(id)
     if (!sql) return new Set()
     return remember(readsCache, hash(this.dialect, sql), () => {
@@ -295,7 +297,7 @@ export class ProjectLineage {
           ((core.extractMetadata(sql, this.dialect) as any).columns ?? []).map((c: string) => String(c).toLowerCase()),
         )
       } catch {
-        return new Set<string>()
+        return null
       }
     })
   }
@@ -439,17 +441,18 @@ export class ProjectLineage {
       edges.push({ from, fromCol, to, ...howOfEdge(e, fromCol, to) })
     }
     const errors: unknown[] = Array.isArray(result.errors) ? result.errors : []
-    if (!edges.length && errors.length) {
+    const firstError = (): string => {
       const first: any = errors[0]
-      return { edges, unresolved: String(first?.message ?? first).slice(0, 200), flags }
+      return String(first?.message ?? first).slice(0, 200)
     }
+    if (!edges.length && errors.length) return { edges, unresolved: firstError(), flags }
     if (!edges.length && parents.length)
       return {
         edges,
         unresolved: `reads ${parents.length} table${parents.length === 1 ? "" : "s"} but the engine traced no column (select * over columns it can't see?)`,
         flags,
       }
-    return { edges, flags }
+    return { edges, flags, ...(errors.length && { partial: firstError() }) }
   }
 }
 

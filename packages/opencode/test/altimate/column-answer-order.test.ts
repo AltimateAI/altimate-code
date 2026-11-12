@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, mock, test } from "bun:test"
+import { afterAll, afterEach, describe, expect, mock, test } from "bun:test"
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -8,6 +8,10 @@ import * as realCore from "@altimateai/altimate-core"
 // reorder its answer themselves.
 let reorder: (edges: any[]) => any[] = (edges) => edges
 const real: any = { ...realCore }
+// Bun's mock.module leaks across test files: put the genuine engine back for the files after this one.
+afterAll(() => {
+  mock.module("@altimateai/altimate-core", () => real)
+})
 mock.module("@altimateai/altimate-core", () => ({
   ...real,
   columnLineage: (...args: unknown[]) => {

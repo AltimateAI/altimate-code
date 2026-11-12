@@ -198,6 +198,43 @@ describe("column answer: downstream", () => {
     expect(a.counts).toMatchObject({ columns: 0, may_carry_models: 1, cleared_models: 0, model_level: 1 })
   })
 
+  test("an ephemeral focus's readers are unresolved, not cleared: their SQL names its parents' columns", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.base": model("base", [], "select 1 as id, 2 as amount", ["id", "amount"]),
+        "model.shop.eph": model("eph", ["base"], `select * from ${T("base")}`, ["id", "amount"], { config: { materialized: "ephemeral" } }),
+        "model.shop.r_star": model("r_star", ["eph"], `with __dbt__cte__eph as (select * from ${T("base")}) select * from __dbt__cte__eph`),
+      },
+    }
+    const a = columnAnswer(write(m), "eph", "amount")
+    expect(a.cleared.map((one) => one.name)).toEqual([])
+    expect(a.unresolved.map((u) => named(a, u.model))).toEqual(["r_star"])
+    expect(a.unresolved[0]!.reason).toContain("ephemeral")
+  })
+
+  test("a reader the engine reads only in part, or whose columns it can't list, is unresolved, never cleared", () => {
+    // Snowflake path access the engine parses only in part (`::variant:`), in a filter and in an output.
+    const m = {
+      metadata: { adapter_type: "snowflake" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as a, 2 as b", ["a", "b"]),
+        "model.shop.r_filter": model("r_filter", ["f"], `select a from ${T("f")} where b::variant:ok::boolean`),
+        "model.shop.r_value": model("r_value", ["f"], `select a, b::variant:path::string as c from ${T("f")}`),
+        "model.shop.after_filter": model("after_filter", ["r_filter"], `select a from ${T("r_filter")}`),
+      },
+    }
+    const a = columnAnswer(write(m), "f", "b")
+    expect(a.cleared.map((one) => one.name)).toEqual([])
+    expect(a.unresolved.map((u) => named(a, u.model)).sort()).toEqual(["r_filter", "r_value"])
+    expect(a.unresolved.every((u) => u.reason.length > 0)).toBe(true)
+    // What the engine did trace still stands.
+    expect(a.columns.map((c) => `${named(a, c.model)}.${c.column}`)).toContain("r_value.c")
+    expect(a.counts.may_carry_models).toBeGreaterThanOrEqual(2)
+  })
+
   test("a reader through an ephemeral model is reached", () => {
     const m = shop()
     m.nodes["model.shop.eph"] = model("eph", ["fct_orders"], `select order_id, revenue from ${T("fct_orders")}`, [], {
