@@ -100,7 +100,9 @@ export function namesOutsideSelect(sql: string, column: string): boolean {
 function namedOutsideSelect(sql: string): Set<string> {
   // An aggregate's FILTER (WHERE …) is how its value is computed, not a filter on the rows.
   const code = stripSql(stripAggFilter(sql)).toLowerCase()
-  const token = /\b(select|from|join|where|on|using|group\s+by|having|qualify|partition\s+by|order\s+by)\b|[()]|"?([a-z_][\w$]*)"?/g
+  // A quoted name (`"my col"`, `"net.amount"`, backticks, brackets) is one name, spaces and dots included.
+  const token =
+    /\b(select|from|join|where|on|using|group\s+by|having|qualify|partition\s+by|order\s+by)\b|[()]|"([^"]+)"|`([^`]+)`|\[([^\]]+)\]|([\p{L}_][\p{L}\p{N}_$]*)/gu
   const uses = new Set(["where", "on", "using", "group by", "having", "qualify", "partition by", "order by"])
   const out = new Set<string>()
   // The clause each parenthesis level is in: a subquery's FROM doesn't end the outer WHERE.
@@ -110,7 +112,10 @@ function namedOutsideSelect(sql: string): Set<string> {
     else if (m[0] === ")") {
       if (levels.length > 1) levels.pop()
     } else if (m[1]) levels[levels.length - 1] = m[1].replace(/\s+/g, " ")
-    else if (m[2] && uses.has([...levels].reverse().find(Boolean) ?? "")) out.add(m[2])
+    else {
+      const name = m[2] ?? m[3] ?? m[4] ?? m[5]
+      if (name && uses.has([...levels].reverse().find(Boolean) ?? "")) out.add(name)
+    }
   }
   return out
 }
@@ -404,7 +409,8 @@ export class ProjectLineage {
     const names = new Set(this.columns(id).map((c) => c.name))
     let settled = names.size > 0
     // A source's docs often list only some of its columns; a seed's header lists them all.
-    if (settled && !this.traced(id)) settled = this.node(id)?.resource_type === "seed" && this.seedHeader(this.node(id)).length > 0
+    if (settled && !this.traced(id))
+      settled = this.node(id)?.resource_type === "seed" && this.seedHeader(this.node(id)).some((c) => c.trim() !== "")
     if (settled && this.traced(id)) {
       const sql = this.sqlOf(id)
       settled = !!sql && (selectsStar(sql)

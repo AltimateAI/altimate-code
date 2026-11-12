@@ -212,9 +212,16 @@ export function columnAnswer(
   const opaqueUse = (id: string, sql: string, cols: string | string[]): string | null =>
     cached(`natural|${id}`, () => joinsNaturally(sql))
       ? "joins with NATURAL JOIN, which may join on the column"
-      : cached(`identifier|${id}|${[cols].flat().join(",")}`, () => namesThroughIdentifier(sql, [cols].flat()))
+      : cached(`any-identifier|${id}`, () => /identifier\s*\(/i.test(sql)) &&
+          cached(`identifier|${id}|${Array.isArray(cols) ? "parents" : cols}`, () => namesThroughIdentifier(sql, [cols].flat()))
         ? "names the column through IDENTIFIER(), which the trace can't follow"
         : null
+  const parentNames = new Map<string, string[]>()
+  const parentColumns = (id: string) => {
+    let names = parentNames.get(id)
+    if (!names) parentNames.set(id, (names = p.parents(id).flatMap((one) => p.columns(one).map((col) => col.name))))
+    return names
+  }
   const usesOutside = (id: string, sql: string, col: string) => cached(`outside|${id}|${col}`, () => namesOutsideSelect(sql, col))
 
   if (direction === "downstream") {
@@ -283,7 +290,7 @@ export function columnAnswer(
       if (lin.partial) unresolved.set(u, `read in part: ${lin.partial}`)
       const sql = p.sqlOf(u)
       // Upstream, IDENTIFIER() names the parents' columns, not this output.
-      const opaque = opaqueUse(u, sql, [c, ...p.parents(u).flatMap((one) => p.columns(one).map((col) => col.name))])
+      const opaque = opaqueUse(u, sql, c) ?? opaqueUse(u, sql, parentColumns(u))
       if (opaque) unresolved.set(u, opaque)
       // A `*` the trace couldn't expand to the column may still be where it comes from.
       if (!lin.edges.some((e) => e.to === c) && selectsStar(sql)) unresolved.set(u, `selects *, which the trace couldn't follow back to ${c}`)

@@ -758,6 +758,62 @@ describe("column answer: never cleared while it may carry the column", () => {
     expect(columnReach(path, "stg", "amount").models.map((one) => one.name)).toEqual(["rpt"])
   })
 
+  test("a filter on a quoted name with a space or a dot still counts as reading it", () => {
+    const m = {
+      metadata: { adapter_type: "snowflake" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], 'select 1 as id, 2 as "net.amount"', ["id", "net.amount"]),
+        "model.shop.r": model("r", ["f"], `select "net.amount" as v, id from ${T("f")} where "net.amount" > 0`),
+        "model.shop.child": model("child", ["r"], `select id from ${T("r")}`),
+      },
+    }
+    const a = names(columnAnswer(write(m), "f", "net.amount"))
+    expect(a.cleared).not.toContain("child")
+    const spaced = {
+      metadata: { adapter_type: "snowflake" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], 'select 1 as id, 2 as "order id"', ["id", "order id"]),
+        "model.shop.r": model("r", ["f"], `select "order id" as v, id from ${T("f")} where "order id" > 0`),
+        "model.shop.child": model("child", ["r"], `select id from ${T("r")}`),
+      },
+    }
+    expect(names(columnAnswer(write(spaced), "f", "order id")).cleared).not.toContain("child")
+  })
+
+  test("a seed with an empty first line isn't settled by its docs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "column-answer-"))
+    dirs.push(dir)
+    mkdirSync(join(dir, "target"))
+    mkdirSync(join(dir, "seeds"))
+    writeFileSync(join(dir, "seeds", "s.csv"), "\n1,2\n")
+    writeFileSync(join(dir, "dbt_project.yml"), "name: shop\n")
+    const seed = {
+      resource_type: "seed",
+      unique_id: "seed.shop.s",
+      name: "s",
+      alias: "s",
+      database: "shop",
+      schema: "main",
+      original_file_path: "seeds/s.csv",
+      config: { materialized: "seed" },
+      columns: { id: { name: "id" } },
+    }
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "seed.shop.s": seed,
+        "model.shop.stg": model("stg", ["seed.shop.s"], `select * from ${T("s")}`),
+        "model.shop.rpt": model("rpt", ["stg"], `select id, amount from ${T("stg")}`),
+      },
+    }
+    const file = join(dir, "target", "manifest.json")
+    writeFileSync(file, JSON.stringify(m))
+    expect(() => columnAnswer(file, "stg", "amount")).not.toThrow()
+  })
+
   test("a star over a source documented only in part leaves its other columns real, in both tools", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },
