@@ -244,6 +244,20 @@ async function v2fixture() {
 // A top-level name that does not exist, so a missing first path segment is exercised.
 const MISSING_TOP = `altimate-guard-missing-${Math.random().toString(36).slice(2)}`
 
+// The paths a refusal names: the list between "): " and ". Use paths".
+function deniedPaths(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  const list = /outside the project \(.*?\): (.*)\. Use paths inside the project instead\./s.exec(message)
+  return list ? list[1].split(", ") : []
+}
+const ETC_HOSTS = (() => {
+  try {
+    return require("fs").realpathSync("/etc/hosts") as string
+  } catch {
+    return "/etc/hosts"
+  }
+})()
+
 // Files the refused commands would have created outside the project.
 async function leaked(outside: string, project: string) {
   const parent = path.dirname(project)
@@ -261,74 +275,137 @@ async function leaked(outside: string, project: string) {
 describe("tool.bash external_directory: deny (review cases)", () => {
   test.each([
     // redirection targets resolve in the directory of the command that owns them
-    ["redirect after cd", (o: string, p: string) => `cd ../.. && echo pwn > ../${path.basename(p)}-marker`, "a/b"],
+    [
+      "redirect after cd",
+      (o: string, p: string) => `cd ../.. && echo pwn > ../${path.basename(p)}-marker`,
+      "a/b",
+      (o: string, p: string) => `${path.dirname(p)}/${path.basename(p)}-marker`,
+    ],
     // every word of a redirection destination is an argument at run time
-    ["word after a redirection", (o: string) => `cat > stolen.txt ${o}/s.txt`, undefined],
-    ["word after a /dev/null redirection", (o: string) => `head > /dev/null ${o}/s.txt`, undefined],
+    ["word after a redirection", (o: string) => `cat > stolen.txt ${o}/s.txt`, undefined, (o: string) => `${o}/s.txt`],
+    [
+      "word after a /dev/null redirection",
+      (o: string) => `head > /dev/null ${o}/s.txt`,
+      undefined,
+      (o: string) => `${o}/s.txt`,
+    ],
     // assignment values
-    ["program from an assignment", (o: string) => `PY=${o}/py; $PY`, undefined],
-    ["PATH entry from an export", (o: string) => `export PATH=${o}:$PATH; py`, undefined],
-    ["file from an export", (o: string) => `export FOO=${o}/s.txt; head "$FOO"`, undefined],
-    ["prefix assignment", (o: string) => `OUT=${o}/w sh -c 'echo x > "$OUT"'`, undefined],
+    ["program from an assignment", (o: string) => `PY=${o}/py; $PY`, undefined, (o: string) => `${o}/py`],
+    ["PATH entry from an export", (o: string) => `export PATH=${o}:$PATH; py`, undefined, (o: string) => o],
+    [
+      "file from an export",
+      (o: string) => `export FOO=${o}/s.txt; head "$FOO"`,
+      undefined,
+      (o: string) => `${o}/s.txt`,
+    ],
+    ["prefix assignment", (o: string) => `OUT=${o}/w sh -c 'echo x > "$OUT"'`, undefined, (o: string) => `${o}/w`],
     // option values
-    ["--opt=value", (o: string) => `sort --output=${o}/w inside.txt`, undefined],
-    ["attached short option", (o: string) => `sort -o${o}/w inside.txt`, undefined],
-    ["key=value write", (o: string) => `dd if=inside.txt of=${o}/w`, undefined],
-    ["key=value read", (o: string) => `dd if=${o}/s.txt`, undefined],
-    ["--flag=value on echo", () => `echo --out=/etc/hosts`, undefined],
+    ["--opt=value", (o: string) => `sort --output=${o}/w inside.txt`, undefined, (o: string) => `${o}/w`],
+    ["attached short option", (o: string) => `sort -o${o}/w inside.txt`, undefined, (o: string) => `${o}/w`],
+    ["key=value write", (o: string) => `dd if=inside.txt of=${o}/w`, undefined, (o: string) => `${o}/w`],
+    ["key=value read", (o: string) => `dd if=${o}/s.txt`, undefined, (o: string) => `${o}/s.txt`],
+    ["--flag=value on echo", () => `echo --out=/etc/hosts`, undefined, () => ETC_HOSTS],
     // literal nested shell strings
-    ["bash -c", (o: string) => `bash -c 'cat ${o}/s.txt'`, undefined],
-    ["sh -c", (o: string) => `sh -c "cat ${o}/s.txt"`, undefined],
-    ["eval", (o: string) => `eval "cat ${o}/s.txt"`, undefined],
-    ["wrapped shell", (o: string) => `env bash -lc 'cat ${o}/s.txt'`, undefined],
+    ["bash -c", (o: string) => `bash -c 'cat ${o}/s.txt'`, undefined, (o: string) => `${o}/s.txt`],
+    ["sh -c", (o: string) => `sh -c "cat ${o}/s.txt"`, undefined, (o: string) => `${o}/s.txt`],
+    ["eval", (o: string) => `eval "cat ${o}/s.txt"`, undefined, (o: string) => `${o}/s.txt`],
+    ["wrapped shell", (o: string) => `env bash -lc 'cat ${o}/s.txt'`, undefined, (o: string) => `${o}/s.txt`],
     // symlinks inside the project that point outside
-    ["read through an in-project symlink", () => `head lnk/s.txt`, undefined],
-    ["read through ./symlink", () => `head ./lnk/s.txt`, undefined],
-    ["write through an in-project symlink", () => `echo x > lnk/w`, undefined],
+    ["read through an in-project symlink", () => `head lnk/s.txt`, undefined, (o: string) => `${o}/s.txt`],
+    ["read through ./symlink", () => `head ./lnk/s.txt`, undefined, (o: string) => `${o}/s.txt`],
+    ["write through an in-project symlink", () => `echo x > lnk/w`, undefined, (o: string) => `${o}/w`],
     // pushd moves the directory like cd
-    ["pushd then a relative write", (o: string, p: string) => `pushd ../.. && cp inside.txt ../${path.basename(p)}-m`, "a/b"],
+    [
+      "pushd then a relative write",
+      (o: string, p: string) => `pushd ../.. && cp inside.txt ../${path.basename(p)}-m`,
+      "a/b",
+      (o: string, p: string) => `${path.dirname(p)}/${path.basename(p)}-m`,
+    ],
     // words outside simple commands
-    ["for loop values", (o: string) => `for f in ${o}/s.txt; do head "$f"; done`, undefined],
-    ["[[ test ]]", (o: string) => `[[ -f ${o}/s.txt ]]`, undefined],
-    ["[ test ]", (o: string) => `[ -f ${o}/s.txt ]`, undefined],
-    ["case word", (o: string) => `case ${o}/s.txt in *) echo y ;; esac`, undefined],
+    [
+      "for loop values",
+      (o: string) => `for f in ${o}/s.txt; do head "$f"; done`,
+      undefined,
+      (o: string) => `${o}/s.txt`,
+    ],
+    ["[[ test ]]", (o: string) => `[[ -f ${o}/s.txt ]]`, undefined, (o: string) => `${o}/s.txt`],
+    ["[ test ]", (o: string) => `[ -f ${o}/s.txt ]`, undefined, (o: string) => `${o}/s.txt`],
+    ["case word", (o: string) => `case ${o}/s.txt in *) echo y ;; esac`, undefined, (o: string) => `${o}/s.txt`],
     // other literal spellings
-    ["ANSI-C quoted argument", (o: string) => `head $'${o}/s.txt'`, undefined],
-    ["ANSI-C quoted program", (o: string) => `$'${o}/py'`, undefined],
-    ["another user's home", () => `head ~root/x`, undefined],
+    ["ANSI-C quoted argument", (o: string) => `head $'${o}/s.txt'`, undefined, (o: string) => `${o}/s.txt`],
+    ["ANSI-C quoted program", (o: string) => `$'${o}/py'`, undefined, (o: string) => `${o}/py`],
+    ["another user's home", () => `head ~root/x`, undefined, () => "~root/x"],
     // redirection operators and quoting
-    ["stderr redirection", (o: string) => `cat inside.txt 2> ${o}/w`, undefined],
-    ["&> redirection", (o: string) => `echo x &> ${o}/w`, undefined],
-    ["input redirection", (o: string) => `cat < ${o}/s.txt`, undefined],
-    ["read-write redirection", (o: string) => `cat <> ${o}/s.txt`, undefined],
-    ["quoted path with spaces", (o: string) => `cat "${o}/dir with space/s.txt"`, undefined],
+    ["stderr redirection", (o: string) => `cat inside.txt 2> ${o}/w`, undefined, (o: string) => `${o}/w`],
+    ["&> redirection", (o: string) => `echo x &> ${o}/w`, undefined, (o: string) => `${o}/w`],
+    ["input redirection", (o: string) => `cat < ${o}/s.txt`, undefined, (o: string) => `${o}/s.txt`],
+    ["read-write redirection", (o: string) => `cat <> ${o}/s.txt`, undefined, (o: string) => `${o}/s.txt`],
+    [
+      "quoted path with spaces",
+      (o: string) => `cat "${o}/dir with space/s.txt"`,
+      undefined,
+      (o: string) => `${o}/dir with space/s.txt`,
+    ],
     // paths that do not exist yet are still outside the project
-    ["touch a missing file", (o: string) => `touch ${o}/w`, undefined],
-    ["touch a missing top-level file", () => `touch /${MISSING_TOP}`, undefined],
-    ["mkdir a missing top-level directory", () => `mkdir /${MISSING_TOP}`, undefined],
-    ["mkdir -p under an existing directory", (o: string) => `mkdir -p ${o}/w/x/y`, undefined],
-    ["mkdir -p under a missing top-level directory", () => `mkdir -p /${MISSING_TOP}/x/y`, undefined],
+    ["touch a missing file", (o: string) => `touch ${o}/w`, undefined, (o: string) => `${o}/w`],
+    ["touch a missing top-level file", () => `touch /${MISSING_TOP}`, undefined, () => `/${MISSING_TOP}`],
+    ["mkdir a missing top-level directory", () => `mkdir /${MISSING_TOP}`, undefined, () => `/${MISSING_TOP}`],
+    [
+      "mkdir -p under an existing directory",
+      (o: string) => `mkdir -p ${o}/w/x/y`,
+      undefined,
+      (o: string) => `${o}/w/x/y`,
+    ],
+    [
+      "mkdir -p under a missing top-level directory",
+      () => `mkdir -p /${MISSING_TOP}/x/y`,
+      undefined,
+      () => `/${MISSING_TOP}/x/y`,
+    ],
     // after a cd that may fail, `;`, `||` and newline continuations can still run in the old directory
-    ["read after a failing cd and ;", (o: string) => `cd missing; head ../${path.basename(o)}/s.txt`, undefined],
-    ["read after a failing cd and ||", (o: string) => `cd missing || head ../${path.basename(o)}/s.txt`, undefined],
-    ["read after a failing cd and newline", (o: string) => `cd missing\nhead ../${path.basename(o)}/s.txt`, undefined],
+    [
+      "read after a failing cd and ;",
+      (o: string) => `cd missing; head ../${path.basename(o)}/s.txt`,
+      undefined,
+      (o: string) => `${o}/s.txt`,
+    ],
+    [
+      "read after a failing cd and ||",
+      (o: string) => `cd missing || head ../${path.basename(o)}/s.txt`,
+      undefined,
+      (o: string) => `${o}/s.txt`,
+    ],
+    [
+      "read after a failing cd and newline",
+      (o: string) => `cd missing\nhead ../${path.basename(o)}/s.txt`,
+      undefined,
+      (o: string) => `${o}/s.txt`,
+    ],
     [
       "read after a failing cd and ; in a group",
       (o: string) => `{ cd missing; head ../${path.basename(o)}/s.txt; }`,
       undefined,
+      (o: string) => `${o}/s.txt`,
     ],
     [
       "read after a failing cd and ; in a subshell",
       (o: string) => `(cd missing; head ../${path.basename(o)}/s.txt)`,
       undefined,
+      (o: string) => `${o}/s.txt`,
     ],
     [
       "write after a failing cd in an && chain then ;",
       (o: string, p: string) => `true && cd missing; echo x > ../${path.basename(p)}-marker`,
       undefined,
+      (o: string, p: string) => `${path.dirname(p)}/${path.basename(p)}-marker`,
     ],
-    ["read after a failing pushd and ;", (o: string) => `pushd missing; head ../${path.basename(o)}/s.txt`, undefined],
-  ])("refuses %s", async (_name, command, workdir) => {
+    [
+      "read after a failing pushd and ;",
+      (o: string) => `pushd missing; head ../${path.basename(o)}/s.txt`,
+      undefined,
+      (o: string) => `${o}/s.txt`,
+    ],
+  ])("refuses %s", async (_name, command, workdir, name) => {
     const { outside, project } = await v2fixture()
     await using _outside = outside
     await using _project = project
@@ -345,6 +422,18 @@ describe("tool.bash external_directory: deny (review cases)", () => {
           ctx,
         ),
       ).rejects.toThrow(/external_directory is denied/)
+      // The refusal names the path this row is about, not just any refused word.
+      const error = await bash
+        .execute(
+          {
+            command: command(outside.path, project.path),
+            ...(workdir && { workdir: path.join(project.path, workdir) }),
+            description: "Escape attempt",
+          },
+          ctx,
+        )
+        .catch((e: Error) => e)
+      expect(deniedPaths(error)).toContain(name(outside.path, project.path))
     })
     expect(await leaked(outside.path, project.path)).toEqual([])
   })
