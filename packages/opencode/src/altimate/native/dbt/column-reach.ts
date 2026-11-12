@@ -195,10 +195,11 @@ export function namesThroughIdentifier(sql: string, columns: string[]): boolean 
     if (call[1] === undefined || !call[2]) return true
     const literal = call[1].replace(/''/g, "'")
     if (!/^[\w$."]*$/.test(literal)) return true
-    // Any mention of the column in the string counts (qualified, quoted, with dots in a quoted name);
-    // a doubled quote inside a quoted name (`"a""b"`) is one quote.
+    // Any mention of the column as a whole name in the string counts (qualified, quoted, with dots in a
+    // quoted name), not one inside a longer name; a doubled quote inside a quoted name (`"a""b"`) is one quote.
     const text = literal.replace(/""/g, '"').toLowerCase()
-    if ([...wanted].some((column) => text.includes(column))) return true
+    const whole = (column: string) => new RegExp(`(?<![\\w$])${column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`)
+    if ([...wanted].some((column) => whole(column).test(text))) return true
   }
   return false
 }

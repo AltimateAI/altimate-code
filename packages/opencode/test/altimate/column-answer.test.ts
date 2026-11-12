@@ -651,6 +651,113 @@ describe("column answer: never cleared while it may carry the column", () => {
     expect(names(a).cleared).not.toContain("eph")
   })
 
+  test("upstream, an ephemeral model that starts the value as a constant is not cleared", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.e": model("e", [], "select 2 as val", ["val"], { config: { materialized: "ephemeral" } }),
+        "model.shop.r": model("r", ["e"], "with __dbt__cte__e as (select 2 as val) select val from __dbt__cte__e", ["val"]),
+      },
+    }
+    expect(names(columnAnswer(write(m), "r", "val", "upstream")).cleared).toEqual([])
+  })
+
+  test("a filter on the name of an output the column feeds counts as reading it", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.r": model("r", ["f"], `with x as (select val as v, id from ${T("f")}) select v, id from x where v > 1`),
+        "model.shop.child": model("child", ["r"], `select id from ${T("r")}`),
+      },
+    }
+    const a = names(columnAnswer(write(m), "f", "val"))
+    expect(a.also).toEqual(["r"])
+    expect(a.cleared).toEqual([])
+  })
+
+  test("IDENTIFIER() naming a longer column doesn't make a reader of a shorter one unresolved", () => {
+    const m = {
+      metadata: { adapter_type: "snowflake" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as order_id", ["id", "order_id"]),
+        "model.shop.r": model("r", ["f"], `select id, identifier('order_id') as x from ${T("f")}`),
+      },
+    }
+    expect(names(columnAnswer(write(m), "f", "id")).unresolved).toEqual([])
+  })
+
+  test("a quoted relation (BigQuery backticks) still ties a qualified star to its parent", () => {
+    const m = {
+      metadata: { adapter_type: "bigquery" },
+      sources: { "source.shop.raw.orders": source("orders", []) },
+      nodes: {
+        "model.shop.stg": model("stg", ["source.shop.raw.orders"], "select * from `shop`.`raw`.`orders`", ["order_id"]),
+        "model.shop.rpt": model("rpt", ["stg"], "select o.* from `shop`.`main`.`stg` o"),
+      },
+    }
+    const a = names(columnAnswer(write(m), "stg", "amount"))
+    expect(a.unresolved).toContain("rpt")
+    expect(a.cleared).toEqual([])
+  })
+
+  test("upstream, IDENTIFIER() naming a parent's column leaves the output unresolved", () => {
+    const m = {
+      metadata: { adapter_type: "snowflake" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.r": model("r", ["f"], `select id, identifier('val') as x from ${T("f")}`, ["id", "x"]),
+      },
+    }
+    expect(names(columnAnswer(write(m), "r", "x", "upstream")).cleared).toEqual([])
+  })
+
+  test("a filter on the column after a subquery in the same WHERE still counts as reading it", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.g": model("g", [], "select 1 as k", ["k"]),
+        "model.shop.r": model("r", ["f", "g"], `select f.val as v, f.id from ${T("f")} f where exists (select 1 from ${T("g")}) and f.val > 0`),
+        "model.shop.child": model("child", ["r"], `select id from ${T("r")}`),
+      },
+    }
+    const a = names(columnAnswer(write(m), "f", "val"))
+    expect(a.also).toContain("r")
+    expect(a.cleared).not.toContain("child")
+  })
+
+  test("a seed whose header can't be read isn't settled by its docs", () => {
+    const seed = {
+      resource_type: "seed",
+      unique_id: "seed.shop.s",
+      name: "s",
+      alias: "s",
+      database: "shop",
+      schema: "main",
+      original_file_path: "seeds/missing.csv",
+      config: { materialized: "seed" },
+      columns: { id: { name: "id" } },
+    }
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "seed.shop.s": seed,
+        "model.shop.stg": model("stg", ["seed.shop.s"], `select * from ${T("s")}`),
+        "model.shop.rpt": model("rpt", ["stg"], `select id, amount from ${T("stg")}`),
+      },
+    }
+    const path = write(m)
+    expect(() => columnAnswer(path, "stg", "amount")).not.toThrow()
+    expect(columnReach(path, "stg", "amount").models.map((one) => one.name)).toEqual(["rpt"])
+  })
+
   test("a star over a source documented only in part leaves its other columns real, in both tools", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },

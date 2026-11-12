@@ -93,17 +93,26 @@ export function hasNestedWith(sql: string): boolean {
  * ORDER BY: a use that can change outputs other than the ones the column feeds.
  */
 export function namesOutsideSelect(sql: string, column: string): boolean {
-  const code = stripSql(sql).toLowerCase()
-  const name = column.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  const word = new RegExp(`(?<![\\w$])"?${name}"?(?![\\w$])`, "g")
-  const clause = /\b(select|from|join|where|on|using|group\s+by|having|qualify|partition\s+by|order\s+by)\b/g
+  return remember(outsideCache, hash("outside", sql), () => namedOutsideSelect(sql)).has(column.toLowerCase())
+}
+
+/** The names the SQL uses under those clauses, lower-cased, in one pass. */
+function namedOutsideSelect(sql: string): Set<string> {
+  // An aggregate's FILTER (WHERE …) is how its value is computed, not a filter on the rows.
+  const code = stripSql(stripAggFilter(sql)).toLowerCase()
+  const token = /\b(select|from|join|where|on|using|group\s+by|having|qualify|partition\s+by|order\s+by)\b|[()]|"?([a-z_][\w$]*)"?/g
   const uses = new Set(["where", "on", "using", "group by", "having", "qualify", "partition by", "order by"])
-  for (const m of code.matchAll(word)) {
-    let last = ""
-    for (const k of code.slice(0, m.index).matchAll(clause)) last = k[1]!.replace(/\s+/g, " ")
-    if (uses.has(last)) return true
+  const out = new Set<string>()
+  // The clause each parenthesis level is in: a subquery's FROM doesn't end the outer WHERE.
+  const levels: string[] = [""]
+  for (const m of code.matchAll(token)) {
+    if (m[0] === "(") levels.push("")
+    else if (m[0] === ")") {
+      if (levels.length > 1) levels.pop()
+    } else if (m[1]) levels[levels.length - 1] = m[1].replace(/\s+/g, " ")
+    else if (m[2] && uses.has([...levels].reverse().find(Boolean) ?? "")) out.add(m[2])
   }
-  return false
+  return out
 }
 
 /** Whether a function takes a `*` (hash(*), hash(t.*), row(t.*)): the engine may not expand it. Not count(*). */
@@ -118,10 +127,13 @@ export function starInFunction(sql: string): boolean {
 export function starOver(sql: string, table: string): boolean {
   if (!selectsStar(sql)) return false
   const code = stripSql(sql).toLowerCase()
-  const qualified = [...code.matchAll(/([a-z_][\w$]*)"?\s*\.\s*\*/g)].map((m) => m[1]!)
-  if (selectsStar(code.replace(/[a-z_][\w$]*"?\s*\.\s*\*/g, "1"))) return true
+  // Qualifiers and table names may be quoted with "", `` or [] (BigQuery, Databricks, SQL Server).
+  const qualified = [...code.matchAll(/([a-z_][\w$]*)["`\]]?\s*\.\s*\*/g)].map((m) => m[1]!)
+  if (selectsStar(code.replace(/[a-z_][\w$]*["`\]]?\s*\.\s*\*/g, "1"))) return true
   const t = table.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-  return qualified.some((q) => q === table.toLowerCase() || new RegExp(`\\b${t}"?\\s+(?:as\\s+)?"?${q}\\b`).test(code))
+  return qualified.some(
+    (q) => q === table.toLowerCase() || new RegExp(`\\b${t}["\`\\]]?\\s+(?:as\\s+)?["\`\\[]?${q}\\b`).test(code),
+  )
 }
 
 /**
@@ -191,6 +203,7 @@ const CACHE_LIMIT = 20_000
 const lineageCache = new Map<string, any>()
 const outputColumnsCache = new Map<string, string[]>()
 const readsCache = new Map<string, Set<string> | null>()
+const outsideCache = new Map<string, Set<string>>()
 
 function remember<T>(cache: Map<string, T>, key: string, make: () => T): T {
   const hit = cache.get(key)
@@ -208,6 +221,7 @@ export function clearLineageCaches() {
   lineageCache.clear()
   outputColumnsCache.clear()
   readsCache.clear()
+  outsideCache.clear()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -338,7 +352,7 @@ export class ProjectLineage {
     })
   }
 
-  private seedHeader(n: any): string[] {
+  seedHeader(n: any): string[] {
     if (!this.projectDir || !n.original_file_path) return []
     try {
       const first = fs.readFileSync(path.join(this.projectDir, n.original_file_path), "utf8").split(/\r?\n/)[0] ?? ""
@@ -381,7 +395,8 @@ export class ProjectLineage {
   /**
    * The node's columns, lower-cased, when nothing can be missing from them; undefined otherwise.
    * A model's are settled by a SELECT list with no `*`, or, with one, by lineage that resolved over
-   * parents whose own columns are settled. A seed's are its header; a source's are never settled.
+   * parents whose own columns are settled. A seed's are its header, when it can be read; a source's are
+   * never settled.
    */
   settledColumns(id: string): Set<string> | undefined {
     if (this.settledMemo.has(id)) return this.settledMemo.get(id)
@@ -389,7 +404,7 @@ export class ProjectLineage {
     const names = new Set(this.columns(id).map((c) => c.name))
     let settled = names.size > 0
     // A source's docs often list only some of its columns; a seed's header lists them all.
-    if (settled && !this.traced(id) && this.node(id)?.resource_type !== "seed") settled = false
+    if (settled && !this.traced(id)) settled = this.node(id)?.resource_type === "seed" && this.seedHeader(this.node(id)).length > 0
     if (settled && this.traced(id)) {
       const sql = this.sqlOf(id)
       settled = !!sql && (selectsStar(sql)
