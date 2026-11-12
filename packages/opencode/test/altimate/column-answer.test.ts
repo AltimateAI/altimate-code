@@ -1078,6 +1078,28 @@ describe("both tools: names that aren't columns", () => {
     expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["col_id", "col_val"])
   })
 
+  test("a documented column whose name holds a backslash stays a column", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: { "model.shop.f": model("f", [], 'select 1 as id, 2 as "a\\b"', ["id", "a\\b"]) },
+    }
+    expect(() => columnAnswer(write(m), "f", "a\\b")).not.toThrow()
+  })
+
+  test("SQL that isn't text gives a low-confidence answer, not a throw", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id", ["id"]),
+        "model.shop.g": model("g", [], ""),
+        "model.shop.r": { ...model("r", ["f", "g"], ""), compiled_code: 42 },
+      },
+    }
+    expect(dbtLineage({ manifest_path: write(m), model: "r" }).confidence).toBe("low")
+  })
+
   test("a real column named like the internal placeholder keeps its edge", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },

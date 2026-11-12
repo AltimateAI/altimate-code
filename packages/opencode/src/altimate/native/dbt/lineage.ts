@@ -153,7 +153,7 @@ export function dbtLineage(params: DbtLineageParams): DbtLineageResult {
   // A placeholder is matched by substring in what the engine returns, so it must not occur in the SQL or
   // in any known column's name.
   const taken = [
-    sql.toLowerCase(),
+    String(sql).toLowerCase(),
     ...Object.values<any>(tables).flatMap((t) => (t?.columns ?? []).map((c: any) => String(c?.name ?? "").toLowerCase())),
   ]
   for (const id of project.unknownParents(uniqueId)) {

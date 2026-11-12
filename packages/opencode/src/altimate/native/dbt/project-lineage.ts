@@ -476,8 +476,7 @@ export class ProjectLineage {
     const n = this.node(id)
     const found = new Map<string, { name: string; type: string }>()
     const add = (name: unknown, type?: unknown) => {
-      // A backslash marks an alias template (DuckDB `columns('.*') as "col_\0"`), not a column.
-      if (typeof name !== "string" || !name || name === "*" || name.includes("\\")) return
+      if (typeof name !== "string" || !name || name === "*") return
       const k = name.toLowerCase()
       const t = typeof type === "string" ? type : ""
       const had = found.get(k)
@@ -486,9 +485,12 @@ export class ProjectLineage {
     for (const [k, c] of Object.entries<any>(n?.columns ?? {})) add(c?.name || k, c?.data_type || c?.type)
     if (n?.resource_type === "seed") for (const c of this.seedHeader(n)) add(c)
     if (this.traced(id) && !this.busy.has(id)) {
-      for (const e of this.lineage(id).edges) add(e.to)
+      // From the SQL, a backslash and a digit mark an alias template (DuckDB `columns('.*') as "col_\0"`),
+      // not a column; a documented name keeps its backslash.
+      const real = (name: string) => !/\\\d/.test(name)
+      for (const e of this.lineage(id).edges) if (real(e.to)) add(e.to)
       const sql = this.sqlOf(id)
-      if (sql) for (const c of this.outputColumns(sql)) add(c)
+      if (sql) for (const c of this.outputColumns(sql)) if (real(c)) add(c)
     }
     const out = [...found.values()]
     this.columnMemo.set(id, out)
