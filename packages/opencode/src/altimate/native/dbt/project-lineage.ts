@@ -120,7 +120,8 @@ export function relationUse(sql: string): "row" | "unclear" | null {
   const tokens = [...code.matchAll(new RegExp(String.raw`${word}|\d[\w.]*|[.,()=<>+\-*/:;]`, "gu"))].map((m) => m[0])
   // What may follow a FROM item: another item, a join, the end of the list, or a clause.
   const after = /^(,|\)|;|on|using|join|left|right|full|inner|outer|cross|natural|where|group|order|having|qualify|limit|window|union|intersect|except|select)$/
-  const ends = /^(where|group|order|having|qualify|limit|window|union|intersect|except|on|using|select|set|values|returning)$/
+  // A join condition (ON, USING) doesn't end the list: a comma after it adds another table.
+  const ends = /^(where|group|order|having|qualify|limit|window|union|intersect|except|select|set|values|returning)$/
   const keywords = /^(on|using|where|join|left|right|full|inner|outer|cross|natural|lateral|group|order|having|qualify|limit|union|intersect|except|window|as|select)$/
   const close = (open: number) => {
     let depth = 0
