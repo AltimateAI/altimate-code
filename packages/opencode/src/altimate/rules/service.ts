@@ -106,6 +106,28 @@ function triggerDeps(ctx: InstanceContext, model?: string): RuleTrigger.TriggerD
 
 /** Sync now, or join the sync already running. Its notices and change event are published by the run itself, once.
  * Shared with routes and the TUI menu. */
+/** Check the person's skill and knowledge requests now: each new decision is published as `rule.proposal.reviewed`
+ * (with its `kind`) to clients listening, and `altimate.rules.changed` asks them to replay when anything was recorded
+ * (or `announceChange`). For the refresh timer and "Sync now". Throws only what the poll does not swallow. */
+export async function pollReviewDecisions(directory: string, opts: { announceChange?: boolean } = {}) {
+  const { ReviewNotices } = await import("../workspace/review-notices")
+  const result = await ReviewNotices.poll(directory, {
+    announce: async (notice) => {
+      await Bus.publish(RuleEvents.Event.Reviewed, {
+        public_id: notice.public_id,
+        text: notice.name,
+        status: notice.status,
+        kind: notice.kind,
+        ...(notice.reason ? { reason: notice.reason } : {}),
+        ...(notice.reviewer ? { reviewer: notice.reviewer } : {}),
+      })
+    },
+  })
+  if (result.status === "done" && (opts.announceChange || result.recorded.length))
+    await Bus.publish(RuleEvents.Event.Changed, { directory }).catch(() => {})
+  return result
+}
+
 export async function syncNow(root: string, directory: string, learn: Parameters<typeof RulesSync.run>[2], trigger: RulesTelemetry.SyncTrigger = "refresh") {
   return RulesSync.runShared(root, directory, learn, trigger)
 }
@@ -183,22 +205,8 @@ export async function start(ctx: InstanceContext): Promise<void> {
     let reviewsPolled = false
     const reviewNotices = Instance.bind(async () => {
       if (disposed) return
-      const { ReviewNotices } = await import("../workspace/review-notices")
-      const result = await ReviewNotices.poll(ctx.directory, {
-        announce: async (notice) => {
-          await Bus.publish(RuleEvents.Event.Reviewed, {
-            public_id: notice.public_id,
-            text: notice.name,
-            status: notice.status,
-            kind: notice.kind,
-            ...(notice.reason ? { reason: notice.reason } : {}),
-            ...(notice.reviewer ? { reviewer: notice.reviewer } : {}),
-          })
-        },
-      })
-      if (result.status !== "done" || disposed) return
-      if (!reviewsPolled || result.recorded.length) await Bus.publish(RuleEvents.Event.Changed, { directory: ctx.directory }).catch(() => {})
-      reviewsPolled = true
+      const result = await pollReviewDecisions(ctx.directory, { announceChange: !reviewsPolled })
+      if (result.status === "done") reviewsPolled = true
     })
     const refresh = Instance.bind(async () => {
       if (disposed) return

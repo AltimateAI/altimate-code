@@ -131,3 +131,20 @@ describe("workspace request routes", () => {
     expect(["signed_out", "not_linked"]).toContain(body.review_status)
   })
 })
+
+describe("rules sync route", () => {
+  test("Sync now also checks skill and knowledge decisions", async () => {
+    const { RulesService } = await import("../../src/altimate/rules/service")
+    const { spyOn } = await import("bun:test")
+    const sync = spyOn(RulesService, "syncNow").mockResolvedValue({ context: { status: "skipped", reason: "not linked" } } as never)
+    const poll = spyOn(RulesService, "pollReviewDecisions").mockResolvedValue({ status: "done", recorded: [] } as never)
+    try {
+      const response = await request("POST", "/altimate/rules/sync")
+      expect(response.status).toBe(200)
+      expect(poll).toHaveBeenCalledTimes(1)
+    } finally {
+      sync.mockRestore()
+      poll.mockRestore()
+    }
+  })
+})

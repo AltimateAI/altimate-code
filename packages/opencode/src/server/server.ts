@@ -1395,8 +1395,14 @@ export namespace Server {
           const { Config } = await import("@/config/config")
           const learn = await RulesService.effectiveLearn((await Config.get()).learn, root, Instance.directory)
           const { RulesSync } = await import("../altimate/rules/sync")
+          const report = await RulesService.syncNow(root, Instance.directory, learn, "manual")
+          // altimate_change start — workspace review: "Sync now" also checks skill and knowledge decisions
+          await RulesService.pollReviewDecisions(Instance.directory).catch((error) =>
+            log.warn("workspace review notices failed", { error: error instanceof Error ? error.message : String(error) }),
+          )
+          // altimate_change end
           // Never the captured credential: the report goes to clients that may log or cache it.
-          return c.json({ ok: true as const, ...RulesSync.publicReport(await RulesService.syncNow(root, Instance.directory, learn, "manual")) })
+          return c.json({ ok: true as const, ...RulesSync.publicReport(report) })
         } catch (err) {
           const error = err instanceof Error ? err.message : String(err)
           log.error("rules sync failed", { error })
