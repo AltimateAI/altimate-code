@@ -204,9 +204,13 @@ When working near production systems. Blocks destructive operations entirely and
 }
 ```
 
-With `external_directory: "deny"`, the bash tool refuses any command whose literal text names a path outside the project (arguments and option values, programs run by path, redirections, assignment values, `cd`/`pushd` targets and literal `sh -c`/`eval` strings), resolved through symlinks and in the directory each command runs in. Directories you allow under `external_directory` keep working. A `"*": "deny"` also removes the default allow for skill directories, reference directories and the CLI temp directory, so bundled skill scripts and reference files stored there are refused unless you allow those directories again. The tool-output directory stays allowed.
+With `external_directory: "deny"`, the bash tool refuses a command whose literal text names a path outside the project. It checks arguments and option values (`--out=/x`, `-o/x`, `key=/x`), programs run by path, redirection targets and the words after them, heredoc arguments, assignment and array values, `for`/`[[ ]]`/`case` words, `cd`/`pushd`/`popd` and `env -C` directories, and literal `sh -c`, `eval`, `env -S` and `find -exec` strings. Each path is resolved in the directory its command runs in, through symlinks, with `..` applied after the symlink the way the kernel does (`lnk/../x`). Directories you allow under `external_directory` keep working. A `"*": "deny"` also removes the default allow for skill directories, reference directories and the CLI temp directory, so bundled skill scripts and reference files stored there are refused unless you allow those directories again. The tool-output directory stays allowed.
 
-This is a guard rail, not a sandbox. It sees only literal command text: paths built at run time (`$HOME/x`, `$(pwd)/..`, globs) and files a program opens on its own (`python -c "open('/etc/hosts')"`, a script that writes to `/tmp`) are not checked. Use a container or VM when you need isolation.
+Some forms are refused because the guard cannot follow them: a loop or function body that changes directory, more than 32 possible working directories, a directory-stack rotation (`pushd +1`), `~-`, another user's `~name`, and `sh -c`/`eval` nested more than three levels deep.
+
+Deliberate exceptions: character devices (`/dev/null`, `/dev/fd/N`), programs in system binary directories run by full path (`/usr/bin/env`), the pattern or program operand of `grep`/`sed`/`awk`/`rg` (`grep /etc/ f`), separator values (`cut -d/`, `IFS=/`, `tr` operands), and text below a top-level entry that does not exist (`echo /api/v1`) unless a parent-creating program (`mkdir`, `install`, `cp`, `rsync`, …) is given it.
+
+This is a guard rail, not a sandbox. It sees only literal command text. Paths built at run time (`$HOME/x`, `$(pwd)/..`, globs, `cd "$dir"`), files a program opens on its own (`python -c "open('/etc/hosts')"`, an awk program that reads a file, a script that writes to `/tmp`), heredoc bodies and directories from `CDPATH` are not checked. Use a container or VM when you need isolation.
 
 ### Per-Agent Lockdown
 
