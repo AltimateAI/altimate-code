@@ -42,11 +42,12 @@ export function renderSummary(env: VerdictEnvelope): string {
 
   if (env.summary.degraded) {
     lines.push(
-      "> ⚙️ **Lint-only run** — no dbt manifest/warehouse was available, so lineage, equivalence and",
+      "> ⚙️ **Lint-only run** — no changed model resolved against a dbt manifest, so lineage, equivalence and",
       "> data-impact checks were skipped. Wire `manifest_path` (and optionally warehouse creds) for the full verdict.",
       "",
     )
   }
+  lines.push(...coverageNotes(env))
 
   // G1 (Round 18) — surface classifier reasons when --explain-tier populated
   // them, so a customer can see why the review ran at this tier. Also surfaces
@@ -110,9 +111,39 @@ export function renderSummary(env: VerdictEnvelope): string {
     `<sub>altimate dbt-pr-review · verdict \`${env.verdict}\`` +
       (env.signature ? ` · signed \`${env.signature.slice(0, 18)}…\`` : "") +
       (env.manifestHash ? ` · manifest \`${env.manifestHash.slice(0, 10)}\`` : "") +
+      (env.scope?.baseRef ? ` · base \`${env.scope.baseRef}\`` : "") +
+      (env.ai?.state === "ok" && env.ai.model ? ` · AI \`${env.ai.model}\`` : "") +
       "</sub>",
   )
   return lines.join("\n")
+}
+
+/**
+ * What the review could not fully check, each on its own line: undecidable
+ * findings, models without compiled SQL, files outside the dbt project, and
+ * the advisory AI lane when it did not run. Kept separate from the lint-only
+ * banner so one undecidable finding never mislabels a manifest-backed run.
+ */
+export function coverageNotes(env: VerdictEnvelope): string[] {
+  const notes: string[] = []
+  const undecided = env.findings.filter((f) => f.degraded).length
+  if (undecided) notes.push(`${undecided} finding(s) could not be decided by the engine and are marked _unverified_.`)
+  const unverified = env.scope?.unverified ?? []
+  if (unverified.length) {
+    const head = unverified.slice(0, 5).map((u) => `\`${u.path}\``).join(", ")
+    const more = unverified.length > 5 ? ` and ${unverified.length - 5} more` : ""
+    notes.push(
+      `${unverified.length} model(s) not verified by the engine — ${unverified[0].reason}: ${head}${more}. ` +
+        "Run `dbt compile` (and compile the base into `target-base/`) for equivalence and lineage checks.",
+    )
+  }
+  if (env.scope?.outOfScopeFiles)
+    notes.push(`${env.scope.outOfScopeFiles} changed file(s) outside the dbt project were not reviewed.`)
+  if (env.ai && env.ai.state !== "ok") {
+    const what = { skipped: "skipped", timeout: "timed out", error: "failed" }[env.ai.state]
+    notes.push(`Advisory AI review ${what}${env.ai.reason ? `: ${env.ai.reason}` : ""}.`)
+  }
+  return notes.length ? [...notes.map((n) => `> ℹ️ ${n}`), ""] : []
 }
 
 /** GitHub `pulls.createReview` inline comments — only findings with a line. */
