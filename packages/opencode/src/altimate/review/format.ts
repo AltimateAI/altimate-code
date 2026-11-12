@@ -221,6 +221,12 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
       `${env.scope.movedUnchangedFiles} file(s) moved without edits; their SQL was not re-reviewed. ` +
         "Folder-level config in `dbt_project.yml` (`+schema`, `+materialized`, `+tags`) can still change where and how a moved model builds.",
     )
+  if (env.policy?.changedInPr?.length) {
+    notes.push(
+      `This PR changes the review policy (\`.altimate/review.yml\`: ${env.policy.changedInPr.join(", ")}). ` +
+        "The base branch's policy was applied; the change takes effect after merge.",
+    )
+  }
   if (env.ai && env.ai.state !== "ok") {
     const what = { skipped: "skipped", timeout: "timed out", error: "failed" }[env.ai.state]
     notes.push(`Advisory AI review ${what}${env.ai.reason ? `: ${env.ai.reason}` : ""}.`)
