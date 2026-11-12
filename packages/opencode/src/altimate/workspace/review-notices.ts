@@ -143,7 +143,9 @@ function cap(state: State): State {
   return {
     ...state,
     pending: state.pending.slice(-MAX_PENDING),
-    approved: state.approved.slice(-MAX_APPROVED),
+    // The ids already tracked are kept, in their order: a newer approval waits for room rather than evicting one, so
+    // the tracked set (and the file) does not change from poll to poll.
+    approved: state.approved.slice(0, MAX_APPROVED),
     seen: state.seen.slice(-MAX_SEEN),
     notices: state.notices.slice(-MAX_NOTICES),
   }
@@ -151,7 +153,8 @@ function cap(state: State): State {
 
 const keyOf = (id: string, status: string) => `${id}:${status}`
 
-/** The decisions in `items` this client has not recorded yet: the caller's own, seen pending before. Pure. */
+/** The decisions in `items` this client has not recorded yet: the caller's own, seen pending before, or a removal by
+ * someone else of one seen pending or approved before. Pure. */
 export function decided(state: State, items: readonly ReviewApi.Contribution[]): Notice[] {
   const pending = new Set(state.pending)
   const approved = new Set(state.approved)
@@ -201,9 +204,10 @@ export function advance(state: State, items: readonly ReviewApi.Contribution[], 
   // Approved ones are tracked until anything else (retired, or gone from a complete list) settles them. An approved one
   // still pending here is kept pending too, until its approval is recorded.
   const ended = new Set(mine.filter((item) => item.status !== "active").map((item) => item.public_id))
-  const approved = [...new Set([...state.approved, ...mine.filter((item) => item.status === "active").map((item) => item.public_id)])].filter(
-    (id) => !ended.has(id) && (!complete || listed.has(id)),
-  )
+  const tracked = state.approved.filter((id) => !ended.has(id) && (!complete || listed.has(id)))
+  const known = new Set(tracked)
+  const added = mine.filter((item) => item.status === "active" && !known.has(item.public_id)).map((item) => item.public_id)
+  const approved = [...tracked, ...added].slice(0, MAX_APPROVED)
   const seen = [...new Set([...state.seen, ...shown.map((notice) => keyOf(notice.public_id, notice.status))])]
   return { ...state, pending, approved, seen, notices: [...state.notices, ...shown] }
 }
@@ -272,15 +276,16 @@ async function pollUnsafe(directory: string, deps: PollDeps): Promise<PollResult
     }
     return { status: "failed", error: error instanceof Error ? error.message : String(error) }
   }
-  // Past the page cap, a request still pending here may be one the list never reached (newer requests push it down,
-  // and a decision does not move it up): each such one is asked for by id, a few per poll.
+  // Past the page cap, a request still pending or approved here may be one the list never reached (newer requests push
+  // it down, and a decision or removal does not move it up): each such one is asked for by id, a few per poll.
   // One the server no longer has (404) is let go; one that could not be read stays and is asked again later, behind
   // the others, so a few that keep failing never take every lookup.
   const gone = new Set<string>()
   let looked: string[] = []
   if (!listed.complete) {
     const listedIds = new Set(listed.items.map((item) => item.public_id))
-    looked = ((await read(scope))?.pending ?? []).filter((id) => !listedIds.has(id)).slice(0, MAX_LOOKUPS)
+    const kept = await read(scope)
+    looked = [...new Set([...(kept?.pending ?? []), ...(kept?.approved ?? [])])].filter((id) => !listedIds.has(id)).slice(0, MAX_LOOKUPS)
     for (const id of looked) {
       const item = await ReviewApi.getMine(scope.datamateId, id, actAs).then(
         (found) => (found === null ? (gone.add(id), undefined) : found),
@@ -296,9 +301,12 @@ async function pollUnsafe(directory: string, deps: PollDeps): Promise<PollResult
     // A row this version could not read may be one of the pending requests: only a list read in full lets one go.
     const next = advance(state, listed.items, recorded, listed.complete && listed.skipped === 0)
     const asked = new Set(looked)
-    const pending = next.pending.filter((id) => !gone.has(id))
+    const behind = (ids: string[]) => {
+      const left = ids.filter((id) => !gone.has(id))
+      return [...left.filter((id) => !asked.has(id)), ...left.filter((id) => asked.has(id))]
+    }
     return {
-      state: { ...next, pending: [...pending.filter((id) => !asked.has(id)), ...pending.filter((id) => asked.has(id))] },
+      state: { ...next, pending: behind(next.pending), approved: behind(next.approved) },
       result: { status: "done", recorded },
     }
   })
