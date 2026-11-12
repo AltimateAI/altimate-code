@@ -78,9 +78,11 @@ export function stripAggFilter(sql: string): string {
  * none can swallow another.
  */
 export function stripSql(sql: string): string {
-  // A quoted name ("a--b", `c/*d`) is kept whole, so comment marks inside it start no comment.
-  return sql.replace(/"(?:[^"]|"")*"|`(?:[^`]|``)*`|'(?:[^']|'')*'|\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (match) =>
-    match.startsWith('"') || match.startsWith("`") ? match : match.startsWith("'") || match.startsWith("$") ? "''" : " ",
+  // A quoted name ("a--b", `c/*d`, [e--f]) is kept whole, so comment marks inside it start no comment.
+  return sql.replace(
+    /"(?:[^"]|"")*"|`(?:[^`]|``)*`|\[(?:[^\]]|\]\])*\]|'(?:[^']|'')*'|\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|--[^\r\n]*|\/\*[\s\S]*?\*\//g,
+    (match) =>
+      match.startsWith('"') || match.startsWith("`") || match.startsWith("[") ? match : match.startsWith("'") || match.startsWith("$") ? "''" : " ",
   )
 }
 
@@ -90,37 +92,101 @@ export function hasNestedWith(sql: string): boolean {
 }
 
 /**
- * Whether the SQL uses a table's whole row as a value (`to_json(t)`, `select t from t`, `t::text`): one of
- * its FROM or JOIN names, or their aliases, standing alone outside the place that names it. Such a row
- * carries every column without naming any. Matching only adds doubt: a column that shares a table's name
- * counts too.
+ * Whether stripping the SQL's literals and comments left nothing it can't account for: no stray quote,
+ * backslash, bracket, dollar-quote or unclosed comment. Fail-closed: when this is false, the text checks
+ * below can't be sure what the SQL names, so the proof stops.
  */
-export function usesRowAsValue(sql: string): boolean {
+export function quotingIsClear(sql: string): boolean {
+  if (/\$[A-Za-z_]*\$/.test(sql)) return false
+  const rest = stripSql(sql)
+    .replace(/''/g, " ")
+    .replace(/"(?:[^"]|"")*"|`(?:[^`]|``)*`/g, " ")
+  return !/['"`\\[\]]|\/\*|\*\//.test(rest)
+}
+
+/**
+ * How the SQL's FROM lists read: "row" when a relation or its alias is used as a value anywhere other than
+ * `alias.column` (`to_json(t)`, `select t from t`, `t as row`, `t::text`); "unclear" when a FROM list holds
+ * something other than a named relation or a parenthesised subquery, each with an optional alias (a
+ * table function, TABLESAMPLE, PIVOT, an unquoted dash, …); null otherwise. Fail-closed: anything it can't
+ * classify is "unclear". A column that shares a table's name counts as a row, which only adds doubt.
+ */
+export function relationUse(sql: string): "row" | "unclear" | null {
   const code = stripSql(sql).toLowerCase()
   const word = '"[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[\\p{L}_][\\p{L}\\p{N}_$]*'
+  const punct = /^[.,()=<>+\-*/:;]$/
+  const isWord = (t: string | undefined) => !!t && !punct.test(t) && !/^\d/.test(t)
   const unquote = (t: string) => t.replace(/^["`[]|["`\]]$/g, "")
-  const names = new Set<string>()
-  const keywords = /^(on|using|where|join|left|right|full|inner|outer|cross|natural|lateral|group|order|having|qualify|limit|union|window|as|tablesample|pivot|unpivot|match_recognize|for|at|before|changes)$/
-  const relation = new RegExp(String.raw`\b(?:from|join)\s+((?:${word})(?:\s*\.\s*(?:${word}))*)(?:\s+(?:as\s+)?(${word}))?`, "gu")
-  for (const m of code.matchAll(relation)) {
-    if (m[1]!.startsWith("(")) continue
-    names.add(unquote(m[1]!.split(".").pop()!.trim()))
-    if (m[2] && !keywords.test(unquote(m[2]))) names.add(unquote(m[2]))
+  const tokens = [...code.matchAll(new RegExp(String.raw`${word}|\d[\w.]*|[.,()=<>+\-*/:;]`, "gu"))].map((m) => m[0])
+  // What may follow a FROM item: another item, a join, the end of the list, or a clause.
+  const after = /^(,|\)|;|on|using|join|left|right|full|inner|outer|cross|natural|where|group|order|having|qualify|limit|window|union|intersect|except|select)$/
+  const ends = /^(where|group|order|having|qualify|limit|window|union|intersect|except|on|using|select|set|values|returning)$/
+  const keywords = /^(on|using|where|join|left|right|full|inner|outer|cross|natural|lateral|group|order|having|qualify|limit|union|intersect|except|window|as|select)$/
+  const close = (open: number) => {
+    let depth = 0
+    for (let k = open; k < tokens.length; k++) {
+      if (tokens[k] === "(") depth++
+      else if (tokens[k] === ")" && --depth === 0) return k
+    }
+    return -1
   }
-  if (!names.size) return false
-  const tokens = [...code.matchAll(new RegExp(String.raw`${word}|[.,()=<>+\-*/:;]`, "gu"))].map((m) => m[0])
+  const names = new Set<string>()
+  const named = new Set<number>()
+  const inFrom: boolean[] = [false]
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i]!
+    if (t === "(") {
+      inFrom.push(false)
+      continue
+    }
+    if (t === ")") {
+      if (inFrom.length > 1) inFrom.pop()
+      continue
+    }
+    const top = inFrom.length - 1
+    if (t === "from" || t === "join") inFrom[top] = true
+    else if (ends.test(t)) inFrom[top] = false
+    if (!inFrom[top] || !(t === "from" || t === "join" || t === ",")) continue
+    let k: number
+    if (tokens[i + 1] === "(") {
+      // A subquery: read inside on its own level; its alias follows the closing parenthesis.
+      const end = close(i + 1)
+      if (end < 0) return "unclear"
+      k = end + 1
+    } else {
+      let last = -1
+      let j = i + 1
+      while (isWord(tokens[j])) {
+        last = j
+        if (tokens[j + 1] !== ".") break
+        j += 2
+      }
+      if (last < 0 || keywords.test(unquote(tokens[last]!))) return "unclear"
+      names.add(unquote(tokens[last]!))
+      named.add(last)
+      k = last + 1
+      // A table function (unnest(…), flatten(…), table(…)): what it reads isn't a named column.
+      if (tokens[k] === "(") return "unclear"
+    }
+    if (tokens[k] === "as") k++
+    if (isWord(tokens[k]) && !keywords.test(unquote(tokens[k]!))) {
+      names.add(unquote(tokens[k]!))
+      named.add(k)
+      k++
+    }
+    if (k < tokens.length && !after.test(tokens[k]!)) return "unclear"
+  }
   for (const [i, raw] of tokens.entries()) {
-    const t = unquote(raw)
-    if (!names.has(t)) continue
+    if (named.has(i) || !names.has(unquote(raw))) continue
     const prev = tokens[i - 1] ?? ""
     const next = tokens[i + 1] ?? ""
-    // Qualifying a column (`t.x`), being named (`from t`, `join db.s.t t`, `t as (` for a CTE), or given an alias.
-    if (next === "." || next === "as" || prev === "." || prev === "from" || prev === "join" || prev === "as" || prev === "with") continue
-    if (/^[\p{L}_"`[]/u.test(prev) && !/^(select|distinct|by|then|else|when|and|or|not|in|is|on|where|having|qualify|returning)$/.test(prev)) continue
-    return true
+    // `t.x` or `db.s.t`, or a CTE being defined (`with t as (`, `, t as (`).
+    if (next === "." || prev === "." || prev === "with" || (next === "as" && tokens[i + 2] === "(")) continue
+    return "row"
   }
-  return false
+  return null
 }
+
 
 /**
  * Whether the SQL selects `*` or `t.*` in any form (DISTINCT ON, TOP n, AS STRUCT, multi-part or
@@ -286,6 +352,16 @@ export class ProjectLineage {
     while (queue.length)
       for (const c of this.children[queue.shift()!] ?? []) if (!seen.has(c)) (seen.add(c), queue.push(c))
     return seen
+  }
+
+  /** The nodes that read this one directly. */
+  childrenOf(id: string): string[] {
+    return this.children[id] ?? []
+  }
+
+  /** The nodes this one reads directly, at model level. */
+  parentsOf(id: string): string[] {
+    return (this.node(id)?.depends_on?.nodes ?? []).filter((p: string) => !!this.node(p))
   }
 
   /** Every node upstream, at model level. */

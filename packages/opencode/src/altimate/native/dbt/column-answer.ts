@@ -11,7 +11,8 @@ import {
   projectLineage,
   selectsStar,
   stripSql,
-  usesRowAsValue,
+  quotingIsClear,
+  relationUse,
   type How,
   type HowFrom,
   type ProjectLineage,
@@ -68,6 +69,7 @@ export type MayCarryReason =
   | "natural_join"
   | "dynamic_name"
   | "row_reference"
+  | "unclear_sql"
   | "names_column"
   | "reads_value_model"
   | "below"
@@ -222,8 +224,6 @@ export function columnAnswer(
   const queue: [string, string, number][] = [[focus, want, 0]]
   const also = new Map<string, Set<string>>()
   const unresolved = new Map<string, { reason: string; code: MayCarryReason }>()
-  // Models with a column the cap left out: what sits past them was never checked.
-  const capped = new Set<string>()
   // The first reason each model couldn't be proven unaffected.
   const marks = new Map<string, { reason: MayCarryReason; via?: string }>()
   const mark = (id: string, reason: MayCarryReason, via?: string) => {
@@ -248,11 +248,17 @@ export function columnAnswer(
       const raw: string[] = p.node(id)?.depends_on?.nodes ?? []
       if (p.ephemeral(id) || raw.some((one) => p.ephemeral(one)))
         return { reason: "an ephemeral model is inlined into it as a CTE", code: "ephemeral" }
+      // The text checks below fail closed: SQL they can't read for certain proves nothing.
+      if (!quotingIsClear(sql))
+        return { reason: "its SQL has quoting the check can't read for certain (a backslash, bracket, dollar-quote or unclosed quote)", code: "unclear_sql" }
       if (selectsStar(sql)) return { reason: "selects *, so it may read the column without naming it", code: "star" }
       if (joinsNaturally(sql)) return { reason: "joins with NATURAL JOIN, which may join on the column", code: "natural_join" }
       if (RUN_TIME_NAME.test(sql) || POSITIONAL.test(stripSql(sql)))
         return { reason: "names columns at run time (IDENTIFIER, COLUMNS or a positional $n)", code: "dynamic_name" }
-      if (usesRowAsValue(sql)) return { reason: "uses a whole table row as a value", code: "row_reference" }
+      const relations = relationUse(sql)
+      if (relations === "row") return { reason: "uses a whole table row as a value", code: "row_reference" }
+      if (relations === "unclear")
+        return { reason: "its FROM list holds something other than named tables and subqueries (a table function, say)", code: "unclear_sql" }
       return null
     })()
     blockers.set(id, found)
@@ -283,7 +289,7 @@ export function columnAnswer(
           const fresh = !columnIndex.has(`${reader}|${e.to}`)
           const to = colIdx(reader, e.to, h + 1, e.how, e.howFrom)
           if (to === null) {
-            capped.add(reader)
+            // The cap left a column out: what sits past it was never checked.
             mark(reader, "capped")
             continue
           }
@@ -328,7 +334,6 @@ export function columnAnswer(
         const fresh = !columnIndex.has(`${e.from}|${e.fromCol}`)
         const from = colIdx(e.from, e.fromCol, h + 1, e.how, e.howFrom)
         if (from === null) {
-          capped.add(e.from)
           mark(e.from, "capped")
           continue
         }
@@ -353,8 +358,19 @@ export function columnAnswer(
   // Upstream, the edges skip an ephemeral model (it is inlined), so one the value may pass through or
   // start in (a constant) is never cleared.
   if (direction === "upstream") for (const id of modelLevel) if (p.ephemeral(id) && open(id) && !mayCarry.has(id)) mayCarry.set(id, { reason: "ephemeral" })
-  for (const id of [...marks.keys(), ...mayCarry.keys()])
-    for (const d of beyond(id)) if (open(d) && !mayCarry.has(d)) mayCarry.set(d, { reason: "below", via: nameOf(id) })
+  // One walk from every model in the tier: each model past one sits "below" the nearest that reaches it.
+  const step = (id: string) => (direction === "downstream" ? p.childrenOf(id) : p.parentsOf(id))
+  const walk: [string, string][] = [...new Set([...marks.keys(), ...mayCarry.keys()])].map((id) => [id, id])
+  const walked = new Set(walk.map(([id]) => id))
+  while (walk.length) {
+    const [id, via] = walk.shift()!
+    for (const next of step(id)) {
+      if (walked.has(next)) continue
+      walked.add(next)
+      if (open(next) && !mayCarry.has(next)) mayCarry.set(next, { reason: "below", via: nameOf(via) })
+      walk.push([next, via])
+    }
+  }
   const cleared = [...modelLevel]
     .filter((id) => !valueModels.has(id) && !mayCarry.has(id))
     .map((id) => ({ id, name: nameOf(id) }))

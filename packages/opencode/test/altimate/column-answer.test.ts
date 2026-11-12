@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
 import { columnReach } from "../../src/altimate/native/dbt/column-reach"
-import { clearLineageCaches, hasNestedWith, howOf, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
+import { clearLineageCaches, hasNestedWith, howOf, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
 afterEach(() => {
@@ -915,6 +915,48 @@ describe("column answer: cleared only when proven", () => {
     // The engine can't parse these names today; the text check keeps them whole either way.
     expect(stripSql('select id from f where "a--b" > 0')).toBe('select id from f where "a--b" > 0')
     expect(stripSql("select id from f where `c/*d` > 0 -- note")).toBe("select id from f where `c/*d` > 0  ")
+  })
+
+  test("a whole row selected under an alias, or from a table listed after a comma, may carry it", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.g": model("g", [], "select 1 as k", ["k"]),
+        "model.shop.r_as": model("r_as", ["f"], `select t as row_value from ${T("f")} t`),
+        "model.shop.r_comma": model("r_comma", ["f", "g"], `select o.k, to_json(f) as j from ${T("g")} o, ${T("f")}`),
+      },
+    }
+    const a = reasons(columnAnswer(write(m), "f", "val"))
+    expect(a.r_as?.[0]).toBe("row_reference")
+    expect(a.r_comma?.[0]).toBe("row_reference")
+  })
+
+  test("quoting the check can't read for certain stops the proof: a bracket name, a backslash, a dollar-quote", () => {
+    for (const sql of [
+      `select id from ${T("f")} where [c--d] > 0`,
+      `select id from ${T("f")} where id <> 'it\\'s'`,
+      `select id, $$x$$ as note from ${T("f")}`,
+    ]) {
+      const a = columnAnswer(write(base(sql, "duckdb")), "f", "val")
+      expect(a.cleared.map((one) => one.name)).not.toContain("r")
+      expect(reasons(a).r?.[0]).toBeOneOf(["unclear_sql", "unresolved", "read_in_part"])
+    }
+    expect(stripSql("select id from f where [c--d] > 0")).toBe("select id from f where [c--d] > 0")
+  })
+
+  test("a FROM list the check can't classify stops the proof: a table function, TABLESAMPLE, an unquoted dash", () => {
+    for (const [sql, dialect] of [
+      [`select f.id, x.value from ${T("f")} f, lateral flatten(input => f.id) x`, "snowflake"],
+      [`select id from ${T("f")} tablesample (10)`, "duckdb"],
+    ] as const) {
+      const a = columnAnswer(write(base(sql, dialect)), "f", "val")
+      expect(a.cleared.map((one) => one.name)).not.toContain("r")
+      expect(reasons(a).r?.[0]).toBeOneOf(["unclear_sql", "unresolved", "read_in_part"])
+    }
+    expect(relationUse("select id from my-project.ds.f o")).toBe("unclear")
+    expect(relationUse("select id from db.s.f f left join db.s.g g using (id) where f.id > 1")).toBeNull()
   })
 
   test("the same manifest gives the same may_carry list, in name order", () => {
