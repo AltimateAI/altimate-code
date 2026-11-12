@@ -741,7 +741,12 @@ export namespace MessageV2 {
     const supportsMediaInToolResults = (() => {
       if (model.api.npm === "@ai-sdk/anthropic") return true
       if (model.api.npm === "@ai-sdk/openai") return true
-      if (model.api.npm === "@ai-sdk/amazon-bedrock") return true
+      // altimate_change start — upstream_fix: Bedrock Converse only accepts tool-result media for Claude, Nova and Llama 4 (anomalyco/opencode#50272)
+      if (model.api.npm === "@ai-sdk/amazon-bedrock") {
+        const id = model.api.id.toLowerCase()
+        return id.includes("anthropic.") || id.includes("nova") || id.includes("llama4") || id.includes("llama-4")
+      }
+      // altimate_change end
       if (model.api.npm === "@ai-sdk/google-vertex/anthropic") return true
       if (model.api.npm === "@ai-sdk/google") {
         const id = model.api.id.toLowerCase()
