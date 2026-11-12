@@ -278,6 +278,16 @@ export async function resolveReviewBase(opts: ResolveBaseOptions): Promise<Resol
   return { ref: parent, sha, source: "parent" }
 }
 
+/** File content at a commit (`git show <ref>:<path>`), or undefined when the
+ *  path does not exist there. `rel` is repository-relative, POSIX. */
+export async function showAtRef(cwd: string, ref: string, rel: string): Promise<string | undefined> {
+  try {
+    return await git(["show", `${ref}:${rel}`], cwd)
+  } catch {
+    return undefined
+  }
+}
+
 /** Compute a short hash of the manifest file for the verdict envelope. */
 export async function manifestHash(manifestPath: string, cwd: string): Promise<string | undefined> {
   try {

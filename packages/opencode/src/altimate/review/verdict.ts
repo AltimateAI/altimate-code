@@ -1,6 +1,6 @@
 import z from "zod"
 import { createHmac, createHash } from "node:crypto"
-import { Finding, type Severity } from "./finding"
+import { Finding, type Severity, catalogRuleId, findingOrigin } from "./finding"
 import { Rubric, DEFAULT_RUBRIC, blockingCategories } from "./rubric"
 
 /**
@@ -41,6 +41,17 @@ export const VCS_EVENT: Record<Verdict, "COMMENT" | "REQUEST_CHANGES"> = {
   REQUEST_CHANGES: "REQUEST_CHANGES",
 }
 
+/** Whether a finding may influence the verdict: deterministic engine
+ *  findings always; catalog (pattern) findings only when the rubric names the
+ *  rule in `blockingRules`; advisory AI findings never. */
+export function verdictEligible(f: Finding, rubric: Rubric = DEFAULT_RUBRIC): boolean {
+  const origin = findingOrigin(f)
+  if (origin === "engine") return true
+  if (origin === "ai") return false
+  const rule = catalogRuleId(f)
+  return !!rule && rubric.blockingRules.includes(rule)
+}
+
 /**
  * Compute the verdict purely from findings + rubric. Faithful to Cloudflare's
  * bias-toward-approval rubric:
@@ -48,21 +59,20 @@ export const VCS_EVENT: Record<Verdict, "COMMENT" | "REQUEST_CHANGES"> = {
  *  - >= warningPatternThreshold warnings         → REQUEST_CHANGES (risk pattern)
  *  - any finding at all                          → COMMENT
  *  - nothing                                     → APPROVE
+ * Only verdict-eligible findings (see verdictEligible) count toward a block:
+ * the docs promise that only the deterministic engine blocks, so a regex rule
+ * or the AI lane can comment but never fail the gate on its own.
  */
 export function computeIdealVerdict(findings: Finding[], rubric: Rubric = DEFAULT_RUBRIC): Verdict {
   if (findings.length === 0) return "APPROVE"
   const blockers = blockingCategories(rubric)
-  const hasBlockingCritical = findings.some((f) => f.severity === "critical" && blockers.has(f.category))
+  const eligible = findings.filter((f) => verdictEligible(f, rubric))
+  const hasBlockingCritical = eligible.some((f) => f.severity === "critical" && blockers.has(f.category))
   if (hasBlockingCritical) return "REQUEST_CHANGES"
   // Count only confidently-warned findings toward the risk pattern. Undecidable
   // ("unknown") warnings — e.g. equivalence that couldn't be proven — must not
   // accumulate into a block; that would let unprovable refactors fail the gate.
-  // Advisory LLM findings (layer 3) are EXCLUDED: the lane is advisory-only and must
-  // never influence the verdict, so its warnings cannot accumulate into a block
-  // (otherwise a chatty or prompt-injected AI review could force REQUEST_CHANGES).
-  const warningCount = findings.filter(
-    (f) => f.severity === "warning" && f.confidence !== "unknown" && f.evidence?.tool !== "ai-review",
-  ).length
+  const warningCount = eligible.filter((f) => f.severity === "warning" && f.confidence !== "unknown").length
   if (warningCount >= rubric.warningPatternThreshold) return "REQUEST_CHANGES"
   return "COMMENT"
 }
@@ -144,6 +154,15 @@ export const VerdictEnvelope = z.object({
   staleManifest: z.boolean().optional(),
   /** Base resolution and review coverage (see ReviewScope). */
   scope: ReviewScope.optional(),
+  /** The review policy applied: from the base branch, the working tree, or
+   *  defaults; its hash; and settings the PR changes but that were not applied. */
+  policy: z
+    .object({
+      source: z.enum(["base", "working_tree", "default"]),
+      hash: z.string(),
+      changedInPr: z.array(z.string()).optional(),
+    })
+    .optional(),
   /** Advisory AI lane outcome: ran, skipped, timed out or failed, and why. */
   ai: z
     .object({
@@ -213,6 +232,7 @@ export interface BuildEnvelopeInput {
   staleManifest?: boolean
   scope?: ReviewScope
   ai?: VerdictEnvelope["ai"]
+  policy?: VerdictEnvelope["policy"]
 }
 
 function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
@@ -236,13 +256,14 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     tierReasons: input.tierReasons,
     tierForced: input.tierForced,
     tierClassified: input.tierClassified,
-    findings: input.findings,
+    findings: input.findings.map((f) => (f.origin ? f : { ...f, origin: findingOrigin(f) })),
     summary: summarize(input.findings, degraded),
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,
     staleManifest: input.staleManifest ? true : undefined,
     scope: input.scope,
     ai: input.ai,
+    policy: input.policy,
     generatedAt: input.generatedAt,
   })
 }
