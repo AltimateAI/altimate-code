@@ -144,6 +144,15 @@ export const VerdictEnvelope = z.object({
   staleManifest: z.boolean().optional(),
   /** Base resolution and review coverage (see ReviewScope). */
   scope: ReviewScope.optional(),
+  /** Advisory AI lane outcome: ran, skipped, timed out or failed, and why. */
+  ai: z
+    .object({
+      state: z.enum(["ok", "skipped", "timeout", "error"]),
+      reason: z.string().optional(),
+      model: z.string().optional(),
+      durationMs: z.number().int().nonnegative().optional(),
+    })
+    .optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */
   generatedAt: z.string().optional(),
   /** Optional break-glass override record. */
@@ -203,6 +212,7 @@ export interface BuildEnvelopeInput {
   /** True when mtime signals the manifest predates a change-affecting file. */
   staleManifest?: boolean
   scope?: ReviewScope
+  ai?: VerdictEnvelope["ai"]
 }
 
 function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
@@ -232,6 +242,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     manifestHash: input.manifestHash,
     staleManifest: input.staleManifest ? true : undefined,
     scope: input.scope,
+    ai: input.ai,
     generatedAt: input.generatedAt,
   })
 }

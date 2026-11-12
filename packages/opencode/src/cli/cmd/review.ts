@@ -3,7 +3,7 @@ import { UI } from "../ui"
 import { cmd } from "./cmd"
 import { bootstrap } from "../bootstrap"
 import { Installation } from "../../installation"
-import { reviewPullRequest } from "../../altimate/review/run"
+import { prContextFromEnv, reviewPullRequest } from "../../altimate/review/run"
 import { renderSummary } from "../../altimate/review/format"
 import { postGitHubReview, resolveGitHubTarget } from "../../altimate/review/post-github"
 // altimate_change — review feature telemetry
@@ -66,6 +66,10 @@ export const ReviewCommand = cmd({
         choices: ["trivial", "lite", "full"] as const,
         describe: "[EXPERIMENTAL / bench debug] override the tier classifier — verdict envelope carries tierForced: true",
       })
+      .option("ai-model", {
+        type: "string",
+        describe: "provider/model for the advisory AI lane (default: the configured default model)",
+      })
       .option("cwd", { type: "string", describe: "project directory (default: current dir)" }),
   async handler(args) {
     const cwd = (args.cwd as string) || process.cwd()
@@ -92,9 +96,13 @@ export const ReviewCommand = cmd({
       // altimate_change — time the engine only. Output writing and posting happen after this and
       // must not be counted as review latency, nor turn a computed review into a failed one.
       const startedAt = Date.now()
+      // PR title/description from the CI event, for the AI lane's intent check.
+      const prContext = await prContextFromEnv()
       let env
       try {
         env = await reviewPullRequest({
+          ...prContext,
+          aiModel: args.aiModel as string | undefined,
           cwd,
           base: args.base as string | undefined,
           head: args.head as string | undefined,

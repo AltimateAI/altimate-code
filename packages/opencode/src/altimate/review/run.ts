@@ -53,6 +53,8 @@ export interface ReviewPullRequestOptions {
   /** PR metadata for the AI reviewer's intent check. */
   prTitle?: string
   prBody?: string
+  /** Explicit `provider/model` for the advisory AI lane. */
+  aiModel?: string
   /** G1 — surface the tier classifier's reasons on the verdict envelope. */
   explainTier?: boolean
   /** G2 — [EXPERIMENTAL] bypass the tier classifier with the supplied tier.
@@ -379,6 +381,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     // path verdicts (cubic-review PR #1041).
     cliVersion: opts.cliVersion ?? Installation.VERSION,
     aiReview: opts.noAi || config.ai === false ? undefined : runAiReview,
+    aiDisabledReason: opts.noAi ? "disabled by --no-ai" : config.ai === false ? "disabled by `ai: false` in .altimate/review.yml" : undefined,
+    aiModel: opts.aiModel,
     prTitle: opts.prTitle,
     prBody: opts.prBody,
     explainTier: opts.explainTier,
@@ -394,6 +398,32 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       movedUnchangedFiles: scoped.movedUnchanged || undefined,
     },
   })
+}
+
+/**
+ * The pull/merge request's title and description from the CI environment, so
+ * the AI lane can check the change against its stated intent. GitHub: the
+ * `pull_request` object in GITHUB_EVENT_PATH. GitLab: CI_MERGE_REQUEST_TITLE /
+ * CI_MERGE_REQUEST_DESCRIPTION. Empty outside a PR/MR run.
+ */
+export async function prContextFromEnv(env: NodeJS.ProcessEnv = process.env): Promise<{ prTitle?: string; prBody?: string }> {
+  if (env.GITHUB_EVENT_PATH) {
+    try {
+      const pr = JSON.parse(await readFile(env.GITHUB_EVENT_PATH, "utf8"))?.pull_request
+      if (pr) {
+        return {
+          prTitle: typeof pr.title === "string" && pr.title ? pr.title : undefined,
+          prBody: typeof pr.body === "string" && pr.body ? pr.body : undefined,
+        }
+      }
+    } catch {
+      /* unreadable event file: try GitLab */
+    }
+  }
+  return {
+    prTitle: env.CI_MERGE_REQUEST_TITLE || undefined,
+    prBody: env.CI_MERGE_REQUEST_DESCRIPTION || undefined,
+  }
 }
 
 /**

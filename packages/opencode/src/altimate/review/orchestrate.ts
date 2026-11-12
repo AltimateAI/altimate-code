@@ -14,7 +14,7 @@ import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
-import { type AiReviewInput } from "./ai-review"
+import { type AiLaneStatus, type AiReviewInput, type AiReviewResult } from "./ai-review"
 
 /**
  * The deterministic review recipe.
@@ -188,7 +188,11 @@ export interface OrchestrateInput {
    * tests pass a fake or omit it (the lane is then skipped). Receives the
    * deterministic findings as grounding and returns ADVISORY findings only.
    */
-  aiReview?: (input: AiReviewInput) => Promise<Finding[]>
+  aiReview?: (input: AiReviewInput) => Promise<AiReviewResult | Finding[]>
+  /** Why the AI lane is off when `aiReview` is not injected (shown in the comment). */
+  aiDisabledReason?: string
+  /** Explicit `provider/model` for the AI lane. */
+  aiModel?: string
   /** PR metadata passed to the AI reviewer for intent checking. */
   prTitle?: string
   prBody?: string
@@ -1410,7 +1414,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // findings are clamped to ≤ warning upstream, so they enrich the review but
   // never change what blocks. Skipped when no aiReview fn is injected (tests /
   // headless-without-model) — the review degrades to deterministic-only.
-  if (lanes.has("ai_review") && input.aiReview) {
+  let aiStatus: AiLaneStatus | undefined
+  if (!lanes.has("ai_review")) {
+    aiStatus = { state: "skipped", reason: `not part of the ${tier} tier` }
+  } else if (!input.aiReview) {
+    aiStatus = { state: "skipped", reason: input.aiDisabledReason ?? "disabled" }
+  } else {
     const aiFiles = [...ctxByPath.values()].map((ctx) => ({
       path: ctx.file.path,
       status: ctx.file.status,
@@ -1419,16 +1428,20 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       sql: ctx.engineNewSql ?? ctx.newSql,
     }))
     try {
-      const aiFindings = await input.aiReview({
+      const res = await input.aiReview({
         files: aiFiles,
         grounding: merged,
         prTitle: input.prTitle,
         prBody: input.prBody,
+        model: input.aiModel,
       })
+      const aiFindings = Array.isArray(res) ? res : res.findings
+      aiStatus = Array.isArray(res) ? { state: "ok" } : res.status
       // Defense in depth: the AI never blocks, regardless of what it returns.
       for (const f of aiFindings) merged.push(f.severity === "critical" ? { ...f, severity: "warning" } : f)
-    } catch {
-      // A failed AI lane must never fail the review.
+    } catch (err) {
+      // A failed AI lane must never fail the review — but it must say so.
+      aiStatus = { state: "error", reason: String((err as Error)?.message ?? err).slice(0, 200) }
     }
   }
 
@@ -1440,8 +1453,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Sort by severity desc, then file.
   findings.sort((a, b) => SEVERITY_ORDER[b.severity] - SEVERITY_ORDER[a.severity] || a.file.localeCompare(b.file))
 
-  const degraded = runDegraded || findings.some((f) => f.degraded)
+  // Lint-only means no changed model resolved against a manifest. A single
+  // undecidable finding does not make the whole run lint-only; those findings
+  // carry their own `degraded` flag and are counted separately in the summary.
+  const degraded = runDegraded
   const envelope = buildEnvelope({
+    ai: aiStatus,
     findings,
     tier,
     mode: input.mode,

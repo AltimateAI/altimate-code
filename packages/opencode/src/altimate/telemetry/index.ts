@@ -1594,10 +1594,20 @@ export namespace Telemetry {
         mode?: string
         tier?: string
         tier_forced?: boolean
-        /** The envelope's fidelity flag: no reviewable files, no usable manifest for the changed
-         *  models, OR a surfaced finding whose engine analysis was undecidable. It does NOT mean
-         *  merely "no warehouse". */
+        /** The envelope's fidelity flag: no reviewable files, or no changed model resolved against
+         *  a manifest (lint-only). An undecidable finding alone no longer sets it — see
+         *  `undecided`. It does NOT mean merely "no warehouse". */
         degraded?: boolean
+        /** Surfaced findings whose engine analysis was undecidable. */
+        undecided?: number
+        /** Models the engine could not verify (no compiled SQL). */
+        unverified_models?: number
+        /** Advisory AI lane outcome: ok | skipped | timeout | error. */
+        ai_state?: string
+        ai_duration_ms?: number
+        /** Where the review base came from (flag, github_event, default_branch, …). */
+        base_source?: string
+        out_of_scope_files?: number
         stale_manifest?: boolean
         critical?: number
         warning?: number
