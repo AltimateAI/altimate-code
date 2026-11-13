@@ -27,6 +27,7 @@ import { type SelectItemColumn, normalizeSelectLine } from "./rule-catalog"
 import { listMirrorsModel, type ConsumerColumnList } from "./consumer-lists"
 import { detectUnitTestFixtures } from "./unit-tests"
 import { selectListNames } from "./select-list"
+import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult, safeReason } from "./ai-review"
 
@@ -1722,6 +1723,9 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Fetches run in parallel across schema files (a schema-heavy PR could touch
   // dozens of yml files; serial `git show` per file adds up).
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
+  // The head's dbt_project.yml (test thresholds inherited by new tests), read once.
+  const projectYmlPath = `${input.layout?.root ? `${input.layout.root.replace(/\/$/, "")}/` : ""}dbt_project.yml`
+  const projectYml = schemaFiles.length ? await getContent?.(projectYmlPath, "new").catch(() => undefined) : undefined
   if (schemaFiles.length) {
     const schemaFindingSets = await Promise.all(
       schemaFiles.map(async (file) => {
@@ -1735,6 +1739,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
             ...detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent }),
             ...detectUnitTestFixtures(file, oldContent, newContent),
             ...snapshotYmlFindings(file, oldContent, newContent),
+            ...detectTestAdequacy({ file, oldContent, newContent, projectYml, layout: input.layout }),
           ]
         } catch (err) {
           // One malformed schema file degrades that file only.
@@ -1744,6 +1749,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       }),
     )
     for (const findings of schemaFindingSets) all.push(findings)
+  }
+  // A dbt_project.yml change that loosens test thresholds for a whole path.
+  for (const file of reviewable.filter((f) => f.kind === "project_config" && /(^|\/)dbt_project\.ya?ml$/.test(f.path))) {
+    if (file.status !== "modified") continue
+    const [oldContent, newContent] = await Promise.all([getContent?.(file.path, "old"), getContent?.(file.path, "new")])
+    all.push(detectThresholdLoosening(file, oldContent, newContent))
   }
 
   // Architectural dedup: the regex `dbt-patterns`/`rule-catalog` layer is a
