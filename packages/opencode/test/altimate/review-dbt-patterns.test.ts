@@ -69,19 +69,11 @@ describe("dbt-patterns detectors", () => {
     expect(has(f, "sql_correctness", "warning")).toBe(true)
   })
 
-  test("SELECT * added → warehouse_cost suggestion; passthrough select * from {{ ref }} is NOT flagged", () => {
-    const flagged = detectModelPatterns(
-      modelFile("models/marts/m.sql", "select *, 1 from x", ["    select *, 1 from x"]),
-      "x",
-      DEFAULT_RUBRIC,
-    )
-    expect(has(flagged, "warehouse_cost")).toBe(true)
-    const passthrough = detectModelPatterns(
-      modelFile("models/staging/m.sql", "select * from {{ ref('x') }}", ["select * from {{ ref('x') }}"]),
-      "x",
-      DEFAULT_RUBRIC,
-    )
-    expect(has(passthrough, "warehouse_cost")).toBe(false)
+  test("a per-line SELECT * is not flagged (import CTEs and CTE chains are the dbt idiom; the catalog covers the final projection)", () => {
+    for (const sql of ["select *, 1 from x", "select * from {{ ref('x') }}"]) {
+      const f = detectModelPatterns(modelFile("models/marts/m.sql", sql, [sql]), "x", DEFAULT_RUBRIC)
+      expect(f.some((x) => /SELECT \* scans all columns/.test(x.title))).toBe(false)
+    }
   })
 
   test("ROW_NUMBER() dedup with NO order by → dedup warning; any order by → clean (tie-prone case is core L039)", () => {
@@ -788,7 +780,7 @@ models: []
   // `not_null` coverage on the same model (constraint if contracted, data_test
   // if view). Directly targets PR D×2 + PR A×2 human findings in the R20
   // corpus study; explicit rule in DBT_GUIDELINES.md.
-  test("R20 S1: unique_combination_of_columns with grain col missing not_null → warning finding", () => {
+  test("R20 S1: unique_combination_of_columns with grain col missing not_null → suggestion finding", () => {
     // `price_start_time` is grain but has no not_null coverage → gap.
     // `metastore_id` / `sku_name` have not_null via constraints on the
     // contracted model → covered. Test scoped as a newly-added model to
@@ -824,7 +816,9 @@ models:
     )
     const gap = f.find((x) => (x.evidence?.result as any)?.rule === "grain_key_not_null_missing")
     expect(gap).toBeDefined()
-    expect(gap!.severity).toBe("warning")
+    // Suggestion: unique_combination_of_columns still catches duplicates (NULL keys group together).
+    expect(gap!.severity).toBe("suggestion")
+    expect(gap!.body).toContain("still catches duplicates")
     expect(gap!.model).toBe("mrt_x")
     expect(gap!.column).toBe("price_start_time")
     // Contract is enforced → recommendation should point at `constraints:`.
