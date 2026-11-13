@@ -102,10 +102,106 @@ function engineMade(name: string, stripped: string): boolean {
   return ENGINE_NAME.test(name) && !new RegExp(`(?<![\\w$])${name}(?![\\w$])`, "i").test(stripped)
 }
 
-/** Whether a SELECT list's output names are the columns the warehouse makes: none unaliased, none repeated. */
-function namesItsOutputs(outputs: string[], stripped: string): boolean {
+/**
+ * Whether a SELECT list's output names are the columns the warehouse makes. The engine lists no outputs for an
+ * unaliased expression or a `*`, so an empty list doesn't settle; neither does a repeated name, which the
+ * warehouse renames.
+ */
+function namesItsOutputs(outputs: string[]): boolean {
   const names = outputs.map((name) => name.toLowerCase())
-  return names.length > 0 && new Set(names).size === names.length && !names.some((name) => engineMade(name, stripped))
+  return names.length > 0 && new Set(names).size === names.length
+}
+
+const QUOTED = '"(?:[^"]|"")*"|`[^`]*`|\\[[^\\]]*\\]'
+const unquoteName = (name: string) => name.replace(/^["`[]|["`\]]$/g, "").toLowerCase()
+
+/**
+ * The items of the SQL's outermost SELECT list (the first one outside parentheses, so after any WITH), split at
+ * top-level commas, from literal- and comment-stripped SQL; [] when there is none.
+ */
+export function selectItems(stripped: string): string[] {
+  const text = stripped.replace(new RegExp(QUOTED, "g"), (q) => q.replace(/[(),]/g, " "))
+  let depth = 0
+  let start = -1
+  const items: string[] = []
+  let from = 0
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!
+    if (ch === "(") depth++
+    else if (ch === ")") depth--
+    if (depth !== 0) continue
+    const word = /^[a-z_]+/i.exec(text.slice(i))?.[0]?.toLowerCase()
+    const boundary = i === 0 || !/[\w$]/.test(text[i - 1]!)
+    if (start < 0) {
+      if (boundary && word === "select") {
+        start = i + 6
+        const lead = /^\s+(?:distinct\s+on\s*\([^)]*\)|distinct|all|top\s+\d+)/i.exec(text.slice(start))
+        if (lead) start += lead[0].length
+        from = start
+        i = start - 1
+      }
+      continue
+    }
+    if (ch === ",") {
+      items.push(stripped.slice(from, i).trim())
+      from = i + 1
+    } else if (boundary && word && /^(from|into|where|union|intersect|except|group|order|limit|qualify|having|window)$/.test(word)) {
+      items.push(stripped.slice(from, i).trim())
+      return items.filter((one) => one !== "")
+    }
+  }
+  if (start >= 0) items.push(stripped.slice(from).trim())
+  return items.filter((one) => one !== "")
+}
+
+/** A SELECT item's output name when the SQL gives one (`x as name`, a bare `t.col`), `*` for a star, else null. */
+export function itemName(item: string): string | null {
+  if (/^(?:[\w$]+\.)*\*(?:\s|$)/.test(item)) return "*"
+  const as = new RegExp(`\\s+as\\s+(${QUOTED}|[\\w$]+)$`, "i").exec(item)
+  if (as) return unquoteName(as[1]!)
+  const bare = new RegExp(`^(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)$`).exec(item)
+  return bare ? unquoteName(bare[1]!) : null
+}
+
+/** The column a SELECT item casts, unaliased (`amount::numeric`, `cast(t.amount as numeric)`); null otherwise. */
+function castColumn(item: string): string | null {
+  const ref = `(?:(?:${QUOTED}|[\\w$]+)\\.)*(${QUOTED}|[\\w$]+)`
+  const m = new RegExp(`^${ref}\\s*::\\s*[\\w\\s(),]+$`, "i").exec(item) ?? new RegExp(`^cast\\s*\\(\\s*${ref}\\s+as\\s+[\\w\\s(),]+\\)$`, "i").exec(item)
+  return m ? unquoteName(m[1]!) : null
+}
+
+/** The names `COLUMNS(...) AS "…"` items give (DuckDB alias templates such as `"col_\0"`), lower-cased. */
+function columnsTemplates(stripped: string): Set<string> {
+  const out = new Set<string>()
+  const call = new RegExp(COLUMNS_CALL.source, "gi")
+  for (let m = call.exec(stripped); m; m = call.exec(stripped)) {
+    let depth = 0
+    let i = m.index + m[0].length - 1
+    for (; i < stripped.length; i++) {
+      if (stripped[i] === "(") depth++
+      else if (stripped[i] === ")" && --depth === 0) break
+    }
+    const alias = new RegExp(`^\\s*as\\s+(${QUOTED}|[\\w$]+)`, "i").exec(stripped.slice(i + 1))
+    if (alias) out.add(unquoteName(alias[1]!))
+  }
+  return out
+}
+
+/** DuckDB's names for a SELECT list's repeated outputs: the second `val` is `val_1`, the third `val_2`. */
+function duckdbRepeats(outputs: string[], taken: Set<string>): string[] {
+  const seen = new Map<string, number>()
+  const out: string[] = []
+  for (const raw of outputs) {
+    const name = raw.toLowerCase()
+    const n = seen.get(name) ?? 0
+    seen.set(name, n + 1)
+    if (n === 0) continue
+    let k = n
+    while (taken.has(`${name}_${k}`)) k++
+    taken.add(`${name}_${k}`)
+    out.push(`${name}_${k}`)
+  }
+  return out
 }
 
 /**
@@ -504,14 +600,20 @@ export class ProjectLineage {
     if (n?.resource_type === "seed") for (const c of this.seedHeader(n)) add(c)
     if (this.traced(id) && !this.busy.has(id)) {
       // Names from the SQL that aren't the warehouse's: the engine's own name for an unaliased expression
-      // (`_1`, `_col_1`), and, where the SQL calls COLUMNS(), an alias template with a backslash and a digit
-      // (`as "col_\0"`). A documented name is kept as it is.
+      // (`_1`, `_col_1`), and the alias template a COLUMNS(...) item gives (`as "col_\0"`). A documented name is
+      // kept as it is.
       const sql = this.sqlOf(id)
       const stripped = sql ? stripSql(sql) : ""
-      const template = COLUMNS_CALL.test(stripped)
-      const real = (name: string) => !engineMade(name, stripped) && !(template && /\\\d/.test(name))
-      for (const e of this.lineage(id).edges) if (real(e.to)) add(e.to)
-      if (sql) for (const c of this.outputColumns(sql)) if (real(c)) add(c)
+      const templates = columnsTemplates(stripped)
+      const edges = this.lineage(id).edges
+      // A name a parent column of the same name passes on (`select * from r` over r's real `_1`) is that column.
+      const passed = new Set(edges.filter((e) => e.fromCol === e.to).map((e) => e.to))
+      const real = (name: string) => !templates.has(name.toLowerCase()) && (passed.has(name) || !engineMade(name, stripped))
+      for (const e of edges) if (real(e.to)) add(e.to)
+      const outputs = sql ? this.outputColumns(sql).filter(real) : []
+      for (const c of outputs) add(c)
+      // DuckDB keeps a repeated output under a new name (`val`, `val_1`): a `select *` over it reads both.
+      if (this.dialect === "duckdb") for (const c of duckdbRepeats(outputs, new Set(found.keys()))) add(c)
     }
     const out = [...found.values()]
     this.columnMemo.set(id, out)
@@ -541,12 +643,22 @@ export class ProjectLineage {
     if (settled && this.traced(id)) {
       const sql = this.sqlOf(id)
       settled = !!sql && !/(?<![\w$])(?:identifier|columns)\s*\(/i.test(stripSql(sql)) && (selectsStar(sql)
-        ? !this.lineage(id).unresolved && this.parents(id).every((p) => this.settledColumns(p) !== undefined)
-        : namesItsOutputs(this.outputColumns(sql), stripSql(sql)))
+        ? !this.lineage(id).unresolved && this.parents(id).every((p) => this.settledColumns(p) !== undefined) &&
+          !this.renamesBesideStar(id, stripSql(sql))
+        : namesItsOutputs(this.outputColumns(sql)))
     }
     const out = settled ? names : undefined
     this.settledMemo.set(id, out)
     return out
+  }
+
+  /** Whether a bare `*` sits beside an output that repeats a name the star brings in (`select *, val as id`). */
+  private renamesBesideStar(id: string, stripped: string): boolean {
+    const items = selectItems(stripped)
+    if (!items.some((item) => /^\*(?:\s|$)/.test(item))) return false
+    const brought = new Set(this.parents(id).flatMap((p) => [...(this.settledColumns(p) ?? [])]))
+    const explicit = items.map(itemName).filter((name): name is string => !!name && name !== "*")
+    return new Set(explicit).size !== explicit.length || explicit.some((name) => brought.has(name))
   }
 
   lineage(id: string): ModelLineage {
@@ -628,10 +740,21 @@ export class ProjectLineage {
     }
     // The engine names an unaliased expression twice: `_N`, as if the value passed through unchanged, and
     // `_col_N`, how unknown. Keep the second; the warehouse picks the real name.
+    // A `_N` the SQL itself writes (`amount as _1`) is a real alias and stays.
+    const stripped = stripSql(raw)
     const named = new Set(edges.filter((e) => /^_col_\d+$/.test(e.to)).map((e) => `${e.from}|${e.fromCol}|${e.to.slice(5)}`))
     for (let i = edges.length - 1; i >= 0; i--) {
       const e = edges[i]!
-      if (/^_\d+$/.test(e.to) && named.has(`${e.from}|${e.fromCol}|${e.to.slice(1)}`)) edges.splice(i, 1)
+      if (/^_\d+$/.test(e.to) && engineMade(e.to, stripped) && named.has(`${e.from}|${e.fromCol}|${e.to.slice(1)}`)) edges.splice(i, 1)
+    }
+    // Postgres and Redshift name an unaliased cast of a column after the column (`amount::numeric` is `amount`).
+    if (this.dialect === "postgres" || this.dialect === "redshift") {
+      const items = selectItems(stripped)
+      for (const e of edges) {
+        const n = /^_col_(\d+)$/.exec(e.to)?.[1]
+        const name = n === undefined ? null : castColumn(items[Number(n)] ?? "")
+        if (name && !edges.some((o) => o.from === e.from && o.fromCol === e.fromCol && o.to === name)) e.to = name
+      }
     }
     const errors: unknown[] = Array.isArray(result.errors) ? result.errors : []
     const firstError = (): string => {

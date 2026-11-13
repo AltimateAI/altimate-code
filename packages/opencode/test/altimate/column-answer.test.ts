@@ -843,7 +843,7 @@ describe("column answer: why a model may carry it", () => {
     const a = columnAnswer(write(base(`select id from ${T("f")} where id > 0`)), "f", "val")
     expect(reasons(a)).toEqual({ after: ["not_traced", null], r: ["not_traced", null] })
     expect(a.counts).toMatchObject({ models: 0, may_carry_models: 2, not_traced_models: 2, model_level: 2 })
-    expect(describeAnswer(a)).toContain("; 2 more of the 2 downstream may carry it, 2 of them with no sign (not traced)")
+    expect(describeAnswer(a)).toContain("; 2 more of the 2 downstream may carry it, 2 of them not traced (no sign either way)")
   })
 
   test("a reader that names the column with no traced edge may carry it, and what sits past it is below it", () => {
@@ -1186,3 +1186,91 @@ describe("both tools: names that aren't columns", () => {
     expect(JSON.stringify((lineage.raw_lineage as any).column_dict?.val ?? [])).toContain("__altimate_unknown_0__")
   })
 })
+
+// Names at the edges: aliases that look like the engine's own names, templates, casts, repeats.
+describe("both tools: names at the edges", () => {
+  const nodes = (dialect: string, list: any[]) => ({ metadata: { adapter_type: dialect }, sources: {}, nodes: Object.fromEntries(list.map((n) => [n.unique_id, n])) })
+  const carried = (a: ColumnAnswer) => a.columns.slice(1).map((c) => `${named(a, c.model)}.${c.column}`)
+
+  test("a real _1 column a select * child inherits stays a column of the child", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("r", ["f"], `select id, amount as _1 from ${T("f")}`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    expect(() => columnReach(path, "child", "_1")).not.toThrow()
+    expect(carried(columnAnswer(path, "child", "_1", "upstream"))).toEqual(expect.arrayContaining(["r._1", "f.amount"]))
+  })
+
+  test("a real alias named like the engine's _N keeps its edge beside an engine-named twin", () => {
+    for (const sql of [`select amount as _1, amount as _col_1 from ${T("f")}`, `select id, amount * 2, amount as _1 from ${T("f")}`]) {
+      const path = write(nodes("duckdb", [
+        model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+        model("r", ["f"], sql),
+        model("child", ["r"], `select _1 as x from ${T("r")}`),
+      ]))
+      expect(carried(columnAnswer(path, "f", "amount"))).toEqual(expect.arrayContaining(["r._1", "child.x"]))
+    }
+  })
+
+  test("a repeated name beside a * doesn't settle: the warehouse renames it", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+      model("r", ["f"], `select *, val as id from ${T("f")}`),
+      model("child", ["r"], `select id_1 as x from ${T("r")}`),
+    ]))
+    expect(columnReach(path, "r", "id_1").models.map((one) => one.name)).toEqual(["child"])
+    expect(() => columnAnswer(path, "r", "id_1")).not.toThrow()
+  })
+
+  test("a COLUMNS() call elsewhere in the SQL leaves a real backslash alias a column", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2.5 as amount", ["id", "amount"]),
+      model("r", ["f"], `select id, amount as "col_\\0" from ${T("f")} where columns('amount') > 0`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const lineage = dbtLineage({ manifest_path: path, model: "child" })
+    expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["col_\\0", "id"])
+  })
+
+  test("on Postgres and Redshift a cast of a column is named after it, so the trace goes on", () => {
+    for (const dialect of ["postgres", "redshift"]) {
+      for (const cast of ["amount::numeric", "cast(amount as numeric)"]) {
+        const path = write(nodes(dialect, [
+          model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+          model("r", ["orders"], `select order_id, ${cast} from ${T("orders")}`),
+          model("child", ["r"], `select order_id, amount from ${T("r")}`),
+        ]))
+        expect(carried(columnAnswer(path, "orders", "amount"))).toEqual(expect.arrayContaining(["r.amount", "child.amount"]))
+        const up = columnAnswer(path, "child", "amount", "upstream")
+        expect(up.may_carry.map((m) => m.name)).not.toContain("orders")
+      }
+    }
+    // Elsewhere the warehouse picks another name: the engine's label stays.
+    const duck = write(nodes("duckdb", [
+      model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+      model("r", ["orders"], `select order_id, amount::decimal(10,2) from ${T("orders")}`),
+    ]))
+    expect(carried(columnAnswer(duck, "orders", "amount"))).toEqual(["r._col_1"])
+  })
+
+  test("DuckDB names a repeated output from a join val_1, and a select * child lists it", () => {
+    const path = write(nodes("duckdb", [
+      model("a", [], "select 1 as id, 2 as val", ["id", "val"]),
+      model("b", [], "select 1 as id, 3 as val", ["id", "val"]),
+      model("r", ["a", "b"], `select a.id, a.val, b.val from ${T("a")} a join ${T("b")} b on a.id = b.id`),
+      model("child", ["r"], `select * from ${T("r")}`),
+    ]))
+    const lineage = dbtLineage({ manifest_path: path, model: "child" })
+    expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {}).sort()).toEqual(["id", "val", "val_1"])
+  })
+
+  test("the text line says how many may-carry models are only not traced, without suggesting no effect", () => {
+    const path = write(nodes("duckdb", [
+      model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+      model("r", ["f"], `select id from ${T("f")} where id > 0`),
+    ]))
+    expect(describeAnswer(columnAnswer(path, "f", "val"))).toContain("; 1 more of the 1 downstream may carry it, 1 of them not traced (no sign either way)")
+  })
+})
+
