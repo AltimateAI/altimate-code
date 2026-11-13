@@ -1230,6 +1230,35 @@ describe("workspace review", () => {
     expect(describePublish(await publish())).toStartWith("Already approved:")
   })
 
+  test("an admin is not refused when review is off: the server attaches their skill directly", async () => {
+    workspaceOwners = { 42: 99 }
+    server(
+      () => reply(summary({ role: "admin", review_enabled: false })),
+      () => reply({ status: "active", attached_directly: true, duplicate: false, contribution: null }),
+    )
+    const report = await publish()
+    expect(posted()).toHaveLength(1)
+    expect(report.review).toMatchObject({ status: "active", attachedDirectly: true })
+    expect(describePublish(report)).toStartWith('Published "deploy" to "Growth"')
+  })
+
+  test("an admin's submission to a server that turns out to have no review falls back to attaching", async () => {
+    workspaceOwners = { 42: 99 }
+    server(() => reply(summary({ role: "admin" })), () => reply({ detail: { code: "reviews_not_available", message: "x" } }, 404))
+    const report = await publish()
+    expect(report.review).toBeUndefined()
+    expect(attaches()).toHaveLength(1)
+  })
+
+  test("an older server's summary without a role: a non-owner is a member, refused while review is off", async () => {
+    workspaceOwners = { 42: 99 }
+    server(() => reply(summary({ review_enabled: false })), () => reply({}, 500))
+    const err = await publish().catch((e) => e)
+    expect(err).toBeInstanceOf(ReviewDisabledError)
+    expect(err.message).toContain("or an admin of it")
+    expect(uploads()).toEqual([])
+  })
+
   test("a member is refused before anything is uploaded when review is off", async () => {
     workspaceOwners = { 42: 99 }
     server(() => reply(summary({ review_enabled: false })), () => reply({}, 500))

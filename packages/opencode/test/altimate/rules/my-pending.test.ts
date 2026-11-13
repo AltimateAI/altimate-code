@@ -76,6 +76,15 @@ describe("pulled", () => {
     ])
   })
 
+  test("the caller's workspace role is kept from a pull, and absent from an older server", async () => {
+    answer = () => Response.json(syncBody([ACTIVE], { role: "admin" }))
+    await RulesSync.pull(root, ready())
+    expect((await RulesStore.read(root)).workspace).toMatchObject({ is_owner: false, role: "admin" })
+    answer = () => Response.json(syncBody([ACTIVE]))
+    await RulesSync.pull(root, ready())
+    expect((await RulesStore.read(root)).workspace?.role).toBeUndefined()
+  })
+
   test("an older server without my_pending still pulls, and delivers no pending rules", async () => {
     answer = () => Response.json(syncBody([ACTIVE]))
     expect((await RulesSync.pull(root, ready())).ok).toBe(true)

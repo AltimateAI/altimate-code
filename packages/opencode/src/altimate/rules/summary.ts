@@ -9,7 +9,7 @@ type LearnConfig = Parameters<typeof RuleTrigger.learningEnabled>[0]
 
 export interface Summary {
   linked: boolean
-  workspace?: { name: string; owner_name?: string | null; is_owner: boolean }
+  workspace?: { name: string; owner_name?: string | null; is_owner: boolean; role?: string | null }
   team_rules: number
   /** Proposals waiting for the owner, workspace-wide in this repository's scope. */
   pending_review: number
