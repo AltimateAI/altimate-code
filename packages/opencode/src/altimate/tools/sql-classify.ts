@@ -268,10 +268,16 @@ const CODE_HARD_DENY = new RegExp(
     // alias without AS (`SELECT truncate x`, `FROM truncate t`).
     // The t.truncate check runs only after TRUNCATE matched, over the whitespace just before it (comments
     // are masked to spaces), so each run of whitespace is scanned once.
-    "|\\bTRUNCATE(?<!\\.\\s*TRUNCATE)\\s+(?!(FROM|AS|WHERE|ORDER|GROUP|HAVING|UNION|EXCEPT|INTERSECT|MINUS|LIMIT|OFFSET|FETCH|" +
-    "QUALIFY|WINDOW|INTO|JOIN|INNER|LEFT|RIGHT|FULL|CROSS|OUTER|ON|USING|AND|OR|NOT|IS|IN|LIKE|ILIKE|RLIKE|REGEXP|SIMILAR|" +
-    "BETWEEN|AT|COLLATE|ESCAPE|ASC|DESC|NULLS|OVER|FILTER|WITHIN|THEN|ELSE|WHEN|END|DIV|MOD|XOR|OVERLAPS|" +
-    "ISNULL|NOTNULL|GLOB|MATCH|SOUNDS|ROWS|RANGE|GROUPS|WITH|START|CONNECT|SETTINGS|OPTION|FOR|OPERATOR|ASCENDING|DESCENDING)\\b)[\\w\"`$\\u0080-\\uffff]",
+    // Words reserved in both MySQL and Snowflake (whose routine and task bodies hold an unquoted
+    // TRUNCATE) are never a target. Any other clause word can name a table (TRUNCATE settings), so it
+    // counts as a clause only when the statement goes on after it: not before `.`, `;` or the end.
+    "|\\bTRUNCATE(?<!\\.\\s*TRUNCATE)\\s+(?!(FROM|AS|WHERE|ORDER|GROUP|HAVING|UNION|INTERSECT|INTO|JOIN|INNER|LEFT|RIGHT|" +
+    "CROSS|ON|USING|AND|OR|NOT|IS|IN|LIKE|RLIKE|REGEXP|BETWEEN|THEN|ELSE|WHEN|WITH|FOR|ROWS)\\b|" +
+    // A sort key (ORDER BY truncate DESC) may end the statement.
+    "(?<=(\\bBY|,)\\s*TRUNCATE\\s+)(ASC|DESC|ASCENDING|DESCENDING)\\b|" +
+    "(EXCEPT|MINUS|LIMIT|OFFSET|FETCH|QUALIFY|WINDOW|FULL|OUTER|ILIKE|SIMILAR|AT|COLLATE|ESCAPE|ASC|DESC|NULLS|OVER|FILTER|" +
+    "WITHIN|END|DIV|MOD|XOR|OVERLAPS|ISNULL|NOTNULL|GLOB|MATCH|SOUNDS|RANGE|GROUPS|START|CONNECT|SETTINGS|OPTION|OPERATOR|" +
+    "ASCENDING|DESCENDING)\\b(?!\\s*([.;]|$)))[\\w\"`$\\u0080-\\uffff]",
   "i",
 )
 
@@ -315,13 +321,19 @@ function quotedHardDeny(tokens: ReturnType<typeof tokenizeSql>["tokens"], dialec
   )
 }
 
+const DYNAMIC_SQL = /\bEXEC(UTE)?\b|(^|;)\s*(PREPARE|DO)\b/i
+
 // Sequence advances outside PostgreSQL's nextval(): NEXT VALUE FOR s (SQL Server, DB2), and in Oracle,
 // Snowflake and MariaDB (Oracle mode) s.NEXTVAL, quoted or not (elsewhere s.nextval is a column).
 function advancesSequence(tokens: ReturnType<typeof tokenizeSql>["tokens"], masked: string, dialect?: string): boolean {
   if (/\bNEXT\s+VALUE\s+FOR\b/i.test(masked)) return true
   if (!/^(oracle|snowflake|mysql|mariadb)$/i.test(dialect ?? "") && isModeledDialect(dialect)) return false
-  // Comments masked to spaces and quoted names unwrapped, so s./* c */"NEXTVAL" reads as s.NEXTVAL.
-  return /\.\s*NEXTVAL\b/i.test(maskSql(tokens, true))
+  // Comments masked to spaces and quoted names unwrapped, so s./* c */"NEXTVAL" reads as s.NEXTVAL. A dot
+  // inside one quoted name ("s.NEXTVAL") is part of a column name, not a separator.
+  const names = tokens.map((token) =>
+    token.kind === "identifier" ? { ...token, text: token.text.replaceAll(".", "_") } : token,
+  )
+  return /\.\s*NEXTVAL\b/i.test(maskSql(names, true))
 }
 
 /** The word DROP with DATABASE, SCHEMA, CATALOG or NAMESPACE anywhere after it, or TRUNCATE not
@@ -445,6 +457,10 @@ export function classifyAndCheck(sql: string, dialect?: string): {
     // of the whole text already covered them.
     const lexical = tokenizeSql(sql, dialect)
     if (lexical.complete && quotedHardDeny(lexical.tokens, dialect)) return { ...result, blocked: true }
+    // Dynamic SQL can join literals into one statement ('DROP ' + 'DATABASE x', or PostgreSQL's
+    // adjacent constants), so its words count across literals too.
+    if (lexical.complete && DYNAMIC_SQL.test(maskSql(lexical.tokens)) && mentionsHardDenyAnywhere(sql))
+      return { ...result, blocked: true }
   }
   return result
 }

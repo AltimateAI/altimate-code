@@ -11,6 +11,8 @@ import { Global } from "../../../src/global"
 import * as Registry from "../../../src/altimate/native/connections/registry"
 import { registerDefaultNativeHandlers } from "../../lib/native-handlers"
 import * as Dispatcher from "../../../src/altimate/native/dispatcher"
+import { DataDiffTool } from "../../../src/altimate/tools/data-diff"
+import { initTool } from "../tool-fixture"
 
 let dir: string
 let runner: Runner
@@ -403,6 +405,16 @@ describe("data_diff write-carrying inputs", () => {
 })
 
 describe("sql_explain", () => {
+  test("names uncertain quoting as the reason it does not explain", async () => {
+    Registry.setConfigs({ pg: { type: "postgres" } as any })
+    try {
+      const result = await runner.run("sql_explain", { sql: "SELECT 'a\\'", warehouse: "pg" })
+      expect(JSON.stringify(result)).toContain("could not be read with certainty")
+    } finally {
+      Registry.reset()
+    }
+  })
+
   test("explains one statement only, since some drivers run every statement in the text", async () => {
     Registry.setConfigs({ rs: { type: "redshift" } as any })
     const sent: string[] = []
@@ -441,6 +453,25 @@ describe("data_diff empty target_warehouse", () => {
       const params = call.mock.calls.find(([method]) => method === "data.diff")?.[1] as Record<string, unknown>
       expect(params.source_warehouse).toBe("src")
       expect(params.target_warehouse).toBeUndefined()
+    } finally {
+      call.mockRestore()
+      Registry.reset()
+    }
+  })
+
+  test("asks once, for the source warehouse", async () => {
+    Registry.setConfigs({ src: { type: "postgres" } as any, other: { type: "mysql" } as any })
+    const call = spyOn(Dispatcher, "call").mockResolvedValue({ success: true, outcome: { mode: "diff" } } as any)
+    const asks: unknown[] = []
+    try {
+      const tool = await initTool(DataDiffTool)
+      await tool.execute(
+        { source: "orders", target: "orders_v2", key_columns: ["id"], source_warehouse: "src", target_warehouse: "" },
+        { sessionID: "ses_test", messageID: "msg_test", callID: "c", agent: "build", abort: AbortSignal.any([]), messages: [], ask: (input: unknown) => void asks.push(input) },
+      )
+      expect(asks).toEqual([
+        { permission: "sql_execute_read", patterns: ["orders", "orders_v2"], always: ["*"], metadata: { warehouse: "src", hardDenyChecked: true } },
+      ])
     } finally {
       call.mockRestore()
       Registry.reset()

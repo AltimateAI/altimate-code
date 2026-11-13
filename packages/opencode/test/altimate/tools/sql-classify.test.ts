@@ -582,7 +582,9 @@ describe("each engine's own literal and statement rules", () => {
     ["SELECT s.nextval FROM metrics s", "postgres", "read", false],
     ["SELECT CASE WHEN true THEN truncate SIMILAR TO 'a%' ELSE false END FROM metrics", "postgres", "read", false],
     ["SELECT CASE WHEN a THEN truncate AT TIME ZONE 'UTC' END FROM metrics", "postgres", "read", false],
-    ["SELECT CASE WHEN a THEN 1 ELSE truncate END;", "postgres", "read", false],
+    // Without FROM, truncate cannot be a column: END before `;` is a table named end.
+    ["SELECT CASE WHEN a THEN 1 ELSE truncate END;", "postgres", "write", true],
+    ["SELECT CASE WHEN a THEN 1 ELSE truncate END FROM metrics;", "postgres", "read", false],
     ["SELECT * FROM bigquery_execute('p', 'DELETE FROM d.t WHERE true')", "duckdb", "write", false],
     ["SELECT * FROM ducklake_expire_snapshots('lake', older_than => now())", "duckdb", "write", false],
     // ClickHouse jdbc() can run a mutation through the bridge.
@@ -648,6 +650,31 @@ describe("each engine's own literal and statement rules", () => {
     ["DROP TABLE IF EXISTS s.t; CREATE SCHEMA IF NOT EXISTS s2", "postgres", "write", false],
     ["ALTER TABLE t DROP COLUMN c; GRANT USAGE ON SCHEMA s TO r", "postgres", "write", false],
     ["SELECT 1; DROP/**/SCHEMA s", "postgres", "write", true],
+    // A clause word that is not reserved can be TRUNCATE's target: refused unless the clause goes on.
+    ...("settings start filter at escape nulls connect ascending descending sounds glob isnull notnull " +
+      "overlaps within similar ilike operator qualify offset minus end")
+      .split(" ")
+      .flatMap((word): [string, string, "write", boolean][] => [
+        [`CREATE PROCEDURE p() TRUNCATE ${word}`, "mysql", "write", true],
+        [`CREATE PROCEDURE p() TRUNCATE /*c*/ ${word}.orders`, "mysql", "write", true],
+      ]),
+    ["CREATE TASK k AS TRUNCATE groups", "snowflake", "write", true],
+    ["CREATE TASK k AS TRUNCATE settings", "snowflake", "write", true],
+    ["SELECT truncate FROM t ORDER BY truncate DESC", "mysql", "read", false],
+    ["SELECT * FROM t ORDER BY a, truncate ASC", "snowflake", "read", false],
+    ["SELECT sum(truncate) FILTER (WHERE x) FROM t", "postgres", "read", false],
+    // Dynamic SQL joins its literals, so a hard deny split across them counts.
+    ["EXEC('DROP ' + 'DATABASE victim')", "sqlserver", "write", true],
+    ["EXECUTE IMMEDIATE CONCAT('DROP ', 'SCHEMA victim CASCADE')", "bigquery", "write", true],
+    ["SET @s = CONCAT('DROP ', 'DATABASE victim'); PREPARE p FROM @s; EXECUTE p", "mysql", "write", true],
+    ["DO 'BEGIN DROP '\n'SCHEMA victim CASCADE; END'", "postgres", "write", true],
+    // A dot inside one quoted name is not a sequence advance.
+    ['SELECT "s.NEXTVAL" FROM metrics', "snowflake", "read", false],
+    ['SELECT "s.NEXTVAL" FROM metrics', "oracle", "read", false],
+    ["SELECT `s.NEXTVAL` FROM metrics", "mysql", "read", false],
+    // DuckLake's metadata functions read; its maintenance functions write.
+    ["SELECT * FROM ducklake_snapshots('lake')", "duckdb", "read", false],
+    ["SELECT * FROM ducklake_table_info('lake')", "duckdb", "read", false],
   ]
   for (const [sql, dialect, queryType, blocked] of cases)
     test(`${dialect}: ${sql.replace(/\n/g, "\\n")}`, () => {

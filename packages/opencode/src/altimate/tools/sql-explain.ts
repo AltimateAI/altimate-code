@@ -98,14 +98,17 @@ export const SqlExplainTool = Tool.define("sql_explain", {
       const warehouse = args.warehouse || Registry.list().warehouses[0]?.name
       const dialect = Registry.canonicalType(warehouse ? Registry.getConfig(warehouse)?.type : undefined) ?? undefined
       const { queryType, blocked } = classifyAndCheck(args.sql, dialect)
-      const statements = tokenizeSql(args.sql, dialect).complete ? statementsOf(args.sql, dialect) : []
+      const complete = tokenizeSql(args.sql, dialect).complete
+      const statements = complete ? statementsOf(args.sql, dialect) : []
       // The tool adds EXPLAIN itself: SQL starting with an EXPLAIN option (ANALYZE, VERBOSE, an option
       // list such as ("analyze")) would turn the plan into EXPLAIN ANALYZE, which runs the statement. A
       // leading "(" is a query only when a query keyword follows it.
       const option = /^(EXPLAIN|ANALY[SZ]E|VERBOSE)\b|^\((?![(\s]*(SELECT|WITH|VALUES|TABLE|FROM)\b)/i.test(statements[0] ?? "")
       const error = blocked
         ? "DROP DATABASE, DROP SCHEMA and TRUNCATE are blocked for safety."
-        : statements.length !== 1 || option
+        : !complete
+          ? "The SQL's quotes or comments could not be read with certainty (for example an unterminated quote), so it is not explained."
+          : statements.length !== 1 || option
           ? "Only a single statement can be explained, without EXPLAIN or its options. Run each statement separately."
           : args.analyze && (queryType !== "read" || !isSingleQuery(args.sql, dialect))
             ? "EXPLAIN ANALYZE executes the statement, so only a single read-only query can be analyzed. Use analyze: false for a plan of this statement."
