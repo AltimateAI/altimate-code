@@ -50,7 +50,7 @@ export interface HookInput {
 
 /** What a host session start learns about workspace rules. `rules` is empty when nothing may be shown. */
 export interface Start {
-  workspace?: { name: string; owner_name?: string | null; is_owner: boolean; id?: number }
+  workspace?: { name: string; owner_name?: string | null; is_owner: boolean; role?: string | null; id?: number }
   /** `review: "pending"`: the person's own proposal still waiting for the owner (`RulesStore.vouched`), never presented
    * as approved. */
   rules: { text: string; applies_to: string[]; review?: "pending" }[]
@@ -206,13 +206,13 @@ function ruleLines(start: Start, ws: string): string[] {
   return [
     ...(approved.length
       ? [
-          `Team rules from ${ws} for this repository (approved by the workspace owner; they apply to all work here, including code you write yourself):`,
+          `Team rules from ${ws} for this repository (approved by the workspace owner or an admin; they apply to all work here, including code you write yourself):`,
           ...approved.map(line),
         ]
       : []),
     ...(pending.length
       ? [
-          `Rules the person proposed in ${ws}, still waiting for the workspace owner's review (not approved yet; they apply to the person's own work here):`,
+          `Rules the person proposed in ${ws}, still waiting for review by the workspace owner or an admin (not approved yet; they apply to the person's own work here):`,
           ...pending.map(line),
         ]
       : []),

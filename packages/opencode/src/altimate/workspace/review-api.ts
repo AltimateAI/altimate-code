@@ -1,7 +1,7 @@
 // altimate_change - new file
 //
 // Wire client for workspace review in altimate-backend (`/datamates/{id}/reviews*`): a member submits their own skill or
-// knowledge base to a workspace, and the owner approves or rejects it in the web app. The CLI only submits and reads
+// knowledge base to a workspace, and the owner or an admin approves or rejects it in the web app. The CLI only submits and reads
 // status; it never approves or rejects.
 //
 // Errors are classified by the rules client's `classify` (one mapping for both features): a 404 `reviews_not_available`,
@@ -24,6 +24,8 @@ const PAGE_SIZE = 50
 
 export const Summary = z.object({
   is_owner: z.boolean(),
+  /** `owner`, `admin` or `member` (absent from servers older than workspace roles: see `WorkspaceRole.roleOf`). */
+  role: z.string().nullable().optional(),
   review_enabled: z.boolean(),
   owner_name: z.string().nullable().optional(),
   pending_count: z.number().int(),
