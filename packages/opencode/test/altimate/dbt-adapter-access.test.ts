@@ -89,7 +89,7 @@ describe("feature tools in the allow-list", () => {
       expect(tool.id).toBe(id)
       const result = await tool.execute(MINIMAL_ARGS[id], ctx)
       expect(result.title).toBe(`${id}: not implemented`)
-      expect(result.metadata.success).toBe(false)
+      expect(result.metadata).toEqual({ success: false, error: "not implemented", truncated: false })
       expect(result.output).toContain(id)
     }
   })
@@ -151,6 +151,30 @@ describe("dbtAdapterFor", () => {
     }
   })
 
+  test("says the adapter didn't start when the project exists but creating it fails", async () => {
+    dbtAdapterInternals.create = async () => {
+      created += 1
+      throw new Error("dbt-integration missing")
+    }
+    const access = await dbtAdapterFor(ctx)
+    expect(access).toEqual({ refusal: "not_started", reason: "the dbt adapter didn't start" })
+    expect(created).toBe(1)
+  })
+
+  test("a call cancelled while the adapter starts throws and stops waiting", async () => {
+    let entered = () => {}
+    const starting = new Promise<void>((resolve) => (entered = resolve))
+    dbtAdapterInternals.create = () => {
+      entered()
+      return new Promise(() => {})
+    }
+    const controller = new AbortController()
+    const pending = dbtAdapterFor({ ...ctx, abort: controller.signal })
+    await starting
+    controller.abort(new Error("cancelled"))
+    await expect(pending).rejects.toThrow("cancelled")
+  })
+
   test("a cancelled call throws rather than answering", async () => {
     const controller = new AbortController()
     controller.abort()
@@ -169,6 +193,28 @@ describe("dbtAdapterFor", () => {
       expect(created).toBe(0)
     } finally {
       await disposeInstance(project)
+    }
+  })
+
+  test("a session in another dbt project than the adapter's says which", async () => {
+    const other = await mkdtemp(path.join(os.tmpdir(), "dbt-adapter-other-"))
+    await writeFile(path.join(other, "dbt_project.yml"), "name: other\n")
+    dbtAdapterInternals.readConfig = async () => ({
+      projectRoot: other,
+      pythonPath: "python3",
+      dbtIntegration: "corecommand",
+      queryLimit: 500,
+    })
+    try {
+      const access = await Instance.provide({ directory: project, fn: () => dbtAdapterFor(ctx) })
+      expect(access).toEqual({
+        refusal: "other_project",
+        reason: `the dbt adapter is set up for ${realpathSync(other)}, not ${realpathSync(project)}`,
+      })
+      expect(created).toBe(0)
+    } finally {
+      await disposeInstance(project)
+      await rm(other, { recursive: true, force: true })
     }
   })
 })
@@ -218,6 +264,8 @@ describe("AltimateApi.apiRequest", () => {
 
   test("names the file when the stored credentials can't be read", async () => {
     await Bun.write(path.join(home, ".altimate", "altimate.json"), "{not json")
-    await expect(AltimateApi.apiRequest("GET", "/dbt/v1/x")).rejects.toThrow("can't be used")
+    await expect(AltimateApi.apiRequest("GET", "/dbt/v1/x")).rejects.toThrow(
+      `The Altimate credentials in ${path.join(home, ".altimate", "altimate.json")} can't be used`,
+    )
   })
 })

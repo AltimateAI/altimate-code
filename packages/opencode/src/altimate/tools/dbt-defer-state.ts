@@ -9,7 +9,7 @@ export const DbtDeferStateTool = Tool.define("dbt_defer_state", {
   async execute() {
     return {
       title: "dbt_defer_state: not implemented",
-      metadata: { success: false },
+      metadata: { success: false, error: "not implemented" },
       output: "dbt_defer_state is not implemented in this build of altimate-code yet.",
     }
   },

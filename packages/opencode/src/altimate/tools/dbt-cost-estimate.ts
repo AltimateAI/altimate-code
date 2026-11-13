@@ -10,7 +10,7 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   async execute() {
     return {
       title: "dbt_cost_estimate: not implemented",
-      metadata: { success: false },
+      metadata: { success: false, error: "not implemented" },
       output: "dbt_cost_estimate is not implemented in this build of altimate-code yet.",
     }
   },
