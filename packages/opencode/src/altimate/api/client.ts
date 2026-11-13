@@ -347,6 +347,26 @@ export namespace AltimateApi {
     // altimate_change end
   }
 
+  /**
+   * Calls an Altimate API endpoint with the stored credentials (Bearer key and x-tenant headers) and
+   * returns the parsed JSON body. Endpoint functions in other files go through this. Fails with a
+   * message naming the credentials file when none are stored or they can't be read.
+   */
+  export async function apiRequest(method: string, endpoint: string, body?: unknown): Promise<any> {
+    let creds: AltimateCredentials
+    try {
+      creds = await getCredentials()
+    } catch (e) {
+      const p = credentialsPath()
+      if (!(await Filesystem.exists(p)))
+        throw new Error(
+          `No Altimate credentials are stored: sign in to Altimate in altimate-code first (they are saved to ${p}).`,
+        )
+      throw new Error(`The Altimate credentials in ${p} can't be used: ${e instanceof Error ? e.message : String(e)}`)
+    }
+    return request(creds, method, endpoint, body)
+  }
+
   export async function listDatamates(creds?: AltimateCredentials) {
     creds ??= await getCredentials()
     const data = await request(creds, "GET", "/datamates/")
