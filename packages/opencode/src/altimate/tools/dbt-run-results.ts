@@ -20,6 +20,8 @@ export interface DbtRunResultRow {
 
 export interface DbtRunResultsView {
   found: boolean
+  /** The dbt project folder the artifact was read from. */
+  projectDir: string | null
   invocationId: string | null
   command: string | null
   elapsedSec: number | null
@@ -35,6 +37,7 @@ export interface DbtRunResultsView {
 
 const NONE: DbtRunResultsView = {
   found: false,
+  projectDir: null,
   invocationId: null,
   command: null,
   elapsedSec: null,
@@ -107,6 +110,7 @@ export async function readRunView(dbtRoot: string): Promise<DbtRunResultsView> {
     const listed = [...failed, ...all.filter((row) => !failing.has(row))].slice(0, MAX_ROWS)
     return {
       found: true,
+      projectDir: dbtRoot,
       invocationId: invocation,
       command: artifact.command,
       elapsedSec: same ? num(raw["elapsed_time"]) : null,
@@ -128,10 +132,10 @@ export const DbtRunResultsTool = Tool.define("dbt_run_results", {
     project_dir: z
       .string()
       .optional()
-      .describe("The dbt project folder (default: the project the session's directory is in)"),
+      .describe("A folder in the dbt project (its dbt_project.yml is looked for there and above; default: the project the dbt adapter is configured for, else the session's directory's)"),
   }),
   async execute(args) {
-    const root = args.project_dir ? path.resolve(projectRoot(), args.project_dir) : await defaultRoot()
+    const root = args.project_dir ? await projectAbove(path.resolve(projectRoot(), args.project_dir)) : await defaultRoot()
     const view = await readRunView(root)
     if (!view.found) {
       return {
@@ -155,12 +159,16 @@ export const DbtRunResultsTool = Tool.define("dbt_run_results", {
   },
 })
 
+/** The dbt project `dir` is in: the closest folder at or above it holding dbt_project.yml, else `dir`. */
+async function projectAbove(dir: string): Promise<string> {
+  const { findProjectRoot } = await import("../../../../dbt-tools/src/config")
+  return findProjectRoot(dir) ?? dir
+}
+
 /** The project the dbt adapter is configured for, else the one the session's directory is in. */
 async function defaultRoot(): Promise<string> {
   const { getDbtProjectRoot } = await import("../native/connections/register")
   const configured = await getDbtProjectRoot()
   if (configured) return configured
-  const { findProjectRoot } = await import("../../../../dbt-tools/src/config")
-  const base = projectRoot()
-  return findProjectRoot(base) ?? base
+  return projectAbove(projectRoot())
 }

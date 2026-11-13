@@ -70,6 +70,7 @@ describe("dbt_run_results", () => {
     expect(result.metadata).toEqual({
       truncated: false,
       found: true,
+      projectDir: expect.any(String),
       invocationId: "11111111-aaaa-bbbb-cccc-000000000001",
       command: "build",
       elapsedSec: 12.5,
@@ -97,6 +98,7 @@ describe("dbt_run_results", () => {
     expect(result.metadata).toEqual({
       truncated: false,
       found: true,
+      projectDir: expect.any(String),
       invocationId: "22222222-aaaa-bbbb-cccc-000000000002",
       command: "compile",
       elapsedSec: 2,
@@ -118,6 +120,7 @@ describe("dbt_run_results", () => {
     expect(result.metadata).toEqual({
       truncated: false,
       found: false,
+      projectDir: null,
       invocationId: null,
       command: null,
       elapsedSec: null,
@@ -139,6 +142,7 @@ describe("dbt_run_results", () => {
     expect(result.metadata).toEqual({
       truncated: false,
       found: true,
+      projectDir: expect.any(String),
       invocationId: null,
       command: "run",
       elapsedSec: null,
@@ -195,6 +199,16 @@ describe("dbt_run_results", () => {
 
     expect((result.metadata as any).found).toBe(false)
     expect(result.output).toContain("not a run artifact")
+  })
+
+  test("a folder inside the project reads that project; a relative one resolves against the session's project", async () => {
+    const dir = await project("nested", BUILD)
+    await mkdir(path.join(dir, "models", "marts"), { recursive: true })
+
+    const view = (await run(path.join(dir, "models", "marts"))).metadata as any
+
+    expect(view.projectDir).toBe(dir)
+    expect(view.invocationId).toBe("11111111-aaaa-bbbb-cccc-000000000001")
   })
 
   test("with no project_dir, the project the dbt adapter is configured for is read", async () => {
