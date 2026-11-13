@@ -16,6 +16,10 @@ const patterns = [
   /exceeded model token limit/i,
   /context[_ ]length[_ ]exceeded/i,
   /request entity too large/i,
+  // altimate_change start — upstream_fix: oversized image payloads are overflows (anomalyco/opencode#62270)
+  /request body too large/i,
+  /multimodal data size is too large/i,
+  // altimate_change end
   /context length is only \d+ tokens/i,
   /input length.*exceeds.*context length/i,
   /prompt too long; exceeded (?:max )?context length/i,
