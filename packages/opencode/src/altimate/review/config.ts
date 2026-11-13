@@ -36,11 +36,11 @@ export const ReviewConfig = z.object({
    */
   portability: z.boolean().optional(),
   /**
-   * CI runs `dbt build` (or `dbt run`) on the PR, so dbt itself fails a model
-   * whose SELECT doesn't match its enforced contract. The review then skips its
-   * own contract-vs-SELECT check instead of repeating CI.
+   * Opt-in: report a new column missing from an enforced contract. `dbt build`
+   * already fails on it, so this only helps CI that runs `dbt parse`/`compile`
+   * without building.
    */
-  ciRunsDbtBuild: z.boolean().default(false),
+  checkContractColumns: z.boolean().default(false),
   /**
    * Opt-in: explicit column lists outside dbt (loaders, exports) that must
    * track a model's columns. `files` is a repo-relative glob, `pattern` a regex

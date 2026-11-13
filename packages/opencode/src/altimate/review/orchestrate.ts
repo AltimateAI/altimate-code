@@ -660,13 +660,13 @@ const ticks = (xs: string[]) => xs.map((x) => `\`${x}\``).join(", ")
  * feeds exposures (dashboards, apps, ML) or has an enforced contract breaks
  * readers outside the DAG; the finding names them. And a new column missing
  * from an enforced contract fails `dbt build` — reported unless the project
- * says CI already runs the build (`ciRunsDbtBuild`), where dbt catches it.
+ * opts in (`checkContractColumns`); `dbt build` already enforces it.
  */
 async function consumerContractLane(
   ctx: ModelContext,
   runner: ReviewRunner,
   dialect: string,
-  opts: { ciRunsDbtBuild: boolean; changedYmlText: () => Promise<string[]> },
+  opts: { checkContractColumns: boolean; changedYmlText: () => Promise<string[]> },
 ): Promise<Finding[]> {
   if (!runner.modelConsumers || !runner.columnLineage) return []
   const model = modelNameFromPath(ctx.file.path)
@@ -700,7 +700,7 @@ async function consumerContractLane(
     )
   }
 
-  if (consumers.contractEnforced && !opts.ciRunsDbtBuild && consumers.contractColumns.length && added.length) {
+  if (consumers.contractEnforced && opts.checkContractColumns && consumers.contractColumns.length && added.length) {
     const declared = new Set(consumers.contractColumns)
     const yml = await opts.changedYmlText()
     // A column the PR adds to a changed yml is declared even when the manifest predates the PR.
@@ -719,7 +719,7 @@ async function consumerContractLane(
           file: ctx.file.path,
           model,
           confidence: "high",
-          evidence: { tool: "dbt.manifest", result: { missing } },
+          evidence: { tool: "contract-check", result: { missing } },
           ruleKey: "contract_violation:contract-missing-column",
         }),
       )
@@ -1473,7 +1473,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     }
     if (lanes.has("lineage_breakage") || lanes.has("contract_violation")) {
       tasks.push(
-        consumerContractLane(ctx, input.runner, dialect, { ciRunsDbtBuild: input.config.ciRunsDbtBuild, changedYmlText }),
+        consumerContractLane(ctx, input.runner, dialect, { checkContractColumns: input.config.checkContractColumns, changedYmlText }),
       )
       tasks.push(consumerListLane(ctx, input.runner, dialect, input.consumerLists ?? []))
     }

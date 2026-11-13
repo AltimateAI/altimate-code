@@ -340,7 +340,10 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   // the dbt manifest's `adapter_type` (so a BigQuery/Redshift project isn't
   // analyzed as the snowflake default — wrong-dialect portability suppression).
   const detectedDialect = config.dialect ? undefined : await detectDialect(manifestAbs)
-  const dialectKnown = !!config.dialect || !!detectedDialect
+  // Known = set in config, or an adapter the review maps to a dialect. An
+  // unmapped adapter (a community adapter) is treated as unknown, so generic
+  // advice isn't suppressed on a guess.
+  const dialectKnown = !!config.dialect || (!!detectedDialect && Object.values(ADAPTER_DIALECT).includes(detectedDialect))
   if (!config.dialect) config.dialect = detectedDialect ?? "snowflake"
 
   // Prefer dbt's catalog.json (real warehouse columns from `dbt docs generate`)

@@ -55,6 +55,8 @@ describe("integer division follows the adapter", () => {
     expect(run("select cast(count(*) as double) / count(x) as r")).toHaveLength(0)
     expect(run("select 7.0 / 2 as r")).toHaveLength(0)
     expect(run("select col1 / 2 as r")).toHaveLength(0)
+    expect(run("where dt >= '2024/01/15'")).toHaveLength(0)
+    expect(run("select 'a 1/2 b' as label, 3 / 4 as r")).toHaveLength(1)
   })
 
   test("end to end: a Snowflake project drops it, a multi-adapter package keeps it", async () => {
@@ -137,16 +139,21 @@ describe("consumers outside the DAG", () => {
     expect(plain.findings.some((x) => x.title.includes("declared consumers"))).toBe(false)
   })
 
-  test("a new column missing from the enforced contract fails dbt build", async () => {
-    const env = await review({ exposures: [], contractEnforced: true, contractColumns: ["id", "email", "amount"] })
-    expect(env.findings.find((x) => x.title.includes("missing from the enforced contract"))?.body).toContain("`region`")
+  const optIn = { config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["lineage_breakage", "contract_violation"], checkContractColumns: true } }
+
+  test("opt-in: a new column missing from the enforced contract is reported, and never blocks", async () => {
+    const env = await review({ exposures: [], contractEnforced: true, contractColumns: ["id", "email", "amount"] }, optIn)
+    const f = env.findings.find((x) => x.title.includes("missing from the enforced contract"))
+    expect(f?.body).toContain("`region`")
+    expect(f?.origin).toBe("catalog")
   })
 
-  test("skipped when CI runs dbt build, or when the PR declares the column in a changed yml", async () => {
+  test("off by default (dbt build enforces it), and skipped when the PR declares the column in a changed yml", async () => {
     const consumers = { exposures: [], contractEnforced: true, contractColumns: ["id", "email", "amount"] }
-    const ci = await review(consumers, { config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["contract_violation"], ciRunsDbtBuild: true } })
-    expect(ci.findings.some((x) => x.title.includes("missing from the enforced contract"))).toBe(false)
+    const def = await review(consumers)
+    expect(def.findings.some((x) => x.title.includes("missing from the enforced contract"))).toBe(false)
     const yml = await review(consumers, {
+      ...optIn,
       changedFiles: [...changed, { path: "models/marts/_fct.yml", status: "modified", diff: "+      - name: region\n" }],
       getContent: async (f, side) => (f.endsWith(".yml") ? "models:\n  - name: fct\n    columns:\n      - name: region\n" : side === "old" ? OLD : NEW),
     })
@@ -224,7 +231,7 @@ describe("unit tests that cannot exercise the model", () => {
 `
   test("all inputs empty and nothing expected: cannot fail", () => {
     const [f] = detectUnitTestFixtures(file, undefined, yml("[]"))
-    expect(f.title).toContain("cannot fail")
+    expect(f.title).toContain("doesn't exercise the model")
     expect(f.severity).toBe("suggestion")
   })
 
