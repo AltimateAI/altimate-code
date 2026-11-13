@@ -1,6 +1,6 @@
 import { describe, test, expect } from "bun:test"
-import { runReview, definedVars, type ReviewRunner } from "../../src/altimate/review/orchestrate"
-import { detectModelPatterns, detectSchemaYmlPatterns } from "../../src/altimate/review/dbt-patterns"
+import { runReview, definedVars, inlineConfigSplats, type ReviewRunner } from "../../src/altimate/review/orchestrate"
+import { detectMacroPatterns, detectModelPatterns, detectSchemaYmlPatterns } from "../../src/altimate/review/dbt-patterns"
 import { CATALOG, ruleMatches, subqueryDepth, caseDepth, finalSelectStarFromRelation } from "../../src/altimate/review/rule-catalog"
 import { incrementalFilter } from "../../src/altimate/review/incremental-semantics"
 import { DEFAULT_RUBRIC } from "../../src/altimate/review/rubric"
@@ -169,5 +169,39 @@ select * from merged`
     expect(incrementalFilter(frag(">"))).not.toBe(incrementalFilter(frag(">=")))
     const elseOnly = (w: string) => `select * from t\n{% if is_incremental() %}\n  where u > 1\n{% else %}\n  ${w}\n{% endif %}`
     expect(incrementalFilter(elseOnly("where a"))).toBe(incrementalFilter(elseOnly("where b")))
+  })
+})
+
+describe("config shared through a dict splat", () => {
+  test("a flat literal dict is inlined into config(**dict)", () => {
+    const sql = `{% set meta_config = {\n  "materialized": "incremental",\n  "unique_key": ["day", "code"],\n} %}\n{{ config(meta=meta_config, **meta_config) }}\nselect 1`
+    const out = inlineConfigSplats(sql)
+    expect(out).toContain(`materialized= "incremental"`)
+    expect(out).toContain(`unique_key= ["day", "code"]`)
+    expect(out).not.toContain("**meta_config")
+  })
+  test("no literal dict: untouched", () => {
+    const sql = "{{ config(**get_config()) }}\nselect 1"
+    expect(inlineConfigSplats(sql)).toBe(sql)
+  })
+})
+
+describe("changed macros are reviewed", () => {
+  const macro = (body: string) => ({ path: "macros/m.sql", status: "modified" as const, diff: body.split("\n").map((l) => "+" + l).join("\n") })
+  const titles = (body: string, vars = new Set<string>()) =>
+    detectMacroPatterns(macro(body), body, DEFAULT_RUBRIC, vars).map((f) => f.title)
+
+  test("SQL shapes that hold in a template fire", () => {
+    expect(titles("{% macro m(t) %}\nselect top 1 x from {{ t }}\n{% endmacro %}").some((t) => /TOP/i.test(t))).toBe(true)
+    expect(titles("{% macro m(a, b) %}\nselect * from {{ a }} as a join {{ b }} as b\n  on a.id = b.id\n  or a.alt = b.alt\n{% endmacro %}").some((t) => /OR in a join/.test(t))).toBe(true)
+  })
+  test("var with no default: reported unless the project sets it or it is defaulted elsewhere", () => {
+    const body = "{% macro m() %}\n{% if var('dbt_artifacts_exclude_all_results') %}x{% endif %}\n{% endmacro %}"
+    expect(titles(body).some((t) => /dbt_artifacts_exclude_all_results/.test(t))).toBe(true)
+    expect(titles(body, new Set(["dbt_artifacts_exclude_all_results"]))).toHaveLength(0)
+    expect(titles(body + "\n{{ var('dbt_artifacts_exclude_all_results', false) }}")).toHaveLength(0)
+  })
+  test("model-only rules stay off macros", () => {
+    expect(titles("{% macro m() %}\nselect * from {{ ref('x') }}\n{% endmacro %}")).toHaveLength(0)
   })
 })
