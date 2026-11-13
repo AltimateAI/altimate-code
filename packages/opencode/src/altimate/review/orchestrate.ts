@@ -329,21 +329,6 @@ function mapCheckCategory(raw?: unknown): ReviewCategory {
   return "sql_quality"
 }
 
-/** Map an impact severity bucket to a finding severity. */
-function impactToSeverity(impact: ImpactResult): Severity | null {
-  switch (impact.severity) {
-    case "BREAKING":
-    case "HIGH":
-      return "critical"
-    case "MEDIUM":
-      return "warning"
-    case "LOW":
-      return "suggestion"
-    default:
-      return null // SAFE / UNKNOWN → no standalone finding
-  }
-}
-
 function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: ImpactResult, rubric: Rubric): Finding[] {
   const model = modelNameFromPath(file.path)
   const total = impact.directCount + impact.transitiveCount
@@ -382,33 +367,10 @@ function lineageBreakageLane(file: ChangedFile & { kind: string }, impact: Impac
     ]
   }
 
-  const sev = impactToSeverity(impact)
-  if (!sev) return []
-  // For a MODIFIED model, blast radius alone is NOT a breaking change — a wide
-  // fan-out doesn't mean the edit broke anything (it may be additive/safe). Until
-  // a real column-drop classifier exists, cap modified-model lineage impact at
-  // `warning` so merely touching a popular model never blocks. Only delete/rename
-  // (handled above) is treated as a genuine break.
-  const capped: Severity = sev === "critical" ? "warning" : sev
-  const clamped = clampSeverity("lineage_breakage", capped, degraded ? "unknown" : "high")
-  return [
-    makeFinding({
-      severity: clamped,
-      category: "lineage_breakage",
-      title: `${model}: high downstream fan-out (${total} model${total !== 1 ? "s" : ""})`,
-      body:
-        `\`${model}\` has ${impact.directCount} direct and ${impact.transitiveCount} transitive` +
-        ` downstream models (+${impact.testCount} tests). Blast radius is informational — verify the` +
-        ` change is backward-compatible (no removed/renamed columns) for these consumers.` +
-        (degraded ? "\n\n_Lint-only: no manifest, blast radius unverified._" : ""),
-      file: file.path,
-      model,
-      confidence: degraded ? "unknown" : "high",
-      degraded,
-      evidence: { tool: "impact_analysis", result: impact },
-      ruleKey: "lineage_breakage:impact",
-    }),
-  ]
+  // A modified model's blast radius is not a defect: it feeds risk tiering
+  // (tier reasons name the downstream count), and concrete breakage on a
+  // modified model comes from the column-removal lanes.
+  return []
 }
 
 async function semanticChangeLane(
@@ -690,6 +652,8 @@ function rawSelectList(sql: string): Set<string> {
 }
 
 const FINAL_LAYER = /(^|\/)(marts?|reporting|dimensional|presentation|extracts|exports)\//i
+// Intermediate/staging models nested under a final-layer folder are not read directly.
+const NOT_FINAL = /(^|\/)(intermediate|staging|base)\/|(^|\/)(int|stg|base)_[^/]*$/i
 
 const ticks = (xs: string[]) => xs.map((x) => `\`${x}\``).join(", ")
 
@@ -712,7 +676,7 @@ async function consumerContractLane(
   if (!consumers) return []
   const declared = consumers.exposures.length > 0 || consumers.contractEnforced
   // A final-layer model is read outside dbt (BI, exports) even when nothing is declared.
-  const finalLayer = FINAL_LAYER.test(ctx.file.path)
+  const finalLayer = FINAL_LAYER.test(ctx.file.path) && !NOT_FINAL.test(ctx.file.path)
   if (!declared && !(finalLayer && hasOldSide(ctx.file))) return []
   const { added, removed } = await columnDelta(ctx, runner, dialect)
   const out: Finding[] = []

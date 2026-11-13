@@ -703,10 +703,15 @@ const JOINS: Rule[] = [
     "join_risk",
     "warning",
     "OR in a join condition — explosive/slow",
-    "`JOIN … ON a=b OR c=d` often produces a near-cartesian and disables hash joins. Split into UNION.",
-    { onClause: /\bor\b/i, macros: true },
+    "An OR in the ON clause can match one row through more than one alternative (duplicates downstream), and an OR between join keys leaves no single key to hash on. Add a uniqueness test on the output grain, or split into a UNION of one join per alternative.",
+    // An open-ended interval guard (`b.valid_to is null or a.d < b.valid_to`) matches each
+    // row once by design, so an OR whose disjunct is an IS [NOT] NULL test is excluded.
+    {
+      onClause: /(?<!\bis\s+(?:not\s+)?null\s*\)?\s*)\bor\b(?!\s*\(?\s*[\w.]+\s+is\s+(?:not\s+)?null\b)/i,
+      macros: true,
+    },
     { add: "join b\n  on a.id = b.id\n  and (\n    a.d between b.s and b.e\n    or a.d2 between b.s and b.e\n  )" },
-    { add: "join b on a.id=b.id and a.k=b.k\nwhere a.x = 1 or a.y = 2" },
+    { add: "join b\n  on a.id = b.id\n  and a.d >= b.valid_from\n  and (b.valid_to is null\n    or a.d < b.valid_to)" },
   ),
   r(
     "lateral-join",

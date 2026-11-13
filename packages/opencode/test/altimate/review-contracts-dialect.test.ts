@@ -148,6 +148,10 @@ describe("consumers outside the DAG", () => {
       changedFiles: [{ ...changed[0], path: "models/intermediate/int_x.sql" }],
     })
     expect(inter.findings.some((x) => x.title.includes("final-layer"))).toBe(false)
+    const nested = await review(none, {
+      changedFiles: [{ ...changed[0], path: "models/extracts/tableau/intermediate/int_roster.sql" }],
+    })
+    expect(nested.findings.some((x) => x.title.includes("final-layer"))).toBe(false)
   })
 
   const optIn = { config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["lineage_breakage", "contract_violation"], checkContractColumns: true } }
