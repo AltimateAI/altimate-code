@@ -24,7 +24,8 @@ import { Log } from "@/altimate/util/log"
 import type { Binding, ProjectBindingLookup } from "./api-client"
 import type { SeedOutcome } from "./memory-backfill"
 // altimate_change — the IDE extension's workspace pin; see ./pin.ts
-import { readPinLogged, resolveWithinRoot, type ValidPin } from "./pin"
+import { readPin, readPinLogged, resolveWithinRoot, type ValidPin } from "./pin"
+import { isEnabled as workspaceEnabled } from "./engine-seams"
 import { resolveProjectIdentifier } from "./detect"
 
 const CACHE_VERSION = 2
@@ -460,6 +461,9 @@ export type BindingOutcome =
        * or rebound elsewhere. Absent when the server confirmed it inside the
        * revalidation window. */
       stale?: true
+      /** altimate_change — the credential the pin's verdict was reached under, set by the pin path, so a
+       * caller that keys on the tenant needn't read the credentials again after a switch. */
+      scope?: AccountKey
     }
   | {
       status: "unbound"
@@ -496,6 +500,9 @@ let pinNow: () => number = () => Date.now()
 /** Exposed for tests; production never calls either. */
 export function __resetPinValidation(clock?: () => number): void {
   pinValidation.clear()
+  // A caller after the reset starts its own request rather than joining one from before it. (A
+  // caller already awaiting that request still writes the memo when it answers.)
+  pinValidationInFlight.clear()
   pinNow = clock ?? (() => Date.now())
 }
 
@@ -649,7 +656,8 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
   // validation: the caller that speaks to the user can then say "last known" rather than "is",
   // exactly as the non-pinned path marks a cached binding it could not re-check.
   let stale = false
-  if (!(memo && pinNow() - memo.at < PIN_VALIDATION_TTL_MS)) {
+  const fresh = !!memo && pinNow() - memo.at < PIN_VALIDATION_TTL_MS
+  if (!fresh) {
     let accessible: { id: number; name: string }[] | null = null
     let transient = false
     try {
@@ -704,7 +712,9 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
   const ident = cachedProjectIdentifier(canonicalDirectory)
   // Logged on success as well as on every refusal: a silently-working pin is indistinguishable
   // from a pin that was never read, which is exactly the ambiguity that makes this hard to support.
-  log.info("resolved the workspace pinned by the IDE extension", {
+  // At info when this call checked the pin with the account, at debug when the memo answered: a turn
+  // reads the pin for its rows, its routing and its identity, so one turn would log it several times.
+  ;(fresh ? log.debug : log.info)("resolved the workspace pinned by the IDE extension", {
     datamateId: pin.datamateId,
     datamateName,
   })
@@ -719,6 +729,7 @@ async function resolvePinnedBinding(directory: string, pin: ValidPin): Promise<B
       pinned: true,
     },
     ...(stale ? { stale: true as const } : {}),
+    scope: { tenant: creds.altimateInstanceName, apiUrl: creds.altimateUrl, account },
   }
 }
 
@@ -752,10 +763,23 @@ export async function resolvePinnedBindingForRouting(
 }
 
 /** How long a turn waits for the pin's verdict before its rows go without a workspace. Past the
- * validation TTL the verdict is a round trip, and the routing read later in the same turn joins that
- * request, so giving up here costs routing nothing. Waiting out the request instead would make a
- * failed validation run twice, once here and once for routing. */
+ * validation TTL the verdict is a round trip. When routing asks for the pin too (the workspace
+ * feature on, the escape hatch off), its read later in the same turn joins that request, so giving
+ * up here costs routing nothing; waiting out the request instead would make a failed validation run
+ * twice, once here and once for routing. */
 export const TURN_PIN_WAIT_MS = 3_000
+
+/** A turn's workspace with the credential it was resolved under, so a row claimed for the workspace
+ * (`first-events.ts`) names the tenant the binding belongs to without reading the credentials again. */
+export type TurnBinding = CachedBinding & { scope?: AccountKey }
+
+/** The project's link from the local cache, with the credential the read was scoped by. */
+async function linkedTurnBinding(directory: string): Promise<TurnBinding | null> {
+  const key = await accountKey()
+  if (!key) return null
+  const binding = await readCachedBinding(directory, key)
+  return binding ? { ...binding, scope: key } : null
+}
 
 /** The workspace a turn's telemetry rows name: the pin when there is one, else the project's link
  * from the local cache.
@@ -767,7 +791,11 @@ export const TURN_PIN_WAIT_MS = 3_000
 export async function resolveTurnBinding(
   directory: string,
   waitMs = TURN_PIN_WAIT_MS,
-): Promise<CachedBinding | null> {
+): Promise<TurnBinding | null> {
+  // With the workspace kill switch on, nothing else in the session reads the pin, so the turn sends
+  // no validation request and waits for none. Its rows read the link, as they did before the pin
+  // was honoured.
+  if (!workspaceEnabled()) return linkedTurnBinding(directory)
   let timer: ReturnType<typeof setTimeout> | undefined
   const deadline = new Promise<BindingOutcome>((done) => {
     timer = setTimeout(() => done({ status: "unknown" }), waitMs)
@@ -776,14 +804,25 @@ export async function resolveTurnBinding(
   const pinned = await Promise.race([resolvePinnedBindingForRouting(directory), deadline]).finally(() =>
     clearTimeout(timer),
   )
-  if (pinned) return pinned.status === "bound" ? pinned.binding : null
+  if (pinned) {
+    if (pinned.status !== "bound") return null
+    return { ...pinned.binding, scope: pinned.scope }
+  }
+  return linkedTurnBinding(directory)
+}
+
+/** The workspace a prompt's attachment reads name when no loop follows it (`noReply`). No turn uses
+ * the verdict, so the pin is neither validated nor waited for: a pinned session's reads name nothing
+ * rather than the project's link, and an unpinned one's name the link. */
+export async function unvalidatedTurnBinding(directory: string): Promise<CachedBinding | null> {
+  if (workspaceEnabled() && readPin().kind !== "absent") return null
   return readLocalBinding(directory)
 }
 
 /** Each session's verdict for its current turn, from the first read in the turn until the loop
  * starts. Bounded: a turn that fails before its loop leaves its entry until the session's next
  * turn clears it. */
-const turnVerdicts = new Map<string, Promise<CachedBinding | null>>()
+const turnVerdicts = new Map<string, Promise<TurnBinding | null>>()
 const TURN_VERDICTS_MAX = 256
 
 /** The workspace a session's current turn names. The first read in a turn resolves it and every
@@ -794,10 +833,14 @@ export function turnBinding(
   sessionID: string,
   directory: string,
   waitMs = TURN_PIN_WAIT_MS,
-): Promise<CachedBinding | null> {
+): Promise<TurnBinding | null> {
   const known = turnVerdicts.get(sessionID)
   if (known) return known
-  const verdict = resolveTurnBinding(directory, waitMs).catch(() => null)
+  const verdict = resolveTurnBinding(directory, waitMs).catch((err) => {
+    // Logged, so "no workspace because of an error" reads differently from a refused pin.
+    log.warn("could not resolve the turn's workspace", { err: String(err) })
+    return null
+  })
   turnVerdicts.set(sessionID, verdict)
   if (turnVerdicts.size > TURN_VERDICTS_MAX) {
     const oldest = turnVerdicts.keys().next()

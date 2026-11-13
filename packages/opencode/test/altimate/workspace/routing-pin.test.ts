@@ -20,6 +20,7 @@ process.env.XDG_STATE_HOME = path.join(SANDBOX, "state")
 const {
   resolvePinnedBindingForRouting,
   resolveTurnBinding,
+  unvalidatedTurnBinding,
   turnBinding,
   endTurnBinding,
   recordApprovedBinding,
@@ -217,6 +218,63 @@ describe("resolveTurnBinding", () => {
     answer.resolve([{ id: 42, name: "pinned-workspace" }])
     expect((await routing)?.status).toBe("bound")
     expect(listCalls).toBe(1)
+  })
+
+  test("with the workspace kill switch on, the pin is neither validated nor waited for: the link names the turn", async () => {
+    await seedLocalLink(7, "project-link")
+    // A validation that never answers: a turn that asked would reach its deadline with no workspace.
+    ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = () => {
+      listCalls += 1
+      return new Promise(() => {})
+    }
+    setPin()
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    expect((await resolveTurnBinding(ROOT))?.datamateId).toBe(7)
+    expect(listCalls).toBe(0)
+  })
+
+  test("the turn's workspace carries the account it was resolved under, from the link or the pin", async () => {
+    await seedLocalLink(7, "project-link")
+    expect((await resolveTurnBinding(ROOT))?.scope).toMatchObject({ tenant: "acme", apiUrl: "https://api.test" })
+    setPin()
+    expect((await resolveTurnBinding(ROOT))?.scope).toMatchObject({ tenant: "acme", apiUrl: "https://api.test" })
+  })
+
+  test("a credential switch while the pin is validated leaves the turn on the account that validated it", async () => {
+    setPin()
+    ;(WorkspaceApi as unknown as { listDatamates: () => Promise<unknown> }).listDatamates = async () => {
+      listCalls += 1
+      ;(AltimateApi as unknown as { getCredentials: () => Promise<Creds> }).getCredentials = async () =>
+        ({ altimateInstanceName: "other", altimateUrl: "https://api.test", altimateApiKey: "k2" }) as Creds
+      return [{ id: 42, name: "pinned-workspace" }]
+    }
+    const turn = await resolveTurnBinding(ROOT)
+    expect(turn?.datamateId).toBe(42)
+    expect(turn?.scope).toMatchObject({ tenant: "acme" })
+    expect(listCalls).toBe(1)
+  })
+})
+
+// The attachment reads of a `noReply` prompt, which runs no turn.
+describe("unvalidatedTurnBinding", () => {
+  test("in a pinned session the reads name nothing, with no validation request", async () => {
+    await seedLocalLink(7, "project-link")
+    setPin()
+    expect(await unvalidatedTurnBinding(ROOT)).toBeNull()
+    expect(listCalls).toBe(0)
+  })
+
+  test("in an unpinned session the reads name the project's link", async () => {
+    await seedLocalLink(7, "project-link")
+    expect((await unvalidatedTurnBinding(ROOT))?.datamateId).toBe(7)
+    expect(listCalls).toBe(0)
+  })
+
+  test("with the kill switch on, a pinned session's reads name the project's link", async () => {
+    await seedLocalLink(7, "project-link")
+    setPin()
+    process.env.ALTIMATE_DISABLE_WORKSPACE = "1"
+    expect((await unvalidatedTurnBinding(ROOT))?.datamateId).toBe(7)
   })
 })
 

@@ -26,7 +26,10 @@ import { RunBudget } from "@/altimate/run-budget"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect } from "effect"
 // altimate_change start — upstream_fix: recover committed child findings when cancellation interrupts a task.
-import { interruptedTaskOutput } from "../session/task-output"
+import { interruptedTaskOutput, lastTaskText } from "../session/task-output"
+// altimate_change end
+// altimate_change start — redact provider error messages before they reach the parent's task result
+import { redactSecrets } from "@/altimate/learn/digest"
 // altimate_change end
 const log = Log.create({ service: "tool.task" })
 
@@ -253,12 +256,22 @@ export const TaskTool = Tool.define("task", async (ctx) => {
       if (ctx.abort.aborted) partialOutput ??= await interruptedTaskOutput(session.id, messageID)
 
       const text = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
+      // altimate_change start — a child that ends on an error or with no text must not reach the
+      // parent as an empty result, which reads as "done, nothing found". An error is reported even
+      // when the child wrote text before it, since that text may be incomplete.
+      const childError = result?.info.role === "assistant" ? result.info.error : undefined
+      const status =
+        ctx.abort.aborted || (text.trim() && !childError)
+          ? []
+          : await emptyTaskStatus(session.id, messageID, childError, text)
+      // altimate_change end
 
       const output = partialOutput ?? [
         `task_id: ${session.id} (for resuming to continue this task if needed)`,
         "",
         "<task_result>",
         ...(ctx.abort.aborted ? ["Task interrupted. Findings may be incomplete."] : []),
+        ...status,
         text,
         "</task_result>",
       ].join("\n")
@@ -278,3 +291,36 @@ export const TaskTool = Tool.define("task", async (ctx) => {
     },
   }
 })
+
+// altimate_change start — explicit status for a child that errored or produced no final text
+async function emptyTaskStatus(
+  sessionID: SessionID,
+  messageID: MessageID,
+  error: MessageV2.Assistant["error"],
+  text: string,
+): Promise<string[]> {
+  const reason = error
+    ? `Task stopped with an error before giving a final answer (${errorText(error)}).`
+    : "Task ended without a final text answer."
+  // The final text, when there is one, follows the status in the result.
+  if (text.trim()) return [reason, "Its last written text, which may be incomplete:"]
+  const partial = await lastTaskText(sessionID, messageID).catch(() => undefined)
+  return partial
+    ? [reason, "Its last written text, which may be incomplete:", partial]
+    : [reason, "It wrote no text. Resume it with task_id or treat its work as unfinished."]
+}
+
+// The task result is persisted and sent to the parent's model, so a provider error message is
+// passed through the same credential redaction as exported trajectories, and kept short.
+const ERROR_MESSAGE_LIMIT = 300
+function errorText(error: NonNullable<MessageV2.Assistant["error"]>): string {
+  const raw =
+    "data" in error && error.data && typeof error.data === "object" && "message" in error.data
+      ? String(error.data.message)
+      : ""
+  const message = redactSecrets(raw).trim()
+  if (!message) return error.name
+  const short = message.length > ERROR_MESSAGE_LIMIT ? `${message.slice(0, ERROR_MESSAGE_LIMIT)}…` : message
+  return `${error.name}: ${short}`
+}
+// altimate_change end
