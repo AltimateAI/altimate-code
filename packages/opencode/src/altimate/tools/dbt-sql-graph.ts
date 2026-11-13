@@ -67,34 +67,46 @@ export type SqlGraphDeps = {
   readFile: (file: string) => string
   /** The dbt project's root, to resolve a model's project-relative path. */
   projectRoot: string | undefined
+  /** Names the caller's session in the backend's session id, with the SQL's hash. */
+  sessionId: string
 }
 
-/** A column name as the warehouse and the manifest agree on it: lower case unless quoted. */
-function columnKey(name: string): string {
-  return /^(["`]).*\1$/.test(name) ? name : name.toLowerCase()
+/** Adapters whose unquoted identifiers fold to lower case; the rest fold to upper case. */
+const LOWER_FOLDING = new Set(["trino", "athena", "postgres", "duckdb", "risingwave"])
+
+/** A name the warehouse would only keep as written if it were quoted: it is not in the adapter's own folding case. */
+function isQuotedIdentifier(name: string, adapter: string): boolean {
+  return LOWER_FOLDING.has(adapter) ? !/^([_a-z]+[_a-z0-9$]*)$/.test(name) : !/^([_A-Z]+[_A-Z0-9$]*)$/.test(name)
+}
+
+/** A column name as dbt Power User keys it: lower case unless the adapter would only keep it as written when quoted. */
+function columnKey(name: string, adapter: string): string {
+  return isQuotedIdentifier(name, adapter) ? name : name.toLowerCase()
 }
 
 /** The parent's manifest columns plus any the warehouse reports that the manifest lacks. */
 export function mergeColumns(
   manifestColumns: SqlLineageModelNode["columns"],
   fromDb: { column: string; dtype: string }[] | undefined,
+  adapter: string,
 ): SqlLineageModelNode["columns"] {
-  const merged: SqlLineageModelNode["columns"] = {}
-  for (const [k, v] of Object.entries(manifestColumns ?? {})) merged[columnKey(k)] = { ...v }
+  // A Map: a column named `constructor` or `__proto__` is a column, not an inherited property.
+  const merged = new Map<string, SqlLineageModelNode["columns"][string]>()
+  for (const [k, v] of Object.entries(manifestColumns ?? {})) merged.set(columnKey(k, adapter), { ...v })
   for (const c of fromDb ?? []) {
-    const key = columnKey(c.column)
-    const existing = merged[key]
+    const key = columnKey(c.column, adapter)
+    const existing = merged.get(key)
     if (existing) {
       existing.data_type = (existing.data_type || c.dtype)?.toLowerCase()
       continue
     }
-    merged[key] = { name: key, data_type: c.dtype?.toLowerCase(), description: "", meta: {} }
+    merged.set(key, { name: key, data_type: c.dtype?.toLowerCase(), description: "", meta: {} })
   }
-  return merged
+  return Object.fromEntries(merged)
 }
 
 /**
- * The backend names the model's own select `__final_select__`: name it after the model, tie each
+ * The backend names the model's own select `__final_select__`: name it after the model (or `<model> (final select)` when the SQL has a node of that name), tie each
  * relation node to the dbt node it stands for, and drop the layout positions the list doesn't use.
  */
 export function remapSqlLineage(
@@ -111,18 +123,20 @@ export function remapSqlLineage(
     const key = Object.keys(details).find((k) => details[k].type === "table" && k.toLowerCase() === wanted)
     if (key) mapping[key] = { nodeId: p.uniqueId, type: p.resourceType }
   }
-  mapping[model.name] = { nodeId: model.uniqueId, type: model.resourceType }
+  // A CTE or relation the SQL names like the model (`with customers as (…)`, `{{ this }}`) keeps its node: the model's own select is told apart.
+  const finalKey = Object.hasOwn(details, model.name) ? `${model.name} (final select)` : model.name
+  mapping[finalKey] = { nodeId: model.uniqueId, type: model.resourceType }
   const edges = response.tableEdges.map(
-    (edge) => edge.map((item) => (item === FINAL_SELECT ? model.name : item)) as [string, string],
+    (edge) => edge.map((item) => (item === FINAL_SELECT ? finalKey : item)) as [string, string],
   )
   if (details[FINAL_SELECT]) {
-    details[model.name] = details[FINAL_SELECT]
+    details[finalKey] = details[FINAL_SELECT]
     delete details[FINAL_SELECT]
   }
   const nodes: SqlGraphNode[] = Object.entries(details).map(([key, d]) => {
     const merged = { ...d, ...mapping[key] }
     return {
-      name: key === model.name ? model.name : (merged.name ?? key),
+      name: key === finalKey ? finalKey : (merged.name ?? key),
       type: merged.type,
       ...(merged.nodeId ? { nodeId: merged.nodeId } : {}),
       sql: merged.sql ?? "",
@@ -140,12 +154,16 @@ export async function buildSqlGraph(
   signal: AbortSignal,
 ): Promise<SqlGraph> {
   const manifest = await adapter.parseManifest()
+  signal.throwIfAborted()
   if (!manifest) throw new Error("the dbt manifest is not available")
   const node = manifest.nodeMetaMap.lookupByUniqueId(model) ?? manifest.nodeMetaMap.lookupByBaseName(model)
   if (!node) throw new Error(`no model named ${model} in the manifest`)
-  if (!node.path) throw new Error(`${node.name} has no SQL file`)
+  // A seed, snapshot or analysis shares the node map: only a model's .sql file is compiled and sent.
+  if (node.resource_type !== "model" || !node.path?.toLowerCase().endsWith(".sql"))
+    throw new Error(`${node.name} is not a dbt model with a SQL file`)
   const file = path.isAbsolute(node.path) ? node.path : path.join(deps.projectRoot ?? "", node.path)
   const compiled = await adapter.unsafeCompileQuery(deps.readFile(file), node.name)
+  signal.throwIfAborted()
   if (!compiled) throw new Error(`unable to compile ${node.name}`)
 
   const parentIds = adapter.getNonEphemeralParents([node.unique_id])
@@ -189,11 +207,14 @@ export async function buildSqlGraph(
   const fromDb = requests.length ? await adapter.getBulkSchemaFromDB(requests, signal) : {}
   signal.throwIfAborted()
   const hash = crypto.createHash("md5").update(compiled).digest("hex")
+  const dialect = adapter.getAdapterType()
   const response = await deps.fetchLineage({
     compiled_sql: compiled,
-    model_info: infos.map((n) => ({ model_node: { ...n, columns: mergeColumns(n.columns, fromDb[n.uniqueId]) } })),
-    model_dialect: adapter.getAdapterType(),
-    session_id: `altimate-code-${hash}`,
+    model_info: infos.map((n) => ({
+      model_node: { ...n, columns: mergeColumns(n.columns, fromDb[n.uniqueId], dialect) },
+    })),
+    model_dialect: dialect,
+    session_id: `${deps.sessionId}-${hash}`,
   })
   signal.throwIfAborted()
   return remapSqlLineage(
@@ -203,7 +224,7 @@ export async function buildSqlGraph(
   )
 }
 
-/** The graph as a list in dependency order: each node, its inputs, its column count. */
+/** The graph as a list, one line per node: its type, its column count and its inputs. */
 export function formatSqlGraph(model: string, graph: SqlGraph): string {
   const inputs = new Map<string, string[]>()
   for (const [from, to] of graph.edges) inputs.set(to, [...(inputs.get(to) ?? []), from])
@@ -241,6 +262,7 @@ export const DbtSqlGraphTool = Tool.define("dbt_sql_graph", {
           fetchLineage: sqlLineage,
           readFile: (f) => fs.readFileSync(f, "utf8"),
           projectRoot: await getDbtProjectRoot(),
+          sessionId: ctx.sessionID,
         },
         ctx.abort,
       )
