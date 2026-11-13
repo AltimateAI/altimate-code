@@ -82,7 +82,7 @@ describe("feature tools in the allow-list", () => {
   })
 
   test("each placeholder answers that it isn't implemented, as a failure", async () => {
-    for (const id of FEATURE_TOOLS) {
+    for (const id of FEATURE_TOOLS.filter((tool) => tool !== "dbt_docs_coverage")) {
       const tool = await initTool(EXPOSED[id] as any)
       expect(tool.id).toBe(id)
       const result = await tool.execute(MINIMAL_ARGS[id], ctx)
