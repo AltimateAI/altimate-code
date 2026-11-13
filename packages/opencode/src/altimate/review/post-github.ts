@@ -64,6 +64,12 @@ export interface PostResult {
 }
 
 /** Headline of a review this bot posted (see verdictHeadline). */
+/** True when no engine call and no file failed, so missing findings mean "fixed", not "not checked". */
+export function runCompleted(env: VerdictEnvelope): boolean {
+  if (env.engineErrors?.length) return false
+  return !(env.scope?.unverified ?? []).some((u) => u.reason.startsWith("review failed for this file"))
+}
+
 const BOT_REVIEW_RE = /(Approved|Reviewed with comments|Changes requested)\b.*\((trivial|lite|full) tier/
 
 /** The Octokit surface the poster uses; injectable so the posting rules
@@ -131,7 +137,9 @@ export async function postGitHubReview(
   // Gate lifecycle: when this run no longer blocks, an earlier blocking
   // altimate review would keep the PR blocked forever. Dismiss it, pointing at
   // the new verdict. (Requires `pull-requests: write`; a failure is non-fatal.)
-  if (event === "COMMENT" && staleBlocking.length) {
+  // Only a run that actually completed may clear a block: when an engine call
+  // or a file failed, the blocking finding may simply not have been produced.
+  if (event === "COMMENT" && staleBlocking.length && runCompleted(env)) {
     let dismissed = 0
     for (const id of staleBlocking) {
       try {

@@ -191,6 +191,33 @@ async function mergeBase(a: string, b: string, cwd: string): Promise<string | un
   }
 }
 
+/**
+ * A default CI checkout is shallow (`actions/checkout` fetches one commit) and
+ * lacks the target branch. Fetch the branch, then deepen the history until a
+ * merge-base exists, so the review works without `fetch-depth: 0`. Returns
+ * true once `found` resolves; false when it never does (no remote, no access).
+ */
+async function fetchTargetHistory(branch: string, cwd: string, found: () => Promise<unknown>): Promise<boolean> {
+  if (branch.startsWith("-")) return false
+  try {
+    await git(["fetch", "--no-tags", "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`], cwd)
+  } catch {
+    return false
+  }
+  if (await found()) return true
+  for (const depth of [50, 200, 1000]) {
+    try {
+      if ((await git(["rev-parse", "--is-shallow-repository"], cwd)).trim() !== "true") return false
+      const headSha = (await git(["rev-parse", "HEAD"], cwd)).trim()
+      await git(["fetch", "--no-tags", `--deepen=${depth}`, "origin", `+refs/heads/${branch}:refs/remotes/origin/${branch}`, headSha], cwd)
+    } catch {
+      return false
+    }
+    if (await found()) return true
+  }
+  return false
+}
+
 /** The PR's target branch from the CI provider, when the run is for a PR/MR. */
 async function ciTargetBranch(env: NodeJS.ProcessEnv): Promise<{ branch: string; source: BaseSource } | undefined> {
   if (env.GITHUB_EVENT_PATH) {
@@ -230,10 +257,15 @@ export async function resolveReviewBase(opts: ResolveBaseOptions): Promise<Resol
 
   const target = await ciTargetBranch(env)
   if (target) {
-    for (const ref of [`origin/${target.branch}`, target.branch]) {
-      const sha = await mergeBase(ref, head, opts.cwd)
-      if (sha) return { ref, sha, source: target.source }
+    const find = async () => {
+      for (const ref of [`origin/${target.branch}`, target.branch]) {
+        const sha = await mergeBase(ref, head, opts.cwd)
+        if (sha) return { ref, sha, source: target.source }
+      }
+      return undefined
     }
+    const found = (await find()) ?? ((await fetchTargetHistory(target.branch, opts.cwd, find)) ? await find() : undefined)
+    if (found) return found
     throw new Error(
       `PR target branch '${target.branch}' (${target.source}) is not available locally. ` +
         `Fetch it (actions/checkout with fetch-depth: 0, or git fetch origin ${target.branch}) or pass --base.`,

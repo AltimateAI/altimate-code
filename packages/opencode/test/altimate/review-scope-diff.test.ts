@@ -337,3 +337,36 @@ describe("reviewPullRequest end to end: monorepo, PR into a non-default branch",
     expect(env.findings.some((f) => f.file.includes("drift"))).toBe(false)
   }, 60_000)
 })
+
+describe("a shallow CI checkout without the target branch", () => {
+  test("the target branch and enough history are fetched to find the merge-base", async () => {
+    const exec = (await import("node:util")).promisify((await import("node:child_process")).execFile)
+    const fsp = (await import("node:fs")).promises
+    const os = await import("node:os")
+    const pth = await import("node:path")
+    const g = (cwd: string, ...a: string[]) => exec("git", a, { cwd }).then((r) => r.stdout.trim())
+    const origin = await fsp.realpath(await fsp.mkdtemp(pth.join(os.tmpdir(), "shallow-origin-")))
+    await g(origin, "init", "-q", "-b", "main")
+    await g(origin, "config", "user.email", "t@t")
+    await g(origin, "config", "user.name", "t")
+    await g(origin, "config", "commit.gpgsign", "false")
+    await g(origin, "config", "uploadpack.allowReachableSHA1InWant", "true")
+    for (let i = 0; i < 5; i++) {
+      await fsp.writeFile(pth.join(origin, `f${i}.sql`), `select ${i}\n`)
+      await g(origin, "add", "-A")
+      await g(origin, "commit", "-qm", `main ${i}`)
+    }
+    const branchPoint = await g(origin, "rev-parse", "HEAD")
+    await g(origin, "checkout", "-q", "-b", "feature")
+    for (let i = 0; i < 3; i++) {
+      await fsp.writeFile(pth.join(origin, `pr${i}.sql`), `select ${i}\n`)
+      await g(origin, "add", "-A")
+      await g(origin, "commit", "-qm", `pr ${i}`)
+    }
+    const clone = await fsp.realpath(await fsp.mkdtemp(pth.join(os.tmpdir(), "shallow-clone-")))
+    await exec("git", ["clone", "-q", "--depth", "1", "--branch", "feature", `file://${origin}`, clone])
+    const resolved = await resolveReviewBase({ cwd: clone, env: { GITHUB_BASE_REF: "main" } })
+    expect(resolved.source).toBe("github_env")
+    expect(resolved.sha).toBe(branchPoint)
+  }, 60_000)
+})
