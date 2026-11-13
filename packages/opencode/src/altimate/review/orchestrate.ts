@@ -150,6 +150,8 @@ export interface ReviewRunner {
   >
   /** A model's or snapshot's merged dbt `config` from the manifest (project + yml + inline). */
   modelConfig?(name: string): Promise<Record<string, unknown> | undefined>
+  /** Column sets the model's `unique` / `unique_combination_of_columns` tests declare unique. */
+  declaredUniqueKeys?(model: string): Promise<string[][]>
   /** Column-lineage edges for a query: source `"table"."col"` → target output column. */
   columnLineage?(sql: string, dialect: string): Promise<Array<{ source: string; target: string }>>
   /** Classify a set of column names as PII (Email/SSN/…) with confidence + masking. */
@@ -1179,6 +1181,42 @@ async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner, projectVar
 }
 
 /**
+ * An incremental merge key that differs from every uniqueness test on the model:
+ * one of the two is wrong. A test key missing a `unique_key` column fails once a
+ * row per extra value lands; a `unique_key` missing a test column merges rows the
+ * test treats as distinct.
+ */
+async function uniqueKeyMismatchLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
+  if (!runner.modelConfig || !runner.declaredUniqueKeys || ctx.file.status === "deleted") return []
+  const model = modelNameFromPath(ctx.file.path)
+  const cfg = await runner.modelConfig(model)
+  if (cfg?.materialized !== "incremental" || !cfg.unique_key) return []
+  const uk = (Array.isArray(cfg.unique_key) ? cfg.unique_key : String(cfg.unique_key).split(","))
+    .map((c) => String(c).trim().toLowerCase())
+    .filter(Boolean)
+  const declared = await runner.declaredUniqueKeys(model)
+  if (!uk.length || !declared.length) return []
+  const same = (k: string[]) => k.length === uk.length && k.every((c) => uk.includes(c.toLowerCase()))
+  if (declared.some(same)) return []
+  const tests = declared.map((k) => `[${k.join(", ")}]`).join(", ")
+  return [
+    makeFinding({
+      severity: "warning",
+      category: "materialization",
+      title: `${model}: incremental unique_key differs from the declared uniqueness test`,
+      body:
+        `\`${model}\` merges on \`unique_key\` [${uk.join(", ")}], but its uniqueness test${declared.length > 1 ? "s declare" : " declares"} ${tests}. ` +
+        `If the merge key is right the test fails as soon as two rows share the test key; if the test is right the merge collapses or duplicates rows. Make them the same column set.`,
+      file: ctx.file.path,
+      model,
+      confidence: "high",
+      evidence: { tool: "dbt.manifest", result: { unique_key: uk, declared } },
+      ruleKey: "materialization:unique-key-test-mismatch",
+    }),
+  ]
+}
+
+/**
  * STRUCTURAL base-vs-head diff — the `*_change` SQL rules (DISTINCT/UNION flip,
  * GROUP BY grain shift, surrogate-key change, COALESCE removed, predicate
  * removed, type narrowing). These moved off diff-LINE regex onto a core AST
@@ -1661,6 +1699,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     // enables those concerns without dbt_patterns.
     if (lanes.has("dbt_patterns") || lanes.has("materialization") || lanes.has("contract_violation")) {
       tasks.push(dbtConfigLane(ctx, input.runner, projectVars))
+      tasks.push(uniqueKeyMismatchLane(ctx, input.runner))
     }
     // Base-vs-head structural diff is a `semantic_change` concern (DISTINCT/UNION/grain/
     // surrogate-key/predicate changes) — gate on semantic_change, keeping dbt_patterns

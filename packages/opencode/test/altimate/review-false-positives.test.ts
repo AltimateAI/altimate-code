@@ -205,3 +205,46 @@ describe("changed macros are reviewed", () => {
     expect(titles("{% macro m() %}\nselect * from {{ ref('x') }}\n{% endmacro %}")).toHaveLength(0)
   })
 })
+
+describe("incremental unique_key vs the declared uniqueness test", () => {
+  const review = async (uniqueKey: unknown, declared: string[][]) => {
+    const runner = {
+      async impact() {
+        return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+      },
+      async grade() {
+        return { grade: "B" }
+      },
+      async check() {
+        return { issues: [], ran: true }
+      },
+      async detectPii() {
+        return { columns: [] }
+      },
+      async modelConfig() {
+        return { materialized: "incremental", unique_key: uniqueKey }
+      },
+      async declaredUniqueKeys() {
+        return declared
+      },
+    } as unknown as ReviewRunner
+    const env = await runReview({
+      changedFiles: [{ path: "models/int_latest.sql", status: "added", diff: "+select 1" }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner,
+      getContent: async () => "select 1",
+    })
+    return env.findings.filter((f) => /unique_key differs/.test(f.title))
+  }
+  test("a merge key with a column the test lacks is reported", async () => {
+    const [f] = await review(["charge_point_id", "connector_id", "port_id"], [["charge_point_id", "connector_id"]])
+    expect(f.body).toContain("[charge_point_id, connector_id, port_id]")
+  })
+  test("same set (any order or case), or no test: silent", async () => {
+    expect(await review(["B", "a"], [["a", "b"]])).toHaveLength(0)
+    expect(await review("id", [["ID"]])).toHaveLength(0)
+    expect(await review(["a", "b"], [])).toHaveLength(0)
+  })
+})
