@@ -1106,9 +1106,9 @@ async function syncReal(
     steps.push({ label: l, ok: true })
     onStep?.(l, true)
   }
-  const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>, sharedConnection = false): SyncOutcome => {
+  const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>, sharedConnection = false, rewritten = sharedConnection): SyncOutcome => {
     // A shared connection that was rewritten stays reported as shared even when the attach after it fails.
-    if ("error" in w) return { id, result: "failed", reason: ATTACH_FAILED_PREFIX + w.error + (sharedConnection ? ` ${SHARED_REWRITE_NOTE}` : ""), steps, ...(sharedConnection ? { shared: true as const } : {}) }
+    if ("error" in w) return { id, result: "failed", reason: ATTACH_FAILED_PREFIX + w.error + (rewritten ? ` ${SHARED_REWRITE_NOTE}` : ""), steps, ...(sharedConnection ? { shared: true as const } : {}) }
     if ("attached" in w) step(`${w.kept ? `Kept the workspace's existing connection in ${workspaceLabel(w.attached, w.workspaceId)}` : `Attached to ${workspaceLabel(w.attached, w.workspaceId)}`}${w.shared ? SHARED_AUDIENCE : ""}`)
     else {
       steps.push({ label: NOT_LINKED_LABEL, ok: false })
@@ -1136,7 +1136,7 @@ async function syncReal(
         if (!found) return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
         if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
         step("Connection already in the workspace")
-        return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id), share), found.privacy !== "private")
+        return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id), share), found.privacy !== "private", false)
       })
     } catch (e) {
       return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
