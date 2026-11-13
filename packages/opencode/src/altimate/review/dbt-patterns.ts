@@ -249,6 +249,40 @@ const detectDedupTie: Detector = (c) => {
   })
 }
 
+// 9b. Dedup ordered ONLY by a load/ingestion timestamp. Rows loaded in one batch
+// share that value, so which version survives is arbitrary (SCD2 versions ranked
+// by `ingestion_timestamp` alone). A single business column (`updated_at`) is the
+// developer's choice and stays silent; load timestamps are a known trap.
+const LOAD_TS_RE =
+  /^(_?(ingest(ion|ed)?|load(ed)?|etl|extract(ed)?|batch|sync(ed)?)(_at|_ts|_time|_timestamp|_date|_dt)|_?(ingestion|load|etl|batch)_timestamp|_fivetran_synced|_airbyte_extracted_at|_airbyte_emitted_at|_sdc_batched_at|_sdc_extracted_at|_dlt_load_id|_loaded_at)$/i
+const detectDedupLoadTimestamp: Detector = (c) => {
+  for (const line of c.added) {
+    const s = stripComments(line)
+    const m = /row_number\s*\(\s*\)\s*over\s*\(([^)]*)\)/i.exec(s)
+    if (!m) continue
+    const order = /order\s+by\s+(.+)$/i.exec(m[1])?.[1]
+    if (!order) continue
+    const keys = order.split(",").map((k) => k.trim().replace(/\s+(asc|desc)\b.*$/i, "").replace(/\s+nulls\s+(first|last)$/i, ""))
+    if (keys.length !== 1) continue
+    const col = keys[0].split(".").pop()!.replace(/["`]/g, "")
+    if (!LOAD_TS_RE.test(col)) continue
+    return makeFinding({
+      severity: "warning",
+      category: "dedup",
+      title: `${c.model}: dedup ordered only by load timestamp \`${col}\``,
+      body:
+        `\`row_number()\` is ordered only by \`${col}\`. Rows loaded in the same batch share it, so which version survives is ` +
+        "arbitrary and can change between runs. Order by the source's own change time first and add a unique tie-breaker.",
+      file: c.file.path,
+      model: c.model,
+      confidence: "high",
+      evidence: { tool: "dbt-patterns", result: { rule: "dedup_load_timestamp_only", line: line.trim() } },
+      ruleKey: "dedup:load-timestamp-only",
+    })
+  }
+  return null
+}
+
 // 11. Function/cast wrapped around a column in an added WHERE — defeats partition pruning.
 const detectPartitionFunction: Detector = (c) => {
   const hit = c.added.find((l) => {
@@ -735,6 +769,7 @@ const MODEL_DETECTORS: Detector[] = [
   detectFanout,
   detectNotIn,
   detectDedupTie,
+  detectDedupLoadTimestamp,
   detectPartitionFunction,
   detectCountDistinct,
   detectPiiIntoMart,

@@ -442,6 +442,19 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       }
     },
 
+    async modelConfig(name: string) {
+      try {
+        const raw = loadRawManifest(opts.manifestPath)
+        const hit = Object.entries<any>(raw?.nodes ?? {}).find(
+          ([id, n]) => (id.startsWith("model.") || id.startsWith("snapshot.")) && n?.name === name,
+        )
+        return hit?.[1]?.config as Record<string, unknown> | undefined
+      } catch (err) {
+        fail("modelConfig", err)
+        return undefined
+      }
+    },
+
     async isComplex(sql: string): Promise<boolean> {
       try {
         const res = await Dispatcher.call("altimate_core.metadata", { sql })
