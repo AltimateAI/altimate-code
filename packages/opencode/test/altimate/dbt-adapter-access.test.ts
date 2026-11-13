@@ -22,7 +22,6 @@ const MINIMAL_ARGS: Record<string, Record<string, unknown>> = {
   dbt_run_results: {},
   dbt_defer_state: { project_dir: "." },
   dbt_map_relations: { sql: "select 1" },
-  docs_share_comments: { action: "list" },
   dbt_cost_estimate: {},
   dbt_health: {},
   dbt_sql_graph: { model: "customers" },
