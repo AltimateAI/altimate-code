@@ -359,7 +359,9 @@ export namespace AltimateApi {
     } catch (e) {
       const p = credentialsPath()
       if (!(await Filesystem.exists(p)))
-        throw new Error(`No Altimate credentials are stored: sign in to Altimate in altimate-code first (they are saved to ${p}).`)
+        throw new Error(
+          `No Altimate credentials are stored: sign in to Altimate in altimate-code first (they are saved to ${p}).`,
+        )
       throw new Error(`The Altimate credentials in ${p} can't be used: ${e instanceof Error ? e.message : String(e)}`)
     }
     return request(creds, method, endpoint, body)
