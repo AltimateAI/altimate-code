@@ -5,7 +5,7 @@ import type { ChangedFile } from "./diff-filter"
 /**
  * dbt unit tests whose fixtures cannot exercise the model. When every `given`
  * input has `rows: []`:
- *  - `expect` with no rows: the test passes whatever the model does;
+ *  - `expect` with no rows: the model's logic over its inputs is never tested;
  *  - `expect` with rows: the model has nothing to transform, so the test can
  *    only pass if the model emits constant rows.
  * One empty input is normal (an empty `this` for an `is_incremental` test), so
@@ -58,17 +58,17 @@ export function detectUnitTestFixtures(file: ChangedFile, oldContent?: string, n
         severity: passesAnyway ? "suggestion" : "warning",
         category: "test_coverage",
         title: passesAnyway
-          ? `${model || name}: unit test \`${name}\` cannot fail`
+          ? `${model || name}: unit test \`${name}\` doesn't exercise the model`
           : `${model || name}: unit test \`${name}\` expects rows from empty inputs`,
         body: passesAnyway
-          ? "Every `given` input has `rows: []` and `expect` has no rows, so the test passes whatever the model does. " +
+          ? "Every `given` input has `rows: []` and `expect` has no rows, so the model's logic over its inputs is never tested. " +
             "Add input rows that exercise the logic under test."
           : `Every \`given\` input has \`rows: []\` but \`expect\` has ${expectRows.length} row(s): the model has nothing to transform. ` +
             "Add input rows that exercise the changed logic.",
         file: file.path,
         model: model || undefined,
         confidence: "high",
-        evidence: { tool: "unit-test-fixtures", result: { rule: passesAnyway ? "unit_test_cannot_fail" : "unit_test_empty_inputs", test: name } },
+        evidence: { tool: "unit-test-fixtures", result: { rule: passesAnyway ? "unit_test_no_input_rows" : "unit_test_empty_inputs", test: name } },
         ruleKey: `test_coverage:unit-test-empty-inputs:${name}`,
       }),
     )
