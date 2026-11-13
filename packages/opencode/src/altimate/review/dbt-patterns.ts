@@ -225,15 +225,42 @@ const detectNotIn: Detector = (c) => {
   })
 }
 
+/**
+ * `row_number() over (…)` windows in the model, read from the whole file so a
+ * window split across lines is seen whole. A window counts as part of the
+ * change when one of the PR's added lines falls inside it.
+ */
+function dedupWindows(c: Ctx): Array<{ spec: string; text: string }> {
+  const sql = stripComments(c.newSql)
+  const added = c.added.map((l) => stripComments(l).trim()).filter((l) => l.length >= 3)
+  const out: Array<{ spec: string; text: string }> = []
+  for (const m of sql.matchAll(/row_number\s*\(\s*\)\s*over\s*\(/gi)) {
+    const open = m.index! + m[0].length - 1
+    let depth = 0
+    let close = -1
+    for (let i = open; i < sql.length; i++) {
+      if (sql[i] === "(") depth++
+      else if (sql[i] === ")" && --depth === 0) {
+        close = i
+        break
+      }
+    }
+    if (close < 0) continue
+    const text = sql.slice(m.index!, close + 1)
+    if (!added.some((l) => text.includes(l) || l.includes(text.replace(/\s+/g, " ")))) continue
+    out.push({ spec: sql.slice(open + 1, close).replace(/\s+/g, " ").trim(), text: text.replace(/\s+/g, " ") })
+  }
+  return out
+}
+
 // 9. Dedup via ROW_NUMBER()/QUALIFY whose ORDER BY has no unique tiebreaker.
 const detectDedupTie: Detector = (c) => {
-  const hit = c.added.find((l) => /row_number\s*\(\s*\)\s*over\s*\(/i.test(stripComments(l)))
-  if (!hit) return null
   // Only flag dedup with NO ORDER BY — that is unambiguously non-deterministic.
   // A present ORDER BY (even single-column) is the developer's deterministic
   // choice and the dbt-recommended pattern; warning "it might not be unique"
   // on every dedup is noise (false positives on the common, correct case).
-  if (/order\s+by/i.test(stripComments(hit))) return null
+  const hit = dedupWindows(c).find((w) => !/order\s+by/i.test(w.spec))
+  if (!hit) return null
   return makeFinding({
     severity: "warning",
     category: "dedup",
@@ -244,7 +271,7 @@ const detectDedupTie: Detector = (c) => {
     file: c.file.path,
     model: c.model,
     confidence: "high",
-    evidence: { tool: "dbt-patterns", result: { rule: "dedup_no_tiebreaker", line: hit.trim() } },
+    evidence: { tool: "dbt-patterns", result: { rule: "dedup_no_tiebreaker", line: hit.text } },
     ruleKey: "dedup:no-tiebreaker",
   })
 }
@@ -257,11 +284,8 @@ const detectDedupTie: Detector = (c) => {
 const LOAD_TS_RE =
   /^(_?(ingest(ion|ed)?|load(ed)?|etl|extract(ed)?|batch)(_at|_ts|_time|_timestamp|_date|_dt)|_?(ingestion|load|etl|batch)_timestamp|_loaded_at)$/i
 const detectDedupLoadTimestamp: Detector = (c) => {
-  for (const line of c.added) {
-    const s = stripComments(line)
-    const m = /row_number\s*\(\s*\)\s*over\s*\(([^)]*)\)/i.exec(s)
-    if (!m) continue
-    const order = /order\s+by\s+(.+)$/i.exec(m[1])?.[1]
+  for (const w of dedupWindows(c)) {
+    const order = /order\s+by\s+(.+)$/i.exec(w.spec)?.[1]
     if (!order) continue
     const keys = order.split(",").map((k) => k.trim().replace(/\s+(asc|desc)\b.*$/i, "").replace(/\s+nulls\s+(first|last)$/i, ""))
     if (keys.length !== 1) continue
@@ -277,7 +301,7 @@ const detectDedupLoadTimestamp: Detector = (c) => {
       file: c.file.path,
       model: c.model,
       confidence: "high",
-      evidence: { tool: "dbt-patterns", result: { rule: "dedup_load_timestamp_only", line: line.trim() } },
+      evidence: { tool: "dbt-patterns", result: { rule: "dedup_load_timestamp_only", line: w.text } },
       ruleKey: "dedup:load-timestamp-only",
     })
   }
