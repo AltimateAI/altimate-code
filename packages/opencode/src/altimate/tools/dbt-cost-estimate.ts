@@ -1,44 +1,39 @@
-import fs from "fs"
-import path from "path"
 import z from "zod"
 import { Tool } from "../../tool/tool"
 import { dbtAdapterFor } from "./dbt-adapter-access"
-import { findModel, loadRawManifest } from "../native/dbt/helpers"
 
 /** The units dbt-bigquery's `format_bytes` writes, smallest first; each is 1024 times the one before. */
 const UNITS = ["Bytes", "KiB", "MiB", "GiB", "TiB", "PiB"] as const
 
 /**
  * The byte count in a dry run's `bytes_processed`, which dbt-bigquery formats as text ("4.2 TiB",
- * "512.0 Bytes"). The text carries one decimal, so a figure past a KiB is an approximation. Undefined
- * for anything else, so a changed format is reported, never read as a count.
+ * "512.0 Bytes"), and the most it can be. The text carries one decimal, so a figure past a byte is
+ * rounded: the true count is within half a tenth of its unit. Undefined for anything else, so a changed
+ * format is reported, never read as a count.
  */
-export function parseBytesProcessed(display: unknown): number | undefined {
-  if (typeof display === "number") return Number.isFinite(display) && display >= 0 ? Math.round(display) : undefined
+export function parseBytesProcessed(display: unknown): { bytes: number; maxBytes: number } | undefined {
+  if (typeof display === "number") {
+    if (!Number.isFinite(display) || display < 0) return undefined
+    const bytes = Math.round(display)
+    return { bytes, maxBytes: bytes }
+  }
   if (typeof display !== "string") return undefined
   const match = /^\s*(\d+(?:\.\d+)?)\s*(Bytes|KiB|MiB|GiB|TiB|PiB)\s*$/i.exec(display)
   if (!match) return undefined
   const unit = UNITS.findIndex((u) => u.toLowerCase() === match[2].toLowerCase())
-  return Math.round(Number(match[1]) * 1024 ** unit)
+  const scale = 1024 ** unit
+  const bytes = Math.round(Number(match[1]) * scale)
+  return { bytes, maxBytes: unit === 0 ? bytes : Math.ceil((Number(match[1]) + 0.05) * scale) }
 }
 
-/** The SQL a model's file holds, as Power User reads it, or the manifest's copy when the file is gone. */
-async function modelSource(model: string, root: string | undefined): Promise<{ sql?: string; name?: string; error?: string }> {
-  const manifestPath = path.join(root ?? "", "target", "manifest.json")
-  let node: any
-  try {
-    node = findModel(loadRawManifest(manifestPath)?.nodes ?? {}, model)
-  } catch (e) {
-    return { error: `couldn't read ${manifestPath}: ${e instanceof Error ? e.message : String(e)}` }
-  }
-  if (!node) return { error: `no model "${model}" in ${manifestPath}: run dbt parse or dbt compile first` }
-  const file = root && node.original_file_path ? path.join(root, node.original_file_path) : undefined
-  let sql: string | undefined
-  try {
-    if (file) sql = fs.readFileSync(file, "utf-8")
-  } catch {}
-  sql ??= typeof node.raw_code === "string" ? node.raw_code : undefined
-  return sql?.trim() ? { sql, name: node.name } : { error: `model "${model}" has no SQL` }
+/** Waits for `work`, but gives up as soon as the call is cancelled. */
+function untilAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(signal.reason)
+    signal.addEventListener("abort", stop, { once: true })
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop))
+  })
 }
 
 function failure(title: string, message: string, extra: Record<string, unknown> = {}) {
@@ -47,7 +42,7 @@ function failure(title: string, message: string, extra: Record<string, unknown> 
 
 export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
   description:
-    "Estimate the bytes a dbt model or a SQL query would scan, from a warehouse dry run. Only BigQuery has a dry run: any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter, so it needs write permission (`--allow-write` on `tool run`). Pass `model` (a model name; its file is compiled) or `sql` (may use Jinja).",
+    "Estimate the bytes a dbt model or a SQL query would scan, from a warehouse dry run. Only BigQuery has a dry run: any other warehouse answers `supported: false` and nothing is compiled. Starts the dbt adapter, so it needs write permission (`--allow-write` on `tool run`). Pass `model` (a model name, compiled as dbt would) or `sql` (may use Jinja).",
   parameters: z.object({
     model: z.string().optional().describe("Model name to compile and estimate"),
     sql: z.string().optional().describe("SQL (may use Jinja) to compile and estimate"),
@@ -67,39 +62,41 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
         output: `No cost estimate: dry runs are only available on BigQuery (this project uses ${adapterName}).`,
       }
     }
+    const signal = ctx.abort
+    let compiled: unknown
     try {
-      let query = args.sql
-      let name = args.model
-      if (!query) {
-        const root = await (await import("../native/connections/register")).getDbtProjectRoot()
-        const source = await modelSource(args.model!, root)
-        if (!source.sql) return failure("model not found", source.error ?? "No SQL to estimate.", { adapter: type })
-        query = source.sql
-        name = source.name ?? name
-      }
-      ctx.abort.throwIfAborted()
-      const compiled = await adapter.unsafeCompileQuery(query, name)
-      ctx.abort.throwIfAborted()
-      if (typeof compiled !== "string" || !compiled.trim()) {
-        return failure("compile failed", "The query compiled to nothing.", { adapter: type })
-      }
-      const result = await adapter.validateSQLDryRun(compiled)
-      ctx.abort.throwIfAborted()
-      const display = result?.bytes_processed
-      const bytes = parseBytesProcessed(display)
-      if (bytes === undefined) {
-        return failure("unreadable estimate", `The dry run returned an amount this tool can't read: ${JSON.stringify(display)}.`, {
-          adapter: type,
-        })
-      }
-      return {
-        title: `dbt_cost_estimate: ${display}`,
-        metadata: { success: true, supported: true, adapter: type, bytes, display: String(display), ...(name && { model: name }) },
-        output: `${name ? `${name} ` : "The query "}would process ${display} (about ${bytes} bytes).`,
-      }
+      // A model compiles by name, so its node context (`this`, config) is kept; SQL compiles inline.
+      compiled = await untilAbort(args.model ? adapter.unsafeCompileNode(args.model) : adapter.unsafeCompileQuery(args.sql!, undefined), signal)
     } catch (e) {
-      if (ctx.abort.aborted) throw e
+      if (signal.aborted) throw e
+      return failure("compile failed", e instanceof Error ? e.message : String(e), { adapter: type })
+    }
+    if (typeof compiled !== "string" || !compiled.trim()) {
+      return failure("compile failed", "The query compiled to nothing.", { adapter: type })
+    }
+    let display: unknown
+    try {
+      const result = await untilAbort(adapter.validateSQLDryRun(compiled), signal)
+      if (result == null) {
+        return failure("dry run failed", "The dry run returned no estimate: dbt-core before 1.6 can't dry run.", { adapter: type })
+      }
+      display = (result as { bytes_processed?: unknown }).bytes_processed
+    } catch (e) {
+      if (signal.aborted) throw e
       return failure("dry run failed", e instanceof Error ? e.message : String(e), { adapter: type })
+    }
+    const parsed = parseBytesProcessed(display)
+    if (!parsed) {
+      return failure("unreadable estimate", `The dry run returned an amount this tool can't read: ${JSON.stringify(display)}.`, {
+        adapter: type,
+      })
+    }
+    const name = args.model
+    const shown = typeof display === "number" ? `${parsed.bytes} Bytes` : String(display)
+    return {
+      title: `dbt_cost_estimate: ${shown}`,
+      metadata: { success: true, supported: true, adapter: type, ...parsed, display: shown, ...(name && { model: name }) },
+      output: `${name ? `${name} ` : "The query "}would process ${shown} (at most ${parsed.maxBytes} bytes).`,
     }
   },
 })
