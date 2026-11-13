@@ -1126,6 +1126,21 @@ describe("both tools: names that aren't columns", () => {
     }
   })
 
+  test("a column the SQL itself aliases like an engine name (amount as _1) is a real column", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.orders": model("orders", [], "select 1 as order_id, 2.5 as amount", ["order_id", "amount"]),
+        "model.shop.r": model("r", ["orders"], `select order_id, amount as _1 from ${T("orders")}`),
+        "model.shop.child": model("child", ["r"], `select * from ${T("r")}`),
+      },
+    }
+    const path = write(m)
+    expect(Object.keys((dbtLineage({ manifest_path: path, model: "child" }).raw_lineage as any).column_dict ?? {}).sort()).toEqual(["_1", "order_id"])
+    expect(columnReach(path, "r", "_1").models.map((one) => one.name)).toEqual(["child"])
+  })
+
   test("a real column whose name holds a backslash and a digit stays a column when nothing calls COLUMNS()", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },

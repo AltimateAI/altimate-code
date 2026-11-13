@@ -107,7 +107,7 @@ export interface ColumnAnswer {
     contracts: number
     ends: number
     may_carry_models: number
-    /** Of those, the ones with no sign at all (`not_traced`): the rest of the model-level set. */
+    /** Of the may-carry models, the ones with no sign at all (reason `not_traced`). */
     not_traced_models: number
     model_level: number
   }

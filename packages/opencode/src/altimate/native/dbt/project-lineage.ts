@@ -91,14 +91,21 @@ export function hasNestedWith(sql: string): boolean {
   return /\(\s*with\s+(?:recursive\s+)?[a-z_][a-z0-9_]*\s+as\s*\(/i.test(stripSql(sql))
 }
 
-/** The engine's own name for an unaliased expression in a SELECT list: not the warehouse's name for it. */
 const ENGINE_NAME = /^_(?:col_)?\d+$/i
 const COLUMNS_CALL = /(?<![\w$])columns\s*\(/i
 
+/**
+ * The engine's own name for an unaliased expression in a SELECT list (`_1`, `_col_1`): not the warehouse's
+ * name for it. A name the SQL itself writes (`amount as _1`) is a real alias.
+ */
+function engineMade(name: string, stripped: string): boolean {
+  return ENGINE_NAME.test(name) && !new RegExp(`(?<![\\w$])${name}(?![\\w$])`, "i").test(stripped)
+}
+
 /** Whether a SELECT list's output names are the columns the warehouse makes: none unaliased, none repeated. */
-function namesItsOutputs(outputs: string[]): boolean {
+function namesItsOutputs(outputs: string[], stripped: string): boolean {
   const names = outputs.map((name) => name.toLowerCase())
-  return names.length > 0 && new Set(names).size === names.length && !names.some((name) => ENGINE_NAME.test(name))
+  return names.length > 0 && new Set(names).size === names.length && !names.some((name) => engineMade(name, stripped))
 }
 
 /**
@@ -500,8 +507,9 @@ export class ProjectLineage {
       // (`_1`, `_col_1`), and, where the SQL calls COLUMNS(), an alias template with a backslash and a digit
       // (`as "col_\0"`). A documented name is kept as it is.
       const sql = this.sqlOf(id)
-      const template = !!sql && COLUMNS_CALL.test(stripSql(sql))
-      const real = (name: string) => !ENGINE_NAME.test(name) && !(template && /\\\d/.test(name))
+      const stripped = sql ? stripSql(sql) : ""
+      const template = COLUMNS_CALL.test(stripped)
+      const real = (name: string) => !engineMade(name, stripped) && !(template && /\\\d/.test(name))
       for (const e of this.lineage(id).edges) if (real(e.to)) add(e.to)
       if (sql) for (const c of this.outputColumns(sql)) if (real(c)) add(c)
     }
@@ -534,7 +542,7 @@ export class ProjectLineage {
       const sql = this.sqlOf(id)
       settled = !!sql && !/(?<![\w$])(?:identifier|columns)\s*\(/i.test(stripSql(sql)) && (selectsStar(sql)
         ? !this.lineage(id).unresolved && this.parents(id).every((p) => this.settledColumns(p) !== undefined)
-        : namesItsOutputs(this.outputColumns(sql)))
+        : namesItsOutputs(this.outputColumns(sql), stripSql(sql)))
     }
     const out = settled ? names : undefined
     this.settledMemo.set(id, out)
