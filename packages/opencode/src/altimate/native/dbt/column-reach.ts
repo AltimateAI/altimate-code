@@ -8,6 +8,7 @@
 // engine reports no edge), and models that read it through a table name several parents share.
 import { loadRawManifest, findModel } from "./helpers"
 import { dbtLineage } from "./lineage"
+import { missingColumn, projectLineage, selectsStar, stripSql } from "./project-lineage"
 
 export interface ColumnReachModel {
   name: string
@@ -30,6 +31,9 @@ export interface ColumnReachExposure {
   /** The exposure's label when it has one, else its name. */
   label: string
   type: string
+  url?: string
+  /** The owner's name, as the project declares it. */
+  owner?: string
 }
 
 export interface ColumnReach {
@@ -113,50 +117,12 @@ function documentedColumns(node: any): Set<string> {
 
 const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 
-/**
- * SQL with comments blanked and string literals (quoted or dollar-quoted) emptied, in one pass so
- * none can swallow another.
- */
-function stripSql(sql: string): string {
-  return sql.replace(/'(?:[^']|'')*'|\$([A-Za-z_]\w*)?\$[\s\S]*?\$\1\$|--[^\r\n]*|\/\*[\s\S]*?\*\//g, (match) =>
-    match.startsWith("'") || match.startsWith("$") ? "''" : " ",
-  )
-}
-
-/**
- * Whether the SQL selects `*` or `t.*` in any form (DISTINCT ON, TOP n, AS STRUCT, multi-part or
- * quoted qualifiers, EXCLUDE/EXCEPT/REPLACE/RENAME modifiers). Every `*` counts except count(*) and
- * multiplication, which has an operand on both sides that is not a keyword ending the projection.
- */
-export function selectsStar(sql: string): boolean {
-  const code = stripSql(sql)
-  const ends = /^(from|exclude|except|replace|rename|ilike|columns)\b/i
-  for (let at = code.indexOf("*"); at !== -1; at = code.indexOf("*", at + 1)) {
-    const before = code.slice(0, at).trimEnd()
-    const after = code.slice(at + 1).trimStart()
-    const prev = before.at(-1) ?? ""
-    const next = after[0] ?? ""
-    // count(*) reads no column; hash(*), object_construct(*), struct(*) read them all.
-    if (prev === "(" && next === ")" && /\bcount(?:_big|_if)?\s*\($/i.test(before)) continue
-    if (prev === "." || next === "" || next === "," || next === ")" || ends.test(after)) return true
-    const operand = /[\w"'`\])]/
-    // A sign on the right operand (`revenue * -1`) belongs to it.
-    const right = after.replace(/^[+-]\s*/, "")[0] ?? ""
-    if (operand.test(prev) && (operand.test(right) || right === "(" || /\d/.test(right))) {
-      // An operand before the `*` that is itself a keyword (SELECT, DISTINCT, ALL, STRUCT) is no operand.
-      if (/\b(select|distinct|all|struct)$/i.test(before)) return true
-      continue
-    }
-    return true
-  }
-  return false
-}
 
 /**
  * Whether compiled SQL names the column anywhere but as an output alias, comments and string
  * literals aside. Used only to mark a model as one that may read the column.
  */
-function namesColumn(sql: string, column: string): boolean {
+export function namesColumn(sql: string, column: string): boolean {
   const code = stripSql(sql)
   const name = escapeRegExp(column)
   // Quoted, the closing delimiter in the name is written doubled: "a""b", `a``b`, [a]]b].
@@ -184,7 +150,7 @@ function namesColumn(sql: string, column: string): boolean {
  */
 // Between the keywords: whitespace, or a comment (`--`, `#` or `//` to the line's end, `/* … */` to its
 // first `*/`). Limit: a nested Postgres comment between them is not read as one.
-const GAP = String.raw`(?:\s|(?:--|#|\/\/)[^\r\n]*[\r\n]|\/\*(?:[^*]|\*(?!\/))*\*\/)+`
+export const GAP = String.raw`(?:\s|(?:--|#|\/\/)[^\r\n]*[\r\n]|\/\*(?:[^*]|\*(?!\/))*\*\/)+`
 // The join's modifiers in any dialect: LEFT/RIGHT/FULL/INNER/CROSS, OUTER, Spark's SEMI/ANTI, Snowflake's DIRECTED.
 const NATURAL = new RegExp(
   String.raw`^natural${GAP}(?:(?:left|right|full|inner|cross|outer|semi|anti|directed)${GAP}){0,4}join\b`,
@@ -229,10 +195,11 @@ export function namesThroughIdentifier(sql: string, columns: string[]): boolean 
     if (call[1] === undefined || !call[2]) return true
     const literal = call[1].replace(/''/g, "'")
     if (!/^[\w$."]*$/.test(literal)) return true
-    // Any mention of the column in the string counts (qualified, quoted, with dots in a quoted name);
-    // a doubled quote inside a quoted name (`"a""b"`) is one quote.
+    // Any mention of the column as a whole name in the string counts (qualified, quoted, with dots in a
+    // quoted name), not one inside a longer name; a doubled quote inside a quoted name (`"a""b"`) is one quote.
     const text = literal.replace(/""/g, '"').toLowerCase()
-    if ([...wanted].some((column) => text.includes(column))) return true
+    const whole = (column: string) => new RegExp(`(?<![\\w$])${column.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w$])`)
+    if ([...wanted].some((column) => whole(column).test(text))) return true
   }
   return false
 }
@@ -256,6 +223,11 @@ export function columnReach(manifestPath: string, model: string, column: string,
   const target = findModel(nodes, model)
   if (!target) throw new Error(`Model '${model}' not found in manifest`)
   const targetId: string = target.unique_id ?? Object.keys(nodes).find((id) => nodes[id] === target)
+  // The same parent columns dbtLineage reads each model against.
+  const project = projectLineage(manifestPath, dialect)
+  const missing = missingColumn(project, targetId, column)
+  if (missing) throw new Error(missing)
+  const known = (id: string) => new Set(project.columns(id).map((col) => col.name))
   const children = childMapOf(manifest)
 
   // Everything downstream, then a topological order over it, so each node is traced after all its
@@ -327,8 +299,10 @@ export function columnReach(manifestPath: string, model: string, column: string,
 
     const result = dbtLineage({ manifest_path: manifestPath, model: id, dialect })
     const lineage = result.raw_lineage as any
-    // dbtLineage rates a model low when the engine threw or answered SQL it cannot parse (`errors`, no edges).
-    if (result.confidence === "low") {
+    // dbtLineage rates a model low when the engine threw or answered SQL it cannot parse (`errors`, no
+    // edges), or when a `*` reads a parent with no known column. The edges it traced stand in the last
+    // case: a traced parent's columns are known, and a `*` over the target with none is caught below.
+    if (result.confidence === "low" && !result.unexpanded_stars?.length) {
       untraced.push(entry(id, result.confidence_factors[0] ?? "the lineage engine could not trace it"))
       unsure.add(id)
       continue
@@ -356,7 +330,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
     const collides = parents.some((p) => allParents.some((other) => other !== p && bareName(other) === bareName(p)))
     const wildcard =
       selectsStar(sqlText) &&
-      parents.some((p) => [...tracked.get(p)!].some((col) => !documentedColumns(lookup(p)).has(col)))
+      parents.some((p) => [...tracked.get(p)!].some((col) => !known(p).has(col)))
     if (collides || wildcard) {
       unsure.add(id)
       uncertain.push(
@@ -364,7 +338,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
           id,
           collides
             ? "reads a parent whose table name another parent shares"
-            : "selects * from a parent whose schema.yml does not list the column",
+            : "selects * from a parent whose known columns don't include the column",
         ),
       )
       continue
@@ -490,10 +464,38 @@ export function exposuresOn(manifestPath: string, ids: Iterable<string>): Column
   }
   return Object.entries<any>(manifest?.exposures ?? {})
     .filter(([, node]) => (node?.depends_on?.nodes ?? []).some((dep: string) => wanted.has(dep)))
-    .map(([id, node]) => ({
-      unique_id: id,
-      name: node?.name ?? id,
-      label: node?.label || node?.name || id,
-      type: node?.type ?? "exposure",
-    }))
+    .map(([id, node]) => describeExposure(id, node))
+}
+
+/** An exposure as a manifest declares it. */
+export function describeExposure(id: string, node: any): ColumnReachExposure {
+  return {
+    unique_id: id,
+    name: node?.name ?? id,
+    label: node?.label || node?.name || id,
+    type: node?.type ?? "exposure",
+    ...(node?.url && { url: String(node.url) }),
+    ...(node?.owner?.name && { owner: String(node.owner.name) }),
+  }
+}
+
+/** How many exposures the project declares, whatever they read. */
+export function exposuresDeclared(manifestPath: string): number {
+  return Object.keys(loadRawManifest(manifestPath)?.exposures ?? {}).length
+}
+
+/** What an exposure reads, by unique_id: through metrics and semantic models, down to the models and sources. */
+export function exposureReads(manifest: any, exposure: any): Set<string> {
+  const reads = new Set<string>()
+  const seen = new Set<string>()
+  const queue: string[] = [...(exposure?.depends_on?.nodes ?? [])]
+  while (queue.length) {
+    const id = String(queue.shift())
+    if (seen.has(id)) continue
+    seen.add(id)
+    const layer = manifest?.metrics?.[id] ?? manifest?.semantic_models?.[id]
+    if (layer) queue.push(...(layer.depends_on?.nodes ?? []))
+    else reads.add(id)
+  }
+  return reads
 }
