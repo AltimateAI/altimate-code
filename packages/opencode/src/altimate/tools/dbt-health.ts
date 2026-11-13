@@ -3,6 +3,7 @@ import fs from "node:fs"
 import path from "node:path"
 import z from "zod"
 import { Tool } from "../../tool/tool"
+import { dbtAdapterInternals } from "../native/connections/register"
 import { dbtAdapterFor } from "./dbt-adapter-access"
 
 /** One DataPilot finding for a model. */
@@ -13,6 +14,16 @@ export interface HealthInsight {
   severity: string
   message: string
   recommendation: string
+  /** The model's SQL file and its properties file, absolute; empty when the model isn't the project's own package's. */
+  file: string
+  properties: string
+}
+
+/** What the script says about each model node of the manifest. */
+interface NodeFiles {
+  package?: string
+  file?: string
+  patch?: string
 }
 
 /** Test seams. */
@@ -28,14 +39,23 @@ export const dbtHealthInternals = {
         { cwd, signal, timeout: dbtHealthInternals.runTimeoutMs, maxBuffer: 64 * 1024 * 1024, windowsHide: true },
         (error, stdout, stderr) => {
           const code = (error as { code?: unknown } | null)?.code
+          if ((error as { killed?: boolean } | null)?.killed)
+            return reject(new Error(`DataPilot didn't finish within ${dbtHealthInternals.runTimeoutMs / 1000} s`))
           if (error && typeof code !== "number") return reject(error)
           resolve({ stdout, stderr, code: typeof code === "number" ? code : 0 })
         },
       )
       child.stdin?.end()
     }),
-  /** The Python the project's dbt runs under. */
+  /** The Python found for a project when the dbt config names none. */
   discoverPython: async (root: string) => (await import("../../../../dbt-tools/src/config")).discoverPython(root),
+}
+
+/** The Python dbt runs under: the one the dbt config names (the adapter uses it), else one found for the project. */
+async function pythonFor(root: string): Promise<string> {
+  const { read } = await import("../../../../dbt-tools/src/config")
+  const config = (dbtAdapterInternals.readConfig ? await dbtAdapterInternals.readConfig() : await read()) as { pythonPath?: unknown } | undefined
+  return typeof config?.pythonPath === "string" && config.pythonPath ? config.pythonPath : dbtHealthInternals.discoverPython(root)
 }
 
 // DataPilot is called the way dbt-integration's `project_healthcheck` calls it (Manual config: a file
@@ -49,7 +69,9 @@ try:
     from datapilot.core.platforms.dbt.executor import DBTInsightGenerator
     from datapilot.core.platforms.dbt.utils import load_catalog, load_manifest
 except ImportError as e:
-    print(json.dumps({"error": "missing_datapilot", "detail": str(e)}))
+    # Only DataPilot itself missing is "not installed"; a name missing from it, or one of its own imports failing, is a failure.
+    kind = "missing_datapilot" if isinstance(e, ModuleNotFoundError) and getattr(e, "name", None) == "datapilot" else "failed"
+    print(json.dumps({"error": kind, "detail": str(e)}))
     sys.exit(0)
 manifest_path, catalog_path, config_path = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
@@ -62,13 +84,28 @@ try:
     )
     reports = generator.run()
     out = {k: [json.loads(i.json()) for i in v] for k, v in reports[MODEL].items()}
-    print(json.dumps({"model_insights": out}))
+    with open(manifest_path) as f:
+        raw = json.load(f)
+    nodes = {
+        k: {"package": n.get("package_name"), "file": n.get("original_file_path"), "patch": n.get("patch_path")}
+        for k, n in raw.get("nodes", {}).items()
+        if k in out
+    }
+    print(json.dumps({"model_insights": out, "nodes": nodes, "project": (raw.get("metadata") or {}).get("project_name")}))
 except Exception as e:
     print(json.dumps({"error": "failed", "detail": str(e)}))
 `
 
-/** Flattens DataPilot's `model_insights` ({ uniqueId: [response] }) into one list. */
-export function flattenInsights(modelInsights: unknown): HealthInsight[] {
+/** A manifest `patch_path` (`package://models/schema.yml`) as the path inside its package. */
+function patchFile(patch: string | undefined): string {
+  return patch ? patch.replace(/^[^:/]*:\/\//, "") : ""
+}
+
+/**
+ * Flattens DataPilot's `model_insights` ({ uniqueId: [response] }) into one list. A model of the project's
+ * own package gets its files resolved against `root`; another package's gets none.
+ */
+export function flattenInsights(modelInsights: unknown, root = "", nodes: Record<string, NodeFiles> = {}, project?: string): HealthInsight[] {
   const out: HealthInsight[] = []
   if (!modelInsights || typeof modelInsights !== "object") return out
   for (const [uniqueId, list] of Object.entries(modelInsights as Record<string, unknown>)) {
@@ -81,8 +118,13 @@ export function flattenInsights(modelInsights: unknown): HealthInsight[] {
         severity?: string
         insight?: { name?: string; message?: string; recommendation?: string }
       }
+      const id = r.unique_id ?? uniqueId
+      const node = nodes[id]
+      const own = !!root && !!node && !!project && node.package === project
       out.push({
-        uniqueId: r.unique_id ?? uniqueId,
+        file: own && node.file ? path.resolve(root, node.file) : "",
+        properties: own && patchFile(node.patch) ? path.resolve(root, patchFile(node.patch)) : "",
+        uniqueId: id,
         path: r.original_file_path ?? r.path ?? "",
         name: r.insight?.name ?? "",
         severity: r.severity ?? "",
@@ -100,7 +142,7 @@ function failure(title: string, output: string, extra: Record<string, unknown> =
 
 export const DbtHealthTool = Tool.define("dbt_health", {
   description:
-    "DataPilot project health insights for the models of the dbt project (hard-coded references, missing tests or documentation, naming and structure issues, and so on). Uses the project's dbt integration (starts it, so it needs write permission) for a fresh manifest, then runs DataPilot (the `altimate-datapilot-cli` Python package, which must be installed in the project's Python) over the manifest, and the catalog when target/catalog.json exists. Returns `insights`: uniqueId, path, name, severity, message and recommendation for each.",
+    "DataPilot project health insights for the models of the dbt project (hard-coded references, missing tests or documentation, naming and structure issues, and so on). Uses the project's dbt integration (starts it, so it needs write permission) for a fresh manifest, then runs DataPilot (the `altimate-datapilot-cli` Python package, which must be installed in the project's Python) over the manifest, and the catalog when target/catalog.json exists. Returns `insights`: uniqueId, path, name, severity, message and recommendation for each, plus the model's absolute `file` and `properties` file for the project's own models.",
   parameters: z.object({
     config_path: z
       .string()
@@ -114,6 +156,27 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     const { getDbtProjectRoot } = await import("../native/connections/register")
     const root: string | undefined = (typeof adapter.getProjectRoot === "function" ? adapter.getProjectRoot() : undefined) ?? (await getDbtProjectRoot())
     if (!root) return failure("unavailable", "dbt_health can't run: no dbt project here.")
+    // The adapter's watcher rebuilds the manifest after an edit a moment later: parse now, so the run reads
+    // the project as it is, and say so when the check failed and the last good manifest is what is read.
+    let stale: { message: string; manifest_path?: string; written_at?: string; age_seconds?: number } | undefined
+    if (typeof adapter.parseManifest === "function") {
+      try {
+        const parsed = await adapter.parseManifest()
+        if (parsed?.stale) {
+          // The same shape the other dbt tools give a stale manifest.
+          const writtenAt = typeof parsed.stale.writtenAt === "number" ? parsed.stale.writtenAt : undefined
+          stale = {
+            message: `The dbt project check failed, so these insights come from the manifest of the last successful parse${writtenAt === undefined ? "" : `, written ${new Date(writtenAt).toISOString()}`}. They may not match the project as it is now.`,
+            manifest_path: parsed.stale.manifestPath,
+            written_at: writtenAt === undefined ? undefined : new Date(writtenAt).toISOString(),
+            age_seconds: writtenAt === undefined ? undefined : Math.max(0, Math.round((Date.now() - writtenAt) / 1000)),
+          }
+        }
+      } catch (e) {
+        if (ctx.abort.aborted) throw e
+        return failure("parse failed", `dbt_health can't run: dbt couldn't parse the project: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
     const manifest: string =
       (typeof adapter.getManifestPath === "function" ? adapter.getManifestPath() : undefined) ?? path.join(root, "target", "manifest.json")
     if (!fs.existsSync(manifest)) return failure("no manifest", `dbt_health can't run: no manifest at ${manifest}; run dbt parse or dbt compile first.`)
@@ -124,7 +187,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
       configPath = path.resolve(root, args.config_path)
       if (!fs.existsSync(configPath)) return failure("no config", `dbt_health can't run: no DataPilot config at ${configPath}.`)
     }
-    const python = await dbtHealthInternals.discoverPython(root)
+    const python = await pythonFor(root)
     let run: { stdout: string; stderr: string; code: number | null }
     try {
       run = await dbtHealthInternals.runPython(python, SCRIPT, [manifest, catalog, configPath], root, ctx.abort)
@@ -133,7 +196,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
       return failure("failed", `dbt_health couldn't run ${python}: ${e instanceof Error ? e.message : String(e)}`)
     }
     // DataPilot may log to stdout: the answer is the last line that parses as an object.
-    let parsed: { error?: string; detail?: string; model_insights?: unknown } | undefined
+    let parsed: { error?: string; detail?: string; model_insights?: unknown; nodes?: Record<string, NodeFiles>; project?: string } | undefined
     for (const line of run.stdout.split("\n").reverse()) {
       try {
         const value = JSON.parse(line)
@@ -152,12 +215,12 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         { missing: "altimate-datapilot-cli", python },
       )
     if (parsed.error) return failure("failed", `DataPilot failed: ${parsed.detail ?? parsed.error}`)
-    const insights = flattenInsights(parsed.model_insights)
+    const insights = flattenInsights(parsed.model_insights, root, parsed.nodes, parsed.project)
     const lines = insights.map((i) => `- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`)
     return {
       title: `dbt_health: ${insights.length} insight${insights.length === 1 ? "" : "s"}`,
-      metadata: { success: true, insights, catalog: !!catalog },
-      output: insights.length ? lines.join("\n") : "No health insights.",
+      metadata: { success: true, insights, catalog: !!catalog, ...(stale ? { stale_manifest: stale } : {}) },
+      output: [stale?.message, insights.length ? lines.join("\n") : "No health insights."].filter(Boolean).join("\n"),
     }
   },
 })

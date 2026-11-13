@@ -23,6 +23,12 @@ const ctx: Tool.Context = {
 
 // What dbt-integration's project_healthcheck returns, as DataPilot serialises it.
 const HEALTHCHECK = {
+  project: "shop",
+  nodes: {
+    "model.shop.stg_orders": { package: "shop", file: "models/staging/stg_orders.sql", patch: "shop://models/staging/_staging.yml" },
+    "model.shop.customers": { package: "shop", file: "models/customers.sql", patch: null },
+    "model.dep.base": { package: "dep", file: "models/base.sql", patch: null },
+  },
   model_insights: {
     "model.shop.stg_orders": [
       {
@@ -42,6 +48,17 @@ const HEALTHCHECK = {
         },
       },
     ],
+    "model.dep.base": [
+      {
+        unique_id: "model.dep.base",
+        package_name: "dep",
+        path: "models/base.sql",
+        original_file_path: "models/base.sql",
+        insight_level: "model",
+        severity: "INFO",
+        insight: { name: "Missing tests", type: "Testing", message: "No tests.", recommendation: "Add some.", reason_to_flag: "", metadata: {} },
+      },
+    ],
     "model.shop.customers": [
       {
         unique_id: "model.shop.customers",
@@ -57,6 +74,9 @@ const HEALTHCHECK = {
 }
 
 let project: string
+let parses = 0
+let order: string[] = []
+let parsed: unknown
 let python: { calls: { python: string; args: string[]; cwd: string }[]; stdout: string; code: number }
 const originals = { ...dbtHealthInternals }
 
@@ -74,11 +94,24 @@ afterAll(async () => {
 
 beforeEach(() => {
   resetDbtAdapter()
+  parses = 0
+  order = []
+  parsed = { stale: undefined }
   python = { calls: [], stdout: JSON.stringify(HEALTHCHECK) + "\n", code: 0 }
-  dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, pythonPath: "python3", dbtIntegration: "corecommand", queryLimit: 500 })
-  dbtAdapterInternals.create = async () => ({ isInitialized: () => true, getProjectRoot: () => project, dispose: async () => {} })
-  dbtHealthInternals.discoverPython = async () => "/venv/bin/python"
+  dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, pythonPath: "/venv/bin/python", dbtIntegration: "corecommand", queryLimit: 500 })
+  dbtAdapterInternals.create = async () => ({
+    isInitialized: () => true,
+    getProjectRoot: () => project,
+    parseManifest: async () => {
+      parses += 1
+      order.push("parse")
+      return parsed
+    },
+    dispose: async () => {},
+  })
+  dbtHealthInternals.discoverPython = async () => "/discovered/python"
   dbtHealthInternals.runPython = async (py, _script, args, cwd) => {
+    order.push("python")
     python.calls.push({ python: py, args, cwd })
     return { stdout: python.stdout, stderr: "", code: python.code }
   }
@@ -106,6 +139,19 @@ describe("dbt_health", () => {
         severity: "WARNING",
         message: "Model stg_orders has hard-coded references to raw.orders.",
         recommendation: "Use source() or ref() instead.",
+        file: path.join(project, "models", "staging", "stg_orders.sql"),
+        properties: path.join(project, "models", "staging", "_staging.yml"),
+      },
+      // Another package's model carries no files: an edit in the project can't be about it.
+      {
+        uniqueId: "model.dep.base",
+        path: "models/base.sql",
+        name: "Missing tests",
+        severity: "INFO",
+        message: "No tests.",
+        recommendation: "Add some.",
+        file: "",
+        properties: "",
       },
       {
         uniqueId: "model.shop.customers",
@@ -114,9 +160,11 @@ describe("dbt_health", () => {
         severity: "ERROR",
         message: "No description.",
         recommendation: "Add one.",
+        file: path.join(project, "models", "customers.sql"),
+        properties: "",
       },
     ])
-    expect(result.title).toBe("dbt_health: 2 insights")
+    expect(result.title).toBe("dbt_health: 3 insights")
   })
 
   test("runs DataPilot over the project's manifest with the project's Python and no config by default", async () => {
@@ -138,9 +186,47 @@ describe("dbt_health", () => {
     ])
   })
 
-  test("never sends DataPilot's All mode: nothing but the manifest, catalog and config reach it", async () => {
+  test("runs DataPilot under the Python the dbt config names, not one found for the project", async () => {
+    dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, pythonPath: "/pyenv/dbt/bin/python", dbtIntegration: "corecommand", queryLimit: 500 })
     await run()
-    expect(python.calls[0].args).toHaveLength(3)
+    expect(python.calls[0].python).toBe("/pyenv/dbt/bin/python")
+  })
+
+  test("falls back to the Python found for the project when the config names none", async () => {
+    dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, dbtIntegration: "corecommand", queryLimit: 500 })
+    await run()
+    expect(python.calls[0].python).toBe("/discovered/python")
+  })
+
+  test("parses the project before it reads the manifest, and says so when that fell back to an old one", async () => {
+    const fresh = await run()
+    expect(parses).toBe(1)
+    expect(order).toEqual(["parse", "python"])
+    expect(fresh.metadata.stale_manifest).toBeUndefined()
+    parsed = { stale: { writtenAt: Date.UTC(2026, 0, 2, 3, 4, 5), manifestPath: "x" } }
+    const old = await run()
+    expect(old.metadata.success).toBe(true)
+    expect(old.metadata.stale_manifest).toMatchObject({
+      message: "The dbt project check failed, so these insights come from the manifest of the last successful parse, written 2026-01-02T03:04:05.000Z. They may not match the project as it is now.",
+      manifest_path: "x",
+      written_at: "2026-01-02T03:04:05.000Z",
+    })
+    expect((old.metadata.stale_manifest as { age_seconds: number }).age_seconds).toBeGreaterThan(0)
+    expect(old.output.split("\n")[0]).toContain("last successful parse")
+  })
+
+  test("does not run DataPilot when the project can't be parsed", async () => {
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      parseManifest: async () => {
+        throw new Error("Compilation Error in model x")
+      },
+    })
+    const result = await run()
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("Compilation Error in model x")
+    expect(python.calls).toHaveLength(0)
   })
 
   test("says no insights when there are none", async () => {
@@ -152,7 +238,7 @@ describe("dbt_health", () => {
 
   test("reads the answer from the last JSON line when DataPilot logs to stdout", async () => {
     python.stdout = `INFO:dbt-insight-generator:Running insight x\n${JSON.stringify(HEALTHCHECK)}\n`
-    expect((await run()).metadata.insights).toHaveLength(2)
+    expect((await run()).metadata.insights).toHaveLength(3)
   })
 
   test("names altimate-datapilot-cli when DataPilot isn't importable, and installs nothing", async () => {
@@ -162,6 +248,45 @@ describe("dbt_health", () => {
     expect(result.metadata.missing).toBe("altimate-datapilot-cli")
     expect(result.output).toContain("altimate-datapilot-cli")
     expect(python.calls).toHaveLength(1)
+  })
+
+  test("the script says \"not installed\" only when the datapilot package itself can't be found", async () => {
+    const py = Bun.which("python3")
+    if (!py) return
+    const stubs = await mkdtemp(path.join(os.tmpdir(), "dbt-health-stub-"))
+    const originalRun = originals.runPython
+    const classify = async (pythonPath: string) => {
+      const saved = process.env.PYTHONPATH
+      process.env.PYTHONPATH = pythonPath
+      try {
+        dbtHealthInternals.runPython = (_py, script, args, cwd, signal) => originalRun(py, script, args, cwd, signal)
+        return await run()
+      } finally {
+        if (saved === undefined) delete process.env.PYTHONPATH
+        else process.env.PYTHONPATH = saved
+      }
+    }
+    try {
+      // Nothing named datapilot on the path: not installed.
+      expect((await classify(stubs)).metadata.missing).toBe("altimate-datapilot-cli")
+      // datapilot there, but one of its own imports can't be satisfied: a failure, not a missing package.
+      await mkdir(path.join(stubs, "datapilot", "config"), { recursive: true })
+      await writeFile(path.join(stubs, "datapilot", "__init__.py"), "")
+      await writeFile(path.join(stubs, "datapilot", "config", "__init__.py"), "")
+      await writeFile(path.join(stubs, "datapilot", "config", "config.py"), "import not_a_real_dependency_xyz\n")
+      const broken = await classify(stubs)
+      expect(broken.metadata.success).toBe(false)
+      expect(broken.metadata.missing).toBeUndefined()
+      expect(broken.output).toContain("not_a_real_dependency_xyz")
+      // datapilot there, but a name it should export is gone (a version mismatch): also a failure.
+      await writeFile(path.join(stubs, "datapilot", "config", "config.py"), "")
+      const mismatch = await classify(stubs)
+      expect(mismatch.metadata.success).toBe(false)
+      expect(mismatch.metadata.missing).toBeUndefined()
+      expect(mismatch.output).toContain("load_config")
+    } finally {
+      await rm(stubs, { recursive: true, force: true })
+    }
   })
 
   test("reports a DataPilot failure", async () => {
