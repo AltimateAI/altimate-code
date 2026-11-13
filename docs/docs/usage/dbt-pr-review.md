@@ -273,6 +273,7 @@ riskTierPathTokens:           # OFF by default — see "Risk-tier path tokens" b
   pii: [ssn, email, phone]    # or supply your own case-insensitive tokens
 allowForceTier: true          # set false in gate CI: --force-tier is then rejected
 checkContractColumns: false   # opt-in: new columns missing from an enforced contract (CI that doesn't run `dbt build`)
+incrementalSliceVars: []      # opt-in: vars that pick one slice per incremental run (e.g. [tenant])
 consumerColumnLists: []       # OFF by default — see "Consumers outside dbt" below
 rubric:
   blockOn: [lineage_breakage, contract_violation, pii_exposure, semantic_change]
@@ -486,30 +487,30 @@ The deterministic rules group into four families:
 - **dbt unit tests.** A unit test whose `given` inputs are all `rows: []` is
   reported: it either never tests the model's logic, or expects rows the model has nothing to
   build from.
-- **Incremental, microbatch and snapshot semantics.** Config is read from the
-  manifest (project, yml and inline, as dbt merges them) with the head's inline
-  `{{ config() }}` on top. All of these are advisory:
-    - the SQL of an existing incremental model or snapshot changes, and the PR
-      doesn't say how history is handled (`--full-refresh`, a backfill, or
-      forward-only);
+- **Incremental and snapshot semantics.** Config is read from the manifest
+  (project, yml and inline, as dbt merges them) with the head's inline
+  `{{ config() }}` on top. Formatting-only edits never count as a change.
+    - an existing incremental model gains a column, or its `is_incremental()`
+      filter changes, and the PR doesn't say how existing rows are handled
+      (`--full-refresh`, a backfill, or forward-only) — a suggestion;
     - `partition_by` changes on an incremental model (needs a full refresh);
     - `on_schema_change='fail'` and the change adds or removes columns, so the
       first incremental run after merge fails;
-    - a `delete+insert` or `merge` model processes one slice per run (a column
-      filtered by `var()`, e.g. a tenant) but its `unique_key` lacks that column,
-      so one slice's run deletes or overwrites another's rows;
-    - a snapshot's `check_cols` or `strategy` changes, which can version every
-      row on the next run;
+    - a snapshot's `check_cols` or `strategy` changes (`.sql` or dbt 1.9+ yml
+      snapshots), which can version every row on the next run;
     - `row_number()` dedup ordered only by a load timestamp (`loaded_at`,
-      `_fivetran_synced`, …), where rows from one batch tie.
-
-  Adapter-dependent rules fire only where the adapter table establishes the
-  behavior. On Trino and Athena, concurrent commits to one Iceberg table
-  conflict, so microbatch without `concurrent_batches=false` is flagged. On
-  Trino, `on_table_exists='replace'` with an enforced contract runs `create or
-  replace` and then `insert`, and `drop` removes the table for the whole build:
-  readers see an empty or missing table. This is a warning when the model has
-  consumers. `unique_key` and strategy changes are covered by the engine's
+      `ingestion_timestamp`) — a suggestion; loader sync columns such as
+      `_fivetran_synced` are not flagged.
+- **Opt-in: per-slice incremental runs.** For projects that run one slice per
+  invocation (a tenant or region chosen by a var), list those vars:
+  `incrementalSliceVars: [tenant]`. A `delete+insert` or `merge` model filtered
+  by one of them must include the filtered column in `unique_key`, or one
+  slice's run deletes or overwrites another's rows.
+- **Adapter-dependent advice** fires only where the adapter table establishes
+  the behavior. On Trino, `on_table_exists='replace'` with an enforced contract
+  runs `create or replace` then `insert`, and `drop` removes the table during
+  the build, so readers outside dbt can see an empty or missing table (a
+  suggestion). `unique_key` and strategy changes are covered by the engine's
   `DBT011`/`DBT012`.
 - **dbt config / Jinja (`DBT0xx`).** A core **minijinja** parser reads
   `{{ config(...) }}` and the model body: incremental model without an

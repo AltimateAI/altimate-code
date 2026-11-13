@@ -1,3 +1,4 @@
+import YAML from "yaml"
 import { makeFinding, type Finding } from "./finding"
 import type { ChangedFile } from "./diff-filter"
 import { capabilityFor } from "./adapter-capabilities"
@@ -5,7 +6,7 @@ import { capabilityFor } from "./adapter-capabilities"
 /**
  * dbt incremental, microbatch and snapshot semantics. These rules follow
  * dbt-core behavior, which is the same on every adapter; where the outcome
- * depends on the adapter (concurrent commits, atomic table replace) they read
+ * depends on the adapter (atomic table replace) they read
  * the capability table and stay silent for adapters it doesn't cover.
  *
  * Config comes from the manifest (dbt_project.yml + yml + inline, merged by
@@ -95,22 +96,11 @@ function asList(v: unknown): string[] | undefined {
   return [unquote(s).toLowerCase()]
 }
 
-function asBool(v: unknown): boolean | undefined {
-  if (typeof v === "boolean") return v
-  if (typeof v === "string") {
-    const s = unquote(v).toLowerCase()
-    if (s === "true") return true
-    if (s === "false") return false
-  }
-  return undefined
-}
-
 export interface ModelSemantics {
   materialized?: string
   strategy?: string
   uniqueKey?: string[]
   onSchemaChange?: string
-  concurrentBatches?: boolean
   contractEnforced?: boolean
   onTableExists?: string
 }
@@ -126,7 +116,6 @@ export function modelSemantics(inline: Record<string, string>, manifest?: Record
     strategy: str("incremental_strategy"),
     uniqueKey: asList(inline.unique_key ?? m.unique_key),
     onSchemaChange: str("on_schema_change"),
-    concurrentBatches: asBool(inline.concurrent_batches ?? m.concurrent_batches),
     contractEnforced: contractInline ?? contractManifest,
     onTableExists: str("on_table_exists"),
   }
@@ -146,11 +135,28 @@ export function modelBody(sql: string): string {
   return s.replace(/\s+/g, " ").trim().toLowerCase()
 }
 
-/** Columns compared to a `var()` in the model: the slice one run processes (tenant, region…). */
-export function varScopedColumns(sql: string): string[] {
+/** The body as a token stream, so formatting (spaces, line breaks, case) never counts as a change. */
+export function bodyTokens(sql: string): string {
+  return (modelBody(sql).match(/[a-z0-9_$]+|'(?:[^']|'')*'|[^\s\w]/gi) ?? []).join(" ")
+}
+
+/** The `{% if is_incremental() %}` block(s): what each incremental run picks up. */
+export function incrementalFilter(sql: string): string {
+  const blocks = [...sql.matchAll(/\{%-?\s*if\s+is_incremental\(\)\s*-?%\}([\s\S]*?)\{%-?\s*endif\s*-?%\}/gi)].map((m) => m[1])
+  return blocks.map((b) => bodyTokens(b)).join(" | ")
+}
+
+/**
+ * Columns compared to one of the named vars: the slice one run processes. Only
+ * vars the project lists (`incrementalSliceVars`) count, so a filter like
+ * `currency = '{{ var("reporting_currency") }}'` is not mistaken for a slice.
+ */
+export function varScopedColumns(sql: string, sliceVars: string[]): string[] {
+  if (!sliceVars.length) return []
+  const names = new Set(sliceVars.map((v) => v.toLowerCase()))
   const out = new Set<string>()
-  const re = /(?:\b[A-Za-z_][\w]*\.)?\b([A-Za-z_][\w]*)\s*(?:=|\bin\b)\s*\(?\s*['"]?\{\{\s*var\s*\(/gi
-  for (const m of modelBody(sql).matchAll(re)) out.add(m[1].toLowerCase())
+  const re = /(?:\b[A-Za-z_][\w]*\.)?\b([A-Za-z_][\w]*)\s*(?:=|\bin\b)\s*\(?\s*['"]?\{\{\s*var\s*\(\s*['"]([^'"]+)['"]/gi
+  for (const m of modelBody(sql).matchAll(re)) if (names.has(m[2].toLowerCase())) out.add(m[1].toLowerCase())
   return [...out]
 }
 
@@ -173,8 +179,10 @@ export interface IncrementalInput {
   dialectKnown: boolean
   /** PR title + description; empty outside a PR run. */
   prText: string
-  /** Exposures or downstream models depend on this model. */
-  hasConsumers: boolean
+  /** Exposures (readers outside dbt) depend on this model. */
+  hasExposures: boolean
+  /** Vars that select the slice one run processes (`incrementalSliceVars`); empty = rule off. */
+  sliceVars: string[]
   /** Output columns added/removed by the change (lazy: needs column lineage). */
   columnDelta: () => Promise<{ added: string[]; removed: string[] }>
 }
@@ -206,13 +214,24 @@ export async function incrementalFindings(input: IncrementalInput): Promise<Find
   const cap = input.dialectKnown ? capabilityFor(input.dialect) : undefined
 
   if (cfg.materialized === "incremental") {
-    // Logic changed under an existing incremental table, with no stated plan for history.
-    if (!isNew && input.oldSql && modelBody(input.oldSql) !== modelBody(input.newSql) && !PLAN_RE.test(input.prText))
-      out.push(
-        finding(input, "incremental-logic-no-refresh", "warning", "materialization", "incremental logic changed without a full-refresh or backfill plan",
-          "Rows already in the incremental table keep the old logic; only new runs use the new one. " +
-            "Say in the PR how history is handled: `--full-refresh` on deploy, a backfill of the affected range, or that the change is forward-only."),
-      )
+    // History diverges from new rows when the incremental filter changes or a
+    // column is added (old rows get NULL). Formatting-only edits never count,
+    // and `on_schema_change='fail'` has its own finding below.
+    if (!isNew && input.oldSql && cfg.onSchemaChange !== "fail" && bodyTokens(input.oldSql) !== bodyTokens(input.newSql) &&
+        !PLAN_RE.test(input.prText)) {
+      const filterChanged = incrementalFilter(input.oldSql) !== incrementalFilter(input.newSql)
+      const { added } = await input.columnDelta()
+      if (filterChanged || added.length) {
+        const why = [
+          added.length ? `${ticks(added)} ${added.length === 1 ? "is" : "are"} new: rows built before this change get NULL unless backfilled.` : "",
+          filterChanged ? "The `is_incremental()` filter changed, so what a run picks up differs from what is already loaded." : "",
+        ].filter(Boolean).join(" ")
+        out.push(
+          finding(input, "incremental-history-plan", "suggestion", "materialization", "incremental change without a plan for existing rows",
+            `${why} Say in the PR how history is handled: \`--full-refresh\` on deploy, a backfill of the affected range, or that the change is forward-only.`),
+        )
+      }
+    }
 
     if (configChanged("partition_by") && inlineOld.partition_by !== undefined)
       out.push(
@@ -232,19 +251,10 @@ export async function incrementalFindings(input: IncrementalInput): Promise<Find
       }
     }
 
-    // Microbatch on an adapter whose concurrent commits to one table conflict.
-    if (cfg.strategy === "microbatch" && cap?.concurrentCommitsConflict && cfg.concurrentBatches !== false &&
-        (isNew || configChanged("incremental_strategy") || configChanged("concurrent_batches")))
-      out.push(
-        finding(input, "microbatch-concurrent-commits", "warning", "materialization", "microbatch batches may commit concurrently",
-          `On ${input.dialect}, concurrent commits to one table conflict (Iceberg/Delta optimistic concurrency), so parallel batches ` +
-            "and overlapping backfills fail with commit errors. Set `concurrent_batches=false`."),
-      )
-
     // A per-slice run (filtered by a var) whose key doesn't contain the slice column.
     if ((cfg.strategy === "delete+insert" || cfg.strategy === "merge") && cfg.uniqueKey?.length &&
         (isNew || /unique_key|incremental_strategy|var\s*\(/i.test(addedText))) {
-      const missing = varScopedColumns(input.newSql).filter((c) => !cfg.uniqueKey!.includes(c))
+      const missing = varScopedColumns(input.newSql, input.sliceVars).filter((c) => !cfg.uniqueKey!.includes(c))
       if (missing.length)
         out.push(
           finding(input, "unique-key-missing-slice-column", "warning", "dedup", `\`unique_key\` doesn't include ${ticks(missing)}`,
@@ -268,9 +278,11 @@ export async function incrementalFindings(input: IncrementalInput): Promise<Find
       : undefined
   if (gap && (isNew || /contract|on_table_exists|materialized/i.test(addedText)))
     out.push(
-      finding(input, "non-atomic-table-replace", input.hasConsumers ? "warning" : "suggestion", "materialization", "table is unavailable while it rebuilds",
-        `On ${input.dialect}, \`on_table_exists='${cfg.onTableExists}'\` ${gap}.` +
-          (input.hasConsumers ? " This model has declared consumers; schedule them after the build, or use `on_table_exists='rename'`." : "")),
+      finding(input, "non-atomic-table-replace", "suggestion", "materialization", "table is unavailable while it rebuilds",
+        `On ${input.dialect}, \`on_table_exists='${cfg.onTableExists}'\` ${gap}. ` +
+          (input.hasExposures
+            ? "Readers outside dbt (this model has exposures) can hit that window; `on_table_exists='rename'` swaps the table in at the end."
+            : "Readers outside dbt can hit that window; `on_table_exists='rename'` swaps the table in at the end.")),
     )
 
   return out
@@ -289,11 +301,48 @@ export function snapshotFindings(input: { file: ChangedFile; model: string; newS
         "Changing what an existing snapshot compares can version every row on the next run (a column new to the snapshot compares " +
           "NULL with its value), recording history that never happened. Check on a copy first, or start a new snapshot table."),
     )
-  else if (modelBody(input.oldSql) !== modelBody(input.newSql) && !PLAN_RE.test(input.prText))
+  else if (bodyTokens(input.oldSql) !== bodyTokens(input.newSql) && !PLAN_RE.test(input.prText))
     out.push(
       finding(input, "snapshot-logic-no-plan", "warning", "materialization", "snapshot query changed without a plan for history",
         "Rows already captured keep the old query's values; the next run versions every row whose values the new query computes differently. " +
           "Say in the PR how history is handled (backfill, a new snapshot, or accepted as forward-only)."),
     )
+  return out
+}
+
+/** dbt 1.9+ snapshots defined in yml (`snapshots:` with `config.check_cols`/`strategy`). */
+export function snapshotYmlFindings(file: ChangedFile, oldContent?: string, newContent?: string): Finding[] {
+  if (file.status === "added" || file.status === "deleted" || !oldContent || !newContent) return []
+  const configs = (text: string) => {
+    const out = new Map<string, Record<string, unknown>>()
+    let doc: unknown
+    try {
+      doc = YAML.parse(text)
+    } catch {
+      return out
+    }
+    const list = (doc as { snapshots?: unknown })?.snapshots
+    if (!Array.isArray(list)) return out
+    for (const snap of list)
+      if (snap && typeof snap === "object" && typeof (snap as any).name === "string")
+        out.set((snap as any).name, ((snap as any).config ?? {}) as Record<string, unknown>)
+    return out
+  }
+  const before = configs(oldContent)
+  const out: Finding[] = []
+  for (const [name, cfg] of configs(newContent)) {
+    const prev = before.get(name)
+    if (!prev) continue
+    const changed = ["check_cols", "strategy"].filter(
+      (k) => prev[k] !== undefined && JSON.stringify(prev[k]) !== JSON.stringify(cfg[k]),
+    )
+    if (changed.length)
+      out.push(
+        finding({ file, model: name }, "snapshot-tracking-change", "warning", "materialization",
+          `snapshot ${changed.map((k) => `\`${k}\``).join(" and ")} changed`,
+          "Changing what an existing snapshot compares can version every row on the next run (a column new to the snapshot compares " +
+            "NULL with its value), recording history that never happened. Check on a copy first, or start a new snapshot table."),
+      )
+  }
   return out
 }

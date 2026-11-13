@@ -16,7 +16,7 @@ import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope,
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { listMirrorsModel, type ConsumerColumnList } from "./consumer-lists"
 import { detectUnitTestFixtures } from "./unit-tests"
-import { incrementalFindings, snapshotFindings } from "./incremental-semantics"
+import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult } from "./ai-review"
 
 /**
@@ -782,6 +782,7 @@ async function incrementalSemanticsLane(
   dialect: string,
   dialectKnown: boolean,
   prText: string,
+  sliceVars: string[],
 ): Promise<Finding[]> {
   const { file, newSql, oldSql } = ctx
   if (!newSql || file.status === "deleted") return []
@@ -797,7 +798,8 @@ async function incrementalSemanticsLane(
     dialect,
     dialectKnown,
     prText,
-    hasConsumers: ctx.impact.directCount > 0 || !!consumers?.exposures.length,
+    hasExposures: !!consumers?.exposures.length,
+    sliceVars,
     columnDelta: () => columnDelta(ctx, runner, dialect),
   })
 }
@@ -1552,7 +1554,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
       tasks.push(lexicalLane(ctx.file, input.runner))
     }
     if (lanes.has("dbt_patterns") || lanes.has("materialization")) {
-      tasks.push(incrementalSemanticsLane(ctx, input.runner, dialect, !!input.dialectKnown, prText))
+      tasks.push(incrementalSemanticsLane(ctx, input.runner, dialect, !!input.dialectKnown, prText, input.config.incrementalSliceVars))
     }
     // dbt config/Jinja lint (materialization / incremental / contract) — gate on its
     // own concerns, not just dbt_patterns, so it isn't silently dropped on a tier that
@@ -1645,6 +1647,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
         return [
           ...detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent }),
           ...detectUnitTestFixtures(file, oldContent, newContent),
+          ...snapshotYmlFindings(file, oldContent, newContent),
         ]
       }),
     )
