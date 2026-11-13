@@ -109,6 +109,22 @@ describe("docsCoverage", () => {
     ).toThrow("its columns are not known")
   })
 
+  test("a star beside named columns says that only the manifest's columns are counted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "docs-coverage-star-"))
+    try {
+      const path = join(dir, "manifest.json")
+      const node = { ...orders, compiled_code: "select *, 1 as extra from raw.orders" }
+      writeFileSync(path, JSON.stringify(manifest({ [orders.unique_id]: node })))
+      const tool = await initTool(DbtDocsCoverageTool)
+      const r = await tool.execute({ model: "orders", manifest_path: path }, ctx as any)
+      expect(r.metadata.source).toBe("manifest_columns")
+      expect(r.metadata.output_columns).toEqual(["id", "customer_id", "status"])
+      expect(r.output).toContain("a column the SQL adds beside `*` is not")
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   test("a model without compiled SQL is an error, not full coverage", () => {
     expect(() => docsCoverage({ ...orders, compiled_code: "" }, "snowflake")).toThrow("no compiled SQL")
   })
@@ -139,6 +155,7 @@ describe("dbt_docs_coverage tool", () => {
     const tool = await initTool(DbtDocsCoverageTool)
     const r = await tool.execute({ model: "nope", manifest_path: path }, ctx as any)
     expect(r.metadata.success).toBe(false)
+    expect(r.metadata.error).toContain('Model "nope" not found')
     expect(r.output).toContain("not found")
   })
 
@@ -146,6 +163,7 @@ describe("dbt_docs_coverage tool", () => {
     const tool = await initTool(DbtDocsCoverageTool)
     const r = await tool.execute({ model: "orders", manifest_path: join(dir, "absent.json") }, ctx as any)
     expect(r.metadata.success).toBe(false)
+    expect(r.metadata.error).toContain("No manifest")
     expect(r.output).toContain("dbt compile")
   })
 })

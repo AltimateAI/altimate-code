@@ -103,7 +103,7 @@ export const DbtDocsCoverageTool = Tool.define("dbt_docs_coverage", {
       if (!manifest) {
         return {
           title: "Docs coverage: NO MANIFEST",
-          metadata: { success: false },
+          metadata: { success: false, error: `No manifest at ${args.manifest_path}` },
           output: `No manifest at ${args.manifest_path}. Run \`dbt compile\` first to generate it.`,
         }
       }
@@ -111,7 +111,7 @@ export const DbtDocsCoverageTool = Tool.define("dbt_docs_coverage", {
       if (!node) {
         return {
           title: "Docs coverage: MODEL NOT FOUND",
-          metadata: { success: false },
+          metadata: { success: false, error: `Model "${args.model}" not found` },
           output: `Model "${args.model}" not found in the manifest at ${args.manifest_path}.`,
         }
       }
@@ -122,7 +122,9 @@ export const DbtDocsCoverageTool = Tool.define("dbt_docs_coverage", {
       ]
       if (result.missing.length > 0) lines.push(`Missing descriptions: ${result.missing.join(", ")}`)
       if (result.source === "manifest_columns")
-        lines.push("The model selects `*`, so its columns are the ones the manifest lists.")
+        lines.push(
+          "The model selects `*`, so only the columns the manifest lists are counted; a column the SQL adds beside `*` is not.",
+        )
       return {
         title: `Docs coverage: ${result.model} ${result.percent}%`,
         metadata: { success: true, ...result },
