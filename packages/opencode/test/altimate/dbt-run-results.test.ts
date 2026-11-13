@@ -201,7 +201,7 @@ describe("dbt_run_results", () => {
     expect(result.output).toContain("not a run artifact")
   })
 
-  test("a folder inside the project reads that project; a relative one resolves against the session's project", async () => {
+  test("a folder inside the project reads that project", async () => {
     const dir = await project("nested", BUILD)
     await mkdir(path.join(dir, "models", "marts"), { recursive: true })
 
