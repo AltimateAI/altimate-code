@@ -254,3 +254,55 @@ describe("end to end through the orchestrator", () => {
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 })
+
+describe("dedup windows split across lines", () => {
+  const sql = "select *,\n  row_number() over (\n    partition by job_id\n    order by ingestion_timestamp desc\n  ) as rn\nfrom t"
+  const rulesFor = (diffAdded: string) =>
+    detectModelPatterns({ path: "models/m.sql", status: "modified", diff: diffAdded }, sql, DEFAULT_RUBRIC).map(
+      (f) => (f.evidence?.result as { rule?: string })?.rule,
+    )
+  test("an ORDER BY on its own line is seen: no false 'no ORDER BY', and the load-timestamp rule fires", () => {
+    const r = rulesFor("+  row_number() over (\n")
+    expect(r).not.toContain("dedup_no_tiebreaker")
+    expect(r).toContain("dedup_load_timestamp_only")
+  })
+  test("a window the PR doesn't touch is not reported", () => {
+    expect(rulesFor("+select 1 as unrelated\n")).not.toContain("dedup_load_timestamp_only")
+  })
+})
+
+describe("column changes without compiled SQL (dbt parse-only CI)", () => {
+  test("on_schema_change='fail' sees columns added to the raw model's SELECT", async () => {
+    const cfg = "{{ config(materialized='incremental', unique_key='id', on_schema_change='fail') }}\n"
+    const oldSql = `${cfg}select id, amount from {{ ref('src') }}`
+    const newSql = `${cfg}select id, amount, region from {{ ref('src') }}`
+    const env = await runReview({
+      changedFiles: [{ path: "models/marts/fct.sql", status: "modified", diff: `-${oldSql}\n+${newSql}\n` }],
+      config: { ...DEFAULT_REVIEW_CONFIG, reviewers: ["dbt_patterns"] },
+      rubric: DEFAULT_RUBRIC,
+      mode: "comment",
+      runner: {
+        async impact() {
+          return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
+        },
+        async grade() {
+          return {}
+        },
+        async check() {
+          return { issues: [], ran: true }
+        },
+        async equivalence() {
+          return { decided: false }
+        },
+        async detectPii() {
+          return { columns: [] }
+        },
+        async columnLineage() {
+          return []
+        },
+      } as ReviewRunner,
+      getContent: async (_f, side) => (side === "old" ? oldSql : newSql),
+    })
+    expect(env.findings.find((f) => f.title.includes("on_schema_change"))?.body).toContain("adds `region`")
+  })
+})

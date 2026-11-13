@@ -648,19 +648,41 @@ async function columnDelta(
   dialect: string,
 ): Promise<{ added: string[]; removed: string[]; current: Set<string> }> {
   const none = { added: [], removed: [], current: new Set<string>() }
-  const { file, engineNewSql, engineOldSql } = ctx
-  if (!engineNewSql || file.status === "deleted") return none
-  const current = await outputColumns(runner, engineNewSql, dialect)
-  if (!current.size) return none
-  if (!hasOldSide(file)) return { added: [...current], removed: [], current }
-  if (!engineOldSql) return none
-  const before = await outputColumns(runner, engineOldSql, dialect)
-  if (!before.size) return none
-  return {
-    added: [...current].filter((c) => !before.has(c)),
-    removed: [...before].filter((c) => !current.has(c)),
-    current,
+  const { file, engineNewSql, engineOldSql, newSql, oldSql } = ctx
+  if (file.status === "deleted") return none
+  const withOld = hasOldSide(file)
+  const delta = (current: Set<string>, before?: Set<string>) =>
+    !current.size || (withOld && !before?.size)
+      ? none
+      : {
+          added: [...current].filter((c) => !before?.has(c)),
+          removed: before ? [...before].filter((c) => !current.has(c)) : [],
+          current,
+        }
+  // Compiled SQL on both sides: column lineage plus the final SELECT's names.
+  if (engineNewSql && (!withOld || engineOldSql)) {
+    const current = await outputColumns(runner, engineNewSql, dialect)
+    const before = withOld ? await outputColumns(runner, engineOldSql!, dialect) : undefined
+    return delta(current, before)
   }
+  // No compiled SQL (CI that only runs `dbt parse`): the raw model's own SELECT
+  // list, when it names its columns. Columns produced inside a macro stay unknown.
+  if (!newSql) return none
+  const current = rawSelectList(newSql)
+  const before = withOld && oldSql ? rawSelectList(oldSql) : undefined
+  return delta(current, before)
+}
+
+/** Output names of a raw (Jinja) model's final SELECT; empty when a Jinja expression is in the list. */
+function rawSelectList(sql: string): Set<string> {
+  const plain = sql
+    .replace(/\{#[\s\S]*?#\}/g, " ")
+    .replace(/\{%[\s\S]*?%\}/g, " ")
+    .replace(/\{\{[\s\S]*?\}\}/g, " __jinja__ ")
+  const names = selectListNames(plain)
+  if (!names || names.includes("__jinja__")) return new Set()
+  // A Jinja expression inside an item (e.g. `{{ col }} as x`) leaves its alias intact.
+  return new Set(names)
 }
 
 const ticks = (xs: string[]) => xs.map((x) => `\`${x}\``).join(", ")
