@@ -140,24 +140,10 @@ const detectClock: Detector = (c) => {
   })
 }
 
-// 4. SELECT * added (warehouse cost + fragility on columnar warehouses).
-const detectSelectStar: Detector = (c) => {
-  const hit = c.added.find((l) => /^\s*select\s+\*/i.test(stripComments(l)) && !/select\s+\*\s+from\s+\{\{/i.test(l))
-  if (!hit) return null
-  return makeFinding({
-    severity: "suggestion",
-    category: "warehouse_cost",
-    title: `${c.model}: SELECT * scans all columns`,
-    body:
-      "`SELECT *` reads every column on a columnar warehouse (Snowflake/BigQuery) and makes the model fragile to " +
-      "upstream column adds. Select only the columns you need.",
-    file: c.file.path,
-    model: c.model,
-    confidence: "high",
-    evidence: { tool: "dbt-patterns", result: { rule: "select_star", line: hit.trim() } },
-    ruleKey: "warehouse_cost:select-star",
-  })
-}
+// 4. SELECT * — covered by the catalog's "SELECT * in final projection" rule, which
+// fires only when the model's final SELECT reads straight from another relation.
+// A `select *` from a CTE or an import CTE is the dbt style-guide idiom, and
+// columnar engines prune the unused columns, so it is not flagged per line.
 
 // 5. LEFT/RIGHT JOIN silently collapsed to INNER by a WHERE/AND on the outer table.
 
@@ -308,11 +294,37 @@ const detectDedupLoadTimestamp: Detector = (c) => {
   return null
 }
 
+const NOT_COLUMN = new Set([
+  "year", "month", "day", "week", "quarter", "hour", "minute", "second", "epoch", "dow", "doy", "from", "as", "date", "timestamp",
+  "timestamp_ntz", "timestamp_tz", "datetime", "time", "boolean", "bool", "int", "integer", "bigint", "smallint", "numeric", "decimal",
+  "float", "double", "real", "varchar", "char", "string", "text", "current_date", "current_timestamp", "now", "null", "true", "false",
+  "interval", "with", "zone", "at", "precision",
+])
+
+/** True when a partition-defeating function in the line wraps a bare column (not a literal, var or clock). */
+function wrapsColumn(line: string): boolean {
+  const s = line.replace(/'(?:[^']|'')*'/g, "''").replace(/\{\{[\s\S]*?\}\}/g, " ")
+  for (const m of s.matchAll(/\b(extract|date_trunc|date|year|month|cast|trunc)\s*\(/gi)) {
+    let depth = 1
+    let i = (m.index ?? 0) + m[0].length
+    const start = i
+    while (i < s.length && depth > 0) {
+      if (s[i] === "(") depth++
+      else if (s[i] === ")") depth--
+      i++
+    }
+    const args = s.slice(start, i - 1)
+    const idents = [...args.matchAll(/(?<![\w.'])([a-z_][\w]*(?:\.[a-z_][\w]*)*)(?!\s*\()/gi)].map((x) => x[1].toLowerCase())
+    if (idents.some((x) => !NOT_COLUMN.has(x.split(".").pop()!))) return true
+  }
+  return false
+}
+
 // 11. Function/cast wrapped around a column in an added WHERE — defeats partition pruning.
 const detectPartitionFunction: Detector = (c) => {
   const hit = c.added.find((l) => {
     const s = stripComments(l)
-    return /^\s*(where|and)\b/i.test(s) && /\b(extract|date_trunc|date|year|month|cast|trunc)\s*\(/i.test(s)
+    return /^\s*(where|and)\b/i.test(s) && wrapsColumn(s)
   })
   if (!hit) return null
   return makeFinding({
@@ -789,7 +801,6 @@ const detectMultiCountDistinct: Detector = (c) => {
 
 const MODEL_DETECTORS: Detector[] = [
   detectClock,
-  detectSelectStar,
   detectCrossJoin,
   detectFanout,
   detectNotIn,
@@ -1430,9 +1441,30 @@ export function detectSchemaYmlPatterns(
     if (canCommit) {
       const oldSet = extractTestOccurrences(oldDoc ?? {})
       const newSet = extractTestOccurrences(isDeletedFile ? {} : newDoc)
+      // A test that moved with a column rename (old column gone, a new column on
+      // the same model carries the same test) is not a removal.
+      const cols = (set: Set<string>) => {
+        const m = new Map<string, Set<string>>()
+        for (const k of set) {
+          const [mod, col] = k.split("\x00")
+          if (!m.has(mod)) m.set(mod, new Set())
+          m.get(mod)!.add(col)
+        }
+        return m
+      }
+      const oldCols = cols(oldSet)
+      const newCols = cols(newSet)
+      const movedTo = (model: string, column: string, testField: string) =>
+        !!column &&
+        !newCols.get(model)?.has(column) &&
+        [...newSet].some((k) => {
+          const [mod, col, tf] = k.split("\x00")
+          return mod === model && tf === testField && !!col && !oldCols.get(model)?.has(col)
+        })
       for (const key of oldSet) {
         if (newSet.has(key)) continue
         const [model, column, testField] = key.split("\x00")
+        if (movedTo(model, column, testField)) continue
         // `testField` may carry a `\x01<to>\x02<field>` discriminator for
         // `relationships` tests so multiple relationships on the same column
         // don't collapse to one removal (MINOR #4). Strip it for display;
@@ -1626,14 +1658,15 @@ export function detectSchemaYmlPatterns(
       : `Add \`not_null\` to \`${g.column}\`'s \`data_tests:\` on \`${g.model}\` (contract is not enforced, so a \`constraints:\` entry would be inert — use a data_test).`
     findings.push(
       makeFinding({
-        severity: clampSeverity("test_coverage", "warning", "high"),
+        severity: "suggestion",
         category: "test_coverage",
         title: `${filename}: grain column \`${g.column}\` in unique_combination_of_columns lacks \`not_null\` on \`${g.model}\``,
         body:
           `The \`unique_combination_of_columns\` test on \`${g.model}\` names \`${g.column}\` as a grain key, but no \`not_null\` ` +
           `coverage is declared for it (either as a \`constraints:\` entry on a contracted model, or as a \`data_tests: [not_null]\` ` +
-          `on a view). A NULL grain-key value silently passes the uniqueness test, so a fan-out or duplicate bug can ship without ` +
-          `any test catching it. ${recommendation}`,
+          `on a view). The uniqueness test still catches duplicates (rows with NULL keys group together), but nothing stops NULL ` +
+          `grain keys themselves, and as an incremental \`unique_key\` a NULL never matches on merge, so those rows are re-inserted every run. ` +
+          `${recommendation}`,
         file: file.path,
         model: g.model,
         column: g.column,

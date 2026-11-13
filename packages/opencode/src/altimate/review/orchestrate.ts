@@ -1,4 +1,5 @@
 import path from "node:path"
+import YAML from "yaml"
 import {
   type Finding,
   type ReviewCategory,
@@ -1078,7 +1079,26 @@ async function missingGrainTestLane(ctx: ModelContext, runner: ReviewRunner): Pr
  * var-without-default, and materialization change (vs base). This replaces the regex
  * dbt-patterns config detectors — the parsing now lives in core.
  */
-async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner): Promise<Finding[]> {
+/** Var names defined under `vars:` in dbt_project.yml (top level and project-scoped). */
+export function definedVars(projectYml?: string): Set<string> {
+  const out = new Set<string>()
+  if (!projectYml) return out
+  let doc: any
+  try {
+    doc = YAML.parse(projectYml)
+  } catch {
+    return out
+  }
+  const vars = doc?.vars
+  if (!vars || typeof vars !== "object") return out
+  for (const [k, v] of Object.entries(vars)) {
+    out.add(k)
+    if (v && typeof v === "object" && !Array.isArray(v)) for (const k2 of Object.keys(v)) out.add(k2)
+  }
+  return out
+}
+
+async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner, projectVars: Set<string> = new Set()): Promise<Finding[]> {
   if (!runner.dbtConfigLint) return []
   const { file, newSql, oldSql } = ctx
   if (!newSql || file.status === "deleted") return []
@@ -1086,6 +1106,12 @@ async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner): Promise<F
   const raw = await runner.dbtConfigLint(newSql, hasOldSide(file) ? oldSql : undefined)
   const out: Finding[] = []
   for (const f of raw) {
+    // A var defined in dbt_project.yml, or given a default elsewhere in the model, compiles fine.
+    if (f.rule === "var_no_default") {
+      const name = /var\(\s*['"]([^'"]+)['"]/.exec(f.message)?.[1]
+      const esc = name?.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      if (name && (projectVars.has(name) || new RegExp(`var\\(\\s*['"]${esc}['"]\\s*,`).test(newSql))) continue
+    }
     const cat: ReviewCategory = /var_no_default|microbatch|incremental|materialization/.test(f.rule)
       ? "materialization"
       : /contract/.test(f.rule)
@@ -1508,6 +1534,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const diffScopedPiiCompletedFiles = new Set<string>()
   const diffScopedPiiFindingFiles = new Set<string>()
   const classifiedPiiColumnsByFile = new Map<string, Set<string>>()
+  // The head's dbt_project.yml, read once: inherited test thresholds and defined vars.
+  const projectYmlPath = `${input.layout?.root ? `${input.layout.root.replace(/\/$/, "")}/` : ""}dbt_project.yml`
+  const projectYml = await getContent?.(projectYmlPath, "new").catch(() => undefined)
+  const projectVars = definedVars(projectYml)
   for (const ctx of ctxByPath.values()) {
     const tasks: Promise<Finding[]>[] = []
     // Engine lanes consume COMPILED SQL (rendered by dbt) when available.
@@ -1590,7 +1620,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     // own concerns, not just dbt_patterns, so it isn't silently dropped on a tier that
     // enables those concerns without dbt_patterns.
     if (lanes.has("dbt_patterns") || lanes.has("materialization") || lanes.has("contract_violation")) {
-      tasks.push(dbtConfigLane(ctx, input.runner))
+      tasks.push(dbtConfigLane(ctx, input.runner, projectVars))
     }
     // Base-vs-head structural diff is a `semantic_change` concern (DISTINCT/UNION/grain/
     // surrogate-key/predicate changes) — gate on semantic_change, keeping dbt_patterns
@@ -1666,9 +1696,6 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Fetches run in parallel across schema files (a schema-heavy PR could touch
   // dozens of yml files; serial `git show` per file adds up).
   const schemaFiles = reviewable.filter((f) => f.kind === "schema_yml")
-  // The head's dbt_project.yml (test thresholds inherited by new tests), read once.
-  const projectYmlPath = `${input.layout?.root ? `${input.layout.root.replace(/\/$/, "")}/` : ""}dbt_project.yml`
-  const projectYml = schemaFiles.length ? await getContent?.(projectYmlPath, "new").catch(() => undefined) : undefined
   if (schemaFiles.length) {
     const schemaFindingSets = await Promise.all(
       schemaFiles.map(async (file) => {

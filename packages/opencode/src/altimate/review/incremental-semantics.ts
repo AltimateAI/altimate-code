@@ -140,10 +140,37 @@ export function bodyTokens(sql: string): string {
   return (modelBody(sql).match(/[a-z0-9_$]+|'(?:[^']|'')*'|[^\s\w]/gi) ?? []).join(" ")
 }
 
-/** The `{% if is_incremental() %}` block(s): what each incremental run picks up. */
+const CLAUSE_END = /^(group\s+by|order\s+by|select|union|limit|qualify|window|from|join|left|right|inner|full|cross|\{%)\b/i
+
+/**
+ * The predicates inside a block: `where`/`having`/`on` clauses, or the whole
+ * block when it is a bare predicate fragment (`and updated_at > …`). Select
+ * lists and CTE bodies in the block are not filters.
+ */
+function predicates(block: string): string[] {
+  const s = modelBody(block)
+  if (/^(and|or|where|having)\b/.test(s)) return [s]
+  const out: string[] = []
+  for (const m of s.matchAll(/\b(where|having)\b/g)) {
+    let depth = 0
+    let i = (m.index ?? 0) + m[0].length
+    const start = i
+    for (; i < s.length; i++) {
+      if (s[i] === "(") depth++
+      else if (s[i] === ")") { if (depth === 0) break; depth-- }
+      else if (depth === 0 && /\s/.test(s[i - 1] ?? " ") && CLAUSE_END.test(s.slice(i, i + 12))) break
+    }
+    out.push(m[1] + " " + s.slice(start, i).trim())
+  }
+  return out
+}
+
+/** The predicates of the `{% if is_incremental() %}` branch(es): what each incremental run picks up. */
 export function incrementalFilter(sql: string): string {
-  const blocks = [...sql.matchAll(/\{%-?\s*if\s+is_incremental\(\)\s*-?%\}([\s\S]*?)\{%-?\s*endif\s*-?%\}/gi)].map((m) => m[1])
-  return blocks.map((b) => bodyTokens(b)).join(" | ")
+  const blocks = [...sql.matchAll(/\{%-?\s*if\s+is_incremental\(\)[^%]*-?%\}([\s\S]*?)\{%-?\s*endif\s*-?%\}/gi)].map(
+    (m) => m[1].split(/\{%-?\s*(?:else|elif)\b/i)[0],
+  )
+  return blocks.flatMap((b) => predicates(b).map((p) => bodyTokens(p))).join(" | ")
 }
 
 /**

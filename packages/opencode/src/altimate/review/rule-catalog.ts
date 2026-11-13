@@ -61,6 +61,12 @@ export interface Rule {
   portabilityBody?: string
   /** Match `added` outside quoted strings only (e.g. `'2024/01/15'` is not a division). */
   ignoreStrings?: boolean
+  /**
+   * Structural condition on the whole new file (comments and string contents
+   * blanked), for shapes a regex can't see: real nesting depth, CASE/END
+   * balance, the final SELECT. ANDed with the other conditions.
+   */
+  check?: (sql: string) => boolean
   example: RuleExample
   counter?: RuleExample
 }
@@ -120,7 +126,59 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   if (rule.absentNewSql) {
     if (rule.absentNewSql.test(stripComments(input.newSql))) return false
   }
+  if (rule.check && !rule.check(stripStrings(stripComments(input.newSql)))) return false
   return relevant
+}
+
+/** Deepest stack of parenthesised subqueries: `(select … (select …))` is 2; sibling CTEs are 1 each. */
+export function subqueryDepth(sql: string): number {
+  const stack: boolean[] = []
+  let depth = 0
+  let max = 0
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i]
+    if (ch === "(") {
+      const sub = /^\(\s*select\b/i.test(sql.slice(i, i + 40))
+      stack.push(sub)
+      if (sub) max = Math.max(max, ++depth)
+    } else if (ch === ")") {
+      if (stack.pop()) depth--
+    }
+  }
+  return max
+}
+
+const JINJA_BRANCH = /\{%-?\s*(if|for|elif|else)\b/i
+
+/** CASE…END nesting depth, or -1 when CASE and END don't balance. */
+export function caseDepth(sql: string): number {
+  let depth = 0
+  let max = 0
+  for (const m of sql.matchAll(/\b(case|end)\b/gi)) {
+    if (m[1].toLowerCase() === "case") max = Math.max(max, ++depth)
+    else if (depth > 0) depth--
+  }
+  return depth === 0 ? max : -1
+}
+
+/** True when the last top-level SELECT is `select *` reading a relation that is not a CTE of this file. */
+export function finalSelectStarFromRelation(sql: string): boolean {
+  const s = sql.replace(/\{%[\s\S]*?%\}/g, " ")
+  let depth = 0
+  let last = -1
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (ch === "(") depth++
+    else if (ch === ")") depth = Math.max(0, depth - 1)
+    else if (depth === 0 && /^select\b/i.test(s.slice(i, i + 7)) && !/\w/.test(s[i - 1] ?? " ")) last = i
+  }
+  if (last < 0) return false
+  const m = /^select\s+(?:distinct\s+)?\*\s+from\s+([\w."`]+|\{\{[^}]*\}\})/i.exec(s.slice(last))
+  if (!m) return false
+  const target = m[1].replace(/["`]/g, "").toLowerCase()
+  if (target.startsWith("{{")) return true
+  const ctes = new Set([...s.matchAll(/\b(\w+)\s+as\s*\(/gi)].map((c) => c[1].toLowerCase()))
+  return !ctes.has(target)
 }
 
 /** The project's engine, for engine-dependent rules. Omitted = unknown. */
@@ -244,6 +302,7 @@ const r = (
       | "dialectGate"
       | "portabilityBody"
       | "ignoreStrings"
+      | "check"
   >,
   example: RuleExample,
   counter?: RuleExample,
@@ -817,10 +876,10 @@ const PERF: Rule[] = [
     "warehouse_cost",
     "suggestion",
     "SELECT * in final projection",
-    "A trailing `select *` carries every upstream column forward, bloating the model and storage.",
-    { added: /^\s*select\s+\*\s*$/i },
-    { add: "select *" },
-    { add: "select id, name" },
+    "The model's final `select *` reads straight from another relation, so every upstream column (including ones added later) lands in this model.",
+    { added: /\bselect\s+(distinct\s+)?\*/i, check: finalSelectStarFromRelation },
+    { add: "select * from {{ ref('orders') }}" },
+    { add: "with final as (select id from {{ ref('orders') }})\nselect * from final" },
   ),
   r(
     "large-in-list",
@@ -838,9 +897,9 @@ const PERF: Rule[] = [
     "suggestion",
     "deeply nested subqueries hurt readability/plans",
     "Several nested `(select … (select …))` levels are hard to optimize; flatten into CTEs.",
-    { newSql: /\(\s*select[\s\S]*\(\s*select[\s\S]*\(\s*select/i },
+    { added: /\(\s*select\b/i, check: (s) => subqueryDepth(s) >= 3 },
     { add: "select (select (select (select 1)))" },
-    { add: "select a from t" },
+    { add: "with a as (select 1), b as (select 2), c as (select 3)\nselect * from a" },
   ),
   r(
     "distinct-star",
@@ -1740,9 +1799,9 @@ const STYLE: Rule[] = [
     "suggestion",
     "deeply nested CASE expression",
     "Nested `CASE WHEN … CASE WHEN` is hard to verify; flatten with combined conditions or a mapping.",
-    { newSql: /case\s+when[\s\S]*\bcase\s+when/i },
+    { added: /\bcase\b/i, check: (s) => caseDepth(s) >= 2 },
     { add: "case when a then case when b then 1 end end" },
-    { add: "case when a then 1 end" },
+    { add: "case when a then 1 end as x,\ncase when b then 2 end as y" },
   ),
   r(
     "hardcoded-env-name",
@@ -2130,10 +2189,12 @@ const MISC: Rule[] = [
     "sql_correctness",
     "warning",
     "CASE without END",
-    "A `CASE WHEN` with no matching `END` on the line/expression is a syntax error.",
-    { added: /\bcase\s+when\b[^;]*$/i, unless: /\bend\b|\{\{|\{%/i },
+    "The model has more `CASE` than `END` keywords, which is a syntax error.",
+    // Whole-file balance, not per line: a CASE whose END sits on a later line is fine.
+    // Jinja branches can emit different CASE/END counts per branch, so they abstain.
+    { added: /\bcase\s+when\b/i, check: (s) => caseDepth(s) === -1 && !JINJA_BRANCH.test(s) },
     { add: "case when x > 0 then 1" },
-    { add: "case when x > 0 then 1 end" },
+    { add: "case when x > 0\n  then 1\n  else 0\nend as flag" },
   ),
   r(
     "double-aggregation-alias",
