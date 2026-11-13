@@ -13,7 +13,7 @@ export const DocsShareCommentsTool = Tool.define("docs_share_comments", {
   async execute() {
     return {
       title: "docs_share_comments: not implemented",
-      metadata: { success: false },
+      metadata: { success: false, error: "not implemented" },
       output: "docs_share_comments is not implemented in this build of altimate-code yet.",
     }
   },
