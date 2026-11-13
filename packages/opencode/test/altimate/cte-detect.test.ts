@@ -5,6 +5,7 @@ import {
   extractRowCount,
   quoteSqlIdentifier,
   stripColumnList,
+  unclosedJinjaBlock,
   type CteInfo,
 } from "../../src/altimate/tools/cte-detect"
 
@@ -318,9 +319,8 @@ select * from source`
 
       const ctes = detectCtes(document)
 
-      // With unterminated comment, the parser may not detect the CTE correctly
-      // This test verifies graceful handling of malformed comments
-      expect(ctes.length).toBeGreaterThanOrEqual(0)
+      // The comment swallows the rest of the text, so there is no CTE to find.
+      expect(ctes).toEqual([])
     })
 
     it("should handle sequential line and block comments between name and AS", () => {
@@ -1274,9 +1274,8 @@ select * from renamed`
 
       const ctes = detectCtes(document)
 
-      // The regex actually detects "comment" as a CTE name due to the unterminated comment
-      // This is expected behavior - the regex tries to parse what it can
-      expect(ctes.length).toBeGreaterThanOrEqual(0)
+      // The comment swallows the rest of the text, so there is no CTE to find.
+      expect(ctes).toEqual([])
     })
   })
 
@@ -1431,11 +1430,11 @@ select * from last`
   it("keeps WITH RECURSIVE in the count query, and a WITH written inside a Jinja block is not the model's", () => {
     const recursive = "with recursive r as (select 1 as n union all select n + 1 from r where n < 3) select * from r"
     const ctes = detectCtesInText(recursive)
-    expect(buildCountQuery(recursive, ctes, ctes[0])).toStartWith("WITH RECURSIVE r as (")
+    expect(buildCountQuery(recursive, ctes, ctes[0])).toStartWith("with recursive r as (")
     const block = "{% set q %}with z as (select 1) select * from z{% endset %}\nwith a as (select 1), b as (select 2) select * from b"
     const found = detectCtesInText(block)
     expect(found.map((c) => c.name)).toEqual(["a", "b"])
-    expect(buildCountQuery(block, found, found[1])).toContain("b as (\nselect 2\n)")
+    expect(buildCountQuery(block, found, found[1])).toContain("b as (select 2)")
     const inline = "{% set q = 'with z as (select 1)' %}\nwith a as (select 1) select * from a"
     expect(detectCtesInText(inline).map((c) => c.name)).toEqual(["a"])
     const macro = "{% macro m() %}with z as (select 1) select * from z{% endmacro %}\nwith a as (select 1) select * from a"
@@ -1467,7 +1466,7 @@ describe("buildCountQuery", () => {
     expect(ctes.map((c) => c.name)).toEqual(["orders", "customers", "joined"])
     const query = buildCountQuery(sql, ctes, ctes[1])!
     expect(query.startsWith("{{ config(materialized='table') }}")).toBe(true)
-    expect(query).toContain("WITH orders as (")
+    expect(query).toContain("with orders as (")
     expect(query).toContain("customers as (")
     expect(query).not.toContain("joined")
     expect(query.endsWith("SELECT COUNT(*) AS _profile_count FROM customers")).toBe(true)
@@ -1485,14 +1484,14 @@ describe("buildCountQuery", () => {
     const text = "with a (x, y) as (select 1, 2) select * from a"
     const ctes = detectCtesInText(text)
     const query = buildCountQuery(text, ctes, ctes[0])!
-    expect(query).toContain("WITH a (x, y) as (")
+    expect(query).toContain("with a (x, y) as (")
     expect(query.endsWith("FROM a")).toBe(true)
   })
 
   it("builds no query for a CTE of a second WITH clause, whose preamble would hold the first clause's query", () => {
     const text = "with a as (select 1) select * from a;\nwith b as (select 2) select * from b"
     const ctes = detectCtesInText(text)
-    expect(buildCountQuery(text, ctes, ctes.find((c) => c.name === "a")!)).toContain("WITH a as (")
+    expect(buildCountQuery(text, ctes, ctes.find((c) => c.name === "a")!)).toContain("with a as (")
     expect(buildCountQuery(text, ctes, ctes.find((c) => c.name === "b")!)).toBeUndefined()
   })
 
@@ -1508,6 +1507,88 @@ describe("buildCountQuery", () => {
         withClauseStart: 0,
       }),
     ).toBeUndefined()
+  })
+})
+
+describe("count query edge cases", () => {
+  it("keeps Jinja written between CTEs, and reports a block left open by the cut", () => {
+    const kept = "{% set n = 2 %}\nwith a as (select {{ n }}),\n{% if true %}b as (select 2),{% endif %}\nc as (select 3) select * from c"
+    const ctes = detectCtesInText(kept)
+    expect(buildCountQuery(kept, ctes, ctes[2])).toContain("{% if true %}b as (select 2),{% endif %}")
+    expect(unclosedJinjaBlock(buildCountQuery(kept, ctes, ctes[2])!)).toBeUndefined()
+    const open = "{% if x %}\nwith a as (select 1) select * from a\n{% endif %}"
+    const found = detectCtesInText(open)
+    expect(unclosedJinjaBlock(buildCountQuery(open, found, found[0])!)).toBe("if")
+    expect(unclosedJinjaBlock("{% set q %}x")).toBe("set")
+    expect(unclosedJinjaBlock("{% raw %}{% if x %}{% endraw %}")).toBeUndefined()
+  })
+
+  it("matches nested set blocks to their own end tag", () => {
+    const sql = "{% set outer %}{% set inner %}with fake as (select 1){% endset %}x{% endset %}\nwith real as (select 2) select * from real"
+    expect(detectCtesInText(sql).map((c) => c.name)).toEqual(["real"])
+  })
+
+  it("reads a comment or Jinja tag between AS, NOT and MATERIALIZED and the body", () => {
+    expect(detectCtesInText("with a as /* c */ (select 1), b as not /* c */ materialized (select 2) select 1").map((c) => c.name)).toEqual(["a", "b"])
+    expect(detectCtesInText("with a /* c */ as {# j #} materialized -- x\n(select 1) select 1").map((c) => c.name)).toEqual(["a"])
+  })
+
+  it("strips a column list that holds a quoted ')' or a comment", () => {
+    expect(stripColumnList('a ("x)")')).toBe("a")
+    expect(stripColumnList("a (x /* ) */)")).toBe("a")
+    expect(stripColumnList("Big Spenders")).toBe("Big Spenders")
+    const text = 'with a ("x)", y) as (select 1, 2) select * from a'
+    const ctes = detectCtesInText(text)
+    expect(buildCountQuery(text, ctes, ctes[0])).toEndWith("FROM a")
+  })
+
+  it("a dollar-quoted string does not end the CTE body early", () => {
+    const text = "with a as (select $$ ) $$ as s), b as (select $tag$ ( $tag$ as t) select 1"
+    expect(detectCtesInText(text).map((c) => c.name)).toEqual(["a", "b"])
+  })
+
+  it("tags inside a Jinja comment are not blocks, and a % inside a tag does not hide it", () => {
+    expect(unclosedJinjaBlock("{# {% if x %} #}with a as (select 1)")).toBeUndefined()
+    expect(unclosedJinjaBlock("{% if x %}{# {% endif %} #}with a as (select 1)")).toBe("if")
+    expect(unclosedJinjaBlock("{% if x % 2 == 0 %}with a as (select 1)")).toBe("if")
+    const sql = "{% set q %}{# {% endset %} #}with z as (select 1){% endset %}\nwith a as (select 2) select * from a"
+    expect(detectCtesInText(sql).map((c) => c.name)).toEqual(["a"])
+  })
+
+  it("counts open Jinja blocks in linear time: 100k tags in a second", () => {
+    const sql = "{% if x %}".repeat(100_000) + "{% endfor %}".repeat(100_000)
+    const started = performance.now()
+    expect(unclosedJinjaBlock(sql)).toBe("if")
+    expect(performance.now() - started).toBeLessThan(1000)
+  })
+
+  it("unterminated tags, comments and many block tags are scanned in linear time", () => {
+    for (const unit of ["{% if x ", "{# c ", "{% set q %}", "{% set q | upper %}"]) {
+      const sql = unit.repeat(100_000) + "with a as (select 1) select 1"
+      const started = performance.now()
+      unclosedJinjaBlock(sql)
+      detectCtesInText(sql)
+      expect(performance.now() - started).toBeLessThan(1500)
+    }
+  })
+
+  it("a filtered set block is a block, and raw text holds no tags", () => {
+    expect(unclosedJinjaBlock("{% set q | upper %}x")).toBe("set")
+    expect(unclosedJinjaBlock("{% set q = 1 | upper %}x")).toBeUndefined()
+    const sql = "{% set q %}{% raw %}{% endset %}{% endraw %}with z as (select 1){% endset %}\nwith a as (select 2) select * from a"
+    expect(detectCtesInText(sql).map((c) => c.name)).toEqual(["a"])
+  })
+
+  it("a dollar-quote tag may hold digits", () => {
+    expect(detectCtesInText("with a as (select $f1$ ) $f1$ as s), b as (select 2) select 1").map((c) => c.name)).toEqual(["a", "b"])
+  })
+
+  it("writes a name with $ or a non-ASCII letter as it was declared", () => {
+    for (const name of ["my$cte", "Ünits"]) {
+      const text = `with ${name} as (select 1) select * from ${name}`
+      const ctes = detectCtesInText(text)
+      expect(buildCountQuery(text, ctes, ctes[0])).toEndWith(`FROM ${name}`)
+    }
   })
 })
 

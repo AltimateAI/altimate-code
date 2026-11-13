@@ -72,7 +72,11 @@ beforeAll(async () => {
   await writeFile(path.join(project, "models", "staging", "dup.sql"), "with b as (select 1) select * from b")
   await writeFile(
     path.join(project, "models", "marts", "twins.sql"),
-    '{% if is_incremental() %}\nwith "Foo" as (select 1 as a), foo as (select 2 as a), keep as (select 3 as a)\nselect * from keep\n{% endif %}\n',
+    'with "Foo" as (select 1 as a), foo as (select 2 as a), keep as (select 3 as a)\nselect * from keep\n',
+  )
+  await writeFile(
+    path.join(project, "models", "marts", "wrapped.sql"),
+    "{% if is_incremental() %}\nwith a as (select 1 as x) select * from a\n{% else %}\nwith b as (select 2 as x) select * from b\n{% endif %}\n",
   )
   await writeFile(
     path.join(project, "models", "marts", "second.sql"),
@@ -85,6 +89,8 @@ beforeAll(async () => {
       nodes: {
         "model.jaffle_shop.customers": { resource_type: "model", name: "customers", original_file_path: "models/marts/customers.sql" },
         "model.jaffle_shop.gone": { resource_type: "model", name: "gone", original_file_path: "models/marts/gone.sql" },
+        "model.jaffle_shop.dup.v1": { resource_type: "model", name: "sales", unique_id: "model.jaffle_shop.sales.v1", original_file_path: "models/marts/dup.sql" },
+        "model.jaffle_shop.sales.v2": { resource_type: "model", name: "sales", unique_id: "model.jaffle_shop.sales.v2", original_file_path: "models/staging/dup.sql" },
         "model.pkg.customers": { resource_type: "model", name: "customers", package_name: "pkg", original_file_path: "models/marts/customers.sql" },
       },
     }),
@@ -293,6 +299,34 @@ describe("dbt_cte_profile run", () => {
     const run = tool.execute({ model: "customers", cte: "orders" }, { ...ctx, abort: controller.signal })
     setTimeout(() => controller.abort(new Error("stopped")), 50)
     await expect(run).rejects.toThrow("stopped")
+  })
+
+  test("a name shared by several versions of one model is refused, not guessed", async () => {
+    const tool = await initTool(DbtCteProfileTool)
+    const result = await tool.execute({ model: "sales" }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("matches 2 models")
+  })
+
+  test("a query that timed out is reported as timed out, since it may still be running", async () => {
+    respond = async () => {
+      throw Object.assign(new Error("exceeded 300000 ms"), { code: "QUERY_TIMEOUT" })
+    }
+    const tool = await initTool(DbtCteProfileTool)
+    const result = await tool.execute({ model: "customers", cte: "orders" }, ctx)
+    expect(result.metadata.success).toBe(false)
+    expect(result.metadata.timedOut).toBe(true)
+    expect(result.output).toContain("may still be running")
+  })
+
+  test("a CTE inside a Jinja block that the query would cut open is refused, and nothing runs", async () => {
+    const tool = await initTool(DbtCteProfileTool)
+    for (const cte of ["a", "b"]) {
+      const result = await tool.execute({ model: "wrapped", cte }, ctx)
+      expect(result.metadata.success).toBe(false)
+      expect(result.output).toContain("Jinja")
+    }
+    expect(queries).toHaveLength(0)
   })
 
   test("runs one count query over the CTE and the earlier ones, limit 1, and reads the count by position", async () => {

@@ -4,9 +4,10 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { loadRawManifest, findModel } from "../native/dbt/helpers"
 import { projectRoot } from "../native/connections/registry"
+import { isQueryTimeoutError } from "@altimateai/drivers/types"
 import { executeQuery } from "../native/query-execution"
 import { dbtAdapterFor } from "./dbt-adapter-access"
-import { buildCountQuery, detectCtes, extractRowCount, stripColumnList, type CteInfo } from "./cte-detect"
+import { buildCountQuery, detectCtes, extractRowCount, stripColumnList, unclosedJinjaBlock, type CteInfo } from "./cte-detect"
 
 /** Folders a model search never enters. */
 const SKIPPED_DIRS = new Set(["target", "dbt_packages", "dbt_modules", "node_modules", "logs", "venv", "site-packages"])
@@ -74,10 +75,18 @@ function modelFile(root: string, model: string): { file?: string; error?: string
   }
   try {
     const manifest = loadRawManifest(path.join(realRoot, "target", "manifest.json"))
-    const node = manifest?.nodes ? findModel(manifest.nodes, model) : null
+    const own = /^name:\s*['"]?([\w-]+)/m.exec(fs.readFileSync(path.join(realRoot, "dbt_project.yml"), "utf-8"))?.[1]
+    let node = manifest?.nodes ? findModel(manifest.nodes, model) : null
+    if (node && !model.startsWith("model.")) {
+      // The project's own model of that name comes before a package's; versions of one model share a name and the manifest can't say which is meant.
+      const named = Object.values<any>(manifest.nodes).filter((n) => n.resource_type === "model" && n.name === model)
+      const mine = named.filter((n) => !own || !n.package_name || n.package_name === own)
+      const pool = mine.length > 0 ? mine : named
+      if (pool.length > 1) return { error: `${model} matches ${pool.length} models (${pool.map((n) => n.unique_id).join(", ")}): pass the path of the one to profile` }
+      node = pool[0]
+    }
     if (node?.original_file_path) {
       // dbt records the path relative to the model's own package: only the project's models can be read here.
-      const own = /^name:\s*['"]?([\w-]+)/m.exec(fs.readFileSync(path.join(realRoot, "dbt_project.yml"), "utf-8"))?.[1]
       if (node.package_name && own && node.package_name !== own) return { error: `${model} belongs to the package ${node.package_name}: pass the path of its .sql file` }
       const candidate = path.resolve(realRoot, node.original_file_path)
       if (inside(realRoot, realpath(candidate)) && fs.existsSync(candidate)) return { file: realpath(candidate) }
@@ -180,7 +189,18 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     }
     const query = buildCountQuery(text, ctes, target)
     const name = stripColumnList(target.name)
-    if (!query) return failure("no query", `${name} is in a second WITH clause of ${args.model}, which has no query of its own to count.`, { model: args.model, cte: name })
+    if (!query) {
+      const block = unclosedJinjaBlock(text.substring(0, target.withClauseStart))
+      return failure(
+        "no query",
+        block
+          ? `${name} sits in a WITH clause of ${args.model} that is one branch of a Jinja {% ${block} %} block, so it has no query of its own to count.`
+          : `${name} is in a second WITH clause of ${args.model}, which has no query of its own to count.`,
+        { model: args.model, cte: name },
+      )
+    }
+    const block = unclosedJinjaBlock(query)
+    if (block) return failure("no query", `${name} is inside a Jinja {% ${block} %} block of ${args.model}, which cannot be cut off at that CTE and stay valid: compile the model and profile the compiled SQL, or move the WITH out of the block.`, { model: args.model, cte: name })
 
     const access = await dbtAdapterFor(ctx)
     if (!access.adapter) return failure("not run", access.reason ?? "the dbt adapter is not available", { model: args.model, cte: name, refusal: access.refusal })
@@ -189,7 +209,7 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     const started = performance.now()
     try {
       // The adapter has no cancel of its own: the run's timeout, budget and abort end the wait, not the query.
-      const result: { data?: Record<string, unknown>[] } = await executeQuery({ type: "dbt" } as any, {}, { signal: ctx.abort, sessionID: ctx.sessionID }, () =>
+      const result: { data?: Record<string, unknown>[] } = await executeQuery({ type: "dbt" }, {}, { signal: ctx.abort, sessionID: ctx.sessionID }, () =>
         adapter.immediatelyExecuteSQLWithLimit(query, `cte_profiler_${name}`, 1),
       )
       const queryMs = Math.round(performance.now() - started)
@@ -202,7 +222,9 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     } catch (e) {
       if (ctx.abort.aborted) throw e
       const message = e instanceof Error ? e.message : String(e)
-      return failure("query failed", `The count query for ${name} failed: ${message}`, { model: args.model, cte: name })
+      // A timeout gives up the wait, not the query: it may still be running on the warehouse.
+      const timedOut = isQueryTimeoutError(e)
+      return failure(timedOut ? "timed out" : "query failed", `The count query for ${name} ${timedOut ? "timed out and may still be running on the warehouse" : "failed"}: ${message}`, { model: args.model, cte: name, ...(timedOut && { timedOut }) })
     }
   },
 })
