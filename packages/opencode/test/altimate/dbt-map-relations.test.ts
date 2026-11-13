@@ -6,7 +6,7 @@
  * that share it, so the matching rules read the qualifiers back from the SQL text.
  */
 import { describe, test, expect, afterEach } from "bun:test"
-import { mkdtempSync, rmSync, writeFileSync } from "fs"
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
 import { Effect } from "effect"
@@ -322,6 +322,37 @@ describe("dbt_map_relations tool", () => {
     const result = await run({ sql: "select * from t", manifest_path: "/nonexistent/manifest.json" })
     expect(result.metadata.success).toBe(false)
     expect(result.output).toContain("/nonexistent/manifest.json")
+  })
+
+  test("without manifest_path the dbt project around the working directory supplies target/manifest.json", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "map-relations-project-")))
+    dirs.push(dir)
+    writeFileSync(join(dir, "dbt_project.yml"), "name: jaffle\n")
+    mkdirSync(join(dir, "target"))
+    writeFileSync(join(dir, "target", "manifest.json"), JSON.stringify(MANIFEST))
+    const cwd = process.cwd()
+    process.chdir(dir)
+    try {
+      const result = await run({ sql: "select * from legacy.thing" })
+      expect(result.metadata.success).toBe(true)
+      expect(result.metadata.manifest_path).toBe(join(dir, "target", "manifest.json"))
+    } finally {
+      process.chdir(cwd)
+    }
+  })
+
+  test("outside a dbt project, without manifest_path, the error says so", async () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "map-relations-bare-")))
+    dirs.push(dir)
+    const cwd = process.cwd()
+    process.chdir(dir)
+    try {
+      const result = await run({ sql: "select * from t" })
+      expect(result.metadata.success).toBe(false)
+      expect(result.output).toBe("No dbt project found here. Run from a dbt project or pass manifest_path.")
+    } finally {
+      process.chdir(cwd)
+    }
   })
 
   test("SQL that does not parse is an error", async () => {

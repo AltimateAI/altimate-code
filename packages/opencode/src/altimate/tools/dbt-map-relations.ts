@@ -159,7 +159,7 @@ function readChain(sql: string, start: number): { raw: string; end: number } | n
       }
       if (i >= n) return null
       i++
-    } else if (/[A-Za-z0-9_$\-]/.test(ch) && (i > start || /[A-Za-z_$]/.test(ch))) {
+    } else if (/[A-Za-z0-9_$-]/.test(ch) && (i > start || /[A-Za-z_$]/.test(ch))) {
       while (i < n && /[A-Za-z0-9_$]/.test(sql[i])) i++
       // BigQuery project ids may contain hyphens (`my-proj.ds.tbl` unquoted).
       while (sql[i] === "-" && /[A-Za-z0-9_]/.test(sql[i + 1] ?? "")) {
@@ -414,6 +414,7 @@ export const DbtMapRelationsTool = Tool.define("dbt_map_relations", {
     })
     try {
       const manifestPath = args.manifest_path ?? (await defaultManifestPath())
+      if (!manifestPath) return fail("No dbt project found here. Run from a dbt project or pass manifest_path.")
       const manifest = loadRawManifest(manifestPath)
       if (!manifest) return fail(`No manifest at ${manifestPath}. Run \`dbt parse\` or pass manifest_path.`)
       const dialect = args.dialect || detectDialect(manifest)
@@ -437,13 +438,14 @@ export const DbtMapRelationsTool = Tool.define("dbt_map_relations", {
   },
 })
 
-async function defaultManifestPath(): Promise<string> {
+async function defaultManifestPath(): Promise<string | null> {
   const { findProjectRoot } = await import("../../../../dbt-tools/src/config")
   const found = findProjectRoot(projectRoot())
   const root = found ?? (await (await import("../native/connections/register")).getDbtProjectRoot())
-  let real = root ?? ""
+  if (!root) return null
+  let real = root
   try {
-    real = root ? fs.realpathSync(root) : ""
+    real = fs.realpathSync(root)
   } catch {}
   return path.join(real, "target", "manifest.json")
 }
