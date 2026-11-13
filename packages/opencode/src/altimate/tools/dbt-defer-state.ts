@@ -41,25 +41,29 @@ function expandVariables(value: string, workspaceFolder: string): string {
     .replace(/\$\{workspaceFolder\}/g, () => workspaceFolder)
 }
 
-function readSettings(file: string): Record<string, unknown> | undefined {
+const UNREADABLE = Symbol("unreadable settings")
+
+/** The parsed settings; undefined when there is no file, UNREADABLE when there is one that cannot be trusted. */
+function readSettings(file: string): Record<string, unknown> | typeof UNREADABLE | undefined {
   let text: string
   try {
     text = fs.readFileSync(file, "utf-8")
-  } catch {
-    return undefined
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "ENOENT" || (err as NodeJS.ErrnoException).code === "ENOTDIR" ? undefined : UNREADABLE
   }
   const errors: ParseError[] = []
   // .vscode/settings.json allows comments and trailing commas.
   const parsed = parseJsonc(text, errors, { allowTrailingComma: true })
   // A file that does not parse cannot be trusted to say defer is on.
-  if (errors.length > 0) return undefined
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined
+  if (errors.length > 0) return UNREADABLE
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return UNREADABLE
   return parsed as Record<string, unknown>
 }
 
 /**
  * Find the entry for the project. The workspace folder is the nearest ancestor of the project (or the
- * project itself) whose `.vscode/settings.json` has an entry under the project's relative path.
+ * project itself) whose `.vscode/settings.json` has an entry under the project's relative path. A settings
+ * file that cannot be read or parsed ends the search.
  */
 export function findDeferSetting(projectDir: string, workspaceDir?: string) {
   const start = path.resolve(projectDir)
@@ -74,6 +78,8 @@ export function findDeferSetting(projectDir: string, workspaceDir?: string) {
   for (const folder of candidates) {
     const file = path.join(folder, ".vscode", "settings.json")
     const settings = readSettings(file)
+    // The nearest settings file that cannot be read ends the search: an outer folder's entry must not stand in for it.
+    if (settings === UNREADABLE) return undefined
     const perProject = settings?.[SETTING]
     if (!perProject || typeof perProject !== "object") continue
     const key = path.relative(folder, start)
@@ -122,6 +128,14 @@ export async function readProfileTargets(projectDir: string) {
   return out
 }
 
+function isFile(file: string): boolean {
+  try {
+    return fs.statSync(file).isFile()
+  } catch {
+    return false
+  }
+}
+
 function isDirectory(dir: string): boolean {
   try {
     return fs.statSync(dir).isDirectory()
@@ -162,12 +176,13 @@ export async function resolveDeferState(projectDir: string, workspaceDir?: strin
   if (typeof raw !== "string" || raw.trim() === "") {
     return { ...result, reason: "manifestPathForDeferral is not set." }
   }
-  const expanded = expandVariables(raw, found.folder)
+  // Power User expands ${workspaceFolder} to the dbt project's own folder.
+  const expanded = expandVariables(raw, root)
   const stateDir = path.isAbsolute(expanded) ? expanded : path.resolve(root, expanded)
   if (!isDirectory(stateDir)) {
     return { ...result, reason: `manifestPathForDeferral is not a directory: ${stateDir}` }
   }
-  if (!fs.existsSync(path.join(stateDir, "manifest.json"))) {
+  if (!isFile(path.join(stateDir, "manifest.json"))) {
     return { ...result, reason: `No manifest.json in manifestPathForDeferral: ${stateDir}` }
   }
   return { ...result, enabled: wanted, stateDir }
