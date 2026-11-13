@@ -14,6 +14,9 @@ import { dbtAdapterFor } from "./dbt-adapter-access"
 const FINAL_SELECT = "__final_select__"
 
 export type SqlGraphNode = {
+  /** Unique in the graph; the edges name nodes by it. */
+  id: string
+  /** What the node is called on screen; two nodes can share one (a relation used twice). */
   name: string
   /** The backend's node type ("cte", "table", ...); a relation that maps to a dbt node carries its resource type ("model", "source", ...). */
   type: string
@@ -112,18 +115,35 @@ export function mergeColumns(
 export function remapSqlLineage(
   response: SqlLineageResponse,
   model: { name: string; uniqueId: string; resourceType: string },
-  parents: { uniqueId: string; alias?: string; sourceTable?: string; resourceType: string }[],
+  parents: {
+    uniqueId: string
+    alias?: string
+    sourceTable?: string
+    schema?: string
+    database?: string
+    resourceType: string
+  }[],
 ): SqlGraph {
   const details = { ...response.details }
   const mapping: Record<string, { nodeId: string; type: string }> = {}
+  // A relation that more than one parent could be is tied to none: an arbitrary dbt node would be shown as the real one.
+  const claimed = new Map<string, Set<string>>()
   for (const p of parents) {
-    // A source's relation is its table name; any other node's, its alias.
+    // A source's relation is its table's identifier; any other node's, its alias.
     const wanted = (p.sourceTable ?? p.alias ?? "").toLowerCase()
     if (!wanted) continue
-    const key = Object.keys(details).find((k) => details[k].type === "table" && k.toLowerCase() === wanted)
-    if (key) mapping[key] = { nodeId: p.uniqueId, type: p.resourceType }
+    // The backend keys a relation by its location and a per-occurrence suffix, so the match is on its name, in the parent's database and schema when both say one;
+    // every occurrence of the relation in the SQL stands for the same dbt node.
+    for (const [k, d] of Object.entries(details)) {
+      if (d.type !== "table" || (d.name ?? k).toLowerCase() !== wanted) continue
+      if (d.schema && p.schema && d.schema.toLowerCase() !== p.schema.toLowerCase()) continue
+      if (d.db && p.database && d.db.toLowerCase() !== p.database.toLowerCase()) continue
+      claimed.set(k, (claimed.get(k) ?? new Set()).add(p.uniqueId))
+      mapping[k] = { nodeId: p.uniqueId, type: p.resourceType }
+    }
   }
-  // A CTE or relation the SQL names like the model (`with customers as (…)`, `{{ this }}`) keeps its node: the model's own select is told apart.
+  for (const [k, owners] of claimed) if (owners.size > 1) delete mapping[k]
+  // A CTE the SQL names like the model (`with customers as (…)`) keeps its node: the model's own select is told apart.
   const finalKey = Object.hasOwn(details, model.name) ? `${model.name} (final select)` : model.name
   mapping[finalKey] = { nodeId: model.uniqueId, type: model.resourceType }
   const edges = response.tableEdges.map(
@@ -136,14 +156,29 @@ export function remapSqlLineage(
   const nodes: SqlGraphNode[] = Object.entries(details).map(([key, d]) => {
     const merged = { ...d, ...mapping[key] }
     return {
+      // The key is the node's identity (edges use it); the name is only what is shown.
+      id: key,
       name: key === finalKey ? finalKey : (merged.name ?? key),
       type: merged.type,
       ...(merged.nodeId ? { nodeId: merged.nodeId } : {}),
-      sql: merged.sql ?? "",
+      sql: merged.sql ?? merged.expression ?? "",
       columns: merged.columns ?? [],
     }
   })
   return { nodes, edges }
+}
+
+/** The promise's result, or an abort as soon as the signal fires: the backend call itself is bounded by the API client's own timeout. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    work.catch(() => {})
+    return Promise.reject(signal.reason)
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason)
+    signal.addEventListener("abort", onAbort, { once: true })
+    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort))
+  })
 }
 
 /** Compile the model, read its parents' columns, ask the backend, and return the remapped graph. */
@@ -169,7 +204,14 @@ export async function buildSqlGraph(
   const parentIds = adapter.getNonEphemeralParents([node.unique_id])
   const requests: { unique_id: string; name: string; resource_type: string; table?: string }[] = []
   const infos: SqlLineageModelNode[] = []
-  const parents: { uniqueId: string; alias?: string; sourceTable?: string; resourceType: string }[] = []
+  const parents: {
+    uniqueId: string
+    alias?: string
+    sourceTable?: string
+    schema?: string
+    database?: string
+    resourceType: string
+  }[] = []
   for (const id of parentIds) {
     const parts = id.split(".")
     if (parts[0] === "source") {
@@ -186,7 +228,13 @@ export async function buildSqlGraph(
         columns: table.columns,
         path: table.path,
       })
-      parents.push({ uniqueId: id, sourceTable: table.name, resourceType: "source" })
+      parents.push({
+        uniqueId: id,
+        sourceTable: table.identifier || table.name,
+        schema: source.schema,
+        database: source.database,
+        resourceType: "source",
+      })
       continue
     }
     const parent = manifest.nodeMetaMap.lookupByUniqueId(id)
@@ -201,22 +249,32 @@ export async function buildSqlGraph(
       columns: parent.columns,
       path: parent.path,
     })
-    parents.push({ uniqueId: id, alias: parent.alias, resourceType: parent.resource_type })
+    parents.push({
+      uniqueId: id,
+      alias: parent.alias,
+      schema: parent.schema,
+      database: parent.database,
+      resourceType: parent.resource_type,
+    })
   }
   // The warehouse metadata read: once per call, only for the parents.
   const fromDb = requests.length ? await adapter.getBulkSchemaFromDB(requests, signal) : {}
   signal.throwIfAborted()
   const hash = crypto.createHash("md5").update(compiled).digest("hex")
   const dialect = adapter.getAdapterType()
-  const response = await deps.fetchLineage({
-    compiled_sql: compiled,
-    model_info: infos.map((n) => ({
-      model_node: { ...n, columns: mergeColumns(n.columns, fromDb[n.uniqueId], dialect) },
-    })),
-    model_dialect: dialect,
-    session_id: `${deps.sessionId}-${hash}`,
-  })
+  const response = await untilAborted(
+    deps.fetchLineage({
+      compiled_sql: compiled,
+      model_info: infos.map((n) => ({
+        model_node: { ...n, columns: mergeColumns(n.columns, fromDb[n.uniqueId], dialect) },
+      })),
+      model_dialect: dialect,
+      session_id: `${deps.sessionId}-${hash}`,
+    }),
+    signal,
+  )
   signal.throwIfAborted()
+  if (!Array.isArray(response?.tableEdges) || !response.details) throw new Error("the backend returned no SQL graph")
   return remapSqlLineage(
     response,
     { name: node.name, uniqueId: node.unique_id, resourceType: node.resource_type },
@@ -227,10 +285,11 @@ export async function buildSqlGraph(
 /** The graph as a list, one line per node: its type, its column count and its inputs. */
 export function formatSqlGraph(model: string, graph: SqlGraph): string {
   const inputs = new Map<string, string[]>()
-  for (const [from, to] of graph.edges) inputs.set(to, [...(inputs.get(to) ?? []), from])
+  const nameOf = new Map(graph.nodes.map((n) => [n.id, n.name]))
+  for (const [from, to] of graph.edges) inputs.set(to, [...(inputs.get(to) ?? []), nameOf.get(from) ?? from])
   const lines = [`SQL graph for ${model}: ${graph.nodes.length} nodes, ${graph.edges.length} edges`]
   for (const n of graph.nodes) {
-    const from = inputs.get(n.name)
+    const from = inputs.get(n.id)
     lines.push(
       `- ${n.name} (${n.type}${n.nodeId ? `, ${n.nodeId}` : ""}): ${n.columns.length} columns${from?.length ? `, from ${from.join(", ")}` : ""}`,
     )
@@ -249,7 +308,7 @@ export const DbtSqlGraphTool = Tool.define("dbt_sql_graph", {
     if (!access.adapter) {
       return {
         title: "dbt SQL graph: not available",
-        metadata: { success: false, model: args.model, reason: access.reason },
+        metadata: { success: false, model: args.model, reason: access.reason, error: access.reason },
         output: `Not available: ${access.reason}`,
       }
     }

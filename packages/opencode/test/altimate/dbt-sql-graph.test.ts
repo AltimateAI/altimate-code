@@ -3,12 +3,22 @@
 // dbt_sql_graph: the request built from the compiled model and its parents' columns, and the
 // remap of the backend's reply (`__final_select__` to the model's node, relation nodes to dbt unique ids).
 // The adapter and the endpoint are fakes, so no dbt, warehouse or backend is involved.
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
+import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { realpathSync } from "node:fs"
+import os from "node:os"
+import path from "node:path"
+import { Effect } from "effect"
+import { SessionID, MessageID } from "@/session/schema"
+import type { Tool } from "@/tool/tool"
+import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
+import { initTool } from "./tool-fixture"
 import {
   buildSqlGraph,
   formatSqlGraph,
   mergeColumns,
   remapSqlLineage,
+  DbtSqlGraphTool,
   type SqlGraphAdapter,
 } from "@/altimate/tools/dbt-sql-graph"
 import type { SqlLineageRequest, SqlLineageResponse } from "@/altimate/api/sql-lineage"
@@ -84,7 +94,7 @@ const reply: SqlLineageResponse = {
     ["stg_customers", "__final_select__"],
   ],
   details: {
-    raw_orders: { name: "raw_orders", type: "table", sql: "", columns: [{ name: "id" }, { name: "amount" }] },
+    raw_orders: { name: "RAW_ORDERS_T", type: "table", columns: [{ name: "id" }, { name: "amount" }] },
     o: { name: "o", type: "cte", sql: "select * from raw.orders", columns: [{ name: "id" }] },
     stg_customers: { name: "stg_customers", type: "table", sql: "", columns: [{ name: "id" }, { name: "name" }] },
     __final_select__: { name: "__final_select__", type: "final", sql: "select * from o", columns: [{ name: "id" }] },
@@ -163,7 +173,7 @@ describe("mergeColumns", () => {
 
 describe("remapSqlLineage", () => {
   const parents = [
-    { uniqueId: "source.shop.raw.raw_orders", sourceTable: "raw_orders", resourceType: "source" },
+    { uniqueId: "source.shop.raw.raw_orders", sourceTable: "RAW_ORDERS_T", resourceType: "source" },
     { uniqueId: "model.shop.stg_customers", alias: "STG_CUSTOMERS", resourceType: "model" },
   ]
   const graph = remapSqlLineage(
@@ -178,20 +188,41 @@ describe("remapSqlLineage", () => {
       ["o", "orders"],
       ["stg_customers", "orders"],
     ])
-    expect(graph.nodes.map((n) => n.name)).toEqual(["raw_orders", "o", "stg_customers", "orders"])
+    expect(graph.nodes.map((n) => n.id)).toEqual(["raw_orders", "o", "stg_customers", "orders"])
     expect(JSON.stringify(graph)).not.toContain("__final_select__")
   })
 
   test("ties table nodes to dbt unique ids, case-insensitively, and the model to itself", () => {
-    const byName = Object.fromEntries(graph.nodes.map((n) => [n.name, n]))
-    expect(byName.raw_orders).toMatchObject({ nodeId: "source.shop.raw.raw_orders", type: "source" })
-    expect(byName.stg_customers).toMatchObject({ nodeId: "model.shop.stg_customers", type: "model" })
-    expect(byName.orders).toMatchObject({ nodeId: "model.shop.orders", type: "model", sql: "select * from o" })
+    const byId = Object.fromEntries(graph.nodes.map((n) => [n.id, n]))
+    expect(byId.raw_orders).toEqual({
+      id: "raw_orders",
+      name: "RAW_ORDERS_T",
+      type: "source",
+      nodeId: "source.shop.raw.raw_orders",
+      sql: "",
+      columns: [{ name: "id" }, { name: "amount" }],
+    })
+    expect(byId.stg_customers).toEqual({
+      id: "stg_customers",
+      name: "stg_customers",
+      type: "model",
+      nodeId: "model.shop.stg_customers",
+      sql: "",
+      columns: [{ name: "id" }, { name: "name" }],
+    })
+    expect(byId.orders).toEqual({
+      id: "orders",
+      name: "orders",
+      type: "model",
+      nodeId: "model.shop.orders",
+      sql: "select * from o",
+      columns: [{ name: "id" }],
+    })
   })
 
   test("leaves CTEs unmapped and drops the layout positions", () => {
-    const cte = graph.nodes.find((n) => n.name === "o")!
-    expect(cte).toEqual({ name: "o", type: "cte", sql: "select * from raw.orders", columns: [{ name: "id" }] })
+    const cte = graph.nodes.find((n) => n.id === "o")!
+    expect(cte).toEqual({ id: "o", name: "o", type: "cte", sql: "select * from raw.orders", columns: [{ name: "id" }] })
     expect(graph).not.toHaveProperty("nodePositions")
   })
 
@@ -213,9 +244,10 @@ describe("remapSqlLineage", () => {
       ["orders", "orders (final select)"],
     ])
     expect(out.nodes).toEqual([
-      { name: "stg_customers", type: "table", sql: "", columns: [] },
-      { name: "orders", type: "cte", sql: "select * from stg_customers", columns: [{ name: "id" }] },
+      { id: "stg_customers", name: "stg_customers", type: "table", sql: "", columns: [] },
+      { id: "orders", name: "orders", type: "cte", sql: "select * from stg_customers", columns: [{ name: "id" }] },
       {
+        id: "orders (final select)",
         name: "orders (final select)",
         type: "model",
         nodeId: "model.shop.orders",
@@ -317,7 +349,7 @@ describe("buildSqlGraph", () => {
     ])
     expect(graph.edges).toContainEqual(["o", "orders"])
     expect(graph.nodes.find((n) => n.name === "orders")?.nodeId).toBe("model.shop.orders")
-    expect(graph.nodes.find((n) => n.name === "raw_orders")?.nodeId).toBe("source.shop.raw.raw_orders")
+    expect(graph.nodes.find((n) => n.id === "raw_orders")?.nodeId).toBe("source.shop.raw.raw_orders")
   })
 
   test("accepts a unique_id and resolves a project-relative path against the project root", async () => {
@@ -437,6 +469,223 @@ describe("formatSqlGraph", () => {
     const text = formatSqlGraph("orders", graph)
     expect(text).toContain("4 nodes, 3 edges")
     expect(text).toContain("- orders (model, model.shop.orders): 1 columns, from o, stg_customers")
-    expect(text).toContain("- o (cte): 1 columns, from raw_orders")
+    expect(text).toContain("- o (cte): 1 columns, from RAW_ORDERS_T")
+  })
+})
+
+describe("the backend's real node shapes", () => {
+  // Relations are keyed by location and a per-occurrence suffix, and carry `name`, `db` and `schema`; joins, filters and the like have no name and carry
+  // `expression` instead of `sql`.
+  const real: SqlLineageResponse = {
+    tableEdges: [
+      ["analytics.customers_111", "LEFT_JOIN_9"],
+      ["raw.customers_222", "LEFT_JOIN_9"],
+      ["LEFT_JOIN_9", "__final_select__"],
+      ["analytics.customers_111", "WHERE_7"],
+      ["WHERE_7", "__final_select__"],
+    ],
+    details: {
+      "analytics.customers_111": {
+        name: "customers",
+        type: "table",
+        expression: "analytics.customers",
+        db: "db",
+        schema: "analytics",
+        columns: [],
+      },
+      "raw.customers_222": {
+        name: "customers",
+        type: "table",
+        expression: "raw.customers",
+        db: "db",
+        schema: "raw",
+        columns: [],
+      },
+      LEFT_JOIN_9: { type: "LEFT_JOIN", expression: "LEFT JOIN raw.customers ON 1 = 1", columns: [] },
+      WHERE_7: { type: "FILTER", expression: "WHERE amount > 0" },
+      __final_select__: { name: "__final_select__", type: "final", sql: "select 1", columns: [{ name: "id" }] },
+    },
+  }
+  const graph = remapSqlLineage(real, { name: "orders", uniqueId: "model.shop.orders", resourceType: "model" }, [
+    { uniqueId: "model.shop.customers", alias: "customers", schema: "analytics", resourceType: "model" },
+    { uniqueId: "source.shop.raw.customers", sourceTable: "customers", schema: "raw", resourceType: "source" },
+  ])
+
+  test("every edge ends at a node id, though two relations share a name", () => {
+    const ids = graph.nodes.map((n) => n.id)
+    expect(new Set(ids).size).toBe(ids.length)
+    for (const edge of graph.edges) for (const end of edge) expect(ids).toContain(end)
+    expect(graph.nodes.filter((n) => n.name === "customers")).toHaveLength(2)
+  })
+
+  test("a relation is tied to the dbt node in its own schema, and a join or filter keeps its SQL", () => {
+    const byId = Object.fromEntries(graph.nodes.map((n) => [n.id, n]))
+    expect(byId["analytics.customers_111"]).toMatchObject({
+      nodeId: "model.shop.customers",
+      type: "model",
+      sql: "analytics.customers",
+    })
+    expect(byId["raw.customers_222"]).toMatchObject({ nodeId: "source.shop.raw.customers", type: "source" })
+    expect(byId.LEFT_JOIN_9).toEqual({
+      id: "LEFT_JOIN_9",
+      name: "LEFT_JOIN_9",
+      type: "LEFT_JOIN",
+      sql: "LEFT JOIN raw.customers ON 1 = 1",
+      columns: [],
+    })
+    expect(byId.WHERE_7.sql).toBe("WHERE amount > 0")
+  })
+
+  test("two relations of one name and schema in different databases are told apart by the database", () => {
+    const twoDbs: SqlLineageResponse = {
+      tableEdges: [],
+      details: {
+        "a.raw.customers_1": { name: "customers", type: "table", db: "a", schema: "raw" },
+        "b.raw.customers_2": { name: "customers", type: "table", db: "b", schema: "raw" },
+      },
+    }
+    const parentsIn = (first: string, second: string) => [
+      {
+        uniqueId: `source.p.${first}.customers`,
+        sourceTable: "customers",
+        schema: "raw",
+        database: first,
+        resourceType: "source",
+      },
+      {
+        uniqueId: `source.p.${second}.customers`,
+        sourceTable: "customers",
+        schema: "raw",
+        database: second,
+        resourceType: "source",
+      },
+    ]
+    const model = { name: "orders", uniqueId: "model.shop.orders", resourceType: "model" }
+    for (const order of [parentsIn("a", "b"), parentsIn("b", "a")]) {
+      const out = remapSqlLineage(twoDbs, model, order)
+      expect(out.nodes.map((n) => n.nodeId)).toEqual(["source.p.a.customers", "source.p.b.customers"])
+    }
+  })
+
+  test("a relation two parents could both be is tied to neither, whatever the parent order", () => {
+    const ambiguous: SqlLineageResponse = {
+      tableEdges: [],
+      details: { "raw.customers_1": { name: "customers", type: "table", schema: "raw" } },
+    }
+    const model = { name: "orders", uniqueId: "model.shop.orders", resourceType: "model" }
+    const a = { uniqueId: "source.p.raw.customers", sourceTable: "customers", schema: "raw", resourceType: "source" }
+    const b = { uniqueId: "model.p.customers", alias: "customers", schema: "raw", resourceType: "model" }
+    for (const order of [
+      [a, b],
+      [b, a],
+    ]) {
+      const out = remapSqlLineage(ambiguous, model, order)
+      expect(out.nodes).toEqual([{ id: "raw.customers_1", name: "customers", type: "table", sql: "", columns: [] }])
+    }
+  })
+
+  test("every occurrence of one relation in the SQL is tied to its dbt node", () => {
+    const twice: SqlLineageResponse = {
+      tableEdges: [],
+      details: {
+        "analytics.customers_1": { name: "customers", type: "table", schema: "analytics" },
+        "analytics.customers_2": { name: "customers", type: "table", schema: "analytics" },
+      },
+    }
+    const out = remapSqlLineage(twice, { name: "orders", uniqueId: "model.shop.orders", resourceType: "model" }, [
+      { uniqueId: "model.shop.customers", alias: "customers", schema: "analytics", resourceType: "model" },
+    ])
+    expect(out.nodes.map((n) => n.nodeId)).toEqual(["model.shop.customers", "model.shop.customers"])
+  })
+})
+
+describe("a cancel while the backend is answering", () => {
+  test("ends the call at once, and a late answer is ignored", async () => {
+    const controller = new AbortController()
+    let release!: (r: SqlLineageResponse) => void
+    const slow = new Promise<SqlLineageResponse>((resolve) => (release = resolve))
+    const call = buildSqlGraph(
+      adapter(),
+      "orders",
+      { fetchLineage: () => slow, readFile: (f) => f, projectRoot: "/proj", sessionId: "ses_1" },
+      controller.signal,
+    )
+    const settled = call.then(
+      () => "answered",
+      () => "aborted",
+    )
+    await Bun.sleep(10)
+    controller.abort()
+    expect(await settled).toBe("aborted")
+    release(reply)
+  })
+
+  test("a reply with no graph is a clear failure, not a crash", async () => {
+    const deps = {
+      fetchLineage: async () => ({}) as SqlLineageResponse,
+      readFile: (f: string) => f,
+      projectRoot: "/proj",
+      sessionId: "ses_1",
+    }
+    await expect(buildSqlGraph(adapter(), "orders", deps, signal)).rejects.toThrow("the backend returned no SQL graph")
+  })
+})
+
+describe("the tool's own answer", () => {
+  const ctx: Tool.Context = {
+    sessionID: SessionID.make("ses_sql_graph"),
+    messageID: MessageID.make("msg_sql_graph"),
+    agent: "analyst",
+    abort: new AbortController().signal,
+    messages: [],
+    metadata: () => Effect.void,
+    ask: () => Effect.void,
+  }
+
+  afterEach(() => {
+    resetDbtAdapter()
+    delete dbtAdapterInternals.readConfig
+    delete dbtAdapterInternals.create
+  })
+
+  test("a read-only call is a failure the CLI reports as one: success false and an error", async () => {
+    const tool = await initTool(DbtSqlGraphTool as any)
+    const result = await tool.execute({ model: "orders" }, { ...ctx, extra: { forceReadOnly: true } })
+    expect(result.metadata).toEqual({
+      success: false,
+      model: "orders",
+      reason: expect.stringContaining("--allow-write"),
+      error: expect.stringContaining("--allow-write"),
+      truncated: false,
+    })
+    expect(result.output).toContain("Not available")
+  })
+
+  test("a model the manifest lacks is a failure with the reason", async () => {
+    const project = realpathSync(await mkdtemp(path.join(os.tmpdir(), "dbt-sql-graph-")))
+    await writeFile(path.join(project, "dbt_project.yml"), "name: shop\n")
+    dbtAdapterInternals.readConfig = async () => ({
+      projectRoot: project,
+      pythonPath: "python3",
+      dbtIntegration: "corecommand",
+      queryLimit: 500,
+    })
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      dispose: async () => {},
+      parseManifest: async () => ({
+        nodeMetaMap: { lookupByUniqueId: () => undefined, lookupByBaseName: () => undefined },
+        sourceMetaMap: { get: () => undefined },
+      }),
+    })
+    const tool = await initTool(DbtSqlGraphTool as any)
+    const result = await tool
+      .execute({ model: "nope" }, ctx)
+      .finally(() => rm(project, { recursive: true, force: true }))
+    expect(result.metadata).toMatchObject({
+      success: false,
+      model: "nope",
+      error: "no model named nope in the manifest",
+    })
   })
 })

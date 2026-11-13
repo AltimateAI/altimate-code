@@ -18,13 +18,21 @@ export type SqlLineageRequest = {
   session_id: string
 }
 
+/**
+ * One node of the backend's graph, keyed in `details` by an id that edges use. A CTE or the final select carries `sql`; a relation, join, filter, group, sort or
+ * subquery carries `expression`. A relation, subquery, CTE and the final select have a `name`; a join, filter, group or sort has none.
+ */
 export type SqlLineageNodeDetails = {
-  name: string
+  name?: string
   type: string
   nodeType?: string
   nodeId?: string
-  sql: string
-  columns: { name: string; datatype?: string; expression?: string }[]
+  sql?: string
+  expression?: string
+  /** A relation's warehouse database (catalog) and schema. */
+  db?: string
+  schema?: string
+  columns?: { name: string; datatype?: string; expression?: string }[]
 }
 
 export type SqlLineageResponse = {
