@@ -228,7 +228,12 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     if (parsed.error) return failure("failed", `DataPilot failed: ${parsed.detail ?? parsed.error}`)
     if (run.code !== 0 || !parsed.model_insights || typeof parsed.model_insights !== "object")
       return failure("failed", `DataPilot gave no insights (exit ${run.code}).${run.stderr ? `\n${run.stderr.slice(-2000)}` : ""}`)
-    const insights = flattenInsights(parsed.model_insights, root, parsed.nodes, parsed.project)
+    // Paths from the folder as the system names it (`/tmp` is `/private/tmp` on macOS), the way an editor's cwd is.
+    let realRoot = root
+    try {
+      realRoot = fs.realpathSync(root)
+    } catch {}
+    const insights = flattenInsights(parsed.model_insights, realRoot, parsed.nodes, parsed.project)
     const lines = insights.slice(0, LISTED_LINES).map((i) => `- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`)
     return {
       title: `dbt_health: ${insights.length} insight${insights.length === 1 ? "" : "s"}`,

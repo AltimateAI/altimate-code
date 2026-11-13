@@ -1,7 +1,7 @@
 // dbt_health: the DataPilot run through the project's dbt adapter. The adapter and the Python run are
 // replaced through their seams, so these tests need no dbt, no Python and no DataPilot.
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import { Effect } from "effect"
@@ -81,7 +81,8 @@ let python: { calls: { python: string; args: string[]; cwd: string }[]; stdout: 
 const originals = { ...dbtHealthInternals }
 
 beforeAll(async () => {
-  project = await mkdtemp(path.join(os.tmpdir(), "dbt-health-"))
+  // The folder as the system names it: the tool reports files under that name.
+  project = await realpath(await mkdtemp(path.join(os.tmpdir(), "dbt-health-")))
   await writeFile(path.join(project, "dbt_project.yml"), "name: shop\n")
   await mkdir(path.join(project, "target"), { recursive: true })
   await writeFile(path.join(project, "target", "manifest.json"), "{}")
@@ -199,6 +200,21 @@ describe("dbt_health", () => {
     dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, dbtIntegration: "corecommand", queryLimit: 500 })
     await run()
     expect(python.calls[0].python).toBe("/discovered/python")
+  })
+
+  test("names a model's files under the real folder when the project is reached through a symlink", async () => {
+    const link = path.join(await mkdtemp(path.join(os.tmpdir(), "dbt-health-link-")), "project")
+    await symlink(project, link)
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => link,
+      getManifestPath: () => path.join(project, "target", "manifest.json"),
+      parseManifest: async () => parsed,
+      dispose: async () => {},
+    })
+    const result = await run()
+    expect(result.metadata.insights[0].file).toBe(path.join(project, "models", "staging", "stg_orders.sql"))
+    await rm(path.dirname(link), { recursive: true, force: true })
   })
 
   test("rebuilds the manifest, and waits for it, before it parses and reads it", async () => {
