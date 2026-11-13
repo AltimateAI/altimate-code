@@ -72,6 +72,9 @@ export namespace LLM {
     // altimate_change start — upstream_fix: keep ambient context outside the reusable system prefix
     environment?: string[]
     // altimate_change end
+    // altimate_change start — upstream_fix: step-only reminders kept out of the environment message
+    reminders?: string[]
+    // altimate_change end
     abort: AbortSignal
     messages: ModelMessage[]
     small?: boolean
@@ -158,13 +161,19 @@ export namespace LLM {
     )
 
     // altimate_change start — upstream_fix: keep per-session environment last. Providers with explicit
-    // cache breakpoints get it as its own trailing message (after the marked prefix); others keep a
-    // single system message with the environment at the end. Either way plugins still see it.
-    const environment = input.environment?.length ? input.environment.join("\n") : undefined
-    const splitEnvironment = environment !== undefined && ProviderTransform.usesExplicitCacheBreakpoints(input.model)
-    if (environment !== undefined) {
-      if (splitEnvironment) system.push(environment)
-      else system[0] = [system[0], environment].filter((x) => x).join("\n")
+    // cache breakpoints get it as its own trailing message (after the marked prefix), and step-only
+    // reminders (task pin, plan switch) as one more message after it: the environment message carries
+    // the last system breakpoint, so it stays byte-identical whether or not a reminder is present.
+    // Others keep a single system message with the environment, then the reminders, at the end.
+    // Either way plugins still see them.
+    const ambient = [...(input.environment ?? []), ...(input.reminders ?? [])]
+    const splitEnvironment = ambient.length > 0 && ProviderTransform.usesExplicitCacheBreakpoints(input.model)
+    const tail = splitEnvironment
+      ? [input.environment, input.reminders].filter((x) => x?.length).map((x) => x!.join("\n"))
+      : []
+    if (ambient.length) {
+      if (splitEnvironment) system.push(...tail)
+      else system[0] = [system[0], ambient.join("\n")].filter((x) => x).join("\n")
     }
 
     const header = system[0]
@@ -173,13 +182,18 @@ export namespace LLM {
       { sessionID: input.sessionID, model: input.model },
       { system },
     )
-    // rejoin to maintain 2-part structure for caching if header unchanged
-    if (system.length > 2 && system[0] === header) {
+    // rejoin to maintain the header / rest / tail structure for caching if header unchanged
+    if (system.length > 1 + Math.max(tail.length, 1) && system[0] === header) {
       const rest = system.slice(1)
-      const at = splitEnvironment ? rest.lastIndexOf(environment!) : -1
-      if (at >= 0) rest.splice(at, 1)
+      const kept: string[] = []
+      for (const message of tail) {
+        const at = rest.lastIndexOf(message)
+        if (at < 0) continue
+        rest.splice(at, 1)
+        kept.push(message)
+      }
       system.length = 0
-      system.push(header, ...(rest.length ? [rest.join("\n")] : []), ...(at >= 0 ? [environment!] : []))
+      system.push(header, ...(rest.length ? [rest.join("\n")] : []), ...kept)
     }
     // altimate_change end
 

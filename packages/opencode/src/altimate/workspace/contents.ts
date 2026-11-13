@@ -176,7 +176,7 @@ export async function workspaceSkills(directory: string, datamateId: number): Pr
 type Summary = { integrations: string[] | null; memoryEnabled: boolean | null; knowledge: WorkspaceKnowledge | null }
 const UNKNOWN: Summary = { integrations: null, memoryEnabled: null, knowledge: null }
 /** `complete`: everything the response promised was read, so the entry may be reused. */
-type Fetched = { value: Summary; complete: boolean }
+type Fetched = { value: Summary; complete: boolean; failed?: boolean }
 /** Keyed by account AND workspace id: ids are per tenant, so another account's workspace with the
  * same id must never be answered from this cache. */
 const summaries = new Map<string, { at: number; value?: Summary; pending?: Promise<Fetched> }>()
@@ -239,7 +239,7 @@ async function fetchSummary(datamateId: number, creds: Credentials): Promise<Fet
       complete: !(knowledge?.kind === "selected" && knowledge.names === null),
     }
   } catch {
-    return { value: UNKNOWN, complete: false }
+    return { value: UNKNOWN, complete: false, failed: true }
   }
 }
 
@@ -253,10 +253,14 @@ export async function workspaceSummary(datamateId: number, now = Date.now(), wai
   if (hit?.value && now - hit.at < SUMMARY_TTL_MS) return hit.value
   let pending = hit?.pending
   if (!pending) {
+    const previous = hit?.value
     pending = fetchSummary(datamateId, account.creds).then((fetched) => {
+      // A failed refresh keeps the answer it was refreshing, filed with `at: 0` so the next step
+      // retries. Replacing it with "not known" dropped lines from the cached system prefix.
+      const kept: Fetched = fetched.failed && previous ? { value: previous, complete: false } : fetched
       // An incomplete fetch is kept for this step only, so the next step retries.
-      summaries.set(key, { at: fetched.complete ? Date.now() : 0, value: fetched.value })
-      return fetched
+      summaries.set(key, { at: kept.complete ? Date.now() : 0, value: kept.value })
+      return kept
     })
     summaries.set(key, { at: hit?.at ?? 0, value: hit?.value, pending })
   }
