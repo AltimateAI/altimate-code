@@ -21,6 +21,8 @@ export interface CteInfo {
   index: number
   /** Offset of the WITH keyword that opens this CTE's clause. */
   withClauseStart: number
+  /** The clause is `WITH RECURSIVE`. */
+  recursive?: boolean
 }
 
 /** Position just past the string literal, quoted identifier or comment (`--`, block, Jinja) that starts at `pos`; `pos` itself when none does. An unterminated one runs to the end of the text. */
@@ -85,6 +87,23 @@ function findMatchingClosingParen(text: string, openParenPos: number): number {
   return -1
 }
 
+/**
+ * Position just past the Jinja tag at `pos`, and past its whole block when it opens one whose text
+ * is not the model's own SQL (`{% set x %}…{% endset %}`, `{% call %}`, `{% macro %}`): a query
+ * written there is a string for dbt to run, not a CTE of the model.
+ */
+function skipJinjaBlock(text: string, pos: number): number {
+  const close = text.indexOf("%}", pos + 2)
+  if (close === -1) return text.length
+  const tag = /^\{%-?\s*(set|call|macro)\b([^%]*)/.exec(text.substring(pos, close + 2))
+  // `{% set x = … %}` is an inline set, with no block to skip.
+  if (!tag || (tag[1] === "set" && tag[2].includes("="))) return close + 2
+  const end = new RegExp(`\\{%-?\\s*end${tag[1]}\\b[^%]*%\\}`, "g")
+  end.lastIndex = close + 2
+  const found = end.exec(text)
+  return found ? found.index + found[0].length : text.length
+}
+
 /** Every WITH keyword outside comments, strings and parentheses: a WITH inside a CTE body or a subquery belongs to that query, not to the model. */
 function findTopLevelWithKeywords(text: string): number[] {
   const positions: number[] = []
@@ -98,6 +117,10 @@ function findTopLevelWithKeywords(text: string): number[] {
       continue
     }
     const char = text[pos]
+    if (char === "{" && text[pos + 1] === "%") {
+      pos = skipJinjaBlock(text, pos)
+      continue
+    }
     if (char === "(") depth++
     else if (char === ")") depth = Math.max(0, depth - 1)
     else if (depth === 0 && (char === "w" || char === "W") && !/[A-Za-z0-9_$]/.test(text[pos - 1] ?? " ")) {
@@ -123,11 +146,12 @@ function readIdentifier(text: string, pos: number): number {
       if (close === end || text[close - 1] !== char || close - end < 2) return -1
       end = close
     } else if (char === "[") {
-      const close = text.indexOf("]", end + 1)
-      if (close === -1) return -1
-      end = close + 1
+      const bracketed = /\[[^\]\n]{1,256}\]/y
+      bracketed.lastIndex = end
+      if (!bracketed.test(text)) return -1
+      end = bracketed.lastIndex
     } else {
-      const bare = /[A-Za-z_][A-Za-z0-9_]*/y
+      const bare = /[\p{L}_][\p{L}\p{N}_$]*/uy
       bare.lastIndex = end
       if (!bare.test(text)) return -1
       end = bare.lastIndex
@@ -140,9 +164,10 @@ function readIdentifier(text: string, pos: number): number {
 /** The CTEs of the WITH clause that opens at `withPos`: each `name [(columns)] AS (body)`, separated by commas, up to the first thing that is not one. */
 function parseWithClause(text: string, withPos: number, ctes: CteInfo[]): void {
   let pos = skipTrivia(text, withPos + 4, true)
-  const recursive = /recursive\b/iy
-  recursive.lastIndex = pos
-  if (recursive.test(text)) pos = skipTrivia(text, pos + "recursive".length, true)
+  const keyword = /recursive\b/iy
+  keyword.lastIndex = pos
+  const recursive = keyword.test(text)
+  if (recursive) pos = skipTrivia(text, pos + "recursive".length, true)
 
   const asOpen = /as(?:\s+(?:not\s+)?materialized)?\s*\(/iy
   for (let index = 0; ; index++) {
@@ -174,6 +199,7 @@ function parseWithClause(text: string, withPos: number, ctes: CteInfo[]): void {
       queryEnd: close,
       index,
       withClauseStart: withPos,
+      ...(recursive && { recursive }),
     })
     pos = skipTrivia(text, close + 1, true)
     if (text[pos] !== ",") return
@@ -222,7 +248,7 @@ export function buildCountQuery(text: string, ctes: CteInfo[], target: CteInfo):
   const preamble = text.substring(0, target.withClauseStart).trim()
   let query = ""
   if (preamble) query += preamble + "\n\n"
-  query += "WITH " + definitions.join(",\n")
+  query += (target.recursive ? "WITH RECURSIVE " : "WITH ") + definitions.join(",\n")
   query += `\nSELECT COUNT(*) AS _profile_count FROM ${quoteSqlIdentifier(stripColumnList(target.name))}`
   return query
 }
@@ -235,11 +261,4 @@ export function extractRowCount(data: Record<string, unknown>[] | undefined): nu
   if (!data || data.length === 0) return 0
   const first = Object.values(data[0])[0]
   return typeof first === "number" ? first : Number(first) || 0
-}
-
-/** Zero-based line number of an offset. */
-export function lineOf(text: string, offset: number): number {
-  let line = 0
-  for (let i = 0; i < offset && i < text.length; i++) if (text[i] === "\n") line++
-  return line
 }

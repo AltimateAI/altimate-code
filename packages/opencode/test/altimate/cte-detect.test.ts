@@ -3,7 +3,6 @@ import {
   buildCountQuery,
   detectCtes as detectCtesInText,
   extractRowCount,
-  lineOf,
   quoteSqlIdentifier,
   stripColumnList,
   type CteInfo,
@@ -1429,10 +1428,27 @@ select * from last`
     expect(performance.now() - started).toBeLessThan(1000)
   })
 
-  it("reports zero-based lines", () => {
-    const sql = "with a as (select 1),\n  b as (select 2)\nselect * from b"
-    const ctes = detectCtesInText(sql)
-    expect(ctes.map((c) => lineOf(sql, c.nameStart))).toEqual([0, 1])
+  it("keeps WITH RECURSIVE in the count query, and a WITH written inside a Jinja block is not the model's", () => {
+    const recursive = "with recursive r as (select 1 as n union all select n + 1 from r where n < 3) select * from r"
+    const ctes = detectCtesInText(recursive)
+    expect(buildCountQuery(recursive, ctes, ctes[0])).toStartWith("WITH RECURSIVE r as (")
+    const block = "{% set q %}with z as (select 1) select * from z{% endset %}\nwith a as (select 1), b as (select 2) select * from b"
+    const found = detectCtesInText(block)
+    expect(found.map((c) => c.name)).toEqual(["a", "b"])
+    expect(buildCountQuery(block, found, found[1])).toContain("b as (\nselect 2\n)")
+    const inline = "{% set q = 'with z as (select 1)' %}\nwith a as (select 1) select * from a"
+    expect(detectCtesInText(inline).map((c) => c.name)).toEqual(["a"])
+    const macro = "{% macro m() %}with z as (select 1) select * from z{% endmacro %}\nwith a as (select 1) select * from a"
+    expect(detectCtesInText(macro).map((c) => c.name)).toEqual(["a"])
+  })
+
+  it("reads $ and non-ASCII letters in a name, and survives crafted input in linear time", () => {
+    expect(detectCtesInText("with my$cte as (select 1), é_t as (select 2) select * from é_t").map((c) => c.name)).toEqual(["my$cte", "é_t"])
+    for (const unit of ["with [", "with {%", "with ((", "with a as (", "with '", "with /*", "with \"x"]) {
+      const started = performance.now()
+      detectCtesInText(unit.repeat(200_000))
+      expect(performance.now() - started).toBeLessThan(2000)
+    }
   })
 })
 

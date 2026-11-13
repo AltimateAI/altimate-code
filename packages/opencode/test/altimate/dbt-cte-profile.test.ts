@@ -85,6 +85,7 @@ beforeAll(async () => {
       nodes: {
         "model.jaffle_shop.customers": { resource_type: "model", name: "customers", original_file_path: "models/marts/customers.sql" },
         "model.jaffle_shop.gone": { resource_type: "model", name: "gone", original_file_path: "models/marts/gone.sql" },
+        "model.pkg.customers": { resource_type: "model", name: "customers", package_name: "pkg", original_file_path: "models/marts/customers.sql" },
       },
     }),
   )
@@ -168,6 +169,10 @@ describe("dbt_cte_profile model lookup", () => {
     // The manifest knows this model but its file is gone: the name search must not answer for another package's.
     const gone = await tool.execute({ model: "model.jaffle_shop.gone" }, ctx)
     expect(gone.metadata.success).toBe(false)
+    // A package's model is recorded relative to its own package: never read as the project's file of that path.
+    const packaged = await tool.execute({ model: "model.pkg.customers" }, ctx)
+    expect(packaged.metadata.success).toBe(false)
+    expect(packaged.output).toContain("belongs to the package pkg")
   })
 
   test("a folder, or a path that is not a .sql file, is a failure, not a crash", async () => {

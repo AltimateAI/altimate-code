@@ -6,7 +6,7 @@ import { loadRawManifest, findModel } from "../native/dbt/helpers"
 import { projectRoot } from "../native/connections/registry"
 import { executeQuery } from "../native/query-execution"
 import { dbtAdapterFor } from "./dbt-adapter-access"
-import { buildCountQuery, detectCtes, extractRowCount, lineOf, stripColumnList, type CteInfo } from "./cte-detect"
+import { buildCountQuery, detectCtes, extractRowCount, stripColumnList, type CteInfo } from "./cte-detect"
 
 /** Folders a model search never enters. */
 const SKIPPED_DIRS = new Set(["target", "dbt_packages", "dbt_modules", "node_modules", "logs", "venv", "site-packages"])
@@ -28,7 +28,7 @@ function bareName(name: string): string {
 
 function inside(root: string, file: string): boolean {
   const rel = path.relative(root, file)
-  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel)
+  return rel !== "" && rel !== ".." && !rel.startsWith(".." + path.sep) && !path.isAbsolute(rel)
 }
 
 function realpath(p: string): string {
@@ -76,6 +76,9 @@ function modelFile(root: string, model: string): { file?: string; error?: string
     const manifest = loadRawManifest(path.join(realRoot, "target", "manifest.json"))
     const node = manifest?.nodes ? findModel(manifest.nodes, model) : null
     if (node?.original_file_path) {
+      // dbt records the path relative to the model's own package: only the project's models can be read here.
+      const own = /^name:\s*['"]?([\w-]+)/m.exec(fs.readFileSync(path.join(realRoot, "dbt_project.yml"), "utf-8"))?.[1]
+      if (node.package_name && own && node.package_name !== own) return { error: `${model} belongs to the package ${node.package_name}: pass the path of its .sql file` }
       const candidate = path.resolve(realRoot, node.original_file_path)
       if (inside(realRoot, realpath(candidate)) && fs.existsSync(candidate)) return { file: realpath(candidate) }
     }
@@ -131,9 +134,16 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     const file = path.relative(realpath(root), located.file)
 
     if (args.cte === undefined && args.position === undefined) {
+      // The CTEs come in source order: count the lines once, not once per CTE.
+      let line = 1
+      let counted = 0
+      const lineAt = (offset: number) => {
+        for (; counted < offset; counted++) if (text[counted] === "\n") line++
+        return line
+      }
       const list = ctes.map((c, position) => ({
         name: stripColumnList(c.name),
-        line: lineOf(text, c.nameStart) + 1,
+        line: lineAt(c.nameStart),
         index: c.index,
         clause: c.withClauseStart,
         position,
