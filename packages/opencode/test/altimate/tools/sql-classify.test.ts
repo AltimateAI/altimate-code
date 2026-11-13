@@ -582,7 +582,7 @@ describe("each engine's own literal and statement rules", () => {
     ["SELECT s.nextval FROM metrics s", "postgres", "read", false],
     ["SELECT CASE WHEN true THEN truncate SIMILAR TO 'a%' ELSE false END FROM metrics", "postgres", "read", false],
     ["SELECT CASE WHEN a THEN truncate AT TIME ZONE 'UTC' END FROM metrics", "postgres", "read", false],
-    // Without FROM, truncate cannot be a column: END before `;` is a table named end.
+    // TRUNCATE before END and `;` is read as TRUNCATE end (MySQL); with FROM after it, a column.
     ["SELECT CASE WHEN a THEN 1 ELSE truncate END;", "postgres", "write", true],
     ["SELECT CASE WHEN a THEN 1 ELSE truncate END FROM metrics;", "postgres", "read", false],
     ["SELECT * FROM bigquery_execute('p', 'DELETE FROM d.t WHERE true')", "duckdb", "write", false],
@@ -659,6 +659,12 @@ describe("each engine's own literal and statement rules", () => {
         [`CREATE PROCEDURE p() TRUNCATE /*c*/ ${word}.orders`, "mysql", "write", true],
       ]),
     ["CREATE TASK k AS TRUNCATE groups", "snowflake", "write", true],
+    ["CREATE PROCEDURE p() TRUNCATE settings$archive", "mysql", "write", true],
+    ["CREATE PROCEDURE p() TRUNCATE settingsé", "mysql", "write", true],
+    ["CREATE TASK k AS TRUNCATE groups$archive", "snowflake", "write", true],
+    ["CREATE PROCEDURE p() TRUNCATE settings NOWAIT", "mariadb", "write", true],
+    ["CREATE PROCEDURE p() TRUNCATE settings WAIT 5", "mariadb", "write", true],
+    ["CREATE PROCEDURE p() TRUNCATE from$x", "mysql", "write", true],
     ["CREATE TASK k AS TRUNCATE settings", "snowflake", "write", true],
     ["SELECT truncate FROM t ORDER BY truncate DESC", "mysql", "read", false],
     ["SELECT * FROM t ORDER BY a, truncate ASC", "snowflake", "read", false],

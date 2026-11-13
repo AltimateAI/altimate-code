@@ -270,14 +270,15 @@ const CODE_HARD_DENY = new RegExp(
     // are masked to spaces), so each run of whitespace is scanned once.
     // Words reserved in both MySQL and Snowflake (whose routine and task bodies hold an unquoted
     // TRUNCATE) are never a target. Any other clause word can name a table (TRUNCATE settings), so it
-    // counts as a clause only when the statement goes on after it: not before `.`, `;` or the end.
+    // counts as a clause only when the statement goes on after it: not before `.`, `;`, the end or MariaDB's
+    // NOWAIT / WAIT n. A word ends where the identifier does (settings$archive is a name).
     "|\\bTRUNCATE(?<!\\.\\s*TRUNCATE)\\s+(?!(FROM|AS|WHERE|ORDER|GROUP|HAVING|UNION|INTERSECT|INTO|JOIN|INNER|LEFT|RIGHT|" +
-    "CROSS|ON|USING|AND|OR|NOT|IS|IN|LIKE|RLIKE|REGEXP|BETWEEN|THEN|ELSE|WHEN|WITH|FOR|ROWS)\\b|" +
+    "CROSS|ON|USING|AND|OR|NOT|IS|IN|LIKE|RLIKE|REGEXP|BETWEEN|THEN|ELSE|WHEN|WITH|FOR|ROWS)(?![\\w$\\u0080-\\uffff])|" +
     // A sort key (ORDER BY truncate DESC) may end the statement.
-    "(?<=(\\bBY|,)\\s*TRUNCATE\\s+)(ASC|DESC|ASCENDING|DESCENDING)\\b|" +
+    "(?<=(\\bBY|,)\\s*TRUNCATE\\s+)(ASC|DESC|ASCENDING|DESCENDING)(?![\\w$\\u0080-\\uffff])|" +
     "(EXCEPT|MINUS|LIMIT|OFFSET|FETCH|QUALIFY|WINDOW|FULL|OUTER|ILIKE|SIMILAR|AT|COLLATE|ESCAPE|ASC|DESC|NULLS|OVER|FILTER|" +
     "WITHIN|END|DIV|MOD|XOR|OVERLAPS|ISNULL|NOTNULL|GLOB|MATCH|SOUNDS|RANGE|GROUPS|START|CONNECT|SETTINGS|OPTION|OPERATOR|" +
-    "ASCENDING|DESCENDING)\\b(?!\\s*([.;]|$)))[\\w\"`$\\u0080-\\uffff]",
+    "ASCENDING|DESCENDING)(?![\\w$\\u0080-\\uffff])(?!(\\s+(NOWAIT|WAIT\\s+\\d+))?\\s*([.;]|$)))[\\w\"`$\\u0080-\\uffff]",
   "i",
 )
 
@@ -304,8 +305,8 @@ function namesKept(tokens: ReturnType<typeof tokenizeSql>["tokens"]): string {
  * dynamic SQL (EXEC('...'), sp_executesql N'...', EXECUTE IMMEDIATE, PREPARE ... FROM, dblink_exec),
  * or a function, procedure or trigger body created and called in the same call. Each literal is read
  * word by word with its escapes decoded, as uncertain SQL is, so nothing inside it (nested quotes,
- * comments) can separate the words. A statement built by concatenation is not seen, and a custom
- * UESCAPE character is not decoded, so it blocks. */
+ * comments) can separate the words. Each literal is read alone here (classifyAndCheck reads dynamic SQL
+ * across its literals), and a custom UESCAPE character is not decoded, so it blocks. */
 function quotedHardDeny(tokens: ReturnType<typeof tokenizeSql>["tokens"], dialect?: string): boolean {
   // UESCAPE counts with a U&'...' literal: U& in code right before a literal token.
   const unicode = tokens.some(({ kind, text }, i) => kind === "code" && /\bU&$/i.test(text) && tokens[i + 1]?.kind === "literal")
