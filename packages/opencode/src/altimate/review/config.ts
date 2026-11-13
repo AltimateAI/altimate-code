@@ -35,6 +35,21 @@ export const ReviewConfig = z.object({
    * Functions missing on the project's own engine are always reported.
    */
   portability: z.boolean().optional(),
+  /**
+   * CI runs `dbt build` (or `dbt run`) on the PR, so dbt itself fails a model
+   * whose SELECT doesn't match its enforced contract. The review then skips its
+   * own contract-vs-SELECT check instead of repeating CI.
+   */
+  ciRunsDbtBuild: z.boolean().default(false),
+  /**
+   * Opt-in: explicit column lists outside dbt (loaders, exports) that must
+   * track a model's columns. `files` is a repo-relative glob, `pattern` a regex
+   * whose first capture group is the list, `model` the model it mirrors
+   * (omitted = files that mention the model by name).
+   */
+  consumerColumnLists: z
+    .array(z.object({ files: z.string(), pattern: z.string(), model: z.string().optional() }))
+    .default([]),
   /** Allow `--force-tier` (a debug bypass of the risk classifier). Set false
    *  in gate CI so a run cannot skip checks by forcing a lower tier. */
   allowForceTier: z.boolean().default(true),
