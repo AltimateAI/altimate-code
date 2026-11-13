@@ -1077,30 +1077,37 @@ export function describePublish(report: PublishReport): string {
   return `Sent "${name}" for review to ${owner} ${detail}. It reaches the workspace once approved; \`altimate-code workspace review status\` shows where it stands.`
 }
 
+/** Every error this module raises on purpose, with its stable code for clients that explain it in their own words
+ * (the extension's `/workspace publish`). One table, so a refusal never has a message without a code. */
+const PUBLISH_ERRORS: readonly [new (...args: never[]) => Error, string][] = [
+  [NotLinkedError, "not_linked"],
+  [NotConfiguredError, "not_configured"],
+  [CredentialsChangedError, "credentials_changed"],
+  [ManagedSkillError, "managed_skill"],
+  [NotProjectSkillError, "not_project_skill"],
+  [BinaryFileError, "binary_file"],
+  [SymlinkError, "symlink"],
+  [EmptyBundleError, "empty_bundle"],
+  [BundleTooLargeError, "bundle_too_large"],
+  [SkillNameConflictError, "name_conflict"],
+  [SkillChangedElsewhereError, "changed_elsewhere"],
+  [NotWorkspaceOwnerError, "not_workspace_owner"],
+  [AttachFailedError, "attach_failed"],
+  [ReviewDisabledError, "review_disabled"],
+  [TooManyReviewRequestsError, "too_many_requests"],
+  [SubmitFailedError, "submit_failed"],
+]
+
+/** A stable code for an error this module raised on purpose; null for any other error. */
+export function publishErrorCode(err: unknown): string | null {
+  return PUBLISH_ERRORS.find(([type]) => err instanceof type)?.[1] ?? null
+}
+
 /** The message for an error this module raised on purpose, or null for one it
  * did not — a surface shows the former as-is (each already says what to do)
  * and wraps the latter as a failure. */
 export function explainPublishError(err: unknown): string | null {
-  if (
-    err instanceof NotLinkedError ||
-    err instanceof NotConfiguredError ||
-    err instanceof CredentialsChangedError ||
-    err instanceof ManagedSkillError ||
-    err instanceof NotProjectSkillError ||
-    err instanceof BinaryFileError ||
-    err instanceof SymlinkError ||
-    err instanceof EmptyBundleError ||
-    err instanceof BundleTooLargeError ||
-    err instanceof SkillNameConflictError ||
-    err instanceof SkillChangedElsewhereError ||
-    err instanceof NotWorkspaceOwnerError ||
-    err instanceof AttachFailedError ||
-    err instanceof ReviewDisabledError ||
-    err instanceof TooManyReviewRequestsError ||
-    err instanceof SubmitFailedError
-  )
-    return err.message
-  return null
+  return publishErrorCode(err) !== null && err instanceof Error ? err.message : null
 }
 
 /** Which of the update path's conflicts this is. The server distinguishes them

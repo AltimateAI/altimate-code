@@ -165,4 +165,27 @@ export async function getMine(datamateId: number, publicId: string, actAs: ActAs
   }
 }
 
+/** The author takes back their own request still waiting for review (`withdrawn`). Answers the request as it is now; a
+ * repeat changes nothing. Refusals arrive classified: 403 `author_only`, 409 `already_decided` / `version_conflict`. */
+export function withdraw(datamateId: number, publicId: string, body: { expected_version: number }, actAs: ActAs): Promise<Contribution> {
+  return call(Contribution, "POST", datamateId, `/${encodeURIComponent(publicId)}/withdraw`, {
+    actAs,
+    body: { ...body, source: "cli" },
+  })
+}
+
+/** Remove an approved contribution from the workspace (`retired`), with no review: its author, the owner or an admin.
+ * A reason is required when removing someone else's (422 `reason_required`). */
+export function retire(
+  datamateId: number,
+  publicId: string,
+  body: { expected_version: number; reason?: string },
+  actAs: ActAs,
+): Promise<Contribution> {
+  return call(Contribution, "POST", datamateId, `/${encodeURIComponent(publicId)}/retire`, {
+    actAs,
+    body: { ...body, source: "cli" },
+  })
+}
+
 export * as ReviewApi from "./review-api"
