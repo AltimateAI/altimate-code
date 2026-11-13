@@ -9,14 +9,16 @@ import {
   parentsNamed,
   joinsNaturally,
   namesThroughIdentifier,
-  selectsStar,
 } from "../../src/altimate/native/dbt/column-reach"
+import { selectsStar } from "../../src/altimate/native/dbt/project-lineage"
 import { lineageGraph } from "../../src/altimate/native/dbt/graph"
 import { structuredError, structuredResult } from "../../src/altimate/mcp-server/server"
 import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
+import { clearLineageCaches } from "../../src/altimate/native/dbt/project-lineage"
 
 const dirs: string[] = []
 afterEach(() => {
+  clearLineageCaches()
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
@@ -429,8 +431,20 @@ describe("parentsNamed", () => {
   })
 })
 
+describe("columnReach of a column the model doesn't have", () => {
+  test("is an error, not a reach with the model's dashboards as readers", () => {
+    expect(() => columnReach(manifestFile(manifest()), "fct_orders", "not_a_column")).toThrow(
+      "fct_orders has no column not_a_column; its columns are gross_revenue, order_id, revenue",
+    )
+  })
+
+  test("is no error for the column in another case", () => {
+    expect(columnReach(manifestFile(manifest()), "fct_orders", "REVENUE").models.length).toBeGreaterThan(0)
+  })
+})
+
 describe("columnReach where the engine's schema falls short", () => {
-  test("select * from a parent whose schema.yml does not list the column is a possible read, and its children may read it", () => {
+  test("select * from a parent whose schema.yml leaves the column out reaches it through the parent's own SQL", () => {
     const value = manifest()
     value.nodes["model.shop.fct_orders"].columns = { order_id: column("order_id") }
     value.nodes["model.shop.rpt_star"] = model(
@@ -446,8 +460,29 @@ describe("columnReach where the engine's schema falls short", () => {
       ["total"],
     )
     const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    expect(reach.models.find((m) => m.name === "rpt_star")?.columns).toEqual(["revenue"])
+    expect(reach.models.find((m) => m.name === "rpt_after_star")?.columns).toEqual(["total"])
+    expect(reach.uncertain.map((m) => m.name)).not.toContain("rpt_star")
+  })
+
+  test("select * from a target whose columns can't be known is a possible read, and its children may read it", () => {
+    const value = manifest()
+    value.nodes["model.shop.fct_orders"] = model("fct_orders", [], "select * from raw.orders", [])
+    value.nodes["model.shop.rpt_star"] = model(
+      "rpt_star",
+      ["model.shop.fct_orders"],
+      'select * from "shop"."main"."fct_orders"',
+      [],
+    )
+    value.nodes["model.shop.rpt_after_star"] = model(
+      "rpt_after_star",
+      ["model.shop.rpt_star"],
+      "select sum(revenue) as total from rpt_star",
+      ["total"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
     expect(reach.uncertain.find((m) => m.name === "rpt_star")?.reason).toBe(
-      "selects * from a parent whose schema.yml does not list the column",
+      "selects * from a parent whose known columns don't include the column",
     )
     expect(reach.uncertain.map((m) => m.name)).toContain("rpt_after_star")
   })
@@ -459,7 +494,7 @@ describe("columnReach where the engine's schema falls short", () => {
       'select "shop"."main"."fct_orders".* from "shop"."main"."fct_orders"',
     ]) {
       const value: any = manifest()
-      value.nodes["model.shop.fct_orders"].columns = { order_id: column("order_id") }
+      value.nodes["model.shop.fct_orders"] = model("fct_orders", [], "select * from raw.orders", [])
       value.nodes["model.shop.rpt_star"] = model("rpt_star", ["model.shop.fct_orders"], sql, [])
       value.exposures["exposure.shop.star_board"] = {
         name: "star_board",
@@ -963,6 +998,20 @@ describe("structuredResult over the cap", () => {
     expect(out.truncated).toBe(true)
     expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(60_000)
     expect("x".repeat(300_000).startsWith(out.report as string)).toBe(true)
+  })
+
+  test("a column answer too big for the cap goes first; the reach and the model-level fields stay", () => {
+    const columnAnswer = { columns: Array.from({ length: 3000 }, (_, i) => ({ model: 0, name: `column_${i}` })) }
+    const out = structuredResult(
+      "impact_analysis",
+      { severity: "HIGH", downstream: ["a"], column_reach: { models: [] }, column_answer: columnAnswer },
+      "Impact",
+    ) as Record<string, unknown>
+    expect(out.column_answer).toBeUndefined()
+    expect(out.column_answer_error).toContain("for size")
+    expect(out).toMatchObject({ severity: "HIGH", downstream: ["a"], column_reach: { models: [] }, report: "Impact" })
+    expect(out.truncated).toBeUndefined()
+    expect(Buffer.byteLength(JSON.stringify(out))).toBeLessThanOrEqual(60_000)
   })
 })
 
