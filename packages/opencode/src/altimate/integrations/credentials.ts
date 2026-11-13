@@ -747,14 +747,17 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
   const config: Record<string, unknown> = {}
   for (const f of r.def.fields) if (r.values[f.name]) config[f.name] = r.values[f.name]
   if (check.expiresAt) config.expires_at = check.expiresAt
+  // Set once a shared connection was rewritten, so a later failure still says who already has the new credential.
+  let sharedRewrite = false
   try {
     // The blocked check and the upload share one lock with Keep local, so a move to this machine cannot interleave with an upload.
     return await core.withLock(async (): Promise<CredentialResult> => {
       if (!core.sameRecord(core.loadStore().providers[id], rec)) return local({ status: "failed", sync: syncState(), message: CHANGED_WHILE_CONNECTING })
       if (core.isBlocked(id)) return local({ status: "failed", sync: syncState(), message: "Sync is blocked for this provider, kept local." })
-      const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config), opts.share === true)
+      const res = await core.upsertManaged(cfg, id, core.withVariant(id, r.variant, config), opts.share === true, "update")
+      sharedRewrite = res.shared === true
       if (!res.isValid) {
-        const rejected = (sync: "synced" | "local"): CredentialResult => ({ ...base, provider: id, status: "rejected", sync, account: check.account, expiresAt: common.expiresAt ?? null, message: core.rejectionMessage(res) })
+        const rejected = (sync: "synced" | "local"): CredentialResult => ({ ...base, provider: id, status: "rejected", sync, account: check.account, expiresAt: common.expiresAt ?? null, message: core.rejectionMessage(res) + (res.shared ? ` ${core.SHARED_REWRITE_NOTE}` : ""), ...(res.shared ? { shared: true as const } : {}) })
         // An existing connection was updated in place and cannot be reverted, so it stays marked rejected for update to fix; the local copy of a local credential is untouched.
         if (!res.created && !(rec?.registered && !rec.synced)) {
           await record(true, { connectionId: res.connectionId, rejected: true })
@@ -780,7 +783,7 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       try {
         await record(true, { connectionId: res.connectionId })
       } catch (e) {
-        return { ...base, provider: id, status: "failed", sync: "synced", account: check.account, expiresAt: common.expiresAt ?? null, message: core.RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Connect again") }
+        return { ...base, provider: id, status: "failed", sync: "synced", account: check.account, expiresAt: common.expiresAt ?? null, message: [core.RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Connect again"), res.shared ? core.SHARED_REWRITE_NOTE : null].filter(Boolean).join(" "), ...(res.shared ? { shared: true as const } : {}) }
       }
       let leftover: string | null = null
       try {
@@ -790,12 +793,15 @@ export async function connectCredentials(opts: CredentialOptions): Promise<Crede
       } catch (e) {
         leftover = `Saved to the workspace, but the local copy of the credential could not be removed: ${e instanceof Error ? e.message : String(e)}`
       }
-      const message = [workspaceNote(res.workspace), leftover].filter(Boolean).join(" ") || null
-      const shared = res.workspace && "attached" in res.workspace && res.workspace.shared ? { shared: true as const } : {}
+      const sharedNote = res.shared ? `Updated the shared connection${core.SHARED_CONNECTION_AUDIENCE}.` : null
+      const message = [sharedNote, workspaceNote(res.workspace), leftover].filter(Boolean).join(" ") || null
+      const shared = res.shared || (res.workspace && "attached" in res.workspace && res.workspace.shared) ? { shared: true as const } : {}
       return { ...base, provider: id, status: "connected", sync: "synced", account: check.account, expiresAt: common.expiresAt ?? null, message, ...shared }
     })
   } catch (e) {
-    return local({ status: "failed", sync: syncState(), message: e instanceof Error ? e.message : String(e) })
+    const message = e instanceof Error ? e.message : String(e)
+    if (sharedRewrite) return { ...local({ status: "failed", sync: syncState(), message: `${message} ${core.SHARED_REWRITE_NOTE}` }), shared: true }
+    return local({ status: "failed", sync: syncState(), message })
   }
 }
 
@@ -804,7 +810,7 @@ function workspaceNote(w: core.UpsertResult["workspace"]): string | null {
   if ("error" in w) return core.ATTACH_FAILED_PREFIX + w.error
   if ("notLinked" in w) return core.NOT_LINKED_LABEL
   const where = workspaceLabel(w.attached, w.workspaceId)
-  const audience = w.shared ? `; its members can use this connection` : ""
+  const audience = w.shared ? core.SHARED_AUDIENCE : ""
   return `${w.kept ? `Kept the workspace's existing connection in ${where}` : `Attached to ${where}`}${audience}`
 }
 

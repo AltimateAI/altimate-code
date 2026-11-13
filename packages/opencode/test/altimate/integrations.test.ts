@@ -6,7 +6,7 @@ import { EventEmitter } from "node:events"
 import { PassThrough } from "node:stream"
 import path from "node:path"
 import { IntegrationsCore as core } from "../../src/altimate/integrations/core"
-import { skipsSynced, clean, syncedTo } from "../../src/cli/cmd/integrations"
+import { skipsSynced, clean, syncedTo, SyncCommand, ConnectCommand } from "../../src/cli/cmd/integrations"
 import { IntegrationsBackend as backend } from "../../src/altimate/integrations/backend"
 import { IntegrationsCredentials as creds } from "../../src/altimate/integrations/credentials"
 import { AltimateApi } from "../../src/altimate/api/client"
@@ -167,7 +167,7 @@ function connectionsStub() {
     listFails: false,
   }
   const seed = (row: Record<string, unknown>) => {
-    const full = { id: state.next++, user_id: 1, is_valid: true, is_owner: true, config: {}, last_validated_at: null, created_at: "2030-01-01T00:00:00Z", ...row }
+    const full = { id: state.next++, user_id: 1, is_valid: true, is_owner: true, privacy: "private", config: {}, last_validated_at: null, created_at: "2030-01-01T00:00:00Z", ...row }
     state.rows.push(full)
     return full
   }
@@ -453,6 +453,44 @@ describe("workspace connections", () => {
     expect(writes()[1].body).toEqual({ config: { github_token: "gh_no_expiry" } })
   })
 
+  test("sync does not upload into a connection that is already shared without --share", async () => {
+    expect((await core.syncProvider("github")).shared).toBeUndefined()
+    api.state.rows[0].privacy = "public"
+    process.env.GITHUB_TOKEN = "gh_no_expiry"
+    const refused = await core.syncProvider("github")
+    expect([refused.result, refused.reason, refused.shared]).toEqual(["failed", core.SHARED_CONNECTION_REFUSAL("github"), undefined])
+    expect(writes()).toHaveLength(1)
+    const shared = await core.syncProvider("github", undefined, 0, false, true)
+    expect([shared.result, shared.shared, shared.steps.map((x) => x.label)]).toEqual(["synced", true, [`Updated connection${core.SHARED_CONNECTION_AUDIENCE}`, core.NOT_LINKED_LABEL]])
+    expect(writes()).toHaveLength(2)
+    // A rewrite the workspace marks invalid, or whose record cannot be written, still says it is shared.
+    api.state.valid = false
+    const invalid = await core.syncProvider("github", undefined, 0, false, true)
+    expect([invalid.result, invalid.shared]).toEqual(["failed", true])
+    expect(invalid.reason).toContain(core.SHARED_REWRITE_NOTE)
+    api.state.valid = true
+    const rename = fs.renameSync
+    const disk = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
+      if (String(to).endsWith("integrations.json")) throw new Error("disk full")
+      return rename(from, to)
+    }) as any)
+    try {
+      const unrecorded = await core.syncProvider("github", undefined, 0, false, true)
+      expect([unrecorded.result, unrecorded.shared]).toEqual(["failed", true])
+    } finally {
+      disk.mockRestore()
+    }
+    // An attach that fails after the shared connection was rewritten still says it is shared.
+    ;(workspaceState.resolveBindingOutcome as any).mockResolvedValue({ status: "unknown" })
+    spyOn(AltimateApi, "isConfigured").mockResolvedValue(true)
+    try {
+      const failed = await core.syncProvider("github", undefined, 0, false, true)
+      expect([failed.result, failed.shared]).toEqual(["failed", true])
+    } finally {
+      ;(AltimateApi.isConfigured as any).mockRestore()
+    }
+  })
+
   test("sync creates the managed connection, then updates it in place", async () => {
     const first = await core.syncProvider("github")
     expect(first.result).toBe("synced")
@@ -607,7 +645,7 @@ describe("workspace connections", () => {
       expect(update).not.toHaveBeenCalled()
       const shared = await core.syncProvider("github", undefined, 0, true, true)
       expect([shared.result, shared.shared]).toEqual(["synced", true])
-      expect([syncedTo(shared), syncedTo(refused)]).toEqual(["synced to workspace, shared with its members", "synced to workspace (private)"])
+      expect([syncedTo(shared), syncedTo(refused)]).toEqual(["synced to workspace, shared with other people", "synced to workspace (private)"])
       expect(update).toHaveBeenCalledTimes(1)
     } finally {
       for (const sp of [...spies, update]) sp.mockRestore()
@@ -2400,16 +2438,72 @@ describe("credentials flow", () => {
         expect([shared.status, shared.shared]).toEqual(["connected", true])
         expect(shared.message).toContain("its members can use this connection")
         expect(update).toHaveBeenCalledTimes(2)
-        // Once the workspace uses the connection, an update without --share keeps it attached and says it is shared.
+        // Attaching widened the connection, as the backend does: its new credential reaches the members too, so an update needs --share again.
         const id = core.loadStore().providers.github!.connectionId
+        api.state.rows.find((r) => r.id === id)!.privacy = "public"
         getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "github", tools: [], connection_id: String(id) }] } as any)
         await token("github", "github_token")
-        const again = await creds.connectCredentials({ id: "github", update: true })
+        const config = api.state.rows.find((r) => r.id === id)!.config
+        const refusedUpdate = await creds.connectCredentials({ id: "github", update: true })
+        expect([refusedUpdate.status, refusedUpdate.sync, refusedUpdate.message]).toEqual(["failed", "synced", core.SHARED_CONNECTION_REFUSAL("github", "update")])
+        expect(api.state.rows.find((r) => r.id === id)!.config).toBe(config)
+        const again = await creds.connectCredentials({ id: "github", update: true, share: true })
         expect([again.status, again.shared]).toEqual(["connected", true])
         expect(again.message).toContain("its members can use this connection")
       } finally {
         for (const sp of [...spies, update]) sp.mockRestore()
       }
+    })
+
+    test("a connection shared outside any workspace is not rewritten without --share, and with it says so", async () => {
+      real()
+      await token("github", "github_token")
+      expect((await creds.connectCredentials({ id: "github" })).shared).toBeUndefined()
+      const row = api.state.rows.find((r) => !r.deleted)!
+      // Missing privacy counts as shared, as it does for workspaces.
+      for (const privacy of ["public", "restricted", undefined]) {
+        row.privacy = privacy
+        const config = row.config
+        await token("github", "github_token")
+        const r = await creds.connectCredentials({ id: "github", update: true })
+        expect([r.status, r.sync, r.shared, r.message]).toEqual(["failed", "synced", undefined, core.SHARED_CONNECTION_REFUSAL("github", "update")])
+        expect(row.config).toBe(config)
+        // Nothing to upload: the attach-only sync changes nothing, but no longer calls the connection private.
+        const s = await core.syncProvider("github", undefined, 0, true)
+        expect([s.result, s.shared]).toEqual(["synced", true])
+        expect(row.config).toBe(config)
+      }
+      row.privacy = "public"
+      api.state.valid = false
+      await token("github", "github_token")
+      const invalid = await creds.connectCredentials({ id: "github", update: true, share: true })
+      expect([invalid.status, invalid.shared]).toEqual(["rejected", true])
+      expect(invalid.message).toContain(core.SHARED_REWRITE_NOTE)
+      api.state.valid = true
+      const rename = fs.renameSync
+      const disk = spyOn(fs, "renameSync").mockImplementation(((from: string, to: string) => {
+        if (String(to).endsWith("integrations.json")) throw new Error("disk full")
+        return rename(from, to)
+      }) as any)
+      try {
+        await token("github", "github_token")
+        const unrecorded = await creds.connectCredentials({ id: "github", update: true, share: true })
+        expect([unrecorded.status, unrecorded.shared]).toEqual(["failed", true])
+        expect(unrecorded.message).toContain(core.SHARED_REWRITE_NOTE)
+        // Rejected and then unrecorded: the failure still says who has the new credential.
+        api.state.valid = false
+        await token("github", "github_token")
+        const both = await creds.connectCredentials({ id: "github", update: true, share: true })
+        expect([both.status, both.shared]).toEqual(["failed", true])
+        expect(both.message).toContain(core.SHARED_REWRITE_NOTE)
+        api.state.valid = true
+      } finally {
+        disk.mockRestore()
+      }
+      await token("github", "github_token")
+      const shared = await creds.connectCredentials({ id: "github", update: true, share: true })
+      expect([shared.status, shared.shared]).toEqual(["connected", true])
+      expect(shared.message).toContain(core.SHARED_CONNECTION_AUDIENCE)
     })
 
     test("a hand-made connection cannot be updated from here", async () => {
@@ -2644,6 +2738,11 @@ describe("attach keeps another connection", () => {
       // Without --share that kept entry is not refused either: the write changes nothing members can use.
       expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9, 3])).toEqual({ attached: "WS", workspaceId: "5", kept: true })
       expect(update).toHaveBeenCalledTimes(3)
+      // A secondary connection already in the entry is not exposed again, but becoming the default (the stored one is gone) needs --share.
+      getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "public", integrations: [{ id: "jira", tools: [], connection_id: "3", connection_ids: ["3", "9"] }] } as any)
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9, 3])).toEqual({ attached: "WS", workspaceId: "5", kept: true, shared: true })
+      expect(await core.attachToBoundWorkspace(cfg, "jira", 9, [9])).toEqual({ error: core.SHARED_WORKSPACE_REFUSAL("WS", "jira") })
+      expect(update).toHaveBeenCalledTimes(4)
       getDatamate.mockResolvedValue({ id: "5", name: "WS", is_owner: true, privacy: "private", integrations: [{ id: "jira", tools: [], connection_id: null }] } as any)
       expect(await core.attachToBoundWorkspace(cfg, "jira", 9)).toEqual({ attached: "WS", workspaceId: "5" })
       update.mockClear()
@@ -2684,6 +2783,25 @@ describe("detachFromIntegrations", () => {
     const other = { id: "linear", tools: [], connection_id: "5" }
     const out = core.detachFromIntegrations([{ id: "jira", tools: [{ key: "t" }], connection_id: "9", connection_ids: ["3", "9"] }, other], 9)
     expect(out).toEqual([{ id: "jira", tools: [{ key: "t" }], connection_id: null, connection_ids: ["3"] }, other])
+  })
+})
+
+describe("the CLI passes --share through and reports shared", () => {
+  test("connect --share --json and sync --share", async () => {
+    const logs: string[] = []
+    const log = spyOn(console, "log").mockImplementation((t?: unknown) => void logs.push(String(t)))
+    const connect = spyOn(creds, "connectCredentials").mockResolvedValue({ provider: "github", status: "connected", sync: "synced", account: null, expiresAt: null, message: null, shared: true } as any)
+    const sync = spyOn(core, "syncProvider").mockResolvedValue({ id: "github", result: "synced", steps: [], shared: true })
+    try {
+      await (ConnectCommand.handler as any)({ provider: "github", share: true, json: true })
+      expect(connect.mock.calls[0][0].share).toBe(true)
+      expect(JSON.parse(logs.join("\n")).shared).toBe(true)
+      await (SyncCommand.handler as any)({ provider: "github", share: true, json: true })
+      expect(sync.mock.calls[0][4]).toBe(true)
+    } finally {
+      for (const sp of [log, connect, sync]) sp.mockRestore()
+      process.exitCode = 0
+    }
   })
 })
 

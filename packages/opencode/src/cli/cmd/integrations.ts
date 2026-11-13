@@ -99,7 +99,7 @@ const DetectCommand = cmd({
 })
 
 /** Who can use a synced connection: only the user, unless it was attached to a workspace that is not private. */
-export const syncedTo = (o: Pick<core.SyncOutcome, "shared">) => `synced to workspace${o.shared ? ", shared with its members" : " (private)"}`
+export const syncedTo = (o: Pick<core.SyncOutcome, "shared">) => `synced to workspace${o.shared ? ", shared with other people" : " (private)"}`
 
 function renderSync(o: core.SyncOutcome) {
   const name = core.PROVIDER_NAMES[o.id]
@@ -132,7 +132,7 @@ async function runSync(ids: ProviderId[], asJson: boolean, skipSynced = false, s
 /** A run over every provider, or one provider asked to keep a saved connection, never overwrites a connection already synced to the workspace. */
 export const skipsSynced = (args: { provider?: string; all?: boolean; keepSynced?: boolean }) => !args.provider || Boolean(args.keepSynced)
 
-const SyncCommand = cmd({
+export const SyncCommand = cmd({
   command: "sync [provider]",
   describe: "push detected and connected credentials to the workspace",
   builder: (yargs: Argv) =>
@@ -234,7 +234,7 @@ const credentialOptions = (yargs: Argv) =>
     .option("json", jsonOption)
     .option("variant", variantOption)
 
-const ConnectCommand = cmd({
+export const ConnectCommand = cmd({
   command: "connect <provider>",
   describe: "connect a provider with its own credentials",
   builder: (yargs: Argv) =>

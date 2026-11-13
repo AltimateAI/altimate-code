@@ -33,6 +33,8 @@ export interface Connection {
   created_at?: string | null
   updated_at?: string | null
   is_owner?: boolean
+  /** Who besides the owner can use it; anything but "private" (or none) counts as shared. */
+  privacy?: string
 }
 
 /** The login used for backend calls, or null when there is none. */

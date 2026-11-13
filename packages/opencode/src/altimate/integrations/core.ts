@@ -920,6 +920,8 @@ export interface UpsertResult {
   created: boolean
   isValid: boolean
   message: string | null
+  /** The updated connection was already shared, so whoever it is shared with gets the new credential. */
+  shared?: true
   /** What happened to the workspace attach; absent when the connection was saved invalid. */
   workspace?: { attached: string; workspaceId?: string; kept?: true; shared?: true } | { notLinked: true } | { error: string }
 }
@@ -942,14 +944,17 @@ export const rejectionMessage = (res: Pick<UpsertResult, "created">) => (res.cre
  * Saves the credential as this tool's own connection: updated in place when it exists (matched on
  * integration and name among the caller's own connections), created otherwise.
  */
-export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, config: Record<string, unknown>, share = false): Promise<UpsertResult> {
+export async function upsertManaged(cfg: backend.BackendConfig, id: ProviderId, config: Record<string, unknown>, share = false, retry: "sync" | "update" = "sync"): Promise<UpsertResult> {
   const visible = await backend.listVisibleConnections(cfg)
   const existing = findManaged(backend.ownConnections(visible), id)
+  // An update in place hands the new credential to everyone the connection is already shared with, so it needs the same consent as attaching to a shared workspace.
+  const sharedConnection = existing != null && existing.privacy !== "private"
+  if (sharedConnection && !share) throw new Error(SHARED_CONNECTION_REFUSAL(id, retry))
   const saved = existing
     ? await backend.updateConnection(cfg, existing.id, { config })
     : await backend.createConnection(cfg, { name: managedName(id), integration_id: INTEGRATION_IDS[id], config })
   const isValid = saved.is_valid !== false
-  const result: UpsertResult = { connectionId: saved.id, created: !existing, isValid, message: isValid ? null : rejectionMessage({ created: !existing }) }
+  const result: UpsertResult = { connectionId: saved.id, created: !existing, isValid, message: isValid ? null : rejectionMessage({ created: !existing }), ...(sharedConnection ? { shared: true as const } : {}) }
   if (!isValid) return result
   return { ...result, workspace: await attachToBoundWorkspace(cfg, id, saved.id, visible.map((c) => c.id), share) }
 }
@@ -1005,6 +1010,15 @@ export function attachToIntegrations(
   })
 }
 
+export const SHARED_CONNECTION_REFUSAL = (id: ProviderId, command: "sync" | "update" = "sync") =>
+  `the workspace connection is shared with other people, so updating it would let them use the new credential; nothing was changed. Run altimate integrations ${command} ${id} --share to update it`
+
+/** Appended to what a sync or connect reports when other people can use the connection. */
+export const SHARED_AUDIENCE = "; its members can use this connection"
+export const SHARED_CONNECTION_AUDIENCE = "; the people it is shared with can use the new credential"
+/** Added to a failure after a shared connection was rewritten, so the text says who already has the new credential. */
+export const SHARED_REWRITE_NOTE = `The shared connection was updated${SHARED_CONNECTION_AUDIENCE}.`
+
 export const SHARED_WORKSPACE_REFUSAL = (name: string, id: ProviderId) =>
   `workspace "${name}" is shared, so attaching would let its members use this connection; it stays saved to your account only. Run altimate integrations sync ${id} --share to attach it`
 
@@ -1031,8 +1045,11 @@ async function attachToWorkspace(cfg: backend.BackendConfig, id: ProviderId, con
   const next = attachToIntegrations(datamate.integrations, integrationId, connectionId, keys, live)
   // Attaching widens the connection to the workspace's audience, so a workspace that does not say it is private (in this latest read) only gets it
   // when asked. Members can use it only when the entry ends up naming it: a connection already there widens nothing more, and neither does an entry kept on another one.
+  const isDefault = (entries: backend.DatamateIntegrationEntry[]) => entries.some((e) => String(e.id) === integrationId && String(e.connection_id ?? "") === conn)
   const shared = datamate.privacy !== "private" && usesThis(next)
-  if (shared && !share && !usesThis(datamate.integrations)) throw new Error(SHARED_WORKSPACE_REFUSAL(datamate.name, id))
+  // Already there means already exposed, unless this write promotes it from a secondary connection to the entry's default.
+  const alreadyThere = usesThis(datamate.integrations) && (isDefault(datamate.integrations) || !isDefault(next))
+  if (shared && !share && !alreadyThere) throw new Error(SHARED_WORKSPACE_REFUSAL(datamate.name, id))
   await backend.updateDatamateIntegrations(cfg, datamateId, next)
   const entry = next.find((e) => String(e.id) === integrationId)
   return { kept: entry?.connection_id != null && String(entry.connection_id) !== conn, shared }
@@ -1089,14 +1106,15 @@ async function syncReal(
     steps.push({ label: l, ok: true })
     onStep?.(l, true)
   }
-  const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>): SyncOutcome => {
-    if ("error" in w) return { id, result: "failed", reason: ATTACH_FAILED_PREFIX + w.error, steps }
-    if ("attached" in w) step(w.kept ? `Kept the workspace's existing connection in ${workspaceLabel(w.attached, w.workspaceId)}` : `Attached to ${workspaceLabel(w.attached, w.workspaceId)}`)
+  const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>, sharedConnection = false): SyncOutcome => {
+    // A shared connection that was rewritten stays reported as shared even when the attach after it fails.
+    if ("error" in w) return { id, result: "failed", reason: ATTACH_FAILED_PREFIX + w.error, steps, ...(sharedConnection ? { shared: true as const } : {}) }
+    if ("attached" in w) step(`${w.kept ? `Kept the workspace's existing connection in ${workspaceLabel(w.attached, w.workspaceId)}` : `Attached to ${workspaceLabel(w.attached, w.workspaceId)}`}${w.shared ? SHARED_AUDIENCE : ""}`)
     else {
       steps.push({ label: NOT_LINKED_LABEL, ok: false })
       onStep?.(NOT_LINKED_LABEL, false)
     }
-    return { id, result: "synced", steps, ...("attached" in w && w.shared ? { shared: true as const } : {}) }
+    return { id, result: "synced", steps, ...(sharedConnection || ("attached" in w && w.shared) ? { shared: true as const } : {}) }
   }
   if ("reason" in collected) {
     // Nothing local to upload, but a connection already in the workspace may still need attaching to it: the one this machine saved, or one it has no record of.
@@ -1118,7 +1136,7 @@ async function syncReal(
         if (!found) return { id, result: "skipped", reason: known == null ? collected.reason : REMOVED_NOTE, steps: [] }
         if (found.is_valid === false) return { id, result: "skipped", reason: INVALID_IN_WORKSPACE, steps: [] }
         step("Connection already in the workspace")
-        return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id), share))
+        return reportWorkspace(await attachToBoundWorkspace(cfg, id, found.id, visible.map((c) => c.id), share), found.privacy !== "private")
       })
     } catch (e) {
       return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
@@ -1158,9 +1176,9 @@ async function syncReal(
             warning = REMOVE_FAILED_WARNING(e instanceof Error ? e.message : String(e))
           }
         }
-        return { id, result: "failed", reason: rejectionMessage(res) + warning, steps }
+        return { id, result: "failed", reason: rejectionMessage(res) + warning + (res.shared ? ` ${SHARED_REWRITE_NOTE}` : ""), steps, ...(res.shared ? { shared: true as const } : {}) }
       }
-      step(res.created ? "Created connection" : "Updated connection")
+      step(res.created ? "Created connection" : `Updated connection${res.shared ? SHARED_CONNECTION_AUDIENCE : ""}`)
       try {
         await updateStore((next) => {
           next.providers[id] = {
@@ -1178,7 +1196,7 @@ async function syncReal(
           }
         })
       } catch (e) {
-        return { id, result: "failed", reason: RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Run sync again"), steps }
+        return { id, result: "failed", reason: RECORD_WRITE_FAILED(e instanceof Error ? e.message : String(e), "Run sync again") + (res.shared ? ` ${SHARED_REWRITE_NOTE}` : ""), steps, ...(res.shared ? { shared: true as const } : {}) }
       }
       // The connection is in the workspace and accepted: no secret stays on this machine, the same as when it is connected there directly.
       try {
@@ -1188,7 +1206,7 @@ async function syncReal(
         // The workspace holds the connection and the record says so; only the local cleanup is left to redo, which running sync for this provider does.
         steps.push({ label: `${LOCAL_CLEANUP_FAILED_PREFIX}${e instanceof Error ? e.message : String(e)}. Run altimate integrations sync ${id} to remove it.`, ok: false })
       }
-      return reportWorkspace(res.workspace ?? { notLinked: true })
+      return reportWorkspace(res.workspace ?? { notLinked: true }, res.shared === true)
     })
   } catch (e) {
     return { id, result: "failed", reason: e instanceof Error ? e.message : String(e), steps }
