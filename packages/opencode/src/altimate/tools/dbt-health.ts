@@ -26,6 +26,9 @@ interface NodeFiles {
   patch?: string
 }
 
+/** The most insights the text of the answer lists; the structured result carries every one. */
+const LISTED_LINES = 100
+
 /** Test seams. */
 export const dbtHealthInternals = {
   /** How long the DataPilot run may take. */
@@ -156,11 +159,13 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     const { getDbtProjectRoot } = await import("../native/connections/register")
     const root: string | undefined = (typeof adapter.getProjectRoot === "function" ? adapter.getProjectRoot() : undefined) ?? (await getDbtProjectRoot())
     if (!root) return failure("unavailable", "dbt_health can't run: no dbt project here.")
-    // The adapter's watcher rebuilds the manifest after an edit a moment later: parse now, so the run reads
-    // the project as it is, and say so when the check failed and the last good manifest is what is read.
+    // The adapter's watcher rebuilds the manifest a moment after an edit, and `parseManifest` only reads the
+    // file: rebuild now and wait for it, so the run reads the project as it is, and say so when the rebuild
+    // failed and the last good manifest is what is read.
     let stale: { message: string; manifest_path?: string; written_at?: string; age_seconds?: number } | undefined
     if (typeof adapter.parseManifest === "function") {
       try {
+        if (typeof adapter.rebuildManifest === "function") await adapter.rebuildManifest()
         const parsed = await adapter.parseManifest()
         if (parsed?.stale) {
           // The same shape the other dbt tools give a stale manifest.
@@ -187,7 +192,13 @@ export const DbtHealthTool = Tool.define("dbt_health", {
       configPath = path.resolve(root, args.config_path)
       if (!fs.existsSync(configPath)) return failure("no config", `dbt_health can't run: no DataPilot config at ${configPath}.`)
     }
-    const python = await pythonFor(root)
+    let python: string
+    try {
+      python = await pythonFor(root)
+    } catch (e) {
+      if (ctx.abort.aborted) throw e
+      return failure("failed", `dbt_health couldn't find a Python to run DataPilot: ${e instanceof Error ? e.message : String(e)}`)
+    }
     let run: { stdout: string; stderr: string; code: number | null }
     try {
       run = await dbtHealthInternals.runPython(python, SCRIPT, [manifest, catalog, configPath], root, ctx.abort)
@@ -195,12 +206,12 @@ export const DbtHealthTool = Tool.define("dbt_health", {
       if (ctx.abort.aborted) throw e
       return failure("failed", `dbt_health couldn't run ${python}: ${e instanceof Error ? e.message : String(e)}`)
     }
-    // DataPilot may log to stdout: the answer is the last line that parses as an object.
+    // DataPilot may log to stdout: the answer is the last line that parses as the script's answer.
     let parsed: { error?: string; detail?: string; model_insights?: unknown; nodes?: Record<string, NodeFiles>; project?: string } | undefined
     for (const line of run.stdout.split("\n").reverse()) {
       try {
         const value = JSON.parse(line)
-        if (value && typeof value === "object") {
+        if (value && typeof value === "object" && !Array.isArray(value) && ("error" in value || "model_insights" in value)) {
           parsed = value
           break
         }
@@ -215,12 +226,20 @@ export const DbtHealthTool = Tool.define("dbt_health", {
         { missing: "altimate-datapilot-cli", python },
       )
     if (parsed.error) return failure("failed", `DataPilot failed: ${parsed.detail ?? parsed.error}`)
+    if (run.code !== 0 || !parsed.model_insights || typeof parsed.model_insights !== "object")
+      return failure("failed", `DataPilot gave no insights (exit ${run.code}).${run.stderr ? `\n${run.stderr.slice(-2000)}` : ""}`)
     const insights = flattenInsights(parsed.model_insights, root, parsed.nodes, parsed.project)
-    const lines = insights.map((i) => `- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`)
+    const lines = insights.slice(0, LISTED_LINES).map((i) => `- ${i.severity} ${i.name} · ${i.uniqueId} (${i.path}): ${i.message}${i.recommendation ? ` → ${i.recommendation}` : ""}`)
     return {
       title: `dbt_health: ${insights.length} insight${insights.length === 1 ? "" : "s"}`,
       metadata: { success: true, insights, catalog: !!catalog, ...(stale ? { stale_manifest: stale } : {}) },
-      output: [stale?.message, insights.length ? lines.join("\n") : "No health insights."].filter(Boolean).join("\n"),
+      output: [
+        stale?.message,
+        insights.length ? lines.join("\n") : "No health insights.",
+        insights.length > LISTED_LINES ? `…and ${insights.length - LISTED_LINES} more insights, all in the result's \`insights\`.` : undefined,
+      ]
+        .filter(Boolean)
+        .join("\n"),
     }
   },
 })

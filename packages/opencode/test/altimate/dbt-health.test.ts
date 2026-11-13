@@ -102,6 +102,9 @@ beforeEach(() => {
   dbtAdapterInternals.create = async () => ({
     isInitialized: () => true,
     getProjectRoot: () => project,
+    rebuildManifest: async () => {
+      order.push("rebuild")
+    },
     parseManifest: async () => {
       parses += 1
       order.push("parse")
@@ -198,10 +201,58 @@ describe("dbt_health", () => {
     expect(python.calls[0].python).toBe("/discovered/python")
   })
 
+  test("rebuilds the manifest, and waits for it, before it parses and reads it", async () => {
+    await run()
+    expect(order).toEqual(["rebuild", "parse", "python"])
+  })
+
+  test("does not run DataPilot when the rebuild fails", async () => {
+    dbtAdapterInternals.create = async () => ({
+      isInitialized: () => true,
+      getProjectRoot: () => project,
+      rebuildManifest: async () => {
+        throw new Error("dbt parse failed")
+      },
+      parseManifest: async () => parsed,
+    })
+    const result = await run()
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("dbt parse failed")
+    expect(python.calls).toHaveLength(0)
+  })
+
+  test("an answer that isn't the script's (a log object, an empty list) or comes with a failing exit is not a clean report", async () => {
+    for (const [stdout, code] of [['{"event":"starting"}\n', 1], ["[]\n", 0], [JSON.stringify(HEALTHCHECK) + "\n", 1]] as const) {
+      python.stdout = stdout
+      python.code = code
+      const result = await run()
+      expect([stdout, result.metadata.success]).toEqual([stdout, false])
+    }
+  })
+
+  test("the text lists at most 100 insights and says how many more the result carries", async () => {
+    const many = Array.from({ length: 150 }, (_, i) => ({ unique_id: "model.shop.m", path: "models/m.sql", severity: "WARNING", insight: { name: `Insight ${i}`, message: "m", recommendation: "r" } }))
+    python.stdout = JSON.stringify({ model_insights: { "model.shop.m": many } })
+    const result = await run()
+    expect(result.metadata.insights).toHaveLength(150)
+    expect(result.output.split("\n")).toHaveLength(101)
+    expect(result.output).toContain("and 50 more insights")
+  })
+
+  test("a Python that can't be found is a failure, not a throw", async () => {
+    dbtHealthInternals.discoverPython = async () => {
+      throw new Error("no python here")
+    }
+    dbtAdapterInternals.readConfig = async () => ({ projectRoot: project, dbtIntegration: "corecommand", queryLimit: 500 })
+    const result = await run()
+    expect(result.metadata.success).toBe(false)
+    expect(result.output).toContain("no python here")
+  })
+
   test("parses the project before it reads the manifest, and says so when that fell back to an old one", async () => {
     const fresh = await run()
     expect(parses).toBe(1)
-    expect(order).toEqual(["parse", "python"])
+    expect(order).toEqual(["rebuild", "parse", "python"])
     expect(fresh.metadata.stale_manifest).toBeUndefined()
     parsed = { stale: { writtenAt: Date.UTC(2026, 0, 2, 3, 4, 5), manifestPath: "x" } }
     const old = await run()
