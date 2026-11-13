@@ -195,8 +195,8 @@ function classifyFallback(sql: string, dialect?: string, write = true): { queryT
     // Escapes decoded too: dynamic SQL may run a literal such as '\x44ROP SCHEMA s'.
     if (mentionsHardDenyAnywhere(sql)) blocked = true
   } else {
-    // Read with certainty: the statement words in code (literals, identifiers and comments masked,
-    // so DROP/**/SCHEMA reads as DROP SCHEMA) decide too, since T-SQL runs `SELECT 1 DROP DATABASE x`
+    // Read with certainty: the statement words in code (literals and comments masked, each quoted
+    // identifier a placeholder name, so DROP/**/SCHEMA reads as DROP SCHEMA) decide too, since T-SQL runs `SELECT 1 DROP DATABASE x`
     // as two statements with no ; and a parser may read a literal differently from the engine.
     const names = namesKept(lexical.tokens)
     // Snowflake's ->> chains statements (elsewhere a JSON operator), and Snowflake Scripting's ASYNC (,
@@ -319,10 +319,10 @@ const DYNAMIC_SQL = /\bEXEC(UTE)?\b|(^|;)\s*(PREPARE|DO)\b/i
 function advancesSequence(tokens: ReturnType<typeof tokenizeSql>["tokens"], masked: string, dialect?: string): boolean {
   if (/\bNEXT\s+VALUE\s+FOR\b/i.test(masked)) return true
   if (!/^(oracle|snowflake|mysql|mariadb)$/i.test(dialect ?? "") && isModeledDialect(dialect)) return false
-  // Comments masked to spaces and quoted names unwrapped, so s./* c */"NEXTVAL" reads as s.NEXTVAL. A dot
-  // inside one quoted name ("s.NEXTVAL") is part of a column name, not a separator.
+  // Comments masked to spaces, and a quoted name counts only when it is exactly NEXTVAL, so
+  // s./* c */"NEXTVAL" reads as s.NEXTVAL while "s.NEXTVAL" and t."NEXTVAL VALUE" are column names.
   const names = tokens.map((token) =>
-    token.kind === "identifier" ? { ...token, text: token.text.replaceAll(".", "_") } : token,
+    token.kind === "identifier" && !/^.NEXTVAL.$/i.test(token.text) ? { ...token, text: '"_"' } : token,
   )
   return /\.\s*NEXTVAL\b/i.test(maskSql(names, true))
 }

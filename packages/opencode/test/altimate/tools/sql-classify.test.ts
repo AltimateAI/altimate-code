@@ -691,9 +691,14 @@ describe("each engine's own literal and statement rules", () => {
     ['SELECT "s.NEXTVAL" FROM metrics', "oracle", "read", false],
     ["SELECT `s.NEXTVAL` FROM metrics", "mysql", "read", false],
     // DuckLake's metadata functions read; its maintenance functions write.
-    ["SELECT * FROM ducklake_snapshots('lake')", "duckdb", "read", false],
-    ["SELECT * FROM ducklake_table_info('lake')", "duckdb", "read", false],
-    ["SELECT * FROM ducklake_settings('lake')", "duckdb", "read", false],
+    ...["snapshots", "table_info", "table_changes", "table_insertions", "table_deletions", "list_files", "options", "settings", "current_snapshot", "last_committed_snapshot"]
+      .map((name): [string, string, "read", boolean] => [`SELECT * FROM ducklake_${name}('lake')`, "duckdb", "read", false]),
+    // A quoted name counts as NEXTVAL only when it is exactly that word.
+    ['SELECT t."NEXTVAL VALUE" FROM t', "snowflake", "read", false],
+    ['SELECT t."NEXTVAL$amount" FROM t', "snowflake", "read", false],
+    ['SELECT t."NEXTVAL-count" FROM t', "oracle", "read", false],
+    ['SELECT t."NEXTVAL " FROM t', "oracle", "read", false],
+    ['SELECT s."nextval" FROM dual', "oracle", "write", false],
   ]
   for (const [sql, dialect, queryType, blocked] of cases)
     test(`${dialect}: ${sql.replace(/\n/g, "\\n")}`, () => {
