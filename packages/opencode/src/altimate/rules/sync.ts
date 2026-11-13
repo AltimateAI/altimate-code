@@ -69,19 +69,14 @@ export async function context(directory: string, learn: LearnConfig): Promise<Co
   const outcome = await resolveBindingOutcome(directory).catch(() => ({ status: "unknown" as const }))
   if (outcome.status === "unbound") return { status: "skipped", code: "not_linked", reason: "this project is not linked to a workspace", unlinked: true }
   if (outcome.status !== "bound") return { status: "skipped", code: "link_unconfirmed", reason: "the workspace link could not be confirmed" }
-  if (!outcome.binding.repoRemote) return { status: "skipped", code: "no_remote", reason: "this project has no git remote" }
+  if (!outcome.binding.repoRemote) return { status: "skipped", code: "no_remote", reason: "this project is linked by its path, and workspace rules need a git remote on the link (add a remote if the project has none, then run `altimate-code link`)" }
   const digest = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
   // The binding was resolved with the ambient credential: it must still be the captured one.
   if ((await accountDigest()) !== digest) return { status: "skipped", code: "account_changed", reason: "the Altimate account changed" }
   // Queued state belongs to a person, not to a key: rotating the key or signing in again keeps it, another user on
   // the same tenant does not. Unknown for now (the server did not answer): skipped, nothing reset.
-  let account = principals.get(digest)
-  if (!account) {
-    const id = await WorkspaceApi.whoami(actAs).catch(() => undefined)
-    if (id === undefined) return { status: "skipped", code: "account_unconfirmed", reason: "the Altimate account could not be confirmed" }
-    account = `user:${id}`
-    principals.set(digest, account)
-  }
+  const account = await accountOf(actAs)
+  if (!account) return { status: "skipped", code: "account_unconfirmed", reason: "the Altimate account could not be confirmed" }
   return {
     status: "ready",
     actAs,
@@ -93,6 +88,27 @@ export async function context(directory: string, learn: LearnConfig): Promise<Co
       repoRemote: outcome.binding.repoRemote,
     },
   }
+}
+
+/** `accountOf` from what this process already knows, asking no server: undefined until `accountOf` has answered. */
+export async function knownAccount(actAs: ActAs): Promise<string | undefined> {
+  const { credentialDigest } = await import("../workspace/state")
+  return principals.get(credentialDigest(actAs.url, actAs.instance, actAs.apiKey))
+}
+
+/** The person `actAs` signs in as (`user:<id>`), asked once per credential per process; undefined while the server
+ * cannot say. Per-person state (rules, workspace review notices) is keyed by it, never by the key. */
+export async function accountOf(actAs: ActAs): Promise<string | undefined> {
+  const { WorkspaceApi } = await import("../workspace/api-client")
+  const { credentialDigest } = await import("../workspace/state")
+  const digest = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
+  const known = principals.get(digest)
+  if (known) return known
+  const id = await WorkspaceApi.whoami(actAs).catch(() => undefined)
+  if (id === undefined) return undefined
+  const account = `user:${id}`
+  principals.set(digest, account)
+  return account
 }
 
 type Ready = Extract<Context, { status: "ready" }>
@@ -130,6 +146,8 @@ export async function adopt(root: string, ctx: Ready): Promise<{ state: State; s
 const ownedBy = (state: State, ctx: Ready) => !state.scope || RulesStore.sameScope(state.scope, ctx.scope)
 
 export async function pull(root: string, ctx: Ready): Promise<PullResult> {
+  const { credentialDigest } = await import("../workspace/state")
+  const pulledWith = credentialDigest(ctx.actAs.url, ctx.actAs.instance, ctx.actAs.apiKey)
   const { state: before, same } = await adopt(root, ctx)
   try {
     const response = await RulesApi.sync(ctx.actAs, ctx.scope.datamateId, {
@@ -139,12 +157,21 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
     })
     const fresh: State["notices"] = []
     let applied = true
+    // Stamped only while the credential that pulled is still the one signed in: another process may have signed in as
+    // someone else while this pull ran.
+    const { accountDigest } = await import("../workspace/state")
+    const current = (await accountDigest().catch(() => null)) === pulledWith
     const state = await RulesStore.update(root, (state) => {
       // Applied only to the state it was asked for: another process may have adopted another account or workspace, or
       // pulled a newer revision, while this answer was on its way.
       if (!ownedBy(state, ctx) || (state.revision !== undefined && response.revision < state.revision)) return void (applied = false)
       state.scope = ctx.scope
-      state.workspace = { name: response.workspace_name, owner_name: response.owner_name ?? null, is_owner: response.is_owner }
+      state.workspace = {
+        name: response.workspace_name,
+        owner_name: response.owner_name ?? null,
+        is_owner: response.is_owner,
+        ...(response.role ? { role: response.role } : {}),
+      }
       state.settings = response.settings
       // A rule this version could not read was skipped: without the revision, the next pull fetches the full list
       // (a known revision would answer `unchanged` and the rule would stay missing).
@@ -152,10 +179,21 @@ export async function pull(root: string, ctx: Ready): Promise<PullResult> {
       state.cursor = response.cursor
       state.pending_count = response.pending_count
       state.pulled_at = new Date().toISOString()
-      state.last_error = response.skipped
-        ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code, or did not pass the rule lint (one line, no commands, links or secrets), and ${response.skipped === 1 ? "is" : "are"} not delivered`
-        : undefined
+      if (current) state.pulled_with = pulledWith
+      else delete state.pulled_with
+      const unreadable = [
+        response.skipped
+          ? `${response.skipped} team ${response.skipped === 1 ? "rule" : "rules"} could not be read by this version of altimate-code, or did not pass the rule lint (one line, no commands, links or secrets), and ${response.skipped === 1 ? "is" : "are"} not delivered`
+          : undefined,
+        // The person's own proposals waiting for review reach their sessions too; one left out is said, not dropped.
+        response.pending_skipped
+          ? `${response.pending_skipped} of your proposals waiting for review could not be read by this version of altimate-code, or did not pass the rule lint, and ${response.pending_skipped === 1 ? "is" : "are"} not in your sessions until approved`
+          : undefined,
+      ].filter(Boolean)
+      state.last_error = unreadable.length ? unreadable.join("; ") : undefined
       if (!response.unchanged) state.rules = response.rules
+      // Always in the answer, `unchanged` or not (none from a server older than workspace review).
+      state.my_pending = response.my_pending
       for (const reviewed of response.my_reviewed) {
         if (state.notices.some((n) => n.public_id === reviewed.public_id && n.status === reviewed.status)) continue
         const notice = {
@@ -342,7 +380,7 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
       // queued with its error, which the card, `/rules` and `learn status` show.
       if (error.kind === "rejected") {
         done.add(entry.id)
-        sent.push({ id: entry.id, text: entry.item.text, status: "rejected", error: error.message })
+        sent.push({ id: entry.id, text: entry.item.text, status: "rejected", error: error.message || error.code || "rejected" })
       } else failed.set(entry.id, error.message)
       continue
     }
@@ -351,7 +389,7 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
       continue
     }
     if (result.error_code && RETRY_LATER.has(result.error_code)) {
-      failed.set(entry.id, result.error_detail ?? result.error_code)
+      failed.set(entry.id, result.error_detail || result.error_code)
       continue
     }
     done.add(entry.id)
@@ -362,7 +400,8 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
       status: result.status,
       // A refused item's `public_id` is not the person's proposal (a `stale` edit carries its target's).
       ...(ok && result.public_id ? { public_id: result.public_id } : {}),
-      ...(!ok ? { error: result.error_detail ?? result.error_code ?? result.status } : {}),
+      // Never empty: a recorded outcome without an error reads as accepted (`proposal.ts` `acted`).
+      ...(!ok ? { error: result.error_detail || result.error_code || result.status } : {}),
       ...(!ok && result.error_code ? { error_code: result.error_code } : {}),
       ...(!ok && result.error_code && TARGET_GONE.has(result.error_code) ? { target_gone: true } : {}),
     })
@@ -375,7 +414,10 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
   let foreign = false
   const after = await record(root, (s) => {
     if (!ownedBy(s, ctx)) return void (foreign = true)
-    s.outbox = s.outbox.filter((entry) => !done.has(entry.id))
+    // An entry queued again under its id while this send ran (`enqueue` replaces it) is not what was sent: it stays.
+    const version = (entry: OutboxEntry) => JSON.stringify([entry.created_at, entry.item, entry.approve])
+    const sentAs = new Map(batch.map((entry) => [entry.id, version(entry)]))
+    s.outbox = s.outbox.filter((entry) => !done.has(entry.id) || version(entry) !== sentAs.get(entry.id))
     for (const entry of s.outbox) {
       const error = failed.get(entry.id)
       if (error === undefined) continue
@@ -443,7 +485,9 @@ async function pushLocked(root: string, ctx: Ready): Promise<PushResult> {
 /** Keep each row's answer per outbox id (capped), for a card whose proposal another run sent. */
 function recordOutcomes(s: State, rows: PushResult["sent"]) {
   for (const row of rows) s.push_outcomes[row.id] = toRecorded(row)
-  const ids = Object.keys(s.push_outcomes)
+  // A stored proposal's outcome is kept while the proposal is: it says the send acted.
+  const open = new Set(s.proposals.map((p) => p.card.id))
+  const ids = Object.keys(s.push_outcomes).filter((id) => !open.has(id))
   for (const id of ids.slice(0, Math.max(0, ids.length - MAX_PUSH_OUTCOMES))) delete s.push_outcomes[id]
 }
 
@@ -530,13 +574,13 @@ export class ScopeChangedError extends Error {
  * for; checked in the same write, so they never join another scope's outbox. */
 export async function enqueueMany(
   root: string,
-  all: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway" }[],
+  all: readonly { item: ProposalItem; approve?: "approve" | "approve_anyway"; id?: string }[],
   scope?: Scope,
   /** `forget`: the "remember" card these come from; its kept request ends in the same write that queues them. */
   options: { upTo?: boolean; forget?: string } = {},
 ): Promise<string[]> {
   let items = all
-  let ids = items.map(() => randomUUID())
+  let ids = items.map((entry) => entry.id ?? randomUUID())
   const at = new Date().toISOString()
   await RulesStore.update(root, (state) => {
     if (scope && !RulesStore.sameScope(state.scope, scope)) throw new ScopeChangedError()
@@ -545,28 +589,38 @@ export async function enqueueMany(
       items = all.slice(0, room)
       ids = ids.slice(0, room)
     }
-    if (state.outbox.length + items.length > RulesStore.MAX_OUTBOX)
+    // An item queued again under its id (a stored proposal answered again after its process died) replaces the queued
+    // one: it is sent once.
+    const queued = new Set(state.outbox.map((entry) => entry.id))
+    const fresh = items.filter((_, index) => !queued.has(ids[index])).length
+    if (state.outbox.length + fresh > RulesStore.MAX_OUTBOX)
       throw new Error(
         items.length > RulesStore.MAX_OUTBOX
           ? `${items.length} proposals are more than can wait to be sent at once (${RulesStore.MAX_OUTBOX}); send fewer`
           : `${state.outbox.length} proposals are already waiting to be sent, and ${items.length} more would pass the limit of ${RulesStore.MAX_OUTBOX}; sync before proposing more`,
       )
-    items.forEach(({ item, approve }, index) =>
-      state.outbox.push({ id: ids[index], created_at: at, attempts: 0, item, ...(approve ? { approve } : {}) }))
+    items.forEach(({ item, approve }, index) => {
+      const entry = { id: ids[index], created_at: at, attempts: 0, item, ...(approve ? { approve } : {}) }
+      const existing = state.outbox.findIndex((queuedEntry) => queuedEntry.id === entry.id)
+      if (existing >= 0) state.outbox[existing] = entry
+      else state.outbox.push(entry)
+    })
     if (options.forget) state.remember_requests = state.remember_requests.filter((r) => r.card !== options.forget)
   })
   return ids
 }
 
-/** Queue one proposal; it is sent by the next push. Returns its outbox id. */
+/** Queue one proposal; it is sent by the next push. Returns its outbox id: `options.id` when given (still queued under
+ * it: replaced). `options.forget` as for `enqueueMany`. */
 export async function enqueue(
   root: string,
   item: ProposalItem,
   approve?: "approve" | "approve_anyway",
   scope?: Scope,
-  forget?: string,
+  options: { id?: string; forget?: string } = {},
 ): Promise<string> {
-  return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}) }], scope, forget ? { forget } : {}))[0]
+  const { id, forget } = options
+  return (await enqueueMany(root, [{ item, ...(approve ? { approve } : {}), ...(id ? { id } : {}) }], scope, forget ? { forget } : {}))[0]
 }
 
 /**
@@ -779,16 +833,7 @@ export async function run(root: string, directory: string, learn: LearnConfig, t
 async function runUntracked(root: string, directory: string, learn: LearnConfig): Promise<RunReport> {
   const key = await canonicalRoot(root)
   const ctx = await context(directory, learn)
-  if (ctx.status !== "ready") {
-    // Unlinked, or signed out: nothing vouches for the pulled rules any more, so they stop being delivered (the queue
-    // stays for when the link or the sign-in returns). Other skips (unconfirmed for now) keep them.
-    if (ctx.status === "skipped" && (ctx.unlinked || ctx.code === "not_signed_in")) {
-      const state = await RulesStore.read(root)
-      if (state.workspace) await RulesStore.reset(root, { keepOutbox: true })
-    }
-    failedAt.set(key, Date.now())
-    return { context: ctx }
-  }
+  if (ctx.status !== "ready") return unready(root, key, ctx)
   const { state } = await adopt(root, ctx)
   const pushed = await push(root, ctx)
   // Usage before the pull: it is counted against the rule versions sessions were shown, which a pull that edits or
@@ -798,6 +843,89 @@ async function runUntracked(root: string, directory: string, learn: LearnConfig)
   if (pulled.ok) failedAt.delete(key)
   else failedAt.set(key, Date.now())
   return { context: ctx, push: pushed, pull: pulled, ...(usage ? { usage } : {}) }
+}
+
+/** A run that cannot sync. Unlinked, or signed out: nothing vouches for the pulled rules any more, so they stop being
+ * delivered (the queue stays for when the link or the sign-in returns). Other skips (unconfirmed for now) keep them. */
+async function unready(root: string, key: string, ctx: Exclude<Context, Ready>): Promise<RunReport> {
+  if (ctx.status === "skipped" && (ctx.unlinked || ctx.code === "not_signed_in")) {
+    const state = await RulesStore.read(root)
+    if (state.workspace) await RulesStore.reset(root, { keepOutbox: true })
+  }
+  failedAt.set(key, Date.now())
+  return { context: ctx }
+}
+
+/** A pull without a push or a usage report, for a process that may exit before it ends (a host's session-start hook):
+ * abandoning it leaves nothing half-sent. Queued proposals and usage go with the next full run. */
+export async function pullOnly(root: string, directory: string, learn: LearnConfig, trigger: SyncTrigger = "session_start"): Promise<RunReport> {
+  const startedAt = Date.now()
+  const key = await canonicalRoot(root)
+  try {
+    const ctx = await context(directory, learn)
+    const report = ctx.status === "ready" ? { context: ctx, pull: await pull(root, ctx) } : await unready(root, key, ctx)
+    if (report.pull?.ok) failedAt.delete(key)
+    else if (report.pull) failedAt.set(key, Date.now())
+    await recordPullOutcome(root, report, startedAt)
+    RulesTelemetry.synced(trigger, report, startedAt)
+    return report
+  } catch (error) {
+    // A pull that threw (the learn lock timed out): the next session start does not wait on it again.
+    await recordPullOutcome(root, undefined, startedAt)
+    RulesTelemetry.syncThrew(trigger, startedAt)
+    throw error
+  }
+}
+
+/** Context skips that are a failure to reach or confirm the workspace, not the person's setup. */
+const TRANSIENT = new Set<string>(["link_unconfirmed", "account_unconfirmed"])
+
+/**
+ * Keep a run's pull outcome on disk (`pull_failed_at`, with the credential it failed under): each host hook is a new
+ * process, so `failedAt` does not outlive it, and the next one does not wait on another pull for `REFRESH_MS`. Only a
+ * pull that ran and failed, a run that threw (`report` undefined), or a link or account the server could not confirm
+ * is a failure: signed out, unlinked or no remote is not one to back off from (signing in pulls at once).
+ */
+export async function recordPullOutcome(root: string, report: RunReport | undefined, startedAt: number): Promise<void> {
+  const failed = !report || (report.pull ? !report.pull.ok : TRANSIENT.has(report.context.status === "skipped" ? report.context.code : ""))
+  const { accountDigest, credentialDigest } = await import("../workspace/state")
+  // Stamped with the credential the pull ran with, when it got that far: whoever signed in since gets a pull of their own.
+  const ctx = report?.context.status === "ready" ? report.context : undefined
+  const account = !failed ? null : ctx ? credentialDigest(ctx.actAs.url, ctx.actAs.instance, ctx.actAs.apiKey) : await accountDigest().catch(() => null)
+  await RulesStore.update(root, (s) => {
+    // Not written into a state another account or workspace has adopted meanwhile.
+    if (ctx && !ownedBy(s, ctx)) return
+    // A pull that succeeded after this run started is newer news than its failure (runs in other processes overlap).
+    if (failed && s.pulled_at && Date.parse(s.pulled_at) > startedAt) return
+    if (failed) {
+      s.pull_failed_at = new Date().toISOString()
+      if (account) s.pull_failed_with = account
+      else delete s.pull_failed_with
+    } else {
+      delete s.pull_failed_at
+      delete s.pull_failed_with
+    }
+  }).catch((error) => log.warn("rules pull outcome not recorded", { error: errorText(error) }))
+}
+
+/** A pull without a sync run failed within `REFRESH_MS` (`pullOnly`), under the credential signed in now: not worth
+ * waiting on again yet. Signed in as someone else since, it is. */
+export async function pullFailedRecently(state: State, now = Date.now()): Promise<boolean> {
+  if (!state.pull_failed_at || !(now - Date.parse(state.pull_failed_at) < REFRESH_MS)) return false
+  const { accountDigest } = await import("../workspace/state")
+  return (state.pull_failed_with ?? null) === (await accountDigest().catch(() => null))
+}
+
+/** `pullOnly`, waited for at most `waitMs`; never throws. A pull still running then counts as failed (`pullFailedRecently`):
+ * the caller's process may exit under it, and a server that hangs is not waited on again by every start. */
+export async function pullWithin(root: string, directory: string, learn: LearnConfig, waitMs: number): Promise<void> {
+  const startedAt = Date.now()
+  let done = false
+  const pulling = pullOnly(root, directory, learn)
+    .catch((error) => log.warn("rules pull failed", { error: errorText(error) }))
+    .finally(() => (done = true))
+  await Promise.race([pulling, new Promise((resolve) => setTimeout(resolve, waitMs).unref?.())])
+  if (!done) await recordPullOutcome(root, undefined, startedAt)
 }
 
 // Keyed by the real path: the service and the session loop may name one project through different paths.

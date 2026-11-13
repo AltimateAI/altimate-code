@@ -1,14 +1,18 @@
 // altimate_change - new file
 //
-// Local state for workspace rules, under `.altimate-code/learn/workspace-rules/` (git-ignored):
+// Local state for workspace rules:
 //
-// - `approved.json`: the workspace's approved rules for this repository, as lessons of the read-only
-//   `workspace-rules` store (a name reserved for it; the person's own stores, `team` included, are separate). Delivery, recurrence and `learn show` read it like any other store, so team rules reach the
-//   prompt ("Team rules"), their exposure is recorded, and "corrected again" falls out of recurrence.
-//   Only a pull writes it; reflection and promotion never target this store.
-// - `rules.json`: everything else this client keeps: the scope it was pulled for, workspace and owner,
-//   settings, revision and review cursor, the outbox of proposals not yet sent, the person's sent
-//   proposals and review notices, dismissed topics, and what usage has been reported.
+// - The state, in the person's own state directory (`<state>/workspace-rules/<sha256 of the project's real path>.json`,
+//   private to them), never in the project: the scope it was pulled for, workspace and owner, settings, revision and
+//   review cursor, the outbox of proposals not yet sent, the person's sent proposals and review notices, dismissed
+//   topics, and what usage has been reported. It is acted on with the person's credential (the outbox is sent, approvals
+//   replayed), and a file in the working tree can come from anyone: a branch, a merge or a pull can put one there.
+// - `.altimate-code/learn/workspace-rules/approved.json` (git-ignored): a copy of the workspace's approved rules for
+//   this repository, as lessons of the read-only `workspace-rules` store (a name reserved for it; the person's own
+//   stores, `team` included, are separate). Delivery, recurrence and `learn show` read it like any other store, so team
+//   rules reach the prompt ("Team rules"), their exposure is recorded, and "corrected again" falls out of recurrence.
+//   Only a pull writes it; reflection and promotion never target this store. Delivery gives team rules from the state
+//   (`vouched`), never from this copy: a copy in the project is never trusted on its own.
 //
 // Writes take the learn lock (delivery reads the same directory) and are atomic.
 import { constants } from "node:fs"
@@ -21,14 +25,26 @@ import { Log } from "@/util/log"
 import { canonical, parse as parseLessons, type Lesson } from "../learn/lesson"
 import { withLearnLock } from "../learn/lock"
 import * as Store from "../learn/store"
-import { RuleOut, Settings } from "./api"
+import { MyPending, RuleOut, Settings } from "./api"
+import { ProposalCard } from "./events"
+import { printable } from "./printable"
 
 /** The read-only store team rules are mirrored into (reserved: `learn/store.ts` `RESERVED_STORES`). */
 export const WORKSPACE_RULES_STORE = Store.WORKSPACE_RULES_STORE
 const log = Log.create({ service: "rules.store" })
 const LOCK = { timeoutMs: 5_000 }
 const MAX_NOTICES = 50
+/** Unstored host requests kept until the next host session start reports them. */
+const MAX_HOST_UNSTORED = 10
+const MAX_HOST_SESSIONS = 50
+
+/** The key a host session start marks a review notice reported under (`host_notices_seen`). */
+export const hostNoticeKey = (notice: Pick<Notice, "public_id" | "status">) => `${notice.public_id}|${notice.status}`
+/** The key a host session start marks a failed check reported under (`host_notices_seen`). */
+export const hostCheckKey = (check: { at: string }) => `check|${check.at}`
 const MAX_SENT = 200
+/** The person's own pending proposals kept from a pull. The server caps open proposals per person well below this. */
+export const MAX_MY_PENDING = 100
 /** Safety cap for the signal id list; `processed_signals` is also pruned to live signals. */
 const MAX_TRACKED = 5000
 /** How long the "queued proposals were dropped" notice of an account or workspace change stays shown. */
@@ -121,20 +137,64 @@ export const MAX_REMEMBER_REQUESTS = 50
 const BOOT = Symbol.for("altimate.rules.process.boot")
 export const PROCESS_BOOT = ((globalThis as Record<symbol, unknown>)[BOOT] ??= randomUUID()) as string
 
+/**
+ * A proposal raised while no client that shows cards was attached (a Claude Code or Codex session through the plugin,
+ * a headless `run`): kept here until the person answers it with `learn proposals reply` (the plugin's
+ * `/altimate-code:rules`). Answering claims it first (`claim`), so two processes cannot act on it twice.
+ */
+export const StoredProposal = z.object({
+  card: ProposalCard,
+  /** The instance directory that raised it. */
+  directory: z.string(),
+  /** The account and workspace it was raised for: sent or approved only for them. */
+  scope: Scope.optional(),
+  trigger: z.enum(["remember", "recurrence", "shown_rule"]),
+  /** The session the evidence came from. */
+  source_session: z.string(),
+  memory: z.object({ id: z.string(), tags: z.array(z.string()) }).optional(),
+  /** A "remember" the person asked for: saved as before cards if the proposal is closed without an answer. */
+  request: RememberRequest.pick({ session: true, via: true, memory: true, training: true }).optional(),
+  edits: z.number().int().default(0),
+  at: z.string(),
+  /** A reply in progress: another process refuses to act on it while `pid` lives. `answering`: the closing action it
+   * took; until it is recorded as done, only that action finishes the proposal. */
+  claim: z.object({ pid: z.number().int(), at: z.string(), answering: z.string().optional() }).optional(),
+})
+export type StoredProposal = z.infer<typeof StoredProposal>
+/** Kept at most. A session proposal past it is not raised (its corrections stay unchecked); a "remember" the person asked
+ * for is kept anyway, up to `MAX_REQUESTED_PROPOSALS`, so a request is never dropped. */
+export const MAX_STORED_PROPOSALS = 20
+/** Hard bound on stored proposals, requested ones included, so the state file stays small. */
+export const MAX_REQUESTED_PROPOSALS = 100
+
 export const State = z.object({
   version: z.literal(1),
   scope: Scope.optional(),
-  workspace: z.object({ name: z.string(), owner_name: z.string().nullable().optional(), is_owner: z.boolean() }).optional(),
+  workspace: z
+    .object({
+      name: z.string(),
+      owner_name: z.string().nullable().optional(),
+      is_owner: z.boolean(),
+      // `owner`, `admin` or `member` from the last pull; absent before workspace roles (`WorkspaceRole.roleOf`).
+      role: z.string().nullable().optional(),
+    })
+    .optional(),
   settings: Settings.optional(),
   revision: z.number().int().optional(),
   cursor: z.string().optional(),
   pending_count: z.number().int().default(0),
   pulled_at: z.string().optional(),
+  /** The credential (`credentialDigest`) the last successful pull was made with: its rules are delivered only while the
+   * same credential is signed in. */
+  pulled_with: z.string().optional(),
   last_error: z.string().optional(),
   /** Queued proposals dropped because the account or workspace changed. Its own field: a later pull's error (or its
    * success) does not erase it. Shown for `SCOPE_DROP_NOTICE_MS`. */
   scope_drop: z.object({ count: z.number().int(), at: z.string() }).optional(),
   rules: z.array(RuleOut).default([]),
+  /** The person's own proposals still waiting for review, from the last pull (`my_pending`), with the same scope and
+   * credential binding as `rules`: delivered to this person only (`vouched`). Replaced by every pull. */
+  my_pending: z.array(MyPending).default([]),
   outbox: z.array(OutboxItem).default([]),
   sent: z.array(Sent).default([]),
   notices: z.array(Notice).default([]),
@@ -171,6 +231,37 @@ export const State = z.object({
     attempts: z.number().int().default(0),
   })).default([]),
   remember_requests: z.array(RememberRequest).default([]),
+  /** Proposals waiting for an answer outside a card (`StoredProposal`). Never trimmed: `MAX_STORED_PROPOSALS` is
+   * enforced when one is added. */
+  proposals: z.array(StoredProposal).default([]),
+  /** Review notices already reported at a host session start (`public_id|status`). */
+  host_notices_seen: z.array(z.string()).default([]),
+  /** Host sessions whose check stopped with work left (the round limit): the next check with nothing new takes them first. */
+  host_pending: z.array(z.string()).default([]),
+  /** Host sessions whose corrections this person's hooks recorded, latest last: the only ones checked as leftovers. */
+  host_sessions: z.array(z.string()).default([]),
+  /** Per host session, when its failed check may be retried as a leftover (a failing model is not retried every turn). */
+  host_retry: z.record(z.string(), z.string()).default({}),
+  /** When the last pull without a sync run failed: a host session start does not wait on another one for `REFRESH_MS`. */
+  pull_failed_at: z.string().optional(),
+  /** The credential (`accountDigest`) that pull failed with: signed in as someone else since, the next start pulls. */
+  pull_failed_with: z.string().optional(),
+  /** "Remember … as a team rule" requests from a host prompt that were not stored: said at the next host session start,
+   * then dropped (the prompt hook runs in the background and cannot answer). */
+  host_unstored: z.array(z.object({
+    at: z.string(),
+    text: z.string(),
+    /** `full`: too many proposals waiting; `invalid`: not a one-line rule (`detail` says why); `failed`: not written. */
+    reason: z.enum(["full", "invalid", "failed"]),
+    detail: z.string().optional(),
+  })).default([]),
+  /** The after-turn check running for a host session, per session: one at a time across processes. */
+  host_checks: z.record(z.string(), z.object({
+    pid: z.number().int(),
+    at: z.string(),
+    /** Work that arrived while the check ran (another Stop, a new correction): it checks again before releasing. */
+    pending: z.number().int().optional(),
+  })).default({}),
   /** A usage report sent but not yet acknowledged: resent with the same `batch_id` so the server counts it once. */
   pending_usage: z.object({
     batch_id: z.string(),
@@ -188,16 +279,84 @@ const EMPTY: State = State.parse({ version: 1 })
 export function dir(root: string) {
   return Store.paths(root, WORKSPACE_RULES_STORE).learnDir
 }
-const stateFile = (root: string) => path.join(dir(root), "rules.json")
+/** The state file of the project at `root`: in the person's own state directory, keyed by the project's real path, so
+ * nothing in the working tree is ever read as this state. */
+export async function stateFile(root: string): Promise<string> {
+  // Loaded when used: `@/global` at import time would load the learn store before this module is ready.
+  const { stateFileOf } = await import("./state-path")
+  return stateFileOf(await fs.realpath(root).catch(() => path.resolve(root)))
+}
 
 /** The state file's text, or undefined when there is none. Other read errors propagate. */
 async function readRaw(root: string): Promise<string | undefined> {
-  return fs.readFile(stateFile(root), "utf8").catch((error: NodeJS.ErrnoException) => {
+  return fs.readFile(await stateFile(root), "utf8").catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return undefined
     throw error
   })
 }
 
+/** Write `file` in the state directory atomically, private to the person (the project's writer is confined to it). */
+async function writePrivate(file: string, data: string): Promise<void> {
+  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+  const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    await fs.writeFile(tmp, data, { mode: 0o600, flag: "wx" })
+    await fs.rename(tmp, file)
+  } catch (error) {
+    await fs.rm(tmp, { force: true }).catch(() => {})
+    throw error
+  }
+}
+
+/** The team rules delivery may give, by lesson id, built from the state: nothing of the project's `workspace-rules`
+ * copy (wording, pin, tags, paths) is used. None while the project is not linked (unlinked and lost access clear the
+ * state's workspace), and none unless the credential signed in now is the one they were pulled with: a sign-out or
+ * another account stops them at once, not at the next sync. No network.
+ *
+ * With them, the person's own pending proposals (`my_pending`), marked `review: "pending"`: an `add` as a rule of its
+ * own, an `edit` as its proposed wording in place of the active rule it replaces; a `retire` changes nothing. */
+export async function vouched(root: string): Promise<Map<string, Lesson>> {
+  const state = await read(root)
+  if (!state.workspace || !state.pulled_with) return new Map()
+  const { accountDigest } = await import("../workspace/state")
+  if ((await accountDigest().catch(() => null)) !== state.pulled_with) return new Map()
+  const lessons = new Map(state.rules.map((rule) => [lessonId(rule.rule_key), toLesson(rule)]))
+  for (const pending of state.my_pending) {
+    if (pending.change === "retire") continue
+    if (pending.change === "edit") {
+      const active = state.rules.find((rule) => rule.public_id === pending.replaces_public_id)
+      // An edit of a rule this pull did not deliver (retired meanwhile, or not readable here) has nothing to replace.
+      if (!active) continue
+      lessons.set(lessonId(active.rule_key), pendingLesson(pending, active))
+      continue
+    }
+    const id = lessonId(pending.rule_key)
+    // An add whose rule is already active (approved after this pull) is delivered as the active rule.
+    if (!lessons.has(id)) lessons.set(id, pendingLesson(pending))
+  }
+  return lessons
+}
+
+/** One of the person's pending proposals as a lesson, under the active rule's id, paths and pin when it edits one: the
+ * edit changes the wording, not how the rule is selected. */
+function pendingLesson(pending: MyPending, replaces?: RuleOut): Lesson {
+  const paths = pending.applies_to.length ? pending.applies_to : (replaces?.applies_to ?? [])
+  return {
+    id: lessonId((replaces ?? pending).rule_key),
+    text: printable(pending.text),
+    tags: pending.tags,
+    scope: "project",
+    ...(replaces?.pinned ? { pinned: true } : {}),
+    review: "pending",
+    ...(paths.length ? { trigger: { paths } } : {}),
+    helpful: 0,
+    harmful: 0,
+    applied: 0,
+    created: pending.created_at,
+    updated: pending.created_at,
+    provenance: `workspace rule proposal ${pending.public_id}`,
+  }
+}
 
 function parse(raw: string | undefined): State | undefined {
   if (!raw) return structuredClone(EMPTY)
@@ -235,9 +394,8 @@ export function toLesson(rule: RuleOut): Lesson {
 
 const IGNORE = "*\n"
 
-/** Under the learn lock. The parent learn ignore already keeps `rules.json` out of Git but shares each store's
- * `approved.json`, so the mirror needs this one too (whatever an older file said). Written with the mirror only,
- * so a project without a workspace never gets it. */
+/** Under the learn lock. The parent learn ignore shares each store's `approved.json`, so the mirror needs this one
+ * (whatever an older file said). Written with the mirror only, so a project without a workspace never gets it. */
 async function ensureIgnore(root: string) {
   const ignore = path.join(dir(root), ".gitignore")
   const current = await SafeFS.open(root, ignore, constants.O_RDONLY)
@@ -257,22 +415,34 @@ function capSent(sent: Sent[]): Sent[] {
 export async function update(root: string, change: (state: State) => State | void): Promise<State> {
   return withLearnLock(root, async () => {
     await SafeFS.mkdir(root, dir(root))
+    const file = await stateFile(root)
     const raw = await readRaw(root)
     let current = parse(raw)
     if (!current) {
       // Written by another version or damaged: keep it for inspection rather than overwrite it.
-      await Store.writeAtomic(root, `${stateFile(root)}.unreadable-${Date.now()}`, raw!, 0o600)
+      await writePrivate(`${file}.unreadable-${Date.now()}`, raw!)
       current = structuredClone(EMPTY)
     }
     const rulesBefore = JSON.stringify(current.rules)
     const next = change(current) ?? current
     next.notices = next.notices.slice(-MAX_NOTICES)
     next.sent = capSent(next.sent)
+    next.my_pending = next.my_pending.slice(0, MAX_MY_PENDING)
     next.processed_signals = next.processed_signals.slice(-MAX_TRACKED)
+    // Keys of notices still listed are never trimmed (they would be reported again): only keys of notices gone, and of
+    // failed checks reported before the last one, make room.
+    if (next.host_notices_seen.length > MAX_NOTICES) {
+      const live = new Set([...next.notices.map(hostNoticeKey), ...(next.last_check ? [hostCheckKey(next.last_check)] : [])])
+      const gone = next.host_notices_seen.filter((key) => !live.has(key))
+      const drop = new Set(gone.slice(0, next.host_notices_seen.length - MAX_NOTICES))
+      next.host_notices_seen = next.host_notices_seen.filter((key) => !drop.has(key))
+    }
+    next.host_unstored = next.host_unstored.slice(-MAX_HOST_UNSTORED)
+    next.host_sessions = next.host_sessions.slice(-MAX_HOST_SESSIONS)
     const now = Date.now()
     next.dismissed = next.dismissed.filter((d) => Date.parse(d.until) > now)
     if (next.scope_drop && !scopeDropShown(next.scope_drop, now)) delete next.scope_drop
-    await Store.writeAtomic(root, stateFile(root), JSON.stringify(next, null, 2) + "\n")
+    await writePrivate(file, JSON.stringify(next, null, 2) + "\n")
     // Only a linked project (or one whose rules just changed, e.g. a reset) has a mirror to write: in a project with no
     // workspace, only the state file is written (a dismissal, a learning choice), never an `approved.json` that delivery
     // would read. A mirror left behind by a write that failed after the state was saved (or by an unreadable state set
@@ -338,6 +508,8 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
     usage_reported: state.usage_reported,
     corrected_reported: state.corrected_reported,
     processed_signals: state.processed_signals,
+    // A stored proposal's send recorded here is what says it acted (`proposal.ts` `acted`, `act`): kept with it.
+    push_outcomes: Object.fromEntries(Object.entries(state.push_outcomes).filter(([id]) => state.proposals.some((p) => p.card.id === id))),
     // A batch built for this scope can only be resent to it.
     // The same scope comes back (the link or access returns): its queue, approvals, the person's sent history and the
     // review cursor stay, so reviews made meanwhile are still announced.
@@ -353,8 +525,18 @@ export function cleared(state: State, options: { keepOutbox?: boolean } = {}): S
       : {}),
     // A drop notice outlives a later reset: it is about proposals the person was told were queued.
     ...(state.scope_drop ? { scope_drop: state.scope_drop } : {}),
-    // A "remember" is saved locally whatever the workspace: no reset loses it.
+    // A "remember" is saved locally whatever the workspace: no reset loses it. Nor an open proposal: its answer checks
+    // the scope it was raised for.
     remember_requests: state.remember_requests,
+    proposals: state.proposals,
+    host_notices_seen: state.host_notices_seen,
+    host_checks: state.host_checks,
+    host_pending: state.host_pending,
+    host_sessions: state.host_sessions,
+    host_retry: state.host_retry,
+    // A refused request's text is the person's: not shown to another account or workspace (`keepOutbox` is the same
+    // scope, gone for now).
+    host_unstored: options.keepOutbox ? state.host_unstored : [],
   }
 }
 
@@ -366,6 +548,15 @@ export function scopeDropNote(state: State, now = Date.now()): string | undefine
   const drop = state.scope_drop
   if (!drop || !scopeDropShown(drop, now)) return undefined
   return `${drop.count} queued ${drop.count === 1 ? "proposal was" : "proposals were"} for another account or workspace and ${drop.count === 1 ? "was" : "were"} not sent`
+}
+
+/** The rules state was pulled with the credential signed in now (`pulled_with`). Two people can share a tenant: the
+ * credential's digest tells them apart, where the API URL and tenant would not. No network. Every path that shows
+ * workspace content outside a running session (a host session start, `learn proposals`, a reply) checks it. */
+export async function verified(state: State): Promise<boolean> {
+  if (!state.pulled_with) return false
+  const { accountDigest } = await import("../workspace/state")
+  return (await accountDigest().catch(() => null)) === state.pulled_with
 }
 
 /** Queued proposals at most; a new one is refused (the card stays open) rather than an older one dropped. */

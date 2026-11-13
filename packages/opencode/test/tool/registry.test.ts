@@ -2,7 +2,7 @@ import { afterEach, describe, expect } from "bun:test"
 import path from "path"
 import fs from "fs/promises"
 import { fileURLToPath, pathToFileURL } from "url"
-import { Effect, Layer, Result, Schema } from "effect"
+import { Cause, Effect, Exit, Layer, Result, Schema } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { ToolRegistry } from "@/tool/registry"
 import { Tool } from "@/tool/tool"
@@ -19,6 +19,10 @@ import { ToolJsonSchema } from "@/tool/json-schema"
 import { MessageID, SessionID } from "@/session/schema"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ModelID, ProviderID } from "@/provider/schema"
+// altimate_change start — upstream_fix: tool_lookup follows the background flag.
+import { ToolLookupTool } from "@/altimate/tools/tool-lookup"
+import { Truncate } from "@/tool/truncate"
+// altimate_change end
 
 const configLayer = TestConfig.layer({
   directories: () => InstanceState.directory.pipe(Effect.map((dir) => [path.join(dir, ".opencode")])),
@@ -70,6 +74,16 @@ const withParallel = testEffect(
   }),
 )
 // altimate_change end
+// altimate_change start — upstream_fix: the background experiment publishes task.background.
+const withBackground = testEffect(
+  LayerNode.buildLayer(root, {
+    replacements: [
+      LayerNode.replace(Config.node, configLayer),
+      LayerNode.replace(RuntimeFlags.node, RuntimeFlags.layer({ experimentalBackgroundSubagents: true })),
+    ],
+  }),
+)
+// altimate_change end
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -101,6 +115,141 @@ describe("tool.registry", () => {
       expect((task?.jsonSchema?.properties as Record<string, unknown> | undefined)?.background).toBeUndefined()
     }),
   )
+
+  // altimate_change start — upstream_fix: the background experiment publishes task.background.
+  withBackground.instance("exposes task background parameter when experimental background subagents are enabled", () =>
+    Effect.gen(function* () {
+      const registry = yield* ToolRegistry.Service
+      const agent = yield* Agent.Service
+      const build = yield* agent.get("build")
+      if (!build) throw new Error("build agent not found")
+      const task = (yield* registry.tools({
+        providerID: ProviderID.opencode,
+        modelID: ModelID.make("test"),
+        agent: build,
+      })).find((tool) => tool.id === "task")
+
+      const properties = task?.jsonSchema?.properties as Record<string, { type?: string }> | undefined
+      expect(properties?.background?.type).toBe("boolean")
+      expect(properties?.task_id).toBeDefined()
+    }),
+  )
+
+  const taskFrom = Effect.gen(function* () {
+    const registry = yield* ToolRegistry.Service
+    const build = yield* (yield* Agent.Service).get("build")
+    if (!build) throw new Error("build agent not found")
+    return (yield* registry.tools({
+      providerID: ProviderID.opencode,
+      modelID: ModelID.make("test"),
+      agent: build,
+    })).find((tool) => tool.id === "task")!
+  })
+
+  it.instance("keeps the task description when experimental background subagents are off", () =>
+    Effect.gen(function* () {
+      const task = yield* taskFrom
+      expect(task.description).toContain("For background tasks, you will be notified automatically")
+    }),
+  )
+
+  withBackground.instance("tells the model to collect background tasks before its turn ends", () =>
+    Effect.gen(function* () {
+      const task = yield* taskFrom
+      expect(task.description).not.toContain("notified automatically")
+      expect(task.description).toContain("calling task again with its task_id")
+      expect(task.description).toContain("ending your turn cancels")
+    }),
+  )
+
+  withBackground.instance("execution follows the same flag that published the background field", () =>
+    Effect.gen(function* () {
+      const previous = {
+        flag: process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS,
+        all: process.env.OPENCODE_EXPERIMENTAL,
+      }
+      delete process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS
+      delete process.env.OPENCODE_EXPERIMENTAL
+      try {
+        const task = yield* taskFrom
+        const controller = new AbortController()
+        controller.abort()
+        const exit = yield* task
+          .execute(
+            { description: "x", prompt: "x", subagent_type: "general", background: true },
+            {
+              sessionID: SessionID.make("ses_missing"),
+              messageID: MessageID.ascending(),
+              agent: "build",
+              abort: controller.signal,
+              extra: { bypassAgentCheck: true },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(String(Cause.squash(exit.cause))).not.toContain("require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS")
+        }
+      } finally {
+        if (previous.flag !== undefined) process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = previous.flag
+        if (previous.all !== undefined) process.env.OPENCODE_EXPERIMENTAL = previous.all
+      }
+    }),
+  )
+  // altimate_change end
+
+  // altimate_change start — upstream_fix: tool_lookup describes task with the same background flag decision.
+  const lookupTask = (flag: string | undefined) =>
+    Effect.gen(function* () {
+      const previous = {
+        flag: process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS,
+        all: process.env.OPENCODE_EXPERIMENTAL,
+      }
+      delete process.env.OPENCODE_EXPERIMENTAL
+      if (flag === undefined) delete process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS
+      else process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = flag
+      try {
+        const lookup = yield* (yield* ToolLookupTool.pipe(Effect.provide(Truncate.defaultLayer))).init()
+        const result = yield* lookup.execute(
+          { tool_name: "task" },
+          {
+            sessionID: SessionID.make("ses_lookup"),
+            messageID: MessageID.ascending(),
+            agent: "build",
+            abort: new AbortController().signal,
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        return result.output
+      } finally {
+        if (previous.flag === undefined) delete process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS
+        else process.env.OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS = previous.flag
+        if (previous.all !== undefined) process.env.OPENCODE_EXPERIMENTAL = previous.all
+      }
+    })
+
+  it.instance("tool_lookup describes task.background and collection when the experiment is on", () =>
+    Effect.gen(function* () {
+      const output = yield* lookupTask("true")
+      expect(output).toContain("background  (boolean, optional)")
+      expect(output).toContain("calling task again with its task_id")
+      expect(output).not.toContain("notified automatically")
+    }),
+  )
+
+  it.instance("tool_lookup describes task unchanged when the experiment is off", () =>
+    Effect.gen(function* () {
+      const output = yield* lookupTask(undefined)
+      expect(output).not.toContain("background  (")
+      expect(output).toContain("For background tasks, you will be notified automatically")
+    }),
+  )
+  // altimate_change end
 
   withParallel.instance("exposes websearch for non-opencode providers when Parallel is enabled", () =>
     Effect.gen(function* () {

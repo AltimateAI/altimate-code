@@ -285,3 +285,36 @@ test.each(["append", "consume"] as const)("learn refuses signal %s after lease l
     await fs.rm(root, { recursive: true, force: true })
   }
 })
+
+test("closing learn locks waits until a held lock is released, not only until its task returns", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "learn-lock-close-"))
+  const lock = path.resolve(import.meta.dir, "../../../src/altimate/learn/lock.ts")
+  try {
+    const child = Bun.spawn([process.execPath, "--eval", `
+      import fs from "node:fs/promises";
+      import { Flock } from "@opencode-ai/core/util/flock";
+      import { withLearnLock, closeLearnLocks } from ${JSON.stringify(lock)};
+      const root = ${JSON.stringify(root)};
+      // A slow release: the lease is let go some time after the task returns.
+      const original = Flock.withLock;
+      Flock.withLock = async (key, task, opts) => {
+        const result = await original(key, task, opts);
+        await Bun.sleep(200);
+        await fs.writeFile(root + "/released", "");
+        return result;
+      };
+      let entered;
+      const inside = new Promise((resolve) => (entered = resolve));
+      const work = withLearnLock(root, async () => { entered(); await Bun.sleep(20) });
+      await inside;
+      await closeLearnLocks(5000);
+      console.log(JSON.stringify(await Bun.file(root + "/released").exists()));
+      await work;
+    `], { cwd: path.resolve(import.meta.dir, "../../.."), stdout: "pipe", stderr: "pipe" })
+    const [out, err] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text()])
+    expect(await child.exited, err).toBe(0)
+    expect(JSON.parse(out.trim())).toBe(true)
+  } finally {
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})

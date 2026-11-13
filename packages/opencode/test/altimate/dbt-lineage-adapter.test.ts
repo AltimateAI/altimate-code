@@ -94,12 +94,14 @@ afterAll(async () => {
 
 beforeEach(() => {
   resetDbtAdapter()
+  dbtAdapterInternals.hasModelLineage = () => true
 })
 
 afterEach(() => {
   resetDbtAdapter()
   delete dbtAdapterInternals.readConfig
   delete dbtAdapterInternals.create
+  delete dbtAdapterInternals.hasModelLineage
 })
 
 describe("dbt_lineage in a read-only call", () => {

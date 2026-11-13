@@ -119,12 +119,14 @@ afterAll(async () => {
 beforeEach(() => {
   resetDbtAdapter()
   requests.length = 0
+  dbtAdapterInternals.hasModelLineage = () => true
 })
 
 afterEach(() => {
   resetDbtAdapter()
   delete dbtAdapterInternals.readConfig
   delete dbtAdapterInternals.create
+  delete dbtAdapterInternals.hasModelLineage
 })
 
 describe("dbt_lineage with the project's dbt adapter", () => {
@@ -300,6 +302,22 @@ describe("dbt_lineage without dbt-integration's lineage", () => {
       })
       expect(result.metadata.structuredContent).toBeUndefined()
       expect(result.output).toContain("dbt integration not used: no dbt project here")
+    } finally {
+      call.mockRestore()
+    }
+  })
+
+  test("answers from the manifest without starting an adapter that has no lineage to give", async () => {
+    useConfig(false)
+    dbtAdapterInternals.hasModelLineage = () => false
+    dbtAdapterInternals.attempts = 0
+    dbtAdapterInternals.create = async () => fakeAdapter(true)
+    const call = manifestOnly()
+    try {
+      const result = await (await initTool(DbtLineageTool)).execute({ model: "customers" }, ctx)
+      expect(dbtAdapterInternals.attempts).toBe(0)
+      expect(call).toHaveBeenCalledTimes(1)
+      expect(result.output).not.toContain("dbt integration not used")
     } finally {
       call.mockRestore()
     }

@@ -13,6 +13,8 @@ import { MessageV2, isEchoTransportError } from "./message-v2"
 import { emptyRecordPath } from "../altimate/workspace/empty-record-path"
 // altimate_change — workspace rules: the prompt path skips them in a project that cannot have any
 import { Global } from "../global"
+// altimate_change — workspace rules: their state lives in the person's state directory, not the project
+import { stateFileOf } from "../altimate/rules/state-path"
 import { Log } from "../util/log"
 import { SessionRevert } from "./revert"
 import { Session } from "."
@@ -101,6 +103,11 @@ import { ToolJsonSchema } from "@/tool/json-schema"
 import { Context, Effect, Layer } from "effect"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 // altimate_change end
+// altimate_change start — upstream_fix: SessionPrompt.Service passes its RuntimeFlags to the loop.
+import { Option } from "effect"
+import { RuntimeFlags } from "@/effect/runtime-flags"
+import { withRuntimeFlags } from "@/tool/task"
+// altimate_change end
 // altimate_change start - import fingerprint for env-based skill selection
 import { Fingerprint } from "../altimate/fingerprint"
 // altimate_change end
@@ -123,7 +130,13 @@ import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
 // altimate_change start — the session's bound workspace rides on every telemetry row; workspace rules canonicalize bound
 // directories like the bindings cache does
-import { canonicalDirectory, readLocalBinding } from "@/altimate/workspace/state"
+import {
+  canonicalDirectory,
+  endTurnBinding,
+  turnBinding,
+  unvalidatedTurnBinding,
+  type AccountKey,
+} from "@/altimate/workspace/state"
 
 /** The session's workspace use, as session_end fields. Read only: the row is tracked first, then the
  * turn ends its telemetry entries (`Telemetry.endSession`), so the row itself still carries the
@@ -139,6 +152,7 @@ function workspaceUseFields(sessionID: string, turn: number) {
 // altimate_change end
 import { TraceContext } from "@/altimate/observability/trace-context" // altimate_change — client trace per turn
 import * as OnboardingTelemetry from "@/altimate/telemetry/onboarding" // altimate_change — onboarding funnel
+import * as WorkspaceFirstEvents from "@/altimate/workspace/first-events" // altimate_change — a workspace's first prompt and job
 // altimate_change start — keyless public Zen predicate (flat module)
 import { isPublicZen } from "@/provider/public-zen"
 // altimate_change end
@@ -171,8 +185,8 @@ const boundDirectories = (): ReadonlySet<string> => {
     return new Set()
   }
 }
-const mayHaveWorkspaceRules = (root: string, directory: string) => {
-  if (existsSync(path.join(root, ".altimate-code", "learn", "workspace-rules", "rules.json"))) return true
+export const mayHaveWorkspaceRules = (root: string, directory: string) => {
+  if (existsSync(stateFileOf(canonicalDirectory(root)))) return true
   const dirs = boundDirectories()
   return dirs.size > 0 && dirs.has(canonicalDirectory(directory))
 }
@@ -187,6 +201,9 @@ IMPORTANT:
 - This tool provides your final answer - no further actions are taken after calling it`
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
+// altimate_change start — the step-cap instruction for a json_schema request, whose answer is a tool call
+const STRUCTURED_MAX_STEPS = `The maximum number of steps allowed for this task has been reached. Call the StructuredOutput tool now with your final answer formatted according to the schema, based on the work done so far. Do NOT call any other tool and do NOT respond with plain text.`
+// altimate_change end
 
 // altimate_change start - request identity is independent of compaction message adjacency
 const RequestStarted = BusEvent.define(
@@ -427,6 +444,8 @@ export namespace SessionPrompt {
 
   export const prompt = fn(PromptInput, async (input) => {
     const session = await Session.get(input.sessionID)
+    // altimate_change — a new turn: its rows name the workspace it resolves, not one an earlier turn left
+    endTurnBinding(input.sessionID)
     // altimate_change start — fork Session.Info (index zod) ≡ core Session.Info (session.ts) at the SessionRevert boundary
     await SessionRevert.cleanup(session as unknown as Parameters<typeof SessionRevert.cleanup>[0])
     // altimate_change end
@@ -555,7 +574,11 @@ export namespace SessionPrompt {
     }
     // altimate_change end
 
-    const message = await createUserMessage(input)
+    // altimate_change — a prompt that fails here runs no loop, so no later loop may take its verdict
+    const message = await createUserMessage(input).catch((err) => {
+      endTurnBinding(input.sessionID)
+      throw err
+    })
     await Session.touch(input.sessionID)
 
     // this is backwards compatibility for allowing `tools` to be specified when
@@ -574,6 +597,7 @@ export namespace SessionPrompt {
     }
 
     if (input.noReply === true) {
+      endTurnBinding(input.sessionID) // altimate_change — no loop takes this turn's workspace
       return message
     }
 
@@ -696,6 +720,9 @@ export namespace SessionPrompt {
 
     const abort = resume_existing ? resume(sessionID) : start(sessionID)
     if (!abort) {
+      // altimate_change — this prompt joins the running loop, which named its workspace when it
+      // started, so its verdict is left for no later loop (the summarize route, a resume) to take.
+      endTurnBinding(sessionID)
       return new Promise<MessageV2.WithParts>((resolve, reject) => {
         const callbacks = state()[sessionID].callbacks
         callbacks.push({ resolve, reject })
@@ -751,6 +778,11 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     let step = 0
+    // altimate_change start — the agent's `steps` cap counts model requests only. `step` also
+    // counts iterations that run a compaction or a subtask and `continue`, which ended capped
+    // agents several requests early.
+    let modelSteps = 0
+    // altimate_change end
     // altimate_change start — which tool catalogs of this loop run the workspace
     // engine's turn boundary: the first, and the first after a new user request
     // joins the loop. `step` counts loop iterations, and an iteration can
@@ -810,9 +842,12 @@ export namespace SessionPrompt {
       throw e
     }
     // altimate_change end
-    // altimate_change start — the workspace this project is linked to (local binding cache, no
-    // network), named by the rows of this turn that carry workspace_id.
-    const boundWorkspace = await readLocalBinding(Instance.directory).catch(() => null)
+    // altimate_change start — the workspace this turn works against (the IDE extension's pin, else
+    // the project's link), named by the rows of this turn that carry workspace_id.
+    // The verdict the user message's attachment reads used, when it has any, so every row of the turn
+    // names one workspace. Ended here: the next turn resolves its own.
+    const boundWorkspace = await turnBinding(sessionID, Instance.directory)
+    endTurnBinding(sessionID)
     const telemetryTurn = Telemetry.setContext({
       sessionId: sessionID,
       projectId: Instance.project?.id ?? "",
@@ -1160,6 +1195,21 @@ export namespace SessionPrompt {
           tasks.push(...task)
         }
       }
+      // altimate_change start — filterCompacted renders the retained tail after
+      // the summary, so the array-last finished assistant is a pre-compaction turn
+      // still carrying its overflowing usage. Select it by stored order (the
+      // summary is stored after the tail) so the overflow check sees the summary
+      // and does not compact again before the next request. Ids are not used:
+      // an imported message keeps its caller-provided id, so a summary with a
+      // greater id than a newer finished assistant would hide that turn's usage.
+      lastFinished = undefined
+      for (const msg of msgs) {
+        if (msg.info.role !== "assistant" || !msg.info.finish) continue
+        const info = msg.info as MessageV2.Assistant
+        const order = lastFinished ? compareMessageOrder(messageOrder, info.id, lastFinished.id) : 1
+        if (order > 0 || (order === 0 && lastFinished !== undefined && info.id > lastFinished.id)) lastFinished = info
+      }
+      // altimate_change end
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
       // altimate_change start - only compaction-created continuations belong to the same request
@@ -1252,12 +1302,13 @@ export namespace SessionPrompt {
 
       step++
       if (step === 1)
-        ensureTitle({
+        // altimate_change — fire-and-forget, but never an unhandled rejection
+        void ensureTitle({
           session,
           modelID: lastUser.model.modelID,
           providerID: lastUser.model.providerID,
           history: msgs,
-        })
+        }).catch((error) => log.error("failed to generate title", { error: String(error) }))
 
       const model = await Provider.getModel(lastUser.model.providerID, lastUser.model.modelID).catch((e) => {
         if (Provider.ModelNotFoundError.isInstance(e)) {
@@ -1560,7 +1611,9 @@ export namespace SessionPrompt {
       // normal processing
       const agent = await Agent.get(lastUser.agent)
       const maxSteps = agent.steps ?? Infinity
-      const isLastStep = step >= maxSteps
+      // altimate_change start — see `modelSteps`; it advances right before `processor.process`
+      const isLastStep = modelSteps + 1 >= maxSteps
+      // altimate_change end
       // altimate_change start — only a completed compaction may change this prefix.
       // Recover the marker from persisted history too, including a process restart
       // between summary completion and the next model call.
@@ -1808,6 +1861,7 @@ export namespace SessionPrompt {
               // altimate_change start — file rules append only to this tool result
               lessons,
               workspaceId: boundWorkspace?.datamateId,
+              workspaceScope: boundWorkspace?.scope,
               turn: telemetryTurn,
               // altimate_change end
             }),
@@ -1827,6 +1881,12 @@ export namespace SessionPrompt {
       // per-server timeout. Later catalogs keep the engine tools this request
       // started with.
       const boundary = turnBoundary(msgs)
+      // altimate_change start — a request's slash-command flag is read at its own boundary, so a command
+      // sent while the loop is busy clears its flag here and doesn't leave it for the next typed message.
+      const fromCommand =
+        boundary &&
+        (OnboardingTelemetry.consumeCommandSubmission(sessionID) || OnboardingTelemetry.consumeUntrackedCommand(sessionID))
+      // altimate_change end
       const tools = boundary ? await WorkspaceEngine.atTurnStart(sessionID, catalog) : await catalog()
       WorkspaceEngine.pinTurnTools(sessionID, boundary, tools)
       if (boundary) workspaceNotice.settle(sessionID)
@@ -1939,25 +1999,20 @@ export namespace SessionPrompt {
         //   - `step === 1` (the enclosing block) is NOT "first message of the session". `step`
         //     is declared inside loop() and loop() runs once per user turn, so this block runs
         //     on every turn. `claimFirstPrompt` is what makes this once-per-session.
-        //   - `isOnboardingSession` scopes it to the funnel. Without it, an onboarding-taxonomy
-        //     event would fire for every session in the product — TUI, `run`, GitHub, API.
-        //   - `consumeCommandSubmission` excludes slash commands, because the scan gate submits
+        //   - `promptSent` scopes it to an onboarding session or a workspace not yet counted on this
+        //     machine. Without that, the row would fire for every session in the product.
+        //   - `fromCommand` excludes slash commands, because the scan gate submits
         //     a hidden `/onboard-connect` as an ordinary user message: it would otherwise be
         //     recorded as the user's first typed prompt in every fresh onboarding.
         //   - a real text part, because a message carrying only attachments (a dragged-in file,
         //     a pasted image) reached this block too and was recorded as the user's first typed
         //     prompt before they had typed anything. Same filter as the intent classifier above.
-        const fromCommand = OnboardingTelemetry.consumeCommandSubmission(sessionID)
         const hasUserText = !!userMsg?.parts.some(
           (p) => p.type === "text" && !p.ignored && !p.synthetic && p.text.trim().length > 0,
         )
-        if (
-          !fromCommand &&
-          hasUserText &&
-          OnboardingTelemetry.isOnboardingSession(sessionID) &&
-          OnboardingTelemetry.claimFirstPrompt(sessionID)
-        ) {
-          void OnboardingTelemetry.emit({ type: "first_prompt_sent", ...turnWorkspace }, sessionID)
+        // A subagent's session starts from the command's template or the model's prompt, not a typed one.
+        if (!fromCommand && hasUserText && !session.parentID) {
+          await WorkspaceFirstEvents.promptSent(sessionID, boundWorkspace?.datamateId, boundWorkspace?.scope)
         }
         // altimate_change end
         // altimate_change end — session start telemetry
@@ -2084,6 +2139,9 @@ export namespace SessionPrompt {
       // altimate_change start - every successful commit makes the next generation an echo, including after compaction
       const echoCommittedAnswer =
         format.type === "text" && agent.name === "analyst" && committedAnswer !== undefined
+      // At the step cap a text answer is produced with tools off. A json_schema request keeps
+      // its tools: its answer is the StructuredOutput tool call.
+      const textFinalStep = isLastStep && !echoCommittedAnswer && format.type !== "json_schema"
       const deferredText: MessageV2.TextPart[] = []
       // altimate_change end
 
@@ -2165,6 +2223,9 @@ export namespace SessionPrompt {
         }
       }
       // altimate_change end
+      // altimate_change start — only a request actually sent to the model counts toward the cap
+      modelSteps++
+      // altimate_change end
       const result = await processor.process({
         user: lastUser,
         // altimate_change start — correlate request-boundary snapshots with this assistant message
@@ -2195,20 +2256,27 @@ export namespace SessionPrompt {
             : isLastStep
               ? [
                   {
-                    role: "assistant" as const,
-                    content: MAX_STEPS,
+                    // The step-cap instruction is a user turn, like the echo above. Sent as a
+                    // trailing assistant message with every tool still offered, the gateway
+                    // rejected it and the run ended with no answer. A json_schema request keeps
+                    // its tools and answers through StructuredOutput, so it gets its own text.
+                    role: "user" as const,
+                    content: format.type === "json_schema" ? STRUCTURED_MAX_STEPS : MAX_STEPS,
                   },
                 ]
               : []),
           // altimate_change end
         ],
-        // altimate_change start - the final echo cannot spend another step on tools
-        tools: echoCommittedAnswer ? {} : tools,
+        // altimate_change start - the final echo, and the step-cap answer, cannot spend another step on tools.
+        // Text finalization uses the same toolless shape as compaction and title generation: no
+        // tools and toolChoice "none", so llm.ts flattens historical tool calls for the gateway.
+        tools: echoCommittedAnswer || textFinalStep ? {} : tools,
         deferText: echoCommittedAnswer ? deferredText : undefined,
         // altimate_change end
         model,
         // altimate_change start - a user output schema still takes precedence over text finalization
-        toolChoice: echoCommittedAnswer ? "none" : format.type === "json_schema" ? "required" : undefined,
+        toolChoice:
+          echoCommittedAnswer || textFinalStep ? "none" : format.type === "json_schema" ? "required" : undefined,
         // altimate_change end
       })
 
@@ -2622,6 +2690,10 @@ export namespace SessionPrompt {
           ? "abandoned"
           : "completed"
     // altimate_change start — emit quality signal, tool chain, and error fingerprint events
+    // A subagent's turn is not the workspace's job: the parent's turn counts it through its `task` call.
+    if (outcome === "completed" && toolCallCount > toolErrorCount && !session.parentID) {
+      await WorkspaceFirstEvents.jobCompleted(sessionID, boundWorkspace?.datamateId, boundWorkspace?.scope)
+    }
     Telemetry.track({
       type: "task_outcome_signal",
       ...turnWorkspace, // altimate_change — this turn's workspace, not the session's current entry
@@ -2823,6 +2895,8 @@ export namespace SessionPrompt {
     /** The workspace the calling turn resolved, for the rows its MCP calls emit, and the turn itself,
      * so a call landing after the turn was replaced does not count toward the replacement. */
     workspaceId?: number
+    /** The credential that turn's workspace was resolved under, noted for each tool call's plugins. */
+    workspaceScope?: AccountKey
     turn?: number
     // altimate_change end
   }) {
@@ -2948,6 +3022,8 @@ export namespace SessionPrompt {
             // altimate_change start — stamp authoritative tool source so clients render the right
             // badge. Shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
             const stamped = stampRegistryToolSource(output, item)
+            // The turn's credential, for this call's plugins: a first-event mark names its tenant.
+            using _callScope = WorkspaceFirstEvents.noteCallScope(ctx.callID, input.workspaceScope)
             // altimate_change end
             await Plugin.trigger(
               "tool.execute.after",
@@ -3166,6 +3242,22 @@ export namespace SessionPrompt {
   }
 
   async function createUserMessage(input: PromptInput) {
+    // altimate_change start — the workspace this message's attachment reads name: the turn's, or for a
+    // `noReply` prompt, which runs no turn, one read without the pin's validation or wait.
+    const attachmentWorkspace = async () =>
+      (input.noReply === true
+        ? await unvalidatedTurnBinding(Instance.directory)
+        : await turnBinding(input.sessionID, Instance.directory)
+      )?.datamateId
+    // Every part settles before a failed one is rethrown. A part still running after another failed could
+    // otherwise read the turn's workspace once `prompt` has cleared it, and leave a verdict for the next
+    // loop started without a prompt (summarize, resume) to take.
+    function settled<T>(results: PromiseSettledResult<T>[]): T[] {
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected")
+      if (failed) throw failed.reason
+      return results.map((result) => (result as PromiseFulfilledResult<T>).value)
+    }
+    // altimate_change end
     const agentName = input.agent ?? (await Agent.defaultAgent())
     const agent = await Agent.get(agentName)
     if (!agent) {
@@ -3220,7 +3312,9 @@ export namespace SessionPrompt {
       id: part.id ? PartID.make(part.id) : PartID.ascending(),
     })
 
-    const parts = await Promise.all(
+    // altimate_change start — every part settles before a failure is rethrown (see `settled`)
+    const parts = await Promise.allSettled(
+      // altimate_change end
       input.parts.map(async (part): Promise<Draft<MessageV2.Part>[]> => {
         if (part.type === "file") {
           // before checking the protocol we check if this is an mcp resource because it needs special handling
@@ -3379,8 +3473,8 @@ export namespace SessionPrompt {
                 const model = await Provider.getModel(info.model.providerID, info.model.modelID)
                 const readCtx: Tool.Context = {
                   sessionID: input.sessionID,
-                  // altimate_change — the project's binding, so the attachment read's tool rows name the workspace
-                  workspaceId: (await readLocalBinding(Instance.directory).catch(() => null))?.datamateId,
+                  // altimate_change — the turn's workspace, so the attachment read's tool rows name it
+                  workspaceId: await attachmentWorkspace(),
                   abort: new AbortController().signal,
                   agent: input.agent!,
                   messageID: info.id,
@@ -3449,6 +3543,8 @@ export namespace SessionPrompt {
                 const args = { filePath: filepath }
                 const listCtx: Tool.Context = {
                   sessionID: input.sessionID,
+                  // altimate_change — the turn's workspace, as on a file attachment's read
+                  workspaceId: await attachmentWorkspace(),
                   abort: new AbortController().signal,
                   agent: input.agent!,
                   messageID: info.id,
@@ -3548,7 +3644,9 @@ export namespace SessionPrompt {
           },
         ]
       }),
-    ).then((x) => x.flat().map(assign))
+      // altimate_change start — every part settles before a failure is rethrown (see `settled`)
+    ).then((x) => settled(x).flat().map(assign))
+    // altimate_change end
 
     await Plugin.trigger(
       "chat.message",
@@ -4861,6 +4959,42 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     return result
   }
 
+  // altimate_change start — how many user messages of a session may each trigger a title request
+  // while the session still carries its placeholder title.
+  const TITLE_MAX_ATTEMPTS = 5
+  /** Sessions with a title request in flight: one at a time, so a slow request and the next
+   * turn's retry cannot both set the title. */
+  const titleInFlight = new Set<string>()
+  /** Name, message and HTTP status of a title failure. Covers errors that are not Error instances
+   * (openai-compatible in-band errors are strings, Anthropic's are plain objects) and the SDK's
+   * RetryError, which carries the status on its last attempt rather than on itself. */
+  function describeTitleError(err: unknown): { name: string; message: string; status?: number } {
+    const statusOf = (value: unknown) => {
+      const o = value as { statusCode?: unknown; lastError?: { statusCode?: unknown } } | undefined
+      const code = o?.statusCode ?? o?.lastError?.statusCode
+      return typeof code === "number" ? code : undefined
+    }
+    // The name becomes a telemetry dimension: an identifier-shaped token or nothing.
+    const safeName = (value: unknown, fallback: string) =>
+      typeof value === "string" && /^[A-Za-z0-9_.:-]{1,64}$/.test(value) ? value : fallback
+    if (err instanceof Error) return { name: safeName(err.name, "Error"), message: err.message, status: statusOf(err) }
+    if (err && typeof err === "object") {
+      const o = err as Record<string, unknown>
+      const name = safeName(o.name, safeName(o.type, "object"))
+      let message = typeof o.message === "string" ? o.message : ""
+      if (!message) {
+        try {
+          message = JSON.stringify(err).slice(0, 500)
+        } catch {
+          message = "[object]"
+        }
+      }
+      return { name, message, status: statusOf(err) }
+    }
+    return { name: typeof err, message: String(err) }
+  }
+  // altimate_change end
+
   async function ensureTitle(input: {
     session: Session.Info
     history: MessageV2.WithParts[]
@@ -4876,10 +5010,16 @@ NOTE: At any point in time through this workflow you should feel free to ask the
     )
     if (firstRealUserIdx === -1) return
 
-    const isFirst =
-      input.history.filter((m) => m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic))
-        .length === 1
-    if (!isFirst) return
+    // altimate_change start — retry while the placeholder stands. Upstream requested a title only
+    // on the first user message, so one failed small-model call left `New session - <time>` for the
+    // rest of the session (field report, altimate-code 0.12.8). Later turns retry with the same
+    // first-message context, bounded so a permanently broken small model does not cost a failed
+    // request on every turn.
+    const attempt = input.history.filter(
+      (m) => m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic),
+    ).length
+    if (attempt > TITLE_MAX_ATTEMPTS) return
+    // altimate_change end
 
     // Gather all messages up to and including the first real user message for context
     // This includes any shell/subtask executions that preceded the user's first prompt
@@ -4893,56 +5033,113 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const agent = await Agent.get("title")
     if (!agent) return
-    const model = await iife(async () => {
-      // altimate_change start — agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
-      if (agent.model)
-        return await Provider.getModel(ProviderID.make(agent.model.providerID), ModelID.make(agent.model.modelID))
-      // altimate_change end
-      return (
-        (await Provider.getSmallModel(input.providerID)) ?? (await Provider.getModel(input.providerID, input.modelID))
-      )
-    })
-    const result = await LLM.stream({
-      agent,
-      user: firstRealUser.info as MessageV2.User,
-      system: [],
-      small: true,
-      tools: {},
-      // altimate_change start — title generation is toolless, but without an explicit "none" the
-      // historical-tool-stub injection in LLM.stream repopulates `tools` from any tool parts in
-      // the context, which both re-declares tools this request cannot use and suppresses the
-      // toolless message flattening. compaction.ts passes the same flag for the same reason.
-      toolChoice: "none" as const,
-      // altimate_change end
-      model,
-      abort: new AbortController().signal,
-      sessionID: input.session.id,
-      retries: 2,
-      messages: [
-        {
-          role: "user",
-          content: "Generate a title for this conversation:\n",
-        },
-        ...(hasOnlySubtaskParts
-          ? [{ role: "user" as const, content: subtaskParts.map((p) => p.prompt).join("\n") }]
-          : await MessageV2.toModelMessages(contextMessages, model)),
-      ],
-    })
-    const text = await Promise.resolve(result.text).catch((err: unknown) => {
-      log.error("failed to generate title", { error: err })
-      return undefined
-    })
-    if (text) {
-      const cleaned = text
-        .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
-        .split("\n")
-        .map((line: string) => line.trim())
-        .find((line: string) => line.length > 0)
-      if (!cleaned) return
-
-      const title = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
-      return Session.setTitle({ sessionID: input.session.id, title })
+    // altimate_change start — read the stream itself. `result.text` rejects with the SDK's generic
+    // "No output generated. Check the stream for errors." and the provider's own error reaches only
+    // the stream's error part, so the log never said why a title failed. The model lookup sits in
+    // the same try: a `small_model` the provider does not list used to throw out of this
+    // fire-and-forget call with no log line and no event. Record the real error and report it, so
+    // the next field report is answerable from App Insights.
+    if (titleInFlight.has(input.session.id)) return
+    titleInFlight.add(input.session.id)
+    let text = ""
+    let failure: unknown
+    let model: Provider.Model | undefined
+    // The model the request is for, so a failed lookup is reported against the model that was asked
+    // for (the title agent's own, or `small_model`), not against the chat model.
+    let requested: { providerID: string; modelID: string } | undefined
+    try {
+      requested = await iife(async () => {
+        if (agent.model) return { providerID: String(agent.model.providerID), modelID: String(agent.model.modelID) }
+        const small = (await Config.get()).small_model
+        if (!small) return undefined
+        const parsed = Provider.parseModel(small)
+        return { providerID: String(parsed.providerID), modelID: String(parsed.modelID) }
+      })
+      model = await iife(async () => {
+        // agent.model carries core ProviderV2.ID/ModelV2.ID brands; re-brand to fork ProviderID/ModelID (identity at runtime)
+        if (agent.model)
+          return await Provider.getModel(ProviderID.make(agent.model.providerID), ModelID.make(agent.model.modelID))
+        return (
+          (await Provider.getSmallModel(input.providerID)) ??
+          (await Provider.getModel(input.providerID, input.modelID))
+        )
+      })
+      const result = await LLM.stream({
+        agent,
+        user: firstRealUser.info as MessageV2.User,
+        system: [],
+        small: true,
+        tools: {},
+        // title generation is toolless, but without an explicit "none" the historical-tool-stub
+        // injection in LLM.stream repopulates `tools` from any tool parts in the context, which both
+        // re-declares tools this request cannot use and suppresses the toolless message flattening.
+        // compaction.ts passes the same flag for the same reason.
+        toolChoice: "none" as const,
+        model,
+        abort: new AbortController().signal,
+        sessionID: input.session.id,
+        retries: 2,
+        messages: [
+          {
+            role: "user",
+            content: "Generate a title for this conversation:\n",
+          },
+          ...(hasOnlySubtaskParts
+            ? [{ role: "user" as const, content: subtaskParts.map((p) => p.prompt).join("\n") }]
+            : await MessageV2.toModelMessages(contextMessages, model)),
+        ],
+      })
+      for await (const part of result.fullStream) {
+        if (part.type === "text-delta") text += part.text
+        else if (part.type === "error") failure = part.error
+      }
+    } catch (err) {
+      failure = err
+    } finally {
+      titleInFlight.delete(input.session.id)
     }
+    const cleaned = text
+      .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+      .split("\n")
+      .map((line: string) => line.trim())
+      .find((line: string) => line.length > 0)
+    // An answer with no usable line (empty, or thinking only) is a failed attempt too, so it is
+    // reported rather than silently using up one of the five.
+    if (failure !== undefined || !cleaned) {
+      const err = failure ?? new Error(text.trim() ? "the model returned no title line" : "the model returned no text")
+      const described = describeTitleError(err)
+      const providerID = model?.providerID ?? requested?.providerID ?? input.providerID
+      const modelID = model?.id ?? requested?.modelID ?? input.modelID
+      // Name, message and status only: a provider error object can carry the request body.
+      log.error("failed to generate title", {
+        errorType: described.name,
+        message: described.message.slice(0, 500),
+        status: described.status,
+        attempt,
+        providerID,
+        modelID,
+      })
+      Telemetry.track({
+        type: "title_generation_failed",
+        timestamp: Date.now(),
+        session_id: input.session.id,
+        provider_id: providerID,
+        model_id: modelID,
+        attempt,
+        error_type: described.name,
+        error_class: Telemetry.classifyError(described.message),
+        ...(described.status !== undefined ? { http_status: described.status } : {}),
+      })
+      return
+    }
+
+    const title = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
+    // The user may have named the session while the request was in flight: a generated title only
+    // ever replaces the placeholder, and when that cannot be checked the title is left for a retry.
+    const current = await Session.get(input.session.id).catch(() => undefined)
+    if (!current || !Session.isDefaultTitle(current.title)) return
+    // altimate_change end
+    return Session.setTitle({ sessionID: input.session.id, title })
   }
 
   // altimate_change start — Effect Context.Service facade over the existing Promise namespace.
@@ -4969,23 +5166,29 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
   export class Service extends Context.Service<Service, Interface>()("@opencode/SessionPrompt") {}
 
-  export const layer = Layer.succeed(
+  // The imperative loop takes this service's RuntimeFlags for the background-subagent decision
+  // instead of re-reading the environment.
+  export const layer = Layer.effect(
     Service,
-    Service.of({
-      prompt: (input) => Effect.promise(() => prompt(input)),
-      loop: (input) => Effect.promise(() => loop(input)),
-      cancel: (sessionID) => Effect.promise(() => cancel(sessionID)),
-      shell: (input) =>
-        Effect.tryPromise({
-          try: () => shell(input),
-          catch: (e) => (e instanceof Session.BusyError ? e : new Session.BusyError(input.sessionID)),
-        }),
-      command: (input) => Effect.promise(() => command(input)),
+    Effect.gen(function* () {
+      const flags = Option.getOrUndefined(yield* Effect.serviceOption(RuntimeFlags.Service))
+      const scoped = <A>(fn: () => Promise<A>) => withRuntimeFlags(flags, fn)
+      return Service.of({
+        prompt: (input) => Effect.promise(() => scoped(() => prompt(input))),
+        loop: (input) => Effect.promise(() => scoped(() => loop(input))),
+        cancel: (sessionID) => Effect.promise(() => cancel(sessionID)),
+        shell: (input) =>
+          Effect.tryPromise({
+            try: () => scoped(() => shell(input)),
+            catch: (e) => (e instanceof Session.BusyError ? e : new Session.BusyError(input.sessionID)),
+          }),
+        command: (input) => Effect.promise(() => scoped(() => command(input))),
+      })
     }),
   )
 
   export const defaultLayer = layer
 
-  export const node = LayerNode.make(layer, [])
+  export const node = LayerNode.make(layer, () => [RuntimeFlags.node])
   // altimate_change end
 }

@@ -63,6 +63,8 @@ import {
   NotFoundError,
   PreconditionFailedError,
   WorkspaceApi,
+  ADDING_REMOTE_MESSAGE,
+  addsRemoteToLink,
   type Binding,
   type ActAs,
   type DatamateRef,
@@ -1218,6 +1220,8 @@ interface OnDemandPickerProps {
    * correct rebind endpoint when the user swaps workspaces or picks Create
    * on an already-linked project. (M3) */
   matchedBy?: MatchedIdentifier
+  /** The link was found by path and the project has a remote it lacks: picking the linked workspace adds it. */
+  addsRemote?: boolean
   defaultName: string
 }
 
@@ -1319,6 +1323,12 @@ function OnDemandPickerDialog(props: OnDemandPickerProps) {
           return
         }
         // Picked an existing workspace.
+        if (option.value === props.currentlyLinkedDatamateId && props.addsRemote) {
+          // A plain bind to the linked workspace: the service stores the remote on the existing link.
+          props.api.ui.toast({ variant: "info", message: ADDING_REMOTE_MESSAGE })
+          void bindOrRebindInline(props.api, props.identifier, option.value, undefined, listedAs)
+          return
+        }
         if (option.value === props.currentlyLinkedDatamateId) {
           // No-op — user picked the workspace this project is already linked to.
           props.api.ui.toast({
@@ -1454,6 +1464,7 @@ async function runOnDemandPicker(api: TuiPluginApi, directory: string): Promise<
       currentlyLinkedDatamateId={existing?.datamate.id}
       currentlyLinkedDatamateName={existing?.datamate.name}
       matchedBy={existing?.matchedBy}
+      addsRemote={existing ? addsRemoteToLink(identifier, existing) : false}
       defaultName={defaultName}
     />
   ))
