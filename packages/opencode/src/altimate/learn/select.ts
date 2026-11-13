@@ -135,7 +135,7 @@ export function estimateTokens(text: string): number {
 }
 
 /** The heading of the person's own proposed rules that are still waiting for review. */
-export const PENDING_REVIEW_HEADING = "Your rules pending review (proposed by you, not yet approved by the workspace owner):"
+export const PENDING_REVIEW_HEADING = "Your rules pending review (proposed by you, not yet approved by the workspace owner or an admin):"
 
 /** Include only complete lesson lines; the heading and newlines count against the budget. The person's own proposals
  * still waiting for review (`review: "pending"`) are listed apart, under `PENDING_REVIEW_HEADING`. */

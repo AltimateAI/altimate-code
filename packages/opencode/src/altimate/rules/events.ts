@@ -22,7 +22,15 @@ export const ProposalCard = z.object({
   chars: z.number().int(),
   weakens_verification: z.string().optional(),
   /** Absent when the project is not linked: the card then offers to save the rule for this project only. */
-  workspace: z.object({ name: z.string(), owner_name: z.string().nullable().optional(), is_owner: z.boolean() }).optional(),
+  workspace: z
+    .object({
+      name: z.string(),
+      owner_name: z.string().nullable().optional(),
+      is_owner: z.boolean(),
+      // `owner`, `admin` or `member` from the last pull; absent before workspace roles (`WorkspaceRole.roleOf`).
+      role: z.string().nullable().optional(),
+    })
+    .optional(),
   actions: z.array(z.enum(["send", "approve", "edit", "dismiss", "save_local", "save_memory"])),
   /** The wording did not say rule or memory: the card asks "Save as: Memory · Team rule · Skip". */
   choose: z.boolean().optional(),

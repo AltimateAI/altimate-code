@@ -618,8 +618,8 @@ describe("host session", () => {
         { text: "Prefix marts with fct_.", applies_to: [], review: "pending" },
       ])
       const context = RulesHost.context(added)
-      const approvedAt = context.indexOf("approved by the workspace owner")
-      const pendingAt = context.indexOf("still waiting for the workspace owner's review")
+      const approvedAt = context.indexOf("approved by the workspace owner or an admin")
+      const pendingAt = context.indexOf("still waiting for review by the workspace owner or an admin")
       expect(approvedAt).toBeGreaterThan(-1)
       expect(pendingAt).toBeGreaterThan(approvedAt)
       expect(context.slice(pendingAt)).toContain("- Prefix marts with fct_.")
@@ -632,8 +632,8 @@ describe("host session", () => {
       const edited = await RulesHost.start({ root: edit, directory: edit, learn, ...(session ? { session: `${session}-e` } : {}) })
       expect(edited.rules).toEqual([{ text: "Name staging models stg_<source>__<entity>.", applies_to: [], review: "pending" }])
       const editContext = RulesHost.context(edited)
-      expect(editContext).not.toContain("approved by the workspace owner")
-      expect(editContext).toContain("still waiting for the workspace owner's review")
+      expect(editContext).not.toContain("approved by the workspace owner or an admin")
+      expect(editContext).toContain("still waiting for review by the workspace owner or an admin")
     }
   })
 

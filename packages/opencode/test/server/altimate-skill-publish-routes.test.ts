@@ -134,14 +134,14 @@ describe("POST /altimate/skill/publish", () => {
     expect(((await response.json()) as { error: string }).error).toContain('Did you mean "deploy"?')
   })
 
-  test("reports the engine's own refusals as 422 with their message", async () => {
+  test("reports the engine's own refusals as 422 with their message and a stable code", async () => {
     stubSkills()
     const refusal = new SkillPublish.NotLinkedError()
     spies.push(spyOn(SkillPublish, "publishSkill").mockRejectedValue(refusal))
 
     const response = await request("POST", "/altimate/skill/publish", { name: "deploy" })
     expect(response.status).toBe(422)
-    expect(await response.json()).toEqual({ ok: false, error: refusal.message })
+    expect(await response.json()).toEqual({ ok: false, code: "not_linked", error: refusal.message })
   })
 
   test("reports a backend conflict the engine did not classify as a 422 with the server's detail", async () => {

@@ -170,7 +170,15 @@ export const MAX_REQUESTED_PROPOSALS = 100
 export const State = z.object({
   version: z.literal(1),
   scope: Scope.optional(),
-  workspace: z.object({ name: z.string(), owner_name: z.string().nullable().optional(), is_owner: z.boolean() }).optional(),
+  workspace: z
+    .object({
+      name: z.string(),
+      owner_name: z.string().nullable().optional(),
+      is_owner: z.boolean(),
+      // `owner`, `admin` or `member` from the last pull; absent before workspace roles (`WorkspaceRole.roleOf`).
+      role: z.string().nullable().optional(),
+    })
+    .optional(),
   settings: Settings.optional(),
   revision: z.number().int().optional(),
   cursor: z.string().optional(),

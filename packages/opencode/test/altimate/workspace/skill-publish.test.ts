@@ -1230,6 +1230,35 @@ describe("workspace review", () => {
     expect(describePublish(await publish())).toStartWith("Already approved:")
   })
 
+  test("an admin is not refused when review is off: the server attaches their skill directly", async () => {
+    workspaceOwners = { 42: 99 }
+    server(
+      () => reply(summary({ role: "admin", review_enabled: false })),
+      () => reply({ status: "active", attached_directly: true, duplicate: false, contribution: null }),
+    )
+    const report = await publish()
+    expect(posted()).toHaveLength(1)
+    expect(report.review).toMatchObject({ status: "active", attachedDirectly: true })
+    expect(describePublish(report)).toStartWith('Published "deploy" to "Growth"')
+  })
+
+  test("an admin's submission to a server that turns out to have no review falls back to attaching", async () => {
+    workspaceOwners = { 42: 99 }
+    server(() => reply(summary({ role: "admin" })), () => reply({ detail: { code: "reviews_not_available", message: "x" } }, 404))
+    const report = await publish()
+    expect(report.review).toBeUndefined()
+    expect(attaches()).toHaveLength(1)
+  })
+
+  test("an older server's summary without a role: a non-owner is a member, refused while review is off", async () => {
+    workspaceOwners = { 42: 99 }
+    server(() => reply(summary({ review_enabled: false })), () => reply({}, 500))
+    const err = await publish().catch((e) => e)
+    expect(err).toBeInstanceOf(ReviewDisabledError)
+    expect(err.message).toContain("or an admin of it")
+    expect(uploads()).toEqual([])
+  })
+
   test("a member is refused before anything is uploaded when review is off", async () => {
     workspaceOwners = { 42: 99 }
     server(() => reply(summary({ review_enabled: false })), () => reply({}, 500))
@@ -1395,3 +1424,51 @@ describe("workspace review", () => {
   })
 })
 // altimate_change end
+
+describe("refusal codes for clients", () => {
+  test("each deliberate refusal has a stable code; anything else has none", async () => {
+    const mod = await import("../../../src/altimate/workspace/skill-publish")
+    expect(mod.publishErrorCode(new mod.ReviewDisabledError("Growth", "Olive"))).toBe("review_disabled")
+    expect(mod.publishErrorCode(new mod.TooManyReviewRequestsError("Growth"))).toBe("too_many_requests")
+    expect(mod.publishErrorCode(new mod.NotLinkedError())).toBe("not_linked")
+    expect(mod.publishErrorCode(new Error("boom"))).toBeNull()
+    // Every refusal class: an instance of each (its constructor's arguments do not matter to the code).
+    const { NotConfiguredError } = await import("../../../src/altimate/workspace/api-client")
+    const of = (type: { prototype: object }) => mod.publishErrorCode(Object.create(type.prototype))
+    expect({
+      NotConfiguredError: of(NotConfiguredError),
+      CredentialsChangedError: of(mod.CredentialsChangedError),
+      ManagedSkillError: of(mod.ManagedSkillError),
+      NotProjectSkillError: of(mod.NotProjectSkillError),
+      BinaryFileError: of(mod.BinaryFileError),
+      SymlinkError: of(mod.SymlinkError),
+      EmptyBundleError: of(mod.EmptyBundleError),
+      BundleTooLargeError: of(mod.BundleTooLargeError),
+      SkillNameConflictError: of(mod.SkillNameConflictError),
+      SkillChangedElsewhereError: of(mod.SkillChangedElsewhereError),
+      NotWorkspaceOwnerError: of(mod.NotWorkspaceOwnerError),
+      AttachFailedError: of(mod.AttachFailedError),
+      SubmitFailedError: of(mod.SubmitFailedError),
+    }).toEqual({
+      NotConfiguredError: "not_configured",
+      CredentialsChangedError: "credentials_changed",
+      ManagedSkillError: "managed_skill",
+      NotProjectSkillError: "not_project_skill",
+      BinaryFileError: "binary_file",
+      SymlinkError: "symlink",
+      EmptyBundleError: "empty_bundle",
+      BundleTooLargeError: "bundle_too_large",
+      SkillNameConflictError: "name_conflict",
+      SkillChangedElsewhereError: "changed_elsewhere",
+      NotWorkspaceOwnerError: "not_workspace_owner",
+      AttachFailedError: "attach_failed",
+      SubmitFailedError: "submit_failed",
+    })
+  })
+
+  test("a refusal's message is shown as-is; any other error is not", async () => {
+    const mod = await import("../../../src/altimate/workspace/skill-publish")
+    expect(mod.explainPublishError(new mod.NotLinkedError())).toBe(new mod.NotLinkedError().message)
+    expect(mod.explainPublishError(new Error("boom"))).toBeNull()
+  })
+})
