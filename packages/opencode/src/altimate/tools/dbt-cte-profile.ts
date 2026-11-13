@@ -10,7 +10,7 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
   async execute() {
     return {
       title: "dbt_cte_profile: not implemented",
-      metadata: { success: false },
+      metadata: { success: false, error: "not implemented" },
       output: "dbt_cte_profile is not implemented in this build of altimate-code yet.",
     }
   },

@@ -67,7 +67,8 @@ export async function dbtAdapterFor(ctx: Pick<Tool.Context, "abort" | "agent" | 
         ? { refusal: "not_started", reason: "the dbt adapter didn't start" }
         : { refusal: "no_project", reason: "no dbt project here" }
     }
-    if (adapter.isInitialized?.() === false) return { refusal: "not_loaded", reason: "the dbt adapter didn't load the project" }
+    if (adapter.isInitialized?.() === false)
+      return { refusal: "not_loaded", reason: "the dbt adapter didn't load the project" }
     return { adapter }
   } catch (e) {
     if (signal.aborted) throw e
