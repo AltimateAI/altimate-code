@@ -3,6 +3,7 @@ import {
   anchorToDiff,
   commentableLines,
   isCatalogPortability,
+  isSuppressiblePortability,
   runReview,
   type ReviewRunner,
 } from "../../src/altimate/review/orchestrate"
@@ -17,6 +18,7 @@ import {
   SUMMARY_BUDGET_CHARS,
 } from "../../src/altimate/review/format"
 import { buildEnvelope } from "../../src/altimate/review/verdict"
+import { evaluateCatalog } from "../../src/altimate/review/rule-catalog"
 import { classifyPostOutcome } from "../../src/altimate/review/telemetry"
 
 /**
@@ -185,7 +187,7 @@ describe("portability noise", () => {
     category: "sql_quality",
     title: "m: DISTINCT ON isn't portable",
     body: "`DISTINCT ON (…)` isn't portable; use `qualify row_number()` for first-row-per-group.",
-    evidence: { tool: "rule-catalog", result: {} },
+    evidence: { tool: "rule-catalog", result: { rule: "distinct-on", portability: true, worksOn: ["postgres", "duckdb"] } },
   })
   const coreMissing = finding({
     category: "sql_quality",
@@ -194,12 +196,31 @@ describe("portability noise", () => {
     evidence: { tool: "altimate_core.check", result: { rule: "non_portable_function" } },
   })
 
+  test("only explicitly tagged rules are portability advice, not rules that mention standard SQL", async () => {
+    const legacy = evaluateCatalog(
+      { path: "models/m.sql", status: "added" },
+      "select * from [proj:ds.t]",
+      ["select * from [proj:ds.t]"],
+      [],
+      DEFAULT_RUBRIC,
+    ).find((f) => (f.evidence?.result as { rule: string }).rule === "bq-legacy-sql")
+    expect(legacy).toBeDefined()
+    expect(isCatalogPortability(legacy!)).toBe(false)
+  })
+
+  test("a construct that fails on the project's own engine is kept", () => {
+    expect(isSuppressiblePortability(portability, "postgres")).toBe(true)
+    expect(isSuppressiblePortability(portability, "snowflake")).toBe(false)
+    const untagged = { ...portability, evidence: { tool: "rule-catalog", result: { rule: "pivot-portability", portability: true } } }
+    expect(isSuppressiblePortability(untagged, "snowflake")).toBe(true)
+  })
+
   test("catalog portability advice is recognised; core's dialect-aware check is not", () => {
     expect(isCatalogPortability(portability)).toBe(true)
     expect(isCatalogPortability(coreMissing)).toBe(false)
   })
 
-  test("a single known engine drops catalog portability findings", async () => {
+  test("a single known engine drops portability advice it supports, keeps what fails on it", async () => {
     const runner = {
       async impact() {
         return { hasManifest: true, severity: "SAFE", directCount: 0, transitiveCount: 0, testCount: 0 }
@@ -227,9 +248,24 @@ describe("portability noise", () => {
       getContent: async () => sql,
     }
     const kept = await runReview(base)
-    const dropped = await runReview({ ...base, suppressPortability: true })
-    const before = kept.findings.filter(isCatalogPortability).length
-    expect(before).toBeGreaterThan(0)
-    expect(dropped.findings.filter(isCatalogPortability).length).toBe(0)
+    expect(kept.findings.filter(isCatalogPortability).length).toBeGreaterThan(0)
+    // Postgres supports DISTINCT ON: the advice is noise there and is dropped.
+    const pg = { ...base, config: { ...base.config, dialect: "postgres" } }
+    expect((await runReview({ ...pg, suppressPortability: true })).findings.filter(isCatalogPortability).length).toBe(0)
+    // Snowflake doesn't: on a Snowflake project it is a real error and stays.
+    expect((await runReview({ ...base, suppressPortability: true })).findings.filter(isCatalogPortability).length).toBeGreaterThan(0)
+  })
+})
+
+describe("moved files", () => {
+  test("moves are named in the comment with the folder-config caveat, and are not a lint-only run", async () => {
+    const env = buildEnvelope({
+      findings: [],
+      tier: "trivial",
+      mode: "comment",
+      scope: { movedUnchangedFiles: 3 } as any,
+    })
+    expect(renderSummary(env)).toContain("3 file(s) moved without edits")
+    expect(renderSummary(env)).toContain("`+schema`")
   })
 })

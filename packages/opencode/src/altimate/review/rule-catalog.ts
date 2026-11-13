@@ -44,6 +44,12 @@ export interface Rule {
   unless?: RegExp
   kind?: RuleKind
   pathGlob?: RegExp
+  /**
+   * Cross-engine portability advice: dropped for a project on one known
+   * engine, unless that engine is missing from `worksOn` (then it is a real
+   * error there and is kept). Omit `worksOn` when support isn't established.
+   */
+  portability?: { worksOn?: string[] }
   example: RuleExample
   counter?: RuleExample
 }
@@ -122,7 +128,10 @@ export function evaluateCatalog(
       file: file.path,
       model,
       confidence: "high",
-      evidence: { tool: "rule-catalog", result: { rule: rule.id } },
+      evidence: {
+        tool: "rule-catalog",
+        result: rule.portability ? { rule: rule.id, portability: true, worksOn: rule.portability.worksOn } : { rule: rule.id },
+      },
       ruleKey: `${rule.category}:${rule.id}`,
     })
     if (!exclusionReason(f, rubric)) matched.push({ rule, finding: f })
@@ -167,7 +176,7 @@ const r = (
   severity: Severity,
   title: string,
   body: string,
-  match: Pick<Rule, "added" | "removed" | "newSql" | "absentNewSql" | "unless" | "kind" | "pathGlob">,
+  match: Pick<Rule, "added" | "removed" | "newSql" | "absentNewSql" | "unless" | "kind" | "pathGlob" | "portability">,
   example: RuleExample,
   counter?: RuleExample,
 ): Rule => ({ id, category, severity, title, body, ...match, example, counter })
@@ -585,7 +594,7 @@ const AGG: Rule[] = [
     "suggestion",
     "COUNT(DISTINCT a, b) portability",
     "Multi-column COUNT(DISTINCT) isn't supported on all warehouses; concat or use a subquery.",
-    { added: /count\s*\(\s*distinct\s+[^),]+,/i },
+    { added: /count\s*\(\s*distinct\s+[^),]+,/i, portability: { worksOn: ["mysql", "snowflake", "databricks"] } },
     { add: "count(distinct a, b)" },
     { add: "count(distinct a)" },
   ),
@@ -1703,7 +1712,7 @@ const STYLE: Rule[] = [
     "suggestion",
     "PIVOT/UNPIVOT is dialect-specific",
     "`PIVOT`/`UNPIVOT` syntax varies by warehouse and is hard to test; consider conditional aggregation.",
-    { added: /\b(pivot|unpivot)\s*\(/i },
+    { added: /\b(pivot|unpivot)\s*\(/i, portability: {} },
     { add: "from t pivot(sum(x) for k in ('a'))" },
     { add: "sum(case when k='a' then x end)" },
   ),
@@ -1723,7 +1732,7 @@ const STYLE: Rule[] = [
     "suggestion",
     "GROUP BY on a SELECT alias",
     "Grouping by a select-list alias isn't portable (errors on some warehouses); repeat the expression.",
-    { added: /\bgroup\s+by\s+\w+_(amt|amount|total|cnt|count)\b/i },
+    { added: /\bgroup\s+by\s+\w+_(amt|amount|total|cnt|count)\b/i, portability: { worksOn: ["snowflake", "bigquery", "postgres", "redshift", "databricks", "duckdb", "mysql", "clickhouse"] } },
     { add: "group by total_amount" },
     { add: "group by customer_id" },
   ),
@@ -1733,7 +1742,7 @@ const STYLE: Rule[] = [
     "suggestion",
     "string interval literal portability",
     "`interval '1 day'` literal syntax differs across warehouses; prefer dateadd/date_add functions.",
-    { added: /interval\s+'\d+\s*\w+'/i },
+    { added: /interval\s+'\d+\s*\w+'/i, portability: {} },
     { add: "d + interval '1 day'" },
     { add: "dateadd(day, 1, d)" },
   ),
@@ -1743,7 +1752,7 @@ const STYLE: Rule[] = [
     "suggestion",
     "integer arithmetic on a date",
     "`date + 7` (bare int) isn't portable and is ambiguous (days? seconds?); use dateadd/interval.",
-    { added: /\b\w*(date|_at|_dt)\b\s*[+\-]\s*\d+\b/i },
+    { added: /\b\w*(date|_at|_dt)\b\s*[+\-]\s*\d+\b/i, portability: { worksOn: ["postgres", "redshift", "snowflake", "duckdb", "oracle"] } },
     { add: "select order_date + 7" },
     { add: "select dateadd(day, 7, order_date)" },
   ),
@@ -1866,7 +1875,7 @@ const MISC: Rule[] = [
     "suggestion",
     "DISTINCT ON is Postgres-specific",
     "`DISTINCT ON (…)` isn't portable; use `qualify row_number()` for first-row-per-group.",
-    { added: /distinct\s+on\s*\(/i },
+    { added: /distinct\s+on\s*\(/i, portability: { worksOn: ["postgres", "duckdb"] } },
     { add: "select distinct on (id) * from t" },
     { add: "qualify row_number() over (partition by id order by d) = 1" },
   ),
@@ -1876,7 +1885,7 @@ const MISC: Rule[] = [
     "suggestion",
     "FETCH FIRST portability",
     "`FETCH FIRST n ROWS` isn't supported everywhere; `LIMIT` (with ORDER BY) is more portable.",
-    { added: /fetch\s+first\s+\d+/i },
+    { added: /fetch\s+first\s+\d+/i, portability: { worksOn: ["postgres", "snowflake", "oracle", "trino"] } },
     { add: "fetch first 10 rows only" },
     { add: "limit 10" },
   ),
@@ -2299,7 +2308,7 @@ const MISC2: Rule[] = [
     "suggestion",
     "non-portable type name (TEXT)",
     "`cast(x as text)` isn't supported on all warehouses; use `string`/`varchar`.",
-    { added: /\bas\s+text\b/i },
+    { added: /\bas\s+text\b/i, portability: { worksOn: ["postgres", "redshift", "duckdb", "snowflake"] } },
     { add: "cast(x as text)" },
     { add: "cast(x as string)" },
   ),

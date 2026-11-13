@@ -210,12 +210,20 @@ export interface OrchestrateInput {
   suppressPortability?: boolean
 }
 
-const PORTABILITY_RE = /portab|dialect[ -]specific|non-?standard|n't standard|not standard|standard sql/i
-
-/** A regex-catalog finding whose concern is portability across warehouses. */
+/** A catalog finding tagged as cross-engine portability advice. */
 export function isCatalogPortability(f: Finding): boolean {
-  const tool = f.evidence?.tool
-  return (tool === "rule-catalog" || tool === "dbt-patterns") && PORTABILITY_RE.test(`${f.title} ${f.body}`)
+  return f.evidence?.tool === "rule-catalog" && (f.evidence.result as { portability?: boolean })?.portability === true
+}
+
+/**
+ * Portability advice that is noise for a project on `dialect`: dropped unless
+ * the rule names the engines that support the construct and `dialect` isn't
+ * one of them — then it is an error on this project's own engine.
+ */
+export function isSuppressiblePortability(f: Finding, dialect: string): boolean {
+  if (!isCatalogPortability(f)) return false
+  const worksOn = (f.evidence?.result as { worksOn?: string[] })?.worksOn
+  return !worksOn || worksOn.includes(dialect.toLowerCase())
 }
 
 /** Line numbers on the head side of a unified diff that GitHub accepts for an
@@ -1170,7 +1178,8 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   )
 
   // A run is degraded when model files exist but none resolved against a manifest.
-  const runDegraded = modelFiles.length > 0 ? !anyManifest : reviewable.length === 0
+  // Nothing to resolve (yml-only, pure moves) is not a lint-only run.
+  const runDegraded = modelFiles.length > 0 && !anyManifest
 
   // High-risk path tokens are user-configured (billing/pci/patient/etc.) —
   // the reviewer core carries no default list. `undefined` when no
@@ -1514,7 +1523,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   // Cross-engine portability advice from the regex catalog is noise for a
   // project that runs on one known engine. Core's dialect-aware check (a
   // function missing on THIS engine) is a real error and is kept.
-  if (input.suppressPortability) findings = findings.filter((f) => !isCatalogPortability(f))
+  if (input.suppressPortability) findings = findings.filter((f) => !isSuppressiblePortability(f, dialect))
   findings = anchorToDiff(findings, input.changedFiles)
   const minSev = SEVERITY_ORDER[input.config.severityThreshold]
   findings = findings.filter((f) => SEVERITY_ORDER[f.severity] >= minSev)
