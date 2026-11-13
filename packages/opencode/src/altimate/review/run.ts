@@ -3,8 +3,16 @@ import { readFile, realpath, stat, access } from "node:fs/promises"
 import { Installation } from "../../installation"
 import { loadReviewConfig, resolveRubric } from "./config"
 import type { Severity } from "./finding"
-import { collectChangedFiles, makeContentResolver, defaultBaseRef, gitRepoRoot, manifestHash } from "./git"
-import { makeCompiledResolver, dbtProjectName } from "./compiled"
+import {
+  collectChangedFiles,
+  makeContentResolver,
+  resolveReviewBase,
+  type ResolvedBase,
+  gitRepoRoot,
+  manifestHash,
+} from "./git"
+import { makeCompiledResolver, dbtProjectName, dbtProjectLayout } from "./compiled"
+import { scopeToProject } from "./diff-filter"
 import { buildCatalogSchemaContext } from "./schema-context"
 import { createDispatcherRunner } from "./runner"
 import { runReview } from "./orchestrate"
@@ -21,7 +29,7 @@ import type { ChangedFile } from "./diff-filter"
 
 export interface ReviewPullRequestOptions {
   cwd: string
-  /** Base ref; defaults to merge-base with origin/main. */
+  /** Base ref; defaults to the PR target branch from CI (else the remote default branch), reduced to the merge-base. */
   base?: string
   /** Head ref; omit to diff against the working tree. */
   head?: string
@@ -213,26 +221,12 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   if (opts.severityThreshold) config.severityThreshold = opts.severityThreshold
   const rubric = resolveRubric(config)
 
-  // Only resolve a base ref if we actually need git (to collect changed files
-  // or to read old/new content). A caller that supplies BOTH `changedFiles` and
-  // `getContent` (e.g. a non-git CI integration) must not be forced through a
-  // git lookup that can fail when there's no usable history.
-  const needGit = !opts.changedFiles || !opts.getContent
-  const base = opts.base ?? (needGit ? await defaultBaseRef(opts.cwd) : "")
-  const changedFiles = opts.changedFiles ?? (await collectChangedFiles({ base, head: opts.head, cwd: opts.cwd }))
   // Resolve the repo top-level once; used to root working-tree FS reads, the
   // stale-manifest existence check, and the compiled-SQL resolver's path
   // mapping. Falls back to opts.cwd when we couldn't resolve it (non-git or
   // bare-repo contexts) — safe for the repo-root-invoked case but not helpful
   // in the subdir-invocation case that this addresses.
   const gitRoot = (await gitRepoRoot(opts.cwd)) ?? opts.cwd
-  // Map renamed files → their old path so getContent resolves the "old" side
-  // from where the file lived at `base`.
-  const renames = new Map(
-    changedFiles.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
-  )
-  const getContent =
-    opts.getContent ?? makeContentResolver({ base, head: opts.head, cwd: opts.cwd, renames, gitRoot })
 
   // Resolve the manifest against the PROJECT being reviewed (cwd), not the
   // binary's process.cwd() — otherwise a relative path silently misses when the
@@ -241,11 +235,10 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     ? config.manifestPath
     : path.join(opts.cwd, config.manifestPath)
   // The "effective dbt project root" for downstream lookups (dbtProjectName,
-  // compiled-SQL resolver). Starts as opts.cwd — G3 auto-discovery updates it
-  // when it finds a dbt_project.yml in an ancestor directory, so the compiled
-  // resolver and project-name lookups target the discovered project rather
-  // than the CLI's working directory (which may be a subdir).
-  let dbtRoot = opts.cwd
+  // compiled-SQL resolver, scope). The nearest dbt_project.yml at or above cwd
+  // (inside the repo); G3 auto-discovery below may refine it.
+  const project = await findDbtProject(opts.cwd, gitRoot, manifestAbs)
+  let dbtRoot = project ?? opts.cwd
   // G3 (Round 18) — auto-discovery when the caller didn't pass `--manifest` and
   // the config-relative resolve above doesn't point at an existing file. Walk
   // upward for the dbt project root and use its `target/manifest.json`. Explicit
@@ -270,6 +263,44 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
       }
     }
   }
+  // The dbt project's location inside the repo ("" = repo root). Undefined
+  // when no dbt_project.yml was found or it lies outside the repo: then
+  // nothing is scoped out and conventional directory names classify files.
+  const projectRootRel = await repoRelative(gitRoot, dbtRoot, project !== undefined || dbtRoot !== opts.cwd)
+  const layout = projectRootRel !== undefined ? await dbtProjectLayout(dbtRoot, projectRootRel) : undefined
+
+  // Only resolve a base ref if we actually need git (to collect changed files
+  // or to read old/new content). A caller that supplies BOTH `changedFiles` and
+  // `getContent` (e.g. a non-git CI integration) must not be forced through a
+  // git lookup that can fail when there's no usable history.
+  //
+  // The base is always the MERGE-BASE of the PR's target branch and the head:
+  // the diff, and every "old" file version, come from the commit the PR
+  // branched from, so commits the target gained since never leak in as changes.
+  const needGit = !opts.changedFiles || !opts.getContent
+  const resolved: ResolvedBase | undefined = needGit
+    ? await resolveReviewBase({ cwd: opts.cwd, base: opts.base, head: opts.head })
+    : undefined
+  if (resolved && resolved.source !== "flag") {
+    process.stderr.write(`ℹ️  review base: ${resolved.ref} (${resolved.source}), merge-base ${resolved.sha.slice(0, 12)}\n`)
+  }
+  const base = resolved?.sha ?? opts.base ?? ""
+  const collected = opts.changedFiles ?? (await collectChangedFiles({ base, head: opts.head, cwd: opts.cwd }))
+  const scoped = scopeToProject(collected, projectRootRel)
+  const changedFiles = scoped.inScope
+  if (scoped.outOfScope > 0) {
+    process.stderr.write(
+      `ℹ️  ${scoped.outOfScope} changed file(s) outside the dbt project (${projectRootRel || "."}) were not reviewed.\n`,
+    )
+  }
+  // Map renamed files → their old path so getContent resolves the "old" side
+  // from where the file lived at `base`.
+  const renames = new Map(
+    changedFiles.filter((f) => f.status === "renamed" && f.oldPath).map((f) => [f.path, f.oldPath as string]),
+  )
+  const getContent =
+    opts.getContent ?? makeContentResolver({ base, head: opts.head, cwd: opts.cwd, renames, gitRoot })
+
   // Freshness check: detect (and warn — non-fatal) when the manifest predates
   // change-affecting files. Runs for both the pinned-head CI shape AND the
   // working-tree local shape — the local scenario "dbt compile once, edit for
@@ -353,5 +384,69 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     explainTier: opts.explainTier,
     forceTier: opts.forceTier,
     staleManifest,
+    layout,
+    scope: {
+      baseRef: resolved?.ref ?? opts.base,
+      baseSha: resolved?.sha,
+      baseSource: resolved?.source,
+      projectRoot: projectRootRel,
+      outOfScopeFiles: scoped.outOfScope || undefined,
+      movedUnchangedFiles: scoped.movedUnchanged || undefined,
+    },
   })
+}
+
+/**
+ * The dbt project being reviewed: the nearest directory at or above `cwd`
+ * (not above the repo root) holding dbt_project.yml; else the project that
+ * owns the configured manifest (`<project>/target/manifest.json`).
+ */
+async function findDbtProject(cwd: string, gitRoot: string, manifestAbs: string): Promise<string | undefined> {
+  const hasProjectFile = async (dir: string) => {
+    for (const fn of ["dbt_project.yml", "dbt_project.yaml"]) {
+      try {
+        await access(path.join(dir, fn))
+        return true
+      } catch {
+        /* try next */
+      }
+    }
+    return false
+  }
+  let stop = path.resolve(gitRoot)
+  try {
+    stop = await realpath(stop)
+  } catch {
+    /* keep unresolved */
+  }
+  let dir = path.resolve(cwd)
+  try {
+    dir = await realpath(dir)
+  } catch {
+    /* keep unresolved */
+  }
+  for (;;) {
+    if (await hasProjectFile(dir)) return dir
+    if (dir === stop || path.dirname(dir) === dir) break
+    dir = path.dirname(dir)
+  }
+  const owner = path.dirname(path.dirname(manifestAbs))
+  return (await hasProjectFile(owner)) ? owner : undefined
+}
+
+/** `dir` relative to the repo root in POSIX form, or undefined when unknown
+ *  or outside the repo. */
+async function repoRelative(gitRoot: string, dir: string, known: boolean): Promise<string | undefined> {
+  if (!known) return undefined
+  let a = gitRoot
+  let b = dir
+  try {
+    a = await realpath(gitRoot)
+    b = await realpath(dir)
+  } catch {
+    /* compare unresolved */
+  }
+  const rel = path.relative(a, b).replace(/\\/g, "/")
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return undefined
+  return rel
 }

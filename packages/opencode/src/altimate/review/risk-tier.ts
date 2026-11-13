@@ -1,7 +1,7 @@
 import {
   type ChangedFile,
   type DbtFileKind,
-  classifyDbtFile,
+  fileKind,
   countChangedLines,
   looksLikeSourceYml,
   touchesContract,
@@ -290,7 +290,7 @@ function dbtRiskYmlKeyMatches(kind: DbtFileKind, scanned: string): string[] {
 
 /** Classify a single changed file from its diff + optional manifest signals. */
 export function classifyFile(file: ChangedFile, opts: ClassifyOptions = {}): FileChangeClass {
-  const kind = classifyDbtFile(file.path)
+  const kind = fileKind(file)
   const diff = file.diff
   const changed = changedLines(diff)
   // Block-scalar-aware scan: walks the whole diff (including context lines)

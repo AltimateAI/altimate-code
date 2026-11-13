@@ -1,5 +1,5 @@
 import { type Finding, type Severity, type ReviewCategory, makeFinding } from "./finding"
-import { type ChangedFile, classifyDbtFile } from "./diff-filter"
+import { type ChangedFile, fileKind } from "./diff-filter"
 import { type Rubric, clampSeverity, exclusionReason } from "./rubric"
 import path from "node:path"
 
@@ -68,7 +68,7 @@ export interface RuleInput {
 
 /** True when the rule matches the change. */
 export function ruleMatches(rule: Rule, input: RuleInput): boolean {
-  const kind = classifyDbtFile(input.file.path)
+  const kind = fileKind(input.file)
   const wantKind = rule.kind ?? "model_sql"
   if (wantKind !== "any" && kind !== wantKind) return false
   if (rule.pathGlob && !rule.pathGlob.test(input.file.path)) return false

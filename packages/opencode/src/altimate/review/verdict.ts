@@ -89,6 +89,28 @@ export const EngineVersions = z.object({
 })
 export type EngineVersions = z.infer<typeof EngineVersions>
 
+/** What the review looked at: the resolved base, and files it deliberately
+ *  did not review. Signed with the rest of the envelope so a verdict computed
+ *  against the wrong base, or with models left unverified, is auditable. */
+export const ReviewScope = z.object({
+  /** Ref the base was resolved from (e.g. `origin/deployment`). */
+  baseRef: z.string().optional(),
+  /** Merge-base commit the diff and the old file versions were taken from. */
+  baseSha: z.string().optional(),
+  baseSource: z
+    .enum(["flag", "github_event", "github_env", "gitlab_env", "remote_default", "default_branch", "parent"])
+    .optional(),
+  /** dbt project directory relative to the repository root ("" = root). */
+  projectRoot: z.string().optional(),
+  /** Changed files outside the dbt project: counted, not reviewed. */
+  outOfScopeFiles: z.number().int().nonnegative().optional(),
+  /** Renames with unchanged content and name (pure moves): not re-reviewed. */
+  movedUnchangedFiles: z.number().int().nonnegative().optional(),
+  /** Models the engine lanes could not verify, with the reason. */
+  unverified: z.array(z.object({ path: z.string(), reason: z.string() })).optional(),
+})
+export type ReviewScope = z.infer<typeof ReviewScope>
+
 export const VerdictEnvelope = z.object({
   version: z.literal("1"),
   verdict: Verdict,
@@ -120,6 +142,8 @@ export const VerdictEnvelope = z.object({
    *  against out-of-date metadata — a stderr warning alone is easy for CI to
    *  swallow. */
   staleManifest: z.boolean().optional(),
+  /** Base resolution and review coverage (see ReviewScope). */
+  scope: ReviewScope.optional(),
   /** ISO timestamp; injected by the caller (no clock access in pure code). */
   generatedAt: z.string().optional(),
   /** Optional break-glass override record. */
@@ -178,6 +202,7 @@ export interface BuildEnvelopeInput {
   tierClassified?: RiskTier
   /** True when mtime signals the manifest predates a change-affecting file. */
   staleManifest?: boolean
+  scope?: ReviewScope
 }
 
 function summarize(findings: Finding[], degraded: boolean): VerdictEnvelope["summary"] {
@@ -206,6 +231,7 @@ export function buildEnvelope(input: BuildEnvelopeInput): VerdictEnvelope {
     engine: EngineVersions.parse(input.engine ?? {}),
     manifestHash: input.manifestHash,
     staleManifest: input.staleManifest ? true : undefined,
+    scope: input.scope,
     generatedAt: input.generatedAt,
   })
 }
