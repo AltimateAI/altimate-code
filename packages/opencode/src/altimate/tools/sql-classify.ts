@@ -177,7 +177,7 @@ const HARD_DENY_PATTERN = /^\s*(DROP\s+((EXTERNAL|PLUGGABLE)\s+)?(DATABASE|SCHEM
  * Fail closed when the parser is unavailable or rejects the input. Lexical
  * statement boundaries still enforce hard denies without reading quoted text.
  */
-function classifyFallback(sql: string, dialect?: string): { queryType: "read" | "write"; blocked: boolean } {
+function classifyFallback(sql: string, dialect?: string, write = true): { queryType: "read" | "write"; blocked: boolean } {
   const statements = statementsOf(sql, dialect)
   // Executable comments can contain entire statements or fragments of a hard
   // deny. Reject them outright because generic parsers discard their bodies.
@@ -204,7 +204,8 @@ function classifyFallback(sql: string, dialect?: string): { queryType: "read" | 
     const chained =
       (/^snowflake$/i.test(dialect ?? "") || !isModeledDialect(dialect)) &&
       /(->>|\bASYNC\s*\(|:=\s*\(|\bDEFAULT\s*\()\s*TRUNCATE\b(?!\s*\()/i.test(names)
-    if (CODE_HARD_DENY.test(names) || handlerTruncate(names) || chained) blocked = true
+    if (CODE_HARD_DENY.test(names) || handlerTruncate(names) || chained || (write && WRITE_TRUNCATE.test(names)))
+      blocked = true
   }
   return { queryType: "write", blocked }
 }
@@ -250,7 +251,7 @@ function escapeReadings(sql: string): string[] {
 
 // TRUNCATE as a statement: TRUNCATE TABLE, or TRUNCATE starting a statement or a block (BEGIN [NOT
 // ATOMIC], DO, LOOP, REPEAT, a handler's condition). After THEN or ELSE it must be a name and the end
-// of the statement, since CASE ... THEN truncate ... is a column. A column or alias named truncate is not.
+// of the statement, since CASE ... THEN truncate ... is a column. In a read, a column or alias named truncate is not.
 const CODE_HARD_DENY = new RegExp(
   "\\bDROP\\s+((EXTERNAL|PLUGGABLE)\\s+)?(DATABASE|SCHEMA|CATALOG|NAMESPACE)\\b|\\bTRUNCATE\\s+TABLE\\b" +
     // DuckDB accepts TRUNCATE after EXPLAIN (options) and PREPARE p AS ([^()] keeps the scan linear).
@@ -261,26 +262,14 @@ const CODE_HARD_DENY = new RegExp(
     "(?!(FROM|AS|WHERE|ORDER|GROUP|HAVING|UNION|LIMIT|WINDOW|INTO|JOIN|ON|AND|OR|END)\\b)[\\w\"`$\\u0080-\\uffff]" +
     // After THEN/ELSE: [IF EXISTS] a (dotted, quoted or IDENTIFIER(...)) name, then the statement's end.
     "|\\b(THEN|ELSE)\\s+TRUNCATE\\s+(IF\\s+EXISTS\\s+)?(?!END\\b)" +
-    "(IDENTIFIER\\s*\\([^()]*\\)|[^\\s;,().]+(\\s*\\.{1,2}\\s*[^\\s;,().]+)*)(\\s+(NOWAIT|WAIT\\s+\\d+))?\\s*(;|$)" +
-    // Anywhere else, TRUNCATE followed by a target (a routine or task body, BEGIN ATOMIC, ALTER TABLE
-    // ... TRUNCATE PARTITION). A column named truncate is followed by a clause word, an operator, `,`
-    // or `)`, or qualified (t.truncate). A name truncate followed by any other word is refused, e.g. an
-    // alias without AS (`SELECT truncate x`, `FROM truncate t`).
-    // The t.truncate check runs only after TRUNCATE matched, over the whitespace just before it (comments
-    // are masked to spaces), so each run of whitespace is scanned once.
-    // Words reserved in both MySQL and Snowflake (whose routine and task bodies hold an unquoted
-    // TRUNCATE) are never a target. Any other clause word can name a table (TRUNCATE settings), so it
-    // counts as a clause only when the statement goes on after it: not before `.`, `;`, the end or MariaDB's
-    // NOWAIT / WAIT n. A word ends where the identifier does (settings$archive is a name).
-    "|\\bTRUNCATE(?<!\\.\\s*TRUNCATE)\\s+(?!(FROM|AS|WHERE|ORDER|GROUP|HAVING|UNION|INTERSECT|INTO|JOIN|INNER|LEFT|RIGHT|" +
-    "CROSS|ON|USING|AND|OR|NOT|IS|IN|LIKE|RLIKE|REGEXP|BETWEEN|THEN|ELSE|WHEN|WITH|FOR|ROWS)(?![\\w$\\u0080-\\uffff])|" +
-    // A sort key (ORDER BY truncate DESC) may end the statement.
-    "(?<=(\\bBY|,)\\s*TRUNCATE\\s+)(ASC|DESC|ASCENDING|DESCENDING)(?![\\w$\\u0080-\\uffff])|" +
-    "(EXCEPT|MINUS|LIMIT|OFFSET|FETCH|QUALIFY|WINDOW|FULL|OUTER|ILIKE|SIMILAR|AT|COLLATE|ESCAPE|ASC|DESC|NULLS|OVER|FILTER|" +
-    "WITHIN|END|DIV|MOD|XOR|OVERLAPS|ISNULL|NOTNULL|GLOB|MATCH|SOUNDS|RANGE|GROUPS|START|CONNECT|SETTINGS|OPTION|OPERATOR|" +
-    "ASCENDING|DESCENDING)(?![\\w$\\u0080-\\uffff])(?!(\\s+(NOWAIT|WAIT\\s+\\d+))?\\s*([.;]|$)))[\\w\"`$\\u0080-\\uffff]",
+    "(IDENTIFIER\\s*\\([^()]*\\)|[^\\s;,().]+(\\s*\\.{1,2}\\s*[^\\s;,().]+)*)(\\s+(NOWAIT|WAIT\\s+\\d+))?\\s*(;|$)",
   "i",
 )
+
+// In a write, TRUNCATE is a statement wherever it sits (a routine or task body, ALTER TABLE ... TRUNCATE
+// PARTITION), so any unqualified TRUNCATE not followed by `(` (the function) counts. A column named
+// truncate is exempt only in a read, which holds no statement body.
+const WRITE_TRUNCATE = /\bTRUNCATE\b(?<!\.\s*TRUNCATE)(?!\s*\()/i
 
 /** A handler's statement follows its conditions (a code, SQLSTATE '...', a name): a TRUNCATE after
  * HANDLER FOR within the same statement counts. One pass over the statements. */
@@ -496,29 +485,27 @@ function classifySql(sql: string, dialect: string | undefined, depth: number): {
     const masked = maskSql(lexical.tokens)
     const blocked =
       functions.blocked ||
-      classifyFallback(sql, dialect).blocked ||
+      classifyFallback(sql, dialect, false).blocked ||
       result.statements.some(
         (s: { statement_type: string }) => s.statement_type && HARD_DENY_TYPES.has(s.statement_type.toUpperCase()),
       )
 
-    return {
-      queryType:
-        !functions.write &&
-        !blocked &&
-        !batchedStatement(masked, dialect) &&
-        // Snowflake's ->> runs the statements it chains, DML included.
-        !(/^snowflake$/i.test(dialect ?? "") && masked.includes("->>")) &&
-        // Spark/Hive SELECT TRANSFORM(...) USING 'cmd' runs a command on the cluster; any USING not
-        // followed by "(" counts (comments and the script masked), while JOIN ... USING (col) is a join.
-        !((/^(spark|databricks|hive)$/i.test(dialect ?? "") || !isModeledDialect(dialect)) &&
-          /\bTRANSFORM\s*\(/i.test(masked) &&
-          /\bUSING\b(?!\s*\()/i.test(masked)) &&
-        !advancesSequence(lexical.tokens, masked, dialect) &&
-        otherIsReadOnly(sql, result.statements, dialect)
-          ? "read"
-          : "write",
-      blocked,
-    }
+    const queryType =
+      !functions.write &&
+      !blocked &&
+      !batchedStatement(masked, dialect) &&
+      // Snowflake's ->> runs the statements it chains, DML included.
+      !(/^snowflake$/i.test(dialect ?? "") && masked.includes("->>")) &&
+      // Spark/Hive SELECT TRANSFORM(...) USING 'cmd' runs a command on the cluster; any USING not
+      // followed by "(" counts (comments and the script masked), while JOIN ... USING (col) is a join.
+      !((/^(spark|databricks|hive)$/i.test(dialect ?? "") || !isModeledDialect(dialect)) &&
+        /\bTRANSFORM\s*\(/i.test(masked) &&
+        /\bUSING\b(?!\s*\()/i.test(masked)) &&
+      !advancesSequence(lexical.tokens, masked, dialect) &&
+      otherIsReadOnly(sql, result.statements, dialect)
+      ? "read"
+      : "write"
+    return { queryType, blocked: blocked || (queryType === "write" && WRITE_TRUNCATE.test(namesKept(lexical.tokens))) }
   } catch (error) {
     return { ...classifyFallback(sql, dialect), parseError: error instanceof Error ? error.message : String(error) }
   }

@@ -488,8 +488,8 @@ describe("each engine's own literal and statement rules", () => {
     ["BEGIN REPEAT TRUNCATE t; UNTIL (TRUE) END REPEAT; END", "snowflake", "write", true],
     ["CREATE PROCEDURE p() BEGIN DECLARE CONTINUE HANDLER FOR SQLEXCEPTION TRUNCATE t; END", "mysql", "write", true],
     ["SELECT truncate, x FROM t ORDER BY truncate DESC", "postgres", "read", false],
-    // An alias written without AS after a column named truncate is refused (best effort, fails closed).
-    ["SELECT truncate result FROM (VALUES (1)) AS t(truncate)", "postgres", "write", true],
+    // In a read, a column named truncate may take an alias without AS.
+    ["SELECT truncate result FROM (VALUES (1)) AS t(truncate)", "postgres", "read", false],
     ["SELECT truncate AS result FROM (VALUES (1)) AS t(truncate)", "postgres", "read", false],
     // TRUNCATE followed by a target, wherever it sits.
     ["CREATE TASK k AS TRUNCATE t", "snowflake", "write", true],
@@ -582,8 +582,7 @@ describe("each engine's own literal and statement rules", () => {
     ["SELECT s.nextval FROM metrics s", "postgres", "read", false],
     ["SELECT CASE WHEN true THEN truncate SIMILAR TO 'a%' ELSE false END FROM metrics", "postgres", "read", false],
     ["SELECT CASE WHEN a THEN truncate AT TIME ZONE 'UTC' END FROM metrics", "postgres", "read", false],
-    // TRUNCATE before END and `;` is read as TRUNCATE end (MySQL); with FROM after it, a column.
-    ["SELECT CASE WHEN a THEN 1 ELSE truncate END;", "postgres", "write", true],
+    ["SELECT CASE WHEN a THEN 1 ELSE truncate END;", "postgres", "read", false],
     ["SELECT CASE WHEN a THEN 1 ELSE truncate END FROM metrics;", "postgres", "read", false],
     ["SELECT * FROM bigquery_execute('p', 'DELETE FROM d.t WHERE true')", "duckdb", "write", false],
     ["SELECT * FROM ducklake_expire_snapshots('lake', older_than => now())", "duckdb", "write", false],
@@ -665,6 +664,14 @@ describe("each engine's own literal and statement rules", () => {
     ["CREATE PROCEDURE p() TRUNCATE settings NOWAIT", "mariadb", "write", true],
     ["CREATE PROCEDURE p() TRUNCATE settings WAIT 5", "mariadb", "write", true],
     ["CREATE PROCEDURE p() TRUNCATE from$x", "mysql", "write", true],
+    ["CREATE PROCEDURE p() TRUNCATE .settings", "mariadb", "write", true],
+    ["CREATE PROCEDURE p AS BEGIN IF 1 = 1 THEN TRUNCATE settings REUSE STORAGE; END IF; END;", "mariadb", "write", true],
+    ["CREATE TASK k AS TRUNCATE inner", "snowflake", "write", true],
+    ["ALTER TABLE t TRUNCATE PARTITION p0", "mysql", "write", true],
+    // In a write, a column named truncate is refused, as a TRUNCATE in a body would be; qualified, it is not.
+    ["UPDATE t SET truncate = 1", "postgres", "write", true],
+    ["UPDATE t SET x = t.truncate", "postgres", "write", false],
+    ['SELECT * FROM truncate "t"(id)', "duckdb", "read", false],
     ["CREATE TASK k AS TRUNCATE settings", "snowflake", "write", true],
     ["SELECT truncate FROM t ORDER BY truncate DESC", "mysql", "read", false],
     ["SELECT * FROM t ORDER BY a, truncate ASC", "snowflake", "read", false],
