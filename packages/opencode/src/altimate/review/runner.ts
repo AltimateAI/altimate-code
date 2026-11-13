@@ -1,6 +1,7 @@
 import { Dispatcher } from "../native"
 import { EngineCoerce } from "../native/engine-coerce"
 import { parseManifest } from "../native/dbt/manifest"
+import { loadRawManifest } from "../native/dbt/helpers"
 import type { CheckResult, EquivalenceResult, GradeResult, ImpactResult, ReviewRunner } from "./orchestrate"
 import { buildReviewSchemaContext, type SchemaContext } from "./schema-context"
 
@@ -219,8 +220,13 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           // Only surface validation errors when a REAL schema was supplied —
           // in lint-only mode the throwaway `_altimate_lint_` schema makes
           // every real table "unknown" and would flood the review.
+          // A manifest-derived schema lists only models documented in yml, so
+          // "table not found" there means "undocumented", not "missing": drop
+          // it unless the schema came from a complete catalog.json.
           hasTables
-            ? asArray(data.validation?.errors).map((e: any) => ({ ...e, rule: "validate", severity: "error" }))
+            ? asArray(data.validation?.errors)
+                .filter((e: any) => opts.schemaContext || e?.category?.type !== "TableNotFound")
+                .map((e: any) => ({ ...e, rule: "validate", severity: "error" }))
             : [],
         )
         .concat(
@@ -414,6 +420,28 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
       return out
     },
 
+    async modelConsumers(model: string) {
+      try {
+        const raw = loadRawManifest(opts.manifestPath)
+        if (!raw) return undefined
+        const nodes = Object.entries<any>(raw.nodes ?? {})
+        const hit = nodes.find(([id, n]) => id.startsWith("model.") && n?.name === model)
+        if (!hit) return undefined
+        const [uid, node] = hit
+        const exposures = Object.values<any>(raw.exposures ?? {})
+          .filter((e) => Array.isArray(e?.depends_on?.nodes) && e.depends_on.nodes.includes(uid))
+          .map((e) => ({ name: String(e.name ?? ""), type: e.type ? String(e.type) : undefined }))
+        const contractEnforced = node.config?.contract?.enforced === true || node.contract?.enforced === true
+        const contractColumns = contractEnforced
+          ? Object.values<any>(node.columns ?? {}).map((c) => String(c?.name ?? "").toLowerCase()).filter(Boolean)
+          : []
+        return { exposures, contractEnforced, contractColumns }
+      } catch (err) {
+        fail("modelConsumers", err)
+        return undefined
+      }
+    },
+
     async isComplex(sql: string): Promise<boolean> {
       try {
         const res = await Dispatcher.call("altimate_core.metadata", { sql })
@@ -481,18 +509,21 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
     },
 
     async columnLineage(sql: string, dialect?: string): Promise<Array<{ source: string; target: string }>> {
-      try {
-        const res = await Dispatcher.call("altimate_core.column_lineage", {
-          sql,
-          schema_path: "",
-          schema_context: await resolveSchema(),
-          dialect,
-        })
+      const lineage = async (schema_context: Record<string, any> | undefined) => {
+        const res = await Dispatcher.call("altimate_core.column_lineage", { sql, schema_path: "", schema_context, dialect })
         const data = (res.data ?? {}) as Record<string, any>
         return asArray<any>(data.column_lineage).map((e) => ({
           source: String(e.source ?? ""),
           target: String(e.target ?? ""),
         }))
+      }
+      try {
+        const schema = await resolveSchema()
+        const edges = await lineage(schema)
+        // A partial schema (the manifest only types documented models) makes
+        // the engine drop columns read from tables it doesn't know, returning
+        // nothing. Output column names need only the SQL: retry without it.
+        return edges.length || !schema ? edges : await lineage(undefined)
       } catch (err) {
         fail("columnLineage", err)
         return []

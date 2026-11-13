@@ -35,6 +35,21 @@ export const ReviewConfig = z.object({
    * Functions missing on the project's own engine are always reported.
    */
   portability: z.boolean().optional(),
+  /**
+   * Opt-in: report a new column missing from an enforced contract. `dbt build`
+   * already fails on it, so this only helps CI that runs `dbt parse`/`compile`
+   * without building.
+   */
+  checkContractColumns: z.boolean().default(false),
+  /**
+   * Opt-in: explicit column lists outside dbt (loaders, exports) that must
+   * track a model's columns. `files` is a repo-relative glob, `pattern` a regex
+   * whose first capture group is the list, `model` the model it mirrors
+   * (omitted = files that mention the model by name).
+   */
+  consumerColumnLists: z
+    .array(z.object({ files: z.string(), pattern: z.string(), model: z.string().optional() }))
+    .default([]),
   /** Allow `--force-tier` (a debug bypass of the risk classifier). Set false
    *  in gate CI so a run cannot skip checks by forcing a lower tier. */
   allowForceTier: z.boolean().default(true),
