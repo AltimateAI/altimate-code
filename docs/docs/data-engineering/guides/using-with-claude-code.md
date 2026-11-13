@@ -100,6 +100,20 @@ altimate:
 
 The plugin runs `altimate-code run` in your project for each task, with the model provider Altimate Code is set up with. If you have not set one up, run `altimate-code` once and choose a provider, or sign in to Altimate (below).
 
+### dbt helpers beside the chat
+
+In a dbt project the plugin also does what dbt Power User does in VS Code, inside the Claude Code session. Each helper runs the project's own dbt (its `.venv/bin/dbt` when there is one, else `dbt` on `PATH`) and calls no model:
+
+| Helper | When it runs | What you see | What Claude is told |
+|---|---|---|---|
+| Compile and validate | After Claude edits or writes a model's `.sql` file | A line above the prompt: the model compiled and ran (`dbt show`, one row), with the columns `schema.yml` documents but the query did not return, and those it returned undocumented | dbt's own error when the model does not compile or run, or the column differences |
+| Explain and Fix | After a `dbt run`, `test`, `build`, `seed` or `snapshot` Claude ran fails | The failed nodes with **Explain** (Claude explains each failure without changing files) and **Fix with Altimate Code** (runs `/altimate-code:altimate` on the failures) | The failure, read from `target/run_results.json`, when you press a button |
+| Results pane | After Claude runs `dbt show`, or when you run `/dbt-show <model>` or `/dbt-show select …` | The rows as a table beside the chat, with **Re-run**, **Bookmark**, the history and your bookmarks (kept across sessions) | Nothing |
+| Model context | When Claude reads a model's `.sql` file | A toast with the counts | The model's materialization, columns with their types, descriptions and tests, its parents and children, and how deep it sits upstream and downstream, from `target/manifest.json` |
+| Environment doctor | At session start, and `/dbt-doctor` | A line above the prompt when something is wrong: dbt, Python, the profile's adapter, `dbt deps`, and a manifest older than the files it was built from, with **Run dbt parse** | The checks, with the first prompt after they finish |
+
+The doctor tests the warehouse connection (`dbt debug`) only when you run `/dbt-doctor` or press **Test connection**, never at session start. To turn the helpers off, set the plugin's `dbt_mods` option to false in `/config`.
+
 ### The `/altimate` command, without the plugin
 
 Run `/configure-claude` inside altimate to write the command:
