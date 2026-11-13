@@ -59,12 +59,19 @@ export interface Rule {
    */
   dialectGate?: keyof Omit<AdapterCapability, "sources">
   portabilityBody?: string
+  /** Match `added` outside quoted strings only (e.g. `'2024/01/15'` is not a division). */
+  ignoreStrings?: boolean
   example: RuleExample
   counter?: RuleExample
 }
 
 function modelName(p: string): string {
   return path.basename(p).replace(/\.(sql|py)$/i, "")
+}
+
+/** Replace quoted string contents so text inside literals can't match. */
+function stripStrings(s: string): string {
+  return s.replace(/'(?:[^']|'')*'/g, "''").replace(/"(?:[^"\\]|\\.)*"/g, '""')
 }
 
 function stripComments(s: string): string {
@@ -96,7 +103,7 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   let relevant = false
   if (rule.added) {
     const hit = input.added.some((l) => {
-      const s = stripComments(l)
+      const s = rule.ignoreStrings ? stripStrings(stripComments(l)) : stripComments(l)
       return rule.added!.test(s) && !(rule.unless && rule.unless.test(s))
     })
     if (!hit) return false
@@ -209,7 +216,17 @@ const r = (
   body: string,
   match: Pick<
     Rule,
-    "added" | "removed" | "newSql" | "absentNewSql" | "unless" | "kind" | "pathGlob" | "portability" | "dialectGate" | "portabilityBody"
+      | "added"
+      | "removed"
+      | "newSql"
+      | "absentNewSql"
+      | "unless"
+      | "kind"
+      | "pathGlob"
+      | "portability"
+      | "dialectGate"
+      | "portabilityBody"
+      | "ignoreStrings"
   >,
   example: RuleExample,
   counter?: RuleExample,
@@ -1863,6 +1880,7 @@ const MISC: Rule[] = [
     {
       added: /(?<![\w.])\d[\d_]*\s*\/\s*\d[\d_]*(?![\d.])|\bcount\s*\([^()]*\)\s*\/\s*(nullif\s*\(\s*)?count\s*\(/i,
       dialectGate: "integerDivisionTruncates",
+      ignoreStrings: true,
       portabilityBody:
         "Not portable: `int / int` (including `count(…) / count(…)`) returns a decimal on {dialect} but truncates on " +
         "Postgres, Redshift, Trino/Athena and SQL Server. In a package that supports several adapters, cast one side to numeric.",
