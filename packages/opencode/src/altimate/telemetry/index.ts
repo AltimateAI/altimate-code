@@ -1437,8 +1437,16 @@ export namespace Telemetry {
         session_id: string
         /** `search_all` means the user opened the full catalogue; the provider they then chose
          *  arrives as a second event with `via_search`. `other` is any provider outside the
-         *  curated five. */
-        provider: "altimate_gateway" | "altimate_base" | "anthropic" | "openai" | "google" | "search_all" | "other"
+         *  curated rows. */
+        provider:
+          | "altimate_gateway"
+          | "altimate_base"
+          | "anthropic"
+          | "claude_subscription"
+          | "openai"
+          | "google"
+          | "search_all"
+          | "other"
         /** Raw provider id, but ONLY for publicly-known providers (see KNOWN_PROVIDER_IDS).
          *  A user-defined provider in opencode.json can be named after their company, so
          *  anything unrecognised is reported as `other` with this omitted. */
@@ -1667,6 +1675,7 @@ export namespace Telemetry {
     "lmstudio",
     "snowflake-cortex",
     "databricks",
+    "claude-agent",
   ])
 
   /** The curated picker's own rows map to named enum values; everything else is `other`. */
@@ -1678,6 +1687,7 @@ export namespace Telemetry {
     "altimate-backend": "altimate_gateway",
     "altimate-free": "altimate_base",
     anthropic: "anthropic",
+    "claude-agent": "claude_subscription",
     openai: "openai",
     google: "google",
   })

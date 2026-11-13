@@ -38,6 +38,8 @@ export const PROVIDER_PRIORITY: Record<string, number> = {
   // between Google and Zen.
   "altimate-backend": 0,
   anthropic: 1,
+  // Claude Agent: a Claude subscription through the local Claude Code login
+  "claude-agent": 1.5,
   openai: 2,
   google: 3,
   "altimate-free": 4,
@@ -91,6 +93,7 @@ export function providerOptions(list: { id: string; name: string }[]): ProviderO
         description: {
           "altimate-backend": "Recommended · best tool-calling · 1M free tokens",
           anthropic: "(API key)",
+          "claude-agent": "(Claude Pro/Max subscription via Claude Code)",
           openai: "(ChatGPT Plus/Pro or API key)",
           google: "(API key)",
           "altimate-free": ALTIMATE_BASE_HINT,

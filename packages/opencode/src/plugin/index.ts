@@ -33,6 +33,9 @@ import { AltimateAuthPlugin } from "../altimate/plugin/altimate"
 // altimate_change start — onboarding activation-funnel telemetry plugin
 import { OnboardingTelemetryPlugin } from "../altimate/plugin/onboarding-telemetry"
 // altimate_change end
+// altimate_change start — Claude Agent provider: /connect login check and idle-session release
+import { ClaudeAgentPlugin } from "../altimate/provider/claude-agent/plugin"
+// altimate_change end
 // altimate_change start — wire plugin experimental_workspace.register into the
 // control-plane adapter registry consumed by control-plane/workspace.ts
 import { registerAdapter } from "../control-plane/adapters"
@@ -64,6 +67,7 @@ export namespace Plugin {
     DatabricksAuthPlugin,
     AltimateAuthPlugin,
     OnboardingTelemetryPlugin,
+    ClaudeAgentPlugin,
   ]
   // altimate_change end
 

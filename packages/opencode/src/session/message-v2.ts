@@ -19,6 +19,9 @@ import type { Provider } from "@/provider/provider"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { Effect } from "effect"
 import { createHash } from "node:crypto"
+// altimate_change start — Claude Agent: stopped-tool flag for its waiting turn
+import { ToolAborted } from "@/altimate/provider/claude-agent/tools/aborted"
+// altimate_change end
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -937,6 +940,10 @@ export namespace MessageV2 {
             if (part.state.status === "error") {
               // altimate_change start — upstream_fix: preserve partial output from aborted tools.
               const output = part.state.metadata?.interrupted === true ? part.state.metadata.output : undefined
+              // altimate_change start — Claude Agent: a stopped call interrupts its waiting Claude turn
+              const stopped = part.state.metadata?.interrupted === true || part.state.metadata?.rejected === true
+              const callMetadata = stopped ? ToolAborted.mark(part.metadata) : part.metadata
+              // altimate_change end
               if (typeof output === "string") {
                 assistantMessage.parts.push({
                   type: ("tool-" + part.tool) as `tool-${string}`,
@@ -944,7 +951,7 @@ export namespace MessageV2 {
                   toolCallId: replayCallID,
                   input: part.state.input,
                   output,
-                  ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                  ...(differentModel ? {} : { callProviderMetadata: callMetadata }),
                 })
               } else {
                 assistantMessage.parts.push({
@@ -953,7 +960,7 @@ export namespace MessageV2 {
                   toolCallId: replayCallID,
                   input: part.state.input,
                   errorText: part.state.error,
-                  ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                  ...(differentModel ? {} : { callProviderMetadata: callMetadata }),
                 })
               }
               // altimate_change end
@@ -969,7 +976,9 @@ export namespace MessageV2 {
                 // altimate_change end
                 input: part.state.input,
                 errorText: "[Tool execution was interrupted]",
-                ...(differentModel ? {} : { callProviderMetadata: part.metadata }),
+                // altimate_change start — Claude Agent: a stopped call interrupts its waiting Claude turn
+                ...(differentModel ? {} : { callProviderMetadata: ToolAborted.mark(part.metadata) }),
+                // altimate_change end
               })
           }
           if (part.type === "reasoning") {

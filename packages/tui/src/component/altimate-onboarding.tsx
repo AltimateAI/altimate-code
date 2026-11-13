@@ -145,9 +145,9 @@ export function useSetupComplete() {
 }
 
 // First-run welcome picker (presentation only; reuses the same action handlers as
-// DialogModel/createDialogProviderOptions). A curated six: five recommended
-// providers + a "Search all providers…" row that hands off to the full DialogModel
-// picker. The long tail stays behind search.
+// DialogModel/createDialogProviderOptions). Recommended providers (Altimate Base and the
+// Claude subscription only when the server lists them) + a "Search all providers…" row that
+// hands off to the full DialogModel picker. The long tail stays behind search.
 const NAME_W = 24
 type WelcomeTone = "success" | "warning" | "muted"
 
@@ -247,6 +247,20 @@ export function DialogModelWelcome(props: {
       providerID: "anthropic",
       activate: () => connectProvider("anthropic"),
     },
+    // altimate_change start — Claude subscription row: the Claude Agent provider runs the user's own
+    // Claude Code login, so a Pro/Max plan covers usage. Shown only when the server lists it.
+    ...(providers().some((provider) => provider.value === "claude-agent")
+      ? [
+          {
+            name: "Claude subscription",
+            note: "Claude Pro/Max · via your Claude Code login",
+            tone: "muted" as const,
+            providerID: "claude-agent",
+            activate: () => connectProvider("claude-agent"),
+          },
+        ]
+      : []),
+    // altimate_change end
     {
       name: "OpenAI (GPT)",
       note: "bring your own API key",

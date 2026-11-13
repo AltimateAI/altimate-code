@@ -31,6 +31,7 @@ describe("Telemetry.classifyProvider — allowlist + prototype defense", () => {
       ["altimate-backend", "altimate_gateway"],
       ["altimate-free", "altimate_base"],
       ["anthropic", "anthropic"],
+      ["claude-agent", "claude_subscription"],
       ["openai", "openai"],
       ["google", "google"],
     ])("providerID %j → provider %j, keeps raw id", (providerID, expected) => {
