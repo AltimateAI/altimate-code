@@ -579,6 +579,9 @@ across 12 dialects all plan; anything still unrecognized stays *undecidable*, ne
 3. **AI reviewer lane (layer 3).** When a model is configured, the LLM reviewer
    runs **after** the deterministic lanes, grounded in their findings, and adds
    advisory contextual comments (intent, naming, business logic, test coverage).
+   It sees every changed dbt file, not only models: macros, singular data tests,
+   snapshots, schema/source yml, seeds (diff only) and project config, each
+   labeled with its role, with models first under the 20-file cap.
    Findings are clamped to ≤ warning and never block. Skipped (clean degrade) if
    no model is available.
 4. **Rubric → verdict.** Findings map to a verdict by a versioned rubric (data,

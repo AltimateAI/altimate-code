@@ -20,7 +20,9 @@ import { detectUnitTestFixtures } from "./unit-tests"
 import { selectListNames } from "./select-list"
 import { detectTestAdequacy, detectThresholdLoosening } from "./test-adequacy"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
-import { type AiLaneStatus, type AiReviewInput, type AiReviewResult } from "./ai-review"
+import { type AiLaneStatus, type AiReviewFile, type AiReviewInput, type AiReviewResult } from "./ai-review"
+
+const AI_SUPPORTING_KINDS = new Set(["macro", "test", "snapshot", "schema_yml", "source_yml", "seed", "project_config"])
 
 /**
  * The deterministic review recipe.
@@ -1898,13 +1900,23 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   } else if (!input.aiReview) {
     aiStatus = { state: "skipped", reason: input.aiDisabledReason ?? "disabled" }
   } else {
-    const aiFiles = [...ctxByPath.values()].map((ctx) => ({
+    const aiFiles: AiReviewFile[] = [...ctxByPath.values()].map((ctx) => ({
       path: ctx.file.path,
       status: ctx.file.status,
       model: modelNameFromPath(ctx.file.path),
+      kind: ctx.file.kind,
       diff: ctx.file.diff,
       sql: ctx.engineNewSql ?? ctx.newSql,
     }))
+    // Macros, data tests, snapshots, yml and seeds carry defects no model diff shows.
+    // Seeds go as a diff only: the full CSV is data, not logic.
+    const supporting = reviewable.filter((f) => AI_SUPPORTING_KINDS.has(f.kind) && f.status !== "deleted")
+    const contents = await Promise.all(
+      supporting.map((f) => (f.kind === "seed" ? undefined : getContent?.(f.path, "new")?.catch(() => undefined))),
+    )
+    supporting.forEach((f, i) =>
+      aiFiles.push({ path: f.path, status: f.status, model: modelNameFromPath(f.path), kind: f.kind, diff: f.diff, sql: contents[i] }),
+    )
     try {
       const res = await input.aiReview({
         files: aiFiles,
