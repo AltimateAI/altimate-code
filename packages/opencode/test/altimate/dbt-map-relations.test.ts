@@ -5,7 +5,7 @@
  * qualified names: it keeps only the last name part (quotes removed, case kept) and merges tables
  * that share it, so the matching rules read the qualifiers back from the SQL text.
  */
-import { describe, test, expect, afterEach } from "bun:test"
+import { describe, test, expect, afterEach, beforeAll } from "bun:test"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "fs"
 import { tmpdir } from "os"
 import { join } from "path"
@@ -13,6 +13,7 @@ import { Effect } from "effect"
 import type { Tool } from "@/tool/tool"
 import { SessionID, MessageID } from "@/session/schema"
 import { Dispatcher } from "../../src/altimate/native"
+import { registerAll as registerAltimateCore } from "../../src/altimate/native/altimate-core"
 import { initTool } from "./tool-fixture"
 import {
   DbtMapRelationsTool,
@@ -22,6 +23,9 @@ import {
   scanTableReferences,
   splitQualified,
 } from "../../src/altimate/tools/dbt-map-relations"
+
+// Other test files reset the dispatcher; register the parser handlers this file depends on.
+beforeAll(() => registerAltimateCore())
 
 async function tablesOf(sql: string, dialect: string): Promise<string[]> {
   const result = await Dispatcher.call("altimate_core.metadata", { sql, dialect })
