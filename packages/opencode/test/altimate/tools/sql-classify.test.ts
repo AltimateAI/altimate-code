@@ -672,6 +672,11 @@ describe("each engine's own literal and statement rules", () => {
     ["UPDATE t SET truncate = 1", "postgres", "write", true],
     ["UPDATE t SET x = t.truncate", "postgres", "write", false],
     ['SELECT * FROM truncate "t"(id)', "duckdb", "read", false],
+    // A CTE body can be a TRUNCATE (DuckDB runs it).
+    ["WITH x AS (TRUNCATE t) SELECT 1", "duckdb", "write", true],
+    ["WITH x AS NOT MATERIALIZED ( /* c */ TRUNCATE t) SELECT 1", "duckdb", "write", true],
+    ["EXPLAIN ANALYZE WITH x AS (TRUNCATE t) SELECT 1", "duckdb", "write", true],
+    ["WITH x AS (SELECT truncate FROM t) SELECT * FROM x", "duckdb", "read", false],
     ["CREATE TASK k AS TRUNCATE settings", "snowflake", "write", true],
     ["SELECT truncate FROM t ORDER BY truncate DESC", "mysql", "read", false],
     ["SELECT * FROM t ORDER BY a, truncate ASC", "snowflake", "read", false],

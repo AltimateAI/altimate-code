@@ -254,8 +254,9 @@ function escapeReadings(sql: string): string[] {
 // of the statement, since CASE ... THEN truncate ... is a column. In a read, a column or alias named truncate is not.
 const CODE_HARD_DENY = new RegExp(
   "\\bDROP\\s+((EXTERNAL|PLUGGABLE)\\s+)?(DATABASE|SCHEMA|CATALOG|NAMESPACE)\\b|\\bTRUNCATE\\s+TABLE\\b" +
-    // DuckDB accepts TRUNCATE after EXPLAIN (options) and PREPARE p AS ([^()] keeps the scan linear).
-    "|(^|;|\\bPREPARE\\s+\\w+\\s+AS\\b|\\bEXPLAIN\\s*\\([^()]*\\))\\s*TRUNCATE\\b(?!\\s*\\()" +
+    // DuckDB accepts TRUNCATE after EXPLAIN (options), PREPARE p AS and as a CTE body, WITH x AS
+    // [[NOT] MATERIALIZED] (TRUNCATE t) ([^()] keeps the scan linear).
+    "|(^|;|\\bPREPARE\\s+\\w+\\s+AS\\b|\\bEXPLAIN\\s*\\([^()]*\\)|\\bAS\\s*((NOT\\s+)?MATERIALIZED\\s*)?\\()\\s*TRUNCATE\\b(?!\\s*\\()" +
     // After a block or handler word (or EXPLAIN ANALYZE), a target must follow: these words are also
     // column names, so `SELECT atomic truncate FROM t` is an alias.
     "|\\b(BEGIN|NOT\\s+ATOMIC|DO|LOOP|REPEAT|SQLEXCEPTION|SQLWARNING|FOUND|ANALYZE|ANALYSE)\\s+TRUNCATE\\s+" +
