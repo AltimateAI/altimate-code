@@ -42,7 +42,8 @@ function untilAbort<T>(start: () => Promise<T>, signal: AbortSignal): Promise<T>
   return new Promise<T>((resolve, reject) => {
     const stop = () => reject(signal.reason)
     signal.addEventListener("abort", stop, { once: true })
-    start()
+    Promise.resolve()
+      .then(start)
       .then(resolve, reject)
       .finally(() => signal.removeEventListener("abort", stop))
   })
