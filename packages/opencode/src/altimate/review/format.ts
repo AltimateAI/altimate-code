@@ -216,6 +216,11 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
   }
   if (env.scope?.outOfScopeFiles)
     notes.push(`${env.scope.outOfScopeFiles} changed file(s) outside the dbt project were not reviewed.`)
+  if (env.scope?.movedUnchangedFiles)
+    notes.push(
+      `${env.scope.movedUnchangedFiles} file(s) moved without edits; their SQL was not re-reviewed. ` +
+        "Folder-level config in `dbt_project.yml` (`+schema`, `+materialized`, `+tags`) can still change where and how a moved model builds.",
+    )
   if (env.ai && env.ai.state !== "ok") {
     const what = { skipped: "skipped", timeout: "timed out", error: "failed" }[env.ai.state]
     notes.push(`Advisory AI review ${what}${env.ai.reason ? `: ${env.ai.reason}` : ""}.`)
