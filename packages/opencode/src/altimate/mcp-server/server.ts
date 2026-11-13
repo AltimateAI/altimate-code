@@ -61,8 +61,11 @@ const STRUCTURED_FIELDS: Record<string, readonly string[]> = {
     "test_count",
     "downstream",
     "exposures",
+    "exposures_declared",
     "column_reach",
     "column_reach_error",
+    "column_answer",
+    "column_answer_error",
     "exposures_error",
     "error",
   ],
@@ -96,7 +99,15 @@ export function structuredResult(tool: string, metadata: Record<string, unknown>
   // dbt_lineage's text prints the same mappings and edges as `columns` and `edges`: keep its header.
   const head = tool === "dbt_lineage" && "columns" in fields ? report.split(/\n(?:Column Mappings|Lineage Edges):/)[0]!.trim() : report
   const full = { ...fields, report: head }
-  return Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES ? full : capReport(report, true)
+  if (Buffer.byteLength(JSON.stringify(full)) <= STRUCTURED_MAX_BYTES) return full
+  // The column answer is the largest field: past the cap it goes first, so the model-level fields
+  // and the reach stay.
+  if ("column_answer" in full) {
+    const { column_answer: _, ...rest } = full
+    const lighter = { ...rest, column_answer_error: "Left out of the structured result for size; the CLI's --json output carries it." }
+    if (Buffer.byteLength(JSON.stringify(lighter)) <= STRUCTURED_MAX_BYTES) return lighter
+  }
+  return capReport(report, true)
 }
 /** An error report held to the same cap as a result, so a huge exception message cannot exceed it. */
 export function structuredError(message: string): Record<string, unknown> {

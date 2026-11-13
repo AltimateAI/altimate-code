@@ -1424,3 +1424,51 @@ describe("workspace review", () => {
   })
 })
 // altimate_change end
+
+describe("refusal codes for clients", () => {
+  test("each deliberate refusal has a stable code; anything else has none", async () => {
+    const mod = await import("../../../src/altimate/workspace/skill-publish")
+    expect(mod.publishErrorCode(new mod.ReviewDisabledError("Growth", "Olive"))).toBe("review_disabled")
+    expect(mod.publishErrorCode(new mod.TooManyReviewRequestsError("Growth"))).toBe("too_many_requests")
+    expect(mod.publishErrorCode(new mod.NotLinkedError())).toBe("not_linked")
+    expect(mod.publishErrorCode(new Error("boom"))).toBeNull()
+    // Every refusal class: an instance of each (its constructor's arguments do not matter to the code).
+    const { NotConfiguredError } = await import("../../../src/altimate/workspace/api-client")
+    const of = (type: { prototype: object }) => mod.publishErrorCode(Object.create(type.prototype))
+    expect({
+      NotConfiguredError: of(NotConfiguredError),
+      CredentialsChangedError: of(mod.CredentialsChangedError),
+      ManagedSkillError: of(mod.ManagedSkillError),
+      NotProjectSkillError: of(mod.NotProjectSkillError),
+      BinaryFileError: of(mod.BinaryFileError),
+      SymlinkError: of(mod.SymlinkError),
+      EmptyBundleError: of(mod.EmptyBundleError),
+      BundleTooLargeError: of(mod.BundleTooLargeError),
+      SkillNameConflictError: of(mod.SkillNameConflictError),
+      SkillChangedElsewhereError: of(mod.SkillChangedElsewhereError),
+      NotWorkspaceOwnerError: of(mod.NotWorkspaceOwnerError),
+      AttachFailedError: of(mod.AttachFailedError),
+      SubmitFailedError: of(mod.SubmitFailedError),
+    }).toEqual({
+      NotConfiguredError: "not_configured",
+      CredentialsChangedError: "credentials_changed",
+      ManagedSkillError: "managed_skill",
+      NotProjectSkillError: "not_project_skill",
+      BinaryFileError: "binary_file",
+      SymlinkError: "symlink",
+      EmptyBundleError: "empty_bundle",
+      BundleTooLargeError: "bundle_too_large",
+      SkillNameConflictError: "name_conflict",
+      SkillChangedElsewhereError: "changed_elsewhere",
+      NotWorkspaceOwnerError: "not_workspace_owner",
+      AttachFailedError: "attach_failed",
+      SubmitFailedError: "submit_failed",
+    })
+  })
+
+  test("a refusal's message is shown as-is; any other error is not", async () => {
+    const mod = await import("../../../src/altimate/workspace/skill-publish")
+    expect(mod.explainPublishError(new mod.NotLinkedError())).toBe(new mod.NotLinkedError().message)
+    expect(mod.explainPublishError(new Error("boom"))).toBeNull()
+  })
+})
