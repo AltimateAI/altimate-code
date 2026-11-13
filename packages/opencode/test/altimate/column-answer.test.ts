@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
+import { ENGINE, MAX_ANSWER_COLUMNS, columnAnswer, describeAnswer, type ColumnAnswer } from "../../src/altimate/native/dbt/column-answer"
 import { columnReach, namesColumn } from "../../src/altimate/native/dbt/column-reach"
 import { dbtLineage } from "../../src/altimate/native/dbt/lineage"
 import { clearLineageCaches, hasNestedWith, howOf, quotingIsClear, relationUse, shapeFlags, stripAggFilter, stripSql } from "../../src/altimate/native/dbt/project-lineage"
@@ -167,7 +167,7 @@ describe("column answer: downstream", () => {
     ).toEqual([{ name: "rpt_big_orders", columns: ["revenue"], downstream: 1 }])
     expect(a.unresolved.map((u) => [named(a, u.model), u.downstream])).toEqual([["rpt_nested", 1]])
     // value 3 + may carry 5 (rpt_big_orders, rpt_big_child, rpt_nested, rpt_nested_child, and rpt_counts, not traced)
-    expect(a.counts).toMatchObject({ may_carry_models: 5, model_level: 8 })
+    expect(a.counts).toMatchObject({ may_carry_models: 5, not_traced_models: 1, model_level: 8 })
     expect(a.may_carry).toContainEqual({ id: "model.shop.rpt_counts", name: "rpt_counts", reason: "not_traced" })
     // Every model past the edited one is in one of the two tiers.
     expect(a.counts.models + a.counts.may_carry_models).toBe(a.counts.model_level)
@@ -492,7 +492,7 @@ describe("column answer: contract", () => {
     })
     expect(a.inputs.workarounds).toContain("aggregate FILTER clause dropped before analysis")
     expect(Object.keys(a.counts).sort()).toEqual(
-      ["columns", "contracts", "ends", "hops", "may_carry_models", "model_level", "models"].sort(),
+      ["columns", "contracts", "ends", "hops", "may_carry_models", "model_level", "models", "not_traced_models"].sort(),
     )
     expect(a.nodes[0]).toEqual({
       id: "model.shop.fct_orders",
@@ -842,7 +842,8 @@ describe("column answer: why a model may carry it", () => {
   test("a reader that never names the column, read in full, may carry it as not traced, and so may what sits past it", () => {
     const a = columnAnswer(write(base(`select id from ${T("f")} where id > 0`)), "f", "val")
     expect(reasons(a)).toEqual({ after: ["not_traced", null], r: ["not_traced", null] })
-    expect(a.counts).toMatchObject({ models: 0, may_carry_models: 2, model_level: 2 })
+    expect(a.counts).toMatchObject({ models: 0, may_carry_models: 2, not_traced_models: 2, model_level: 2 })
+    expect(describeAnswer(a)).toContain("; 2 more of the 2 downstream may carry it, 2 of them with no sign (not traced)")
   })
 
   test("a reader that names the column with no traced edge may carry it, and what sits past it is below it", () => {

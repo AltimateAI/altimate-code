@@ -107,6 +107,8 @@ export interface ColumnAnswer {
     contracts: number
     ends: number
     may_carry_models: number
+    /** Of those, the ones with no sign at all (`not_traced`): the rest of the model-level set. */
+    not_traced_models: number
     model_level: number
   }
   nodes: ColumnAnswerNode[]
@@ -426,6 +428,7 @@ export function columnAnswer(
       contracts: [...valueModels].filter((id) => !!p.node(id)?.config?.contract?.enforced).length,
       ends: columns.filter((c) => c.end).length,
       may_carry_models: mayCarry.size,
+      not_traced_models: [...mayCarry.values()].filter((m) => m.reason === "not_traced").length,
       model_level: modelLevel.size,
     },
     nodes,
@@ -462,6 +465,6 @@ export function describeAnswer(a: ColumnAnswer): string {
   const c = a.counts
   const what = a.direction === "downstream" ? "Column impact" : "Column trace (upstream)"
   const reach = `${c.columns} column${c.columns === 1 ? "" : "s"} in ${c.models} model${c.models === 1 ? "" : "s"}, ${c.hops} hop${c.hops === 1 ? "" : "s"}, ${c.ends} end${c.ends === 1 ? "" : "s"}`
-  const tiers = `${c.may_carry_models} more of the ${c.model_level} ${a.direction} may carry it`
+  const tiers = `${c.may_carry_models} more of the ${c.model_level} ${a.direction} may carry it${c.not_traced_models ? `, ${c.not_traced_models} of them with no sign (not traced)` : ""}`
   return `${what}: ${reach}; ${tiers}${a.truncated ? " (truncated)" : ""} (metadata.column_answer)`
 }
