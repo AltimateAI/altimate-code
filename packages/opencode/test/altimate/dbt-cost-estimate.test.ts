@@ -95,8 +95,12 @@ describe("parseBytesProcessed", () => {
     ["1.0 PiB", 1024 ** 5, Math.ceil(1.05 * 1024 ** 5)],
     ["10.5 PiB", Math.round(10.5 * 1024 ** 5), Math.ceil(10.55 * 1024 ** 5)],
     ["  7.0 MiB ", 7 * 1024 ** 2, Math.ceil(7.05 * 1024 ** 2)],
-  ])("reads %s as %d bytes, at most %d", (display, bytes, maxBytes) => {
-    expect(parseBytesProcessed(display)).toEqual({ bytes, maxBytes })
+  ])("reads %s as %d bytes, at most about %d", (display, bytes, maxBytes) => {
+    const parsed = parseBytesProcessed(display)!
+    expect(parsed.bytes).toBe(bytes)
+    // The bound is the figure plus half its last digit; past a PiB it carries a few bytes of float margin.
+    expect(parsed.maxBytes).toBeGreaterThanOrEqual(maxBytes)
+    expect(parsed.maxBytes).toBeLessThanOrEqual(maxBytes + maxBytes * 1e-14 + 1)
   })
 
   test("a rounded figure's upper bound covers a scan just over a limit", () => {
@@ -105,6 +109,12 @@ describe("parseBytesProcessed", () => {
     const parsed = parseBytesProcessed("10.0 GiB")!
     expect(parsed.bytes).toBe(10 * 1024 ** 3)
     expect(parsed.maxBytes).toBeGreaterThanOrEqual(over)
+  })
+
+  test("the upper bound reaches a count just past a tie that the dry run shows rounded down", () => {
+    // 9.25 PiB is a tie in the dry run's float formatting, which shows it as "9.2": the bound sits above the tie.
+    const tie = 37n * 1024n ** 5n / 4n
+    expect(BigInt(parseBytesProcessed("9.2 PiB")!.maxBytes)).toBeGreaterThan(tie)
   })
 
   test("takes a number as the exact count", () => {

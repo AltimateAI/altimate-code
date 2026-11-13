@@ -23,16 +23,28 @@ export function parseBytesProcessed(display: unknown): { bytes: number; maxBytes
   const unit = UNITS.findIndex((u) => u.toLowerCase() === match[2].toLowerCase())
   const scale = 1024 ** unit
   const bytes = Math.round(Number(match[1]) * scale)
-  return { bytes, maxBytes: unit === 0 ? bytes : Math.ceil((Number(match[1]) + 0.05) * scale) }
+  if (unit === 0) return { bytes, maxBytes: bytes }
+  // Exact in integers: the shown figure is rounded to its last digit, so the true count is at most half
+  // of that digit above it. A float product is off by whole bytes past a few TiB.
+  const [whole, fraction = ""] = match[1].split(".")
+  const digits = BigInt(whole + fraction)
+  let upper = ((digits * 2n + 1n) * 1024n ** BigInt(unit) + 2n * 10n ** BigInt(fraction.length) - 1n) / (2n * 10n ** BigInt(fraction.length))
+  // Python divides in floats, so a count within a float's last place of a tie is shown rounded down.
+  upper += upper >> 50n
+  let maxBytes = Number(upper)
+  if (BigInt(Math.trunc(maxBytes)) < upper) maxBytes *= 1 + Number.EPSILON
+  return { bytes, maxBytes: Math.max(bytes, maxBytes) }
 }
 
-/** Waits for `work`, but gives up as soon as the call is cancelled. */
-function untilAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+/** Starts `start` and waits for it, but gives up as soon as the call is cancelled; a cancelled call starts nothing. */
+function untilAbort<T>(start: () => Promise<T>, signal: AbortSignal): Promise<T> {
   if (signal.aborted) return Promise.reject(signal.reason)
   return new Promise<T>((resolve, reject) => {
     const stop = () => reject(signal.reason)
     signal.addEventListener("abort", stop, { once: true })
-    work.then(resolve, reject).finally(() => signal.removeEventListener("abort", stop))
+    start()
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", stop))
   })
 }
 
@@ -66,7 +78,10 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
     let compiled: unknown
     try {
       // A model compiles by name, so its node context (`this`, config) is kept; SQL compiles inline.
-      compiled = await untilAbort(args.model ? adapter.unsafeCompileNode(args.model) : adapter.unsafeCompileQuery(args.sql!, undefined), signal)
+      compiled = await untilAbort(
+        () => (args.model ? adapter.unsafeCompileNode(args.model) : adapter.unsafeCompileQuery(args.sql!, undefined)),
+        signal,
+      )
     } catch (e) {
       if (signal.aborted) throw e
       return failure("compile failed", e instanceof Error ? e.message : String(e), { adapter: type })
@@ -76,7 +91,7 @@ export const DbtCostEstimateTool = Tool.define("dbt_cost_estimate", {
     }
     let display: unknown
     try {
-      const result = await untilAbort(adapter.validateSQLDryRun(compiled), signal)
+      const result = await untilAbort(() => adapter.validateSQLDryRun(compiled), signal)
       if (result == null) {
         return failure("dry run failed", "The dry run returned no estimate: dbt-core before 1.6 can't dry run.", { adapter: type })
       }
