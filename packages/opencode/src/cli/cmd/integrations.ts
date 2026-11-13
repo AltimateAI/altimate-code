@@ -23,7 +23,7 @@ const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066
 export const clean = (value: unknown) => String(value ?? "").replace(ANSI, "").replace(UNSAFE, " ").replace(/ {2,}/g, " ").trim()
 const json = (value: unknown) => console.log(JSON.stringify(value, null, 2))
 const jsonOption = { describe: "print machine-readable JSON", type: "boolean", default: false } as const
-const shareOption = { describe: "attach to a linked workspace that is not private, letting its members use this connection", type: "boolean", default: false } as const
+const shareOption = { describe: "allow sharing: attach to a linked workspace that is not private (its members can use the connection), and update a connection that is already shared (the people it is shared with get the new credential)", type: "boolean", default: false } as const
 
 const STATE_VIEW: Record<ProviderStatus["state"], { icon: string; color: string; label: string }> = {
   connected: { icon: "●", color: S.TEXT_SUCCESS, label: "connected" },

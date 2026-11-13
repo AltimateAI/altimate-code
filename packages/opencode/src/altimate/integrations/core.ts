@@ -1108,7 +1108,7 @@ async function syncReal(
   }
   const reportWorkspace = (w: NonNullable<UpsertResult["workspace"]>, sharedConnection = false): SyncOutcome => {
     // A shared connection that was rewritten stays reported as shared even when the attach after it fails.
-    if ("error" in w) return { id, result: "failed", reason: ATTACH_FAILED_PREFIX + w.error, steps, ...(sharedConnection ? { shared: true as const } : {}) }
+    if ("error" in w) return { id, result: "failed", reason: ATTACH_FAILED_PREFIX + w.error + (sharedConnection ? ` ${SHARED_REWRITE_NOTE}` : ""), steps, ...(sharedConnection ? { shared: true as const } : {}) }
     if ("attached" in w) step(`${w.kept ? `Kept the workspace's existing connection in ${workspaceLabel(w.attached, w.workspaceId)}` : `Attached to ${workspaceLabel(w.attached, w.workspaceId)}`}${w.shared ? SHARED_AUDIENCE : ""}`)
     else {
       steps.push({ label: NOT_LINKED_LABEL, ok: false })

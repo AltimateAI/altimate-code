@@ -486,6 +486,7 @@ describe("workspace connections", () => {
     try {
       const failed = await core.syncProvider("github", undefined, 0, false, true)
       expect([failed.result, failed.shared]).toEqual(["failed", true])
+      expect(failed.reason).toContain(core.SHARED_REWRITE_NOTE)
     } finally {
       ;(AltimateApi.isConfigured as any).mockRestore()
     }
@@ -2792,14 +2793,16 @@ describe("the CLI passes --share through and reports shared", () => {
     const log = spyOn(console, "log").mockImplementation((t?: unknown) => void logs.push(String(t)))
     const connect = spyOn(creds, "connectCredentials").mockResolvedValue({ provider: "github", status: "connected", sync: "synced", account: null, expiresAt: null, message: null, shared: true } as any)
     const sync = spyOn(core, "syncProvider").mockResolvedValue({ id: "github", result: "synced", steps: [], shared: true })
+    const info = spyOn(core, "liveWorkspaceInfo").mockResolvedValue({} as any)
     try {
       await (ConnectCommand.handler as any)({ provider: "github", share: true, json: true })
       expect(connect.mock.calls[0][0].share).toBe(true)
       expect(JSON.parse(logs.join("\n")).shared).toBe(true)
       await (SyncCommand.handler as any)({ provider: "github", share: true, json: true })
       expect(sync.mock.calls[0][4]).toBe(true)
+      expect(JSON.parse(logs[logs.length - 1]).results[0].shared).toBe(true)
     } finally {
-      for (const sp of [log, connect, sync]) sp.mockRestore()
+      for (const sp of [log, connect, sync, info]) sp.mockRestore()
       process.exitCode = 0
     }
   })
