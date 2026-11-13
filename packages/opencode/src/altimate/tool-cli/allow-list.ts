@@ -35,10 +35,19 @@ import { AltimateCoreTestgenTool } from "../tools/altimate-core-testgen"
 import { AltimateCoreTrackLineageTool } from "../tools/altimate-core-track-lineage"
 import { AltimateCoreValidateTool } from "../tools/altimate-core-validate"
 import { DataDiffTool } from "../tools/data-diff"
+import { DbtCostEstimateTool } from "../tools/dbt-cost-estimate"
+import { DbtCteProfileTool } from "../tools/dbt-cte-profile"
+import { DbtDeferStateTool } from "../tools/dbt-defer-state"
+import { DbtDocsCoverageTool } from "../tools/dbt-docs-coverage"
+import { DbtHealthTool } from "../tools/dbt-health"
 import { DbtLineageTool } from "../tools/dbt-lineage"
 import { DbtManifestTool } from "../tools/dbt-manifest"
+import { DbtMapRelationsTool } from "../tools/dbt-map-relations"
 import { DbtProfilesTool } from "../tools/dbt-profiles"
+import { DbtRunResultsTool } from "../tools/dbt-run-results"
+import { DbtSqlGraphTool } from "../tools/dbt-sql-graph"
 import { DbtUnitTestGenTool } from "../tools/dbt-unit-test-gen"
+import { DocsShareCommentsTool } from "../tools/docs-share-comments"
 import { FinopsAnalyzeCreditsTool } from "../tools/finops-analyze-credits"
 import { FinopsExpensiveQueriesTool } from "../tools/finops-expensive-queries"
 import { FinopsQueryHistoryTool } from "../tools/finops-query-history"
@@ -106,10 +115,19 @@ export const EXPOSED: Record<string, Source> = {
   altimate_core_track_lineage: AltimateCoreTrackLineageTool,
   altimate_core_validate: AltimateCoreValidateTool,
   data_diff: DataDiffTool,
+  dbt_cost_estimate: DbtCostEstimateTool,
+  dbt_cte_profile: DbtCteProfileTool,
+  dbt_defer_state: DbtDeferStateTool,
+  dbt_docs_coverage: DbtDocsCoverageTool,
+  dbt_health: DbtHealthTool,
   dbt_lineage: DbtLineageTool,
   dbt_manifest: DbtManifestTool,
+  dbt_map_relations: DbtMapRelationsTool,
   dbt_profiles: DbtProfilesTool,
+  dbt_run_results: DbtRunResultsTool,
+  dbt_sql_graph: DbtSqlGraphTool,
   dbt_unit_test_gen: DbtUnitTestGenTool,
+  docs_share_comments: DocsShareCommentsTool,
   finops_analyze_credits: FinopsAnalyzeCreditsTool,
   finops_expensive_queries: FinopsExpensiveQueriesTool,
   finops_query_history: FinopsQueryHistoryTool,

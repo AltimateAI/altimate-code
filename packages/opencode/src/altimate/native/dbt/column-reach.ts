@@ -6,7 +6,8 @@
 // lineage engine cannot settle is reported as such: models it could not trace (no compiled SQL, or
 // SQL it could not parse), models that name the column only outside their select list (where the
 // engine reports no edge), and models that read it through a table name several parents share.
-import { loadRawManifest, findModel } from "./helpers"
+import * as core from "@altimateai/altimate-core"
+import { loadRawManifest, findModel, detectDialect } from "./helpers"
 import { dbtLineage } from "./lineage"
 import { missingColumn, projectLineage, selectsStar, stripSql } from "./project-lineage"
 
@@ -15,6 +16,14 @@ export interface ColumnReachModel {
   unique_id: string
   /** Its output columns that come from the traced column. */
   columns: string[]
+  /**
+   * How each of those columns (keyed as in `columns`) comes from the traced column, as the lineage
+   * engine classifies it: Original (carried as is), Alias (renamed), Transformation, Not sure or
+   * Non select. It covers the whole path from the traced column: a column is Original or Alias only
+   * when every hop is, so a column read from a calculation is never Original. A column whose
+   * edges carry no classification has no entry.
+   */
+  lens_types?: Record<string, string>
 }
 
 export interface ColumnReachUnsure {
@@ -58,6 +67,16 @@ export interface ColumnReach {
 const MAX_MODELS = 300
 const TRACED = new Set(["model", "snapshot"])
 
+// How far a classification is from "the value arrives unchanged", least to most.
+const LENS_ORDER = ["Original", "Alias", "Non select", "Not sure", "Transformation"]
+
+/** The classification of a path made of two: the one further from unchanged, unknown if either is. */
+function joinLens(a: string | undefined, b: string | undefined): string | undefined {
+  if (a === undefined || b === undefined) return undefined
+  const rank = (lens: string) => (LENS_ORDER.includes(lens) ? LENS_ORDER.indexOf(lens) : LENS_ORDER.length)
+  return rank(a) >= rank(b) ? a : b
+}
+
 /** "db"."schema"."orders"."amount" → { parts: ["db","schema","orders"], column: "amount" }, lower-cased. */
 function splitSource(source: unknown): { parts: string[]; column: string; exact: string } | null {
   const text =
@@ -66,8 +85,7 @@ function splitSource(source: unknown): { parts: string[]; column: string; exact:
   // Split on dots outside quotes: "a"."net.amount" is table a, column net.amount.
   // A doubled closing delimiter inside a quoted name is one character ("a""b" is a"b, [a]]b] is a]b).
   const raw = [...text.matchAll(/"((?:[^"]|"")*)"|`((?:[^`]|``)*)`|\[((?:[^\]]|\]\])*)\]|([^."`\[\]]+)/g)].map(
-    (m) =>
-      m[1]?.replaceAll('""', '"') ?? m[2]?.replaceAll("``", "`") ?? m[3]?.replaceAll("]]", "]") ?? m[4] ?? "",
+    (m) => m[1]?.replaceAll('""', '"') ?? m[2]?.replaceAll("``", "`") ?? m[3]?.replaceAll("]]", "]") ?? m[4] ?? "",
   )
   if (raw.length < 2) return null
   // `exact` keeps the column's case, for parents that document two columns differing only by case.
@@ -92,6 +110,59 @@ function relationKeys(node: any): string[] {
     keys.add(name.toLowerCase())
   }
   return [...keys]
+}
+
+type LineageEdge = { source: unknown; target: string; lineage_type?: string; lens_type?: string }
+
+/**
+ * The engine rates every edge "Not sure" when the table it reads is written with its schema
+ * ("db"."schema"."orders", as dbt compiles a ref) and its schema lists that table by bare name only.
+ * The model's SQL is traced again with each parent listed under every way its relation is written,
+ * and an edge both runs report (matched by output column, table name and source column, as the
+ * first run drops the qualification) takes the second run's rating. Anything else keeps its own.
+ */
+function rated(
+  edges: LineageEdge[],
+  sql: string,
+  dialect: string,
+  parents: string[],
+  lookup: (id: string) => any,
+): LineageEdge[] {
+  if (!sql || parents.length === 0 || !edges.some((edge) => edge.lens_type === "Not sure")) return edges
+  try {
+    const tables: Record<string, { columns: { name: string; type: string }[] }> = {}
+    for (const parent of parents) {
+      const node = lookup(parent)
+      const columns = Object.entries<any>(node?.columns ?? {}).map(([key, col]) => ({
+        name: String(col?.name ?? key),
+        type: String(col?.data_type ?? col?.type ?? ""),
+      }))
+      if (columns.length === 0) continue
+      for (const key of relationKeys(node)) tables[key] = { columns }
+    }
+    if (Object.keys(tables).length === 0) return edges
+    const schema = core.Schema.fromJson(JSON.stringify({ tables, version: "1" }))
+    const again: LineageEdge[] =
+      JSON.parse(JSON.stringify(core.columnLineage(sql, dialect, schema))).column_lineage ?? []
+    const keyOf = (edge: LineageEdge) => {
+      const source = splitSource(edge.source)
+      return source ? `${String(edge.target).toLowerCase()}|${source.parts.at(-1)}.${source.column}` : null
+    }
+    const lenses = new Map<string, string>()
+    for (const edge of again) {
+      const key = keyOf(edge)
+      // Edges into one output from the same column keep the one furthest from unchanged.
+      if (key && typeof edge.lens_type === "string")
+        lenses.set(key, joinLens(lenses.get(key), edge.lens_type) ?? edge.lens_type)
+    }
+    return edges.map((edge) => {
+      const key = edge.lens_type === "Not sure" ? keyOf(edge) : null
+      const lens = key ? lenses.get(key) : undefined
+      return lens ? { ...edge, lens_type: lens } : edge
+    })
+  } catch {
+    return edges
+  }
 }
 
 /**
@@ -274,6 +345,8 @@ export function columnReach(manifestPath: string, model: string, column: string,
   if (unsettled) spelled = []
   else if (!exact && matches.length > 0) spelled = matches
   const trackedExact = new Map<string, Set<string>>([[targetId, new Set(spelled)]])
+  // How each tracked column comes from the traced column, per node (the traced column itself is Original).
+  const lensOf = new Map<string, Map<string, string | undefined>>([[targetId, new Map([[column0, "Original"]])]])
   const carries = (parent: string, source: { column: string; exact: string }) =>
     !!tracked.get(parent)?.has(source.column) &&
     (!caseCollides(lookup(parent), source.column) || !!trackedExact.get(parent)?.has(source.exact))
@@ -307,7 +380,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
       unsure.add(id)
       continue
     }
-    const edges: { source: unknown; target: string; lineage_type?: string }[] = lineage?.column_lineage?.length
+    const listed: LineageEdge[] = lineage?.column_lineage?.length
       ? lineage.column_lineage
       : Object.entries<any>(lineage?.column_dict ?? {}).flatMap(([out, sources]) =>
           (Array.isArray(sources) ? sources : [sources]).map((source) => ({
@@ -323,6 +396,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
     // cannot say which one is read; a `select *` from a parent whose schema does not list the
     // column cannot be expanded to it. Both are possible reads with unknown outputs.
     const sqlText: string = nodes[id]?.compiled_code || nodes[id]?.compiled_sql || ""
+    const edges = rated(listed, sqlText, dialect ?? detectDialect(manifest), allParents, lookup)
     const bareName = (p: string) => {
       const node = lookup(p)
       return String(node?.alias || node?.identifier || node?.name || p).toLowerCase()
@@ -346,6 +420,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
 
     const carried = new Set<string>()
     const carriedExact = new Set<string>()
+    const carriedLens = new Map<string, string | undefined>()
     let reads = false
     let ambiguous = false
     for (const edge of edges) {
@@ -360,7 +435,14 @@ export function columnReach(manifestPath: string, model: string, column: string,
       }
       reads = true
       if (edge.lineage_type !== "indirect" && typeof edge.target === "string") {
-        carried.add(edge.target.toLowerCase())
+        const out = edge.target.toLowerCase()
+        const lens = joinLens(
+          lensOf.get(candidates[0]!)?.get(source.column),
+          typeof edge.lens_type === "string" ? edge.lens_type : undefined,
+        )
+        // Several edges into one output: it is as far from unchanged as the furthest of them.
+        carriedLens.set(out, carried.has(out) ? joinLens(carriedLens.get(out), lens) : lens)
+        carried.add(out)
         carriedExact.add(edge.target)
       }
     }
@@ -376,10 +458,24 @@ export function columnReach(manifestPath: string, model: string, column: string,
     if (reads) {
       tracked.set(id, carried)
       trackedExact.set(id, carriedExact)
+      lensOf.set(id, carriedLens)
       // Outputs fed by an unsettled or ephemeral parent, or read through an ambiguous name, stay unsettled.
       // A NATURAL JOIN beside the column may join on it, or carry it on in another output.
       if (ambiguous || fromUnsure || viaEphemeral || partial || opaque) unsure.add(id)
-      reached.push({ name: nodes[id]?.name ?? id, unique_id: id, columns: [...carried].sort() })
+      const columns = [...carried].sort()
+      // Built with fromEntries: assigning to a column named __proto__ would set the prototype instead.
+      const lens_types: Record<string, string> = Object.fromEntries(
+        columns.flatMap((col) => {
+          const lens = carriedLens.get(col)
+          return lens === undefined ? [] : [[col, lens] as const]
+        }),
+      )
+      reached.push({
+        name: nodes[id]?.name ?? id,
+        unique_id: id,
+        columns,
+        ...(Object.keys(lens_types).length > 0 && { lens_types }),
+      })
       continue
     }
 
