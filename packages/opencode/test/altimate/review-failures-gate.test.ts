@@ -203,6 +203,29 @@ describe("posting: dedup, dismissal of a stale block, no repeat reviews", () => 
     expect(r.dismissedReviews).toBe(1)
   })
 
+  test("a rerun where the engine or a file failed does not clear the block", async () => {
+    const blocking = [{ id: 11, body: "🛑 Changes requested — 1 critical (full tier)", state: "CHANGES_REQUESTED" }]
+    const crashed = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "gate",
+      engineErrors: [{ method: "check", reason: "native core not loaded", count: 3 }],
+    })
+    const a = fakeClient({ reviews: blocking })
+    await postGitHubReview(crashed, target, a.client)
+    expect(a.calls.dismissReview).toHaveLength(0)
+
+    const fileFailed = buildEnvelope({
+      findings: [],
+      tier: "full",
+      mode: "gate",
+      scope: { unverified: [{ path: "models/m.sql", reason: "review failed for this file: boom" }] } as any,
+    })
+    const b = fakeClient({ reviews: blocking })
+    await postGitHubReview(fileFailed, target, b.client)
+    expect(b.calls.dismissReview).toHaveLength(0)
+  })
+
   test("a still-blocking rerun does not dismiss and posts REQUEST_CHANGES", async () => {
     const blocking = makeFinding({
       severity: "critical",
