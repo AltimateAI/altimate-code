@@ -808,3 +808,202 @@ describe("decisions for clients that show them (workspace review decisions)", ()
     expect(await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, waitMs: 500 })).toMatchObject({ ok: false })
   })
 })
+
+// altimate_change start — review follow-ups: a fresh process's ack, a late lock, decision order, scopes, refusal codes
+describe("review follow-ups", () => {
+  const { ReviewRequests } = require("../../../src/altimate/workspace/review-requests") as typeof import("../../../src/altimate/workspace/review-requests")
+  const { RulesSync } = require("../../../src/altimate/rules/sync") as typeof import("../../../src/altimate/rules/sync")
+  const { reviewDecisions } = require("../../../src/cli/cmd/workspace") as typeof import("../../../src/cli/cmd/workspace")
+  const { Flock } = require("@opencode-ai/core/util/flock") as typeof import("@opencode-ai/core/util/flock")
+
+  const PIN_KEYS = ["ALTIMATE_CODE_SERVE", "ALTIMATE_PINNED_WORKSPACE_ID", "ALTIMATE_PINNED_WORKSPACE_NAME", "ALTIMATE_PINNED_WORKSPACE_ROOT"]
+  async function withEnv<T>(env: Record<string, string>, run: () => Promise<T>): Promise<T> {
+    const saved = Object.fromEntries(PIN_KEYS.map((key) => [key, process.env[key]]))
+    Object.assign(process.env, env)
+    try {
+      return await run()
+    } finally {
+      for (const key of PIN_KEYS)
+        if (saved[key] === undefined) delete process.env[key]
+        else process.env[key] = saved[key]
+    }
+  }
+  /** Rules state pulled for user 7 on workspace 42 in `root`, with sent rules `sent` and kept rule `notices`. */
+  async function rulesState(root: string, over: { sent?: unknown[]; notices?: unknown[]; account?: string } = {}) {
+    const { RulesStore } = await import("../../../src/altimate/rules/store")
+    const { accountDigest } = await import("../../../src/altimate/workspace/state")
+    const digest = (await accountDigest())!
+    await RulesStore.update(root, (s) => {
+      s.scope = { apiUrl: API, tenant: "acme", account: over.account ?? "user:7", datamateId: 42, repoRemote: "github.com/acme/app" } as never
+      s.workspace = { name: "Growth", is_owner: false } as never
+      s.pulled_with = digest
+      s.sent = (over.sent ?? []) as never
+      s.notices = (over.notices ?? []) as never
+    })
+  }
+  const ruleNotice = (i: number) => ({ public_id: `r-${i}`, text: `rule ${i}`, status: "active", at: new Date(Date.UTC(2026, 10, 1, 0, i)).toISOString() })
+  /** A decision on c-1, made now, kept with a host that has asked before. */
+  async function decidedForHost(host = "claude-ui") {
+    mine = () => page([contribution({ status: "pending" })])
+    await poll()
+    await ReviewNotices.hostDecisions(project, { host, unseen: true })
+    mine = () => page([contribution({ status: "active", reviewed_at: new Date().toISOString() })])
+    await poll()
+  }
+
+  test("--ack in a process that never polled acknowledges: the decision is not handed out again", async () => {
+    await decidedForHost()
+    const claimed = await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, claim: true })
+    expect(claimed.ok && claimed.decisions.map(ReviewNotices.decisionKey)).toEqual(["skill:c-1:active"])
+    // The plugin acknowledges from a second process: nobody there has asked who the person is yet.
+    RulesSync.forgetAccountsForTest()
+    expect(await reviewDecisions({ directory: project, host: "claude-ui", unseen: false, "mark-seen": false, claim: false, ack: ["skill:c-1:active"] })).toEqual({ ok: true })
+    const state = (await ReviewNotices.read(scopeA()))!
+    expect(state.host_seen["claude-ui"]).toContain("skill:c-1:active")
+    expect(state.host_claims["claude-ui"]).toBeUndefined()
+  })
+
+  test("a lock granted after the caller stopped waiting marks nothing: the decision is given next time", async () => {
+    await decidedForHost()
+    const scope = scopeA()
+    const deadline = Date.now() + 1_000
+    // Another process holds the state until just after this ask stops waiting for the lock (250ms before the deadline).
+    let held!: () => void
+    const holding = Flock.withLock(
+      `workspace-reviews:${path.basename(ReviewNotices.stateFile(scope))}`,
+      () => new Promise<void>((resolve) => (held = resolve)),
+      { dir: ReviewNotices.dir(), staleMs: 60_000, timeoutMs: 10_000 },
+    )
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    setTimeout(() => held(), deadline - Date.now() - 230)
+    const answer = await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, markSeen: true, deadline, waitMs: 100 })
+    await holding
+    expect(answer).toEqual({ ok: false, status: "failed" })
+    const later = await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, markSeen: true })
+    expect(later.ok && later.decisions.map((d) => d.public_id)).toEqual(["c-1"])
+  })
+
+  test("decisions are given newest first by when they were decided, not by the order they were recorded", async () => {
+    mine = () => page([contribution({ status: "pending" }), contribution({ public_id: "c-2", status: "pending" })])
+    await poll()
+    await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true })
+    const now = Date.now()
+    // The server lists the older decision first.
+    mine = () =>
+      page([
+        contribution({ status: "active", reviewed_at: new Date(now - 60_000).toISOString() }),
+        contribution({ public_id: "c-2", status: "rejected", reviewed_at: new Date(now).toISOString() }),
+      ])
+    await poll()
+    expect((await ReviewNotices.read(scopeA()))?.notices.map((n) => n.public_id)).toEqual(["c-1", "c-2"])
+    const unseen = await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true })
+    expect(unseen.ok && unseen.decisions.map((d) => d.public_id)).toEqual(["c-2", "c-1"])
+    const all = await ReviewNotices.hostDecisions(project, {})
+    expect(all.ok && all.decisions.map((d) => d.public_id)).toEqual(["c-2", "c-1"])
+  })
+
+  test("the seen lists keep a bounded number of hosts, the most recently written", async () => {
+    mine = () => page([])
+    for (let i = 0; i < ReviewNotices.MAX_HOSTS + 3; i++) await ReviewNotices.hostDecisions(project, { host: `h${i}`, unseen: true })
+    const hosts = Object.keys((await ReviewNotices.read(scopeA()))!.host_seen)
+    expect(hosts).toHaveLength(ReviewNotices.MAX_HOSTS)
+    expect(hosts.at(-1)).toBe(`h${ReviewNotices.MAX_HOSTS + 2}`)
+  })
+
+  test("the per-client flags need --host: without it nothing is marked and every kept decision is not answered", async () => {
+    await decidedForHost()
+    const base = { directory: project, unseen: false, "mark-seen": false, claim: false }
+    for (const flags of [{ unseen: true }, { "mark-seen": true }, { claim: true }, { ack: ["skill:c-1:active"] }])
+      expect(await reviewDecisions({ ...base, ...flags })).toEqual({ ok: false, status: "host_required" })
+    // Without any of them it is the plain list.
+    expect(await reviewDecisions(base)).toMatchObject({ ok: true, decisions: [{ key: "skill:c-1:active" }] })
+  })
+
+  test("signed out and not linked are told apart", async () => {
+    expect(await ReviewNotices.hostDecisions(mkdtempSync(path.join(SANDBOX, "unlinked-")), { host: "claude-ui", unseen: true, waitMs: 500 })).toEqual({
+      ok: false,
+      status: "not_linked",
+    })
+    configured = false
+    expect(await ReviewNotices.hostDecisions(project, { host: "claude-ui", unseen: true, waitMs: 500 })).toEqual({ ok: false, status: "signed_out" })
+  })
+
+  test("a folder with no link lists no rule requests, even with rules state from an earlier link", async () => {
+    const other = mkdtempSync(path.join(SANDBOX, "unlinked-"))
+    await rulesState(other, { sent: [{ public_id: "r-1", text: "x", status: "pending", change: "add", sent_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-01T00:00:00Z" }] })
+    expect(await ReviewRequests.ruleRequests(other, other)).toEqual([])
+    // The linked project with the same state lists it.
+    await rulesState(project, { sent: [{ public_id: "r-1", text: "x", status: "pending", change: "add", sent_at: "2026-11-01T00:00:00Z", updated_at: "2026-11-01T00:00:00Z" }] })
+    expect((await ReviewRequests.ruleRequests(project, project)).map((r) => r.public_id)).toEqual(["r-1"])
+  })
+
+  test("the summary's decisions hold every kept rule decision, and none from another scope", async () => {
+    mine = () => page([contribution({ status: "pending" })])
+    await poll()
+    await rulesState(project, { notices: Array.from({ length: 15 }, (_, i) => ruleNotice(i)) })
+    const summary = await RulesSummary.summary(project, undefined, process.env, project)
+    expect(summary.decisions.filter((d) => d.kind === "rule")).toHaveLength(15)
+    expect(summary.decisions[0].public_id).toBe("r-14")
+    // Rules state still pulled for another account (before the sync catches up): its decisions are not this scope's.
+    await rulesState(project, { notices: [ruleNotice(1)], account: "user:8" })
+    const switched = await RulesSummary.summary(project, undefined, process.env, project)
+    expect(switched.decisions.filter((d) => d.kind === "rule")).toEqual([])
+    expect(switched.notices_scope).toBe(RulesSummary.noticesScope(scopeA()))
+  })
+
+  test("a list with a row this version could not read is not complete", async () => {
+    mine = () => page([contribution({ status: "pending" }), { public_id: "c-2", status: "weird" }])
+    const listed = await ReviewRequests.listReview(project)
+    expect(listed).toMatchObject({ status: "ok", complete: false })
+  })
+
+  test("a link that cannot be confirmed is a failure, not 'not linked'", async () => {
+    await withEnv({ ALTIMATE_CODE_SERVE: "1", ALTIMATE_PINNED_WORKSPACE_ID: "abc", ALTIMATE_PINNED_WORKSPACE_NAME: "P", ALTIMATE_PINNED_WORKSPACE_ROOT: project }, async () => {
+      expect(await ReviewRequests.listReview(project)).toMatchObject({ status: "failed" })
+      expect(await ReviewRequests.act(project, "c-1", "withdraw", { expected_version: 1 })).toMatchObject({ ok: false, status: 503, code: "link_unconfirmed" })
+    })
+  })
+
+  test("a decision another process recorded asks clients to replay on this process's first look, once; never after dispose", async () => {
+    const { RulesService } = await import("../../../src/altimate/rules/service")
+    const { Bus } = await import("../../../src/bus")
+    const { spyOn } = await import("bun:test")
+    const published: string[] = []
+    const spy = spyOn(Bus, "publish").mockImplementation((async (def: { type: string }) => void published.push(def.type)) as never)
+    try {
+      // Another process (a plugin's session start) polled and recorded the decision.
+      mine = () => page([contribution({ status: "pending" })])
+      await poll()
+      mine = () => page([contribution({ status: "active", reviewed_at: new Date().toISOString() })])
+      await poll()
+      await RulesService.pollReviewDecisions(project)
+      expect(published).toEqual(["altimate.rules.changed"])
+      await RulesService.pollReviewDecisions(project)
+      expect(published).toHaveLength(1)
+      // Disposed while polling: nothing is published, even for something new.
+      mine = () => page([contribution({ status: "retired", reviewed_at: new Date().toISOString(), decided_by_me: false })])
+      await RulesService.pollReviewDecisions(project, { live: () => false })
+      expect(published).toHaveLength(1)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test("every refusal carries a code; a stale version is a conflict, not a bad gateway", async () => {
+    const harness = globalThis.fetch
+    let answer: () => Response = () => reply({}, 500)
+    globalThis.fetch = (async (input: any, init?: any) => {
+      const url = typeof input === "string" ? input : input.url
+      if (/\/reviews\/[^/?]+\/withdraw$/.test(url)) return answer()
+      return harness(input, init)
+    }) as typeof fetch
+    const act = () => ReviewRequests.act(project, "c-1", "withdraw", { expected_version: 1 })
+    answer = () => reply({ detail: { message: "Conflict" } }, 409)
+    expect(await act()).toMatchObject({ ok: false, status: 409, code: "refused" })
+    answer = () => reply({ detail: { message: "The request changed" } }, 412)
+    expect(await act()).toMatchObject({ ok: false, status: 409, code: "version_conflict" })
+    answer = () => reply({ detail: { message: "boom" } }, 500)
+    expect(await act()).toMatchObject({ ok: false, status: 502, code: "upstream_failed" })
+  })
+})
+// altimate_change end

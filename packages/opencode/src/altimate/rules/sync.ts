@@ -90,6 +90,11 @@ export async function context(directory: string, learn: LearnConfig): Promise<Co
   }
 }
 
+/** Forget who each credential signs in as: a fresh process, for tests. */
+export function forgetAccountsForTest(): void {
+  principals.clear()
+}
+
 /** `accountOf` from what this process already knows, asking no server: undefined until `accountOf` has answered. */
 export async function knownAccount(actAs: ActAs): Promise<string | undefined> {
   const { credentialDigest } = await import("../workspace/state")

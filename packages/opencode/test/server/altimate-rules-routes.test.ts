@@ -130,6 +130,29 @@ describe("workspace request routes", () => {
     expect(body).toMatchObject({ ok: true, requests: [] })
     expect(["signed_out", "not_linked"]).toContain(body.review_status)
   })
+
+  test("the list joins the person's rule requests to their skill and knowledge requests, and says when it is partial", async () => {
+    const { ReviewRequests } = await import("../../src/altimate/workspace/review-requests")
+    const { spyOn } = await import("bun:test")
+    const rule = { kind: "rule" as const, public_id: "r-1", name: "Use cents", status: "pending", actions: [] }
+    const listed = spyOn(ReviewRequests, "listReview").mockResolvedValue({
+      status: "ok",
+      workspace: { id: 42, name: "Growth" },
+      items: [],
+      complete: false,
+    })
+    const rules = spyOn(ReviewRequests, "ruleRequests").mockResolvedValue([rule])
+    try {
+      const response = await request("GET", "/altimate/workspace/requests")
+      expect(response.status).toBe(200)
+      expect(await response.json()).toMatchObject({ ok: true, requests: [rule], review_status: "ok", review_complete: false })
+      // The rule rows are asked for the workspace the skill listing resolved.
+      expect(rules.mock.calls[0][2]).toBe(42)
+    } finally {
+      listed.mockRestore()
+      rules.mockRestore()
+    }
+  })
 })
 
 describe("rules sync route", () => {

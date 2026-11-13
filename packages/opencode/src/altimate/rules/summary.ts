@@ -87,6 +87,9 @@ export async function summary(root: string, learn: LearnConfig, env: NodeJS.Proc
     ...(n.reviewer ? { reviewer: n.reviewer } : {}),
   }))
   const scope = noticesScope(reviewScope ?? state.scope)
+  // Rule decisions are kept with the scope they were pulled for: after an account switch, a relink or a new pin, and
+  // until the rules sync catches up, they belong to the previous scope, not to the one `decisions` is labelled with.
+  const ruleNotices = !reviewScope || noticesScope(state.scope) === scope ? state.notices : []
   const learning = RuleTrigger.learningDecision(learn, state, env)
   // Dropped proposals first: the person was told they were queued, and a later pull does not clear it.
   const lastError = [RulesStore.scopeDropNote(state), state.last_error].filter(Boolean).join("; ")
@@ -105,7 +108,7 @@ export async function summary(root: string, learn: LearnConfig, env: NodeJS.Proc
     notices: state.notices.slice(-10).reverse(),
     review_notices: reviewNotices,
     decisions: [
-      ...state.notices.slice(-10).map((n): Decision => ({ kind: "rule", ...n })),
+      ...ruleNotices.map((n): Decision => ({ kind: "rule", ...n })),
       ...reviewNotices,
     ].sort((a, b) => Date.parse(b.at) - Date.parse(a.at)),
     ...(scope ? { notices_scope: scope } : {}),

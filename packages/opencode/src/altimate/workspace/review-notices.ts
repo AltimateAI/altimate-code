@@ -180,6 +180,8 @@ function cap(state: State): State {
 }
 
 const keyOf = (id: string, status: string) => `${id}:${status}`
+/** Newest decision first, by when it was decided: a poll records decisions in the server's listing order. */
+const newestFirst = (notices: readonly Notice[]) => [...notices].sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0))
 /** How every client remembers a decision it showed: rule and skill ids live in different id spaces. */
 export const decisionKey = (n: Pick<Notice, "kind" | "public_id" | "status">) => `${n.kind}:${n.public_id}:${n.status}`
 
@@ -358,8 +360,9 @@ export async function storedState(directory: string): Promise<State | undefined>
 }
 
 /** The scope `storedState` reads: the person signed in now on the project's workspace, from what is on hand. No
- * network. */
-export async function storedScope(directory: string): Promise<Scope | undefined> {
+ * network, unless `resolveAccount`: a process that never polled (`workspace review decisions --ack`) asks the server
+ * who the person is, waiting `ACCOUNT_WAIT_MS` at most. */
+export async function storedScope(directory: string, opts: { resolveAccount?: boolean } = {}): Promise<Scope | undefined> {
   if (!workspacesOn()) return undefined
   try {
     const [{ WorkspaceApi }, { readLocalBinding, credentialDigest, accountDigest }, { RulesSync }] = await Promise.all([
@@ -380,7 +383,14 @@ export async function storedScope(directory: string): Promise<Scope | undefined>
     // The link was read with the credential signed in now: it must still be the captured one, or one account's
     // notices could be paired with another account's link.
     if ((await accountDigest()) !== credentialDigest(actAs.url, actAs.instance, actAs.apiKey)) return undefined
-    const account = await RulesSync.knownAccount(actAs)
+    const account =
+      (await RulesSync.knownAccount(actAs)) ??
+      (opts.resolveAccount
+        ? await Promise.race([
+            RulesSync.accountOf(actAs).catch(() => undefined),
+            new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), ACCOUNT_WAIT_MS).unref?.()),
+          ])
+        : undefined)
     if (!account) {
       void RulesSync.accountOf(actAs).catch(() => undefined)
       return undefined
@@ -392,8 +402,13 @@ export async function storedScope(directory: string): Promise<Scope | undefined>
   }
 }
 
+/** How long `storedScope({ resolveAccount })` waits for the server to say who the person is. */
+const ACCOUNT_WAIT_MS = 5_000
+
 /** How many seen keys one host keeps: the state keeps far fewer notices. */
 export const MAX_HOST_SEEN = 200
+/** How many hosts the state keeps a seen list for; the plugins use three. Past it, the least recently written go. */
+export const MAX_HOSTS = 8
 /** A decision older than this is not given as unseen. */
 export const HOST_DECISION_MAX_AGE_MS = 14 * 24 * 60 * 60_000
 /** How long a claimed decision waits for its `ack` before it is handed out again. */
@@ -440,27 +455,27 @@ export async function hostDecisions(directory: string, opts: HostDecisionOptions
     const host = opts.host
     if (!host || !opts.unseen) {
       const state = (await read(scope)) ?? empty(scope)
-      return { ok: true, decisions: [...state.notices].reverse(), waiting: state.pending.length }
+      return { ok: true, decisions: newestFirst(state.notices), waiting: state.pending.length }
     }
     const lockMs = Math.min(HOST_LOCK_MS, left())
     if (lockMs <= 0) return { ok: false, status: "failed" }
     const now = Date.now()
     return await locked(
       scope,
-      async (state) => {
+      async (state): Promise<{ state: State; result: HostDecisions }> => {
+        // The lock can be granted after the caller stopped waiting: then nothing is marked, and the next ask answers.
+        if (left() <= 0) return { state, result: { ok: false, status: "failed" } }
         if (!(host in state.host_seen)) {
           // First ask from this client: what is kept was decided before it was here.
           const keys = state.notices.map(decisionKey).slice(-MAX_HOST_SEEN)
-          return { state: { ...state, host_seen: { ...state.host_seen, [host]: keys } }, result: { ok: true as const, decisions: [], waiting: state.pending.length } }
+          return { state: { ...state, host_seen: withHost(state.host_seen, host, keys) }, result: { ok: true as const, decisions: [], waiting: state.pending.length } }
         }
         const seen = new Set(state.host_seen[host])
         const claims = Object.fromEntries(Object.entries(state.host_claims[host] ?? {}).filter(([, until]) => until > now))
-        const decisions = [...state.notices]
-          .reverse()
-          .filter((n) => !seen.has(decisionKey(n)) && !(decisionKey(n) in claims) && !(now - Date.parse(n.at) > HOST_DECISION_MAX_AGE_MS))
+        const decisions = newestFirst(state.notices).filter((n) => !seen.has(decisionKey(n)) && !(decisionKey(n) in claims) && !(now - Date.parse(n.at) > HOST_DECISION_MAX_AGE_MS))
         const keys = decisions.map(decisionKey)
         const next: State = { ...state, host_claims: { ...state.host_claims, [host]: claims } }
-        if (opts.markSeen && keys.length) next.host_seen = { ...state.host_seen, [host]: [...state.host_seen[host], ...keys].slice(-MAX_HOST_SEEN) }
+        if (opts.markSeen && keys.length) next.host_seen = withHost(state.host_seen, host, [...state.host_seen[host], ...keys])
         else if (opts.claim && keys.length) next.host_claims = { ...next.host_claims, [host]: { ...claims, ...Object.fromEntries(keys.map((k) => [k, now + HOST_CLAIM_MS])) } }
         if (!Object.keys(next.host_claims[host]).length) {
           const { [host]: _, ...rest } = next.host_claims
@@ -476,10 +491,18 @@ export async function hostDecisions(directory: string, opts: HostDecisionOptions
   }
 }
 
+/** `seen` with `host`'s keys set (the last `MAX_HOST_SEEN`), written last; past `MAX_HOSTS` hosts the least recently
+ * written are let go (a host let go asks as a first ask again, which shows nothing). */
+function withHost(seen: State["host_seen"], host: string, keys: string[]): State["host_seen"] {
+  const { [host]: _, ...others } = seen
+  const kept = Object.entries(others).slice(-(MAX_HOSTS - 1))
+  return { ...Object.fromEntries(kept), [host]: keys.slice(-MAX_HOST_SEEN) }
+}
+
 /** `host` showed the decisions `keys` (from a `claim`): marked shown, never handed out again. No network. */
 export async function ackHostDecisions(directory: string, host: string, keys: readonly string[]): Promise<{ ok: boolean }> {
   try {
-    const scope = await storedScope(directory)
+    const scope = await storedScope(directory, { resolveAccount: true })
     if (!scope) return { ok: false }
     await locked(
       scope,
@@ -491,7 +514,7 @@ export async function ackHostDecisions(directory: string, host: string, keys: re
         return {
           state: {
             ...state,
-            host_seen: { ...state.host_seen, [host]: [...kept, ...added].slice(-MAX_HOST_SEEN) },
+            host_seen: withHost(state.host_seen, host, [...kept, ...added]),
             host_claims: Object.keys(left).length ? { ...others, [host]: left } : others,
           },
           result: undefined,

@@ -21,7 +21,7 @@ import { WorkspaceApi, type ActAs, type DatamateRef } from "@/altimate/workspace
 import * as Manage from "@/altimate/workspace/manage"
 import { accountDigest, credentialDigest, resolveBindingOutcome, type BindingOutcome, type CachedBinding } from "@/altimate/workspace/state"
 import { ReviewApi } from "@/altimate/workspace/review-api"
-import { printable } from "@/altimate/rules/printable"
+import { printable, printableDeep } from "@/altimate/rules/printable"
 
 export const EXIT = { OK: 0, FAILED: 1, USAGE: 2, NOT_LINKED: 3 } as const
 
@@ -383,13 +383,7 @@ export async function runReviewStatus(directory: string, json: boolean, deps: Re
         workspace_name: printable(binding.datamateName),
         ...listed,
         // Server text reaches terminals and agent context: made printable here, as the text form is.
-        items: listed.items.map((item) => ({
-          ...item,
-          name: printable(item.name),
-          ...(item.review_reason ? { review_reason: printable(item.review_reason) } : {}),
-          ...(item.reviewed_by_name ? { reviewed_by_name: printable(item.reviewed_by_name) } : {}),
-          ...(item.proposed_by_name ? { proposed_by_name: printable(item.proposed_by_name) } : {}),
-        })),
+        items: printableDeep(listed.items),
       },
       describeReviews(binding.datamateName, listed),
     )
@@ -507,40 +501,50 @@ const ReviewDecisionsCommand = cmd({
       .option("ack", { type: "string", array: true, describe: "Keys (from `key`) --host showed: remembered as given, nothing else is asked" })
       .option("host", { type: "string", describe: "The client asking, e.g. claude-ui" }),
   handler: async (args) => {
-    const { ReviewNotices } = await import("@/altimate/workspace/review-notices")
-    const directory = args.directory ?? process.cwd()
-    if (args.ack?.length) {
-      const acked = args.host ? await ReviewNotices.ackHostDecisions(directory, args.host, args.ack.map(String)) : { ok: false }
-      process.stdout.write(JSON.stringify(acked.ok ? { ok: true } : { ok: false, status: args.host ? "failed" : "host_required" }) + "\n")
-      process.exitCode = 0
-      return
-    }
-    const result = await ReviewNotices.hostDecisions(directory, {
-      ...(args.host ? { host: args.host } : {}),
-      unseen: args.unseen,
-      markSeen: args["mark-seen"],
-      claim: args.claim,
-    })
-    const body = result.ok
-      ? {
-          ok: true,
-          decisions: result.decisions.map((d) => ({
-            key: ReviewNotices.decisionKey(d),
-            kind: d.kind,
-            public_id: d.public_id,
-            name: printable(d.name),
-            status: d.status,
-            at: d.at,
-            ...(d.reason ? { reason: printable(d.reason) } : {}),
-            ...(d.reviewer ? { reviewer: printable(d.reviewer) } : {}),
-          })),
-          waiting: result.waiting,
-        }
-      : result
-    process.stdout.write(JSON.stringify(body) + "\n")
+    process.stdout.write(JSON.stringify(await reviewDecisions(args).catch(() => ({ ok: false, status: "failed" }))) + "\n")
     process.exitCode = 0
   },
 })
+
+/** `workspace review decisions` without the printing: the one JSON object it prints. Exported for its tests. */
+export async function reviewDecisions(args: {
+  directory?: string
+  host?: string
+  unseen: boolean
+  "mark-seen": boolean
+  claim: boolean
+  ack?: (string | number)[]
+}): Promise<object> {
+  const { ReviewNotices } = await import("@/altimate/workspace/review-notices")
+  const directory = args.directory ?? process.cwd()
+  // The per-client flags without the client would answer every kept decision, every time.
+  if (!args.host && (args.ack?.length || args.unseen || args["mark-seen"] || args.claim)) return { ok: false, status: "host_required" }
+  if (args.host && args.ack?.length) {
+    const acked = await ReviewNotices.ackHostDecisions(directory, args.host, args.ack.map(String))
+    return acked.ok ? { ok: true } : { ok: false, status: "failed" }
+  }
+  const result = await ReviewNotices.hostDecisions(directory, {
+    ...(args.host ? { host: args.host } : {}),
+    unseen: args.unseen,
+    markSeen: args["mark-seen"],
+    claim: args.claim,
+  })
+  if (!result.ok) return result
+  return {
+    ok: true,
+    decisions: result.decisions.map((d) => ({
+      key: ReviewNotices.decisionKey(d),
+      kind: d.kind,
+      public_id: d.public_id,
+      name: printable(d.name),
+      status: d.status,
+      at: d.at,
+      ...(d.reason ? { reason: printable(d.reason) } : {}),
+      ...(d.reviewer ? { reviewer: printable(d.reviewer) } : {}),
+    })),
+    waiting: result.waiting,
+  }
+}
 
 const ReviewCommand = cmd({
   command: "review",

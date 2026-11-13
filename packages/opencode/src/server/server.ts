@@ -1457,7 +1457,7 @@ export namespace Server {
             expected_version: version,
             ...(typeof reason === "string" && reason.trim() ? { reason } : {}),
           })
-          if (!result.ok) return c.json({ ok: false, ...(result.code ? { code: result.code } : {}), error: result.error }, result.status)
+          if (!result.ok) return c.json({ ok: false, code: result.code, error: result.error }, result.status)
           // Clients refresh their lists and the skill sync drops a removed skill on the next turn.
           const [{ RuleEvents }, { Bus }] = await Promise.all([import("../altimate/rules/events"), import("@/bus")])
           await Bus.publish(RuleEvents.Event.Changed, { directory: Instance.directory }).catch(() => {})

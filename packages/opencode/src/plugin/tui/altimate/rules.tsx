@@ -456,7 +456,9 @@ function installCards(api: TuiPluginApi) {
     api.kv.set(seenKey(), [...seen, key].slice(-200))
     if (!quiet) reviewToast(api, p)
   }
-  const replay = () =>
+  // `live`: a decision that arrived as an event before the first replay. It is news even when the replay is the scope's
+  // first, which records what was kept before it silently.
+  const replay = (live?: Shown) =>
     void summaryOf(api).then((summary) => {
       if (!summary) return
       scope = summary.notices_scope ?? "none"
@@ -467,11 +469,13 @@ function installCards(api: TuiPluginApi) {
         ...(summary.notices ?? []).map((n) => ({ ...n, kind: "rule" as const })),
         ...(summary.review_notices ?? []),
       ]
-      for (const decision of [...decisions].reverse()) notify(decision, first)
+      const liveKey = live && shownKey(live)
+      for (const decision of [...decisions].reverse()) if (shownKey(decision) !== liveKey) notify(decision, first)
+      if (live) notify(live)
     })
-  // Before the first replay this TUI does not know whose decisions they are: the replay shows this one too.
-  listen("rule.proposal.reviewed", (event) => (scope ? notify(event.properties) : replay()))
-  listen("altimate.rules.changed", replay)
+  // Before the first replay this TUI does not know whose decisions they are: the replay learns it, then shows this one.
+  listen("rule.proposal.reviewed", (event) => (scope ? notify(event.properties) : replay(event.properties)))
+  listen("altimate.rules.changed", () => replay())
   // This TUI shows proposal cards: it holds the server's renderer lease for its project while it runs, renewed at the
   // interval the server asks for. Without a live lease, the save tools save as before cards and the after-turn check
   // waits. No answer (the server may still be starting): tried again in a few seconds. A refusal (workspaces off, an
@@ -539,10 +543,11 @@ async function showMenu(api: TuiPluginApi) {
   const mine = rows.filter((r) => r.source === "mine")
   // altimate_change start — workspace review: the person's skill and knowledge requests, in the same view
   // Bounded: the list asks the server (the link, every page of requests); a slow server must not hold the menu.
+  let slow: ReturnType<typeof setTimeout> | undefined
   const listed = await Promise.race([
     get<RequestsResponse>(api, "/altimate/workspace/requests"),
-    new Promise<"slow">((resolve) => setTimeout(() => resolve("slow"), REQUESTS_WAIT_MS)),
-  ])
+    new Promise<"slow">((resolve) => (slow = setTimeout(() => resolve("slow"), REQUESTS_WAIT_MS))),
+  ]).finally(() => clearTimeout(slow))
   const requests = (listed === "slow" ? [] : (listed?.requests ?? [])).filter((r) => r.kind !== "rule")
   const requestsNote = requestsProblem(listed)
   // altimate_change end
@@ -593,6 +598,8 @@ async function showMenu(api: TuiPluginApi) {
         if (option.value.startsWith("request:")) {
           const request = requests.find((r) => `request:${r.public_id}` === option.value)
           if (request?.actions.length) return showRequestActions(api, request)
+          // Decided, replaced or withdrawn: nothing to do from here.
+          if (request) api.ui.toast({ variant: "info", message: `Nothing to do on this request: it is ${requestStatus(request)}.`, duration: 5000 })
           return
         }
         if (option.value === "requests-note") {
@@ -660,6 +667,9 @@ const REQUEST_STATUS: Record<string, string> = {
   retired: "removed from the workspace",
 }
 
+/** A request's status in words; one this version does not know is shown as the server says it. */
+const requestStatus = (r: Pick<WorkspaceRequest, "status">) => REQUEST_STATUS[r.status] ?? printable(r.status)
+
 /** Why the skill and knowledge part of `/rules` is missing or short, as a row: undefined when it is whole, or absent for
  * a reason the header already says (signed out, not linked) or that is no fault (a server without review). */
 export function requestsProblem(listed: RequestsResponse | "slow" | undefined): { title: string; description: string } | undefined {
@@ -675,7 +685,7 @@ export function requestsProblem(listed: RequestsResponse | "slow" | undefined): 
 }
 
 function requestLine(r: WorkspaceRequest): string {
-  const status = REQUEST_STATUS[r.status] ?? printable(r.status)
+  const status = requestStatus(r)
   const by = r.reviewer && r.status !== "pending" ? ` by ${printable(r.reviewer)}` : ""
   const update = r.change === "edit" ? " · update" : ""
   const expired = r.expired ? " · waiting over 14 days" : ""
@@ -699,8 +709,8 @@ function showRequestActions(api: TuiPluginApi, request: WorkspaceRequest) {
       title={`Your ${what}`}
       options={options}
       onSelect={async (option) => {
+        if (option.value !== "withdraw" && option.value !== "remove") return void showMenu(api)
         api.ui.dialog.clear()
-        if (option.value !== "withdraw" && option.value !== "remove") return
         const result = await post<{ ok: boolean; error?: string; code?: string; request?: WorkspaceRequest }>(
           api,
           `/altimate/workspace/requests/${encodeURIComponent(request.public_id)}/${option.value}`,

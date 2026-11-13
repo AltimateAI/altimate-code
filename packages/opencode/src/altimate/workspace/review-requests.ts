@@ -37,6 +37,7 @@ export interface Request {
 }
 
 export type ReviewListing =
+  /** `complete` is false when a page was not read or a row could not be read by this version (`skipped`). */
   | { status: "ok"; workspace: { id: number; name: string }; items: ReviewApi.Contribution[]; complete: boolean }
   | { status: "signed_out" | "not_linked" | "account_changed" | "unsupported" }
   | { status: "failed"; error: string }
@@ -45,9 +46,9 @@ export type ReviewListing =
 export async function listReview(directory: string): Promise<ReviewListing> {
   try {
     const ctx = await context(directory)
-    if (!ctx.ready) return { status: ctx.status }
+    if (!ctx.ready) return ctx.status === "unconfirmed" ? { status: "failed", error: UNCONFIRMED } : { status: ctx.status }
     const listed = await ReviewApi.listMine(ctx.datamateId, ctx.actAs)
-    return { status: "ok", workspace: { id: ctx.datamateId, name: ctx.name }, items: listed.items, complete: listed.complete }
+    return { status: "ok", workspace: { id: ctx.datamateId, name: ctx.name }, items: listed.items, complete: listed.complete && listed.skipped === 0 }
   } catch (error) {
     if (ReviewApi.unavailable(error)) return { status: "unsupported" }
     return { status: "failed", error: error instanceof Error ? error.message : String(error) }
@@ -76,7 +77,7 @@ export function fromContribution(item: ReviewApi.Contribution): Request {
 
 /** The person's team rule requests (local rules state, no network), only when that state was pulled for the account
  * signed in now and for the workspace the project is on: `workspaceId` when the skill listing resolved it, else the
- * folder's cached link. A link cache that cannot be read hides them. Text is made printable. */
+ * folder's cached link. A folder with no cached link, or one that cannot be read, hides them. Text is made printable. */
 export async function ruleRequests(root: string, directory: string, workspaceId?: number): Promise<Request[]> {
   const [{ RulesStore }, { RulesSummary }, { RulesService }] = await Promise.all([
     import("../rules/store"),
@@ -86,7 +87,7 @@ export async function ruleRequests(root: string, directory: string, workspaceId?
   const state = await RulesStore.read(root)
   if (!state.scope || !(await RulesStore.verified(state))) return []
   const expected =
-    workspaceId ?? (await RulesService.localBinding(root, directory, { strict: true }).then((b) => b?.datamateId ?? state.scope!.datamateId, () => undefined))
+    workspaceId ?? (await RulesService.localBinding(root, directory, { strict: true }).then((b) => b?.datamateId, () => undefined))
   if (expected !== state.scope.datamateId) return []
   return (await RulesSummary.rows(root, "mine")).map((row) => ({
     kind: "rule" as const,
@@ -101,7 +102,11 @@ export async function ruleRequests(root: string, directory: string, workspaceId?
 
 export type ActionResult =
   | { ok: true; request: Request }
-  | { ok: false; status: 400 | 401 | 403 | 404 | 409 | 422 | 502; code?: string; error: string }
+  | { ok: false; status: ActionStatus; code: string; error: string }
+
+const UNCONFIRMED = "Could not confirm the project's workspace link just now. Try again shortly."
+const PASSED: readonly number[] = [400, 401, 403, 404, 409, 422]
+type ActionStatus = 400 | 401 | 403 | 404 | 409 | 422 | 502 | 503
 
 /** Withdraw or remove one of the person's skill or knowledge requests on the project's workspace. Never throws. */
 export async function act(
@@ -114,6 +119,7 @@ export async function act(
     const ctx = await context(directory)
     if (!ctx.ready) {
       if (ctx.status === "signed_out") return { ok: false, status: 401, code: "signed_out", error: "Sign in to Altimate first." }
+      if (ctx.status === "unconfirmed") return { ok: false, status: 503, code: "link_unconfirmed", error: UNCONFIRMED }
       return { ok: false, status: 409, code: ctx.status, error: "This project is not linked to a workspace for the account signed in now." }
     }
     const item =
@@ -123,10 +129,13 @@ export async function act(
     return { ok: true, request: fromContribution(item) }
   } catch (error) {
     if (error instanceof RulesApiError) {
-      const status = (error.status && [400, 401, 403, 404, 409, 422].includes(error.status) ? error.status : 502) as 400 | 401 | 403 | 404 | 409 | 422 | 502
-      return { ok: false, status, ...(error.code ? { code: error.code } : {}), error: printable(error.message) }
+      // A stale `expected_version` (412) is a conflict the client resolves by refreshing. Every answer carries a code:
+      // a client tells a server refusal from the serve route's own 409s by it.
+      const status = (error.status === 412 ? 409 : error.status && PASSED.includes(error.status) ? error.status : 502) as ActionStatus
+      const code = error.code ?? (error.status === 412 ? "version_conflict" : status === 502 ? "upstream_failed" : "refused")
+      return { ok: false, status, code, error: printable(error.message) }
     }
-    return { ok: false, status: 502, error: printable(error instanceof Error ? error.message : String(error)) }
+    return { ok: false, status: 502, code: "upstream_failed", error: printable(error instanceof Error ? error.message : String(error)) }
   }
 }
 
@@ -134,7 +143,7 @@ export async function act(
 async function context(
   directory: string,
 ): Promise<
-  | { ready: false; status: "signed_out" | "not_linked" | "account_changed" }
+  | { ready: false; status: "signed_out" | "not_linked" | "account_changed" | "unconfirmed" }
   | { ready: true; actAs: import("./api-client").ActAs; datamateId: number; name: string }
 > {
   const [{ WorkspaceApi }, { resolveBindingOutcome, credentialDigest, accountDigest }] = await Promise.all([
@@ -143,9 +152,15 @@ async function context(
   ])
   const actAs = await WorkspaceApi.captureCredentials()
   if (!actAs) return { ready: false, status: "signed_out" }
+  // The link is resolved with the credential signed in at the time: it must be the captured one before and after, or
+  // one account's workspace could be paired with another account's credential.
+  const captured = credentialDigest(actAs.url, actAs.instance, actAs.apiKey)
+  if ((await accountDigest()) !== captured) return { ready: false, status: "account_changed" }
   const outcome = await resolveBindingOutcome(directory).catch(() => ({ status: "unknown" as const }))
+  // `unknown`: the link could not be confirmed (no answer, an unreadable pin), which is not the same as no link.
+  if (outcome.status === "unknown") return { ready: false, status: "unconfirmed" }
   if (outcome.status !== "bound") return { ready: false, status: "not_linked" }
-  if ((await accountDigest()) !== credentialDigest(actAs.url, actAs.instance, actAs.apiKey)) return { ready: false, status: "account_changed" }
+  if ((await accountDigest()) !== captured) return { ready: false, status: "account_changed" }
   return { ready: true, actAs, datamateId: outcome.binding.datamateId, name: printable(outcome.binding.datamateName) }
 }
 
