@@ -52,7 +52,8 @@ export async function listSharedDocs(projects: string[]): Promise<DocsShare[]> {
   const params = new URLSearchParams()
   for (const project of projects) params.append("projects", project)
   const shares = await AltimateApi.apiRequest("GET", `/dbt/dbt_docs_share/all?${params.toString()}`)
-  return Array.isArray(shares) ? shares : []
+  if (!Array.isArray(shares)) throw new Error("The shared docs service returned an unexpected answer for the shares.")
+  return shares
 }
 
 /** The people in the tenant, for naming who wrote each message. */
