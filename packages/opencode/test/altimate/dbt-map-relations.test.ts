@@ -84,23 +84,79 @@ describe("splitQualified", () => {
 })
 
 describe("scanTableReferences", () => {
+  const raws = (sql: string, dialect = "snowflake") => scanTableReferences(sql, dialect).refs.map((r) => r.raw)
+
   test("reads qualified names from FROM, JOIN and comma lists, written as in the SQL", () => {
-    const refs = scanTableReferences(
+    const { refs } = scanTableReferences(
       'select * from raw.jaffle.customers c, "RAW"."JAFFLE"."orders" as o left join other.payments p on 1=1',
-      false,
+      "snowflake",
     )
     expect(refs.map((r) => r.raw)).toEqual(["raw.jaffle.customers", '"RAW"."JAFFLE"."orders"', "other.payments"])
     expect(refs[1].parts).toEqual(["RAW", "JAFFLE", "orders"])
   })
   test("ignores table functions, subqueries, comments and strings", () => {
-    const refs = scanTableReferences(
-      "select 'from fake.t' as s from table(flatten(x)) f join (select 1) q on 1=1 /* from c.d */ -- from e.f\n join real.t t on 1=1",
-      false,
-    )
-    expect(refs.map((r) => r.raw)).toEqual(["real.t"])
+    expect(
+      raws(
+        "select 'from fake.t' as s from table(flatten(x)) f join (select 1) q on 1=1 /* from c.d */ -- from e.f\n join real.t t on 1=1",
+      ),
+    ).toEqual(["real.t"])
   })
   test("reads hyphenated BigQuery project ids", () => {
-    expect(scanTableReferences("select * from my-proj.ds.tbl", true)[0].parts).toEqual(["my-proj", "ds", "tbl"])
+    expect(scanTableReferences("select * from my-proj.ds.tbl", "bigquery").refs[0].parts).toEqual([
+      "my-proj",
+      "ds",
+      "tbl",
+    ])
+  })
+  test("whitespace or a comment around a dot does not drop the qualifier", () => {
+    expect(raws("select * from db . right . orders")).toEqual(["db . right . orders"])
+    expect(scanTableReferences("select * from other/*gap*/.marts.customers", "snowflake").refs[0].parts).toEqual([
+      "other",
+      "marts",
+      "customers",
+    ])
+  })
+  test("a table after a subquery or table function in a comma list is still read", () => {
+    expect(raws("select * from (select 1) x, db.right.orders")).toEqual(["db.right.orders"])
+    expect(raws("select * from table(generator(rowcount => 1)) x, db.right.orders")).toEqual(["db.right.orders"])
+    expect(raws("select * from (select * from db.wrong.orders) x, db.right.orders")).toEqual([
+      "db.wrong.orders",
+      "db.right.orders",
+    ])
+  })
+  test("brackets quote names for SQL Server dialects only; ClickHouse double quotes are identifiers", () => {
+    expect(raws("select * from [db].[s].[t]", "tsql")).toEqual(["[db].[s].[t]"])
+    expect(raws('select * from "db"."orders"', "clickhouse")).toEqual(['"db"."orders"'])
+  })
+  test("a hyphenated BigQuery project id is read after a comma and `insert into table` names its table", () => {
+    expect(raws("select * from a, my-proj.ds.t", "bigquery")).toEqual(["a", "my-proj.ds.t"])
+    expect(raws("insert into table db.t select 1", "databricks")).toEqual(["db.t"])
+  })
+  test("clause words inside quoted names, strings and dollar quotes are not clauses", () => {
+    expect(raws('select "from orders", "join orders" as "using orders" from db.right.orders')).toEqual([
+      "db.right.orders",
+    ])
+    expect(raws("select $$from orders $$ as s from db.right.orders")).toEqual(["db.right.orders"])
+    expect(raws("select $q1$from orders $q1$ as s from db.right.orders", "postgres")).toEqual(["db.right.orders"])
+    expect(raws('select "from orders", r"from orders " from db.right.orders', "bigquery")).toEqual(["db.right.orders"])
+    expect(raws('select "from orders" from db.right.orders', "databricks")).toEqual(["db.right.orders"])
+  })
+  test("EXTRACT, TRIM and IS DISTINCT FROM are not table clauses", () => {
+    expect(raws("select extract(year from d), trim(both 'x' from s) from t where a is distinct from orders")).toEqual([
+      "t",
+    ])
+  })
+  test("a backslash ends a string in dialects where it does not escape", () => {
+    expect(raws("select 'C:\\' as p from db.right.orders", "postgres")).toEqual(["db.right.orders"])
+    expect(raws("select 'it\\'s' as p from db.right.orders", "snowflake")).toEqual(["db.right.orders"])
+  })
+  test("CTE names are collected, and a table named like a CTE keeps its qualifiers", () => {
+    const { refs, ctes } = scanTableReferences(
+      "with orders as (select * from db.raw.orders), b(x) as materialized (select 1) select * from orders",
+      "snowflake",
+    )
+    expect([...ctes.keys()]).toEqual(["orders", "b"])
+    expect(refs.map((r) => r.raw)).toEqual(["db.raw.orders", "orders"])
   })
 })
 
@@ -266,6 +322,68 @@ describe("mapRelations", () => {
     expect(row.replaceWith).toBe("{{ ref('stg_orders') }}")
   })
 
+  test("a CTE named like a table is not mapped, and the physical table it reads keeps its mapping", () => {
+    const sql = "with customers as (select * from raw.jaffle.customers) select * from customers"
+    expect(map(sql, []).map((r) => [r.raw, r.match])).toEqual([["raw.jaffle.customers", "case_insensitive"]])
+    expect(map(sql, ["customers"]).map((r) => [r.raw, r.match])).toEqual([["raw.jaffle.customers", "case_insensitive"]])
+  })
+
+  test("a table named like its own CTE, read inside that CTE, is the real table; a recursive CTE's own name is not", () => {
+    expect(map("with orders as (select * from orders) select * from orders", []).map((r) => r.raw)).toEqual(["orders"])
+    expect(
+      map("with recursive customers as (select 1 union all select * from customers) select * from customers", []),
+    ).toEqual([])
+  })
+
+  test("differently written forms of one table stay separate rows; an identical repeat does not", () => {
+    const sql =
+      'select * from raw.jaffle.payments a join "RAW"."JAFFLE"."PAYMENTS" b on 1=1 join raw.jaffle.payments c on 1=1'
+    expect(map(sql, ["PAYMENTS"]).map((r) => r.raw)).toEqual(["raw.jaffle.payments", '"RAW"."JAFFLE"."PAYMENTS"'])
+  })
+
+  test("a versioned model is referenced by its version", () => {
+    const versioned = manifestRelations({
+      metadata: { project_name: "shop" },
+      nodes: {
+        "model.shop.orders.v1": {
+          resource_type: "model",
+          name: "orders",
+          package_name: "shop",
+          version: 1,
+          relation_name: '"A"."B"."ORDERS_V1"',
+          config: {},
+        },
+        "model.shop.orders.v2": {
+          resource_type: "model",
+          name: "orders",
+          package_name: "shop",
+          version: "2",
+          relation_name: '"A"."B"."ORDERS"',
+          config: {},
+        },
+        "model.pkg.dim.v3": {
+          resource_type: "model",
+          name: "dim",
+          package_name: "pkg",
+          version: 3,
+          relation_name: '"A"."B"."DIM"',
+          config: {},
+        },
+      },
+    })
+    const rows = mapRelations(
+      ["ORDERS_V1", "ORDERS", "DIM"],
+      'select * from "A"."B"."ORDERS_V1", "A"."B"."ORDERS", "A"."B"."DIM"',
+      versioned,
+      "snowflake",
+    )
+    expect(rows.map((r) => r.replaceWith)).toEqual([
+      "{{ ref('orders', v=1) }}",
+      "{{ ref('orders', v=\"2\") }}",
+      "{{ ref('pkg', 'dim', v=3) }}",
+    ])
+  })
+
   test("a name altimate-core did not report is not a table", () => {
     expect(map("with customers as (select 1) select * from customers", [])).toEqual([])
   })
@@ -331,6 +449,8 @@ describe("dbt_map_relations tool", () => {
     mkdirSync(join(dir, "target"))
     writeFileSync(join(dir, "target", "manifest.json"), JSON.stringify(MANIFEST))
     const cwd = process.cwd()
+    const home = process.env.HOME
+    process.env.HOME = dir
     process.chdir(dir)
     try {
       const result = await run({ sql: "select * from legacy.thing" })
@@ -338,6 +458,8 @@ describe("dbt_map_relations tool", () => {
       expect(result.metadata.manifest_path).toBe(join(dir, "target", "manifest.json"))
     } finally {
       process.chdir(cwd)
+      if (home === undefined) delete process.env.HOME
+      else process.env.HOME = home
     }
   })
 
@@ -345,6 +467,8 @@ describe("dbt_map_relations tool", () => {
     const dir = realpathSync(mkdtempSync(join(tmpdir(), "map-relations-bare-")))
     dirs.push(dir)
     const cwd = process.cwd()
+    const home = process.env.HOME
+    process.env.HOME = dir
     process.chdir(dir)
     try {
       const result = await run({ sql: "select * from t" })
@@ -352,7 +476,21 @@ describe("dbt_map_relations tool", () => {
       expect(result.output).toBe("No dbt project found here. Run from a dbt project or pass manifest_path.")
     } finally {
       process.chdir(cwd)
+      if (home === undefined) delete process.env.HOME
+      else process.env.HOME = home
     }
+  })
+
+  test("with the real parser, a table a CTE shares its name with and a dot spaced out are both mapped", async () => {
+    const result = await run({
+      sql: "with customers as (select * from raw.jaffle.customers) select * from customers c join analytics . staging . stg_orders o on 1=1",
+      manifest_path: manifestPath(),
+    })
+    const rows = result.metadata.mappings as { raw: string; match: string }[]
+    expect(rows.map((r) => [r.raw, r.match])).toEqual([
+      ["raw.jaffle.customers", "case_insensitive"],
+      ["analytics . staging . stg_orders", "case_insensitive"],
+    ])
   })
 
   test("SQL that does not parse is an error", async () => {
