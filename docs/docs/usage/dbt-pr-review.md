@@ -271,15 +271,31 @@ exclude:
 riskTierPathTokens:           # OFF by default — see "Risk-tier path tokens" below
   finops: [preset:finops]     # promote any FinOps-named path to `full` tier
   pii: [ssn, email, phone]    # or supply your own case-insensitive tokens
+allowForceTier: true          # set false in gate CI: --force-tier is then rejected
 rubric:
   blockOn: [lineage_breakage, contract_violation, pii_exposure, semantic_change]
   warningPatternThreshold: 3
+  blockingRules: []           # catalog rule ids allowed to block (default: engine only)
   thresholds:
     warehouseCostMinRows: 1000000
   exclusions:
     allowSelectStarInStaging: true
     skipNonProdModels: true
 ```
+
+### Which policy applies, and what can block
+
+- **The base branch's `.altimate/review.yml` applies.** The file is read from the
+  commit the PR branched from, so a PR cannot relax the rules it is reviewed
+  under (switch to `comment` mode, drop a `blockOn` category, exclude its own
+  paths). If the PR edits the file, the comment lists the changed settings; they
+  take effect after merge. The applied policy's hash is signed into the envelope
+  (`policy`).
+- **Only the deterministic engine blocks.** Findings carry an `origin`:
+  `engine` (AST, lineage, manifest, equivalence, data-diff), `catalog` (pattern
+  rules) or `ai`. Only `engine` findings count toward REQUEST_CHANGES. A pattern
+  rule you trust can be allowed to block by naming its id in
+  `rubric.blockingRules`. The advisory AI lane never blocks.
 
 ### What the PR comment shows
 

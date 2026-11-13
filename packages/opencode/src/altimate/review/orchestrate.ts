@@ -208,6 +208,8 @@ export interface OrchestrateInput {
   scope?: Omit<ReviewScope, "unverified">
   /** Drop the regex catalog's cross-engine portability findings (single known engine). */
   suppressPortability?: boolean
+  /** Which review policy was applied (see config.ts loadReviewPolicy). */
+  policy?: VerdictEnvelope["policy"]
 }
 
 /** A catalog finding tagged as cross-engine portability advice. */
@@ -1536,6 +1538,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
   const degraded = runDegraded
   const envelope = buildEnvelope({
     ai: aiStatus,
+    policy: input.policy,
     findings,
     tier,
     mode: input.mode,

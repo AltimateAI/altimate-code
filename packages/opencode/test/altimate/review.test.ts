@@ -134,6 +134,7 @@ describe("rubric", () => {
 // verdict.ts
 // ---------------------------------------------------------------------------
 describe("verdict", () => {
+  // Engine findings: only the deterministic engine decides the verdict.
   const mk = (severity: Finding["severity"], category: any = "sql_quality") =>
     makeFinding({
       severity,
@@ -141,6 +142,7 @@ describe("verdict", () => {
       title: "t",
       body: "b",
       file: `m_${Math.random()}.sql`,
+      evidence: { tool: "altimate_core.check", result: {} },
       ruleKey: String(Math.random()),
     })
 
@@ -2268,7 +2270,8 @@ describe("orchestrate", () => {
     expect(
       pii.some((f) => f.evidence?.tool === "dbt-patterns" && (f.evidence?.result as any)?.rule === "pii_into_mart"),
     ).toBe(true)
-    expect(env.verdict).toBe("REQUEST_CHANGES")
+    // A pattern rule is reported but only blocks when the rubric opts it in.
+    expect(env.verdict).toBe("COMMENT")
   })
 
   test("zero-target lineage does not mark the file PII-complete, so the regex twin survives", async () => {
@@ -2303,7 +2306,8 @@ describe("orchestrate", () => {
     expect(
       pii.some((f) => f.evidence?.tool === "dbt-patterns" && (f.evidence?.result as any)?.rule === "pii_into_mart"),
     ).toBe(true)
-    expect(env.verdict).toBe("REQUEST_CHANGES")
+    // A pattern rule is reported but only blocks when the rubric opts it in.
+    expect(env.verdict).toBe("COMMENT")
   })
 
   test("core considered the matched column (muted as low-confidence) → the regex twin is suppressed", async () => {

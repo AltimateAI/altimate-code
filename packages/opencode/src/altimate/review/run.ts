@@ -1,7 +1,7 @@
 import path from "node:path"
 import { readFile, realpath, stat, access } from "node:fs/promises"
 import { Installation } from "../../installation"
-import { loadReviewConfig, resolveRubric } from "./config"
+import { loadReviewPolicy, resolveRubric } from "./config"
 import type { Severity } from "./finding"
 import {
   collectChangedFiles,
@@ -10,6 +10,7 @@ import {
   type ResolvedBase,
   gitRepoRoot,
   manifestHash,
+  showAtRef,
 } from "./git"
 import { makeCompiledResolver, dbtProjectName, dbtProjectLayout } from "./compiled"
 import { scopeToProject } from "./diff-filter"
@@ -217,18 +218,49 @@ async function detectStaleManifest(manifestAbs: string, changed: ChangedFile[], 
 }
 
 export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise<VerdictEnvelope> {
-  const config = await loadReviewConfig(opts.cwd)
-  if (opts.manifestPath) config.manifestPath = opts.manifestPath
-  if (opts.mode) config.mode = opts.mode
-  if (opts.severityThreshold) config.severityThreshold = opts.severityThreshold
-  const rubric = resolveRubric(config)
-
   // Resolve the repo top-level once; used to root working-tree FS reads, the
   // stale-manifest existence check, and the compiled-SQL resolver's path
   // mapping. Falls back to opts.cwd when we couldn't resolve it (non-git or
   // bare-repo contexts) — safe for the repo-root-invoked case but not helpful
   // in the subdir-invocation case that this addresses.
   const gitRoot = (await gitRepoRoot(opts.cwd)) ?? opts.cwd
+
+  // Only resolve a base ref if we actually need git (to collect changed files
+  // or to read old/new content). A caller that supplies BOTH `changedFiles` and
+  // `getContent` (e.g. a non-git CI integration) must not be forced through a
+  // git lookup that can fail when there's no usable history.
+  //
+  // The base is always the MERGE-BASE of the PR's target branch and the head:
+  // the diff, and every "old" file version, come from the commit the PR
+  // branched from, so commits the target gained since never leak in as changes.
+  const needGit = !opts.changedFiles || !opts.getContent
+  const resolved: ResolvedBase | undefined = needGit
+    ? await resolveReviewBase({ cwd: opts.cwd, base: opts.base, head: opts.head })
+    : undefined
+
+  // The policy (.altimate/review.yml) comes from the BASE commit, so the PR
+  // under review cannot relax its own rules; what it would change is listed.
+  const cwdRel = await repoRelative(gitRoot, opts.cwd, true)
+  const policy = await loadReviewPolicy({
+    cwd: opts.cwd,
+    readBase:
+      resolved && cwdRel !== undefined
+        ? (rel) => showAtRef(opts.cwd, resolved.sha, path.posix.join(cwdRel, rel))
+        : undefined,
+  })
+  const config = policy.config
+  if (policy.changedInPr.length) {
+    process.stderr.write(
+      `ℹ️  this PR changes .altimate/review (${policy.changedInPr.join(", ")}); the base branch's policy was applied.\n`,
+    )
+  }
+  if (opts.forceTier && config.allowForceTier === false) {
+    throw new Error("--force-tier is disabled by `allowForceTier: false` in the base branch's .altimate/review.yml")
+  }
+  if (opts.manifestPath) config.manifestPath = opts.manifestPath
+  if (opts.mode) config.mode = opts.mode
+  if (opts.severityThreshold) config.severityThreshold = opts.severityThreshold
+  const rubric = resolveRubric(config)
 
   // Resolve the manifest against the PROJECT being reviewed (cwd), not the
   // binary's process.cwd() — otherwise a relative path silently misses when the
@@ -271,18 +303,6 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
   const projectRootRel = await repoRelative(gitRoot, dbtRoot, project !== undefined || dbtRoot !== opts.cwd)
   const layout = projectRootRel !== undefined ? await dbtProjectLayout(dbtRoot, projectRootRel) : undefined
 
-  // Only resolve a base ref if we actually need git (to collect changed files
-  // or to read old/new content). A caller that supplies BOTH `changedFiles` and
-  // `getContent` (e.g. a non-git CI integration) must not be forced through a
-  // git lookup that can fail when there's no usable history.
-  //
-  // The base is always the MERGE-BASE of the PR's target branch and the head:
-  // the diff, and every "old" file version, come from the commit the PR
-  // branched from, so commits the target gained since never leak in as changes.
-  const needGit = !opts.changedFiles || !opts.getContent
-  const resolved: ResolvedBase | undefined = needGit
-    ? await resolveReviewBase({ cwd: opts.cwd, base: opts.base, head: opts.head })
-    : undefined
   if (resolved && resolved.source !== "flag") {
     process.stderr.write(`ℹ️  review base: ${resolved.ref} (${resolved.source}), merge-base ${resolved.sha.slice(0, 12)}\n`)
   }
@@ -392,6 +412,7 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     staleManifest,
     layout,
     suppressPortability: config.portability === undefined ? dialectKnown : !config.portability,
+    policy: { source: policy.source, hash: policy.hash, changedInPr: policy.changedInPr.length ? policy.changedInPr : undefined },
     scope: {
       baseRef: resolved?.ref ?? opts.base,
       baseSha: resolved?.sha,
