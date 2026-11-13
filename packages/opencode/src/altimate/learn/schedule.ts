@@ -5,7 +5,7 @@ import { registerDisposer } from "@/effect/instance-registry"
 import type { InstanceContext } from "@/project/instance-context"
 import { autoReflectEnabled, flushCapture } from "./capture"
 import { autoReflectSession, type AutoReflectOutcome } from "./auto"
-import { listSignals, pendingSessions, type Signal } from "./signals"
+import { isHostSession, listSignals, pendingSessions, type Signal } from "./signals"
 import { readScheduleState, resolveRecoveryLimits, type RecoveryLimits, type ScheduleState } from "./schedule-state"
 
 const log = Log.create({ service: "learn.schedule" })
@@ -129,7 +129,9 @@ export class Scheduler {
       if (signals.length >= SIGNAL_THRESHOLD) await this.attempt(sessionID, { shouldContinue: ready })
     })
     if (recovery) {
-      for (const id of pendingSessions(this.recovery.signals)) this.recovery.deferred.add(id)
+      // A host agent's session (Claude Code, Codex) is not one this process can open: its signals are checked by the
+      // plugin's hooks, and reflected by `learn reflect --pending`, never by startup recovery.
+      for (const id of pendingSessions(this.recovery.signals)) if (!isHostSession(id)) this.recovery.deferred.add(id)
       this.enqueueRecovery(() => this.recover(idleAt))
     }
   }

@@ -17,7 +17,7 @@ import {
 import { SIGN_IN_COMMAND, linkHeadless, matchWorkspace, type LinkHeadlessDeps } from "../../src/cli/cmd/link"
 import { AltimateAuthPlugin } from "../../src/altimate/plugin/altimate"
 import { AltimateApi } from "../../src/altimate/api/client"
-import { WorkspaceApi } from "../../src/altimate/workspace/api-client"
+import { WorkspaceApi, addsRemoteToLink } from "../../src/altimate/workspace/api-client"
 import yargs from "yargs"
 
 const binding = {
@@ -378,6 +378,33 @@ describe("link --workspace / --create without prompting", () => {
     // Confirmed on this machine (a fresh clone only knows the link as discovered), with no server rebind.
     expect(f.calls).toEqual(["approve:35"])
     expect(f.out.join("\n")).toContain("link confirmed on this machine")
+  })
+
+  test("linked by path, and the project has a remote now: binding the same workspace again adds the remote", async () => {
+    const pathOnly = { datamate: growth, binding: { repo_remote: null, project_path: dir }, matchedBy: "path" } as any
+    const seen: unknown[] = []
+    const f = linkDeps({
+      getBindingForProject: async () => pathOnly,
+      bindOrRebind: async (i, id, e) => void (seen.push(i.repoRemote, e), f.calls.push(`bind:${id}`)),
+    })
+    await linkHeadless({ directory: dir, workspace: "35", yes: false }, f.deps)
+    expect(process.exitCode ?? 0).toBe(0)
+    // A plain bind (no "current" link) to the same workspace: the service stores the remote on the existing link.
+    expect(f.calls).toEqual(["bind:35"])
+    expect(seen[0]).toBeTruthy()
+    expect(seen[1]).toBeNull()
+    expect(f.out.join("\n")).toContain("Adding its git remote")
+  })
+
+  test("the remote is added only to a path-matched link that has none, in a project that has one", () => {
+    const id = { repoRemote: "https://github.com/acme/demo", projectPath: "/p" }
+    const lookup = (matchedBy: "path" | "remote", repo_remote: string | null) =>
+      ({ datamate: growth, binding: { repo_remote, project_path: "/p" }, matchedBy }) as any
+    expect(addsRemoteToLink(id, lookup("path", null))).toBe(true)
+    expect(addsRemoteToLink(id, lookup("remote", "https://github.com/acme/demo"))).toBe(false)
+    // The link already has a (different) remote: changing it is a re-link, not an addition.
+    expect(addsRemoteToLink(id, lookup("path", "https://github.com/acme/old"))).toBe(false)
+    expect(addsRemoteToLink({ projectPath: "/p" } as any, lookup("path", null))).toBe(false)
   })
 
   test("re-linking to a different workspace needs --yes", async () => {

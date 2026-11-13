@@ -18,6 +18,9 @@ import { workspacesOn } from "./config"
 // altimate_change end
 
 const log = Log.create({ service: "learn.delivery" })
+// altimate_change start — workspace rules: the first message of a host session's delivery state (it has no message ids)
+const HOST_START = "host session start"
+// altimate_change end
 const LOCK_OPTIONS = { timeoutMs: 5000 }
 const singleLine = (text: string) => normalizeText(text.replace(/[\s\u0085]+/g, " ")).trim()
 
@@ -217,15 +220,26 @@ export class Delivery {
     // Older versions froze unchecked content. Rebuild unsafe snapshots on the next prepare;
     // valid snapshots retain their byte-identical prefix across resume and approved edits.
     const grandfathered = new Map<string, Pick<Lesson, "id" | "text">[]>()
-    // Read once per check, an unreadable mirror (null) included.
-    let mirrored: Promise<Set<string> | null> | undefined
+    // Read once per check.
+    let vouched: Promise<Map<string, Lesson>> | undefined
     for (const { name, lesson } of state.shown) {
       // altimate_change start — workspace rules: a session's cached section and notes keep a team rule only while sync
-      // still vouches for it: workspaces on, and the rule still in the mirror (an edit keeps its id, so its frozen
-      // wording stays). Otherwise (workspaces off, signed out, unlinked, another workspace, retired) it is rebuilt.
-      if (name === Store.WORKSPACE_RULES_STORE && (!workspacesOn() || (await (mirrored ??= this.mirroredIds()))?.has(lesson.id) === false)) {
+      // still vouches for it: workspaces on, and the rule still in the person's rules state (an edit keeps its id, so its
+      // frozen wording stays). Otherwise (workspaces off, signed out, unlinked, another workspace, retired) it is rebuilt.
+      if (name === Store.WORKSPACE_RULES_STORE && (!workspacesOn() || !(await (vouched ??= this.vouched())).has(lesson.id))) {
         log.info("learn session snapshot rebuilt without team rules", { session })
         return undefined
+      }
+      // A rule shown as the person's pending proposal stays only while it is still that proposal, with that wording and
+      // those paths: approved, rejected or proposed again, the session is given what the state holds now.
+      if (name === Store.WORKSPACE_RULES_STORE) {
+        const now = (await vouched!).get(lesson.id)!
+        const changed =
+          now.text !== lesson.text || JSON.stringify(now.trigger ?? null) !== JSON.stringify(lesson.trigger ?? null)
+        if (now.review !== lesson.review || (lesson.review === "pending" && changed)) {
+          log.info("learn session snapshot rebuilt: a pending team rule changed", { session })
+          return undefined
+        }
       }
       // altimate_change end
       if (lesson.text.length > MAX_TEXT && !grandfathered.has(name))
@@ -239,16 +253,16 @@ export class Delivery {
     return state
   }
 
-  // altimate_change start — workspace rules: the ids the team-rules mirror holds now; a missing mirror holds none, and
-  // one that cannot be read is unknown (null): the snapshot is kept rather than rebuilt on a passing read error
-  private async mirroredIds(): Promise<Set<string> | null> {
-    const raw = await read(this.root, Store.paths(this.root, Store.WORKSPACE_RULES_STORE).approved).catch(() => null)
-    if (raw === null) return null
-    if (raw === undefined) return new Set()
+  // altimate_change start — workspace rules: the team rules the person's own rules state holds now, by lesson id,
+  // outside the project. They are delivered from that state, never from the `workspace-rules` copy in the project: a file
+  // in the working tree can come from anyone (a branch, a merge). Unreadable, it vouches for none.
+  private async vouched(): Promise<Map<string, Lesson>> {
     try {
-      return new Set(parse(raw).map((lesson) => lesson.id))
-    } catch {
-      return null
+      const { RulesStore } = await import("../rules/store")
+      return await RulesStore.vouched(this.root)
+    } catch (error) {
+      log.warn("workspace rules state unreadable; team rules not delivered", { error })
+      return new Map<string, Lesson>()
     }
   }
   // altimate_change end
@@ -273,7 +287,10 @@ export class Delivery {
         if (raw === undefined) continue
         await SafeFS.assertSafePath(this.root, Store.paths(this.root, name).usage)
         await SafeFS.assertSafePath(this.root, path.join(Store.paths(this.root, name).learnDir, "shown.jsonl"))
-        const lessons = await Store.mergeUsage(this.root, name, parse(raw))
+        // altimate_change start — workspace rules: the team rules come from the person's rules state, not the project's copy
+        const parsed = name === Store.WORKSPACE_RULES_STORE ? [...(await this.vouched()).values()] : parse(raw)
+        // altimate_change end
+        const lessons = await Store.mergeUsage(this.root, name, parsed)
         const grandfathered = lessons.some((lesson) => lesson.text.length > MAX_TEXT)
           ? await Store.grandfathered(this.root, name, { migrate: false }) : []
         for (const lesson of lessons) {
@@ -407,6 +424,60 @@ export class Delivery {
       return { ...EMPTY }
     })
   }
+
+  // altimate_change start — workspace rules: a host session (Claude Code, Codex through the plugin) is given one store's
+  // rules at its start
+  /**
+   * Record that host session `session` was given the approved rules of store `name` at its start, pinned first and within
+   * the start budget, as a delivered start: recurrence ("corrected again"), usage and the shown-rule edit path then count
+   * it like an altimate-code session. Returns the rules given, as they are approved now: a session started again (resumed,
+   * cleared, compacted) gets the current rules, not the ones it was given before (a retired or edited rule is not
+   * repeated). A rule sync no longer vouches for leaves its record too, as in any session (`Delivery` rebuilds the
+   * snapshot); one still current stays recorded, for attribution. Only rules recorded as shown are given: past
+   * `session_max_lessons`, as in any session, the rest are not.
+   */
+  async recordStart(session: string, name: string): Promise<Lesson[]> {
+    if (!await this.exists()) return []
+    // Nothing to give: the learn lock is not taken.
+    if (!(await this.approved()).some((entry) => entry.name === name)) return []
+    return Store.transaction(this.root, async () => {
+      const existing = await this.state(session)
+      const approved = (await this.approved()).filter((entry) => entry.name === name)
+        .sort((a, b) => Number(!!b.lesson.pinned) - Number(!!a.lesson.pinned))
+      if (!approved.length) return []
+      const rendered = renderSection(corpus(approved), this.limits.budget_tokens)
+      const state: State = existing ?? {
+        version: 1, session, firstMessage: HOST_START, query: "", touchedPaths: [], section: rendered.section,
+        shown: [], requests: [], requestParts: [], compactions: [], counted: [],
+      }
+      const before = state.shown.length
+      // A rule edited since the session was shown it, and given again now: the shown entry takes the current wording, so
+      // usage and "corrected again" count the version the session now has. One the budget left out keeps its record.
+      const given = new Set(rendered.lessons.map((lesson) => lesson.id))
+      let edited = false
+      for (const entry of state.shown) {
+        if (entry.name !== name || !given.has(identity(name, entry.lesson.id))) continue
+        const now = approved.find((candidate) => candidate.lesson.id === entry.lesson.id)?.lesson
+        if (now && now.text !== entry.lesson.text) {
+          entry.lesson = now
+          entry.at = new Date().toISOString()
+          edited = true
+        }
+      }
+      this.add(state, approved, rendered.lessons, "core", "")
+      if (!existing || edited || state.shown.length > before) {
+        await this.save(state)
+        this.delivered(state, before, "start")
+        await this.log(state)
+      }
+      // The rules within the budget that the session has on record: the snapshot matches what it was given.
+      const recorded = new Set(state.shown.filter((entry) => entry.name === name).map((entry) => entry.lesson.id))
+      return rendered.lessons
+        .map((lesson) => approved.find((entry) => identity(entry.name, entry.lesson.id) === lesson.id)!.lesson)
+        .filter((lesson) => recorded.has(lesson.id))
+    }, LOCK_OPTIONS)
+  }
+  // altimate_change end
 
   /** Provenance lives in server-side state, never in client-editable message metadata. */
   async requestParts(session: string, message: string) {

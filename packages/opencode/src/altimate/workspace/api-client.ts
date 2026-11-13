@@ -73,6 +73,18 @@ export interface ProjectBindingLookup extends GetBindingResponse {
   matchedBy: MatchedIdentifier
 }
 
+/**
+ * True when the link was found by path, has no remote, and the project has one now (a remote added after linking).
+ * Binding the same workspace again (`POST /bind`) stores the remote on the existing link; workspace rules are scoped
+ * by remote and stay off until it has one. A link with a different remote is not changed here: that is a re-link.
+ */
+export function addsRemoteToLink(identifier: ProjectIdentifier, existing: ProjectBindingLookup): boolean {
+  return existing.matchedBy === "path" && !!identifier.repoRemote && !existing.binding.repo_remote
+}
+
+/** What a link prints or shows when it adds the project's remote to a path link. */
+export const ADDING_REMOTE_MESSAGE = "This project is linked by its path. Adding its git remote to the link, so workspace rules can sync."
+
 export interface ConflictDetail {
   message: string
   existing_datamate_id?: number
@@ -205,7 +217,11 @@ const ROUTES: Record<string, Array<[RegExp, string]>> = {
     [/^\/by-remote$/, "/by-remote"],
     [/^\/by-path$/, "/by-path"],
   ],
-  "/datamates": [[/^\/?$/, "/"]],
+  "/datamates": [
+    [/^\/?$/, "/"],
+    [/^\/[^/]+\/reviews$/, "/:id/reviews"],
+    [/^\/[^/]+\/reviews\/summary$/, "/:id/reviews/summary"],
+  ],
   "/skills": [
     [/^\/[^/]+$/, "/:id"],
     [/^\/[^/]+\/datamates$/, "/:id/datamates"],

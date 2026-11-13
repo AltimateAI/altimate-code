@@ -11,6 +11,8 @@
 // - The learn config is read on each refresh and each check, so `learn disable` takes effect without a restart.
 // - After each turn (session idle), check the session's new corrections (`RuleTrigger.afterTurn`).
 // - Review notices from a pull are published as `rule.proposal.reviewed` by the sync run itself (`RulesSync`).
+// - On the same timer, decisions on the person's own skill and knowledge submissions (`ReviewNotices`), published the
+//   same way with their `kind`.
 import fs from "node:fs/promises"
 import { Effect } from "effect"
 import { Bus } from "@/bus"
@@ -54,11 +56,33 @@ async function learnConfig(ctx: InstanceContext): Promise<LearnConfig> {
   return effectiveLearn(Config.peek(ctx)?.learn as LearnConfig, ctx.worktree !== "/" ? ctx.worktree : ctx.directory, ctx.directory)
 }
 
-/** Whether a pull can find anything: pulled state, or a local workspace binding. No network. */
-async function linked(root: string, directory: string): Promise<boolean> {
+/** Whether a pull can find anything: pulled state, or a local workspace binding for `directory` or a directory above it
+ * up to `root` (a session started in a subdirectory of the linked folder). No network. */
+export async function linked(root: string, directory: string): Promise<boolean> {
   if ((await RulesStore.read(root).catch(() => undefined))?.scope) return true
-  const { readLocalBinding } = await import("../workspace/state")
-  return !!(await readLocalBinding(directory).catch(() => null))
+  return !!(await localBinding(root, directory))
+}
+
+/** The cached workspace link of `directory` or the nearest folder above it, up to `root`: no network. With `strict`, a
+ * link cache that is present but cannot be read throws instead of reading as no link. */
+export async function localBinding(root: string, directory: string, options: { strict?: boolean } = {}) {
+  const { readLocalBinding, readLocalBindingScopedStrict } = await import("../workspace/state")
+  const read = options.strict
+    ? async (dir: string) => (await readLocalBindingScopedStrict(dir)).binding
+    : (dir: string) => readLocalBinding(dir).catch(() => null)
+  const path = await import("node:path")
+  const top = path.resolve(root)
+  // Inside `root` by path segments: `/work/repo-sibling` is not inside `/work/repo`.
+  const inside = (dir: string) => {
+    const relative = path.relative(top, dir)
+    // `..generated` is a child: only a `..` segment leaves `top`.
+    return relative === "" || (relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative))
+  }
+  for (let dir = path.resolve(directory); ; dir = path.dirname(dir)) {
+    const binding = await read(dir)
+    if (binding) return binding
+    if (dir === top || path.dirname(dir) === dir || !inside(path.dirname(dir))) return null
+  }
 }
 
 function triggerDeps(ctx: InstanceContext, model?: string): RuleTrigger.TriggerDeps {
@@ -152,8 +176,33 @@ export async function start(ctx: InstanceContext): Promise<void> {
       RuleProposal.list(ctx.directory)
       await RulesRemember.recoverRequests(root, ctx.directory)
     })
+    // Decisions on the person's own skill and knowledge submissions, on the same timer. Not tied to learning: only
+    // workspaces must be on (checked by the poll). A decision is kept in the person's review state and announced to
+    // clients listening now; one not listening shows it from the summary (`review_notices`) when it replays, which the
+    // change event below asks for after the first poll and after every poll that recorded something.
+    let reviewsPolled = false
+    const reviewNotices = Instance.bind(async () => {
+      if (disposed) return
+      const { ReviewNotices } = await import("../workspace/review-notices")
+      const result = await ReviewNotices.poll(ctx.directory, {
+        announce: async (notice) => {
+          await Bus.publish(RuleEvents.Event.Reviewed, {
+            public_id: notice.public_id,
+            text: notice.name,
+            status: notice.status,
+            kind: notice.kind,
+            ...(notice.reason ? { reason: notice.reason } : {}),
+            ...(notice.reviewer ? { reviewer: notice.reviewer } : {}),
+          })
+        },
+      })
+      if (result.status !== "done" || disposed) return
+      if (!reviewsPolled || result.recorded.length) await Bus.publish(RuleEvents.Event.Changed, { directory: ctx.directory }).catch(() => {})
+      reviewsPolled = true
+    })
     const refresh = Instance.bind(async () => {
       if (disposed) return
+      await reviewNotices().catch((error) => log.warn("workspace review notices failed", { error: error instanceof Error ? error.message : String(error) }))
       await recover().catch((error) => log.warn("rules remember recovery failed", { error: error instanceof Error ? error.message : String(error) }))
       const learn = await learnConfig(ctx)
       if (!RulesSync.rulesEnabled(learn) || !(await linked(root, ctx.directory))) return void (await followLearning(learn))
