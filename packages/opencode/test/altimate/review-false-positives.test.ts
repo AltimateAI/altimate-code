@@ -248,3 +248,16 @@ describe("incremental unique_key vs the declared uniqueness test", () => {
     expect(await review(["a", "b"], [])).toHaveLength(0)
   })
 })
+
+describe("OR in a join condition", () => {
+  const sql = (on: string) => `select * from a\njoin b\n  on ${on}`
+  test("alternative keys or overlapping ranges: reported", () => {
+    expect(fires("join-or-condition", sql("(a.courserun_fk = b.courserun_fk\n    or a.program_fk = b.program_fk)\n  and a.platform_fk = b.platform_fk"))).toBe(true)
+    expect(fires("join-or-condition", sql("a.id = b.id\n  and (\n    a.start_date between b.entrydate and b.exitdate\n    or a.end_date between b.entrydate and b.exitdate\n  )"))).toBe(true)
+  })
+  test("an open-ended interval or null-safe key guard: silent", () => {
+    expect(fires("join-or-condition", sql("d.ts >= lp.day and (lp.next_update_day is null or d.ts < lp.next_update_day)"))).toBe(false)
+    expect(fires("join-or-condition", sql("dt.day >= date(t.valid_from)\n  and (dt.day < date(t.valid_to)\n    or t.valid_to is null)"))).toBe(false)
+    expect(fires("join-or-condition", sql("a.k = b.k or (a.k is null and b.k is null)"))).toBe(false)
+  })
+})

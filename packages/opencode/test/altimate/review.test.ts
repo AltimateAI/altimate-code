@@ -1877,7 +1877,7 @@ describe("orchestrate", () => {
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
-  test("modified high-fanout model → warning (not critical), does not block", async () => {
+  test("modified high-fanout model → no lineage finding (blast radius goes to the tier), does not block", async () => {
     const files: ChangedFile[] = [{ path: "models/staging/stg_orders.sql", status: "modified", diff: "+select 1\n" }]
     const runner: ReviewRunner = {
       ...fakeRunner({}),
@@ -1894,8 +1894,8 @@ describe("orchestrate", () => {
       getContent: content("select 1", "select 1"), // identical → no semantic finding, isolates lineage
       generatedAt: "2026-05-29T00:00:00Z",
     })
-    const lin = env.findings.find((f) => f.category === "lineage_breakage")
-    expect(lin?.severity).toBe("warning")
+    expect(env.findings.find((f) => f.category === "lineage_breakage")).toBeUndefined()
+    expect(env.tierReasons?.some((r) => /42 downstream models/.test(r))).toBe(true)
     expect(env.verdict).not.toBe("REQUEST_CHANGES")
   })
 
