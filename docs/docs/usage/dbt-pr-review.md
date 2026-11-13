@@ -209,12 +209,30 @@ jobs:
 | `target-base/compiled/…` | Compile the base ref into `target-base/` (below) | Equivalence proofs and column-breakage for modified models. |
 | `target/catalog.json` | `dbt docs generate` | Complete warehouse columns for column-lineage breakage. |
 
-Compiling the base (optional, for equivalence and column-breakage):
+The action can build these for you with `dbt_prepare` (off by default):
+
+```yaml
+      - uses: AltimateAI/altimate-code/github/review@main
+        with:
+          dbt_prepare: compile        # none | compile | full
+          dbt_command: dbt            # or "uv run dbt", "poetry run dbt"
+          dbt_profiles_dir: .         # relative to project_dir
+```
+
+- **`compile`:** runs `dbt compile` on the head, then compiles the PR's merge-base
+  into `target-base/` in a temporary worktree. This enables equivalence and
+  column-breakage proofs. It usually works offline.
+- **`full`:** also runs `dbt docs generate` for `catalog.json` (complete column
+  types). That needs warehouse credentials in the profile.
+- A base compile that fails is a warning: the review still runs, and the
+  affected models are listed as not verified.
+
+To build them yourself, compile the **merge-base**, not the base branch's tip:
 
 ```yaml
       - name: Compile the base into target-base/
         run: |
-          git worktree add ../base "origin/${{ github.base_ref }}"
+          git worktree add ../base "$(git merge-base origin/${{ github.base_ref }} HEAD)"
           (cd ../base && dbt deps && dbt compile --target-path "$GITHUB_WORKSPACE/target-base")
 ```
 
@@ -242,7 +260,7 @@ ways, or neither (it self-disables, leaving a deterministic-only review):
 Always pass keys as repo **secrets**. Warehouse credentials are consumed by the
 `dbt compile` step (via your `profiles.yml`), **not** by the review step. A
 complete, copy-paste workflow lives at
-[`github/review/examples/altimate-ingestion.yml`](https://github.com/AltimateAI/altimate-code/blob/main/github/review/examples/altimate-ingestion.yml).
+[`github/review/examples/dbt-pr-review.yml`](https://github.com/AltimateAI/altimate-code/blob/main/github/review/examples/dbt-pr-review.yml).
 
 Re-pushing commits updates the same summary comment in place; fixed findings are
 dropped on the next run. `--post` targets **GitHub** PRs (it reads `GITHUB_TOKEN` /

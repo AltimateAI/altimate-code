@@ -1,4 +1,4 @@
-# Example: drop-in dbt PR review for a dbt repo (e.g. altimate-ingestion).
+# Example: drop-in dbt PR review for a dbt repo.
 # Copy to the target repo as `.github/workflows/dbt-pr-review.yml` and adjust the
 # dbt adapter + profiles/secrets to match the warehouse.
 #
