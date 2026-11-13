@@ -25,7 +25,8 @@ export async function dbtProjectAdapterType(): Promise<{ project: boolean; type?
       try {
         if (existsSync(config.path())) saved = JSON.parse(readFileSync(config.path(), "utf8"))
       } catch {}
-      projectRoot = saved === undefined ? config.findProjectRoot() : typeof saved?.projectRoot === "string" ? saved.projectRoot : null
+      if (saved === undefined) projectRoot = config.findProjectRoot()
+      else projectRoot = typeof saved?.projectRoot === "string" ? saved.projectRoot : null
     } catch {
       projectRoot = null
     }

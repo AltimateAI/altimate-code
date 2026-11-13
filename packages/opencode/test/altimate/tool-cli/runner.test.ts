@@ -432,11 +432,17 @@ describe("sql_explain", () => {
       expect(sent).toEqual([])
       // A long run of whitespace after "(" is refused quickly.
       const started = performance.now()
-      await runner.run("sql_explain", { sql: "(" + " ".repeat(200_000) + "x)", warehouse: "rs" })
+      const long = await runner.run("sql_explain", { sql: "(" + " ".repeat(200_000) + "x)", warehouse: "rs" })
       expect(performance.now() - started).toBeLessThan(5_000)
+      expect(JSON.stringify(long)).toMatch(/single statement/)
+      // A leading ";" would leave EXPLAIN on its own and send the statement after it.
+      for (const sql of ["; DELETE FROM t", "/* c */ ;DELETE FROM t"])
+        expect(JSON.stringify(await runner.run("sql_explain", { sql, warehouse: "rs" }))).toMatch(/single statement/)
+      expect(sent).toEqual([])
       // A parenthesized query is a query, not an EXPLAIN option list.
       const plan = await runner.run("sql_explain", { sql: "(SELECT 1) UNION (SELECT 2)", warehouse: "rs" })
-      expect(JSON.stringify(plan)).not.toMatch(/single statement/)
+      expect(JSON.stringify(plan)).toContain("Seq Scan")
+      expect(sent).toHaveLength(1)
     } finally {
       get.mockRestore()
       Registry.reset()
