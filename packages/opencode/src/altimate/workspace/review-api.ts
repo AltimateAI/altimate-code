@@ -1,7 +1,7 @@
 // altimate_change - new file
 //
 // Wire client for workspace review in altimate-backend (`/datamates/{id}/reviews*`): a member submits their own skill or
-// knowledge base to a workspace, and the owner approves or rejects it in the web app. The CLI only submits and reads
+// knowledge base to a workspace, and the owner or an admin approves or rejects it in the web app. The CLI only submits and reads
 // status; it never approves or rejects.
 //
 // Errors are classified by the rules client's `classify` (one mapping for both features): a 404 `reviews_not_available`,
@@ -24,6 +24,8 @@ const PAGE_SIZE = 50
 
 export const Summary = z.object({
   is_owner: z.boolean(),
+  /** `owner`, `admin` or `member` (absent from servers older than workspace roles: see `WorkspaceRole.roleOf`). */
+  role: z.string().nullable().optional(),
   review_enabled: z.boolean(),
   owner_name: z.string().nullable().optional(),
   pending_count: z.number().int(),
@@ -38,7 +40,10 @@ export const Contribution = z.object({
   name: z.string(),
   description: z.string().nullable().optional(),
   change: z.enum(["add", "edit"]),
-  status: z.enum(["pending", "active", "rejected", "superseded"]),
+  // `withdrawn`: the author withdrew it (or it was withdrawn when the author deleted the item or lost access);
+  // `retired`: removed from the workspace after approval, by an owner, an admin or the author. A status this version
+  // does not know makes the row unreadable (skipped and counted), never misread.
+  status: z.enum(["pending", "active", "rejected", "superseded", "withdrawn", "retired"]),
   version: z.number().int(),
   is_mine: z.boolean(),
   proposed_by_name: z.string().nullable().optional(),
@@ -51,6 +56,9 @@ export const Contribution = z.object({
   expired: z.boolean().default(false),
   file_count: z.number().int().nullable().optional(),
   document_version: z.number().int().nullable().optional(),
+  /** Whether the caller made the last decision (`reviewed_by`): a person is not told of their own retire. Absent from
+   * older servers: read as not. */
+  decided_by_me: z.boolean().default(false),
 })
 export type Contribution = z.infer<typeof Contribution>
 
@@ -155,6 +163,29 @@ export async function getMine(datamateId: number, publicId: string, actAs: ActAs
     if (error instanceof RulesApiError && error.kind === "rejected" && error.status === 404) return null
     throw error
   }
+}
+
+/** The author takes back their own request still waiting for review (`withdrawn`). Answers the request as it is now; a
+ * repeat changes nothing. Refusals arrive classified: 403 `author_only`, 409 `already_decided` / `version_conflict`. */
+export function withdraw(datamateId: number, publicId: string, body: { expected_version: number }, actAs: ActAs): Promise<Contribution> {
+  return call(Contribution, "POST", datamateId, `/${encodeURIComponent(publicId)}/withdraw`, {
+    actAs,
+    body: { ...body, source: "cli" },
+  })
+}
+
+/** Remove an approved contribution from the workspace (`retired`), with no review: its author, the owner or an admin.
+ * A reason is required when removing someone else's (422 `reason_required`). */
+export function retire(
+  datamateId: number,
+  publicId: string,
+  body: { expected_version: number; reason?: string },
+  actAs: ActAs,
+): Promise<Contribution> {
+  return call(Contribution, "POST", datamateId, `/${encodeURIComponent(publicId)}/retire`, {
+    actAs,
+    body: { ...body, source: "cli" },
+  })
 }
 
 export * as ReviewApi from "./review-api"

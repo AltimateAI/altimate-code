@@ -104,6 +104,50 @@ function triggerDeps(ctx: InstanceContext, model?: string): RuleTrigger.TriggerD
   }
 }
 
+/** How long "Sync now" waits for the skill and knowledge check before it answers. */
+export const SYNC_REVIEW_POLL_MS = 5_000
+
+/** Per directory, the scope's state file and its newest kept decision, as this process last saw them. Dropped when the
+ * directory's instance is disposed. */
+const lastKept = new Map<string, string>()
+
+/** Check the person's skill and knowledge requests now: each new decision is published as `rule.proposal.reviewed`
+ * (with its `kind`) to clients listening, and `altimate.rules.changed` asks them to replay when anything was recorded
+ * (or `announceChange`). For the refresh timer and "Sync now"; nothing is published once `live` answers false (the
+ * instance was disposed while the poll ran). Throws only what the poll does not swallow. */
+export async function pollReviewDecisions(directory: string, opts: { announceChange?: boolean; live?: () => boolean } = {}) {
+  const live = opts.live ?? (() => true)
+  const { ReviewNotices } = await import("../workspace/review-notices")
+  const result = await ReviewNotices.poll(directory, {
+    announce: async (notice) => {
+      if (!live()) return
+      await Bus.publish(RuleEvents.Event.Reviewed, {
+        public_id: notice.public_id,
+        text: notice.name,
+        status: notice.status,
+        kind: notice.kind,
+        ...(notice.reason ? { reason: notice.reason } : {}),
+        ...(notice.reviewer ? { reviewer: notice.reviewer } : {}),
+      })
+    },
+  })
+  // A decision another process recorded (a plugin's session start, `workspace review decisions`) is not announced by
+  // it, and this poll then finds it already seen: a change in what is kept (or in whose it is) still asks clients to
+  // replay, as does this process's first look. A state that cannot be read now changes nothing.
+  let keptChanged = false
+  const scope = result.status === "done" ? await ReviewNotices.storedScope(directory) : undefined
+  const state = scope ? await ReviewNotices.read(scope) : undefined
+  if (scope && state) {
+    const newest = state.notices.at(-1)
+    const key = `${ReviewNotices.stateFile(scope)}\0${newest ? ReviewNotices.decisionKey(newest) : ""}`
+    keptChanged = lastKept.get(directory) !== key
+    lastKept.set(directory, key)
+  }
+  if (live() && result.status === "done" && (opts.announceChange || result.recorded.length || keptChanged))
+    await Bus.publish(RuleEvents.Event.Changed, { directory }).catch(() => {})
+  return result
+}
+
 /** Sync now, or join the sync already running. Its notices and change event are published by the run itself, once.
  * Shared with routes and the TUI menu. */
 export async function syncNow(root: string, directory: string, learn: Parameters<typeof RulesSync.run>[2], trigger: RulesTelemetry.SyncTrigger = "refresh") {
@@ -183,22 +227,8 @@ export async function start(ctx: InstanceContext): Promise<void> {
     let reviewsPolled = false
     const reviewNotices = Instance.bind(async () => {
       if (disposed) return
-      const { ReviewNotices } = await import("../workspace/review-notices")
-      const result = await ReviewNotices.poll(ctx.directory, {
-        announce: async (notice) => {
-          await Bus.publish(RuleEvents.Event.Reviewed, {
-            public_id: notice.public_id,
-            text: notice.name,
-            status: notice.status,
-            kind: notice.kind,
-            ...(notice.reason ? { reason: notice.reason } : {}),
-            ...(notice.reviewer ? { reviewer: notice.reviewer } : {}),
-          })
-        },
-      })
-      if (result.status !== "done" || disposed) return
-      if (!reviewsPolled || result.recorded.length) await Bus.publish(RuleEvents.Event.Changed, { directory: ctx.directory }).catch(() => {})
-      reviewsPolled = true
+      const result = await pollReviewDecisions(ctx.directory, { announceChange: !reviewsPolled, live: () => !disposed })
+      if (result.status === "done") reviewsPolled = true
     })
     const refresh = Instance.bind(async () => {
       if (disposed) return
@@ -243,6 +273,7 @@ export async function start(ctx: InstanceContext): Promise<void> {
     const unregister = registerDisposer(async (directory) => {
       if (directory !== ctx.directory) return
       disposed = true
+      lastKept.delete(ctx.directory)
       clearInterval(timer)
       stop()
       unregister()

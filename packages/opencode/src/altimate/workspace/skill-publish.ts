@@ -44,6 +44,7 @@ import { accountDigest, credentialDigest, resolveBinding } from "./state"
 import { printable } from "../rules/printable"
 import { RulesApiError } from "../rules/api"
 import { ReviewApi } from "./review-api"
+import { WorkspaceRole } from "./role"
 import { ReviewNotices } from "./review-notices"
 
 const log = Log.create({ service: "altimate-workspace-skill-publish" })
@@ -273,8 +274,8 @@ export class ReviewDisabledError extends Error {
   ) {
     const owner = ownerName ? printable(ownerName) : "its owner"
     super(
-      `"${printable(workspaceName)}" belongs to ${owner}, and review is off there, so only ${owner} can add skills to it. ` +
-        `Ask them to turn on review in the workspace, or to publish the skill.`,
+      `"${printable(workspaceName)}" belongs to ${owner}, and review is off there, so only ${owner} or an admin of it can ` +
+        `add skills to it. Ask one of them to turn on review in the workspace, or to publish the skill.`,
     )
     this.name = "ReviewDisabledError"
   }
@@ -286,7 +287,7 @@ export class TooManyReviewRequestsError extends Error {
   constructor(readonly publicId: string) {
     super(
       `The skill was uploaded (id ${publicId}), but you already have as many open review requests on this workspace as it ` +
-        `allows. Publish again once the owner has decided some of them; \`altimate-code workspace review status\` lists them.`,
+        `allows. Publish again once the owner or an admin has decided some of them; \`altimate-code workspace review status\` lists them.`,
     )
     this.name = "TooManyReviewRequestsError"
   }
@@ -775,10 +776,12 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   const scope = await currentScope(actAs)
 
   // Whether the workspace reviews what members add, asked before anything is uploaded. With review, a member's own skill
-  // is submitted for the owner's review and the owner's is attached directly; with review off only the owner adds
-  // skills. A server without review answers `unsupported`: the skill is attached as before, which needs ownership.
+  // is submitted for review and a manager's (the owner's or an admin's) is attached directly by the server; with review
+  // off only managers add skills. A server without review answers `unsupported`: the skill is attached as before, which
+  // needs ownership (such a server has no admins).
   const review = await reviewSummary(binding.datamateId, actAs)
-  if (review && !review.is_owner && !review.review_enabled) throw new ReviewDisabledError(binding.datamateName, review.owner_name)
+  if (review && !WorkspaceRole.manages(review) && !review.review_enabled)
+    throw new ReviewDisabledError(binding.datamateName, review.owner_name)
   // Without review the workspace must be the caller's. Linking needs only visibility, so
   // a project can be bound to a colleague's shared workspace — where the
   // attach would answer 404, on every publish, leaving a skill nothing from
@@ -806,10 +809,10 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
         contribution: result.contribution,
       }
     } catch (err) {
-      // Only the owner falls back to attaching directly when the server turns out to have no review: a member cannot
-      // attach, and the fallback would answer 404 and take the upload back. The member's upload is kept and the
-      // submission reported as failed.
-      if (ReviewApi.unavailable(err) && review.is_owner) return undefined
+      // Only a manager (owner or admin) falls back to attaching directly when the server turns out to have no review: a
+      // member cannot attach, and the fallback would answer 404 and take the upload back. The member's upload is kept
+      // and the submission reported as failed.
+      if (ReviewApi.unavailable(err) && WorkspaceRole.manages(review)) return undefined
       throw submitError(err, publicId, binding.datamateName, review.owner_name)
     }
   }
@@ -1074,30 +1077,37 @@ export function describePublish(report: PublishReport): string {
   return `Sent "${name}" for review to ${owner} ${detail}. It reaches the workspace once approved; \`altimate-code workspace review status\` shows where it stands.`
 }
 
+/** Every error this module raises on purpose, with its stable code for clients that explain it in their own words
+ * (the extension's `/workspace publish`). One table, so a refusal never has a message without a code. */
+const PUBLISH_ERRORS: readonly [new (...args: never[]) => Error, string][] = [
+  [NotLinkedError, "not_linked"],
+  [NotConfiguredError, "not_configured"],
+  [CredentialsChangedError, "credentials_changed"],
+  [ManagedSkillError, "managed_skill"],
+  [NotProjectSkillError, "not_project_skill"],
+  [BinaryFileError, "binary_file"],
+  [SymlinkError, "symlink"],
+  [EmptyBundleError, "empty_bundle"],
+  [BundleTooLargeError, "bundle_too_large"],
+  [SkillNameConflictError, "name_conflict"],
+  [SkillChangedElsewhereError, "changed_elsewhere"],
+  [NotWorkspaceOwnerError, "not_workspace_owner"],
+  [AttachFailedError, "attach_failed"],
+  [ReviewDisabledError, "review_disabled"],
+  [TooManyReviewRequestsError, "too_many_requests"],
+  [SubmitFailedError, "submit_failed"],
+]
+
+/** A stable code for an error this module raised on purpose; null for any other error. */
+export function publishErrorCode(err: unknown): string | null {
+  return PUBLISH_ERRORS.find(([type]) => err instanceof type)?.[1] ?? null
+}
+
 /** The message for an error this module raised on purpose, or null for one it
  * did not — a surface shows the former as-is (each already says what to do)
  * and wraps the latter as a failure. */
 export function explainPublishError(err: unknown): string | null {
-  if (
-    err instanceof NotLinkedError ||
-    err instanceof NotConfiguredError ||
-    err instanceof CredentialsChangedError ||
-    err instanceof ManagedSkillError ||
-    err instanceof NotProjectSkillError ||
-    err instanceof BinaryFileError ||
-    err instanceof SymlinkError ||
-    err instanceof EmptyBundleError ||
-    err instanceof BundleTooLargeError ||
-    err instanceof SkillNameConflictError ||
-    err instanceof SkillChangedElsewhereError ||
-    err instanceof NotWorkspaceOwnerError ||
-    err instanceof AttachFailedError ||
-    err instanceof ReviewDisabledError ||
-    err instanceof TooManyReviewRequestsError ||
-    err instanceof SubmitFailedError
-  )
-    return err.message
-  return null
+  return publishErrorCode(err) !== null && err instanceof Error ? err.message : null
 }
 
 /** Which of the update path's conflicts this is. The server distinguishes them
