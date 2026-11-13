@@ -507,6 +507,7 @@ function reviewToast(api: TuiPluginApi, raw: { text: string; status: string; rea
     const what = p.kind === "skill" ? `Your skill ${quoted}` : `Your knowledge base ${quoted}`
     if (p.status === "active") api.ui.toast({ variant: "success", message: `${what} was approved${who}. It now reaches the workspace.`, duration: 10000 })
     else if (p.status === "rejected") api.ui.toast({ variant: "warning", message: `${what} was rejected${who}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 })
+    else if (p.status === "retired") api.ui.toast({ variant: "warning", message: `${what} was removed from the workspace${who}${p.reason ? ` — ${p.reason}` : ""}`, duration: 15000 })
     // A status this version does not know (a newer server) is still shown, not dropped.
     else api.ui.toast({ variant: "info", message: `${what} is now ${printable(p.status)}${who}.`, duration: 10000 })
     return

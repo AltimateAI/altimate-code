@@ -4,7 +4,7 @@
 // (`review-notices.ts`) and the read-only `workspace review status` command. Network is stubbed at `globalThis.fetch`;
 // files are real, in a sandbox state directory.
 import { afterAll, afterEach, beforeEach, describe, expect, test } from "bun:test"
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import path from "node:path"
 
@@ -186,6 +186,84 @@ describe("decision notices", () => {
     mine = () => page([contribution({ status: "superseded" }), contribution({ public_id: "c-2", status: "pending" })])
     expect((await poll()).shown).toEqual([])
     expect((await ReviewNotices.read(scopeA()))?.pending).toEqual(["c-2"])
+  })
+
+  test("a request the author withdrew is let go silently, and the list stays complete", async () => {
+    await ReviewNotices.recordSubmitted(scopeA(), { public_id: "c-1", status: "pending" })
+    mine = () => page([contribution({ status: "withdrawn" }), contribution({ public_id: "c-2", status: "pending" })])
+    expect((await poll()).shown).toEqual([])
+    expect((await ReviewNotices.read(scopeA()))?.pending).toEqual(["c-2"])
+    // Read as a known status, not skipped: a complete list lets go of ids it no longer holds.
+    expect((await ReviewApi.listMine(42, ACT_AS)).skipped).toBe(0)
+  })
+
+  test("an approved request removed by someone else is shown once with the reason; your own removal is not", async () => {
+    mine = () => page([contribution({ status: "active" }), contribution({ public_id: "c-2", status: "active" })])
+    await poll()
+    expect((await ReviewNotices.read(scopeA()))?.approved).toEqual(["c-1", "c-2"])
+    mine = () =>
+      page([
+        contribution({ status: "retired", reviewed_by_name: "Olive", review_reason: "Out of date", decided_by_me: false }),
+        contribution({ public_id: "c-2", status: "retired", decided_by_me: true }),
+      ])
+    const { shown } = await poll()
+    expect(shown.map((n) => [n.public_id, n.status, n.reviewer, n.reason])).toEqual([["c-1", "retired", "Olive", "Out of date"]])
+    expect((await poll()).shown).toEqual([])
+    expect((await ReviewNotices.read(scopeA()))?.approved).toEqual([])
+  })
+
+  test("past the cap the tracked approved requests stay the same from one check to the next", async () => {
+    // Two pages of approved requests, more than the client tracks; the server lists newest first.
+    const ids = Array.from({ length: ReviewNotices.MAX_APPROVED + 50 }, (_, i) => `a-${i}`)
+    mine = () => {
+      const at = Number(new URL(requests[requests.length - 1].url).searchParams.get("page") ?? "1")
+      const rows = ids.slice((at - 1) * 50, at * 50).map((id) => contribution({ public_id: id, status: "active" }))
+      return page(rows, Math.ceil(ids.length / 50), at)
+    }
+    await poll()
+    const first = (await ReviewNotices.read(scopeA()))?.approved
+    expect(first).toHaveLength(ReviewNotices.MAX_APPROVED)
+    const file = ReviewNotices.stateFile(scopeA())
+    const before = statSync(file).mtimeMs
+    await poll()
+    expect((await ReviewNotices.read(scopeA()))?.approved).toEqual(first)
+    // Nothing changed, so nothing was written.
+    expect(statSync(file).mtimeMs).toBe(before)
+  })
+
+  test("a removal of an approved request the capped list no longer reaches is still noticed", async () => {
+    mine = () => page([contribution({ public_id: "c-old", status: "active" })])
+    await poll()
+    let at = 0
+    mine = () => {
+      at++
+      return page(Array.from({ length: 50 }, (_, i) => contribution({ public_id: `n-${at}-${i}`, status: "active" })), 99, at)
+    }
+    byId = (id) => reply(contribution({ public_id: id, status: "retired", reviewed_by_name: "Olive", review_reason: "Old", decided_by_me: false }))
+    const { shown } = await poll()
+    expect(shown.map((n) => [n.public_id, n.status])).toEqual([["c-old", "retired"]])
+  })
+
+  test("a request approved and removed between two checks is still told as removed", async () => {
+    await ReviewNotices.recordSubmitted(scopeA(), { public_id: "c-1", status: "pending" })
+    mine = () => page([contribution({ status: "retired", reviewed_by_name: "Olive", review_reason: "Duplicate" })])
+    const { shown } = await poll()
+    expect(shown.map((n) => n.status)).toEqual(["retired"])
+    expect((await ReviewNotices.read(scopeA()))?.pending).toEqual([])
+  })
+
+  test("a request this client never saw is history: its removal shows nothing", async () => {
+    mine = () => page([contribution({ status: "retired", review_reason: "Old" })])
+    expect((await poll()).shown).toEqual([])
+  })
+
+  test("a state file written before approved requests were tracked still loads", async () => {
+    const file = ReviewNotices.stateFile(scopeA())
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify({ version: 1, scope: scopeA(), pending: ["c-1"], seen: [], notices: [] }))
+    expect((await ReviewNotices.read(scopeA()))?.approved).toEqual([])
+    mine = () => page([contribution({ status: "active" })])
+    expect((await poll()).shown.map((n) => n.status)).toEqual(["active"])
   })
 
   test("a 401, a 403 or an outage shows nothing and keeps the state as it was", async () => {
@@ -426,6 +504,19 @@ describe("workspace review status", () => {
       '  skill "deploy" (new): approved by Olive',
       "1 request could not be read by this version of altimate-code.",
     ])
+  })
+
+  test("withdrawn and removed requests read as such, a removal with who and why", () => {
+    const lines = describeReviews("Growth", {
+      items: [
+        ReviewApi.Contribution.parse(contribution({ status: "withdrawn" })),
+        ReviewApi.Contribution.parse(contribution({ public_id: "c-2", status: "retired", reviewed_by_name: "Olive", review_reason: "Duplicate" })),
+      ],
+      skipped: 0,
+      complete: true,
+    })
+    expect(lines[1]).toContain(": withdrawn")
+    expect(lines[2]).toContain(": removed from the workspace by Olive: Duplicate")
   })
 
   test("--json carries the server's rows; exit 0", async () => {

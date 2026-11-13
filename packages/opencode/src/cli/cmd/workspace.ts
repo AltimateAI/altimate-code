@@ -339,6 +339,8 @@ const REVIEW_STATUS: Record<ReviewApi.Contribution["status"], string> = {
   active: "approved",
   rejected: "rejected",
   superseded: "replaced by a newer request",
+  withdrawn: "withdrawn",
+  retired: "removed from the workspace",
 }
 
 /** One line per request for `workspace review status`. Pure, so the wording is testable. Server text is made printable. */
@@ -350,7 +352,7 @@ export function describeReviews(workspaceName: string, listed: Awaited<ReturnTyp
     const change = item.change === "edit" ? "update" : "new"
     const reviewer = item.reviewed_by_name ? ` by ${printable(item.reviewed_by_name)}` : ""
     const reason = item.review_reason ? `: ${printable(item.review_reason)}` : ""
-    const decided = item.status === "active" || item.status === "rejected" ? `${reviewer}${reason}` : ""
+    const decided = item.status === "active" || item.status === "rejected" || item.status === "retired" ? `${reviewer}${reason}` : ""
     // Expired requests stay pending and can still be approved: the label says they have waited past the window.
     const expired = item.status === "pending" && item.expired ? " (expired: waiting longer than 14 days)" : ""
     lines.push(`  ${item.kind} "${printable(item.name)}" (${change}): ${REVIEW_STATUS[item.status]}${decided}${expired}`)
