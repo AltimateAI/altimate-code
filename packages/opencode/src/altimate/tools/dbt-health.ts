@@ -160,8 +160,8 @@ export const DbtHealthTool = Tool.define("dbt_health", {
     const root: string | undefined = (typeof adapter.getProjectRoot === "function" ? adapter.getProjectRoot() : undefined) ?? (await getDbtProjectRoot())
     if (!root) return failure("unavailable", "dbt_health can't run: no dbt project here.")
     // The adapter's watcher rebuilds the manifest a moment after an edit, and `parseManifest` only reads the
-    // file: rebuild now and wait for it, so the run reads the project as it is, and say so when the rebuild
-    // failed and the last good manifest is what is read.
+    // file: rebuild now and wait for it, so the run reads the project as it is. A rebuild that throws stops
+    // the run; one that leaves only the last good manifest is said so in the answer.
     let stale: { message: string; manifest_path?: string; written_at?: string; age_seconds?: number } | undefined
     if (typeof adapter.parseManifest === "function") {
       try {
