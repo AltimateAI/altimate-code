@@ -7,6 +7,7 @@ import path from "node:path"
 import { Effect } from "effect"
 import { SessionID, MessageID } from "@/session/schema"
 import type { Tool } from "@/tool/tool"
+import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
 import { DbtRunResultsTool } from "@/altimate/tools/dbt-run-results"
 import { initTool } from "./tool-fixture"
 
@@ -73,6 +74,10 @@ describe("dbt_run_results", () => {
       command: "build",
       elapsedSec: 12.5,
       completedAt: "2026-11-01T10:00:00.000Z",
+      total: 4,
+      passed: 2,
+      failed: 1,
+      skipped: 1,
       results: [
         { uniqueId: "model.shop.stg_orders", name: "stg_orders", status: "error", executionTimeSec: 1.25, message: "Database Error: relation missing" },
         { uniqueId: "model.shop.fct_sales", name: "fct_sales", status: "success", executionTimeSec: 3.5, message: "CREATE TABLE (10 rows)" },
@@ -89,9 +94,20 @@ describe("dbt_run_results", () => {
 
     const result = await run(dir)
 
-    expect((result.metadata as any).command).toBe("compile")
-    expect((result.metadata as any).invocationId).toBe("22222222-aaaa-bbbb-cccc-000000000002")
-    expect((result.metadata as any).results).toHaveLength(1)
+    expect(result.metadata).toEqual({
+      truncated: false,
+      found: true,
+      invocationId: "22222222-aaaa-bbbb-cccc-000000000002",
+      command: "compile",
+      elapsedSec: 2,
+      completedAt: expect.any(String),
+      total: 1,
+      passed: 1,
+      failed: 0,
+      skipped: 0,
+      results: [{ uniqueId: "model.shop.fct_sales", name: "fct_sales", status: "success", executionTimeSec: 0.01, message: null }],
+    })
+    expect(result.title).toBe("dbt compile: 1/1 ok")
   })
 
   test("no run_results.json: found is false and the answer is empty, not an error", async () => {
@@ -106,6 +122,10 @@ describe("dbt_run_results", () => {
       command: null,
       elapsedSec: null,
       completedAt: null,
+      total: 0,
+      passed: 0,
+      failed: 0,
+      skipped: 0,
       results: [],
     })
     expect(result.title).toBe("dbt run results: none")
@@ -123,6 +143,10 @@ describe("dbt_run_results", () => {
       command: "run",
       elapsedSec: null,
       completedAt: expect.any(String),
+      total: 1,
+      passed: 1,
+      failed: 0,
+      skipped: 0,
       results: [{ uniqueId: "model.shop.a", name: "a", status: "success", executionTimeSec: null, message: null }],
     })
   })
@@ -137,7 +161,53 @@ describe("dbt_run_results", () => {
     const result = await run(dir)
 
     const message = (result.metadata as any).results[0].message as string
-    expect(message.length).toBeLessThan(2100)
-    expect(message.endsWith("…")).toBe(true)
+    expect(message).toBe(`${"e".repeat(2000)}…`)
+  })
+
+  test("a build of many nodes lists the failures first, at most 200 rows, and counts every node", async () => {
+    const results = Array.from({ length: 450 }, (_, i) => ({
+      unique_id: `model.shop.m${i}`,
+      status: i >= 400 ? "error" : "success",
+      message: null,
+      execution_time: 1,
+    }))
+    const dir = await project("many", { metadata: { invocation_id: "m" }, args: { which: "build" }, elapsed_time: 9, results })
+
+    const view = (await run(dir)).metadata as any
+
+    expect([view.total, view.passed, view.failed, view.skipped]).toEqual([450, 400, 50, 0])
+    expect(view.results).toHaveLength(200)
+    expect(view.results.slice(0, 50).every((row: any) => row.status === "error")).toBe(true)
+    expect(view.results[50].name).toBe("m0")
+  })
+
+  test("an artifact with no command is titled as unknown, not as a run", async () => {
+    const dir = await project("nocmd", { results: [{ unique_id: "model.shop.a", status: "success" }] })
+
+    expect((await run(dir)).title).toBe("dbt (unknown command): 1/1 ok")
+  })
+
+  test("a corrupt artifact is not found, and the answer says it may not be a run artifact", async () => {
+    const dir = await project("corrupt")
+    await writeFile(path.join(dir, "target", "run_results.json"), "{not json")
+
+    const result = await run(dir)
+
+    expect((result.metadata as any).found).toBe(false)
+    expect(result.output).toContain("not a run artifact")
+  })
+
+  test("with no project_dir, the project the dbt adapter is configured for is read", async () => {
+    const dir = await project("configured", BUILD)
+    dbtAdapterInternals.readConfig = async () => ({ projectRoot: dir })
+    resetDbtAdapter()
+    try {
+      const result = await run(undefined)
+
+      expect((result.metadata as any).invocationId).toBe("11111111-aaaa-bbbb-cccc-000000000001")
+    } finally {
+      delete dbtAdapterInternals.readConfig
+      resetDbtAdapter()
+    }
   })
 })
