@@ -26,7 +26,8 @@ import { RunBudget } from "@/altimate/run-budget"
 import { ModelID, ProviderID } from "@/provider/schema"
 import { ConfigProvider, Effect, Layer } from "effect"
 // altimate_change start — upstream_fix: recover committed child findings when cancellation interrupts a task.
-import { interruptedTaskOutput, lastTaskText } from "../session/task-output"
+import { interruptedTaskOutput, lastTaskText, runModeTaskReport } from "../session/task-output"
+import { Flag } from "../flag/flag"
 // altimate_change end
 // altimate_change start — redact provider error messages before they reach the parent's task result
 import { redactSecrets } from "@/altimate/learn/digest"
@@ -491,13 +492,17 @@ export const TaskTool = Tool.define("task", async (ctx) => {
           : SessionPrompt.prompt(promptInput)
         ).catch(async (error) => {
           if (!ctx.abort.aborted) throw error
-          partialOutput = await interruptedTaskOutput(session.id, messageID)
+          partialOutput = await interruptedTaskOutput(session.id, messageID, { runMode: Flag.ALTIMATE_RUN_MODE })
           if (!partialOutput) throw error
           return undefined
         })
-        if (ctx.abort.aborted) partialOutput ??= await interruptedTaskOutput(session.id, messageID)
+        if (ctx.abort.aborted)
+          partialOutput ??= await interruptedTaskOutput(session.id, messageID, { runMode: Flag.ALTIMATE_RUN_MODE })
 
-        const text = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
+        const lastText = result?.parts.findLast((x) => x.type === "text")?.text ?? ""
+        // Run mode: the child's completion token is a harness signal, not part of its report,
+        // and a bare-token acknowledgement must not replace the report it confirms.
+        const text = Flag.ALTIMATE_RUN_MODE ? await runModeTaskReport(session.id, lastText, messageID) : lastText
         // altimate_change start — a child that ends on an error or with no text must not reach the
         // parent as an empty result, which reads as "done, nothing found". An error is reported even
         // when the child wrote text before it, since that text may be incomplete.
@@ -610,7 +615,7 @@ async function emptyTaskStatus(
     : "Task ended without a final text answer."
   // The final text, when there is one, follows the status in the result.
   if (text.trim()) return [reason, "Its last written text, which may be incomplete:"]
-  const partial = await lastTaskText(sessionID, messageID).catch(() => undefined)
+  const partial = await lastTaskText(sessionID, messageID, { runMode: Flag.ALTIMATE_RUN_MODE }).catch(() => undefined)
   return partial
     ? [reason, "Its last written text, which may be incomplete:", partial]
     : [reason, "It wrote no text. Resume it with task_id or treat its work as unfinished."]

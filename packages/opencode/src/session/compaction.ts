@@ -2050,33 +2050,42 @@ When constructing the summary, try to stick to this template:
           : ""
         // altimate_change end
         // altimate_change start — completion-aware termination path:
-        // (b) the continue message carries the three-option completion-aware nudge
-        //     (continue / ask for clarification / assert DONE), giving a finished
-        //     session a termination path. Delivered via the NudgeArbiter (Global
+        // (b) the run-mode continue message carries the completion-aware nudge
+        //     (continue / assert DONE / report BLOCKED — no clarification option,
+        //     since nobody can answer in a headless run), giving a finished or
+        //     blocked session a termination path. Delivered via the NudgeArbiter (Global
         //     rule 5): this injection point registers its candidate and takes the
         //     single winner, so pending lower-precedence directives (starvation
         //     breaker, budget reminder) are consumed here and the injected turn
         //     never carries two system-authored directive blocks. The termination
         //     nudge has top precedence, so it always wins at this site.
         // (d) the overflow notice is mechanism-accurate — the old text falsely
-        //     blamed "large media attachments" (see SessionTermination.OVERFLOW_NOTICE).
+        //     blamed "large media attachments" (see SessionTermination.OVERFLOW_NOTICE);
+        //     in run mode it does not ask the absent user to re-supply anything.
+        // The plan agent keeps the ordinary continuation (its prompt ends a turn with a
+        // question or plan_exit), as it gets no completion contract.
         let continuation =
           "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
-        if (Flag.ALTIMATE_RUN_MODE) {
+        const completionNudge = SessionTermination.completionNudge({
+          runMode: Flag.ALTIMATE_RUN_MODE,
+          agent: userMessage.agent,
+        })
+        if (completionNudge) {
           NudgeArbiter.register(
             input.sessionID,
             {
               source: "termination_challenge",
               kind: "completion_nudge",
-              text: SessionTermination.COMPLETION_NUDGE,
+              text: completionNudge,
             },
             input.nudgeGeneration,
           )
-          continuation =
-            NudgeArbiter.take(input.sessionID, input.nudgeGeneration)?.text ?? SessionTermination.COMPLETION_NUDGE
+          continuation = NudgeArbiter.take(input.sessionID, input.nudgeGeneration)?.text ?? completionNudge
         }
         const text =
-          (input.overflow ? SessionTermination.OVERFLOW_NOTICE + "\n\n" : "") +
+          (input.overflow
+            ? SessionTermination.overflowNotice({ runMode: Flag.ALTIMATE_RUN_MODE }) + "\n\n"
+            : "") +
           continuation +
           // altimate_change end
           // altimate_change start — state ledger
