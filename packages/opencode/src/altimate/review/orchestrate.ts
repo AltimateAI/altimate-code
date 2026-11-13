@@ -16,6 +16,7 @@ import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope,
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { listMirrorsModel, type ConsumerColumnList } from "./consumer-lists"
 import { detectUnitTestFixtures } from "./unit-tests"
+import { selectListNames } from "./select-list"
 import { incrementalFindings, snapshotFindings, snapshotYmlFindings } from "./incremental-semantics"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult } from "./ai-review"
 
@@ -625,13 +626,19 @@ async function columnBreakageLane(
   ]
 }
 
-/** A query's output columns from column lineage (lowercased); empty when unknown or `*`. */
+/**
+ * A query's output columns (lowercased); empty when unknown or `*`. Column
+ * lineage gives columns that read a source column; the final SELECT's own
+ * aliases add literal and function-only columns lineage can't see.
+ */
 async function outputColumns(runner: ReviewRunner, sql: string, dialect: string): Promise<Set<string>> {
   if (!runner.columnLineage) return new Set()
   const cols = (await runner.columnLineage(sql, dialect)).map((e) => e.target.toLowerCase()).filter(Boolean)
   // A star in the output means the list is incomplete: report nothing rather than guess.
   if (cols.some((c) => c === "*" || c.endsWith(".*"))) return new Set()
-  return new Set(cols)
+  // `*` in the final SELECT: keep lineage's own answer (it expands stars it can resolve).
+  const named = selectListNames(sql)
+  return new Set([...cols, ...(named ?? [])])
 }
 
 /** Output columns added and removed by the change (both empty when either side is unknown). */
