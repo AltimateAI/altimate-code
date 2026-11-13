@@ -147,7 +147,9 @@ function rated(
     const lenses = new Map<string, string>()
     for (const edge of again) {
       const key = keyOf(edge)
-      if (key && typeof edge.lens_type === "string") lenses.set(key, edge.lens_type)
+      // Edges into one output from the same column keep the one furthest from unchanged.
+      if (key && typeof edge.lens_type === "string")
+        lenses.set(key, joinLens(lenses.get(key), edge.lens_type) ?? edge.lens_type)
     }
     return edges.map((edge) => {
       const key = edge.lens_type === "Not sure" ? keyOf(edge) : null
@@ -487,11 +489,13 @@ export function columnReach(manifestPath: string, model: string, column: string,
       // A NATURAL JOIN beside the column may join on it, or carry it on in another output.
       if (ambiguous || fromUnsure || viaEphemeral || partial || opaque) unsure.add(id)
       const columns = [...carried].sort()
-      const lens_types: Record<string, string> = {}
-      for (const col of columns) {
-        const lens = carriedLens.get(col)
-        if (lens !== undefined) lens_types[col] = lens
-      }
+      // Built with fromEntries: assigning to a column named __proto__ would set the prototype instead.
+      const lens_types: Record<string, string> = Object.fromEntries(
+        columns.flatMap((col) => {
+          const lens = carriedLens.get(col)
+          return lens === undefined ? [] : [[col, lens] as const]
+        }),
+      )
       reached.push({
         name: nodes[id]?.name ?? id,
         unique_id: id,

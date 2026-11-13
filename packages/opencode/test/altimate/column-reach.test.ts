@@ -141,6 +141,34 @@ describe("columnReach", () => {
     expect(found?.lens_types).toEqual({ net: "Alias", revenue: "Original" })
   })
 
+  test("a column named __proto__ keeps its rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_proto"] = model(
+      "stg_proto",
+      ["model.shop.fct_orders"],
+      'select revenue as "__proto__" from fct_orders',
+      ["__proto__"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_proto")
+    expect(found?.columns).toEqual(["__proto__"])
+    expect(Object.entries(found?.lens_types ?? {})).toEqual([["__proto__", "Alias"]])
+  })
+
+  test("a union of a column and a calculation of it through a qualified relation is a Transformation", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_union"] = model(
+      "stg_union",
+      ["model.shop.fct_orders"],
+      'select revenue from "shop"."main"."fct_orders" union all select revenue * 2 as revenue from "shop"."main"."fct_orders"',
+      ["revenue"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    expect(reach.models.find((m) => m.name === "stg_union")?.lens_types).toEqual({ revenue: "Transformation" })
+  })
+
   test("a column copied as is is Original, and a copy of a calculation is never Original", () => {
     const value = manifest()
     const nodes = value.nodes as Record<string, any>

@@ -26,12 +26,12 @@ export interface DocsCoverage {
 
 const hasText = (value: unknown) => typeof value === "string" && value.trim().length > 0
 
-/** Coverage of one manifest model node. Throws when the node has no compiled SQL or the engine cannot read it. */
+/** Coverage of one manifest model node. Throws when the node has no compiled SQL, the engine cannot read it, or it selects `*` and the manifest lists no columns. */
 export function docsCoverage(node: any, dialect: string | undefined): DocsCoverage {
   const yamlColumns: Record<string, any> = node.columns ?? {}
   const described = new Set<string>()
   for (const [key, col] of Object.entries<any>(yamlColumns)) {
-    if (hasText(col?.description)) described.add(String(col?.name || key).toLowerCase())
+    if (hasText(col?.description)) described.add(String(col?.name || key))
   }
 
   const sql: string = node.compiled_code || node.compiled_sql || ""
@@ -45,24 +45,31 @@ export function docsCoverage(node: any, dialect: string | undefined): DocsCovera
   } catch (e) {
     // A `select *` names no columns, so the engine refuses it; the manifest's own columns are then
     // the best list there is. Any other failure is the SQL's, and is reported.
-    if (!/star/i.test(e instanceof Error ? e.message : String(e))) throw e
+    if (!/due to star\b/i.test(e instanceof Error ? e.message : String(e))) throw e
     outputs = []
     source = "manifest_columns"
   }
-  if (outputs.some((c) => c.includes("*"))) source = "manifest_columns"
+  if (outputs.includes("*")) source = "manifest_columns"
   if (source === "manifest_columns") {
     outputs = Object.entries<any>(yamlColumns).map(([key, col]) => String(col?.name || key))
   }
 
-  const seen = new Set<string>()
-  const columns = outputs.filter((c) => {
-    const k = c.toLowerCase()
-    if (seen.has(k)) return false
-    seen.add(k)
-    return true
-  })
-  const documented = columns.filter((c) => described.has(c.toLowerCase()))
-  const missing = columns.filter((c) => !described.has(c.toLowerCase()))
+  if (source === "manifest_columns" && outputs.length === 0) {
+    throw new Error(
+      `Model "${node.name}" selects \`*\` and the manifest lists no columns for it, so its columns are not known. List them in its YAML or run \`dbt docs generate\`.`,
+    )
+  }
+
+  const columns = [...new Set(outputs)]
+  // Names that differ only by case are different columns when quoted, so they are matched as written;
+  // any other name is matched ignoring case, as a warehouse folds an unquoted one.
+  const byCase = new Map<string, number>()
+  for (const c of columns) byCase.set(c.toLowerCase(), (byCase.get(c.toLowerCase()) ?? 0) + 1)
+  const describedFolded = new Set([...described].map((c) => c.toLowerCase()))
+  const isDocumented = (c: string) =>
+    byCase.get(c.toLowerCase()) === 1 ? describedFolded.has(c.toLowerCase()) : described.has(c)
+  const documented = columns.filter(isDocumented)
+  const missing = columns.filter((c) => !isDocumented(c))
   const percent = columns.length === 0 ? 100 : Math.round((documented.length / columns.length) * 1000) / 10
   return {
     model: node.name,
