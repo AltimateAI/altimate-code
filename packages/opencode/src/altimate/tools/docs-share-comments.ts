@@ -7,7 +7,7 @@ import {
   replyToThread,
   resolveThread,
   type DocsShare,
-  type DocsShareThread,
+  type DocsShareRange,
   type DocsShareUser,
 } from "../api/docs-share"
 
@@ -22,7 +22,7 @@ export interface OpenThread {
   column?: string
   field?: string
   highlight?: string
-  range?: { start: { line: number; character: number }; end: { line: number; character: number } }
+  range?: DocsShareRange
   messages: { id: number; user_id: number; author: string; at: string; text: string }[]
 }
 
@@ -37,7 +37,7 @@ export function userName(users: DocsShareUser[], id: number): string {
 export function openThreads(shares: DocsShare[], users: DocsShareUser[]): OpenThread[] {
   const out: OpenThread[] = []
   for (const share of shares) {
-    for (const group of share.conversation_group ?? ([] as DocsShareThread[])) {
+    for (const group of share.conversation_group) {
       if (group.status !== "Pending") continue
       out.push({
         share_id: share.share_id,
@@ -49,8 +49,8 @@ export function openThreads(shares: DocsShare[], users: DocsShareUser[]): OpenTh
         column: group.meta?.column,
         field: group.meta?.field,
         highlight: group.meta?.highlight,
-        range: group.meta?.range,
-        messages: (group.conversations ?? []).map((m) => ({
+        range: group.meta?.range ?? undefined,
+        messages: group.conversations.map((m) => ({
           id: m.conversation_id,
           user_id: m.user_id,
           author: userName(users, m.user_id),

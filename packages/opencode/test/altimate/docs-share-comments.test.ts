@@ -141,6 +141,22 @@ describe("docs_share_comments list", () => {
     expect(result.output).toContain("unexpected answer")
   })
 
+  test("a share or thread that is not what the tool reads is an error, never 'no open threads'", async () => {
+    const tool = await initTool(DocsShareCommentsTool)
+    const broken = [
+      [{ detail: "maintenance" }],
+      [{ ...SHARES[0], conversation_group: null }],
+      [{ ...SHARES[0], conversation_group: [{ ...SHARES[0]!.conversation_group[0], status: "Archived" }] }],
+      [{ ...SHARES[0], conversation_group: [{ ...SHARES[0]!.conversation_group[0], conversations: null }] }],
+    ]
+    for (const shares of broken) {
+      answer = (endpoint) => (endpoint.startsWith("/dbt/dbt_docs_share/all") ? shares : undefined)
+      const result = await tool.execute({ action: "list", project: "jaffle_shop" }, ctx)
+      expect(result.metadata.success).toBe(false)
+      expect(result.output).toContain("unexpected answer")
+    }
+  })
+
   test("comment text is one line and marked as data, so it cannot pose as another thread", async () => {
     answer = (endpoint) =>
       endpoint.startsWith("/dbt/dbt_docs_share/all")
