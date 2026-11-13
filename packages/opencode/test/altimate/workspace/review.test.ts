@@ -675,7 +675,10 @@ describe("requests for other clients", () => {
         contribution({ status: "active", reviewed_by_name: "Olive", reviewed_at: new Date().toISOString() }),
         contribution({ public_id: "c-2", status: "pending" }),
       ])
+    requests = []
     const first = await RulesHost.reviewForHost(project, "claude-context", 3000)
+    // One poll: one page of the person's requests.
+    expect(requests.filter((r) => r.url.includes("/datamates/42/reviews"))).toHaveLength(1)
     expect(first.decisions.map((d) => [d.public_id, d.status, d.reviewer])).toEqual([["c-1", "active", "Olive"]])
     expect(first.waiting).toBe(1)
     expect((await RulesHost.reviewForHost(project, "claude-context", 3000)).decisions).toEqual([])
