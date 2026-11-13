@@ -43,6 +43,12 @@ import { Tracer, FileExporter, HttpExporter, type TraceExporter } from "../../al
 import { RunAccounting } from "./run-accounting"
 // altimate_change start — wall-clock budget validation and deadline decisions
 import { RunTimeBudget } from "./run-time-budget"
+// altimate_change end
+// altimate_change start — billed-token budget across the run and its task sessions (fork-only module)
+import { RunTokenBudget } from "./run-token-budget"
+// altimate_change end
+// altimate_change start — a signal the npm wrapper forwards is one delivery (fork-only module)
+import { RunSignal } from "./run-signal"
 import { defer } from "../../util/defer"
 import { setTimeout as sleep } from "node:timers/promises"
 // altimate_change end
@@ -424,6 +430,13 @@ export const RunCommand = cmd({
           describe: "maximum time in seconds including startup (env: ALTIMATE_RUN_TIME_BUDGET_S); bounded finalization may follow",
         })
         // altimate_change end
+        // altimate_change start — billed-token budget: input + output + reasoning + cache writes + 0.1 × cache reads
+        .option("max-tokens", {
+          type: "number",
+          describe:
+            "maximum billed tokens (input + output + reasoning + cache writes + 0.1 × cache reads, reported to one decimal) across the run and its task sessions; bounded finalization may follow",
+        })
+        // altimate_change end
         // altimate_change end
         // altimate_change start — backport upstream PR #21266 (dropped during v1.4.0 merge)
         .option("dangerously-skip-permissions", {
@@ -455,6 +468,12 @@ export const RunCommand = cmd({
     const timeBudget = timeBudgetInput === undefined ? undefined : Number(timeBudgetInput)
     if (timeBudget !== undefined && !RunTimeBudget.isValidTimeBudget(timeBudget)) {
       UI.error(`--time-budget must be a positive number (env: ALTIMATE_RUN_TIME_BUDGET_S; got ${String(timeBudgetInput)})`)
+      process.exit(1)
+    }
+    // altimate_change end
+    // altimate_change start — validate --max-tokens before anything runs (same reasoning as --max-turns)
+    if (args.maxTokens !== undefined && !RunTokenBudget.isValidMaxTokens(args.maxTokens)) {
+      UI.error(`--max-tokens must be a positive integer (got ${String(args.maxTokens)})`)
       process.exit(1)
     }
     // altimate_change end
@@ -723,12 +742,16 @@ You are speaking to a non-technical business executive. Follow these rules stric
 
       // altimate_change start — preserve the first budget event across work and finalization loops
       let budgetExhaustedEmitted = false
+      // A token limit first reached during finalization is still reported, once.
+      let tokenBudgetExhaustedEmitted = false
       // altimate_change end
       function emit(type: string, data: Record<string, unknown>) {
         if (args.format === "json") {
           // altimate_change start — finalization can exhaust its own allowance after the work budget
           if (type === "budget_exhausted") {
-            if (budgetExhaustedEmitted) return true
+            const token = data.limit_tokens !== undefined
+            if (token ? tokenBudgetExhaustedEmitted : budgetExhaustedEmitted) return true
+            if (token) tokenBudgetExhaustedEmitted = true
             budgetExhaustedEmitted = true
           }
           // altimate_change end
@@ -859,13 +882,23 @@ You are speaking to a non-technical business executive. Follow these rules stric
       let timeBudgetReminder = Promise.resolve()
       let timeBudgetAbort = Promise.resolve()
       let timeAbortRequested = false
-      const timeExhausted = () => timeBudgetDeadline === "hard"
+      // altimate_change start — a reached token budget takes the hard-deadline path: the same abort,
+      // the same one-shot finalization allowance, and the same exit status recovery on an answer.
+      // Created once the session id is known; absent without --max-tokens, so nothing else changes.
+      let tokenBudget: RunTokenBudget.Info | undefined
+      const timeExhausted = () => timeBudgetDeadline === "hard" || tokenBudget?.exhausted === true
+      // altimate_change end
       const elapsedSeconds = () => timeStarted === undefined ? 0 : (performance.now() - timeStarted) / 1000
       const budgetMetadata = () => ({
         max_turns: args.maxTurns,
         time_budget_s: timeBudget,
         elapsed_s: elapsedSeconds(),
         time_budget_deadline: timeBudgetDeadline,
+        // altimate_change start — token accounting, only when a token budget is set
+        max_tokens: tokenBudget?.limit,
+        tokens_used: tokenBudget === undefined ? undefined : RunTokenBudget.reportedTokens(tokenBudget.total),
+        token_budget_exhausted: tokenBudget?.exhausted,
+        // altimate_change end
         // altimate_change start — actual server request-boundary timestamps, in Unix milliseconds
         effort_downgraded_at: effortDowngradedAt,
         generation_interrupted_at: generationInterruptedAt,
@@ -891,6 +924,28 @@ You are speaking to a non-technical business executive. Follow these rules stric
         })
         // altimate_change end
       }
+      // altimate_change start — the step that reached the token limit ends the work phase like a hard deadline;
+      // reached during finalization or after a hard time deadline, it is still reported, without a second stop
+      const exhaustTokenBudget = (finalizing = false) => {
+        if (!sessionID || !tokenBudget) return
+        const stop = !finalizing && timeBudgetDeadline !== "hard"
+        if (stop) {
+          // The hard-deadline state also selects the effort-downgraded finalization headers.
+          timeBudgetDeadline = "hard"
+          timeBudgetStop.abort()
+          stopTimeBudget()
+          accounting.onBudgetExhausted("time")
+        }
+        tracer?.setRunBudget(budgetMetadata())
+        const used = RunTokenBudget.reportedTokens(tokenBudget.total)
+        const warning = stop
+          ? `Budget exceeded: reached ${tokenBudget.limit} token limit (${used} billed). Aborting work and requesting a final reply.`
+          : `Budget exceeded: reached ${tokenBudget.limit} token limit (${used} billed) while finalizing.`
+        emit("budget_exhausted", { limit_tokens: tokenBudget.limit, tokens_used: used })
+        warnBudget(warning)
+        if (stop) abortForTimeBudget()
+      }
+      // altimate_change end
       const checkTimeBudget = () => {
         if (!sessionID || !workActive || timeExhausted()) return
         const deadline = RunTimeBudget.deadline(elapsedSeconds(), timeBudget)
@@ -993,6 +1048,12 @@ You are speaking to a non-technical business executive. Follow these rules stric
           if (options?.signal?.aborted) break
           await runTracing?.observe(event)
           if (options?.signal?.aborted) break
+          // altimate_change start — count every session of the run before the root-session filters below;
+          // finalization turns are not cut off by the budget they are closing out
+          if (tokenBudget?.observe(event as { type: string; properties: Record<string, any> })) {
+            exhaustTokenBudget(options?.turnLimit !== undefined)
+          }
+          // altimate_change end
           // altimate_change start — preserve request boundaries and internal continuation ownership on attached streams
           const requestEvent = event as {
             type: string
@@ -1182,8 +1243,8 @@ You are speaking to a non-technical business executive. Follow these rules stric
               // one-shot). Firing aborts the churning prompt and hands off to the
               // confirm-DONE challenge phase after the event loop drains. Checked
               // BEFORE the json-mode emit-continue so headless drivers take this path too.
-              // altimate_change start — do not issue a completion challenge after a time abort
-              if (budgetAborted || timeBudgetDeadline === "hard") continue
+              // altimate_change start — do not issue a completion challenge after a time or token abort
+              if (budgetAborted || timeExhausted()) continue
               // altimate_change end
               if (idleDone.shouldChallenge()) {
                 idleDone.markChallengeIssued()
@@ -1462,6 +1523,9 @@ You are speaking to a non-technical business executive. Follow these rules stric
         UI.error("Session not found")
         process.exit(1)
       }
+      // altimate_change start — the token budget follows this session and every session descended from it
+      if (args.maxTokens !== undefined) tokenBudget = RunTokenBudget.create(sessionID, args.maxTokens)
+      // altimate_change end
       await share(sdk, sessionID)
 
       // Start trace now that sessionID is available
@@ -1578,14 +1642,17 @@ You are speaking to a non-technical business executive. Follow these rules stric
           process.exit(code)
         })
       }
-      const onSigint = () => {
+      // A group-directed signal the npm wrapper also forwards arrives twice; the
+      // copy is not the second signal that skips the flush above.
+      const acceptSignal = RunSignal.coalescer(RunSignal.forwardedByWrapper())
+      const onSigint = acceptSignal("SIGINT", () => {
         runTracing?.flushSync("Process interrupted")
         exitAfterMirrors(130)
-      }
-      const onSigterm = () => {
+      })
+      const onSigterm = acceptSignal("SIGTERM", () => {
         runTracing?.flushSync("Process interrupted")
         exitAfterMirrors(143)
-      }
+      })
       // altimate_change end
       // altimate_change start — honest rc on fatal abort. beforeExit firing
       // before the run finishes means the event loop drained before the run

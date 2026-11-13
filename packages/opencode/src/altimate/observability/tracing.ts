@@ -167,6 +167,10 @@ export interface RunBudgetMetadata {
   /** Unix milliseconds, matching generation and span timestamps. */
   effort_downgraded_at?: number
   generation_interrupted_at?: number
+  /** `--max-tokens` accounting; present only when a token budget is set. */
+  max_tokens?: number
+  tokens_used?: number
+  token_budget_exhausted?: boolean
 }
 
 interface TracePartIdentity {
