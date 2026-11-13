@@ -693,6 +693,7 @@ describe("each engine's own literal and statement rules", () => {
     // DuckLake's metadata functions read; its maintenance functions write.
     ["SELECT * FROM ducklake_snapshots('lake')", "duckdb", "read", false],
     ["SELECT * FROM ducklake_table_info('lake')", "duckdb", "read", false],
+    ["SELECT * FROM ducklake_settings('lake')", "duckdb", "read", false],
   ]
   for (const [sql, dialect, queryType, blocked] of cases)
     test(`${dialect}: ${sql.replace(/\n/g, "\\n")}`, () => {
