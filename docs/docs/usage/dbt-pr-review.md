@@ -209,12 +209,30 @@ jobs:
 | `target-base/compiled/…` | Compile the base ref into `target-base/` (below) | Equivalence proofs and column-breakage for modified models. |
 | `target/catalog.json` | `dbt docs generate` | Complete warehouse columns for column-lineage breakage. |
 
-Compiling the base (optional, for equivalence and column-breakage):
+The action can build these for you with `dbt_prepare` (off by default):
+
+```yaml
+      - uses: AltimateAI/altimate-code/github/review@main
+        with:
+          dbt_prepare: compile        # none | compile | full
+          dbt_command: dbt            # or "uv run dbt", "poetry run dbt"
+          dbt_profiles_dir: .         # relative to project_dir
+```
+
+- **`compile`:** runs `dbt compile` on the head, then compiles the PR's merge-base
+  into `target-base/` in a temporary worktree. This enables equivalence and
+  column-breakage proofs. It usually works offline.
+- **`full`:** also runs `dbt docs generate` for `catalog.json` (complete column
+  types). That needs warehouse credentials in the profile.
+- A base compile that fails is a warning: the review still runs, and the
+  affected models are listed as not verified.
+
+To build them yourself, compile the **merge-base**, not the base branch's tip:
 
 ```yaml
       - name: Compile the base into target-base/
         run: |
-          git worktree add ../base "origin/${{ github.base_ref }}"
+          git worktree add ../base "$(git merge-base origin/${{ github.base_ref }} HEAD)"
           (cd ../base && dbt deps && dbt compile --target-path "$GITHUB_WORKSPACE/target-base")
 ```
 
@@ -242,7 +260,7 @@ ways, or neither (it self-disables, leaving a deterministic-only review):
 Always pass keys as repo **secrets**. Warehouse credentials are consumed by the
 `dbt compile` step (via your `profiles.yml`), **not** by the review step. A
 complete, copy-paste workflow lives at
-[`github/review/examples/altimate-ingestion.yml`](https://github.com/AltimateAI/altimate-code/blob/main/github/review/examples/altimate-ingestion.yml).
+[`github/review/examples/dbt-pr-review.yml`](https://github.com/AltimateAI/altimate-code/blob/main/github/review/examples/dbt-pr-review.yml).
 
 Re-pushing commits updates the same summary comment in place; fixed findings are
 dropped on the next run. `--post` targets **GitHub** PRs (it reads `GITHUB_TOKEN` /
@@ -487,6 +505,14 @@ The deterministic rules group into four families:
 - **dbt unit tests.** A unit test whose `given` inputs are all `rows: []` is
   reported: it either never tests the model's logic, or expects rows the model has nothing to
   build from.
+- **Data tests that can't do their job.** These are checked on tests added or
+  changed in the PR:
+    - a test that compares a model with itself (`dbt_utils.equality` or
+      `equal_rowcount` against its own `ref`, or a `relationships` test pointing
+      at its own column) passes by construction;
+    - new tests that inherit `severity: warn` or an `error_if` threshold from
+      `dbt_project.yml` report failures without failing the build;
+    - a `dbt_project.yml` change that loosens those thresholds for a whole folder.
 - **Incremental and snapshot semantics.** Config is read from the manifest
   (project, yml and inline, as dbt merges them) with the head's inline
   `{{ config() }}` on top. Formatting-only edits never count as a change.
