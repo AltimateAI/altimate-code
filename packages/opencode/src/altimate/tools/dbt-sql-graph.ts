@@ -9,7 +9,7 @@ export const DbtSqlGraphTool = Tool.define("dbt_sql_graph", {
   async execute() {
     return {
       title: "dbt_sql_graph: not implemented",
-      metadata: { success: false },
+      metadata: { success: false, error: "not implemented" },
       output: "dbt_sql_graph is not implemented in this build of altimate-code yet.",
     }
   },

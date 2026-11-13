@@ -9,7 +9,7 @@ export const DbtHealthTool = Tool.define("dbt_health", {
   async execute() {
     return {
       title: "dbt_health: not implemented",
-      metadata: { success: false },
+      metadata: { success: false, error: "not implemented" },
       output: "dbt_health is not implemented in this build of altimate-code yet.",
     }
   },
