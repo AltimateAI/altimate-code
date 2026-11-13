@@ -212,6 +212,38 @@ describe("decision notices", () => {
     expect((await ReviewNotices.read(scopeA()))?.approved).toEqual([])
   })
 
+  test("past the cap the tracked approved requests stay the same from one check to the next", async () => {
+    // Two pages of approved requests, more than the client tracks; the server lists newest first.
+    const ids = Array.from({ length: ReviewNotices.MAX_APPROVED + 50 }, (_, i) => `a-${i}`)
+    mine = () => {
+      const at = Number(new URL(requests[requests.length - 1].url).searchParams.get("page") ?? "1")
+      const rows = ids.slice((at - 1) * 50, at * 50).map((id) => contribution({ public_id: id, status: "active" }))
+      return page(rows, Math.ceil(ids.length / 50), at)
+    }
+    await poll()
+    const first = (await ReviewNotices.read(scopeA()))?.approved
+    expect(first).toHaveLength(ReviewNotices.MAX_APPROVED)
+    const file = ReviewNotices.stateFile(scopeA())
+    const before = statSync(file).mtimeMs
+    await poll()
+    expect((await ReviewNotices.read(scopeA()))?.approved).toEqual(first)
+    // Nothing changed, so nothing was written.
+    expect(statSync(file).mtimeMs).toBe(before)
+  })
+
+  test("a removal of an approved request the capped list no longer reaches is still noticed", async () => {
+    mine = () => page([contribution({ public_id: "c-old", status: "active" })])
+    await poll()
+    let at = 0
+    mine = () => {
+      at++
+      return page(Array.from({ length: 50 }, (_, i) => contribution({ public_id: `n-${at}-${i}`, status: "active" })), 99, at)
+    }
+    byId = (id) => reply(contribution({ public_id: id, status: "retired", reviewed_by_name: "Olive", review_reason: "Old", decided_by_me: false }))
+    const { shown } = await poll()
+    expect(shown.map((n) => [n.public_id, n.status])).toEqual([["c-old", "retired"]])
+  })
+
   test("a request approved and removed between two checks is still told as removed", async () => {
     await ReviewNotices.recordSubmitted(scopeA(), { public_id: "c-1", status: "pending" })
     mine = () => page([contribution({ status: "retired", reviewed_by_name: "Olive", review_reason: "Duplicate" })])

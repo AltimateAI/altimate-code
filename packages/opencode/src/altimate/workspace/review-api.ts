@@ -59,8 +59,6 @@ export const Contribution = z.object({
   /** Whether the caller made the last decision (`reviewed_by`): a person is not told of their own retire. Absent from
    * older servers: read as not. */
   decided_by_me: z.boolean().default(false),
-  /** For owners and admins, on open requests: false when the author can no longer see the workspace. */
-  author_has_access: z.boolean().nullable().optional(),
 })
 export type Contribution = z.infer<typeof Contribution>
 

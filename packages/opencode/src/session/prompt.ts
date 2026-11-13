@@ -125,7 +125,13 @@ import { Telemetry } from "@/telemetry" // altimate_change — session telemetry
 import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — error_fingerprint payload
 // altimate_change start — the session's bound workspace rides on every telemetry row; workspace rules canonicalize bound
 // directories like the bindings cache does
-import { canonicalDirectory, endTurnBinding, turnBinding } from "@/altimate/workspace/state"
+import {
+  canonicalDirectory,
+  endTurnBinding,
+  turnBinding,
+  unvalidatedTurnBinding,
+  type AccountKey,
+} from "@/altimate/workspace/state"
 
 /** The session's workspace use, as session_end fields. Read only: the row is tracked first, then the
  * turn ends its telemetry entries (`Telemetry.endSession`), so the row itself still carries the
@@ -190,6 +196,9 @@ IMPORTANT:
 - This tool provides your final answer - no further actions are taken after calling it`
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
+// altimate_change start — the step-cap instruction for a json_schema request, whose answer is a tool call
+const STRUCTURED_MAX_STEPS = `The maximum number of steps allowed for this task has been reached. Call the StructuredOutput tool now with your final answer formatted according to the schema, based on the work done so far. Do NOT call any other tool and do NOT respond with plain text.`
+// altimate_change end
 
 // altimate_change start - request identity is independent of compaction message adjacency
 const RequestStarted = BusEvent.define(
@@ -560,7 +569,11 @@ export namespace SessionPrompt {
     }
     // altimate_change end
 
-    const message = await createUserMessage(input)
+    // altimate_change — a prompt that fails here runs no loop, so no later loop may take its verdict
+    const message = await createUserMessage(input).catch((err) => {
+      endTurnBinding(input.sessionID)
+      throw err
+    })
     await Session.touch(input.sessionID)
 
     // this is backwards compatibility for allowing `tools` to be specified when
@@ -702,6 +715,9 @@ export namespace SessionPrompt {
 
     const abort = resume_existing ? resume(sessionID) : start(sessionID)
     if (!abort) {
+      // altimate_change — this prompt joins the running loop, which named its workspace when it
+      // started, so its verdict is left for no later loop (the summarize route, a resume) to take.
+      endTurnBinding(sessionID)
       return new Promise<MessageV2.WithParts>((resolve, reject) => {
         const callbacks = state()[sessionID].callbacks
         callbacks.push({ resolve, reject })
@@ -757,6 +773,11 @@ export namespace SessionPrompt {
     let structuredOutput: unknown | undefined
 
     let step = 0
+    // altimate_change start — the agent's `steps` cap counts model requests only. `step` also
+    // counts iterations that run a compaction or a subtask and `continue`, which ended capped
+    // agents several requests early.
+    let modelSteps = 0
+    // altimate_change end
     // altimate_change start — which tool catalogs of this loop run the workspace
     // engine's turn boundary: the first, and the first after a new user request
     // joins the loop. `step` counts loop iterations, and an iteration can
@@ -1169,6 +1190,21 @@ export namespace SessionPrompt {
           tasks.push(...task)
         }
       }
+      // altimate_change start — filterCompacted renders the retained tail after
+      // the summary, so the array-last finished assistant is a pre-compaction turn
+      // still carrying its overflowing usage. Select it by stored order (the
+      // summary is stored after the tail) so the overflow check sees the summary
+      // and does not compact again before the next request. Ids are not used:
+      // an imported message keeps its caller-provided id, so a summary with a
+      // greater id than a newer finished assistant would hide that turn's usage.
+      lastFinished = undefined
+      for (const msg of msgs) {
+        if (msg.info.role !== "assistant" || !msg.info.finish) continue
+        const info = msg.info as MessageV2.Assistant
+        const order = lastFinished ? compareMessageOrder(messageOrder, info.id, lastFinished.id) : 1
+        if (order > 0 || (order === 0 && lastFinished !== undefined && info.id > lastFinished.id)) lastFinished = info
+      }
+      // altimate_change end
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
       // altimate_change start - only compaction-created continuations belong to the same request
@@ -1570,7 +1606,9 @@ export namespace SessionPrompt {
       // normal processing
       const agent = await Agent.get(lastUser.agent)
       const maxSteps = agent.steps ?? Infinity
-      const isLastStep = step >= maxSteps
+      // altimate_change start — see `modelSteps`; it advances right before `processor.process`
+      const isLastStep = modelSteps + 1 >= maxSteps
+      // altimate_change end
       // altimate_change start — only a completed compaction may change this prefix.
       // Recover the marker from persisted history too, including a process restart
       // between summary completion and the next model call.
@@ -1818,6 +1856,7 @@ export namespace SessionPrompt {
               // altimate_change start — file rules append only to this tool result
               lessons,
               workspaceId: boundWorkspace?.datamateId,
+              workspaceScope: boundWorkspace?.scope,
               turn: telemetryTurn,
               // altimate_change end
             }),
@@ -1968,7 +2007,7 @@ export namespace SessionPrompt {
         )
         // A subagent's session starts from the command's template or the model's prompt, not a typed one.
         if (!fromCommand && hasUserText && !session.parentID) {
-          await WorkspaceFirstEvents.promptSent(sessionID, boundWorkspace?.datamateId)
+          await WorkspaceFirstEvents.promptSent(sessionID, boundWorkspace?.datamateId, boundWorkspace?.scope)
         }
         // altimate_change end
         // altimate_change end — session start telemetry
@@ -2095,6 +2134,9 @@ export namespace SessionPrompt {
       // altimate_change start - every successful commit makes the next generation an echo, including after compaction
       const echoCommittedAnswer =
         format.type === "text" && agent.name === "analyst" && committedAnswer !== undefined
+      // At the step cap a text answer is produced with tools off. A json_schema request keeps
+      // its tools: its answer is the StructuredOutput tool call.
+      const textFinalStep = isLastStep && !echoCommittedAnswer && format.type !== "json_schema"
       const deferredText: MessageV2.TextPart[] = []
       // altimate_change end
 
@@ -2176,6 +2218,9 @@ export namespace SessionPrompt {
         }
       }
       // altimate_change end
+      // altimate_change start — only a request actually sent to the model counts toward the cap
+      modelSteps++
+      // altimate_change end
       const result = await processor.process({
         user: lastUser,
         // altimate_change start — correlate request-boundary snapshots with this assistant message
@@ -2206,20 +2251,27 @@ export namespace SessionPrompt {
             : isLastStep
               ? [
                   {
-                    role: "assistant" as const,
-                    content: MAX_STEPS,
+                    // The step-cap instruction is a user turn, like the echo above. Sent as a
+                    // trailing assistant message with every tool still offered, the gateway
+                    // rejected it and the run ended with no answer. A json_schema request keeps
+                    // its tools and answers through StructuredOutput, so it gets its own text.
+                    role: "user" as const,
+                    content: format.type === "json_schema" ? STRUCTURED_MAX_STEPS : MAX_STEPS,
                   },
                 ]
               : []),
           // altimate_change end
         ],
-        // altimate_change start - the final echo cannot spend another step on tools
-        tools: echoCommittedAnswer ? {} : tools,
+        // altimate_change start - the final echo, and the step-cap answer, cannot spend another step on tools.
+        // Text finalization uses the same toolless shape as compaction and title generation: no
+        // tools and toolChoice "none", so llm.ts flattens historical tool calls for the gateway.
+        tools: echoCommittedAnswer || textFinalStep ? {} : tools,
         deferText: echoCommittedAnswer ? deferredText : undefined,
         // altimate_change end
         model,
         // altimate_change start - a user output schema still takes precedence over text finalization
-        toolChoice: echoCommittedAnswer ? "none" : format.type === "json_schema" ? "required" : undefined,
+        toolChoice:
+          echoCommittedAnswer || textFinalStep ? "none" : format.type === "json_schema" ? "required" : undefined,
         // altimate_change end
       })
 
@@ -2633,8 +2685,9 @@ export namespace SessionPrompt {
           ? "abandoned"
           : "completed"
     // altimate_change start — emit quality signal, tool chain, and error fingerprint events
-    if (outcome === "completed" && toolCallCount > toolErrorCount) {
-      await WorkspaceFirstEvents.jobCompleted(sessionID, boundWorkspace?.datamateId)
+    // A subagent's turn is not the workspace's job: the parent's turn counts it through its `task` call.
+    if (outcome === "completed" && toolCallCount > toolErrorCount && !session.parentID) {
+      await WorkspaceFirstEvents.jobCompleted(sessionID, boundWorkspace?.datamateId, boundWorkspace?.scope)
     }
     Telemetry.track({
       type: "task_outcome_signal",
@@ -2837,6 +2890,8 @@ export namespace SessionPrompt {
     /** The workspace the calling turn resolved, for the rows its MCP calls emit, and the turn itself,
      * so a call landing after the turn was replaced does not count toward the replacement. */
     workspaceId?: number
+    /** The credential that turn's workspace was resolved under, noted for each tool call's plugins. */
+    workspaceScope?: AccountKey
     turn?: number
     // altimate_change end
   }) {
@@ -2962,6 +3017,8 @@ export namespace SessionPrompt {
             // altimate_change start — stamp authoritative tool source so clients render the right
             // badge. Shared with SessionTools.resolve (session/tools.ts) so the resolvers can't drift.
             const stamped = stampRegistryToolSource(output, item)
+            // The turn's credential, for this call's plugins: a first-event mark names its tenant.
+            using _callScope = WorkspaceFirstEvents.noteCallScope(ctx.callID, input.workspaceScope)
             // altimate_change end
             await Plugin.trigger(
               "tool.execute.after",
@@ -3180,6 +3237,22 @@ export namespace SessionPrompt {
   }
 
   async function createUserMessage(input: PromptInput) {
+    // altimate_change start — the workspace this message's attachment reads name: the turn's, or for a
+    // `noReply` prompt, which runs no turn, one read without the pin's validation or wait.
+    const attachmentWorkspace = async () =>
+      (input.noReply === true
+        ? await unvalidatedTurnBinding(Instance.directory)
+        : await turnBinding(input.sessionID, Instance.directory)
+      )?.datamateId
+    // Every part settles before a failed one is rethrown. A part still running after another failed could
+    // otherwise read the turn's workspace once `prompt` has cleared it, and leave a verdict for the next
+    // loop started without a prompt (summarize, resume) to take.
+    function settled<T>(results: PromiseSettledResult<T>[]): T[] {
+      const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected")
+      if (failed) throw failed.reason
+      return results.map((result) => (result as PromiseFulfilledResult<T>).value)
+    }
+    // altimate_change end
     const agentName = input.agent ?? (await Agent.defaultAgent())
     const agent = await Agent.get(agentName)
     if (!agent) {
@@ -3234,7 +3307,9 @@ export namespace SessionPrompt {
       id: part.id ? PartID.make(part.id) : PartID.ascending(),
     })
 
-    const parts = await Promise.all(
+    // altimate_change start — every part settles before a failure is rethrown (see `settled`)
+    const parts = await Promise.allSettled(
+      // altimate_change end
       input.parts.map(async (part): Promise<Draft<MessageV2.Part>[]> => {
         if (part.type === "file") {
           // before checking the protocol we check if this is an mcp resource because it needs special handling
@@ -3394,7 +3469,7 @@ export namespace SessionPrompt {
                 const readCtx: Tool.Context = {
                   sessionID: input.sessionID,
                   // altimate_change — the turn's workspace, so the attachment read's tool rows name it
-                  workspaceId: (await turnBinding(input.sessionID, Instance.directory))?.datamateId,
+                  workspaceId: await attachmentWorkspace(),
                   abort: new AbortController().signal,
                   agent: input.agent!,
                   messageID: info.id,
@@ -3463,6 +3538,8 @@ export namespace SessionPrompt {
                 const args = { filePath: filepath }
                 const listCtx: Tool.Context = {
                   sessionID: input.sessionID,
+                  // altimate_change — the turn's workspace, as on a file attachment's read
+                  workspaceId: await attachmentWorkspace(),
                   abort: new AbortController().signal,
                   agent: input.agent!,
                   messageID: info.id,
@@ -3562,7 +3639,9 @@ export namespace SessionPrompt {
           },
         ]
       }),
-    ).then((x) => x.flat().map(assign))
+      // altimate_change start — every part settles before a failure is rethrown (see `settled`)
+    ).then((x) => settled(x).flat().map(assign))
+    // altimate_change end
 
     await Plugin.trigger(
       "chat.message",

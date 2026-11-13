@@ -264,14 +264,20 @@ export async function OnboardingTelemetryPlugin(_input: PluginInput): Promise<Ho
       ) {
         // altimate_change — the workspace of the turn that ran the tool, carried by the hook input
         // from the trigger site: a tool returning after its turn was cancelled and replaced still
-        // names its own turn's workspace, not the replacement's.
+        // names its own turn's workspace, not the replacement's. None with the kill switch set.
+        const workspaceId = WorkspaceFirstEvents.firstEventWorkspace(input.workspaceId)
         void OnboardingTelemetry.emit(
-          { type: "first_job_completed", job, workspace_id: input.workspaceId },
+          { type: "first_job_completed", job, workspace_id: workspaceId, origin: "onboarding" },
           input.sessionID,
         )
         // Marked so the end of this turn, or a later session, doesn't send the workspace's row as well.
-        if (input.workspaceId !== undefined) {
-          await WorkspaceFirstEvents.claim("first_job_completed", input.workspaceId)
+        // Under the credential of the turn that ran the tool, which its workspace id belongs to.
+        if (workspaceId !== undefined) {
+          await WorkspaceFirstEvents.claim(
+            "first_job_completed",
+            workspaceId,
+            WorkspaceFirstEvents.callScope(input.callID),
+          )
         }
       }
     },
