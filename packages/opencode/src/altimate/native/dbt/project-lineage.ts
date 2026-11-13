@@ -91,10 +91,20 @@ export function hasNestedWith(sql: string): boolean {
   return /\(\s*with\s+(?:recursive\s+)?[a-z_][a-z0-9_]*\s+as\s*\(/i.test(stripSql(sql))
 }
 
+/** The engine's own name for an unaliased expression in a SELECT list: not the warehouse's name for it. */
+const ENGINE_NAME = /^_(?:col_)?\d+$/i
+const COLUMNS_CALL = /(?<![\w$])columns\s*\(/i
+
+/** Whether a SELECT list's output names are the columns the warehouse makes: none unaliased, none repeated. */
+function namesItsOutputs(outputs: string[]): boolean {
+  const names = outputs.map((name) => name.toLowerCase())
+  return names.length > 0 && new Set(names).size === names.length && !names.some((name) => ENGINE_NAME.test(name))
+}
+
 /**
  * Whether stripping the SQL's literals and comments left nothing it can't account for: no stray quote,
  * backslash, bracket, dollar-quote or unclosed comment. Fail-closed: when this is false, the text checks
- * below can't be sure what the SQL names, so the proof stops.
+ * below can't be sure what the SQL names, so the model gets that as its reason.
  */
 export function quotingIsClear(sql: string): boolean {
   if (/\$[A-Za-z_]*\$/.test(sql)) return false
@@ -486,11 +496,13 @@ export class ProjectLineage {
     for (const [k, c] of Object.entries<any>(n?.columns ?? {})) add(c?.name || k, c?.data_type || c?.type)
     if (n?.resource_type === "seed") for (const c of this.seedHeader(n)) add(c)
     if (this.traced(id) && !this.busy.has(id)) {
-      // From the SQL, a backslash and a digit mark an alias template (DuckDB `columns('.*') as "col_\0"`),
-      // not a column; a documented name keeps its backslash.
-      const real = (name: string) => !/\\\d/.test(name)
-      for (const e of this.lineage(id).edges) if (real(e.to)) add(e.to)
+      // Names from the SQL that aren't the warehouse's: the engine's own name for an unaliased expression
+      // (`_1`, `_col_1`), and, where the SQL calls COLUMNS(), an alias template with a backslash and a digit
+      // (`as "col_\0"`). A documented name is kept as it is.
       const sql = this.sqlOf(id)
+      const template = !!sql && COLUMNS_CALL.test(stripSql(sql))
+      const real = (name: string) => !ENGINE_NAME.test(name) && !(template && /\\\d/.test(name))
+      for (const e of this.lineage(id).edges) if (real(e.to)) add(e.to)
       if (sql) for (const c of this.outputColumns(sql)) if (real(c)) add(c)
     }
     const out = [...found.values()]
@@ -505,8 +517,9 @@ export class ProjectLineage {
 
   /**
    * The node's columns, lower-cased, when nothing can be missing from them; undefined otherwise.
-   * A model's are settled by a SELECT list with no `*` and no column named at run time (IDENTIFIER(),
-   * COLUMNS()), or, with a `*`, by lineage that resolved over parents whose own columns are settled.
+   * A model's are settled by a SELECT list with no `*`, no column named at run time (IDENTIFIER(),
+   * COLUMNS()), no unaliased expression and no repeated name (the warehouse names or renames those), or,
+   * with a `*`, by lineage that resolved over parents whose own columns are settled.
    * A seed's are its header, when it can be read; a source's are never settled.
    */
   settledColumns(id: string): Set<string> | undefined {
@@ -521,7 +534,7 @@ export class ProjectLineage {
       const sql = this.sqlOf(id)
       settled = !!sql && !/(?<![\w$])(?:identifier|columns)\s*\(/i.test(stripSql(sql)) && (selectsStar(sql)
         ? !this.lineage(id).unresolved && this.parents(id).every((p) => this.settledColumns(p) !== undefined)
-        : this.outputColumns(sql).length > 0)
+        : namesItsOutputs(this.outputColumns(sql)))
     }
     const out = settled ? names : undefined
     this.settledMemo.set(id, out)
@@ -604,6 +617,13 @@ export class ProjectLineage {
       if (seen.has(dedupe)) continue
       seen.add(dedupe)
       edges.push({ from, fromCol, to, ...howOfEdge(e, fromCol, to) })
+    }
+    // The engine names an unaliased expression twice: `_N`, as if the value passed through unchanged, and
+    // `_col_N`, how unknown. Keep the second; the warehouse picks the real name.
+    const named = new Set(edges.filter((e) => /^_col_\d+$/.test(e.to)).map((e) => `${e.from}|${e.fromCol}|${e.to.slice(5)}`))
+    for (let i = edges.length - 1; i >= 0; i--) {
+      const e = edges[i]!
+      if (/^_\d+$/.test(e.to) && named.has(`${e.from}|${e.fromCol}|${e.to.slice(1)}`)) edges.splice(i, 1)
     }
     const errors: unknown[] = Array.isArray(result.errors) ? result.errors : []
     const firstError = (): string => {

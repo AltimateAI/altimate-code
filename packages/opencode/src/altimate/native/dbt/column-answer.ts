@@ -230,7 +230,7 @@ export function columnAnswer(
   }
   const nameOf = (id: string) => String(p.node(id)?.name ?? id)
   const blockers = new Map<string, { reason: string; code: MayCarryReason } | null>()
-  /** What keeps a model's SQL from proving which columns it reads: null when nothing does. */
+  /** The first sign in a model's SQL that it may read the column without a traced edge: null when there is none. */
   const blockerOf = (id: string) => {
     if (blockers.has(id)) return blockers.get(id)!
     const found = ((): { reason: string; code: MayCarryReason } | null => {

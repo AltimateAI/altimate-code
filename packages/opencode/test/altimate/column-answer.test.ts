@@ -1104,6 +1104,56 @@ describe("both tools: names that aren't columns", () => {
     expect(dbtLineage({ manifest_path: write(m), model: "r" }).confidence).toBe("low")
   })
 
+  test("an unaliased expression adds no engine-made column: a select * child lists only the real ones", () => {
+    for (const [dialect, cast] of [["duckdb", "amount::decimal(10,2)"], ["snowflake", "amount::number(10,2)"], ["bigquery", "cast(amount as numeric)"]] as const) {
+      const m = {
+        metadata: { adapter_type: dialect },
+        sources: {},
+        nodes: {
+          "model.shop.orders": model("orders", [], "select 1 as order_id, 2.5 as amount, 'x' as status", ["order_id", "amount", "status"]),
+          "model.shop.r": model("r", ["orders"], `select order_id, ${cast} from ${T("orders")}`, ["order_id", "amount"]),
+          "model.shop.child": model("child", ["r"], `select * from ${T("r")}`),
+        },
+      }
+      const path = write(m)
+      const lineage = dbtLineage({ manifest_path: path, model: "child" })
+      expect(Object.keys((lineage.raw_lineage as any).column_dict ?? {}).map((k) => k.toLowerCase()).sort()).toEqual(["amount", "order_id"])
+      const a = columnAnswer(path, "orders", "amount")
+      const made = a.columns.map((c) => `${named(a, c.model)}.${c.column}`).filter((k) => /\._(col_)?\d+$/i.test(k))
+      // The value does reach r's unaliased output: one column, as the engine names it, never a child's.
+      expect(made).toEqual(["r._col_1"])
+    }
+  })
+
+  test("a real column whose name holds a backslash and a digit stays a column when nothing calls COLUMNS()", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], 'select 1 as id, 2 as "a\\1"'),
+        "model.shop.r": model("r", ["f"], `select "a\\1" as x from ${T("f")}`),
+      },
+    }
+    const path = write(m)
+    expect(columnReach(path, "f", "a\\1").models.map((one) => one.name)).toEqual(["r"])
+    expect(() => columnAnswer(path, "f", "a\\1")).not.toThrow()
+  })
+
+  test("a SELECT list that repeats a name doesn't settle: the warehouse renames the second", () => {
+    const m = {
+      metadata: { adapter_type: "duckdb" },
+      sources: {},
+      nodes: {
+        "model.shop.f": model("f", [], "select 1 as id, 2 as val", ["id", "val"]),
+        "model.shop.r": model("r", ["f"], `select id, val as id from ${T("f")}`),
+        "model.shop.child": model("child", ["r"], `select id_1 as x from ${T("r")}`),
+      },
+    }
+    const path = write(m)
+    expect(columnReach(path, "r", "id_1").models.map((one) => one.name)).toEqual(["child"])
+    expect(() => columnAnswer(path, "r", "id_1")).not.toThrow()
+  })
+
   test("a real column named like the internal placeholder keeps its edge", () => {
     const m = {
       metadata: { adapter_type: "duckdb" },
