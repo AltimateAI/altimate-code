@@ -505,6 +505,14 @@ The deterministic rules group into four families:
 - **dbt unit tests.** A unit test whose `given` inputs are all `rows: []` is
   reported: it either never tests the model's logic, or expects rows the model has nothing to
   build from.
+- **Data tests that can't do their job.** These are checked on tests added or
+  changed in the PR:
+    - a test that compares a model with itself (`dbt_utils.equality` or
+      `equal_rowcount` against its own `ref`, or a `relationships` test pointing
+      at its own column) passes by construction;
+    - new tests that inherit `severity: warn` or an `error_if` threshold from
+      `dbt_project.yml` report failures without failing the build;
+    - a `dbt_project.yml` change that loosens those thresholds for a whole folder.
 - **Incremental and snapshot semantics.** Config is read from the manifest
   (project, yml and inline, as dbt merges them) with the head's inline
   `{{ config() }}` on top. Formatting-only edits never count as a change.
