@@ -14,6 +14,14 @@ export interface ColumnReachModel {
   unique_id: string
   /** Its output columns that come from the traced column. */
   columns: string[]
+  /**
+   * How each of those columns (keyed as in `columns`) comes from the traced column, as the lineage
+   * engine classifies it: Original (carried as is), Alias (renamed), Transformation, Not sure or
+   * Non select. It covers the whole path from the traced column: a column is Original or Alias only
+   * when every hop is, so a column read from a calculation is never Original. A column whose
+   * edges carry no classification has no entry.
+   */
+  lens_types?: Record<string, string>
 }
 
 export interface ColumnReachUnsure {
@@ -54,6 +62,16 @@ export interface ColumnReach {
 const MAX_MODELS = 300
 const TRACED = new Set(["model", "snapshot"])
 
+// How far a classification is from "the value arrives unchanged", least to most.
+const LENS_ORDER = ["Original", "Alias", "Non select", "Not sure", "Transformation"]
+
+/** The classification of a path made of two: the one further from unchanged, unknown if either is. */
+function joinLens(a: string | undefined, b: string | undefined): string | undefined {
+  if (a === undefined || b === undefined) return undefined
+  const rank = (lens: string) => (LENS_ORDER.includes(lens) ? LENS_ORDER.indexOf(lens) : LENS_ORDER.length)
+  return rank(a) >= rank(b) ? a : b
+}
+
 /** "db"."schema"."orders"."amount" → { parts: ["db","schema","orders"], column: "amount" }, lower-cased. */
 function splitSource(source: unknown): { parts: string[]; column: string; exact: string } | null {
   const text =
@@ -62,8 +80,7 @@ function splitSource(source: unknown): { parts: string[]; column: string; exact:
   // Split on dots outside quotes: "a"."net.amount" is table a, column net.amount.
   // A doubled closing delimiter inside a quoted name is one character ("a""b" is a"b, [a]]b] is a]b).
   const raw = [...text.matchAll(/"((?:[^"]|"")*)"|`((?:[^`]|``)*)`|\[((?:[^\]]|\]\])*)\]|([^."`\[\]]+)/g)].map(
-    (m) =>
-      m[1]?.replaceAll('""', '"') ?? m[2]?.replaceAll("``", "`") ?? m[3]?.replaceAll("]]", "]") ?? m[4] ?? "",
+    (m) => m[1]?.replaceAll('""', '"') ?? m[2]?.replaceAll("``", "`") ?? m[3]?.replaceAll("]]", "]") ?? m[4] ?? "",
   )
   if (raw.length < 2) return null
   // `exact` keeps the column's case, for parents that document two columns differing only by case.
@@ -302,6 +319,8 @@ export function columnReach(manifestPath: string, model: string, column: string,
   if (unsettled) spelled = []
   else if (!exact && matches.length > 0) spelled = matches
   const trackedExact = new Map<string, Set<string>>([[targetId, new Set(spelled)]])
+  // How each tracked column comes from the traced column, per node (the traced column itself is Original).
+  const lensOf = new Map<string, Map<string, string | undefined>>([[targetId, new Map([[column0, "Original"]])]])
   const carries = (parent: string, source: { column: string; exact: string }) =>
     !!tracked.get(parent)?.has(source.column) &&
     (!caseCollides(lookup(parent), source.column) || !!trackedExact.get(parent)?.has(source.exact))
@@ -333,7 +352,8 @@ export function columnReach(manifestPath: string, model: string, column: string,
       unsure.add(id)
       continue
     }
-    const edges: { source: unknown; target: string; lineage_type?: string }[] = lineage?.column_lineage?.length
+    const edges: { source: unknown; target: string; lineage_type?: string; lens_type?: string }[] = lineage
+      ?.column_lineage?.length
       ? lineage.column_lineage
       : Object.entries<any>(lineage?.column_dict ?? {}).flatMap(([out, sources]) =>
           (Array.isArray(sources) ? sources : [sources]).map((source) => ({
@@ -372,6 +392,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
 
     const carried = new Set<string>()
     const carriedExact = new Set<string>()
+    const carriedLens = new Map<string, string | undefined>()
     let reads = false
     let ambiguous = false
     for (const edge of edges) {
@@ -386,7 +407,14 @@ export function columnReach(manifestPath: string, model: string, column: string,
       }
       reads = true
       if (edge.lineage_type !== "indirect" && typeof edge.target === "string") {
-        carried.add(edge.target.toLowerCase())
+        const out = edge.target.toLowerCase()
+        const lens = joinLens(
+          lensOf.get(candidates[0]!)?.get(source.column),
+          typeof edge.lens_type === "string" ? edge.lens_type : undefined,
+        )
+        // Several edges into one output: it is as far from unchanged as the furthest of them.
+        carriedLens.set(out, carried.has(out) ? joinLens(carriedLens.get(out), lens) : lens)
+        carried.add(out)
         carriedExact.add(edge.target)
       }
     }
@@ -402,10 +430,22 @@ export function columnReach(manifestPath: string, model: string, column: string,
     if (reads) {
       tracked.set(id, carried)
       trackedExact.set(id, carriedExact)
+      lensOf.set(id, carriedLens)
       // Outputs fed by an unsettled or ephemeral parent, or read through an ambiguous name, stay unsettled.
       // A NATURAL JOIN beside the column may join on it, or carry it on in another output.
       if (ambiguous || fromUnsure || viaEphemeral || partial || opaque) unsure.add(id)
-      reached.push({ name: nodes[id]?.name ?? id, unique_id: id, columns: [...carried].sort() })
+      const columns = [...carried].sort()
+      const lens_types: Record<string, string> = {}
+      for (const col of columns) {
+        const lens = carriedLens.get(col)
+        if (lens !== undefined) lens_types[col] = lens
+      }
+      reached.push({
+        name: nodes[id]?.name ?? id,
+        unique_id: id,
+        columns,
+        ...(Object.keys(lens_types).length > 0 && { lens_types }),
+      })
       continue
     }
 

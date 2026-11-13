@@ -6,6 +6,9 @@
  * findDownstream logic without a real napi binary or dbt project.
  */
 import { describe, test, expect, spyOn, afterAll, beforeEach } from "bun:test"
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import { initTool } from "./tool-fixture"
 import * as Dispatcher from "../../src/altimate/native/dispatcher"
 import { ImpactAnalysisTool } from "../../src/altimate/tools/impact-analysis"
@@ -270,5 +273,74 @@ describe("impact_analysis: blast radius percentage", () => {
     // 2 downstream out of 20 declared = 10.0%
     expect(result.output).toContain("10.0%")
     expect(result.output).toContain("2/20")
+  })
+})
+
+describe("impact_analysis: column reach carries how each column comes from the traced one", () => {
+  test("lens_types reach the metadata's column_reach for a rename and a calculation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "impact-lens-"))
+    try {
+      const node = (name: string, deps: string[], sql: string, columns: string[]) => ({
+        resource_type: "model",
+        unique_id: `model.shop.${name}`,
+        name,
+        alias: name,
+        schema: "main",
+        database: "shop",
+        depends_on: { nodes: deps },
+        compiled_code: sql,
+        columns: Object.fromEntries(columns.map((c) => [c, { name: c }])),
+      })
+      const nodes = {
+        "model.shop.fct_orders": node("fct_orders", [], "select order_id, revenue from raw.orders", [
+          "order_id",
+          "revenue",
+        ]),
+        "model.shop.mart_ltv": node("mart_ltv", ["model.shop.fct_orders"], "select revenue as ltv from fct_orders", [
+          "ltv",
+        ]),
+        "model.shop.mart_double": node(
+          "mart_double",
+          ["model.shop.fct_orders"],
+          "select revenue * 2 as doubled from fct_orders",
+          ["doubled"],
+        ),
+      }
+      const manifestPath = join(dir, "manifest.json")
+      writeFileSync(manifestPath, JSON.stringify({ metadata: { adapter_type: "duckdb" }, nodes, sources: {} }))
+      mockDispatcher({
+        "dbt.manifest": {
+          models: [
+            { name: "fct_orders", unique_id: "model.shop.fct_orders", depends_on: [], materialized: "table" },
+            {
+              name: "mart_ltv",
+              unique_id: "model.shop.mart_ltv",
+              depends_on: ["model.shop.fct_orders"],
+              materialized: "table",
+            },
+            {
+              name: "mart_double",
+              unique_id: "model.shop.mart_double",
+              depends_on: ["model.shop.fct_orders"],
+              materialized: "table",
+            },
+          ],
+          model_count: 3,
+          test_count: 0,
+        },
+      })
+      const tool = await initTool(ImpactAnalysisTool)
+      const result = await tool.execute(
+        { model: "fct_orders", column: "revenue", change_type: "modify", manifest_path: manifestPath, dialect: "duckdb" },
+        ctx,
+      )
+      const reach = result.metadata.column_reach as { models: { name: string; lens_types?: Record<string, string> }[] }
+      expect(Object.fromEntries(reach.models.map((m) => [m.name, m.lens_types]))).toEqual({
+        mart_ltv: { ltv: "Alias" },
+        mart_double: { doubled: "Transformation" },
+      })
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 })
