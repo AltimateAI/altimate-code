@@ -400,6 +400,18 @@ export function describeToolError(raw: string) {
   }
 }
 
+/** Error the processor records on a tool part still pending or running when its generation closes. */
+export const TOOL_ABORTED_ERROR = "Tool execution aborted"
+
+/**
+ * A tool part closed as aborted after the session's own abort signal fired (Stop/Esc, dispose)
+ * is a requested cancellation, already recorded as the session's "aborted" outcome; it is not a
+ * tool failure. The same error without a session abort is unexpected and is still reported.
+ */
+export function isRequestedToolAbort(error: unknown, sessionAborted: boolean): boolean {
+  return sessionAborted && error === TOOL_ABORTED_ERROR
+}
+
 export function buildErrorFingerprintEvent(
   sessionID: string,
   err: {

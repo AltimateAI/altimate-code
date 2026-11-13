@@ -27,6 +27,7 @@ import { PartID } from "./schema"
 import type { SessionID, MessageID } from "./schema"
 // altimate_change start — import Telemetry for per-generation token tracking
 import { Telemetry } from "@/altimate/telemetry"
+import { ErrorDetail } from "@/altimate/telemetry/error-detail" // altimate_change — shared aborted-tool error
 // altimate_change end
 // altimate_change start — write-starvation breaker + loop detection (fork-only
 // modules) and the run-mode flag that gates armed behavior.
@@ -80,7 +81,7 @@ async function interruptedToolPart(part: MessageV2.ToolPart, capTokens: number):
       },
     }
   }
-  return { ...part, state: { ...state, status: "error", error: "Tool execution aborted", metadata, time } }
+  return { ...part, state: { ...state, status: "error", error: ErrorDetail.TOOL_ABORTED_ERROR, metadata, time } }
 }
 // altimate_change end
 
