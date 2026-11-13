@@ -62,8 +62,14 @@ function adapter(overrides: Partial<SqlGraphAdapter> = {}): SqlGraphAdapter & { 
     getBulkSchemaFromDB: async (requested) => {
       calls.push(`schema:${requested.map((r) => r.unique_id).join(",")}`)
       return {
-        "source.shop.raw.raw_orders": [{ column: "ID", dtype: "INT" }, { column: "AMOUNT", dtype: "NUMBER" }],
-        "model.shop.stg_customers": [{ column: "ID", dtype: "INT" }, { column: "NAME", dtype: "TEXT" }],
+        "source.shop.raw.raw_orders": [
+          { column: "ID", dtype: "INT" },
+          { column: "AMOUNT", dtype: "NUMBER" },
+        ],
+        "model.shop.stg_customers": [
+          { column: "ID", dtype: "INT" },
+          { column: "NAME", dtype: "TEXT" },
+        ],
       }
     },
     getAdapterType: () => "snowflake",
@@ -110,7 +116,11 @@ describe("remapSqlLineage", () => {
     { uniqueId: "source.shop.raw.raw_orders", sourceTable: "raw_orders", resourceType: "source" },
     { uniqueId: "model.shop.stg_customers", alias: "STG_CUSTOMERS", resourceType: "model" },
   ]
-  const graph = remapSqlLineage(reply, { name: "orders", uniqueId: "model.shop.orders", resourceType: "model" }, parents)
+  const graph = remapSqlLineage(
+    reply,
+    { name: "orders", uniqueId: "model.shop.orders", resourceType: "model" },
+    parents,
+  )
 
   test("renames __final_select__ to the model in edges and nodes", () => {
     expect(graph.edges).toEqual([
@@ -203,12 +213,12 @@ describe("buildSqlGraph", () => {
   test("an unknown model, an uncompilable model and a missing manifest each fail with a reason", async () => {
     const deps = { fetchLineage: async () => reply, readFile: read, projectRoot: "/proj" }
     await expect(buildSqlGraph(adapter(), "nope", deps, signal)).rejects.toThrow("no model named nope")
-    await expect(buildSqlGraph(adapter({ unsafeCompileQuery: async () => undefined }), "orders", deps, signal)).rejects.toThrow(
-      "unable to compile orders",
-    )
-    await expect(buildSqlGraph(adapter({ parseManifest: async () => undefined }), "orders", deps, signal)).rejects.toThrow(
-      "manifest is not available",
-    )
+    await expect(
+      buildSqlGraph(adapter({ unsafeCompileQuery: async () => undefined }), "orders", deps, signal),
+    ).rejects.toThrow("unable to compile orders")
+    await expect(
+      buildSqlGraph(adapter({ parseManifest: async () => undefined }), "orders", deps, signal),
+    ).rejects.toThrow("manifest is not available")
   })
 
   test("a backend failure propagates and sends nothing after a cancel", async () => {

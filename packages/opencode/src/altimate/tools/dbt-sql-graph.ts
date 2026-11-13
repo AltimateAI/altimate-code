@@ -3,7 +3,12 @@ import crypto from "crypto"
 import fs from "fs"
 import path from "path"
 import { Tool } from "../../tool/tool"
-import { sqlLineage, type SqlLineageModelNode, type SqlLineageRequest, type SqlLineageResponse } from "../api/sql-lineage"
+import {
+  sqlLineage,
+  type SqlLineageModelNode,
+  type SqlLineageRequest,
+  type SqlLineageResponse,
+} from "../api/sql-lineage"
 import { dbtAdapterFor } from "./dbt-adapter-access"
 
 const FINAL_SELECT = "__final_select__"
@@ -40,7 +45,10 @@ type ManifestSource = {
 export type SqlGraphAdapter = {
   parseManifest(): Promise<
     | {
-        nodeMetaMap: { lookupByUniqueId(id: string): ManifestNode | undefined; lookupByBaseName(name: string): ManifestNode | undefined }
+        nodeMetaMap: {
+          lookupByUniqueId(id: string): ManifestNode | undefined
+          lookupByBaseName(name: string): ManifestNode | undefined
+        }
         sourceMetaMap: { get(name: string): ManifestSource | undefined }
       }
     | undefined
@@ -202,7 +210,9 @@ export function formatSqlGraph(model: string, graph: SqlGraph): string {
   const lines = [`SQL graph for ${model}: ${graph.nodes.length} nodes, ${graph.edges.length} edges`]
   for (const n of graph.nodes) {
     const from = inputs.get(n.name)
-    lines.push(`- ${n.name} (${n.type}${n.nodeId ? `, ${n.nodeId}` : ""}): ${n.columns.length} columns${from?.length ? `, from ${from.join(", ")}` : ""}`)
+    lines.push(
+      `- ${n.name} (${n.type}${n.nodeId ? `, ${n.nodeId}` : ""}): ${n.columns.length} columns${from?.length ? `, from ${from.join(", ")}` : ""}`,
+    )
   }
   return lines.join("\n")
 }
@@ -227,7 +237,11 @@ export const DbtSqlGraphTool = Tool.define("dbt_sql_graph", {
       const graph = await buildSqlGraph(
         access.adapter as SqlGraphAdapter,
         args.model,
-        { fetchLineage: sqlLineage, readFile: (f) => fs.readFileSync(f, "utf8"), projectRoot: await getDbtProjectRoot() },
+        {
+          fetchLineage: sqlLineage,
+          readFile: (f) => fs.readFileSync(f, "utf8"),
+          projectRoot: await getDbtProjectRoot(),
+        },
         ctx.abort,
       )
       return {
