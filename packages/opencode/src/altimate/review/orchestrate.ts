@@ -14,6 +14,8 @@ import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
 import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
+import { listMirrorsModel, type ConsumerColumnList } from "./consumer-lists"
+import { detectUnitTestFixtures } from "./unit-tests"
 import { type AiLaneStatus, type AiReviewInput, type AiReviewResult } from "./ai-review"
 
 /**
@@ -132,6 +134,16 @@ export interface ReviewRunner {
   lexicalScan?(addedLines: string[]): Promise<Array<{ rule: string; severity?: string; message: string; line?: string }>>
   /** Direct downstream models (name + file path) of a model, from the manifest DAG. */
   downstreamModels?(model: string): Promise<Array<{ name: string; path: string }>>
+  /**
+   * Consumers of a model that dbt refs don't show: exposures that depend on it,
+   * and whether it has an enforced contract (with the declared columns).
+   * Undefined when the model is not in the manifest.
+   */
+  modelConsumers?(
+    model: string,
+  ): Promise<
+    { exposures: Array<{ name: string; type?: string }>; contractEnforced: boolean; contractColumns: string[] } | undefined
+  >
   /** Column-lineage edges for a query: source `"table"."col"` → target output column. */
   columnLineage?(sql: string, dialect: string): Promise<Array<{ source: string; target: string }>>
   /** Classify a set of column names as PII (Email/SSN/…) with confidence + masking. */
@@ -213,6 +225,10 @@ export interface OrchestrateInput {
   scope?: Omit<ReviewScope, "unverified">
   /** Drop the regex catalog's cross-engine portability findings (single known engine). */
   suppressPortability?: boolean
+  /** The dialect came from config or the manifest, not the default guess. */
+  dialectKnown?: boolean
+  /** Opt-in explicit column lists outside dbt (see consumer-lists.ts). */
+  consumerLists?: ConsumerColumnList[]
   /** Which review policy was applied (see config.ts loadReviewPolicy). */
   policy?: VerdictEnvelope["policy"]
 }
@@ -604,6 +620,156 @@ async function columnBreakageLane(
       ruleKey: `lineage_breakage:column-removed`,
     }),
   ]
+}
+
+/** A query's output columns from column lineage (lowercased); empty when unknown or `*`. */
+async function outputColumns(runner: ReviewRunner, sql: string, dialect: string): Promise<Set<string>> {
+  if (!runner.columnLineage) return new Set()
+  const cols = (await runner.columnLineage(sql, dialect)).map((e) => e.target.toLowerCase()).filter(Boolean)
+  // A star in the output means the list is incomplete: report nothing rather than guess.
+  if (cols.some((c) => c === "*" || c.endsWith(".*"))) return new Set()
+  return new Set(cols)
+}
+
+/** Output columns added and removed by the change (both empty when either side is unknown). */
+async function columnDelta(
+  ctx: ModelContext,
+  runner: ReviewRunner,
+  dialect: string,
+): Promise<{ added: string[]; removed: string[]; current: Set<string> }> {
+  const none = { added: [], removed: [], current: new Set<string>() }
+  const { file, engineNewSql, engineOldSql } = ctx
+  if (!engineNewSql || file.status === "deleted") return none
+  const current = await outputColumns(runner, engineNewSql, dialect)
+  if (!current.size) return none
+  if (!hasOldSide(file)) return { added: [...current], removed: [], current }
+  if (!engineOldSql) return none
+  const before = await outputColumns(runner, engineOldSql, dialect)
+  if (!before.size) return none
+  return {
+    added: [...current].filter((c) => !before.has(c)),
+    removed: [...before].filter((c) => !current.has(c)),
+    current,
+  }
+}
+
+const ticks = (xs: string[]) => xs.map((x) => `\`${x}\``).join(", ")
+
+/**
+ * Consumers dbt refs don't show. A column removed or renamed on a model that
+ * feeds exposures (dashboards, apps, ML) or has an enforced contract breaks
+ * readers outside the DAG; the finding names them. And a new column missing
+ * from an enforced contract fails `dbt build` — reported unless the project
+ * says CI already runs the build (`ciRunsDbtBuild`), where dbt catches it.
+ */
+async function consumerContractLane(
+  ctx: ModelContext,
+  runner: ReviewRunner,
+  dialect: string,
+  opts: { ciRunsDbtBuild: boolean; changedYmlText: () => Promise<string[]> },
+): Promise<Finding[]> {
+  if (!runner.modelConsumers || !runner.columnLineage) return []
+  const model = modelNameFromPath(ctx.file.path)
+  const consumers = await runner.modelConsumers(model)
+  if (!consumers || (!consumers.exposures.length && !consumers.contractEnforced)) return []
+  const { added, removed } = await columnDelta(ctx, runner, dialect)
+  const out: Finding[] = []
+
+  if (removed.length) {
+    const who: string[] = []
+    if (consumers.exposures.length)
+      who.push(`exposure(s) ${consumers.exposures.map((e) => `\`${e.name}\`${e.type ? ` (${e.type})` : ""}`).join(", ")}`)
+    if (consumers.contractEnforced) who.push("an enforced contract, so readers outside dbt rely on its columns")
+    out.push(
+      makeFinding({
+        severity: "warning",
+        category: "lineage_breakage",
+        title: `${model}: removed column(s) on a model with declared consumers`,
+        body:
+          `This change removes ${ticks(removed)}. \`${model}\` has ${who.join(" and ")}. ` +
+          `Keep the column for a deprecation period, or publish a new model version and migrate the consumers.`,
+        file: ctx.file.path,
+        model,
+        confidence: "high",
+        evidence: {
+          tool: "dbt.manifest",
+          result: { removed, exposures: consumers.exposures.map((e) => e.name), contractEnforced: consumers.contractEnforced },
+        },
+        ruleKey: "lineage_breakage:consumer-column-removed",
+      }),
+    )
+  }
+
+  if (consumers.contractEnforced && !opts.ciRunsDbtBuild && consumers.contractColumns.length && added.length) {
+    const declared = new Set(consumers.contractColumns)
+    const yml = await opts.changedYmlText()
+    // A column the PR adds to a changed yml is declared even when the manifest predates the PR.
+    const inChangedYml = (c: string) =>
+      yml.some((t) => new RegExp(`name:\\s*["']?${c.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}["']?\\s*$`, "im").test(t))
+    const missing = added.filter((c) => !declared.has(c) && !inChangedYml(c))
+    if (missing.length)
+      out.push(
+        makeFinding({
+          severity: "warning",
+          category: "contract_violation",
+          title: `${model}: new column(s) missing from the enforced contract`,
+          body:
+            `${ticks(missing)} ${missing.length === 1 ? "is" : "are"} selected but not declared in \`${model}\`'s contract, ` +
+            `so \`dbt build\` fails the contract check. Declare ${missing.length === 1 ? "it" : "them"} (with \`data_type\`) in the model's yml.`,
+          file: ctx.file.path,
+          model,
+          confidence: "high",
+          evidence: { tool: "dbt.manifest", result: { missing } },
+          ruleKey: "contract_violation:contract-missing-column",
+        }),
+      )
+  }
+  return out
+}
+
+/**
+ * Opt-in consumer column lists (`consumerColumnLists` in review.yml): when the
+ * PR changes a model's columns, every configured list that mirrors the model
+ * must gain the new columns and drop the removed ones.
+ */
+async function consumerListLane(
+  ctx: ModelContext,
+  runner: ReviewRunner,
+  dialect: string,
+  lists: ConsumerColumnList[],
+): Promise<Finding[]> {
+  if (!lists.length) return []
+  const model = modelNameFromPath(ctx.file.path)
+  const mirrors = lists.filter((l) => listMirrorsModel(l, model))
+  if (!mirrors.length || !hasOldSide(ctx.file)) return []
+  const { added, removed } = await columnDelta(ctx, runner, dialect)
+  if (!added.length && !removed.length) return []
+  const out: Finding[] = []
+  for (const list of mirrors) {
+    const have = new Set(list.columns)
+    const missing = added.filter((c) => !have.has(c))
+    const stale = removed.filter((c) => have.has(c))
+    if (!missing.length && !stale.length) continue
+    const parts: string[] = []
+    if (missing.length) parts.push(`lacks the new column(s) ${ticks(missing)}`)
+    if (stale.length) parts.push(`still lists the removed column(s) ${ticks(stale)}`)
+    out.push(
+      makeFinding({
+        severity: "warning",
+        category: "lineage_breakage",
+        title: `${model}: column list in ${list.path} is out of step`,
+        body:
+          `\`${list.path}\` declares an explicit column list for \`${model}\` that ${parts.join(" and ")}. ` +
+          `Readers of that list will drop or fail on these columns; update it in this PR.`,
+        file: ctx.file.path,
+        model,
+        confidence: "high",
+        evidence: { tool: "consumer-column-list", result: { list: list.path, missing, stale } },
+        ruleKey: `lineage_breakage:consumer-list:${list.path}`,
+      }),
+    )
+  }
+  return out
 }
 
 /**
@@ -1262,6 +1428,14 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     : tierResult.reasons
 
   const lanes = new Set(input.config.reviewers.length ? input.config.reviewers : TIER_LANES[tier])
+  // New content of the PR's changed schema files, read once and only if a lane asks.
+  let ymlText: Promise<string[]> | undefined
+  const changedYmlText = () =>
+    (ymlText ??= Promise.all(
+      reviewable
+        .filter((f) => f.kind === "schema_yml" && f.status !== "deleted")
+        .map((f) => (getContent?.(f.path, "new") ?? Promise.resolve(undefined)).then((t) => t ?? "").catch(() => "")),
+    ))
 
   const all: Finding[][] = []
   // Files where the diff-scoped PII classifier completed (looked at the change),
@@ -1296,6 +1470,12 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     if (lanes.has("lineage_breakage")) {
       all.push(lineageBreakageLane(ctx.file, ctx.impact, input.rubric))
       tasks.push(columnBreakageLane(ctx, input.runner, getCompiled, dialect))
+    }
+    if (lanes.has("lineage_breakage") || lanes.has("contract_violation")) {
+      tasks.push(
+        consumerContractLane(ctx, input.runner, dialect, { ciRunsDbtBuild: input.config.ciRunsDbtBuild, changedYmlText }),
+      )
+      tasks.push(consumerListLane(ctx, input.runner, dialect, input.consumerLists ?? []))
     }
     if (lanes.has("test_coverage")) tasks.push(missingGrainTestLane(ctx, input.runner))
     // PII classification always runs (cheap name-pattern check, diff-scoped to
@@ -1337,7 +1517,7 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
     )
     // Deterministic dbt anti-pattern detectors run on RAW SQL + diff (need Jinja).
     if (lanes.has("dbt_patterns")) {
-      all.push(detectModelPatterns(ctx.file, ctx.newSql, input.rubric))
+      all.push(detectModelPatterns(ctx.file, ctx.newSql, input.rubric, { dialect, dialectKnown: !!input.dialectKnown }))
       tasks.push(lexicalLane(ctx.file, input.runner))
     }
     // dbt config/Jinja lint (materialization / incremental / contract) — gate on its
@@ -1410,7 +1590,10 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           file.status !== "added" ? getContent?.(oldRef, "old") : Promise.resolve(undefined),
           file.status !== "deleted" ? getContent?.(file.path, "new") : Promise.resolve(undefined),
         ])
-        return detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent })
+        return [
+          ...detectSchemaYmlPatterns(file, input.rubric, { oldContent, newContent }),
+          ...detectUnitTestFixtures(file, oldContent, newContent),
+        ]
       }),
     )
     for (const findings of schemaFindingSets) all.push(findings)

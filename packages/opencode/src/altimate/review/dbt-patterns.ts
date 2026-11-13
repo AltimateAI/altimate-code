@@ -4,7 +4,7 @@ import { Log } from "@/altimate/util/log"
 import { type Finding, type Severity, type ReviewCategory, makeFinding } from "./finding"
 import { type ChangedFile, fileKind } from "./diff-filter"
 import { type Rubric, clampSeverity, exclusionReason } from "./rubric"
-import { evaluateCatalog } from "./rule-catalog"
+import { evaluateCatalog, type CatalogContext } from "./rule-catalog"
 
 /** Local copy to avoid a cycle with orchestrate.ts. */
 function modelNameFromPath(p: string): string {
@@ -765,7 +765,12 @@ const MODEL_DETECTORS: Detector[] = [
 ]
 
 /** Run the dbt anti-pattern detectors over a changed MODEL file. */
-export function detectModelPatterns(file: ChangedFile, newSql: string | undefined, rubric: Rubric): Finding[] {
+export function detectModelPatterns(
+  file: ChangedFile,
+  newSql: string | undefined,
+  rubric: Rubric,
+  catalogCtx?: CatalogContext,
+): Finding[] {
   const kind = fileKind(file)
   if (!isModelSql(kind) || file.status === "deleted" || !newSql) return []
   const { added, removed } = splitDiff(file.diff)
@@ -784,7 +789,7 @@ export function detectModelPatterns(file: ChangedFile, newSql: string | undefine
     if (f) out.push({ ...f, severity: clampSeverity(f.category, f.severity, f.confidence) })
   }
   // Declarative rule catalog (data-driven checks) complements the programmatic detectors.
-  out.push(...evaluateCatalog(file, newSql, added, removed, rubric))
+  out.push(...evaluateCatalog(file, newSql, added, removed, rubric, catalogCtx))
   return out.filter((f) => !exclusionReason(f, rubric))
 }
 

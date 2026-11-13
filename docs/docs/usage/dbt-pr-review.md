@@ -272,6 +272,8 @@ riskTierPathTokens:           # OFF by default — see "Risk-tier path tokens" b
   finops: [preset:finops]     # promote any FinOps-named path to `full` tier
   pii: [ssn, email, phone]    # or supply your own case-insensitive tokens
 allowForceTier: true          # set false in gate CI: --force-tier is then rejected
+ciRunsDbtBuild: false         # true when CI runs `dbt build`: dbt then enforces contracts itself
+consumerColumnLists: []       # OFF by default — see "Consumers outside dbt" below
 rubric:
   blockOn: [lineage_breakage, contract_violation, pii_exposure, semantic_change]
   warningPatternThreshold: 3
@@ -302,6 +304,31 @@ rubric:
   pattern rule blocking, add its id to `rubric.blockingRules`. A blocking
   review is dismissed only by a later run that completed: when an engine call
   or a file failed, the earlier block stays.
+
+### Consumers outside dbt
+
+A column removed or renamed can break readers the dbt DAG doesn't show. With a
+manifest, the review reports:
+
+- **Exposures and contracts.** Removing a column from a model that has
+  `exposures` (dashboards, apps, ML) or an enforced contract names those
+  consumers and suggests a deprecation period or a new model version.
+  Downstream dbt models that select the column are reported separately, with
+  the models named.
+- **Contract vs `SELECT`.** A new column missing from an enforced contract
+  fails `dbt build`. The review reports it unless `ciRunsDbtBuild: true`, in
+  which case dbt already catches it in CI. A column the PR declares in a changed
+  yml counts as declared even when the manifest predates the PR.
+- **Explicit column lists (opt-in).** Projects whose loaders or exports keep
+  their own column list can have it checked: when a PR adds or removes a
+  model's columns, each matching list must follow.
+
+```yaml
+consumerColumnLists:
+  - files: "loaders/**/*.py"                        # repo-relative glob
+    pattern: "MART_COLUMNS\\s*=\\s*\\[([^\\]]*)\\]"   # first capture group = the list
+    model: fct_orders                               # omit: files that mention the model
+```
 
 ### What the PR comment shows
 
@@ -448,6 +475,15 @@ The deterministic rules group into four families:
   cartesian (`JOIN` without a condition), `NOT IN (… NULL)`, sum-of-a-ratio,
   non-portable dialect functions, integer-multiplication overflow, PK-aware
   join fan-out, timezone-in-hash-key.
+- **Engine-dependent rules read an adapter table.** Where behavior differs by
+  engine, a rule checks the project's adapter (from the manifest or `dialect`)
+  instead of assuming one. Example: `int / int` (and `count(…) / count(…)`)
+  truncates on Postgres, Redshift, Trino/Athena and SQL Server, so it is a
+  correctness finding there. On Snowflake, BigQuery, Databricks and DuckDB it is
+  only portability advice, shown for packages (`portability: true`).
+- **dbt unit tests.** A unit test whose `given` inputs are all `rows: []` is
+  reported: it either can't fail, or expects rows the model has nothing to
+  build from.
 - **dbt config / Jinja (`DBT0xx`).** A core **minijinja** parser reads
   `{{ config(...) }}` and the model body: incremental model without an
   `is_incremental()` guard, `merge`/`delete+insert` without a `unique_key`,

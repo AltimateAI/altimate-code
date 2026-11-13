@@ -18,6 +18,7 @@ import { buildCatalogSchemaContext } from "./schema-context"
 import { createDispatcherRunner } from "./runner"
 import { runReview } from "./orchestrate"
 import { runAiReview } from "./ai-review"
+import { loadConsumerLists } from "./consumer-lists"
 import type { ReviewMode, VerdictEnvelope } from "./verdict"
 import type { ChangedFile } from "./diff-filter"
 
@@ -384,6 +385,15 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     ? undefined
     : makeCompiledResolver({ cwd: dbtRootReal, projectName, pathPrefix })
 
+  const consumerLists = config.consumerColumnLists.length
+    ? await loadConsumerLists({
+        configs: config.consumerColumnLists,
+        gitRoot,
+        head: opts.head,
+        read: (p) => getContent(p, "new"),
+      })
+    : []
+
   return runReview({
     changedFiles,
     config,
@@ -412,6 +422,8 @@ export async function reviewPullRequest(opts: ReviewPullRequestOptions): Promise
     staleManifest,
     layout,
     suppressPortability: config.portability === undefined ? dialectKnown : !config.portability,
+    dialectKnown,
+    consumerLists,
     policy: { source: policy.source, hash: policy.hash, changedInPr: policy.changedInPr.length ? policy.changedInPr : undefined },
     scope: {
       baseRef: resolved?.ref ?? opts.base,
