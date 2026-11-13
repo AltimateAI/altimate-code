@@ -36,8 +36,20 @@ export function verdictHeadline(env: VerdictEnvelope): string {
   return `${VERDICT_LABEL[env.verdict]} — ${counts} (${tierLabel})`
 }
 
+/** Default size budget for the posted PR comment (characters). */
+export const SUMMARY_BUDGET_CHARS = 5_000
+/** The same rule on this many models or more collapses into one bullet. */
+export const GROUP_MIN = 3
+
+export interface RenderOptions {
+  /** Character budget for the comment; findings beyond it are counted, not listed.
+   *  `Infinity` renders everything (local CLI output). */
+  maxChars?: number
+}
+
 /** Full PR/MR summary comment body (markdown), prefixed with the dedup marker. */
-export function renderSummary(env: VerdictEnvelope): string {
+export function renderSummary(env: VerdictEnvelope, opts: RenderOptions = {}): string {
+  const maxChars = opts.maxChars ?? SUMMARY_BUDGET_CHARS
   const lines: string[] = [REVIEW_MARKER, "", `## ${verdictHeadline(env)}`, ""]
 
   if (env.summary.degraded) {
@@ -80,33 +92,15 @@ export function renderSummary(env: VerdictEnvelope): string {
     lines.push(`> 🧭 **Tier: ${env.tier}** — ${shown}${overflow}`, "")
   }
 
-  if (!env.findings.length) {
-    lines.push("No issues found in the changed dbt models. 🎉", "")
-  } else {
-    const grouped = groupBySeverity(env.findings)
-    for (const sev of ["critical", "warning", "suggestion"] as const) {
-      const items = grouped[sev]
-      if (!items.length) continue
-      lines.push(`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${items.length})`, "")
-      for (const f of items) {
-        const loc = f.file + (f.startLine ? `:${f.startLine}` : "")
-        lines.push(
-          `- **${f.title}**  \n  ${oneLine(f.body)}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
-        )
-      }
-      lines.push("")
-    }
-  }
-
+  const tail: string[] = []
   if (env.override) {
-    lines.push(
+    tail.push(
       `> 🔓 **Break-glass override** by @${env.override.by}: ${env.override.reason}`,
       `> (would have been \`${env.override.priorVerdict}\`)`,
       "",
     )
   }
-
-  lines.push(
+  tail.push(
     "---",
     `<sub>altimate dbt-pr-review · verdict \`${env.verdict}\`` +
       (env.signature ? ` · signed \`${env.signature.slice(0, 18)}…\`` : "") +
@@ -115,7 +109,90 @@ export function renderSummary(env: VerdictEnvelope): string {
       (env.ai?.state === "ok" && env.ai.model ? ` · AI \`${env.ai.model}\`` : "") +
       "</sub>",
   )
-  return lines.join("\n")
+
+  if (!env.findings.length) {
+    lines.push("No issues found in the changed dbt models. 🎉", "")
+    return [...lines, ...tail].join("\n")
+  }
+
+  // Findings fill the budget left after the fixed parts, most severe first.
+  // What does not fit is counted, never silently dropped: the envelope keeps
+  // every finding.
+  const overflowReserve = 220
+  let used = [...lines, ...tail].join("\n").length + overflowReserve
+  let hidden = 0
+  const grouped = groupBySeverity(env.findings)
+  for (const sev of ["critical", "warning", "suggestion"] as const) {
+    const items = grouped[sev]
+    if (!items.length) continue
+    const heading = [`### ${SEVERITY_EMOJI[sev]} ${capitalize(sev)} (${items.length})`, ""]
+    const bullets = bulletsFor(items)
+    let headed = false
+    for (const b of bullets) {
+      const cost = b.text.length + 1 + (headed ? 0 : heading.join("\n").length + 2)
+      if (used + cost > maxChars) {
+        hidden += b.count
+        continue
+      }
+      if (!headed) {
+        lines.push(...heading)
+        headed = true
+      }
+      lines.push(b.text)
+      used += cost
+    }
+    if (headed) lines.push("")
+  }
+  if (hidden) {
+    lines.push(
+      `> … ${hidden} more finding(s) not shown to keep this comment short — the full list is in the verdict envelope ` +
+        "(`altimate review --json`, or the action's `--output` artifact).",
+      "",
+    )
+  }
+  return [...lines, ...tail].join("\n")
+}
+
+/** A finding's title without its leading `model: `, with backticked names
+ *  blanked, so the same rule on different models/columns shares a key. */
+function ruleTitle(f: Finding): string {
+  const t = f.model && f.title.startsWith(`${f.model}: `) ? f.title.slice(f.model.length + 2) : f.title
+  return t.replace(/`[^`]*`/g, "`…`")
+}
+
+/** Render findings of one severity as bullets; a rule repeated on GROUP_MIN or
+ *  more models collapses into a single bullet listing the models. */
+function bulletsFor(items: Finding[]): Array<{ text: string; count: number }> {
+  const groups = new Map<string, Finding[]>()
+  for (const f of items) {
+    const key = `${f.category}|${ruleTitle(f)}`
+    const g = groups.get(key)
+    if (g) g.push(f)
+    else groups.set(key, [f])
+  }
+  const out: Array<{ text: string; count: number }> = []
+  for (const g of groups.values()) {
+    if (g.length >= GROUP_MIN) {
+      const names = [...new Set(g.map((f) => f.model ?? f.file))]
+      const shown = names.slice(0, 8).map((n) => `\`${n}\``).join(", ")
+      const more = names.length > 8 ? ` (+${names.length - 8} more)` : ""
+      out.push({
+        text:
+          `- **${ruleTitle(g[0])}** — ${g.length} findings across ${names.length} model(s): ${shown}${more}  \n` +
+          `  ${oneLine(g[0].body)}  \n  <sub>${g[0].category}</sub>`,
+        count: g.length,
+      })
+      continue
+    }
+    for (const f of g) {
+      const loc = f.file + (f.startLine ? `:${f.startLine}` : "")
+      out.push({
+        text: `- **${f.title}**  \n  ${oneLine(f.body)}  \n  <sub>\`${loc}\`${f.degraded ? " · _unverified_" : ""} · ${f.category}</sub>`,
+        count: 1,
+      })
+    }
+  }
+  return out
 }
 
 /**
@@ -139,6 +216,11 @@ export function coverageNotes(env: VerdictEnvelope): string[] {
   }
   if (env.scope?.outOfScopeFiles)
     notes.push(`${env.scope.outOfScopeFiles} changed file(s) outside the dbt project were not reviewed.`)
+  if (env.scope?.movedUnchangedFiles)
+    notes.push(
+      `${env.scope.movedUnchangedFiles} file(s) moved without edits; their SQL was not re-reviewed. ` +
+        "Folder-level config in `dbt_project.yml` (`+schema`, `+materialized`, `+tags`) can still change where and how a moved model builds.",
+    )
   if (env.ai && env.ai.state !== "ok") {
     const what = { skipped: "skipped", timeout: "timed out", error: "failed" }[env.ai.state]
     notes.push(`Advisory AI review ${what}${env.ai.reason ? `: ${env.ai.reason}` : ""}.`)
@@ -154,14 +236,28 @@ export interface InlineComment {
   body: string
 }
 
-export function inlineComments(env: VerdictEnvelope): InlineComment[] {
+/** Hidden per-finding marker on inline comments, keyed by the finding's stable
+ *  fingerprint (rule, file, model, column — not the line), so a rerun can tell
+ *  which findings are already on the PR. */
+export function findingMarker(id: string): string {
+  return `<!-- altimate-finding:${id} -->`
+}
+
+/** Finding ids already posted, read from existing inline comment bodies. */
+export function postedFindingIds(bodies: Array<string | null | undefined>): Set<string> {
+  const out = new Set<string>()
+  for (const b of bodies) for (const m of (b ?? "").matchAll(/<!-- altimate-finding:([\w-]+) -->/g)) out.add(m[1])
+  return out
+}
+
+export function inlineComments(env: VerdictEnvelope, alreadyPosted: Set<string> = new Set()): InlineComment[] {
   return env.findings
-    .filter((f) => typeof f.startLine === "number")
+    .filter((f) => typeof f.startLine === "number" && !alreadyPosted.has(f.id))
     .map((f) => ({
       path: f.file,
       line: f.startLine!,
       side: "RIGHT" as const,
-      body: `${SEVERITY_EMOJI[f.severity]} **${f.title}**\n\n${f.body}`,
+      body: `${SEVERITY_EMOJI[f.severity]} **${f.title}**\n\n${f.body}\n\n${findingMarker(f.id)}`,
     }))
 }
 

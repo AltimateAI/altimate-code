@@ -260,6 +260,8 @@ mode: comment                 # comment | gate
 severityThreshold: suggestion
 manifestPath: target/manifest.json
 dialect: snowflake
+portability: false            # cross-engine advice; default off once the engine is known
+                              # (set true for packages that support several adapters)
 reviewers: []                 # empty = risk-tier defaults; or pin lanes
 dataDiff:                     # OFF by default — see "Data-diff in CI" below
   enabled: false
@@ -278,6 +280,22 @@ rubric:
     allowSelectStarInStaging: true
     skipNonProdModels: true
 ```
+
+### What the PR comment shows
+
+- **One summary comment**, updated in place on every push, capped at about
+  5,000 characters. Critical findings come first; anything that does not fit is
+  counted, and the full list is always in the verdict envelope
+  (`altimate review --json`). Local CLI output is never truncated.
+- **Repeated rules are grouped:** the same rule on three or more models is one
+  bullet listing the models.
+- **Inline comments only on lines of the PR's diff.** Findings computed on
+  compiled SQL, or on unchanged lines, stay in the summary.
+- **No re-posting on reruns:** each inline comment carries the finding's
+  fingerprint, so a push does not repeat findings already on the PR, and a
+  non-blocking rerun with nothing new only updates the summary.
+- **PII:** flagged only for PII columns the change newly exposes, not for
+  columns the base already surfaced.
 
 ### Risk-tier path tokens
 
