@@ -5,6 +5,7 @@ import {
   modelBody,
   modelSemantics,
   snapshotFindings,
+  snapshotYmlFindings,
   varScopedColumns,
   type IncrementalInput,
 } from "../../src/altimate/review/incremental-semantics"
@@ -32,7 +33,8 @@ function input(over: Partial<IncrementalInput>): IncrementalInput {
     dialect: "snowflake",
     dialectKnown: true,
     prText: "",
-    hasConsumers: false,
+    hasExposures: false,
+    sliceVars: [],
     columnDelta: async () => ({ added: [], removed: [] }),
     ...over,
   }
@@ -54,46 +56,44 @@ describe("config parsing", () => {
       materialized: "incremental",
       on_schema_change: "ignore",
       unique_key: "id",
-      concurrent_batches: false,
     })
-    expect(s).toMatchObject({ materialized: "incremental", onSchemaChange: "fail", uniqueKey: ["id"], concurrentBatches: false })
+    expect(s).toMatchObject({ materialized: "incremental", onSchemaChange: "fail", uniqueKey: ["id"] })
   })
 
   test("the model body ignores config, comments and whitespace", () => {
     expect(modelBody("{{ config(a='b') }}\nselect 1 -- x\n")).toBe(modelBody("{# doc #}{{ config(a='c') }} select   1"))
   })
 
-  test("columns scoped by a var are found", () => {
-    expect(varScopedColumns("select * from t where t.tenant_id = '{{ var(\"tenant\") }}' and region in ({{ var('regions') }})")).toEqual([
-      "tenant_id",
-      "region",
-    ])
+  test("only columns compared to a listed slice var count", () => {
+    const sql = "select * from t where t.tenant_id = '{{ var(\"tenant\") }}' and currency = '{{ var('reporting_currency') }}'"
+    expect(varScopedColumns(sql, ["tenant"])).toEqual(["tenant_id"])
+    expect(varScopedColumns(sql, [])).toEqual([])
   })
 })
 
-describe("incremental logic changed without a plan for history", () => {
+describe("incremental change without a plan for existing rows", () => {
+  const delta = (added: string[]) => async () => ({ added, removed: [] })
   for (const dialect of ["snowflake", "trino"]) {
-    test(`fires on ${dialect}; a stated plan silences it`, async () => {
-      const changed = { dialect, newSql: INC("select id, ts, lower(kind) as kind from src") }
-      expect(await rules(changed)).toContain("incremental-logic-no-refresh")
-      expect(await rules({ ...changed, prText: "Needs a --full-refresh on deploy" })).not.toContain("incremental-logic-no-refresh")
-      expect(await rules({ ...changed, prText: "Forward-only: history stays as is" })).not.toContain("incremental-logic-no-refresh")
+    test(`a new column fires on ${dialect}; a stated plan silences it`, async () => {
+      const changed = { dialect, newSql: INC("select id, ts, kind from src"), columnDelta: delta(["kind"]) }
+      const [f] = await incrementalFindings(input(changed))
+      expect(f.body).toContain("`kind` is new: rows built before this change get NULL")
+      expect(f.severity).toBe("suggestion")
+      expect(await rules({ ...changed, prText: "Needs a --full-refresh on deploy" })).not.toContain("incremental-history-plan")
     })
   }
 
-  test("a config-only change, a new model, or a table model does not fire", async () => {
-    expect(await rules({ newSql: INC("select id, ts from src", "materialized='incremental', incremental_strategy='merge', unique_key='id', tags=['x']") })).not.toContain(
-      "incremental-logic-no-refresh",
-    )
-    expect(await rules({ file: { path: "models/marts/fct.sql", status: "added" }, oldSql: undefined, newSql: INC("select 2") })).not.toContain(
-      "incremental-logic-no-refresh",
-    )
-    expect(
-      await rules({
-        newSql: "{{ config(materialized='table') }} select 2",
-        oldSql: "{{ config(materialized='table') }} select 1",
-      }),
-    ).toHaveLength(0)
+  test("a changed is_incremental() filter fires", async () => {
+    const oldSql = "{{ config(materialized='incremental', unique_key='id') }} select id, ts from src {% if is_incremental() %} where ts > (select max(ts) from {{ this }}) {% endif %}"
+    const newSql = oldSql.replace("where ts >", "where ts >=")
+    expect(await rules({ oldSql, newSql })).toContain("incremental-history-plan")
+  })
+
+  test("formatting-only edits, expression edits without new columns, config-only and new models don't fire", async () => {
+    expect(await rules({ newSql: INC("SELECT   id ,\n  ts\nFROM src") })).toHaveLength(0)
+    expect(await rules({ newSql: INC("select id, ts + 1 as ts from src") })).toHaveLength(0)
+    expect(await rules({ newSql: INC("select id, ts from src", "materialized='incremental', incremental_strategy='merge', unique_key='id', tags=['x']") })).toHaveLength(0)
+    expect(await rules({ file: { path: "models/marts/fct.sql", status: "added" }, oldSql: undefined, newSql: INC("select 2"), columnDelta: delta(["x"]) })).toHaveLength(0)
   })
 
   test("partition_by change needs a full refresh", async () => {
@@ -110,23 +110,12 @@ describe("on_schema_change='fail'", () => {
     )
     expect(out.map((f) => f.body).join()).toContain("adds `kind`")
   })
+  test("it replaces, not repeats, the history-plan finding", async () => {
+    const out = await rules({ oldSql: INC("select id from s", cfg), newSql: INC("select id, kind from s", cfg), columnDelta: async () => ({ added: ["kind"], removed: [] }) })
+    expect(out).toEqual(["on-schema-change-fail"])
+  })
   test("an unchanged column set is fine", async () => {
     expect(await rules({ oldSql: INC("select id from s", cfg), newSql: INC("select id from s", cfg) })).not.toContain("on-schema-change-fail")
-  })
-})
-
-describe("microbatch on adapters whose concurrent commits conflict", () => {
-  const mb = (extra = "") => INC("select 1", `materialized='incremental', incremental_strategy='microbatch', event_time='ts', batch_size='day'${extra}`)
-  const isNew = { file: { path: "models/marts/fct.sql", status: "added" as const }, oldSql: undefined }
-  test("trino and athena: flagged unless concurrent_batches=false", async () => {
-    for (const dialect of ["trino", "athena"]) {
-      expect(await rules({ ...isNew, dialect, newSql: mb() })).toContain("microbatch-concurrent-commits")
-      expect(await rules({ ...isNew, dialect, newSql: mb(", concurrent_batches=false") })).not.toContain("microbatch-concurrent-commits")
-    }
-  })
-  test("adapters without a capability entry, or an unknown dialect, stay silent", async () => {
-    expect(await rules({ ...isNew, dialect: "snowflake", newSql: mb() })).not.toContain("microbatch-concurrent-commits")
-    expect(await rules({ ...isNew, dialect: "trino", dialectKnown: false, newSql: mb() })).not.toContain("microbatch-concurrent-commits")
   })
 })
 
@@ -135,12 +124,13 @@ describe("per-slice runs whose unique_key lacks the slice column", () => {
     `{{ config(materialized='incremental', incremental_strategy='${strategy}', unique_key=${key}) }}\nselect event_id, tenant_id from src where tenant_id = '{{ var("tenant") }}'`
   for (const dialect of ["snowflake", "postgres"]) {
     test(`fires on ${dialect} for delete+insert and merge`, async () => {
-      const isNew = { file: { path: "models/marts/fct.sql", status: "added" as const }, oldSql: undefined, dialect }
+      const isNew = { file: { path: "models/marts/fct.sql", status: "added" as const }, oldSql: undefined, dialect, sliceVars: ["tenant"] }
       const [di] = await incrementalFindings(input({ ...isNew, newSql: sql("'event_id'") }))
       expect(di.body).toContain("deletes other slices' rows")
       const [mg] = await incrementalFindings(input({ ...isNew, newSql: sql("'event_id'", "merge") }))
       expect(mg.body).toContain("overwrites other slices' rows")
       expect(await rules({ ...isNew, newSql: sql("['event_id', 'tenant_id']") })).toHaveLength(0)
+      expect(await rules({ ...isNew, sliceVars: [], newSql: sql("'event_id'") })).toHaveLength(0)
     })
   }
 })
@@ -149,11 +139,13 @@ describe("non-atomic table rebuild", () => {
   const tbl = (ote: string, contract = true) =>
     `{{ config(materialized='table', on_table_exists='${ote}'${contract ? ", contract={'enforced': true}" : ""}) }}\nselect 1 as id`
   const isNew = { file: { path: "models/marts/fct.sql", status: "added" as const }, oldSql: undefined, dialect: "trino" }
-  test("trino: replace with an enforced contract, or drop; warning when consumers exist", async () => {
+  test("trino: replace with an enforced contract, or drop; always a suggestion", async () => {
     const [f] = await incrementalFindings(input({ ...isNew, newSql: tbl("replace") }))
     expect(f.severity).toBe("suggestion")
     expect(f.body).toContain("`create or replace table` and then `insert`")
-    expect((await incrementalFindings(input({ ...isNew, newSql: tbl("replace"), hasConsumers: true })))[0].severity).toBe("warning")
+    const [e] = await incrementalFindings(input({ ...isNew, newSql: tbl("replace"), hasExposures: true }))
+    expect(e.severity).toBe("suggestion")
+    expect(e.body).toContain("this model has exposures")
     expect((await incrementalFindings(input({ ...isNew, newSql: tbl("drop", false) })))[0].body).toContain("doesn't exist during each build")
   })
   test("rename, replace without a contract, or another adapter: silent", async () => {
@@ -173,10 +165,18 @@ describe("snapshots", () => {
       "snapshot-tracking-change",
     ])
   })
+  test("yml-defined snapshots (dbt 1.9+) are checked too", () => {
+    const y = (cols: string) => `snapshots:\n  - name: orders_snap\n    relation: source('raw', 'orders')\n    config:\n      unique_key: id\n      strategy: check\n      check_cols: ${cols}\n`
+    const yfile = { path: "snapshots/_snapshots.yml", status: "modified" as const }
+    expect(snapshotYmlFindings(yfile, y("[status]"), y("[status, amount]")).map((f) => f.title)).toEqual(["orders_snap: snapshot `check_cols` changed"])
+    expect(snapshotYmlFindings(yfile, y("[status]"), y("[status]"))).toEqual([])
+  })
+
   test("a query change needs a plan; a new snapshot is fine", () => {
     const changed = { file, model: "s", oldSql: snap("['status']"), newSql: snap("['status']", "select id, upper(status) as status from src") }
     expect(rule(snapshotFindings({ ...changed, prText: "" }))).toEqual(["snapshot-logic-no-plan"])
     expect(rule(snapshotFindings({ ...changed, prText: "we will backfill" }))).toEqual([])
+    expect(rule(snapshotFindings({ ...changed, newSql: snap("['status']", "SELECT id,\n   status FROM src"), prText: "" }))).toEqual([])
     expect(snapshotFindings({ ...changed, file: { ...file, status: "added" }, prText: "" })).toEqual([])
   })
 })
@@ -186,9 +186,16 @@ describe("dedup ordered only by a load timestamp", () => {
     detectModelPatterns({ path: "models/m.sql", status: "added", diff: `+${line}\n` }, line, DEFAULT_RUBRIC).filter(
       (f) => (f.evidence?.result as { rule?: string })?.rule === "dedup_load_timestamp_only",
     )
-  test("load timestamps fire", () => {
-    for (const col of ["loaded_at", "_fivetran_synced", "ingestion_timestamp", "src._sdc_batched_at"])
-      expect(run(`select *, row_number() over (partition by id order by ${col} desc) as rn from t`)).toHaveLength(1)
+  test("load timestamps fire, as a suggestion", () => {
+    for (const col of ["loaded_at", "ingestion_timestamp", "src.load_ts", "_loaded_at"]) {
+      const f = run(`select *, row_number() over (partition by id order by ${col} desc) as rn from t`)
+      expect(f).toHaveLength(1)
+      expect(f[0].severity).toBe("suggestion")
+    }
+  })
+  test("loader sync columns (the standard staging idiom) stay silent", () => {
+    for (const col of ["_fivetran_synced", "_airbyte_extracted_at", "_sdc_batched_at"])
+      expect(run(`select *, row_number() over (partition by id order by ${col} desc) as rn from t`)).toHaveLength(0)
   })
   test("a business timestamp, a tie-breaker, or no row_number: silent", () => {
     expect(run("select *, row_number() over (partition by id order by updated_at desc) as rn from t")).toHaveLength(0)
@@ -217,6 +224,10 @@ describe("end to end through the orchestrator", () => {
     async modelConfig() {
       return { materialized: "incremental", unique_key: "id" }
     },
+    async columnLineage(sql: string) {
+      const m = /select\s+([\s\S]*?)\s+from/i.exec(sql)
+      return m ? m[1].split(",").map((c) => ({ source: `"src"."${c.trim()}"`, target: c.trim() })) : []
+    },
   } as ReviewRunner
 
   test("an incremental model whose materialization is set in yml (manifest) still gets the rule; findings never block", async () => {
@@ -237,7 +248,7 @@ describe("end to end through the orchestrator", () => {
             : "select id, kind from src",
     })
     const titles = env.findings.map((f) => f.title)
-    expect(titles).toContain("fct: incremental logic changed without a full-refresh or backfill plan")
+    expect(titles).toContain("fct: incremental change without a plan for existing rows")
     expect(titles.some((t) => t.startsWith("s: snapshot `check_cols` changed"))).toBe(true)
     expect(env.findings.filter((f) => f.evidence?.tool === "dbt-semantics").every((f) => f.origin === "catalog")).toBe(true)
     expect(env.verdict).not.toBe("REQUEST_CHANGES")

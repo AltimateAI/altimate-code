@@ -251,10 +251,11 @@ const detectDedupTie: Detector = (c) => {
 
 // 9b. Dedup ordered ONLY by a load/ingestion timestamp. Rows loaded in one batch
 // share that value, so which version survives is arbitrary (SCD2 versions ranked
-// by `ingestion_timestamp` alone). A single business column (`updated_at`) is the
-// developer's choice and stays silent; load timestamps are a known trap.
+// by `ingestion_timestamp` alone). A business column (`updated_at`) stays
+// silent, and so do loader sync columns (`_fivetran_synced`, `_airbyte_*`):
+// ordering by them is the standard staging idiom and ties are rare per key.
 const LOAD_TS_RE =
-  /^(_?(ingest(ion|ed)?|load(ed)?|etl|extract(ed)?|batch|sync(ed)?)(_at|_ts|_time|_timestamp|_date|_dt)|_?(ingestion|load|etl|batch)_timestamp|_fivetran_synced|_airbyte_extracted_at|_airbyte_emitted_at|_sdc_batched_at|_sdc_extracted_at|_dlt_load_id|_loaded_at)$/i
+  /^(_?(ingest(ion|ed)?|load(ed)?|etl|extract(ed)?|batch)(_at|_ts|_time|_timestamp|_date|_dt)|_?(ingestion|load|etl|batch)_timestamp|_loaded_at)$/i
 const detectDedupLoadTimestamp: Detector = (c) => {
   for (const line of c.added) {
     const s = stripComments(line)
@@ -267,7 +268,7 @@ const detectDedupLoadTimestamp: Detector = (c) => {
     const col = keys[0].split(".").pop()!.replace(/["`]/g, "")
     if (!LOAD_TS_RE.test(col)) continue
     return makeFinding({
-      severity: "warning",
+      severity: "suggestion",
       category: "dedup",
       title: `${c.model}: dedup ordered only by load timestamp \`${col}\``,
       body:
