@@ -31,6 +31,17 @@ inputs:
     description: "Post the verdict to the PR (summary comment + inline review)."
     required: false
     default: "true"
+  dbt_prepare:
+    description: "Build the dbt artifacts the full review uses before reviewing. `none` (default): you build them in earlier steps. `compile`: `dbt compile` on the head, and on the PR's merge-base into `target-base/` (equivalence and lineage proofs). `full`: also `dbt docs generate` for `catalog.json` (complete column types). `compile` usually works offline; `full` needs warehouse credentials in the profile."
+    required: false
+    default: "none"
+  dbt_command:
+    description: "How to invoke dbt for `dbt_prepare`, e.g. `dbt`, `uv run dbt`, `poetry run dbt`."
+    required: false
+    default: "dbt"
+  dbt_profiles_dir:
+    description: "`--profiles-dir` for `dbt_prepare`, relative to `project_dir`. Empty = dbt's default lookup."
+    required: false
   signing_key:
     description: "Optional HMAC key to sign the verdict envelope (ALTIMATE_REVIEW_SIGNING_KEY)."
     required: false
@@ -166,6 +177,54 @@ runs:
         else
           echo "Advisory lane: no model/credentials provided — running deterministic-only."
         fi
+
+    # Optional: build the head and base artifacts the full-tier review needs.
+    # Inputs are passed as ENV, never interpolated into the script.
+    - name: Prepare dbt artifacts
+      if: inputs.dbt_prepare != 'none'
+      shell: bash
+      env:
+        IN_PREPARE: ${{ inputs.dbt_prepare }}
+        IN_DBT: ${{ inputs.dbt_command }}
+        IN_PROFILES: ${{ inputs.dbt_profiles_dir }}
+        IN_PROJECT_DIR: ${{ inputs.project_dir }}
+        IN_BASE: ${{ inputs.base }}
+        EVENT_BASE: ${{ github.event.pull_request.base.ref }}
+      run: |
+        set -euo pipefail
+        case "$IN_PREPARE" in compile|full) ;; *) echo "::error::dbt_prepare must be none, compile or full (got '$IN_PREPARE')"; exit 1 ;; esac
+        read -ra DBT <<< "$IN_DBT"
+        PROJECT="$(cd "${IN_PROJECT_DIR:-.}" && pwd)"
+        REL="$(git -C "$PROJECT" rev-parse --show-prefix)"
+        PROFILES=()
+        [[ -n "${IN_PROFILES:-}" ]] && PROFILES=(--profiles-dir "$(cd "$PROJECT" && cd "$IN_PROFILES" && pwd)")
+        build() { # $1 = project dir, $2 = target path
+          ( cd "$1"
+            [[ -f packages.yml || -f dependencies.yml ]] && "${DBT[@]}" deps ${PROFILES[@]+"${PROFILES[@]}"}
+            "${DBT[@]}" compile --target-path "$2" ${PROFILES[@]+"${PROFILES[@]}"} )
+        }
+        echo "Compiling the head…"
+        build "$PROJECT" "$PROJECT/target"
+        if [[ "$IN_PREPARE" == "full" ]]; then
+          echo "Generating catalog.json…"
+          ( cd "$PROJECT" && "${DBT[@]}" docs generate --target-path "$PROJECT/target" ${PROFILES[@]+"${PROFILES[@]}"} )
+        fi
+        # The base side: the PR's merge-base, compiled into target-base/.
+        BASE="${IN_BASE:-$EVENT_BASE}"
+        BASE="${BASE#origin/}"
+        if [[ -z "$BASE" ]]; then echo "::warning::No base branch known; skipping the base compile."; exit 0; fi
+        git fetch --no-tags origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" >/dev/null 2>&1 || true
+        MB="$(git merge-base "origin/$BASE" HEAD 2>/dev/null || git merge-base "$BASE" HEAD 2>/dev/null || true)"
+        if [[ -z "$MB" && "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+          git fetch --no-tags --deepen=1000 origin "+refs/heads/$BASE:refs/remotes/origin/$BASE" "$(git rev-parse HEAD)" >/dev/null 2>&1 || true
+          MB="$(git merge-base "origin/$BASE" HEAD 2>/dev/null || true)"
+        fi
+        if [[ -z "$MB" ]]; then echo "::warning::Could not find the merge-base with $BASE; skipping the base compile."; exit 0; fi
+        WT="$RUNNER_TEMP/altimate-review-base"
+        git worktree add --detach "$WT" "$MB" >/dev/null
+        trap 'git worktree remove --force "$WT" >/dev/null 2>&1 || true' EXIT
+        echo "Compiling the base ($BASE @ ${MB:0:12})…"
+        build "$WT/$REL" "$PROJECT/target-base" || echo "::warning::The base compile failed; equivalence will be marked unverified."
 
     - name: Run dbt PR review
       shell: bash
