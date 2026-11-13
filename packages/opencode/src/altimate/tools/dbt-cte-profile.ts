@@ -4,6 +4,7 @@ import z from "zod"
 import { Tool } from "../../tool/tool"
 import { loadRawManifest, findModel } from "../native/dbt/helpers"
 import { projectRoot } from "../native/connections/registry"
+import { executeQuery } from "../native/query-execution"
 import { dbtAdapterFor } from "./dbt-adapter-access"
 import { buildCountQuery, detectCtes, extractRowCount, lineOf, stripColumnList, type CteInfo } from "./cte-detect"
 
@@ -16,11 +17,13 @@ const MAX_SEARCH_DEPTH = 12
 /** Largest model file the tool reads. */
 const MAX_MODEL_BYTES = 4 * 1024 * 1024
 
-/** A CTE name without its column list, quotes or letter case, for comparing what the caller typed. */
-function nameKey(name: string): string {
-  return stripColumnList(name)
-    .replace(/^["'`[]|["'`\]]$/g, "")
-    .toLowerCase()
+/** A CTE name without its column list or surrounding quotes, quote escapes undone. */
+function bareName(name: string): string {
+  const plain = stripColumnList(name)
+  const quote = plain[0]
+  if ((quote === '"' || quote === "`") && plain.length > 1 && plain.endsWith(quote)) return plain.slice(1, -1).replaceAll(quote + quote, quote)
+  if (quote === "[" && plain.endsWith("]")) return plain.slice(1, -1)
+  return plain
 }
 
 function inside(root: string, file: string): boolean {
@@ -60,52 +63,61 @@ function findSqlFiles(root: string, name: string): string[] {
   return found.sort()
 }
 
-/** The model's source file: a project-relative path, the manifest's record of it, or a search by name. */
+/** The model's source file: a project-relative or absolute `.sql` path, the manifest's record of a name or unique_id, or a search by name. */
 function modelFile(root: string, model: string): { file?: string; error?: string } {
   const realRoot = realpath(root)
   if (/\.sql$/i.test(model) || /[\\/]/.test(model)) {
     const candidate = path.resolve(realRoot, model)
+    if (!/\.sql$/i.test(candidate)) return { error: `${model} is not a .sql file` }
     if (!inside(realRoot, realpath(candidate))) return { error: `${model} is outside the dbt project` }
-    return fs.existsSync(candidate) ? { file: candidate } : { error: `no file ${model} in the dbt project` }
+    return fs.existsSync(candidate) && fs.statSync(candidate).isFile() ? { file: realpath(candidate) } : { error: `no file ${model} in the dbt project` }
   }
   try {
     const manifest = loadRawManifest(path.join(realRoot, "target", "manifest.json"))
     const node = manifest?.nodes ? findModel(manifest.nodes, model) : null
     if (node?.original_file_path) {
       const candidate = path.resolve(realRoot, node.original_file_path)
-      if (inside(realRoot, realpath(candidate)) && fs.existsSync(candidate)) return { file: candidate }
+      if (inside(realRoot, realpath(candidate)) && fs.existsSync(candidate)) return { file: realpath(candidate) }
     }
   } catch {
     // A manifest that can't be read doesn't stop the search by name.
   }
-  const name = model.startsWith("model.") ? (model.split(".").pop() ?? model) : model
-  const matches = findSqlFiles(realRoot, name)
-  if (matches.length === 1) return { file: matches[0] }
+  // A unique_id names one model of one package: only the manifest can say which file it is.
+  if (model.startsWith("model.")) return { error: `${model} is not in target/manifest.json: run dbt compile, or pass the model's name or path` }
+  const matches = findSqlFiles(realRoot, model)
+  if (matches.length === 1) return { file: realpath(matches[0]) }
   if (matches.length === 0) return { error: `no model named ${model} in the dbt project` }
   const rel = matches.map((m) => path.relative(realRoot, m))
   return { error: `${model} matches ${matches.length} files (${rel.join(", ")}): pass the path` }
 }
 
+/** The dbt project of the session's directory; else the one the dbt adapter is set up for. */
 async function projectDir(): Promise<string | undefined> {
+  const { findProjectRoot } = await import("../../../../dbt-tools/src/config")
+  const here = findProjectRoot(projectRoot())
+  if (here) return here
   const { getDbtProjectRoot } = await import("../native/connections/register")
-  const root = await getDbtProjectRoot()
-  if (root) return root
-  const here = projectRoot()
-  return fs.existsSync(path.join(here, "dbt_project.yml")) ? here : undefined
+  return getDbtProjectRoot()
 }
 
 function failure(title: string, output: string, extra: Record<string, unknown> = {}) {
-  return { title: `dbt_cte_profile: ${title}`, metadata: { success: false, ...extra }, output }
+  return { title: `dbt_cte_profile: ${title}`, metadata: { success: false, error: output, ...extra }, output }
 }
 
 export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
   description:
-    "List a dbt model's CTEs, or time one CTE with a row-count query. Without `cte` it returns the CTE names in source order and runs nothing (a read-only call works). With `cte` it runs `SELECT COUNT(*)` over that CTE and the CTEs before it in the same WITH clause on the warehouse, and returns the elapsed milliseconds and the row count; that run needs write permission (`--allow-write`) because it starts the dbt adapter and compiles the model. Each run recomputes the earlier CTEs, so a model of N CTEs costs N queries.",
+    "List a dbt model's CTEs, or time one CTE with a row-count query. Without `cte` or `position` it returns the CTE names in source order (name, line, position) and runs nothing, so a read-only call works. With one of them it runs `SELECT COUNT(*)` over that CTE and the CTEs before it in the same WITH clause on the warehouse, and returns the elapsed milliseconds and the row count; that run needs write permission (`--allow-write`) because it starts the dbt adapter and compiles the model. Each run recomputes the earlier CTEs, so a model of N CTEs costs N queries. Only the model's own top-level WITH clause is read: a WITH inside a CTE body is part of that CTE.",
   parameters: z.object({
     model: z
       .string()
-      .describe("Model name, unique_id, or project-relative path to the model's .sql file (e.g. 'customers' or 'models/marts/customers.sql')"),
-    cte: z.string().optional().describe("CTE to time; without it, the CTE list is returned"),
+      .describe("Model name, unique_id, or project-relative or absolute path to the model's .sql file (e.g. 'customers' or 'models/marts/customers.sql')"),
+    cte: z.string().optional().describe("CTE to time, by name; without it (and without `position`), the CTE list is returned"),
+    position: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("The CTE's position in the list (0-based); needed when several CTEs share a name"),
   }),
   async execute(args, ctx) {
     const root = await projectDir()
@@ -118,15 +130,16 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
     const ctes = detectCtes(text)
     const file = path.relative(realpath(root), located.file)
 
-    if (!args.cte) {
-      const list = ctes.map((c) => ({
+    if (args.cte === undefined && args.position === undefined) {
+      const list = ctes.map((c, position) => ({
         name: stripColumnList(c.name),
         line: lineOf(text, c.nameStart) + 1,
         index: c.index,
         clause: c.withClauseStart,
+        position,
       }))
       const output = list.length
-        ? [`${list.length} CTE${list.length === 1 ? "" : "s"} in ${file}:`, ...list.map((c, i) => `${i + 1}. ${c.name} (line ${c.line})`)].join("\n")
+        ? [`${list.length} CTE${list.length === 1 ? "" : "s"} in ${file}:`, ...list.map((c) => `${c.position + 1}. ${c.name} (line ${c.line})`)].join("\n")
         : `No CTEs in ${file}.`
       return {
         title: `dbt_cte_profile: ${list.length} CTE${list.length === 1 ? "" : "s"} in ${args.model}`,
@@ -135,32 +148,46 @@ export const DbtCteProfileTool = Tool.define("dbt_cte_profile", {
       }
     }
 
-    const wanted = nameKey(args.cte)
-    const matches = ctes.filter((c) => nameKey(c.name) === wanted)
-    if (matches.length === 0) {
-      const names = ctes.map((c) => stripColumnList(c.name)).join(", ")
-      return failure("CTE not found", `${args.model} has no CTE named ${args.cte}${names ? `; it has: ${names}` : ""}.`, { model: args.model })
+    const names = ctes.map((c) => stripColumnList(c.name)).join(", ")
+    let target: CteInfo | undefined
+    if (args.position !== undefined) {
+      target = ctes[args.position]
+      if (!target) return failure("CTE not found", `${args.model} has ${ctes.length} CTEs: there is none at position ${args.position}.`, { model: args.model })
+      if (args.cte !== undefined && bareName(target.name) !== bareName(args.cte))
+        return failure("CTE not found", `The CTE at position ${args.position} of ${args.model} is ${stripColumnList(target.name)}, not ${args.cte}.`, { model: args.model })
+    } else {
+      // The name as typed wins; letter case only decides when nothing matches it exactly.
+      const wanted = bareName(args.cte ?? "")
+      const exact = ctes.filter((c) => bareName(c.name) === wanted)
+      const matches = exact.length > 0 ? exact : ctes.filter((c) => bareName(c.name).toLowerCase() === wanted.toLowerCase())
+      if (matches.length === 0)
+        return failure("CTE not found", `${args.model} has no CTE named ${args.cte}${names ? `; it has: ${names}` : ""}.`, { model: args.model })
+      if (matches.length > 1) {
+        const at = matches.map((c) => ctes.indexOf(c)).join(", ")
+        return failure("CTE ambiguous", `${args.model} has ${matches.length} CTEs that match ${args.cte} (positions ${at}): pass position.`, { model: args.model })
+      }
+      target = matches[0]
     }
-    const target: CteInfo = matches[0]
     const query = buildCountQuery(text, ctes, target)
-    if (!query) return failure("no query", `Could not build a count query for ${args.cte}.`, { model: args.model, cte: args.cte })
+    const name = stripColumnList(target.name)
+    if (!query) return failure("no query", `${name} is in a second WITH clause of ${args.model}, which has no query of its own to count.`, { model: args.model, cte: name })
 
     const access = await dbtAdapterFor(ctx)
-    if (!access.adapter) {
-      return failure("not run", `${access.reason}`, { model: args.model, cte: args.cte, refusal: access.refusal })
-    }
+    if (!access.adapter) return failure("not run", access.reason ?? "the dbt adapter is not available", { model: args.model, cte: name, refusal: access.refusal })
+    const adapter = access.adapter
     ctx.abort.throwIfAborted()
-    const name = stripColumnList(target.name)
     const started = performance.now()
     try {
-      const result = await access.adapter.immediatelyExecuteSQLWithLimit(query, `cte_profiler_${name}`, 1)
+      // The adapter has no cancel of its own: the run's timeout, budget and abort end the wait, not the query.
+      const result: { data?: Record<string, unknown>[] } = await executeQuery({ type: "dbt" } as any, {}, { signal: ctx.abort, sessionID: ctx.sessionID }, () =>
+        adapter.immediatelyExecuteSQLWithLimit(query, `cte_profiler_${name}`, 1),
+      )
       const queryMs = Math.round(performance.now() - started)
       const rows = extractRowCount(result?.data)
-      const note = matches.length > 1 ? ` (${matches.length} CTEs share this name; the first was timed)` : ""
       return {
         title: `dbt_cte_profile: ${name} ${queryMs} ms`,
-        metadata: { success: true, model: args.model, cte: name, index: target.index, queryMs, rows },
-        output: `${name}: ${queryMs} ms, ${rows} row${rows === 1 ? "" : "s"}${note}`,
+        metadata: { success: true, model: args.model, cte: name, index: target.index, position: ctes.indexOf(target), queryMs, rows },
+        output: `${name}: ${queryMs} ms, ${rows} row${rows === 1 ? "" : "s"}`,
       }
     } catch (e) {
       if (ctx.abort.aborted) throw e

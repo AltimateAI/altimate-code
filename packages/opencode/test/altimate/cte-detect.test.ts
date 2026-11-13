@@ -138,7 +138,6 @@ describe("detectCtes", () => {
 
       expect(ctes).toHaveLength(1)
       assertCTE(ctes[0], "source", 0, "CTE with single-line block comment between name and AS keyword")
-      // Skip content extraction test for now due to Range/Position mocking complexity
       // The important part is that CTE detection works correctly
     })
 
@@ -157,7 +156,6 @@ select * from source`
 
       expect(ctes).toHaveLength(1)
       assertCTE(ctes[0], "source", 0, "CTE with multi-line block comment between name and AS keyword")
-      // Skip content extraction test for now due to Range/Position mocking complexity
       // The important part is that CTE detection works correctly
     })
 
@@ -942,9 +940,8 @@ select * from renamed`
 
         const ctes = detectCtes(document)
 
-        // Current limitation: Comments between CTE name and column list break the parsing
-        // This is an edge case that would require more complex parsing logic
-        expect(ctes).toHaveLength(0)
+        expect(ctes).toHaveLength(1)
+        assertCTE(ctes[0], "my_cte (id, name)", 0)
       })
 
       it("should handle comments after the closing parenthesis", () => {
@@ -1270,7 +1267,6 @@ select * from renamed`
       expect(ctes).toHaveLength(1)
       assertCTE(ctes[0], "my_cte", 0, "CTE with correlated subquery counting from other table")
 
-      // Skip content extraction test - focus on CTE detection correctness
     })
 
     it("should handle unterminated comments gracefully", () => {
@@ -1378,15 +1374,59 @@ describe("detectCtes offsets", () => {
     expect(detectCtesInText(sql)).toEqual([])
   })
 
-  it("skips a WITH clause that contains another top-level WITH and keeps the inner one", () => {
+  it("lists the CTEs of each top-level WITH, each with its own clause", () => {
     const sql = "with a as (select 1) with b as (select 2) select * from b"
-    expect(detectCtesInText(sql).map((c) => c.name)).toEqual(["b"])
+    const ctes = detectCtesInText(sql)
+    expect(ctes.map((c) => [c.name, c.index])).toEqual([["a", 0], ["b", 0]])
+    expect(ctes[0].withClauseStart).not.toBe(ctes[1].withClauseStart)
   })
 
-  it("tracks CTE of nested WITH inside a body without confusing the outer index", () => {
-    const sql = "with outer_cte as (with inner_cte as (select 1 as x) select x from inner_cte) select * from outer_cte"
-    const names = detectCtesInText(sql).map((c) => c.name)
-    expect(names).toContain("outer_cte")
+  it("lists only the model's own CTEs: a WITH inside a CTE body is part of that body", () => {
+    const sql = `with outer_cte as (
+  with inner_cte as (select 1 as x)
+  select x from inner_cte
+),
+last as (select * from outer_cte)
+select * from last`
+    const ctes = detectCtesInText(sql)
+    expect(ctes.map((c) => [c.name, c.index])).toEqual([["outer_cte", 0], ["last", 1]])
+    // The outer CTE's count query carries its nested WITH whole and closes every parenthesis.
+    const query = buildCountQuery(sql, ctes, ctes[1])!
+    expect(query).toContain("inner_cte as (select 1 as x)")
+    expect(query.match(/\(/g)!.length).toBe(query.match(/\)/g)!.length)
+    expect(query).toEndWith("SELECT COUNT(*) AS _profile_count FROM last")
+  })
+
+  it("a WITH inside a subquery or a window definition is not a model CTE", () => {
+    const sql = "select * from (with s as (select 1) select * from s) t join u on true window w as (partition by a)"
+    expect(detectCtesInText(sql)).toEqual([])
+  })
+
+  it("comment markers and CTE-like text inside string literals neither hide nor add CTEs", () => {
+    expect(detectCtesInText("with a as (select '--' as s), b as (select 2) select * from b").map((c) => c.name)).toEqual(["a", "b"])
+    expect(detectCtesInText("with a as (select '/*' as s), b as (select '*/' as t) select * from b").map((c) => c.name)).toEqual(["a", "b"])
+    expect(detectCtesInText("with a as (select '(x)' as s, 'fake as (select 2)' as t) select * from a").map((c) => c.name)).toEqual(["a"])
+    expect(detectCtesInText("with a as (select 'it''s ) as (' as s), b as (select 2) select * from b").map((c) => c.name)).toEqual(["a", "b"])
+  })
+
+  it("a quoted name keeps its escaped quote", () => {
+    const sql = 'with "a""b" as (select 1), `c``d` as (select 2) select * from "a""b"'
+    expect(detectCtesInText(sql).map((c) => c.name)).toEqual(['"a""b"', "`c``d`"])
+  })
+
+  it("keeps CTEs that follow a Jinja tag between them, and reads WITH RECURSIVE and MATERIALIZED", () => {
+    const jinja = "with a as (select 1),\n{% if x %}\nb as (select 2),\n{% endif %}\nc as (select 3)\nselect * from c"
+    expect(detectCtesInText(jinja).map((c) => c.name)).toEqual(["a", "b", "c"])
+    expect(detectCtesInText("with recursive r as (select 1) select * from r").map((c) => c.name)).toEqual(["r"])
+    expect(detectCtesInText("with m as materialized (select 1), n as not materialized (select 2) select 1").map((c) => c.name)).toEqual(["m", "n"])
+  })
+
+  it("scans in linear time: a 2 MB model is read in well under a second", () => {
+    const body = "select a, b, c from t where x = 1 and y = 'it''s' -- note\n"
+    const sql = `with big as (\n${body.repeat(Math.floor(2_000_000 / body.length))}) select * from big`
+    const started = performance.now()
+    expect(detectCtesInText(sql).map((c) => c.name)).toEqual(["big"])
+    expect(performance.now() - started).toBeLessThan(1000)
   })
 
   it("reports zero-based lines", () => {
@@ -1433,13 +1473,11 @@ describe("buildCountQuery", () => {
     expect(query.endsWith("FROM a")).toBe(true)
   })
 
-  it("only includes CTEs of the target's own WITH clause", () => {
+  it("builds no query for a CTE of a second WITH clause, whose preamble would hold the first clause's query", () => {
     const text = "with a as (select 1) select * from a;\nwith b as (select 2) select * from b"
     const ctes = detectCtesInText(text)
-    const second = ctes.find((c) => c.name === "b")!
-    const query = buildCountQuery(text, ctes, second)!
-    expect(query).not.toContain("WITH a")
-    expect(query).toContain("WITH b as (")
+    expect(buildCountQuery(text, ctes, ctes.find((c) => c.name === "a")!)).toContain("WITH a as (")
+    expect(buildCountQuery(text, ctes, ctes.find((c) => c.name === "b")!)).toBeUndefined()
   })
 
   it("returns undefined for a CTE that is not in the list", () => {

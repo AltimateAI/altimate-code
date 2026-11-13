@@ -83,7 +83,7 @@ describe("feature tools in the allow-list", () => {
 
   test("each placeholder answers that it isn't implemented, as a failure", async () => {
     for (const id of FEATURE_TOOLS) {
-      // Tested in its own file once implemented.
+      // Implemented tools have their own test file.
       if (id === "dbt_cte_profile") continue
       const tool = await initTool(EXPOSED[id] as any)
       expect(tool.id).toBe(id)

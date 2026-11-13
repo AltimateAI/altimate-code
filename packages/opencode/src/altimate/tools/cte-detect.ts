@@ -23,156 +23,88 @@ export interface CteInfo {
   withClauseStart: number
 }
 
-export interface CteProfileEntry {
-  name: string
-  line: number
-  queryTimeMs: number
-  marginalTimeMs: number
-  rowCount: number
-  tier: "hot" | "warm" | "cool"
-}
-
-/** Longest quoted identifier ("name", `name`, [name]) the identifier regex accepts. */
-const MAX_QUOTED_IDENTIFIER_LENGTH = 500
-
-/** Longest CTE column list the identifier regex accepts. */
-const MAX_COLUMN_LIST_LENGTH = 1000
-
-const IDENT_PART =
-  `(?:[a-zA-Z_][a-zA-Z0-9_]*|"[^"]{1,${MAX_QUOTED_IDENTIFIER_LENGTH}}"|` +
-  `\`[^\`]{1,${MAX_QUOTED_IDENTIFIER_LENGTH}}\`|` +
-  `\\[[^\\]]{1,${MAX_QUOTED_IDENTIFIER_LENGTH}}\\])`
-
-function identifierRegex(): RegExp {
-  return new RegExp(`(${IDENT_PART}(?:\\.${IDENT_PART})*(?:\\s*\\([^)]{0,${MAX_COLUMN_LIST_LENGTH}}\\))?)`, "gi")
-}
-
-interface StringState {
-  newPos: number
-  inString: boolean
-  stringChar: string
-}
-
-function handleSqlStringLiteral(text: string, pos: number, inString: boolean, stringChar: string): StringState {
+/** Position just past the string literal, quoted identifier or comment (`--`, block, Jinja) that starts at `pos`; `pos` itself when none does. An unterminated one runs to the end of the text. */
+function skipLiteral(text: string, pos: number): number {
   const char = text[pos]
-  const nextChar = pos < text.length - 1 ? text[pos + 1] : ""
-
-  if (!inString && (char === "'" || char === '"')) {
-    return { newPos: pos, inString: true, stringChar: char }
-  }
-  if (inString && char === stringChar) {
-    if (nextChar === stringChar) {
-      // Doubled quote is an escaped quote: skip the second one.
-      return { newPos: pos + 1, inString: true, stringChar }
-    }
-    return { newPos: pos, inString: false, stringChar: "" }
-  }
-  return { newPos: pos, inString, stringChar }
-}
-
-/**
- * When `pos` starts a comment (`--`, block, or Jinja), return the position of
- * its last character (the newline for line comments); otherwise return `pos`.
- */
-function handleSqlComment(text: string, pos: number): number {
-  const char = text[pos]
-  const nextChar = pos < text.length - 1 ? text[pos + 1] : ""
-
-  if (char === "-" && nextChar === "-") {
-    let endPos = pos + 2
-    while (endPos < text.length && text[endPos] !== "\n" && text[endPos] !== "\r") endPos++
-    return endPos
-  }
-
-  if (char === "/" && nextChar === "*") {
-    let endPos = pos + 2
-    while (endPos < text.length - 1) {
-      if (text[endPos] === "*" && text[endPos + 1] === "/") return endPos + 1
-      endPos++
+  const next = text[pos + 1]
+  if (char === "'" || char === '"' || char === "`") {
+    let i = pos + 1
+    while (i < text.length) {
+      if (text[i] === char) {
+        // A doubled quote is an escaped quote.
+        if (text[i + 1] === char) i += 2
+        else return i + 1
+      } else i++
     }
     return text.length
   }
+  const close = char === "-" && next === "-" ? "\n" : char === "/" && next === "*" ? "*/" : char === "{" && next === "#" ? "#}" : null
+  if (close === null) return pos
+  const end = text.indexOf(close, pos + 2)
+  if (end === -1) return text.length
+  return close === "\n" ? end : end + close.length
+}
 
-  if (char === "{" && nextChar === "#") {
-    let endPos = pos + 2
-    while (endPos < text.length - 1) {
-      if (text[endPos] === "#" && text[endPos + 1] === "}") return endPos + 1
-      endPos++
+/** Position of the first character at or after `pos` that is not whitespace, a comment, or (when `jinja`) a Jinja `{% %}` tag. */
+function skipTrivia(text: string, pos: number, jinja: boolean): number {
+  while (pos < text.length) {
+    if (/\s/.test(text[pos])) {
+      pos++
+      continue
     }
-    return text.length
+    const end = skipLiteral(text, pos)
+    if (end !== pos && !/['"`]/.test(text[pos])) {
+      pos = end
+      continue
+    }
+    if (jinja && text[pos] === "{" && text[pos + 1] === "%") {
+      const close = text.indexOf("%}", pos + 2)
+      if (close === -1) return text.length
+      pos = close + 2
+      continue
+    }
+    return pos
   }
-
   return pos
 }
 
-function isPositionInsideComment(content: string, position: number): boolean {
-  let pos = 0
-  let inBlockComment = false
-  let inJinjaComment = false
-
-  while (pos < position && pos < content.length) {
-    const char = content[pos]
-    const nextChar = pos < content.length - 1 ? content[pos + 1] : ""
-
-    if (!inBlockComment && !inJinjaComment && char === "/" && nextChar === "*") {
-      inBlockComment = true
-      pos += 2
+/** Offset of the `)` that closes the `(` at `openParenPos`, or -1 when it is never closed. */
+function findMatchingClosingParen(text: string, openParenPos: number): number {
+  let depth = 1
+  let pos = openParenPos + 1
+  while (pos < text.length) {
+    const end = skipLiteral(text, pos)
+    if (end !== pos) {
+      pos = end
       continue
     }
-    if (inBlockComment && char === "*" && nextChar === "/") {
-      inBlockComment = false
-      pos += 2
-      continue
-    }
-    if (!inBlockComment && !inJinjaComment && char === "{" && nextChar === "#") {
-      inJinjaComment = true
-      pos += 2
-      continue
-    }
-    if (inJinjaComment && char === "#" && nextChar === "}") {
-      inJinjaComment = false
-      pos += 2
-      continue
-    }
-    if (!inBlockComment && !inJinjaComment && char === "-" && nextChar === "-") {
-      const lineStart = pos
-      let lineEnd = pos + 2
-      while (lineEnd < content.length && content[lineEnd] !== "\n" && content[lineEnd] !== "\r") lineEnd++
-      if (position >= lineStart && position < lineEnd) return true
-      pos = lineEnd
-      continue
-    }
+    if (text[pos] === "(") depth++
+    else if (text[pos] === ")" && --depth === 0) return pos
     pos++
   }
-
-  return inBlockComment || inJinjaComment
+  return -1
 }
 
-/** Every WITH keyword outside comments and strings. */
-function findWithKeywords(text: string): number[] {
+/** Every WITH keyword outside comments, strings and parentheses: a WITH inside a CTE body or a subquery belongs to that query, not to the model. */
+function findTopLevelWithKeywords(text: string): number[] {
   const positions: number[] = []
+  const keyword = /with\b/iy
+  let depth = 0
   let pos = 0
-  let inString = false
-  let stringChar = ""
-
   while (pos < text.length) {
-    const commentEnd = handleSqlComment(text, pos)
-    if (commentEnd !== pos) {
-      pos = commentEnd + 1
+    const end = skipLiteral(text, pos)
+    if (end !== pos) {
+      pos = end
       continue
     }
-
-    const s = handleSqlStringLiteral(text, pos, inString, stringChar)
-    pos = s.newPos
-    inString = s.inString
-    stringChar = s.stringChar
-
-    if (!inString) {
-      const m = text.substring(pos).match(/^with\b/i)
-      if (m) {
-        const before = pos > 0 ? text[pos - 1] : " "
-        if (!/[a-zA-Z0-9_]/.test(before)) positions.push(pos)
-        pos += m[0].length
+    const char = text[pos]
+    if (char === "(") depth++
+    else if (char === ")") depth = Math.max(0, depth - 1)
+    else if (depth === 0 && (char === "w" || char === "W") && !/[A-Za-z0-9_$]/.test(text[pos - 1] ?? " ")) {
+      keyword.lastIndex = pos
+      if (keyword.test(text)) {
+        positions.push(pos)
+        pos += 4
         continue
       }
     }
@@ -181,166 +113,78 @@ function findWithKeywords(text: string): number[] {
   return positions
 }
 
-function findMatchingClosingParen(text: string, openParenPos: number): number {
-  let parenCount = 1
-  let pos = openParenPos + 1
-  let inString = false
-  let stringChar = ""
-
-  while (pos < text.length && parenCount > 0) {
-    const char = text[pos]
-
-    const commentEnd = handleSqlComment(text, pos)
-    if (commentEnd !== pos) {
-      pos = commentEnd
-      continue
+/** Offset just past the identifier (`a`, `"a""b"`, `` `a` ``, `[a]`, `db.schema.a`) that starts at `pos`; -1 when none does. */
+function readIdentifier(text: string, pos: number): number {
+  let end = pos
+  for (;;) {
+    const char = text[end]
+    if (char === '"' || char === "`") {
+      const close = skipLiteral(text, end)
+      if (close === end || text[close - 1] !== char || close - end < 2) return -1
+      end = close
+    } else if (char === "[") {
+      const close = text.indexOf("]", end + 1)
+      if (close === -1) return -1
+      end = close + 1
+    } else {
+      const bare = /[A-Za-z_][A-Za-z0-9_]*/y
+      bare.lastIndex = end
+      if (!bare.test(text)) return -1
+      end = bare.lastIndex
     }
-
-    const s = handleSqlStringLiteral(text, pos, inString, stringChar)
-    pos = s.newPos
-    inString = s.inString
-    stringChar = s.stringChar
-
-    if (!inString) {
-      if (char === "(") parenCount++
-      else if (char === ")") parenCount--
-    }
-    pos++
+    if (text[end] !== ".") return end
+    end++
   }
-
-  return parenCount === 0 ? pos - 1 : -1
 }
 
-/** Position of the main SELECT after the CTEs, the end of text, or -1 when a nested WITH is found. */
-function findWithClauseEnd(text: string, withStartPos: number): number {
-  let pos = withStartPos
-  let parenCount = 0
-  let inString = false
-  let stringChar = ""
+/** The CTEs of the WITH clause that opens at `withPos`: each `name [(columns)] AS (body)`, separated by commas, up to the first thing that is not one. */
+function parseWithClause(text: string, withPos: number, ctes: CteInfo[]): void {
+  let pos = skipTrivia(text, withPos + 4, true)
+  const recursive = /recursive\b/iy
+  recursive.lastIndex = pos
+  if (recursive.test(text)) pos = skipTrivia(text, pos + "recursive".length, true)
 
-  while (pos < text.length) {
-    const char = text[pos]
-
-    const commentEnd = handleSqlComment(text, pos)
-    if (commentEnd !== pos) {
-      pos = commentEnd
-      continue
+  const asOpen = /as(?:\s+(?:not\s+)?materialized)?\s*\(/iy
+  for (let index = 0; ; index++) {
+    const nameStart = pos
+    const identifierEnd = readIdentifier(text, nameStart)
+    if (identifierEnd === -1) return
+    let nameEnd = identifierEnd
+    let name = text.substring(nameStart, identifierEnd)
+    pos = skipTrivia(text, identifierEnd, false)
+    if (text[pos] === "(") {
+      const close = findMatchingClosingParen(text, pos)
+      if (close === -1) return
+      // The name as written plus its column list; a comment between them is left out.
+      name += ` ${text.substring(pos, close + 1)}`
+      nameEnd = close + 1
+      pos = skipTrivia(text, nameEnd, false)
     }
-
-    const s = handleSqlStringLiteral(text, pos, inString, stringChar)
-    pos = s.newPos
-    inString = s.inString
-    stringChar = s.stringChar
-
-    if (!inString) {
-      if (char === "(") {
-        parenCount++
-      } else if (char === ")") {
-        parenCount--
-      } else if (parenCount === 0) {
-        const rest = text.substring(pos)
-        if (/^\s*with\b/i.test(rest)) return -1
-        if (/^\s*select\b/i.test(rest)) return pos
-      }
-    }
-    pos++
-  }
-  return text.length
-}
-
-/** `identifier [(columns)] [comments] AS (` starting at `startIndex`; returns the matched text or undefined. */
-function validateCteMatchWithComments(content: string, startIndex: number, identifierName: string): string | undefined {
-  let pos = startIndex + identifierName.length
-
-  while (pos < content.length && /\s/.test(content[pos])) pos++
-  if (pos < content.length && content[pos] === "(") {
-    const end = findMatchingClosingParen(content, pos)
-    if (end !== -1) pos = end + 1
-  }
-
-  while (pos < content.length) {
-    while (pos < content.length && /\s/.test(content[pos])) pos++
-    if (pos >= content.length) break
-
-    const commentEnd = handleSqlComment(content, pos)
-    if (commentEnd !== pos) {
-      pos = commentEnd + 1
-      continue
-    }
-
-    const asMatch = content.substring(pos).match(/^as\s*\(/i)
-    if (asMatch) return content.substring(startIndex, pos + asMatch[0].length)
-    break
-  }
-  return undefined
-}
-
-function findCteIdentifiersOnly(withClauseContent: string): Array<{ index: number; name: string; fullMatch: string }> {
-  const regex = identifierRegex()
-  const out: Array<{ index: number; name: string; fullMatch: string }> = []
-  let match: RegExpExecArray | null
-
-  while ((match = regex.exec(withClauseContent)) !== null) {
-    const name = match[1]
-    if (isPositionInsideComment(withClauseContent, match.index)) continue
-    const fullMatch = validateCteMatchWithComments(withClauseContent, match.index, name)
-    if (fullMatch !== undefined) out.push({ index: match.index, name, fullMatch })
-  }
-  return out
-}
-
-function extractCtesFromWithClause(
-  withClauseContent: string,
-  withStartPos: number,
-  withClauseStart: number,
-  ctes: CteInfo[],
-): void {
-  let cteIndex = 0
-
-  for (const m of findCteIdentifiersOnly(withClauseContent)) {
-    const nameStart = withStartPos + m.index
-    const nameEnd = nameStart + m.name.length
-    const openParenRel = m.index + m.fullMatch.length - 1
-    const closeRel = findMatchingClosingParen(withClauseContent, openParenRel)
-    if (closeRel === -1) continue
-
+    asOpen.lastIndex = pos
+    const header = asOpen.exec(text)
+    if (!header) return
+    const open = pos + header[0].length - 1
+    const close = findMatchingClosingParen(text, open)
+    if (close === -1) return
     ctes.push({
-      name: m.name,
+      name,
       nameStart,
       nameEnd,
-      queryStart: withStartPos + openParenRel + 1,
-      queryEnd: withStartPos + closeRel,
-      index: cteIndex,
-      withClauseStart,
+      queryStart: open + 1,
+      queryEnd: close,
+      index,
+      withClauseStart: withPos,
     })
-    cteIndex++
+    pos = skipTrivia(text, close + 1, true)
+    if (text[pos] !== ",") return
+    pos = skipTrivia(text, pos + 1, true)
   }
 }
 
-/** Find every CTE in the model text, in source order. */
+/** Find every CTE of the model's own WITH clauses, in source order. A WITH inside a CTE body or a subquery is not listed: its CTEs cannot be counted without the query around them. */
 export function detectCtes(text: string): CteInfo[] {
   const ctes: CteInfo[] = []
-
-  for (const withPos of findWithKeywords(text)) {
-    let start = withPos + 4 // "with".length
-
-    while (start < text.length) {
-      while (start < text.length && /\s/.test(text[start])) start++
-      if (start >= text.length) break
-      const commentEnd = handleSqlComment(text, start)
-      if (commentEnd !== start) {
-        start = commentEnd + 1
-        continue
-      }
-      break
-    }
-
-    const end = findWithClauseEnd(text, start)
-    if (end === -1) continue
-
-    extractCtesFromWithClause(text.substring(start, end), start, withPos, ctes)
-  }
-
+  for (const withPos of findTopLevelWithKeywords(text)) parseWithClause(text, withPos, ctes)
   return ctes
 }
 
@@ -358,8 +202,11 @@ export function quoteSqlIdentifier(identifier: string): string {
 /**
  * `SELECT COUNT(*)` over one CTE, keeping the preamble (dbt configs, variables)
  * and every earlier CTE of the same WITH clause, so the query compiles on its own.
+ * Undefined for a CTE of a second WITH clause in the same file, which has no standalone query.
  */
 export function buildCountQuery(text: string, ctes: CteInfo[], target: CteInfo): string | undefined {
+  // The text before a later WITH holds the earlier clause's whole query: nothing valid stands alone there.
+  if (ctes.some((c) => c.withClauseStart < target.withClauseStart)) return undefined
   const upToTarget = ctes.filter((c) => c.withClauseStart === target.withClauseStart && c.index <= target.index)
 
   const definitions: string[] = []
