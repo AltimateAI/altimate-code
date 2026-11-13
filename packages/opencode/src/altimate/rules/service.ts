@@ -11,6 +11,8 @@
 // - The learn config is read on each refresh and each check, so `learn disable` takes effect without a restart.
 // - After each turn (session idle), check the session's new corrections (`RuleTrigger.afterTurn`).
 // - Review notices from a pull are published as `rule.proposal.reviewed` by the sync run itself (`RulesSync`).
+// - On the same timer, decisions on the person's own skill and knowledge submissions (`ReviewNotices`), published the
+//   same way with their `kind`.
 import fs from "node:fs/promises"
 import { Effect } from "effect"
 import { Bus } from "@/bus"
@@ -174,8 +176,33 @@ export async function start(ctx: InstanceContext): Promise<void> {
       RuleProposal.list(ctx.directory)
       await RulesRemember.recoverRequests(root, ctx.directory)
     })
+    // Decisions on the person's own skill and knowledge submissions, on the same timer. Not tied to learning: only
+    // workspaces must be on (checked by the poll). A decision is kept in the person's review state and announced to
+    // clients listening now; one not listening shows it from the summary (`review_notices`) when it replays, which the
+    // change event below asks for after the first poll and after every poll that recorded something.
+    let reviewsPolled = false
+    const reviewNotices = Instance.bind(async () => {
+      if (disposed) return
+      const { ReviewNotices } = await import("../workspace/review-notices")
+      const result = await ReviewNotices.poll(ctx.directory, {
+        announce: async (notice) => {
+          await Bus.publish(RuleEvents.Event.Reviewed, {
+            public_id: notice.public_id,
+            text: notice.name,
+            status: notice.status,
+            kind: notice.kind,
+            ...(notice.reason ? { reason: notice.reason } : {}),
+            ...(notice.reviewer ? { reviewer: notice.reviewer } : {}),
+          })
+        },
+      })
+      if (result.status !== "done" || disposed) return
+      if (!reviewsPolled || result.recorded.length) await Bus.publish(RuleEvents.Event.Changed, { directory: ctx.directory }).catch(() => {})
+      reviewsPolled = true
+    })
     const refresh = Instance.bind(async () => {
       if (disposed) return
+      await reviewNotices().catch((error) => log.warn("workspace review notices failed", { error: error instanceof Error ? error.message : String(error) }))
       await recover().catch((error) => log.warn("rules remember recovery failed", { error: error instanceof Error ? error.message : String(error) }))
       const learn = await learnConfig(ctx)
       if (!RulesSync.rulesEnabled(learn) || !(await linked(root, ctx.directory))) return void (await followLearning(learn))

@@ -603,6 +603,40 @@ describe("host session", () => {
     expect(snapshot.shown.map((e) => e.id)).toEqual(["L-0000000000bb"])
   })
 
+  test("the person's own pending proposals are given apart, never as approved; a pending edit keeps the approved wording out of the approved list", async () => {
+    const active = rule("Name staging models stg_<source>.")
+    const pendingRow = (key: string, text: string, extra: Record<string, unknown> = {}) => ({
+      public_id: `q-${key}`, rule_key: `R-${key.padEnd(12, "0")}`, repo_identity: "github.com/acme/demo", text, applies_to: [], tags: [],
+      change: "add" as const, replaces_public_id: null, created_at: "2026-11-01T00:00:00Z", ...extra,
+    })
+    for (const session of ["claude:pa", undefined]) {
+      // A pending add: listed under its own heading after the approved team rule.
+      const add = await linkedRoot({ rules: [active], my_pending: [pendingRow("bbbbbbbbbbbb", "Prefix marts with fct_.")] })
+      const added = await RulesHost.start({ root: add, directory: add, learn, ...(session ? { session } : {}) })
+      expect(added.rules).toEqual([
+        { text: active.text, applies_to: [] },
+        { text: "Prefix marts with fct_.", applies_to: [], review: "pending" },
+      ])
+      const context = RulesHost.context(added)
+      const approvedAt = context.indexOf("approved by the workspace owner")
+      const pendingAt = context.indexOf("still waiting for the workspace owner's review")
+      expect(approvedAt).toBeGreaterThan(-1)
+      expect(pendingAt).toBeGreaterThan(approvedAt)
+      expect(context.slice(pendingAt)).toContain("- Prefix marts with fct_.")
+      expect(context.slice(approvedAt, pendingAt)).not.toContain("fct_")
+      // A pending edit: its wording under the pending heading only, and nothing under "approved".
+      const edit = await linkedRoot({
+        rules: [active],
+        my_pending: [pendingRow("dddddddddddd", "Name staging models stg_<source>__<entity>.", { change: "edit", replaces_public_id: active.public_id })],
+      })
+      const edited = await RulesHost.start({ root: edit, directory: edit, learn, ...(session ? { session: `${session}-e` } : {}) })
+      expect(edited.rules).toEqual([{ text: "Name staging models stg_<source>__<entity>.", applies_to: [], review: "pending" }])
+      const editContext = RulesHost.context(edited)
+      expect(editContext).not.toContain("approved by the workspace owner")
+      expect(editContext).toContain("still waiting for the workspace owner's review")
+    }
+  })
+
   test("pinned team rules are given first, so the start budget cuts unpinned ones", async () => {
     const plain = rule("Alias every joined table.", { public_id: "22222222-2222-2222-2222-222222222222", rule_key: "R-0000000000bb" })
     const pinned = rule("Name staging models stg_<source>.", { pinned: true })

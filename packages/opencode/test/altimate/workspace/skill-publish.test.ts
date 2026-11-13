@@ -79,7 +79,7 @@ afterAll(() => {
 })
 
 const originalFetch = globalThis.fetch
-let requests: { method: string; url: string; body: any }[] = []
+let requests: { method: string; url: string; body: any; auth?: string }[] = []
 /** Per-method status. `POST` 409 exercises the name conflict; `PATCH` 404 the
  * published-then-deleted fallback. */
 let statuses: Record<string, number> = {}
@@ -98,6 +98,11 @@ let workspaceOwners: Record<number, number> = { 42: 7, 77: 7, 99: 7 }
 let skillCreator = 7
 /** Skill ids the server has deleted. */
 let deleted: string[] = []
+/** The workspace review routes (`/datamates/{id}/reviews*`). Null is a server older than workspace review: they do not
+ * exist (a bare 404). */
+let reviews: ((method: string, url: string, body: any) => Response) | null = null
+/** A skill detail that leaves out `attached_datamate_ids`. */
+let attachmentsUnreadable = false
 
 let project = ""
 let skillDir = ""
@@ -111,6 +116,8 @@ beforeEach(async () => {
   workspaceOwners = { 42: 7, 77: 7, 99: 7 }
   skillCreator = 7
   deleted = []
+  reviews = null
+  attachmentsUnreadable = false
   project = mkdtempSync(path.join(SANDBOX, "proj-"))
   skillDir = path.join(project, "skills", "deploy")
   mkdirSync(skillDir, { recursive: true })
@@ -125,7 +132,11 @@ beforeEach(async () => {
     } catch {
       /* non-JSON bodies are not used here */
     }
-    requests.push({ method, url, body })
+    requests.push({ method, url, body, auth: (init?.headers as Record<string, string> | undefined)?.Authorization })
+    if (url.includes("/reviews"))
+      return reviews
+        ? reviews(method, url, body)
+        : new Response(JSON.stringify({ detail: "Not Found" }), { status: 404, headers: { "content-type": "application/json" } })
     if (method === "GET" && url.endsWith("/users/me"))
       return new Response(JSON.stringify({ id: me }), { status: 200, headers: { "content-type": "application/json" } })
     if (method === "GET" && url.endsWith("/datamates/"))
@@ -159,6 +170,7 @@ beforeEach(async () => {
       method === "PUT"
         ? { public_id: "pub-1", attached_datamate_ids: attached }
         : { skill: { public_id: "pub-1", attached_datamate_ids: attached, created_by: skillCreator } }
+    if (method === "GET" && attachmentsUnreadable) delete (body_ as { skill: Record<string, unknown> }).skill.attached_datamate_ids
     return new Response(JSON.stringify(body_), { status, headers: { "content-type": "application/json" } })
   }) as typeof fetch
 
@@ -374,6 +386,28 @@ describe("publishSkill", () => {
       const patch = requests.find((r) => r.method === "PATCH")!
       expect(patch.url).toContain("pub-mine")
       expect(requests.some((r) => r.method === "PATCH" && r.url.includes("pub-other-user"))).toBe(false)
+    })
+
+    test("finds the skill among the user's own, so one attached nowhere (a rejected first submission) is updated", async () => {
+      statuses.POST = 409
+      attached = []
+      withList([{ name: "deploy", public_id: "pub-mine", created_by: 7 }])
+
+      const report = await publish({ replace: true })
+
+      expect(report.publicId).toBe("pub-mine")
+      const lookup = new URL(requests.find((r) => r.method === "GET" && /\/skills\?/.test(r.url))!.url)
+      expect(lookup.searchParams.get("mine")).toBe("true")
+      expect(lookup.searchParams.has("datamate_id")).toBe(false)
+    })
+
+    test("refuses a same-name skill attached only to other workspaces", async () => {
+      statuses.POST = 409
+      attached = [77]
+      withList([{ name: "deploy", public_id: "pub-mine", created_by: 7 }])
+
+      await expect(publish({ replace: true })).rejects.toBeInstanceOf(SkillNameConflictError)
+      expect(requests.some((r) => r.method === "PATCH")).toBe(false)
     })
 
     test("still refuses without replace", async () => {
@@ -1007,6 +1041,12 @@ describe("attaching to the workspace", () => {
   // workspace skills by datamate id — which is the UAT report this closes.
   const puts = () => requests.filter((r) => r.method === "PUT" && r.url.includes("/datamates"))
 
+  test("a detail that does not say where the skill is attached fails, rather than replacing the set with this workspace", async () => {
+    attachmentsUnreadable = true
+    await expect(publish()).rejects.toThrow("did not say which workspaces")
+    expect(puts()).toEqual([])
+  })
+
   test("attaches a newly created skill to the bound workspace", async () => {
     const report = await publish()
     expect(report.action).toBe("created")
@@ -1067,15 +1107,15 @@ describe("what a surface says", () => {
   // The CLI and the TUI share these lines so a user moving between them
   // recognises the outcome.
   test("names the outcome, the skill, and the size", () => {
-    const line = describePublish({ action: "created", publicId: "p", name: "deploy", files: 3, bytes: 2048, datamateId: 1 })
+    const line = describePublish({ action: "created", publicId: "p", name: "deploy", files: 3, bytes: 2048, datamateId: 1, workspaceName: "Growth" })
     expect(line).toContain("Published")
     expect(line).toContain('"deploy"')
     expect(line).toContain("3 files")
     expect(line).toContain("2KB")
-    expect(describePublish({ action: "updated", publicId: "p", name: "d", files: 1, bytes: 12, datamateId: 1 })).toContain(
+    expect(describePublish({ action: "updated", publicId: "p", name: "d", files: 1, bytes: 12, datamateId: 1, workspaceName: "Growth" })).toContain(
       "Updated",
     )
-    expect(describePublish({ action: "updated", publicId: "p", name: "d", files: 1, bytes: 12, datamateId: 1 })).toContain(
+    expect(describePublish({ action: "updated", publicId: "p", name: "d", files: 1, bytes: 12, datamateId: 1, workspaceName: "Growth" })).toContain(
       "1 file,",
     )
   })
@@ -1098,3 +1138,260 @@ describe("what a surface says", () => {
     expect(explainPublishError(new Error("ECONNRESET"))).toBeNull()
   })
 })
+
+// altimate_change start — workspace review: a member's skill is submitted for the owner's review
+const { ReviewDisabledError, SubmitFailedError, TooManyReviewRequestsError } = await import(
+  "../../../src/altimate/workspace/skill-publish"
+)
+const { ReviewNotices } = await import("../../../src/altimate/workspace/review-notices")
+const { publishJson } = await import("../../../src/cli/cmd/skill")
+
+describe("workspace review", () => {
+  // The notice state lives in the shared state directory: each test starts without any.
+  beforeEach(() => rmSync(ReviewNotices.dir(), { recursive: true, force: true }))
+  const reply = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
+  const summary = (over: Record<string, unknown> = {}) => ({
+    is_owner: false,
+    review_enabled: true,
+    owner_name: "Olive",
+    pending_count: 0,
+    mine_pending_count: 0,
+    ...over,
+  })
+  const contribution = (over: Record<string, unknown> = {}) => ({
+    public_id: "c-1",
+    kind: "skill",
+    subject_id: "pub-1",
+    name: "deploy",
+    description: "d",
+    change: "add",
+    status: "pending",
+    version: 1,
+    is_mine: true,
+    proposed_by_name: "Sam",
+    reviewed_by_name: null,
+    reviewed_at: null,
+    review_reason: null,
+    created_at: "2026-11-01T00:00:00Z",
+    updated_at: "2026-11-01T00:00:00Z",
+    expires_at: "2026-11-15T00:00:00Z",
+    expired: false,
+    file_count: 1,
+    document_version: null,
+    ...over,
+  })
+  /** The review routes: the summary, and the submission's answer. */
+  const server = (summaryAnswer: () => Response, submitAnswer: (body: any) => Response) => {
+    reviews = (method, url, body) => (url.endsWith("/reviews/summary") ? summaryAnswer() : submitAnswer(body))
+  }
+  const posted = () => requests.filter((r) => r.method === "POST" && r.url.endsWith("/datamates/42/reviews"))
+  const uploads = () => requests.filter((r) => (r.method === "POST" || r.method === "PATCH") && r.url.includes("/skills"))
+  const attaches = () => requests.filter((r) => r.method === "PUT" && r.url.endsWith("/datamates"))
+
+  test("a member's skill is uploaded, then sent for review; nothing is attached directly", async () => {
+    // The workspace belongs to someone else: without review this publish would be refused.
+    workspaceOwners = { 42: 99 }
+    server(
+      () => reply(summary()),
+      () => reply({ status: "pending", attached_directly: false, duplicate: false, contribution: contribution() }),
+    )
+    const report = await publish()
+    expect(posted().map((r) => r.body)).toEqual([{ kind: "skill", subject_id: "pub-1", source: "cli" }])
+    expect(attaches()).toEqual([])
+    expect(report.review).toMatchObject({ status: "pending", attachedDirectly: false, duplicate: false, ownerName: "Olive" })
+    expect(describePublish(report)).toContain('Sent "deploy" for review to Olive')
+    // Remembered as pending, so the owner's decision is noticed.
+    const scope = ReviewNotices.scopeOf("https://api.example.com", "acme", "user:7", 42)
+    expect((await ReviewNotices.read(scope))?.pending).toEqual(["c-1"])
+  })
+
+  test("the owner's own skill is attached directly by the server and says so", async () => {
+    server(
+      () => reply(summary({ is_owner: true })),
+      () => reply({ status: "active", attached_directly: true, duplicate: false, contribution: null }),
+    )
+    const report = await publish()
+    expect(attaches()).toEqual([])
+    expect(describePublish(report)).toBe('Published "deploy" to "Growth" (1 file, 28B).')
+  })
+
+  test("a duplicate says it is already waiting, or already approved, from the server's status", async () => {
+    workspaceOwners = { 42: 99 }
+    server(
+      () => reply(summary()),
+      () => reply({ status: "pending", attached_directly: false, duplicate: true, contribution: contribution() }),
+    )
+    expect(describePublish(await publish())).toStartWith("Already waiting for review:")
+    server(
+      () => reply(summary()),
+      () => reply({ status: "active", attached_directly: false, duplicate: true, contribution: contribution({ status: "active" }) }),
+    )
+    expect(describePublish(await publish())).toStartWith("Already approved:")
+  })
+
+  test("a member is refused before anything is uploaded when review is off", async () => {
+    workspaceOwners = { 42: 99 }
+    server(() => reply(summary({ review_enabled: false })), () => reply({}, 500))
+    await expect(publish()).rejects.toBeInstanceOf(ReviewDisabledError)
+    expect(uploads()).toEqual([])
+  })
+
+  test("a server without review (bare 404, or 404 reviews_not_available) attaches as before", async () => {
+    for (const absent of [
+      () => reply({ detail: "Not Found" }, 404),
+      () => reply({ detail: { code: "reviews_not_available", message: "not migrated" } }, 404),
+    ]) {
+      requests = []
+      server(absent, absent)
+      const report = await publish()
+      expect(report.review).toBeUndefined()
+      expect(attaches()).toHaveLength(1)
+      expect(posted()).toEqual([])
+      expect(describePublish(report)).toMatch(/^(Published|Updated) "deploy" in the workspace/)
+    }
+  })
+
+  test("without review, a workspace owned by someone else is still refused", async () => {
+    workspaceOwners = { 42: 99 }
+    server(() => reply({ detail: { code: "reviews_not_available", message: "x" } }, 404), () => reply({}, 500))
+    await expect(publish()).rejects.toBeInstanceOf(NotWorkspaceOwnerError)
+    expect(uploads()).toEqual([])
+  })
+
+  test("a submission the server no longer has routes for falls back to attaching", async () => {
+    server(() => reply(summary({ is_owner: true })), () => reply({ detail: { code: "reviews_not_available", message: "x" } }, 404))
+    const report = await publish()
+    expect(report.review).toBeUndefined()
+    expect(attaches()).toHaveLength(1)
+  })
+
+  test("one credential for the whole publish: a sign-in change mid-flow does not split it across two accounts", async () => {
+    workspaceOwners = { 42: 99 }
+    server(
+      () => {
+        // Another account signs in once the summary has answered.
+        stubCreds({ altimateApiKey: "k2" })
+        return reply(summary())
+      },
+      () => reply({ status: "pending", attached_directly: false, duplicate: false, contribution: contribution() }),
+    )
+    try {
+      requests = []
+      await publish()
+      expect(posted()).toHaveLength(1)
+      expect(new Set(requests.map((r) => r.auth))).toEqual(new Set(["Bearer k"]))
+    } finally {
+      stubCreds()
+    }
+  })
+
+  test("a member's submission to a server that turns out to have no review keeps the upload and says it failed", async () => {
+    workspaceOwners = { 42: 99 }
+    server(() => reply(summary()), () => reply({ detail: { code: "reviews_not_available", message: "x" } }, 404))
+    const err = await publish().catch((e) => e)
+    expect(err).toBeInstanceOf(SubmitFailedError)
+    // Not attached (the member cannot), and the upload is not taken back.
+    expect(attaches()).toEqual([])
+    expect(deleted).toEqual([])
+  })
+
+  test("a sign-in switch while the link is resolved uploads nothing; signed out is said as such", async () => {
+    const { spyOn } = await import("bun:test")
+    const WorkspaceState = await import("../../../src/altimate/workspace/state")
+    const { CredentialsChangedError } = await import("../../../src/altimate/workspace/skill-publish")
+    const { NotConfiguredError } = await import("../../../src/altimate/workspace/api-client")
+    server(() => reply(summary()), () => reply({}, 500))
+    const switched = spyOn(WorkspaceState, "accountDigest").mockResolvedValue("someone-else")
+    try {
+      await expect(publish()).rejects.toBeInstanceOf(CredentialsChangedError)
+    } finally {
+      switched.mockRestore()
+    }
+    expect(uploads()).toEqual([])
+    const configured = AltimateApi.isConfigured
+    ;(AltimateApi as unknown as { isConfigured: () => Promise<boolean> }).isConfigured = async () => false
+    try {
+      await expect(publish()).rejects.toBeInstanceOf(NotConfiguredError)
+    } finally {
+      ;(AltimateApi as unknown as { isConfigured: typeof configured }).isConfigured = configured
+    }
+    expect(uploads()).toEqual([])
+  })
+
+  test("a submission the server accepted is not a failure when its row has a status this version does not know", async () => {
+    workspaceOwners = { 42: 99 }
+    server(
+      () => reply(summary()),
+      () => reply({ status: "pending", attached_directly: false, duplicate: false, contribution: contribution({ status: "held" }) }),
+    )
+    const report = await publish()
+    expect(report.review).toMatchObject({ status: "pending", contribution: null })
+  })
+
+  test("coded refusals of the submission get their own errors", async () => {
+    workspaceOwners = { 42: 99 }
+    server(() => reply(summary()), () => reply({ detail: { code: "review_disabled", message: "off" } }, 409))
+    await expect(publish()).rejects.toBeInstanceOf(ReviewDisabledError)
+    server(() => reply(summary()), () => reply({ detail: { code: "too_many_requests", message: "50 open" } }, 409))
+    const err = await publish().catch((e) => e)
+    expect(err).toBeInstanceOf(TooManyReviewRequestsError)
+    expect(explainPublishError(err)).toContain("workspace review status")
+  })
+
+  test("a 401 or an outage on the submission is a failure to retry, never a rejection; the next publish updates and resubmits", async () => {
+    workspaceOwners = { 42: 99 }
+    server(() => reply(summary()), () => new Response("unauthorized", { status: 401 }))
+    const unauthorized = await publish().catch((e) => e)
+    expect(unauthorized).toBeInstanceOf(SubmitFailedError)
+    expect(explainPublishError(unauthorized)).toContain("Publish again")
+    // Not recorded as anything the owner decided.
+    expect(await ReviewNotices.read(ReviewNotices.scopeOf("https://api.example.com", "acme", "user:7", 42))).toBeUndefined()
+    requests = []
+    server(
+      () => reply(summary()),
+      () => reply({ status: "pending", attached_directly: false, duplicate: false, contribution: contribution() }),
+    )
+    const report = await publish()
+    expect(report.action).toBe("updated")
+    expect(requests.some((r) => r.method === "PATCH")).toBe(true)
+    expect(posted()).toHaveLength(1)
+  })
+
+  test("the server's text in a failed submission reaches the terminal inert", async () => {
+    workspaceOwners = { 42: 99 }
+    server(() => reply(summary()), () => reply({ detail: "boom\u001b]0;pwned\u0007\nnext line" }, 500))
+    const message = explainPublishError(await publish().catch((e) => e))!
+    expect(message).toContain("boom")
+    expect(message).not.toMatch(/[\u0000-\u001F\u007F]/)
+  })
+
+  test("the summary failing (401, offline) fails the publish before anything is uploaded", async () => {
+    server(() => new Response("unauthorized", { status: 401 }), () => reply({}, 500))
+    await expect(publish()).rejects.toBeDefined()
+    expect(uploads()).toEqual([])
+    reviews = () => {
+      throw new TypeError("network down")
+    }
+    await expect(publish()).rejects.toBeDefined()
+    expect(uploads()).toEqual([])
+  })
+
+  test("--json carries the server's status fields", async () => {
+    workspaceOwners = { 42: 99 }
+    server(
+      () => reply(summary()),
+      () => reply({ status: "pending", attached_directly: false, duplicate: false, contribution: contribution() }),
+    )
+    const out = publishJson(await publish())
+    expect(out).toMatchObject({
+      ok: true,
+      action: "created",
+      public_id: "pub-1",
+      workspace_id: 42,
+      workspace_name: "Growth",
+      review: { status: "pending", attached_directly: false, duplicate: false, owner_name: "Olive", contribution: { public_id: "c-1" } },
+    })
+  })
+})
+// altimate_change end

@@ -391,8 +391,12 @@ const StatusCommand = effectCmd({
         ...await analyzeRecurrence(root, { name }).then((recurrence) => ({ recurrence }), (error) => ({ recurrence_error: error instanceof Error ? error.message : String(error) })),
         // altimate_change start — workspace rules (local state only), with the learn config the service enforces
         rules: await Promise.all([import("../../altimate/rules/summary"), import("../../altimate/rules/service")])
-          .then(async ([{ RulesSummary }, { RulesService }]) =>
-            RulesSummary.summary(root, await RulesService.effectiveLearn(learn, root, (await import("@/project/instance")).Instance.directory))),
+          .then(async ([{ RulesSummary }, { RulesService }]) => {
+            // The session directory names the workspace link the review notices belong to (a subdirectory may differ
+            // from the root).
+            const directory = (await import("@/project/instance")).Instance.directory
+            return RulesSummary.summary(root, await RulesService.effectiveLearn(learn, root, directory), process.env, directory)
+          }),
         // altimate_change end
       }))
       if (args.json) return out(JSON.stringify(status, null, 2))

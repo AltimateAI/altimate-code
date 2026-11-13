@@ -37,11 +37,14 @@ import { existsSync, realpathSync } from "fs"
 import { Log } from "@/altimate/util/log"
 import { Global } from "@/global"
 import { Filesystem } from "@/util/filesystem"
-import { AltimateApi } from "@/altimate/api/client"
 import { isInWorkspaceSnapshot } from "./snapshot-path"
-import { ConflictError, ForbiddenError, NotFoundError, WorkspaceApi, altimateRequest } from "./api-client"
-import type { ConflictDetail } from "./api-client"
-import { resolveBinding } from "./state"
+import { ConflictError, ForbiddenError, NotConfiguredError, NotFoundError, WorkspaceApi, altimateRequest } from "./api-client"
+import type { ActAs, ConflictDetail } from "./api-client"
+import { accountDigest, credentialDigest, resolveBinding } from "./state"
+import { printable } from "../rules/printable"
+import { RulesApiError } from "../rules/api"
+import { ReviewApi } from "./review-api"
+import { ReviewNotices } from "./review-notices"
 
 const log = Log.create({ service: "altimate-workspace-skill-publish" })
 
@@ -205,6 +208,14 @@ export class NotLinkedError extends Error {
   }
 }
 
+/** The Altimate sign-in changed while the publish started: nothing was uploaded. */
+export class CredentialsChangedError extends Error {
+  constructor() {
+    super("Your Altimate sign-in changed while publishing; nothing was uploaded. Publish again.")
+    this.name = "CredentialsChangedError"
+  }
+}
+
 /** The skill directory is not a project skill: it lives outside the project
  * (a personal skill under `~/.claude/skills` or the like), or it reaches
  * the project only through a symbolic link. Publishing shares a bundle with
@@ -247,8 +258,52 @@ export class AttachFailedError extends Error {
     readonly publicId: string,
     cause: unknown,
   ) {
-    super(`The skill was uploaded (id ${publicId}) but could not be attached to the workspace: ${String(cause)}`)
+    super(`The skill was uploaded (id ${publicId}) but could not be attached to the workspace: ${printable(String(cause))}`)
     this.name = "AttachFailedError"
+  }
+}
+
+/** The workspace reviews what members add, and review is off: only its owner adds skills. Raised before anything is
+ * uploaded (from the workspace's review summary), or when the owner turned review off while this publish ran (the
+ * server's 409 `review_disabled`). */
+export class ReviewDisabledError extends Error {
+  constructor(
+    readonly workspaceName: string,
+    ownerName?: string | null,
+  ) {
+    const owner = ownerName ? printable(ownerName) : "its owner"
+    super(
+      `"${printable(workspaceName)}" belongs to ${owner}, and review is off there, so only ${owner} can add skills to it. ` +
+        `Ask them to turn on review in the workspace, or to publish the skill.`,
+    )
+    this.name = "ReviewDisabledError"
+  }
+}
+
+/** The author already has as many open review requests on this workspace as the server allows (409
+ * `too_many_requests`). The skill was uploaded; publishing again once some are decided sends it. */
+export class TooManyReviewRequestsError extends Error {
+  constructor(readonly publicId: string) {
+    super(
+      `The skill was uploaded (id ${publicId}), but you already have as many open review requests on this workspace as it ` +
+        `allows. Publish again once the owner has decided some of them; \`altimate-code workspace review status\` lists them.`,
+    )
+    this.name = "TooManyReviewRequestsError"
+  }
+}
+
+/** The skill exists on the server but could not be sent for review. The next publish takes the update path and submits
+ * again (a submission of unchanged content is answered as a duplicate), so nothing is stranded. */
+export class SubmitFailedError extends Error {
+  constructor(
+    readonly publicId: string,
+    cause: unknown,
+  ) {
+    super(
+      `The skill was uploaded (id ${publicId}) but could not be sent to the workspace: ` +
+        `${printable(cause instanceof Error ? cause.message : String(cause))}. Publish again to retry.`,
+    )
+    this.name = "SubmitFailedError"
   }
 }
 
@@ -305,8 +360,23 @@ export interface PublishReport {
   name: string
   files: number
   bytes: number
-  /** The workspace the skill is now attached to. */
+  /** The workspace the skill was published to. */
   datamateId: number
+  workspaceName: string
+  /** The server's answer to the submission, when the workspace has review (`POST /datamates/{id}/reviews`). Absent
+   * from a server without it: the skill was attached as before. */
+  review?: PublishReview
+}
+
+export interface PublishReview {
+  /** `active`: the workspace serves it now (the owner's own, attached directly, or already approved); `pending`: it waits
+   * for the owner's review. */
+  status: "active" | "pending"
+  attachedDirectly: boolean
+  /** The same content was already open or already active: nothing new was submitted. */
+  duplicate: boolean
+  ownerName: string | null
+  contribution: ReviewApi.Contribution | null
 }
 
 /** Read one directory into a bundle, refusing anything that cannot survive the
@@ -485,11 +555,9 @@ interface LedgerScope {
   userId: number
 }
 
-async function currentScope(): Promise<LedgerScope | null> {
-  const creds = await AltimateApi.getCredentials().catch(() => null)
-  if (!creds) return null
-  const userId = await WorkspaceApi.whoami()
-  return { tenant: creds.altimateInstanceName, apiUrl: creds.altimateUrl, userId }
+async function currentScope(actAs: ActAs): Promise<LedgerScope> {
+  const userId = await WorkspaceApi.whoami(actAs)
+  return { tenant: actAs.instance, apiUrl: actAs.url, userId }
 }
 
 /** The skill directory as the ledger identifies it: its real path. `path.resolve`
@@ -552,7 +620,7 @@ async function recordPublished(skillDir: string, scope: LedgerScope, record: Pub
   })
 }
 
-async function knownPublicId(skillDir: string, scope: LedgerScope): Promise<string | null> {
+async function knownPublicId(skillDir: string, scope: LedgerScope, actAs: ActAs): Promise<string | null> {
   const record = await withLedger(async () => {
     const ledger = await readLedger()
     // Current key first. Then ANY row for this directory under this account,
@@ -581,7 +649,7 @@ async function knownPublicId(skillDir: string, scope: LedgerScope): Promise<stri
   // current key so the question is not asked again. Someone else's, or
   // gone: not ours, and the create path takes over.
   if (record.createdBy === undefined) {
-    const owner = await skillOwner(record.publicId)
+    const owner = await skillOwner(record.publicId, actAs)
     if (owner !== scope.userId) return null
     await recordPublished(skillDir, scope, { ...record, createdBy: owner })
   } else if (record.createdBy !== scope.userId) return null
@@ -589,13 +657,13 @@ async function knownPublicId(skillDir: string, scope: LedgerScope): Promise<stri
 }
 
 /** `created_by` from the skill's detail, or null when the skill is gone. */
-async function skillOwner(publicId: string): Promise<number | null> {
+async function skillOwner(publicId: string, actAs: ActAs): Promise<number | null> {
   try {
     const detail = await altimateRequest<{ created_by?: unknown; skill?: { created_by?: unknown } }>(
       "GET",
       `/${encodeURIComponent(publicId)}`,
       // altimate_change - a 404 is the answer "the skill is gone", not a failed call
-      { base: SKILLS_BASE, expectedStatuses: [404] },
+      { base: SKILLS_BASE, expectedStatuses: [404], actAs },
     )
     const raw = detail?.skill?.created_by ?? detail?.created_by
     return typeof raw === "number" ? raw : null
@@ -632,20 +700,16 @@ function withPublishLock<T>(skillDir: string, task: () => Promise<T>): Promise<T
  * ``PUT /skills/{id}/datamates`` REPLACES the whole set. A bare put with one id
  * would silently detach the skill from every other workspace it was already on,
  * so the current set is read first and merged. */
-async function attachToWorkspace(publicId: string, datamateId: number): Promise<void> {
-  type Attached = { attached_datamate_ids?: unknown }
-  const detail = await altimateRequest<Attached & { skill?: Attached }>("GET", `/${encodeURIComponent(publicId)}`, {
-    base: SKILLS_BASE,
-  })
+async function attachToWorkspace(publicId: string, datamateId: number, actAs: ActAs): Promise<void> {
   // The server answers `{skill: {...}}` (`CustomSkillResponse`); a flat body
   // is tolerated the way `extractPublicId` tolerates both. Reading only the
   // top level found nothing, and the replace below then detached the skill
   // from every workspace it was already on.
-  const raw = detail?.skill?.attached_datamate_ids ?? detail?.attached_datamate_ids
-  const current = Array.isArray(raw) ? raw.filter((n): n is number => Number.isInteger(n)) : []
+  const current = await attachedWorkspaces(publicId, actAs)
   if (current.includes(datamateId)) return
   await altimateRequest<unknown>("PUT", `/${encodeURIComponent(publicId)}/datamates`, {
     base: SKILLS_BASE,
+    actAs,
     body: { datamate_ids: [...current, datamateId] },
     allowEmptyBody: true,
   })
@@ -696,21 +760,59 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   // Before the bundle is even read. An unlinked project has nowhere to attach
   // to, and uploading first would create the orphan this module exists to
   // prevent.
-  const binding = await resolveBinding(input.projectDirectory)
-  if (!binding) throw new NotLinkedError()
-
   // Resolved once and pinned. The ledger lookup and the record after the
   // upload must describe the same account, or a credential change mid-publish
-  // files the id under one and looks for it under the other.
-  const scope = await currentScope()
-  if (!scope) throw new NotLinkedError()
+  // files the id under one and looks for it under the other. Every request
+  // below uses this one credential too: the review summary, the upload, the
+  // submission and the notice scope all belong to the same person.
+  const actAs = await WorkspaceApi.captureCredentials()
+  if (!actAs) throw new NotConfiguredError()
+  const binding = await resolveBinding(input.projectDirectory)
+  if (!binding) throw new NotLinkedError()
+  // The link was resolved with the credential signed in now: it must still be the captured one, or the skill would go
+  // to one account's workspace under another account.
+  if ((await accountDigest()) !== credentialDigest(actAs.url, actAs.instance, actAs.apiKey)) throw new CredentialsChangedError()
+  const scope = await currentScope(actAs)
 
-  // And the workspace must be the caller's. Linking needs only visibility, so
+  // Whether the workspace reviews what members add, asked before anything is uploaded. With review, a member's own skill
+  // is submitted for the owner's review and the owner's is attached directly; with review off only the owner adds
+  // skills. A server without review answers `unsupported`: the skill is attached as before, which needs ownership.
+  const review = await reviewSummary(binding.datamateId, actAs)
+  if (review && !review.is_owner && !review.review_enabled) throw new ReviewDisabledError(binding.datamateName, review.owner_name)
+  // Without review the workspace must be the caller's. Linking needs only visibility, so
   // a project can be bound to a colleague's shared workspace — where the
   // attach would answer 404, on every publish, leaving a skill nothing from
   // the CLI could ever attach. Same rule as the link check: nothing is
   // uploaded until the attach is known to be possible.
-  await assertOwnsWorkspace(binding.datamateId, binding.datamateName, scope.userId)
+  if (!review) await assertOwnsWorkspace(binding.datamateId, binding.datamateName, scope.userId, actAs)
+
+  /** Submit the uploaded skill for review; undefined when the server turns out to have no review (then attached as
+   * before by the caller). */
+  const submit = async (publicId: string): Promise<PublishReview | undefined> => {
+    if (!review) return undefined
+    try {
+      const result = await ReviewApi.submit(binding.datamateId, { kind: "skill", subject_id: publicId, source: "cli" }, actAs)
+      // Remembered as pending, so the owner's decision is noticed even if it lands before the next poll.
+      if (result.contribution)
+        await ReviewNotices.recordSubmitted(
+          ReviewNotices.scopeOf(scope.apiUrl, scope.tenant, `user:${scope.userId}`, binding.datamateId),
+          result.contribution,
+        )
+      return {
+        status: result.status,
+        attachedDirectly: result.attached_directly,
+        duplicate: result.duplicate,
+        ownerName: review.owner_name ?? null,
+        contribution: result.contribution,
+      }
+    } catch (err) {
+      // Only the owner falls back to attaching directly when the server turns out to have no review: a member cannot
+      // attach, and the fallback would answer 404 and take the upload back. The member's upload is kept and the
+      // submission reported as failed.
+      if (ReviewApi.unavailable(err) && review.is_owner) return undefined
+      throw submitError(err, publicId, binding.datamateName, review.owner_name)
+    }
+  }
 
   const files = await collectBundle(skillRoot)
   if (files.length === 0) throw new EmptyBundleError()
@@ -721,6 +823,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     try {
       await altimateRequest<unknown>("PATCH", `/${encodeURIComponent(existing)}`, {
         base: SKILLS_BASE,
+        actAs,
         // `replace_bundle` because `files` is the WHOLE bundle every time —
         // `collectBundle` walks the directory, so a path missing from it is a
         // file the user deleted. Without the flag the server refuses any
@@ -741,13 +844,16 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
           apiUrl: scope.apiUrl,
           createdBy: scope.userId,
         })
-      // Attached on update too: a skill published before this project was
-      // linked to its current workspace is otherwise updated but still absent
-      // from it.
-      try {
-        await attachToWorkspace(existing, binding.datamateId)
-      } catch (err) {
-        throw new AttachFailedError(existing, err)
+      // Submitted (or attached) on update too: a skill published before this project was linked to its current
+      // workspace is otherwise updated but still absent from it, and with review an edit reaches the team only through
+      // a new submission.
+      const reviewed = await submit(existing)
+      if (!reviewed) {
+        try {
+          await attachToWorkspace(existing, binding.datamateId, actAs)
+        } catch (err) {
+          throw new AttachFailedError(existing, err)
+        }
       }
       return {
         action: "updated",
@@ -756,6 +862,8 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
         files: files.length,
         bytes,
         datamateId: binding.datamateId,
+        workspaceName: binding.datamateName,
+        ...(reviewed ? { review: reviewed } : {}),
       }
     } catch (err) {
       // The skill was deleted in the workspace since we published it. Falling
@@ -766,6 +874,9 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
       // was never the problem — with no way forward, since renaming does not
       // help. Told apart by the server's own message.
       if (err instanceof ConflictError) throw updateConflict(err, input.name)
+      // A refusal of the submission (or a failed attach) after a successful upload is reported as is: the update
+      // happened, and creating a second skill would not help.
+      if (isAfterUpload(err)) throw err
       if (adopted) throw err
       // 403: the id is someone else's. Reachable through the legacy ledger
       // keys, which predate creator scoping — on a shared machine a row
@@ -782,7 +893,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
       } else throw err
     }
   }
-  const existing = await knownPublicId(input.skillDirectory, scope)
+  const existing = await knownPublicId(input.skillDirectory, scope, actAs)
   if (existing) {
     const updated = await update(existing)
     if (updated) return updated
@@ -792,6 +903,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
   try {
     created = await altimateRequest<unknown>("POST", "", {
       base: SKILLS_BASE,
+      actAs,
       body: { name: input.name, description: input.description, files },
       timeoutMs: UPLOAD_TIMEOUT_MS,
     })
@@ -800,7 +912,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     // published from another machine, so this one holds no id for it.
     // altimate_change start — learn: `--replace` adopts this user's own same-name skill
     if (err instanceof ConflictError && input.replace) {
-      const own = await findOwnSkillByName(input.name, scope.userId, binding.datamateId)
+      const own = await findOwnSkillByName(input.name, scope.userId, binding.datamateId, actAs)
       if (!own) throw new SkillNameConflictError(input.name, "create", err.detail)
       const updated = await update(own, true)
       if (updated) return updated
@@ -819,11 +931,23 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     apiUrl: scope.apiUrl,
     createdBy: extractCreatedBy(created) ?? scope.userId,
   })
-  // After the id is recorded, deliberately. If the attach fails, the next
-  // publish finds the id, takes the update path, and attaches again — rather
+  // After the id is recorded, deliberately. If the submission or the attach fails, the next
+  // publish finds the id, takes the update path, and tries again — rather
   // than creating a second copy and 409ing on the name.
+  const reviewed = await submit(publicId)
+  if (reviewed)
+    return {
+      action: "created",
+      publicId,
+      name: input.name,
+      files: files.length,
+      bytes,
+      datamateId: binding.datamateId,
+      workspaceName: binding.datamateName,
+      review: reviewed,
+    }
   try {
-    await attachToWorkspace(publicId, binding.datamateId)
+    await attachToWorkspace(publicId, binding.datamateId, actAs)
   } catch (err) {
     // A 404 straight after a create means the workspace refused the
     // attachment outright — not owned, or gone — and retrying will not change
@@ -832,6 +956,7 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     if (err instanceof NotFoundError) {
       await altimateRequest<unknown>("DELETE", `/${encodeURIComponent(publicId)}`, {
         base: SKILLS_BASE,
+        actAs,
         allowEmptyBody: true,
       }).catch((cleanup) => log.warn("could not remove an unattachable skill", { publicId, err: String(cleanup) }))
       await forgetPublished(input.skillDirectory, scope)
@@ -839,18 +964,63 @@ async function publishSkillUnlocked(input: PublishInput): Promise<PublishReport>
     }
     throw new AttachFailedError(publicId, err)
   }
-  return { action: "created", publicId, name: input.name, files: files.length, bytes, datamateId: binding.datamateId }
+  return {
+    action: "created",
+    publicId,
+    name: input.name,
+    files: files.length,
+    bytes,
+    datamateId: binding.datamateId,
+    workspaceName: binding.datamateName,
+  }
+}
+
+/** The workspace's review summary, or null when the server has no review (an older backend, or a tenant without the
+ * tables). Any other failure (offline, 401, the workspace not visible) fails the publish before anything is uploaded. */
+async function reviewSummary(datamateId: number, actAs: ActAs): Promise<ReviewApi.Summary | null> {
+  try {
+    return await ReviewApi.summary(datamateId, actAs)
+  } catch (err) {
+    if (ReviewApi.unavailable(err)) return null
+    throw err
+  }
+}
+
+/** A failed submission, as the error the surfaces explain. Coded refusals get their own type; everything else
+ * (offline, 401/403, a 5xx) says the skill was uploaded and the next publish retries. */
+function submitError(err: unknown, publicId: string, workspaceName: string, ownerName?: string | null): Error {
+  const code = err instanceof RulesApiError && err.kind === "conflict" ? err.code : undefined
+  if (code === "review_disabled") return new ReviewDisabledError(workspaceName, ownerName)
+  if (code === "too_many_requests") return new TooManyReviewRequestsError(publicId)
+  return new SubmitFailedError(publicId, err)
+}
+
+/** Errors raised after the upload succeeded: the skill exists, so the update path must not fall through to a create. */
+function isAfterUpload(err: unknown): boolean {
+  return (
+    err instanceof AttachFailedError ||
+    err instanceof SubmitFailedError ||
+    err instanceof ReviewDisabledError ||
+    err instanceof TooManyReviewRequestsError
+  )
 }
 
 // altimate_change start — learn: find this user's skill by name for `--replace`
-/** The public id of this user's same-name skill attached to the linked workspace, or null unless unique. */
-async function findOwnSkillByName(name: string, userId: number, datamateId: number): Promise<string | null> {
+/** The public id of this user's same-name skill, or null unless unique — and null when it is attached only to other
+ * workspaces, which an update from here would change too.
+ *
+ * Looked up among the user's own skills (`mine=true`), not the linked workspace's list: with review, a skill whose first
+ * submission was rejected (or is still pending for someone else's view) is attached nowhere, so the workspace list does
+ * not name it, and `--replace` must still find it. An older server that ignores `mine` lists more; `created_by` still
+ * picks this user's. */
+async function findOwnSkillByName(name: string, userId: number, datamateId: number, actAs: ActAs): Promise<string | null> {
   const matches = new Set<string>()
   let expectedPages: number | undefined
   for (let page = 1; page <= 50; page++) {
     const body = await altimateRequest<{ items?: unknown[]; pages?: unknown }>("GET", "", {
       base: SKILLS_BASE,
-      query: { datamate_id: String(datamateId), page: String(page), size: "50" },
+      actAs,
+      query: { mine: "true", page: String(page), size: "50" },
     })
     const pages = typeof body?.pages === "number" ? body.pages : 1
     if (expectedPages !== undefined && pages !== expectedPages)
@@ -864,16 +1034,44 @@ async function findOwnSkillByName(name: string, userId: number, datamateId: numb
     }
     if (page >= pages || items.length === 0) break
   }
-  return matches.size === 1 ? [...matches][0] : null
+  if (matches.size !== 1) return null
+  const [publicId] = [...matches]
+  const attached = await attachedWorkspaces(publicId, actAs)
+  return attached.length === 0 || attached.includes(datamateId) ? publicId : null
+}
+
+/** The workspaces a skill is attached to, from its library detail (`{skill: {...}}`, or flat). A detail without a
+ * readable list fails: read as "attached nowhere", it would let `--replace` adopt a skill attached elsewhere, and an
+ * attach replace the whole set with this workspace alone. */
+async function attachedWorkspaces(publicId: string, actAs: ActAs): Promise<number[]> {
+  type Attached = { attached_datamate_ids?: unknown }
+  const detail = await altimateRequest<Attached & { skill?: Attached }>("GET", `/${encodeURIComponent(publicId)}`, {
+    base: SKILLS_BASE,
+    actAs,
+  })
+  const raw = detail?.skill?.attached_datamate_ids ?? detail?.attached_datamate_ids
+  if (!Array.isArray(raw) || !raw.every((n) => Number.isInteger(n)))
+    throw new Error("The workspace did not say which workspaces this skill is attached to. Retry publishing.")
+  return raw as number[]
 }
 // altimate_change end
 
 /** One line for a surface to show after a publish. Both the CLI and the TUI
  * say the same thing, so a user moving between them recognises the outcome. */
 export function describePublish(report: PublishReport): string {
-  const verb = report.action === "created" ? "Published" : "Updated"
   const size = report.bytes >= 1024 ? `${Math.round(report.bytes / 1024)}KB` : `${report.bytes}B`
-  return `${verb} "${report.name}" in the workspace (${report.files} file${report.files === 1 ? "" : "s"}, ${size}).`
+  const detail = `(${report.files} file${report.files === 1 ? "" : "s"}, ${size})`
+  const review = report.review
+  if (!review) return `${report.action === "created" ? "Published" : "Updated"} "${report.name}" in the workspace ${detail}.`
+  // From the server's answer only: what it says the workspace now serves, never what this client expected.
+  const name = printable(report.name)
+  const workspace = printable(report.workspaceName)
+  const owner = review.ownerName ? printable(review.ownerName) : "the workspace owner"
+  if (review.duplicate && review.status === "pending")
+    return `Already waiting for review: "${name}" was sent to ${owner} with the same content. Nothing new was sent.`
+  if (review.duplicate) return `Already approved: "${name}" is in "${workspace}" with the same content. Nothing new was sent.`
+  if (review.status === "active") return `Published "${name}" to "${workspace}" ${detail}.`
+  return `Sent "${name}" for review to ${owner} ${detail}. It reaches the workspace once approved; \`altimate-code workspace review status\` shows where it stands.`
 }
 
 /** The message for an error this module raised on purpose, or null for one it
@@ -882,6 +1080,8 @@ export function describePublish(report: PublishReport): string {
 export function explainPublishError(err: unknown): string | null {
   if (
     err instanceof NotLinkedError ||
+    err instanceof NotConfiguredError ||
+    err instanceof CredentialsChangedError ||
     err instanceof ManagedSkillError ||
     err instanceof NotProjectSkillError ||
     err instanceof BinaryFileError ||
@@ -891,7 +1091,10 @@ export function explainPublishError(err: unknown): string | null {
     err instanceof SkillNameConflictError ||
     err instanceof SkillChangedElsewhereError ||
     err instanceof NotWorkspaceOwnerError ||
-    err instanceof AttachFailedError
+    err instanceof AttachFailedError ||
+    err instanceof ReviewDisabledError ||
+    err instanceof TooManyReviewRequestsError ||
+    err instanceof SubmitFailedError
   )
     return err.message
   return null
@@ -957,8 +1160,8 @@ export function assertProjectSkill(projectRoot: string, skillDirectory: string):
  * from the same list the picker uses, which carries each workspace's owner. A
  * list that omits the owner (an older server) cannot answer, and the attach
  * itself then decides — with the compensation on the create path. */
-async function assertOwnsWorkspace(datamateId: number, datamateName: string, userId: number): Promise<void> {
-  const workspaces = await WorkspaceApi.listDatamates()
+async function assertOwnsWorkspace(datamateId: number, datamateName: string, userId: number, actAs: ActAs): Promise<void> {
+  const workspaces = await WorkspaceApi.listDatamates(actAs)
   const ws = workspaces.find((w) => w.id === datamateId)
   if (ws?.ownerId !== undefined && ws.ownerId !== userId) throw new NotWorkspaceOwnerError(datamateName)
 }

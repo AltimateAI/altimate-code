@@ -46,7 +46,7 @@ function stubSkills(skills = SKILLS) {
   )
 }
 
-const REPORT = { action: "created" as const, publicId: "pub-1", name: "deploy", files: 2, bytes: 2048, datamateId: 42 }
+const REPORT = { action: "created" as const, publicId: "pub-1", name: "deploy", files: 2, bytes: 2048, datamateId: 42, workspaceName: "Growth" }
 
 beforeEach(() => {
   delete process.env.ALTIMATE_DISABLE_WORKSPACE

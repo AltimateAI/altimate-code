@@ -25,12 +25,40 @@ export interface Summary {
   pulled_at?: string
   last_error?: string
   notices: RulesStore.Notice[]
+  /** Decisions on the person's own skill and knowledge submissions to the linked workspace, newest first, kept until
+   * replaced by newer ones (`ReviewNotices`): clients show each once, like `notices`. */
+  review_notices: ReviewNotice[]
   /** What the last post-turn check decided. */
   last_check?: { at: string; session: string; outcome: string }
 }
 
-export async function summary(root: string, learn: LearnConfig, env: NodeJS.ProcessEnv = process.env): Promise<Summary> {
+/** A skill or knowledge decision as clients replay it: the fields of `rule.proposal.reviewed`. */
+export interface ReviewNotice {
+  public_id: string
+  text: string
+  status: string
+  reason?: string
+  reviewer?: string
+  kind: "skill" | "knowledge"
+  at: string
+}
+
+/** `directory`: where the session runs, whose workspace link names the review notices. Every server and CLI caller
+ * passes the session's; it defaults to `root` only for callers with no session. */
+export async function summary(root: string, learn: LearnConfig, env: NodeJS.ProcessEnv = process.env, directory = root): Promise<Summary> {
   const state = await RulesStore.read(root)
+  const { ReviewNotices } = await import("../workspace/review-notices")
+  // Every kept decision (the store keeps the 50 most recent), so a client away for many decisions still gets each once:
+  // clients show a notice once by its id and status.
+  const reviewNotices = (await ReviewNotices.stored(directory)).reverse().map((n): ReviewNotice => ({
+    public_id: n.public_id,
+    text: n.name,
+    status: n.status,
+    kind: n.kind,
+    at: n.at,
+    ...(n.reason ? { reason: n.reason } : {}),
+    ...(n.reviewer ? { reviewer: n.reviewer } : {}),
+  }))
   const learning = RuleTrigger.learningDecision(learn, state, env)
   // Dropped proposals first: the person was told they were queued, and a later pull does not clear it.
   const lastError = [RulesStore.scopeDropNote(state), state.last_error].filter(Boolean).join("; ")
@@ -47,6 +75,7 @@ export async function summary(root: string, learn: LearnConfig, env: NodeJS.Proc
     ...(state.pulled_at ? { pulled_at: state.pulled_at } : {}),
     ...(lastError ? { last_error: lastError } : {}),
     notices: state.notices.slice(-10).reverse(),
+    review_notices: reviewNotices,
     ...(state.last_check ? { last_check: state.last_check } : {}),
   }
 }
