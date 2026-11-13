@@ -138,7 +138,8 @@ function rated(
     }
     if (Object.keys(tables).length === 0) return edges
     const schema = core.Schema.fromJson(JSON.stringify({ tables, version: "1" }))
-    const again: LineageEdge[] = JSON.parse(JSON.stringify(core.columnLineage(sql, dialect, schema))).column_lineage ?? []
+    const again: LineageEdge[] =
+      JSON.parse(JSON.stringify(core.columnLineage(sql, dialect, schema))).column_lineage ?? []
     const keyOf = (edge: LineageEdge) => {
       const source = splitSource(edge.source)
       return source ? `${String(edge.target).toLowerCase()}|${source.parts.at(-1)}.${source.column}` : null
@@ -403,8 +404,7 @@ export function columnReach(manifestPath: string, model: string, column: string,
       unsure.add(id)
       continue
     }
-    const listed: LineageEdge[] = lineage
-      ?.column_lineage?.length
+    const listed: LineageEdge[] = lineage?.column_lineage?.length
       ? lineage.column_lineage
       : Object.entries<any>(lineage?.column_dict ?? {}).flatMap(([out, sources]) =>
           (Array.isArray(sources) ? sources : [sources]).map((source) => ({

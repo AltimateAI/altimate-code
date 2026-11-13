@@ -331,7 +331,13 @@ describe("impact_analysis: column reach carries how each column comes from the t
       })
       const tool = await initTool(ImpactAnalysisTool)
       const result = await tool.execute(
-        { model: "fct_orders", column: "revenue", change_type: "modify", manifest_path: manifestPath, dialect: "duckdb" },
+        {
+          model: "fct_orders",
+          column: "revenue",
+          change_type: "modify",
+          manifest_path: manifestPath,
+          dialect: "duckdb",
+        },
         ctx,
       )
       const reach = result.metadata.column_reach as { models: { name: string; lens_types?: Record<string, string> }[] }
