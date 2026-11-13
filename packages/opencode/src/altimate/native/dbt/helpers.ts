@@ -86,13 +86,15 @@ export function detectDialect(manifest: any): string {
 }
 
 /**
- * Build a schema context object from upstream dependency nodes.
+ * Build a schema context object from upstream dependency nodes, keyed by bare table name.
  * Returns the { tables, version } format expected by core.Schema.fromJson().
  */
 export function buildSchemaContext(
   nodes: Record<string, any>,
   sources: Record<string, any>,
   upstreamIds: string[],
+  /** Columns found beyond the declared ones (e.g. from the node's own SQL), added after them. */
+  moreColumns: (uid: string) => { name: string; type: string }[] = () => [],
 ): Record<string, any> | null {
   const tables: Record<string, any> = {}
 
@@ -103,13 +105,12 @@ export function buildSchemaContext(
     const tableName = node.alias || node.name || ""
     if (!tableName) continue
 
-    const columnsDict = node.columns || {}
-    if (Object.keys(columnsDict).length === 0) continue
-
-    const cols = Object.entries(columnsDict).map(([colName, col]: [string, any]) => ({
+    const cols = Object.entries(node.columns || {}).map(([colName, col]: [string, any]) => ({
       name: col.name || colName,
       type: col.data_type || col.type || "",
     }))
+    const declared = new Set(cols.map((col) => col.name.toLowerCase()))
+    for (const col of moreColumns(uid)) if (!declared.has(col.name.toLowerCase())) cols.push(col)
 
     if (cols.length > 0) {
       tables[tableName] = { columns: cols }
