@@ -14,7 +14,7 @@ import { classifyPR, compilePathTokenResolver, TIER_LANES } from "./risk-tier"
 import { type Rubric, exclusionReason, clampSeverity } from "./rubric"
 import { type ReviewConfig } from "./config"
 import { type ReviewMode, type ReviewScope, type VerdictEnvelope, buildEnvelope, signEnvelope } from "./verdict"
-import { detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
+import { detectMacroPatterns, detectModelPatterns, detectSchemaYmlPatterns, splitDiff } from "./dbt-patterns"
 import { listMirrorsModel, type ConsumerColumnList } from "./consumer-lists"
 import { detectUnitTestFixtures } from "./unit-tests"
 import { selectListNames } from "./select-list"
@@ -687,6 +687,8 @@ function rawSelectList(sql: string): Set<string> {
   return new Set(names)
 }
 
+const FINAL_LAYER = /(^|\/)(marts?|reporting|dimensional|presentation|extracts|exports)\//i
+
 const ticks = (xs: string[]) => xs.map((x) => `\`${x}\``).join(", ")
 
 /**
@@ -705,11 +707,33 @@ async function consumerContractLane(
   if (!runner.modelConsumers || !runner.columnLineage) return []
   const model = modelNameFromPath(ctx.file.path)
   const consumers = await runner.modelConsumers(model)
-  if (!consumers || (!consumers.exposures.length && !consumers.contractEnforced)) return []
+  if (!consumers) return []
+  const declared = consumers.exposures.length > 0 || consumers.contractEnforced
+  // A final-layer model is read outside dbt (BI, exports) even when nothing is declared.
+  const finalLayer = FINAL_LAYER.test(ctx.file.path)
+  if (!declared && !(finalLayer && hasOldSide(ctx.file))) return []
   const { added, removed } = await columnDelta(ctx, runner, dialect)
   const out: Finding[] = []
 
-  if (removed.length) {
+  if (removed.length && !declared) {
+    out.push(
+      makeFinding({
+        severity: "suggestion",
+        category: "lineage_breakage",
+        title: `${model}: removed column(s) on a final-layer model`,
+        body:
+          `This change removes ${ticks(removed)} from \`${model}\`, a final-layer model that dashboards and exports usually read directly; ` +
+          `those readers aren't in the DAG. Keep the old column alongside the new one for a deprecation period, or declare the consumers as exposures.`,
+        file: ctx.file.path,
+        model,
+        confidence: "medium",
+        evidence: { tool: "dbt.manifest", result: { removed, finalLayer: true } },
+        ruleKey: "lineage_breakage:final-layer-column-removed",
+      }),
+    )
+  }
+
+  if (removed.length && declared) {
     const who: string[] = []
     if (consumers.exposures.length)
       who.push(`exposure(s) ${consumers.exposures.map((e) => `\`${e.name}\`${e.type ? ` (${e.type})` : ""}`).join(", ")}`)
@@ -1098,12 +1122,28 @@ export function definedVars(projectYml?: string): Set<string> {
   return out
 }
 
+/**
+ * `{% set cfg = {"materialized": "incremental", ...} %}` + `config(**cfg)` is a
+ * common way to share config; inline a flat literal dict's entries as kwargs so
+ * the config lint sees them.
+ */
+export function inlineConfigSplats(sql: string): string {
+  const dicts = new Map<string, string>()
+  for (const m of sql.matchAll(/\{%-?\s*set\s+(\w+)\s*=\s*\{([^{}]*)\}\s*-?%\}/g)) {
+    dicts.set(m[1], m[2].replace(/["'](\w+)["']\s*:/g, "$1=").replace(/,\s*$/, ""))
+  }
+  if (!dicts.size) return sql
+  return sql.replace(/\bconfig\s*\(([\s\S]*?)\)\s*\}\}/g, (whole) =>
+    whole.replace(/\*\*(\w+)/g, (splat, name) => dicts.get(name) ?? splat),
+  )
+}
+
 async function dbtConfigLane(ctx: ModelContext, runner: ReviewRunner, projectVars: Set<string> = new Set()): Promise<Finding[]> {
   if (!runner.dbtConfigLint) return []
   const { file, newSql, oldSql } = ctx
   if (!newSql || file.status === "deleted") return []
   const model = modelNameFromPath(file.path)
-  const raw = await runner.dbtConfigLint(newSql, hasOldSide(file) ? oldSql : undefined)
+  const raw = await runner.dbtConfigLint(inlineConfigSplats(newSql), hasOldSide(file) && oldSql ? inlineConfigSplats(oldSql) : undefined)
   const out: Finding[] = []
   for (const f of raw) {
     // A var defined in dbt_project.yml, or given a default elsewhere in the model, compiles fine.
@@ -1665,6 +1705,23 @@ export async function runReview(input: OrchestrateInput): Promise<VerdictEnvelop
           const [oldSql, newSql] = await Promise.all([getContent?.(file.oldPath ?? file.path, "old"), getContent?.(file.path, "new")])
           if (!newSql) return []
           return snapshotFindings({ file, model: modelNameFromPath(file.path), newSql, oldSql, prText })
+        } catch (err) {
+          failedFile(file, err)
+          return []
+        }
+      }),
+    )
+    for (const findings of sets) all.push(findings)
+  }
+
+  // Macros: the catalog rules that hold in a SQL template, and vars with no default.
+  if (lanes.has("dbt_patterns")) {
+    const macros = reviewable.filter((f) => f.kind === "macro" && f.status !== "deleted")
+    const sets = await Promise.all(
+      macros.map(async (file) => {
+        try {
+          const newSql = await getContent?.(file.path, "new")
+          return newSql ? detectMacroPatterns(file, newSql, input.rubric, projectVars, { dialect, dialectKnown: !!input.dialectKnown }) : []
         } catch (err) {
           failedFile(file, err)
           return []

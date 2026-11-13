@@ -67,6 +67,14 @@ export interface Rule {
    * balance, the final SELECT. ANDed with the other conditions.
    */
   check?: (sql: string) => boolean
+  /**
+   * Matched against each JOIN's whole ON clause (comments and strings blanked),
+   * so a predicate split across lines is seen whole. Relevant only when one of
+   * the clause's lines was added.
+   */
+  onClause?: RegExp
+  /** Also run on changed macros: the shape means the same thing in a SQL template. */
+  macros?: boolean
   example: RuleExample
   counter?: RuleExample
 }
@@ -98,7 +106,7 @@ export interface RuleInput {
 export function ruleMatches(rule: Rule, input: RuleInput): boolean {
   const kind = fileKind(input.file)
   const wantKind = rule.kind ?? "model_sql"
-  if (wantKind !== "any" && kind !== wantKind) return false
+  if (wantKind !== "any" && kind !== wantKind && !(kind === "macro" && rule.macros)) return false
   if (rule.pathGlob && !rule.pathGlob.test(input.file.path)) return false
 
   // Relevance gate: a rule only fires when its signal is in THE DIFF, never on
@@ -127,7 +135,39 @@ export function ruleMatches(rule: Rule, input: RuleInput): boolean {
     if (rule.absentNewSql.test(stripComments(input.newSql))) return false
   }
   if (rule.check && !rule.check(stripStrings(stripComments(input.newSql)))) return false
+  if (rule.onClause) {
+    const changed = input.added.map((l) => stripStrings(stripComments(l)).trim()).filter((l) => /\w{2}/.test(l))
+    const hit = onClauses(input.newSql).some((c) => rule.onClause!.test(c) && changed.some((l) => c.includes(l)))
+    if (!hit) return false
+    relevant = true
+  }
   return relevant
+}
+
+const ON_END = /^(?:join|where|group\s+by|order\s+by|qualify|having|union|limit|window|left|right|inner|full|cross|natural|lateral|select|from)\b|^;|^\{%/i
+const BEFORE_ON = /\b(join|on|where|select|from|group|having|qualify|order|merge|using|into)\b/gi
+
+/** The text of every JOIN's ON clause (comments and strings blanked), up to the next clause keyword at the same paren depth. */
+export function onClauses(sql: string): string[] {
+  const s = stripStrings(stripComments(sql))
+  const out: string[] = []
+  for (const m of s.matchAll(/\bon\b/gi)) {
+    const at = m.index!
+    const prior = [...s.slice(Math.max(0, at - 2000), at).matchAll(BEFORE_ON)].pop()
+    if (prior?.[1].toLowerCase() !== "join") continue
+    let depth = 0
+    let i = at + 2
+    for (; i < s.length; i++) {
+      const ch = s[i]
+      if (ch === "(") depth++
+      else if (ch === ")") {
+        if (depth === 0) break
+        depth--
+      } else if (depth === 0 && /\W/.test(s[i - 1]) && ON_END.test(s.slice(i, i + 12))) break
+    }
+    out.push(s.slice(at, i))
+  }
+  return out
 }
 
 /** Deepest stack of parenthesised subqueries: `(select … (select …))` is 2; sibling CTEs are 1 each. */
@@ -303,6 +343,8 @@ const r = (
       | "portabilityBody"
       | "ignoreStrings"
       | "check"
+      | "onClause"
+      | "macros"
   >,
   example: RuleExample,
   counter?: RuleExample,
@@ -407,7 +449,7 @@ const CORRECTNESS: Rule[] = [
     "suggestion",
     "GROUP BY positional refs are fragile",
     "`GROUP BY 1,2` breaks silently when the SELECT list reorders; group by explicit names.",
-    { added: /\bgroup\s+by\s+\d+(\s*,\s*\d+)+/i },
+    { added: /\bgroup\s+by\s+\d+(\s*,\s*\d+)+/i, macros: true },
     { add: "group by 1, 2" },
     { add: "group by customer_id" },
   ),
@@ -647,10 +689,14 @@ const JOINS: Rule[] = [
     "join_risk",
     "suggestion",
     "join key wrapped in CAST/function",
-    "Casting a column inside the ON clause defeats key pruning and signals a type mismatch.",
-    { added: /\bon\b[^;]*\bcast\s*\(/i },
-    { add: "on cast(a.id as string) = b.id" },
-    { add: "on a.id = b.id" },
+    "A CAST or function around a column in the ON clause defeats partition and cluster pruning on that side and usually signals a type mismatch; convert once upstream, or on the smaller side.",
+    {
+      macros: true,
+      onClause:
+        /\b(?:cast|try_cast|safe_cast|date|datetime|timestamp|to_date|to_timestamp|to_char|to_varchar|date_trunc|lower|upper|trim|ltrim|rtrim|substr|substring)\s*\(\s*(?:''\s*,\s*)?[a-z_]\w*(?:\.[a-z_]\w*)?\s*(?:\)|,|\bas\b)/i,
+    },
+    { add: "left join b\n  on a.id = b.id\n  and a.code = cast(b.code as string)" },
+    { add: "join b on a.id = b.id and b.day >= cast('2024-01-01' as date)" },
   ),
   r(
     "join-or-condition",
@@ -658,9 +704,9 @@ const JOINS: Rule[] = [
     "warning",
     "OR in a join condition — explosive/slow",
     "`JOIN … ON a=b OR c=d` often produces a near-cartesian and disables hash joins. Split into UNION.",
-    { added: /\bon\b[^;]*\bor\b/i },
-    { add: "on a.id=b.id or a.alt=b.alt" },
-    { add: "on a.id=b.id and a.k=b.k" },
+    { onClause: /\bor\b/i, macros: true },
+    { add: "join b\n  on a.id = b.id\n  and (\n    a.d between b.s and b.e\n    or a.d2 between b.s and b.e\n  )" },
+    { add: "join b on a.id=b.id and a.k=b.k\nwhere a.x = 1 or a.y = 2" },
   ),
   r(
     "lateral-join",
@@ -1849,7 +1895,7 @@ const STYLE: Rule[] = [
     "suggestion",
     "TOP n without ORDER BY",
     "`SELECT TOP n` without `ORDER BY` returns arbitrary rows; add an explicit order.",
-    { added: /select\s+top\s+\d+/i, unless: /order\s+by/i },
+    { added: /select\s+top\s+\d+/i, unless: /order\s+by/i, macros: true },
     { add: "select top 10 * from t" },
     { add: "select top 10 * from t order by d" },
   ),
@@ -2405,7 +2451,7 @@ const MISC2: Rule[] = [
     "suggestion",
     "GREATEST/LEAST NULL behavior varies",
     "Some warehouses return NULL if any GREATEST/LEAST argument is NULL — guard nullable inputs.",
-    { added: /\b(greatest|least)\s*\(/i, unless: /coalesce|nvl|ifnull/i },
+    { added: /\b(greatest|least)\s*\(/i, unless: /coalesce|nvl|ifnull/i, macros: true },
     { add: "greatest(a, b)" },
     { add: "greatest(coalesce(a,0), coalesce(b,0))" },
   ),

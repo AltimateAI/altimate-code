@@ -65,7 +65,10 @@ export async function collectChangedFiles(opts: CollectOptions): Promise<Changed
       // A rename's hunk diff must name BOTH paths: limiting the pathspec to the
       // new path hides the old one from git, so it cannot pair the rename and
       // reports every line as added.
-      const pathspec = oldPath ? [oldPath, newPath] : [newPath]
+      // `--name-status` paths are repo-root relative while git resolves a
+      // pathspec against the cwd (the dbt project, often a subdirectory), so
+      // anchor them at the top or the hunk diff comes back empty.
+      const pathspec = (oldPath ? [oldPath, newPath] : [newPath]).map((p) => `:(top)${p}`)
       let diff = ""
       try {
         diff = await git(["diff", "-M", ...range, "--", ...pathspec], opts.cwd)

@@ -835,6 +835,47 @@ const MODEL_DETECTORS: Detector[] = [
   detectMultiCountDistinct,
 ]
 
+/**
+ * A changed macro: the catalog rules marked `macros`, and `var('x')` read with no
+ * default when `x` isn't set in dbt_project.yml (in a package, every project that
+ * doesn't set it fails to compile).
+ */
+export function detectMacroPatterns(
+  file: ChangedFile,
+  newSql: string,
+  rubric: Rubric,
+  projectVars: Set<string>,
+  catalogCtx?: CatalogContext,
+): Finding[] {
+  if (fileKind(file) !== "macro" || file.status === "deleted") return []
+  const { added, removed } = splitDiff(file.diff)
+  const out = evaluateCatalog(file, newSql, added, removed, rubric, catalogCtx)
+  const model = modelNameFromPath(file.path)
+  const seen = new Set<string>()
+  for (const line of added) {
+    for (const m of stripComments(line).matchAll(/\bvar\(\s*['"]([\w.]+)['"]\s*\)/g)) {
+      const name = m[1]
+      const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      if (seen.has(name) || projectVars.has(name) || new RegExp(`var\\(\\s*['"]${esc}['"]\\s*,`).test(newSql)) continue
+      seen.add(name)
+      out.push(
+        makeFinding({
+          severity: "suggestion",
+          category: "materialization",
+          title: `${model}: var('${name}') read with no default in a macro`,
+          body: `\`var('${name}')\` has no default and isn't set in dbt_project.yml, so any project that calls this macro without setting it fails to compile. Pass a default: \`var('${name}', <default>)\`.`,
+          file: file.path,
+          model,
+          confidence: "high",
+          evidence: { tool: "dbt-patterns", result: { rule: "macro-var-no-default", var: name } },
+          ruleKey: `materialization:macro-var-no-default`,
+        }),
+      )
+    }
+  }
+  return out.filter((f) => !exclusionReason(f, rubric))
+}
+
 /** Run the dbt anti-pattern detectors over a changed MODEL file. */
 export function detectModelPatterns(
   file: ChangedFile,
