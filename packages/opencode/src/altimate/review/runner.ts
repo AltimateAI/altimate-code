@@ -225,7 +225,7 @@ export function createDispatcherRunner(opts: DispatcherRunnerOptions): ReviewRun
           // it unless the schema came from a complete catalog.json.
           hasTables
             ? asArray(data.validation?.errors)
-                .filter((e: any) => opts.schemaContext || e?.category?.type !== "TableNotFound")
+                .filter((e: any) => opts.schemaContext || e?.kind?.type !== "TableNotFound")
                 .map((e: any) => ({ ...e, rule: "validate", severity: "error" }))
             : [],
         )
