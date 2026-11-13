@@ -127,6 +127,20 @@ describe("columnReach", () => {
     })
   })
 
+  test("a column read through a schema-qualified relation, as a compiled ref is written, keeps its real rating", () => {
+    const value = manifest()
+    const nodes = value.nodes as Record<string, any>
+    nodes["model.shop.stg_qualified"] = model(
+      "stg_qualified",
+      ["model.shop.fct_orders"],
+      'select revenue as net, revenue from "shop"."main"."fct_orders"',
+      ["net", "revenue"],
+    )
+    const reach = columnReach(manifestFile(value), "fct_orders", "revenue")
+    const found = reach.models.find((m) => m.name === "stg_qualified")
+    expect(found?.lens_types).toEqual({ net: "Alias", revenue: "Original" })
+  })
+
   test("a column copied as is is Original, and a copy of a calculation is never Original", () => {
     const value = manifest()
     const nodes = value.nodes as Record<string, any>
