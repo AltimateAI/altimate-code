@@ -9,6 +9,7 @@ import { SessionID, MessageID } from "@/session/schema"
 import type { Tool } from "@/tool/tool"
 import { dbtAdapterInternals, resetDbtAdapter } from "@/altimate/native/connections/register"
 import { DbtRunResultsTool } from "@/altimate/tools/dbt-run-results"
+import { Instance } from "@/project/instance"
 import { initTool } from "./tool-fixture"
 
 const ctx: Tool.Context = {
@@ -41,8 +42,8 @@ const COMPILE = {
 }
 
 let root: string
-const run = async (dir: string | undefined) =>
-  (await initTool(DbtRunResultsTool)).execute(dir === undefined ? {} : { project_dir: dir }, ctx)
+const run = async (dir: string | undefined, target_path?: string) =>
+  (await initTool(DbtRunResultsTool)).execute({ ...(dir === undefined ? {} : { project_dir: dir }), ...(target_path ? { target_path } : {}) }, ctx)
 
 async function project(name: string, artifact?: unknown) {
   const dir = path.join(root, name)
@@ -201,6 +202,40 @@ describe("dbt_run_results", () => {
     expect(result.output).toContain("not a run artifact")
   })
 
+  test("a run that wrote to another target folder is read from that folder, whatever DBT_TARGET_PATH says", async () => {
+    const dir = await project("custom-target", COMPILE)
+    await mkdir(path.join(dir, "ci-out"), { recursive: true })
+    await writeFile(path.join(dir, "ci-out", "run_results.json"), JSON.stringify(BUILD))
+    const before = process.env["DBT_TARGET_PATH"]
+    process.env["DBT_TARGET_PATH"] = "elsewhere"
+    let view: any
+    try {
+      view = (await run(dir, "ci-out")).metadata
+    } finally {
+      if (before === undefined) delete process.env["DBT_TARGET_PATH"]
+      else process.env["DBT_TARGET_PATH"] = before
+    }
+    const own = (await run(dir)).metadata as any
+
+    expect(view.invocationId).toBe("11111111-aaaa-bbbb-cccc-000000000001")
+    expect(own.invocationId).toBe("22222222-aaaa-bbbb-cccc-000000000002")
+  })
+
+  test("a node id longer than the bound is cut, so the answer stays small", async () => {
+    const long = "x".repeat(5000)
+    const dir = await project("long-id", {
+      metadata: { invocation_id: "33333333-aaaa-bbbb-cccc-000000000003" },
+      args: { which: "run" },
+      elapsed_time: 1,
+      results: [{ unique_id: `model.shop.${long}`, status: "success", message: null, execution_time: 1 }],
+    })
+
+    const row = ((await run(dir)).metadata as any).results[0]
+
+    expect(row.uniqueId).toBe(`model.shop.${"x".repeat(5000)}`.slice(0, 300) + "…")
+    expect(row.name).toBe("x".repeat(300) + "…")
+  })
+
   test("a folder inside the project reads that project", async () => {
     const dir = await project("nested", BUILD)
     await mkdir(path.join(dir, "models", "marts"), { recursive: true })
@@ -211,7 +246,28 @@ describe("dbt_run_results", () => {
     expect(view.invocationId).toBe("11111111-aaaa-bbbb-cccc-000000000001")
   })
 
-  test("with no project_dir, the project the dbt adapter is configured for is read", async () => {
+  test("with no project_dir, the project the session's folder is in is read before the adapter's", async () => {
+    const here = await project("session-project", BUILD)
+    const other = await project("adapter-project", COMPILE)
+    dbtAdapterInternals.readConfig = async () => ({ projectRoot: other })
+    resetDbtAdapter()
+    try {
+      const result = await Instance.provide({ directory: here, fn: () => run(undefined) })
+
+      expect((result.metadata as any).invocationId).toBe("11111111-aaaa-bbbb-cccc-000000000001")
+    } finally {
+      delete dbtAdapterInternals.readConfig
+      resetDbtAdapter()
+    }
+  })
+
+  test("an invocation id longer than the bound is cut", async () => {
+    const dir = await project("long-invocation", { ...BUILD, metadata: { invocation_id: "i".repeat(5000) } })
+
+    expect(((await run(dir)).metadata as any).invocationId).toBe("i".repeat(300) + "…")
+  })
+
+  test("with no project_dir and none around the session's folder, the project the dbt adapter is configured for is read", async () => {
     const dir = await project("configured", BUILD)
     dbtAdapterInternals.readConfig = async () => ({ projectRoot: dir })
     resetDbtAdapter()
